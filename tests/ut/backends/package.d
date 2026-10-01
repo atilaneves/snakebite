@@ -146,9 +146,10 @@ public void shouldBeStatusOf(
     in string file = __FILE__,
     in size_t line = __LINE__,
 ) {
-    static if (is(BackendType == Native))
-        nativeMainStatus!(SourceCharacters!code).should == expected;
-    else {
+    static if (is(BackendType == Native)) {
+        alias Source = GuestSource!code;
+        nativeMainStatus!(Source.text, Source.id).should == expected;
+    } else {
         enum program_ = RegisterProgram!(module_, code).program;
         auto program = Program([parsedProgram(program_)], "snakebite");
         asTestFailure(run(new BackendType(program), program), file, line)
@@ -165,17 +166,11 @@ public void shouldBeStatusOf(
 // - an unqualified lookup would instead walk out to this module's public
 // imports and could silently resolve to an unrelated `main`.
 //
-// A guest that declares an `extern(C++` class arrives as one type per
-// character, not as a `string` template argument: dmd cannot mangle a
-// `string` value in the parent chain of an `extern(C++)` class, and `Guest`
-// is nested in this instance. Other guests keep the `string`, which is much
-// cheaper to compile. The text test misses a spelling such as
-// `extern (C++)`; that fails at build time with dmd's "template value
-// parameter is not supported" internal compiler error, never silently.
-private int nativeMainStatus(Characters...)() {
+// See `GuestSource` for the template parameters.
+private int nativeMainStatus(alias source, ulong sourceId)() {
     struct Guest {
         static:
-        mixin(sourceText!Characters);
+        mixin(source());
     }
 
     static if (!__traits(hasMember, Guest, "main"))
@@ -209,43 +204,37 @@ private int nativeMainStatus(Characters...)() {
     }
 }
 
-private struct Character(char value_) {
-    enum value = value_;
+// The result of guest statements that end in a `return`, run natively. See
+// `GuestSource` for the template parameters.
+private auto nativeResult(alias statements, ulong statementsId)() {
+    mixin(statements());
 }
 
-private template SourceCharacters(string source) {
-    import std.algorithm.searching: canFind;
+// Guest source in a form that the native oracle can take as template
+// arguments: `text` gives the source and `id` identifies it.
+//
+// A guest `extern(C++)` declaration gets a C++ mangled name that includes
+// the arguments of the template instance it is in. dmd can put a function or
+// an integer in that name, but not a `string`. Each `text` has the same C++
+// name, so `id` is the only part that keeps the C++ symbols of two guests
+// apart; without it the linker merges them.
+//
+// The name of each symbol of the guest contains the mangled name of `text`.
+// The `pragma` keeps the full source out of that name.
+private template GuestSource(string source) {
+    enum ulong id = fnv1a(source);
 
-    static if (source.canFind("extern(C++"))
-        alias SourceCharacters = EachCharacter!source;
-    else
-        alias SourceCharacters = AliasSeq!source;
-}
-
-// Halves the string at each step so the recursion depth stays logarithmic
-// in the length of a guest program.
-private template EachCharacter(string source) {
-    static if (source.length == 0)
-        alias EachCharacter = AliasSeq!();
-    else static if (source.length == 1)
-        alias EachCharacter = AliasSeq!(Character!(source[0]));
-    else
-        alias EachCharacter = AliasSeq!(
-            EachCharacter!(source[0 .. $ / 2]),
-            EachCharacter!(source[$ / 2 .. $]),
-        );
-}
-
-private string sourceText(Characters...)() {
-    static if (Characters.length == 1
-            && is(typeof(Characters[0]) : string))
-        return Characters[0];
-    else {
-        string result;
-        static foreach (Character_; Characters)
-            result ~= Character_.value;
-        return result;
+    pragma(mangle, "snakebite_guest_source_" ~ id.stringof)
+    string text() @safe @nogc nothrow pure {
+        return source;
     }
+}
+
+private ulong fnv1a(in string text) @safe @nogc nothrow pure {
+    ulong result = 0xcbf29ce484222325;
+    foreach (const char character; text)
+        result = (result ^ character) * 0x100000001b3;
+    return result;
 }
 
 // UFCS assertion: `42.shouldBeRetOf!(backend, code, "answer")` invokes one
@@ -269,14 +258,9 @@ public template shouldBeRetOf(
 
         enum call = callExpression!(functionName, Args);
 
-        // A guest `extern(C++)` class does not build here, for the reason
-        // given on `nativeMainStatus`: use `shouldBeStatusOf` for one.
         static if (is(BackendType == Native)) {
-            const native = () {
-                mixin(code);
-                return mixin(call);
-            }();
-            native.should == expected;
+            alias Source = GuestSource!(code ~ "\nreturn " ~ call ~ ";");
+            nativeResult!(Source.text, Source.id).should == expected;
         } else {
             enum entryPoint = "__snakebite_test_entry";
             enum programCode = Args.length == 0
@@ -375,11 +359,10 @@ private string evaluate(
     // straight back for the test to assert on, so a wrong expectation fails
     // as the entry that produced it. The native oracle is one such entry
     // rather than an extra comparison every backend re-runs.
-    // As in `shouldBeRetOf`, a guest `extern(C++)` class does not build in
-    // this arm; see `nativeMainStatus`.
     static if (is(BackendType == Native)) {
-        mixin(declarations);
-        return text(mixin(code));
+        alias Source = GuestSource!(
+            declarations ~ "\nreturn " ~ code ~ "\n;");
+        return text(nativeResult!(Source.text, Source.id));
     } else {
         auto function_ = parsedFunction(snippet);
         auto program = Program([function_.getModule]);

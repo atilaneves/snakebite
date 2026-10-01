@@ -667,3 +667,46 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// The linkage attribute permits white space before its parentheses.
+static foreach (backend; Matrix!()) {
+    @("cppClass.linkageAttributeWithSpace." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern (C++) class Counter {
+                int value() { return 9; }
+            }
+            void main() {
+                assert((new Counter).value == 9);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("cppClass.virtualCallInCalledFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        11.shouldBeRetOf!(backend, q{
+            extern(C++) class Counter {
+                int value() { return 11; }
+            }
+            int answer() {
+                return (new Counter).value;
+            }
+        }, "answer");
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("cppClass.virtualCallInExpression." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        eval!(backend, q{
+            extern(C++) class Counter {
+                int value() { return 13; }
+            }
+        }, q{ (new Counter).value }).should == "13";
+    }
+}
