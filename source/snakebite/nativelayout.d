@@ -981,7 +981,7 @@ private void storeValue(
     // gives a symbol of its own.
     if (auto address = value.isAddrExp) {
         if (auto literal = address.e1.isStructLiteralExp) {
-            auto pointee = literal.stype;
+            auto pointee = literal.type;
             auto storage = new void[pointee.size];
             storeValue(pointee, literal, storage.ptr, symbolAddress, nativeData);
             *cast(void**) place = storage.ptr;
