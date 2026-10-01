@@ -703,3 +703,103 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// An enum is its base type everywhere a value is read: a pointer-based
+// enum dereferences, indexes and binds a `ref` parameter through `*p`
+// like the pointer itself.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot take the address of a local variable"),
+)) {
+    @("enumOfPointer.dereferencedAndBoundToRefParameter."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum P : int* { none = null }
+
+            void setNine(ref int x) { x = 9; }
+            int read(P p) { return *p; }
+
+            void main() {
+                int x = 4;
+                P p = cast(P) &x;
+                assert(read(p) == 4);
+                setNine(*p);
+                assert(p[0] == 9);
+                *p = 11;
+                assert(x == 11);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot take the address of a local variable"),
+)) {
+    @("enumOfPointer.passedByRefAndOut." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum P : int* { none = null }
+
+            void reset(ref P p) { p = P.none; }
+            void clear(out P p) {}
+
+            void main() {
+                int x = 4;
+                P p = cast(P) &x;
+                reset(p);
+                assert(p is P.none);
+                p = cast(P) &x;
+                clear(p);
+                assert(p is P.none);
+            }
+        });
+    }
+}
+
+// A function pointer or delegate behind an enum is called through its
+// base type.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call a function that has no D source"),
+)) {
+    @("enumOfFunctionPointer.calledThroughEnum." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.stdlib: abs;
+            alias F = int function(int);
+            enum EF : F { none = null }
+
+            void main() {
+                EF e = cast(EF) cast(F) &abs;
+                assert(e(-3) == 3);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot take a delegate to a method of a native class"),
+)) {
+    @("enumOfDelegate.calledThroughEnum." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            alias D = string delegate();
+            enum ED : D { none = null }
+
+            void main() {
+                Object o = new Object;
+                D dg = &o.toString;
+                ED e = cast(ED) dg;
+                assert(e() == "object.Object");
+            }
+        });
+    }
+}

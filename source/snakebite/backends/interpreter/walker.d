@@ -5339,8 +5339,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             void* address;
 
             void* argumentAddress() {
-                if (argument.type.ty == Tpointer
-                        && argument.type.nextOf.equals(value.parameterType))
+                auto argumentType = argument.type.toBasetype;
+                if (argumentType.ty == Tpointer
+                        && argumentType.nextOf.equals(value.parameterType))
                     return asPointer(argument);
                 address = addressOf(argument);
                 return address;
