@@ -7,6 +7,7 @@
 # binary as a child process, so they live here and not in `bin/ut`.
 
 import os
+import re
 import stat
 import subprocess
 from pathlib import Path
@@ -225,6 +226,228 @@ def test_import_paths_stay_relative_to_caller(
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# Compiled D runs the module destructors after `main`, and the output they
+# write is flushed before the process ends.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_module_destructor_runs_after_main(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        import std.stdio: writeln;
+        shared static ~this() { writeln("dtor"); }
+        void main() { writeln("main"); }
+        """,
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 0, output(result)
+    assert guest_lines(result) == ["main", "dtor"]
+
+
+# Within a module the destructors run in reverse declaration order. The
+# thread-local ones of the main thread run before the shared ones.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_module_destructors_run_in_reverse_order(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        import std.stdio: writeln;
+        shared static ~this() { writeln("shared 1"); }
+        static ~this() { writeln("thread 1"); }
+        shared static ~this() { writeln("shared 2"); }
+        static ~this() { writeln("thread 2"); }
+        void main() { writeln("main"); }
+        """,
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 0, output(result)
+    assert guest_lines(result) == [
+        "main", "thread 2", "thread 1", "shared 2", "shared 1",
+    ]
+
+
+# A module's destructors run after those of every module that imports it:
+# the reverse of the order its constructors ran.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_module_destructors_run_in_reverse_import_order(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "a_library.d",
+        """
+        module a_library;
+        import std.stdio: writeln;
+        shared static this() { writeln("library constructor"); }
+        shared static ~this() { writeln("library destructor"); }
+        """,
+    )
+    write(
+        tmp_path / "app" / "b_main.d",
+        """
+        module b_main;
+        import a_library;
+        import std.stdio: writeln;
+        shared static this() { writeln("main constructor"); }
+        shared static ~this() { writeln("main destructor"); }
+        void main() { writeln("main"); }
+        """,
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 0, output(result)
+    assert guest_lines(result) == [
+        "library constructor", "main constructor", "main",
+        "main destructor", "library destructor",
+    ]
+
+
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_module_destructor_runs_after_main_throws(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        import std.stdio: writeln;
+        shared static ~this() { writeln("dtor"); }
+        void main() { throw new Exception("main failed"); }
+        """,
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 1, output(result)
+    assert "main failed" in result.stderr
+    assert guest_lines(result) == ["dtor"]
+
+
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_module_destructor_that_throws_fails_the_program(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        import std.stdio: writeln;
+        shared static ~this() { writeln("not reached"); }
+        shared static ~this() { throw new Exception("dtor failed"); }
+        void main() { writeln("main"); }
+        """,
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 1, output(result)
+    assert "dtor failed" in result.stderr
+    assert guest_lines(result) == ["main"]
+
+
+# A thread-local destructor runs on every thread that ends, and a joined
+# thread has run it by the time `join` returns.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_thread_destructor_runs_when_thread_ends(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        import core.thread: Thread;
+        import std.stdio: writeln;
+        static ~this() { writeln("thread destructor"); }
+        void main() {
+            auto thread = new Thread({ writeln("worker"); });
+            thread.start;
+            thread.join;
+            writeln("main");
+        }
+        """,
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 0, output(result)
+    assert guest_lines(result) == [
+        "worker", "thread destructor", "main", "thread destructor",
+    ]
+
+
+# `bin/sb` runs the unittests, then `main`, then the module destructors.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_module_destructor_runs_after_unittests_and_main(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        import std.stdio: writeln;
+        shared static ~this() { writeln("dtor"); }
+        unittest { writeln("unittest"); }
+        void main() { writeln("main"); }
+        """,
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 0, output(result)
+    assert guest_lines(result) == ["unittest", "main", "dtor"]
+
+
+# Compiled D with `-unittest` runs the destructors even when a unittest
+# failed, and `main` does not run.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_module_destructor_runs_after_failed_unittest(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        import std.stdio: writeln;
+        shared static ~this() { writeln("dtor"); }
+        unittest { assert(false, "unittest failed"); }
+        void main() { writeln("main"); }
+        """,
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 1, output(result)
+    assert "dtor" in guest_lines(result)
+    assert "main" not in guest_lines(result)
+
+
+def run_app(
+    tmp_path: Path, backend: str,
+) -> subprocess.CompletedProcess[str]:
+    return run_sb(
+        f"--backend={backend}", "--no-optimise-image", str(tmp_path / "app"),
+        cwd=tmp_path,
+    )
+
+
+# What the guest wrote to stdout, without the timing report `bin/sb` ends
+# its output with.
+def guest_lines(result: subprocess.CompletedProcess[str]) -> list[str]:
+    return [
+        line for line in result.stdout.splitlines()
+        if not re.fullmatch(r"[a-z ]+:\s+[\d.]+ ms", line)
+    ]
 
 
 def test_fetch_keeps_package_name(tmp_path: Path) -> None:

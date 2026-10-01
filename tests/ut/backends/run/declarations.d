@@ -104,6 +104,152 @@ static foreach (backend; Matrix!(
 }
 
 
+// Runs `code` as a whole program the way compiled D runs it, module
+// constructors and destructors included, and returns the exit status. The
+// guest finds `traceFile`, a path in `sandbox`, and writes what it observed
+// there. The native oracle builds an executable: `Guest.main` called from a
+// struct would never run the module's constructors or destructors.
+private int programStatus(Backend)(in Sandbox sandbox, in string code) {
+    const source = "enum traceFile = `" ~ sandbox.inSandboxPath("trace")
+        ~ "`;\nvoid trace(string text) {"
+        ~ " import std.file: append; traceFile.append(text); }\n" ~ code;
+    static if (is(Backend == Native)) {
+        sandbox.writeFile("guest.d", source);
+        const executable = sandbox.inSandboxPath("guest");
+        const built = execute([defaultCompiler,
+            sandbox.inSandboxPath("guest.d"), "-of=" ~ executable]);
+        built.status.shouldEqual(0, built.output);
+        return execute([executable]).status;
+    } else {
+        auto program = Program([parseSnippet(source)]);
+        return run(new Backend(program), program);
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("moduleDestructorRunsAfterMain." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            shared static ~this() { trace("dtor;"); }
+            void main() { trace("main;"); }
+        }).should == 0;
+        sandbox.shouldEqualContent("trace", "main;dtor;");
+    }
+}
+
+
+// Destructors run in the reverse of declaration order. The main thread's
+// `static ~this` run before every `shared static ~this`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("moduleDestructorsRunInReverseOrder." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            shared static ~this() { trace("s1;"); }
+            static ~this() { trace("t1;"); }
+            shared static ~this() { trace("s2;"); }
+            static ~this() { trace("t2;"); }
+            void main() { trace("main;"); }
+        }).should == 0;
+        sandbox.shouldEqualContent("trace", "main;t2;t1;s2;s1;");
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("moduleDestructorRunsAfterMainThrows." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            shared static ~this() { trace("dtor;"); }
+            void main() {
+                trace("main;");
+                throw new Exception("main failed");
+            }
+        }).should == 1;
+        sandbox.shouldEqualContent("trace", "main;dtor;");
+    }
+}
+
+
+// An exception from a destructor ends the destructor phase: the destructors
+// that would run after it do not, and a program that succeeded now fails.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("moduleDestructorThatThrowsFailsTheProgram." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            shared static ~this() { trace("first declared;"); }
+            shared static ~this() {
+                trace("last declared;");
+                throw new Exception("dtor failed");
+            }
+            void main() { trace("main;"); }
+        }).should == 1;
+        sandbox.shouldEqualContent("trace", "main;last declared;");
+    }
+}
+
+
+// A program whose startup failed never ran its module destructors.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("moduleDestructorDoesNotRunAfterFailedConstructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            shared static this() { trace("ctor1;"); }
+            shared static this() { throw new Exception("ctor failed"); }
+            shared static ~this() { trace("dtor;"); }
+            void main() { trace("main;"); }
+        }).should == 1;
+        sandbox.shouldEqualContent("trace", "ctor1;");
+    }
+}
+
+
+// A thread's `static ~this` runs when that thread ends, before a `join` on
+// it returns.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("threadDestructorRunsWhenThreadEnds." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            import core.thread: Thread;
+
+            static ~this() { trace("dtor;"); }
+
+            void main() {
+                auto thread = new Thread({ trace("worker;"); });
+                thread.start;
+                thread.join;
+                trace("main;");
+            }
+        }).should == 0;
+        sandbox.shouldEqualContent("trace", "worker;dtor;main;dtor;");
+    }
+}
+
+
 static foreach (backend; Matrix!()) {
     @("tupleLocalsInitializeEveryMember." ~ backend.stringof)
     @Tags(backend.stringof)
