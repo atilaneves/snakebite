@@ -580,6 +580,44 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A `final switch` on a value that is no member of the enum throws a
+// `SwitchError`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "DMD CTFE cannot interpret a SwitchErrorStatement"),
+)) {
+    @("finalSwitchOnNonMemberThrowsSwitchError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: SwitchError;
+
+            enum Colour {
+                red,
+                green,
+            }
+
+            int weight(Colour colour) {
+                final switch (colour) {
+                    case Colour.red:
+                        return 10;
+
+                    case Colour.green:
+                        return 20;
+                }
+            }
+
+            int main() {
+                try {
+                    return weight(cast(Colour) 7);
+                } catch (SwitchError) {
+                    return 0;
+                }
+            }
+        });
+    }
+}
+
 // A case range and a case list each select one shared case body.
 static foreach (backend; Matrix!()) {
     @("switchSupportsCaseRangesAndLists." ~ backend.stringof)
