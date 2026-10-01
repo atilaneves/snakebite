@@ -920,3 +920,19 @@ static foreach (backend; Matrix!(
         }, "answer");
     }
 }
+
+
+// The compiler finds `alloca` by its symbol name. A function with that
+// identifier and a different symbol is a normal host function.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("call.alloca.otherSymbol." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        5.shouldBeRetOf!(backend, q{
+            pragma(mangle, "abs") extern(C) int alloca(int);
+            int answer() { return alloca(-5); }
+        }, "answer");
+    }
+}
