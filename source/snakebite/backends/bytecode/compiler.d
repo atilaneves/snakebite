@@ -6571,7 +6571,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Expressions* arguments,
         in FrameLayout layout,
     ) {
-        import snakebite.backends.variadic: restartOffset, VariadicLayout;
+        import snakebite.backends.variadic: FirstState, VariadicLayout;
 
         const hasTypes = layout.variadicTypes != size_t.max;
         const firstExtra = hasTypes + layout.parameters.length;
@@ -6595,7 +6595,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 facts[i].size);
             result.values ~= Arg(storage + offset, 0, facts[i].size);
         }
-        emit(&opCopy, storage + restartOffset, storage, Cursor.sizeof);
+        emit(&opCopy, storage + FirstState.offset, storage, FirstState.size);
         const cursor = reserveTemp(pointerFacts);
         emit(&opFrameAddress, cursor, storage, size_t.sizeof);
         if (hasTypes) {
