@@ -172,13 +172,11 @@ public FuncDeclaration nestedContextOwnerOf(FuncDeclaration function_) {
 // What a `DelegateExp` (`&nested`) or a delegate-typed `FuncExp` (a
 // closure literal bound to a delegate) needs, decided from dmd facts alone
 // - nothing a particular backend's own representation of a frame or a
-// closure affects. `function_` is `null` in the result when the caller
-// must reject the expression outright: dmd left no declaration to resolve
-// (`DelegateExp.func`/`FuncExp.fd` can be null for an expression this
-// project's frontend usage never actually produces, but both backends
-// checked it defensively before this was factored out),
-// or `type` is not actually `Tdelegate` (a plain function pointer takes
-// neither backend's delegate path at all).
+// closure affects. `function_` is `null` in the result when `function_` is
+// null or `type` is not `Tdelegate` (a plain function pointer takes neither
+// backend's delegate path at all). dmd always sets `DelegateExp.func` and
+// `FuncExp.fd`, and a delegate expression always has a delegate type, so a
+// backend treats a `null` result as a broken invariant.
 //
 // A hidden context can be needed by a call to another nested function,
 // even when this function reads no outer variables itself. Keep that link

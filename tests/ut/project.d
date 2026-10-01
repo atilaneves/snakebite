@@ -190,6 +190,94 @@ targetType "library"
 }
 
 
+// A native class's untyped D variadic constructor, called through `new`
+// by the guest: the call passes the `TypeInfo` tuple before the declared
+// parameters and the extra arguments after them, as compiled D does.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run D-style variadic functions"),
+)) {
+    @("guestNewsNativeClassWithVariadicConstructor." ~ backend.stringof)
+    @Serial
+    unittest {
+        const sandbox = Sandbox();
+        sandbox.writeFile("dependency/dub.sdl", `name "variadic-ctor-dep"
+targetType "library"
+`);
+        sandbox.writeFile("dependency/source/variadic_ctor_dep.d", q{
+            module variadic_ctor_dep;
+            import core.vararg;
+
+            class Summer {
+                int total;
+                this(int first, ...) {
+                    total = first;
+                    foreach (type; _arguments) {
+                        assert(type == typeid(int));
+                        total += va_arg!int(_argptr);
+                    }
+                }
+            }
+        });
+        sandbox.writeFile("app/dub.sdl", dubProjectRecipe("variadic-ctor-app",
+            "dependency \"variadic-ctor-dep\" path=\"../dependency\"\n"));
+        sandbox.writeFile("app/source/variadic_ctor_app.d", q{
+            module variadic_ctor_app;
+            import variadic_ctor_dep;
+
+            int main() {
+                auto summer = new Summer(1, 2, 3);
+                return summer.total == 6 ? 0 : 1;
+            }
+        });
+        dubProjectMainShouldSucceed!backend(sandbox.inSandboxPath("app"));
+    }
+}
+
+// A native struct's untyped D variadic constructor, called through `new`
+// by the guest: the call passes the `TypeInfo` tuple before the declared
+// parameters and the extra arguments after them, as compiled D does.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run D-style variadic functions"),
+)) {
+    @("guestNewsNativeStructWithVariadicConstructor." ~ backend.stringof)
+    @Serial
+    unittest {
+        const sandbox = Sandbox();
+        sandbox.writeFile("dependency/dub.sdl", `name "variadic-struct-ctor-dep"
+targetType "library"
+`);
+        sandbox.writeFile("dependency/source/variadic_struct_ctor_dep.d", q{
+            module variadic_struct_ctor_dep;
+            import core.vararg;
+
+            struct Summer {
+                int total;
+                this(int first, ...) {
+                    total = first;
+                    foreach (type; _arguments) {
+                        assert(type == typeid(int));
+                        total += va_arg!int(_argptr);
+                    }
+                }
+            }
+        });
+        sandbox.writeFile("app/dub.sdl", dubProjectRecipe("variadic-struct-ctor-app",
+            "dependency \"variadic-struct-ctor-dep\" path=\"../dependency\"\n"));
+        sandbox.writeFile("app/source/variadic_struct_ctor_app.d", q{
+            module variadic_struct_ctor_app;
+            import variadic_struct_ctor_dep;
+
+            int main() {
+                auto summer = new Summer(1, 2, 3);
+                return summer.total == 6 ? 0 : 1;
+            }
+        });
+        dubProjectMainShouldSucceed!backend(sandbox.inSandboxPath("app"));
+    }
+}
+
 // A native class's `auto` method, resolved through a delegate the guest
 // itself takes (`&instance.answer`), not through a subclass's vtable -
 // `snakebite.frontend.dmd.delegates.delegateTargetOf` decides the call's

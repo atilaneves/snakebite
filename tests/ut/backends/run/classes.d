@@ -1995,3 +1995,26 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// `&C.f` without an instance is a plain function pointer to the method.
+// A call through it passes no receiver, so a method that does not read
+// `this` runs like a free function.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE refuses a member function call that has no `this`"),
+)) {
+    @("memberFunctionCalledThroughFunctionPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C {
+                final int f() { return 42; }
+            }
+
+            void main() {
+                auto fp = &C.f;
+                assert(fp() == 42);
+            }
+        });
+    }
+}
