@@ -134,7 +134,9 @@ private final class GuestException: Exception {
     }
 }
 
-import snakebite.backends.checkplan: BoundsCheck;
+import snakebite.backends.checkplan:
+    BoundsCheck, hookOf, isUnanalysed;
+import snakebite.backends.haltprocess: isHalt;
 import snakebite.backends.exceptions: CAssertCall;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
@@ -175,6 +177,9 @@ private struct Shared {
     // The program being run: its `isInterpreted` is the one decision for
     // whether a callee is walked or called natively.
     const Program program;
+    // Set when a halt starts to unwind: the run is over, so no guest code
+    // runs on the way up.
+    bool halted;
     NativeData nativeData;
     RuntimeTypes runtimeTypes;
     // How to reach each already-compiled function this guest calls,
@@ -1218,14 +1223,25 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         void* place,
         scope const(void*)[] slots,
     ) {
+        crossNative({ plan.call(place, slots); });
+    }
+
+    // What native code throws reaches the guest as a `GuestException`,
+    // except what is not an error of the guest: the interpreter's own
+    // refusal, an exception that already is one, and a halt.
+    extern(D) private void crossNative(scope void delegate() call) {
         try
-            plan.call(place, slots);
+            call();
         catch (SnakebiteException exception)
             throw exception;
         catch (GuestException exception)
             throw exception;
-        catch (Throwable guest)
-            throw new GuestException(guest);
+        catch (Throwable thrown) {
+            if (isHalt(thrown))
+                throw thrown;
+
+            throw new GuestException(thrown);
+        }
     }
 
     // What a failed bounds check does under the program's flags. For
@@ -1246,7 +1262,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     ) {
         import snakebite.backends.checkplan:
             boundsPlanOf, cMessageOf, FailurePlan;
-        import snakebite.backends.druntimehooks: DruntimeHook, planOf;
+        import snakebite.backends.druntimehooks: planOf;
         import snakebite.backends.exceptions: cAssertCallOf;
 
         const failure = boundsPlanOf(_program.checks, _function);
@@ -1254,7 +1270,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             case ignore:
                 return;
             case halt:
-                _program.halt;
+                haltRun;
             case cAssert:
                 callCAssert(cAssertCallOf(
                     cMessageOf(check).ptr, loc, _function));
@@ -1262,8 +1278,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 break;
         }
 
-        auto plan = planOf(*_plans, check == BoundsCheck.index
-            ? DruntimeHook.indexBounds : DruntimeHook.sliceBounds);
+        auto plan = planOf(*_plans, hookOf(check));
 
         const file = cast(const(char)*) loc.filename;
         const line = cast(uint) loc.linnum;
@@ -1272,6 +1287,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             ~ extraArguments;
 
         callPlan(plan, null, arguments);
+    }
+
+    // What `-checkaction=halt` does. A halt unwinds to the program's halt
+    // action's owner as a `Halted`, and `_shared.halted` tells the cleanup
+    // that runs on the way up, which holds no `catch` to tell it by, to
+    // run no guest code.
+    private noreturn haltRun() {
+        _shared.halted = true;
+        _program.halt;
     }
 
     // `-checkaction=C`: the C runtime's assert failure function, which
@@ -1310,6 +1334,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private void destroyTemporary(Expression expression) {
+        if (_shared.halted)
+            return;
+
         runForEffect(expression);
     }
 
@@ -1612,7 +1639,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             scopeActive = false;
             if (pendingException is null)
                 runFinalizer = runsFinally(statement);
-            if (runFinalizer)
+            if (runFinalizer && !_shared.halted)
                 _controlFlow.withCleanup({
                     runFinallyBody(statement.finalbody, pendingException);
                 });
@@ -1638,6 +1665,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     throw exception.take;
             });
         } catch (Throwable exception) {
+            if (isHalt(exception))
+                throw exception;
+
             throw new GuestException(exception);
         }
     }
@@ -1991,10 +2021,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // into a `null` place, the same convention `execute` already uses for
     // a discarded `void` return.
     private void runForEffect(Expression expression) {
-        // dmd builds the `HaltExp` of a `switch` default without analysing
-        // it, so it has no type.
         if (expression.isDeclarationExp !is null
-                || expression.isHaltExp !is null) {
+                || isUnanalysed(expression)) {
             expression.accept(this);
             return;
         }
@@ -2867,14 +2895,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     // `a[] = b[]`: both sides are evaluated as ordinary dynamic-array
     // values first. The length and overlap check follows the program's
-    // flags the way any bounds check does: under `-checkaction=D` druntime
-    // does it and keeps it authoritative, otherwise the shared plan decides
-    // what a failure does.
+    // flags the way any bounds check does, and what it raises is
+    // `RangeError`.
     private void* assignSlice(AssignExp expression, void* target) {
         import core.stdc.string: memcpy;
         import snakebite.backends.checkplan: boundsPlanOf, FailurePlan;
         import snakebite.backends.slicecopy: copyUnchecked, slicesConform;
-        import snakebite.druntime.arraycopy: _d_arraycopy;
 
         auto destination = _frames.push(_facts.size, _facts.alignment);
         // `addressOf` has already evaluated the slice bounds and left its
@@ -2887,27 +2913,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         auto to = *cast(void[]*) destination.base;
         auto from = *cast(void[]*) source.base;
         const plan = boundsPlanOf(_program.checks, _function);
-        final switch (plan.kind) with (FailurePlan.Kind) {
-            case raise:
-                try
-                    _d_arraycopy(elementSize, from, to);
-                catch (SnakebiteException exception)
-                    throw exception;
-                catch (GuestException exception)
-                    throw exception;
-                catch (Throwable guest)
-                    throw new GuestException(guest);
-                break;
-            case halt:
-            case cAssert:
-                if (!slicesConform(to, from, elementSize))
-                    failArrayBounds(
-                        BoundsCheck.sliceCopy, expression.loc, null);
-                goto case;
-            case ignore:
-                copyUnchecked(to, from, elementSize);
-                break;
-        }
+        if (plan.kind != FailurePlan.Kind.ignore
+                && !slicesConform(to, from, elementSize))
+            failArrayBounds(BoundsCheck.sliceCopy, expression.loc, null);
+
+        copyUnchecked(to, from, elementSize);
 
         memcpy(_place, destination.base, _facts.size);
         return destination.base;
@@ -4696,22 +4706,22 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import core.exception: AssertError;
         import snakebite.backends.checkplan: assertPlanOf, FailurePlan;
         import snakebite.backends.exceptions:
-            assertFailureOf, cAssertCallOf;
+            assertFailureOf, cAssertCallOf, cAssertionOf;
         import std.string: toStringz;
 
         const plan = assertPlanOf(_program.checks);
         // `auto`: dmd's nodes are not `const`, and `messageExpression` would
         // be if `failure` were.
-        auto failure = assertFailureOf(expression);
+        auto failure = assertFailureOf(expression, _function);
         final switch (plan.kind) with (FailurePlan.Kind) {
             case ignore:
                 assert(0);
             case halt:
-                _program.halt;
+                haltRun;
             case cAssert:
                 callCAssert(cAssertCallOf(
                     failure.messageExpression is null
-                        ? failure.cAssertion
+                        ? cAssertionOf(expression)
                         : evaluateMessage(failure.messageExpression)
                             .toStringz,
                     expression.loc, _function));
@@ -4744,7 +4754,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // dmd makes one for a `switch` default under `-release` or
     // `-checkaction=halt`, and for `assert(0)` with assertions off.
     override void visit(HaltExp) {
-        _program.halt;
+        haltRun;
     }
 
     // A class reference's own invariant is druntime's job, not this

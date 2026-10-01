@@ -49,6 +49,15 @@ public FailurePlan boundsPlanOf(
     }
 }
 
+// dmd builds some nodes without analysing them, so they have no type: the
+// `HaltExp` of a `switch` default, and under `-checkaction=C` the `assert(0)`
+// there. A backend runs such a node for its effect and gives it no type.
+public bool isUnanalysed(
+    in imported!"dmd.expression".Expression expression,
+) @safe nothrow @nogc {
+    return expression.type is null;
+}
+
 // The three bounds checks dmd's glue layer emits, which differ in the
 // message `-checkaction=C` passes to the C runtime.
 public enum BoundsCheck {
@@ -65,6 +74,24 @@ public string cMessageOf(in BoundsCheck check) @safe pure nothrow @nogc {
             return "array slice out of bounds";
         case sliceCopy:
             return "array overflow";
+    }
+}
+
+// The druntime function that raises the error of a failed bounds check
+// under `-checkaction=D`: the one decision that a backend that raises does
+// not make for itself.
+public imported!"snakebite.backends.druntimehooks".DruntimeHook hookOf(
+    in BoundsCheck check,
+) @safe pure nothrow @nogc {
+    import snakebite.backends.druntimehooks: DruntimeHook;
+
+    final switch (check) with (BoundsCheck) {
+        case index:
+            return DruntimeHook.indexBounds;
+        case slice:
+            return DruntimeHook.sliceBounds;
+        case sliceCopy:
+            return DruntimeHook.rangeError;
     }
 }
 

@@ -1411,6 +1411,7 @@ private void applyFrontendFlags(in FrontendFlags flags) {
 
     Strings arguments;
     expandArguments(flags, arguments);
+    const checks = checksOfArguments(arguments);
 
     Param parsedParams;
     foreach (argz; arguments[]) {
@@ -1447,7 +1448,7 @@ private void applyFrontendFlags(in FrontendFlags flags) {
     }
 
     applyParsedFrontendParams(parsedParams);
-    applyChecks(checksOfArguments(arguments));
+    applyChecks(checks);
     global.compileEnv.previewIn = global.params.previewIn;
     global.compileEnv.transitionIn = global.params.v.vin;
     global.compileEnv.ddocOutput = global.params.ddoc.doOutput;
@@ -1477,10 +1478,13 @@ private imported!"snakebite.frontend.checks".Checks checksOfArguments(
 ) {
     import dmd.root.string: toDString;
     import snakebite.frontend.checks: Checks;
+    import std.conv: text;
 
     Checks checks;
     foreach (argument; arguments[])
-        checks.accept(argument.toDString);
+        if (!checks.accept(argument.toDString))
+            throw new Exception(text(
+                "switch `", argument.toDString, "` is invalid"));
     checks.resolve;
 
     return checks;

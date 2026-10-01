@@ -29,22 +29,26 @@ public struct Checks {
 
     private bool _release;
 
-    public void accept(in const(char)[] argument) @safe pure nothrow @nogc {
+    // Whether `argument` is a valid value of a flag that this reads, or
+    // not one of its flags at all.
+    public bool accept(in const(char)[] argument) @safe pure nothrow @nogc {
         import std.algorithm.searching: startsWith;
 
         if (argument == "-release")
             _release = true;
         else if (argument.startsWith("-checkaction="))
-            acceptAction(argument["-checkaction=".length .. $]);
+            return acceptAction(argument["-checkaction=".length .. $]);
+
+        return true;
     }
 
-    private void acceptAction(in const(char)[] name) @safe pure nothrow @nogc {
+    private bool acceptAction(in const(char)[] name) @safe pure nothrow @nogc {
         switch (name) {
-            case "D": action = CHECKACTION.D; break;
-            case "C": action = CHECKACTION.C; break;
-            case "halt": action = CHECKACTION.halt; break;
-            case "context": action = CHECKACTION.context; break;
-            default: break;
+            case "D": action = CHECKACTION.D; return true;
+            case "C": action = CHECKACTION.C; return true;
+            case "halt": action = CHECKACTION.halt; return true;
+            case "context": action = CHECKACTION.context; return true;
+            default: return false;
         }
     }
 

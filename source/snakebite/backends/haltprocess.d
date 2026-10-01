@@ -27,14 +27,24 @@ public noreturn haltProcess() nothrow @nogc @trusted {
     assert(0);
 }
 
-// What a halt action that ends only a cell throws. A guest `catch` or
-// `finally` does not see it: a halt is not an error that guest code
-// handles.
-public final class Halted: Exception {
+// What a halt action that ends only a cell throws. A halt is not an error
+// that guest code handles, so it is neither an `Exception` nor an `Error`:
+// druntime code that handles every `Exception` (`rt_finalize2` makes a
+// `FinalizeError` of one) lets it pass. Each backend checks `isHalt` before
+// it runs any guest code on the way up: no `catch`, `finally`,
+// `scope(exit)` or destructor sees it. Native code that handles every
+// `Throwable` is the one thing that still can: that is a limit of using an
+// exception to leave native frames, which the host cannot unwind in any
+// other way.
+public final class Halted: Throwable {
     public this(
         string file = __FILE__,
         size_t line = __LINE__,
     ) @safe @nogc nothrow pure scope {
         super("a check failed under -checkaction=halt", file, line);
     }
+}
+
+public bool isHalt(in Throwable throwable) @safe @nogc nothrow pure {
+    return cast(const(Halted)) throwable !is null;
 }

@@ -20,6 +20,7 @@ import snakebite.ffi.abi: Register;
 public enum DruntimeHook {
     indexBounds,
     sliceBounds,
+    rangeError,
     classInvariant,
     gcMalloc,
     callFinalizer,
@@ -49,6 +50,13 @@ private immutable Register[5] _sliceBoundsRegisters = [
     Register(Register.Kind.unsigned, 8),
     Register(Register.Kind.unsigned, 8),
     Register(Register.Kind.unsigned, 8),
+];
+
+// `_d_arrayboundsp(immutable(char*) file, uint line)`: the `RangeError` of
+// a check that has no index or bounds to report, such as a slice copy.
+private immutable Register[2] _rangeErrorRegisters = [
+    Register(Register.Kind.pointer, 8),
+    Register(Register.Kind.unsigned, 4),
 ];
 
 // `_d_invariant(Object)`, `_d_callfinalizer(void*)` and
@@ -131,6 +139,9 @@ public DruntimeHookSpec specOf(in DruntimeHook hook) @safe @nogc nothrow pure {
         case sliceBounds:
             return DruntimeHookSpec(
                 "_d_arraybounds_slicep", _sliceBoundsRegisters);
+        case rangeError:
+            return DruntimeHookSpec(
+                "_d_arrayboundsp", _rangeErrorRegisters);
         case classInvariant:
             return DruntimeHookSpec(
                 _classInvariantSymbol, _pointerOnlyRegisters);

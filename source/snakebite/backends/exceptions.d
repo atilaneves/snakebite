@@ -42,36 +42,62 @@ public bool catchMatches(
 // happened to build the error. A message that is not a literal is
 // `messageExpression`, which the backend evaluates when the assertion
 // fails: it is what `assert(c, m())` names and what `-checkaction=context`
-// makes of a plain `assert(a == b)`. `cAssertion` is the text
-// `-checkaction=C` hands the C runtime: the literal, or the asserted
-// expression itself; it is null when there is a `messageExpression`.
+// makes of a plain `assert(a == b)`.
 public struct AssertFailure {
     public string message;
     public string file;
     public size_t line;
     public imported!"dmd.expression".Expression messageExpression;
-    public const(char)* cAssertion;
 }
 
+// `function_` is the function that holds the assertion: druntime's failure
+// hook for an assertion directly in a `unittest` block has its own default
+// message.
 public AssertFailure assertFailureOf(
     imported!"dmd.expression".AssertExp expression,
+    imported!"dmd.func".FuncDeclaration function_,
 ) {
     import std.string: fromStringz;
 
     auto literal = expression.msg is null ? null : expression.msg.isStringExp;
-    const dynamic = expression.msg !is null && literal is null;
+    const inUnittest = function_ !is null
+        && function_.isUnitTestDeclaration !is null;
+    const defaultMessage = inUnittest
+        ? "unittest failure"
+        : "Assertion failure";
     const message = literal is null
-        ? "Assertion failure"
+        ? defaultMessage
         : literal.toStringz.fromStringz.idup;
 
     return AssertFailure(
         message,
         expression.loc.filename.fromStringz.idup,
         expression.loc.linnum,
-        dynamic ? expression.msg : null,
-        dynamic ? null
-            : literal is null ? expression.e1.toChars : literal.toStringz.ptr,
+        messageExpressionOf(expression),
     );
+}
+
+// The message of `expression` when it is not a literal, which the backend
+// evaluates only if the assertion fails.
+public imported!"dmd.expression".Expression messageExpressionOf(
+    imported!"dmd.expression".AssertExp expression,
+) {
+    const dynamic = expression.msg !is null
+        && expression.msg.isStringExp is null;
+
+    return dynamic ? expression.msg : null;
+}
+
+// The text `-checkaction=C` hands the C runtime for an assertion whose
+// message is not an expression: the literal, or the asserted expression
+// itself. It prints the expression, so it is made only when this mode
+// asks for it.
+public const(char)* cAssertionOf(
+    imported!"dmd.expression".AssertExp expression,
+) {
+    auto literal = expression.msg is null ? null : expression.msg.isStringExp;
+
+    return literal is null ? expression.e1.toChars : literal.toStringz.ptr;
 }
 
 // The arguments of the C runtime's assert failure function

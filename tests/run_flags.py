@@ -5,8 +5,8 @@
 
 # Compiler flags change what a whole program means, and a halt ends the
 # process, so these tests run whole programs: `native` is the same unittest
-# compiled with the same flags by the compiler that built snakebite, and the
-# other backends are `bin/sb` on a dub project whose recipe names the flags.
+# compiled with the same flags by dmd, the reference compiler, and the other
+# backends are `bin/sb` on a dub project whose recipe names the flags.
 
 import os
 import shutil
@@ -104,7 +104,11 @@ def outcome_of(result: subprocess.CompletedProcess[str]) -> Outcome:
 # dmd is the reference: snakebite takes its frontend and its glue layer
 # decisions from it, and ldc2 differs from it in some of the cases here.
 def native_compiler() -> str:
-    return shutil.which("dmd") or "ldc2"
+    dmd = shutil.which("dmd")
+    if dmd is None:
+        pytest.skip("dmd, the reference compiler, is not on PATH")
+
+    return dmd
 
 
 def sb_path() -> str:
@@ -478,6 +482,311 @@ def test_failed_assert_evaluates_its_message_expression(
         }
     """)
     assert_raises_after_start(backend, outcome, "dynamic")
+
+
+# The C runtime's abort is what `assert` becomes under `-checkaction=C`, and
+# so is `assert(0)` in the default of a `final switch`.
+@pytest.mark.parametrize("backend", NO_CTFE_ABORT)
+def test_checkaction_c_final_switch_on_non_member_aborts(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, ["-checkaction=C"], """
+        enum E { a, b }
+        unittest {
+            E e = cast(E) 7;
+            log("start\\n");
+            final switch (e) { case E.a: break; case E.b: break; }
+            log("after\\n");
+        }
+    """)
+    assert outcome.status == -SIGABRT, outcome.output
+    assert "Assertion `0' failed" in outcome.output
+    assert "after" not in outcome.output
+
+
+# The slices have different lengths, but the storage behind the source has
+# a third element, so the unchecked copy of `to.length` elements is well
+# defined.
+@pytest.mark.parametrize("backend", NO_CTFE_UNCHECKED)
+def test_release_slice_copy_length_mismatch_in_system_code_is_not_checked(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, ["-release"], """
+        @system unittest {
+            int[4] target;
+            int[4] source = [1, 2, 3, 4];
+            int[] to = target[0 .. 3];
+            int[] from = source[0 .. 2];
+            log("start\\n");
+            to[] = from[];
+            if (target == [1, 2, 3, 0])
+                log("after\\n");
+        }
+    """)
+    assert_passes_after_start(backend, outcome)
+
+
+# A slice copy onto an overlapping slice is a bounds failure, as a length
+# mismatch is.
+@pytest.mark.parametrize("backend", NO_CTFE_HALT)
+def test_checkaction_halt_overlapping_slice_copy_halts(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, ["-checkaction=halt"], """
+        unittest {
+            int[5] storage;
+            int[] to = storage[0 .. 3];
+            int[] from = storage[1 .. 4];
+            log("start\\n");
+            to[] = from[];
+            log("after\\n");
+        }
+    """)
+    assert_halts_after_start(backend, outcome)
+
+
+def assert_aborts_after_start(outcome: Outcome, message: str) -> None:
+    assert outcome.status == -SIGABRT, outcome.output
+    assert f"Assertion `{message}' failed" in outcome.output
+    assert "start" in outcome.output
+    assert "after" not in outcome.output
+
+
+@pytest.mark.parametrize("backend", NO_CTFE_ABORT)
+def test_checkaction_c_index_out_of_bounds_aborts_with_the_c_message(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, ["-checkaction=C"], """
+        unittest {
+            int[4] storage = [1, 2, 3, 4];
+            int[] slice = storage[0 .. 2];
+            log("start\\n");
+            auto value = slice[3];
+            log("after\\n");
+        }
+    """)
+    assert_aborts_after_start(outcome, "array index out of bounds")
+
+
+@pytest.mark.parametrize("backend", NO_CTFE_ABORT)
+def test_checkaction_c_slice_out_of_bounds_aborts_with_the_c_message(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, ["-checkaction=C"], """
+        unittest {
+            int[4] storage = [1, 2, 3, 4];
+            int[] slice = storage[0 .. 2];
+            log("start\\n");
+            auto value = slice[0 .. 3];
+            log("after\\n");
+        }
+    """)
+    assert_aborts_after_start(outcome, "array slice out of bounds")
+
+
+@pytest.mark.parametrize("backend", NO_CTFE_ABORT)
+def test_checkaction_c_slice_copy_length_mismatch_aborts_with_the_c_message(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, ["-checkaction=C"], """
+        unittest {
+            int[4] target;
+            int[4] source = [1, 2, 3, 4];
+            int[] to = target[0 .. 3];
+            int[] from = source[0 .. 2];
+            log("start\\n");
+            to[] = from[];
+            log("after\\n");
+        }
+    """)
+    assert_aborts_after_start(outcome, "array overflow")
+
+
+# The C runtime gets the message of `assert(e, message)` instead of the
+# text of `e`.
+@pytest.mark.parametrize("backend", NO_CTFE_ABORT)
+def test_checkaction_c_failed_assert_aborts_with_its_message_expression(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, ["-checkaction=C"], """
+        string message() { return "dynamic"; }
+        unittest {
+            int x = 1;
+            log("start\\n");
+            assert(x == 2, message());
+            log("after\\n");
+        }
+    """)
+    assert_aborts_after_start(outcome, "dynamic")
+
+
+# A failed `assert` in a `unittest` block has its own default message.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_failed_assert_in_a_unittest_says_unittest_failure(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, [], """
+        unittest {
+            int x = 1;
+            log("start\\n");
+            assert(x == 2);
+            log("after\\n");
+        }
+    """)
+    assert_raises_after_start(backend, outcome, "unittest failure")
+
+
+# Outside a `unittest` block the default message is druntime's.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_failed_assert_in_a_function_says_assertion_failure(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, [], """
+        void check(int x) { assert(x == 2); }
+        unittest {
+            log("start\\n");
+            check(1);
+            log("after\\n");
+        }
+    """)
+    assert_raises_after_start(backend, outcome, "Assertion failure")
+
+
+# A slice copy that fails its check is a `RangeError`, as any bounds
+# failure is.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_slice_copy_length_mismatch_raises_a_range_error(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, [], """
+        unittest {
+            int[4] target;
+            int[4] source = [1, 2, 3, 4];
+            int[] to = target[0 .. 3];
+            int[] from = source[0 .. 2];
+            log("start\\n");
+            to[] = from[];
+            log("after\\n");
+        }
+    """)
+    assert_raises_after_start(backend, outcome, "RangeError")
+
+
+# `-release` keeps the check in `@safe` code.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_release_slice_copy_length_mismatch_in_safe_code_raises(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, ["-release"], """
+        @safe unittest {
+            int[4] target;
+            int[4] source = [1, 2, 3, 4];
+            int[] to = target[0 .. 3];
+            int[] from = source[0 .. 2];
+            log("start\\n");
+            to[] = from[];
+            log("after\\n");
+        }
+    """)
+    assert_raises_after_start(backend, outcome, "RangeError")
+
+
+# A static array target has a length that the source must match, however
+# the copy is written.
+STATIC_COPIES = [
+    "target[] = from[];",
+    "target = from;",
+    "int[4] copy = from;",
+]
+
+
+@pytest.mark.parametrize("statement", STATIC_COPIES)
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_static_array_copy_from_a_shorter_slice_raises(
+    tmp_path: Path, backend: str, statement: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, [], f"""
+        unittest {{
+            int[4] target;
+            int[] from = [1, 2, 3];
+            log("start\\n");
+            {statement}
+            log("after\\n");
+        }}
+    """)
+    assert_raises_after_start(backend, outcome, "RangeError")
+
+
+@pytest.mark.parametrize("statement", STATIC_COPIES)
+@pytest.mark.parametrize("backend", NO_CTFE_HALT)
+def test_checkaction_halt_static_array_copy_from_a_shorter_slice_halts(
+    tmp_path: Path, backend: str, statement: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, ["-checkaction=halt"], f"""
+        unittest {{
+            int[4] target;
+            int[] from = [1, 2, 3];
+            log("start\\n");
+            {statement}
+            log("after\\n");
+        }}
+    """)
+    assert_halts_after_start(backend, outcome)
+
+
+@pytest.mark.parametrize("statement", STATIC_COPIES)
+@pytest.mark.parametrize("backend", NO_CTFE_ABORT)
+def test_checkaction_c_static_array_copy_from_a_shorter_slice_aborts(
+    tmp_path: Path, backend: str, statement: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, ["-checkaction=C"], f"""
+        unittest {{
+            int[4] target;
+            int[] from = [1, 2, 3];
+            log("start\\n");
+            {statement}
+            log("after\\n");
+        }}
+    """)
+    assert_aborts_after_start(outcome, "array overflow")
+
+
+# `dmd` refuses a `-checkaction=` value that it does not know, and so does
+# every backend, before it runs anything.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_unknown_checkaction_value_is_an_error(
+    tmp_path: Path, backend: str,
+) -> None:
+    if backend == "native":
+        result = subprocess.run(
+            [native_compiler(), "-checkaction=bogus", "-o-", "-"],
+            input="void main() {}",
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=TIMEOUT,
+        )
+    else:
+        (tmp_path / "dub.sdl").write_text(
+            'name "app"\ntargetType "library"\ndflags "-checkaction=bogus"\n',
+            encoding="utf-8",
+        )
+        (tmp_path / "source").mkdir()
+        (tmp_path / "source" / "app.d").write_text(
+            "module app;\nunittest {}\n", encoding="utf-8",
+        )
+        result = subprocess.run(
+            [sb_path(), f"--backend={backend}", "--no-optimise-image",
+             str(tmp_path)],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=TIMEOUT,
+        )
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    assert "switch `-checkaction=bogus` is invalid" in output
 
 
 if __name__ == "__main__":
