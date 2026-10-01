@@ -887,11 +887,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileStatement(body_);
 
         if (!_finished) {
-            if (!_isVoidReturn)
-                throw rejection(_function, _function.loc,
-                    "a body that does not return on every path");
-
-            emit(&opReturnVoid, 0, 0, 0);
+            if (_isVoidReturn)
+                emit(&opReturnVoid, 0, 0, 0);
+            else
+                emitUnreachableTrap;
         }
 
         // A `goto case`, or the `switch` itself, jumping to a
@@ -965,6 +964,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             closureSlots,
             parameterOffsets,
         );
+    }
+
+    // dmd normally rejects a non-void function whose end is reachable, but
+    // the compiler's own `_finished` tracking is less precise than dmd's.
+    // Trap at the end instead of rejecting.
+    private void emitUnreachableTrap() {
+        import std.string: fromStringz;
+
+        const zero = reserveTemp(pointerFacts);
+        emit(&opConstant, zero, addConstant(0), size_t.sizeof);
+        _assertSites ~= AssertSite(
+            "internal error: control reached the end of a non-void function",
+            _function.loc.filename.fromStringz.idup,
+            _function.loc.linnum,
+        );
+        emit(&opAssert, zero, _assertSites.length - 1, size_t.sizeof);
     }
 
     private const(Instruction)* instructionAt(in size_t index) const {

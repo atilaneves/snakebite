@@ -1101,3 +1101,53 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+static foreach (backend; Matrix!()) {
+    @("functionEndAfterBackwardGotoAfterIfReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f(int x) { lbl: x++; if (x > 3) return x; goto lbl; }
+            void main() { assert(f(0) == 4); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("functionEndAfterGotoThenIfReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f(int x) { lbl: if (x > 3) return x; x++; goto lbl; }
+            void main() { assert(f(0) == 4); }
+        });
+    }
+}
+
+// dmd's block-exit analysis reads a constant-true condition as "the
+// `if` body always runs", so it accepts this function with no `return`
+// after the `if`.
+static foreach (backend; Matrix!()) {
+    @("functionEndAfterConstantTrueIfReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f(int x) { if (true) return x; }
+            void main() { assert(f(5) == 5); }
+        });
+    }
+}
+
+// A call to a `noreturn` function ends the path for dmd's block-exit
+// analysis, so no `return` is necessary after it.
+static foreach (backend; Matrix!()) {
+    @("functionEndAfterNoreturnCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            noreturn die() { throw new Exception("no"); }
+            int f(int x) { if (x > 3) return x; die(); }
+            void main() { assert(f(5) == 5); }
+        });
+    }
+}
