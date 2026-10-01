@@ -13,5 +13,6 @@ bin/ut -j 1
 bin/at '~@timing'
 bin/at -s '@timing'
 build/test-repl.sh
+build/test-cli.sh
 bin/sb -b bytecode examples/rt-simple
 build/benches.sh
