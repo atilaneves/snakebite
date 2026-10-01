@@ -209,14 +209,13 @@ public struct CallSelection {
             && module_.md.toString == "core.stdc.stdarg";
     }
 
-    // dmd's backend turns a call to the C function named `alloca` into
-    // stack allocation (`dmd.backend.x86.cod1`, by symbol name).
+    // dmd's backend turns a call to the function with the symbol `alloca`
+    // into stack allocation (`dmd.backend.x86.cod1`, by symbol name), not
+    // one with the identifier: `pragma(mangle)` can make them differ.
     private static bool isAlloca(FuncDeclaration function_) {
-        import dmd.astenums: LINK;
-        import snakebite.frontend.dmd.functions: typeFunctionOf;
+        import snakebite.frontend.dmd.mangle: mangledNameOf;
 
-        return function_.ident.toString == "alloca"
-            && typeFunctionOf(function_).linkage == LINK.c;
+        return function_.mangledNameOf == "alloca";
     }
 
     // Asks dmd for `function_`'s own compiler-intrinsic classification
