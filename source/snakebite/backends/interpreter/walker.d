@@ -3377,7 +3377,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private extern(D) void storeIntegralAssign(string op)(
         BinAssignExp expression, void* resolvedTarget,
     ) {
-        import snakebite.backends.shifts: ShiftPlan, shiftPlan;
+        import snakebite.backends.shifts: shiftPlan;
         import snakebite.frontend.storage: compoundTarget;
         import snakebite.nativelayout: loadIntegral, storeIntegral;
 
@@ -3394,10 +3394,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         auto arithmeticFacts = TypeFacts(targetFacts.size,
             targetFacts.alignment, true, operationFacts.isUnsigned);
         bool signExtend = !targetFacts.isUnsigned;
-        static if (op == "<<" || op == ">>" || op == ">>>") {
+        enum isShift = op == "<<" || op == ">>" || op == ">>>";
+        static if (isShift) {
             const shift = shiftPlan(expression);
-            arithmeticFacts = TypeFacts(shift.width, cast(uint) shift.width,
-                true, shift.direction == ShiftPlan.Direction.rightLogical);
             signExtend = shift.signExtend;
         }
         auto target = resolvedTarget;
@@ -3416,8 +3415,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 const current = signExtend
                     ? fieldValue
                     : fieldValue & (ulong.max >> (64 - 8 * targetFacts.size));
-                const result = combine!op(
-                    current, step, arithmeticFacts, stepFacts, expression);
+                static if (isShift)
+                    const result = shifted(current, step, shift);
+                else
+                    const result = combine!op(
+                        current, step, arithmeticFacts, stepFacts, expression);
                 storeBitfieldAt(field, target, result);
                 storeIntegral(_place, result, _facts.size);
                 return;
@@ -3427,8 +3429,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const stepFacts = factsOf(expression.e2.type);
         const step = asIntegral(expression.e2, stepFacts);
         const current = loadIntegral(target, targetFacts.size, signExtend);
-        const result =
-            combine!op(current, step, arithmeticFacts, stepFacts, expression);
+        static if (isShift)
+            const result = shifted(current, step, shift);
+        else
+            const result = combine!op(
+                current, step, arithmeticFacts, stepFacts, expression);
 
         storeIntegral(target, result, targetFacts.size);
         storeIntegral(
@@ -3953,6 +3958,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // `extern(D)`: a string template parameter has no C++ mangling.
     private extern(D) void storeBinaryExp(string op)(BinExp expression) {
         import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
+        import snakebite.backends.shifts: shiftPlan;
         import snakebite.nativelayout: storeIntegral;
         import snakebite.nativevalue: applyComplex, storeFloating;
         import std.conv: text;
@@ -3970,9 +3976,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 const bFacts = factsOf(expression.e2.type);
                 const a = asIntegral(expression.e1, aFacts);
                 const b = asIntegral(expression.e2, bFacts);
-                storeIntegral(_place,
-                    combine!op(a, b, aFacts, bFacts, expression),
-                    _facts.size);
+                static if (op == "<<" || op == ">>" || op == ">>>")
+                    const result = shifted(a, b, shiftPlan(expression));
+                else
+                    const result = combine!op(a, b, aFacts, bFacts, expression);
+                storeIntegral(_place, result, _facts.size);
                 return;
             }
 
@@ -6069,7 +6077,8 @@ private ulong combine(string op)(
     imported!"dmd.expression".Expression expression,
 ) {
     static if (op == "<<" || op == ">>" || op == ">>>")
-        return shifted!op(a, b, aFacts);
+        // dmd rejects a vector shift and a shift has its own `ShiftPlan`.
+        assert(0);
     else static if (op == "/" || op == "%")
         return divided!op(
             a, b, sharedSignedness(aFacts, bFacts), expression);
@@ -6130,39 +6139,31 @@ private ulong divided(string op)(
     return cast(ulong) mixin("a " ~ op ~ " b");
 }
 
-// The left operand alone decides a shift: its width says how many bit
-// positions there are, and its signedness says whether `>>` copies the
-// sign bit down. The right operand is a count rather than a value in
-// the same domain - dmd leaves it its own type, which can differ in
-// signedness from the left one - so its facts say nothing here.
-//
 // A count outside `[0, width)` is undefined in D; the count is masked as
-// compiled D does on the host.
-private ulong shifted(string op)(
+// compiled D does on the host. `a` is 64 bits here, so a logical shift
+// clears the extension above the plan's width first.
+private ulong shifted(
     in long a,
     in long count,
-    in imported!"snakebite.nativelayout".TypeFacts aFacts,
+    in imported!"snakebite.backends.shifts".ShiftPlan plan,
 ) {
     import snakebite.nativevalue: shiftCount;
 
-    const width = aFacts.size * 8;
-    const b = shiftCount(count, aFacts.size);
+    const width = plan.width * 8;
+    const b = shiftCount(count, plan.width);
 
-    static if (op == "<<")
-        return cast(ulong) a << b;
-    else static if (op == ">>")
-        return aFacts.isUnsigned
-            ? cast(ulong) a >> b
-            : cast(ulong) (a >> b);
-    else {
-        // `>>>` fills from the left with zeros within the operand's own
-        // width. `a` is 64 bits here, so a signed operand's sign
-        // extension above that width is cleared before the shift.
-        const bits = width == 64
-            ? cast(ulong) a
-            : cast(ulong) a & ((1UL << width) - 1);
-        return bits >> b;
-    }
+    with (imported!"snakebite.backends.shifts".ShiftPlan.Direction)
+        final switch (plan.direction) {
+            case left:
+                return cast(ulong) a << b;
+            case rightArithmetic:
+                return cast(ulong) (a >> b);
+            case rightLogical:
+                const bits = width == 64
+                    ? cast(ulong) a
+                    : cast(ulong) a & ((1UL << width) - 1);
+                return bits >> b;
+        }
 }
 // A (nested function, enclosing function) pair, by address: which chain of
 // hops leads from the one's frame to the other's context is fixed for

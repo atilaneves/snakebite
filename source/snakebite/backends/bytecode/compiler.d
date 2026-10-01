@@ -4957,16 +4957,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(ShlExp expression) {
-        compileBinaryExpression(expression, &opShiftLeft);
+        compileShiftExpression(expression);
     }
 
     override void visit(UshrExp expression) {
-        compileBinaryExpression(expression, &opShiftRightLogical);
+        compileShiftExpression(expression);
     }
 
     override void visit(ShrExp expression) {
-        compileSignedBinaryExpression(
-            expression, &opShiftRightArithmetic, &opShiftRightLogical);
+        compileShiftExpression(expression);
     }
 
     override void visit(DivExp expression) {
@@ -5000,6 +4999,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         requireDestination(expression);
         compileBinary(expression, _destination, _width, handler);
+    }
+
+    private void compileShiftExpression(BinExp expression) {
+        import snakebite.backends.shifts: shiftPlan;
+
+        compileBinaryExpression(
+            expression, shiftHandler(shiftPlan(expression)));
     }
 
     private void compileSignedBinaryExpression(

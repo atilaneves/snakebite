@@ -4,7 +4,7 @@ private:
 
 import snakebite.nativelayout: TypeFacts;
 
-// How a compound shift (`<<=`, `>>=`, `>>>=`) runs. dmd gives the left
+// How a shift (`<<`, `>>`, `>>>` and the compound forms) runs. dmd gives the left
 // operand the common type of both promoted operands, which can be wider
 // than the target (`int <<= long`) or differ from it in signedness
 // (`int >>= uint`), so the width, the count mask and the kind of right
@@ -22,6 +22,19 @@ package struct ShiftPlan {
     size_t width;
     // Whether the target widens to `width` by sign extension.
     bool signExtend;
+}
+
+// The operands of a plain shift are already promoted, so the left
+// operand's own type is the operation type.
+package ShiftPlan shiftPlan(imported!"dmd.expression".BinExp expression) {
+    const facts = TypeFacts.of(expression.e1.type);
+    const direction = expression.isShlExp
+        ? ShiftPlan.Direction.left
+        : expression.isUshrExp || facts.isUnsigned
+            ? ShiftPlan.Direction.rightLogical
+            : ShiftPlan.Direction.rightArithmetic;
+
+    return ShiftPlan(direction, facts.size, !facts.isUnsigned);
 }
 
 package ShiftPlan shiftPlan(

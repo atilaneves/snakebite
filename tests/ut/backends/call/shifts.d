@@ -288,6 +288,102 @@ private enum shiftCases = [
         "int", "16", "-1", agrees),
     ShiftCase("short", ">>>", assign, "countEqualsOperandWidth",
         "int", "16", "0", agrees),
+    ShiftCase("ubyte", "<<", expr, "countEqualsWidth",
+        "int", "32", "255", rejects),
+    ShiftCase("ubyte", ">>", expr, "countEqualsWidth",
+        "int", "32", "255", rejects),
+    ShiftCase("ubyte", ">>>", expr, "countEqualsWidth",
+        "int", "32", "255", rejects),
+    ShiftCase("ubyte", "<<", expr, "countAboveWidth",
+        "int", "33", "254", rejects),
+    ShiftCase("ubyte", ">>", expr, "countAboveWidth",
+        "int", "33", "127", rejects),
+    ShiftCase("ubyte", ">>>", expr, "countAboveWidth",
+        "int", "33", "127", rejects),
+    ShiftCase("ubyte", "<<", expr, "countNegative",
+        "int", "-1", "0", rejects),
+    ShiftCase("ubyte", ">>", expr, "countNegative",
+        "int", "-1", "0", rejects),
+    ShiftCase("ubyte", ">>>", expr, "countNegative",
+        "int", "-1", "0", rejects),
+    ShiftCase("ubyte", "<<", expr, "countEqualsOperandWidth",
+        "int", "8", "0", agrees),
+    ShiftCase("ubyte", ">>", expr, "countEqualsOperandWidth",
+        "int", "8", "0", agrees),
+    ShiftCase("ubyte", ">>>", expr, "countEqualsOperandWidth",
+        "int", "8", "0", agrees),
+    ShiftCase("ushort", "<<", expr, "countEqualsWidth",
+        "int", "32", "65535", rejects),
+    ShiftCase("ushort", ">>", expr, "countEqualsWidth",
+        "int", "32", "65535", rejects),
+    ShiftCase("ushort", ">>>", expr, "countEqualsWidth",
+        "int", "32", "65535", rejects),
+    ShiftCase("ushort", "<<", expr, "countAboveWidth",
+        "int", "33", "65534", rejects),
+    ShiftCase("ushort", ">>", expr, "countAboveWidth",
+        "int", "33", "32767", rejects),
+    ShiftCase("ushort", ">>>", expr, "countAboveWidth",
+        "int", "33", "32767", rejects),
+    ShiftCase("ushort", "<<", expr, "countNegative",
+        "int", "-1", "0", rejects),
+    ShiftCase("ushort", ">>", expr, "countNegative",
+        "int", "-1", "0", rejects),
+    ShiftCase("ushort", ">>>", expr, "countNegative",
+        "int", "-1", "0", rejects),
+    ShiftCase("ushort", "<<", expr, "countEqualsOperandWidth",
+        "int", "16", "0", agrees),
+    ShiftCase("ushort", ">>", expr, "countEqualsOperandWidth",
+        "int", "16", "0", agrees),
+    ShiftCase("ushort", ">>>", expr, "countEqualsOperandWidth",
+        "int", "16", "0", agrees),
+    ShiftCase("ubyte", "<<", assign, "countEqualsWidth",
+        "int", "32", "255", differs, "0"),
+    ShiftCase("ubyte", ">>", assign, "countEqualsWidth",
+        "int", "32", "255", agrees),
+    ShiftCase("ubyte", ">>>", assign, "countEqualsWidth",
+        "int", "32", "255", differs, "0"),
+    ShiftCase("ubyte", "<<", assign, "countAboveWidth",
+        "int", "33", "254", differs, "0"),
+    ShiftCase("ubyte", ">>", assign, "countAboveWidth",
+        "int", "33", "127", agrees),
+    ShiftCase("ubyte", ">>>", assign, "countAboveWidth",
+        "int", "33", "127", differs, "0"),
+    ShiftCase("ubyte", "<<", assign, "countNegative",
+        "int", "-1", "0", agrees),
+    ShiftCase("ubyte", ">>", assign, "countNegative",
+        "int", "-1", "0", asserts),
+    ShiftCase("ubyte", ">>>", assign, "countNegative",
+        "int", "-1", "0", asserts),
+    ShiftCase("ubyte", "<<", assign, "countEqualsOperandWidth",
+        "int", "8", "0", agrees),
+    ShiftCase("ubyte", ">>", assign, "countEqualsOperandWidth",
+        "int", "8", "0", agrees),
+    ShiftCase("ubyte", ">>>", assign, "countEqualsOperandWidth",
+        "int", "8", "0", agrees),
+    ShiftCase("ushort", "<<", assign, "countEqualsWidth",
+        "int", "32", "65535", differs, "0"),
+    ShiftCase("ushort", ">>", assign, "countEqualsWidth",
+        "int", "32", "65535", agrees),
+    ShiftCase("ushort", ">>>", assign, "countEqualsWidth",
+        "int", "32", "65535", differs, "0"),
+    ShiftCase("ushort", "<<", assign, "countAboveWidth",
+        "int", "33", "65534", differs, "0"),
+    ShiftCase("ushort", ">>", assign, "countAboveWidth",
+        "int", "33", "32767", agrees),
+    ShiftCase("ushort", ">>>", assign, "countAboveWidth",
+        "int", "33", "32767", differs, "0"),
+    ShiftCase("ushort", "<<", assign, "countNegative",
+        "int", "-1", "0", agrees),
+    ShiftCase("ushort", ">>", assign, "countNegative",
+        "int", "-1", "0", asserts),
+    ShiftCase("ushort", ">>>", assign, "countNegative",
+        "int", "-1", "0", asserts),
+    ShiftCase("ushort", "<<", assign, "countEqualsOperandWidth",
+        "int", "16", "0", agrees),
+    ShiftCase("ushort", ">>", assign, "countEqualsOperandWidth",
+        "int", "16", "0", agrees),
+    ShiftCase("ushort", ">>>", assign, "countEqualsOperandWidth",
+        "int", "16", "0", agrees),
     ShiftCase("int", "<<", assign, "longCountAboveWidth",
         "long", "33", "0", agrees),
     ShiftCase("int", ">>", assign, "longCountAboveWidth",
@@ -364,4 +460,58 @@ static foreach (row; shiftCases) {
                 Ctfe, row.shiftCode, "shifted");
         }
     }
+}
+
+// A `long` count promotes a `byte` target twice (`cast(long)cast(int)`),
+// and the shift runs at 64 bits on the sign-extended target. The store
+// must go to the array element under both casts and leave the adjacent
+// elements as they were.
+private enum elementLongCountCode = q{
+    long count() { return 8; }
+    int shifted() {
+        byte[] a = [-100, -100, -100];
+        a[1] >>>= count();
+        return a[0] * 10_000 + a[1] * 100 + a[2];
+    }
+};
+
+static foreach (backend; Matrix!(DiffersInCtfe)) {
+    @("shift.byte.ushrAssign.element.longCount." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        (-1_000_200).shouldBeRetOf!(backend, elementLongCountCode, "shifted");
+    }
+}
+
+@("shift.byte.ushrAssign.element.longCount.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    (-1_000_100).shouldBeRetOf!(Ctfe, elementLongCountCode, "shifted");
+}
+
+// The same double promotion with a struct field as the target: the store
+// must go to the field under both casts and leave the adjacent fields as
+// they were.
+private enum fieldLongCountCode = q{
+    struct S { byte before = -100; byte f = -100; byte after = -100; }
+    long count() { return 8; }
+    int shifted() {
+        S s;
+        s.f >>>= count();
+        return s.before * 10_000 + s.f * 100 + s.after;
+    }
+};
+
+static foreach (backend; Matrix!(DiffersInCtfe)) {
+    @("shift.byte.ushrAssign.field.longCount." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        (-1_000_200).shouldBeRetOf!(backend, fieldLongCountCode, "shifted");
+    }
+}
+
+@("shift.byte.ushrAssign.field.longCount.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    (-1_000_100).shouldBeRetOf!(Ctfe, fieldLongCountCode, "shifted");
 }
