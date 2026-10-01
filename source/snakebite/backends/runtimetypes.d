@@ -451,7 +451,7 @@ private void setSysVArgTypes(
     static if (supported) {
         try {
             auto plan = ArgumentPlan.of(type);
-            if (plan.memory)
+            if (plan.memory || plan.count == 0)
                 return;
 
             info.m_arg1 = eightbyteRepresentative(plan.registers[0]);
@@ -497,6 +497,7 @@ private imported!"object".TypeInfo eightbyteRepresentative(
         case 1: return typeid(byte);
         case 2: return typeid(short);
         case 3: case 4: return typeid(int);
-        default: return typeid(long);
+        case 5: .. case 8: return typeid(long);
+        default: assert(false);
     }
 }
