@@ -225,7 +225,9 @@ public int run(
     Program program,
     in string[] hostArguments = null,
 ) {
-    if (runModuleConstructors(backend, program.moduleConstructors))
+    // Without a runtime nothing calls a module constructor.
+    if (!program.checks.betterC
+            && runModuleConstructors(backend, program.moduleConstructors))
         return 1;
 
     return runMain(backend, program, hostArguments);

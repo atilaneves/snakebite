@@ -1043,6 +1043,7 @@ private void driveSharedSemantic(
     import dmd.globals: global;
     import dmd.semantic2: semantic2;
     import dmd.semantic3: semantic3;
+    import snakebite.frontend.betterc: reportBetterCDiagnostics;
     import snakebite.frontend.inlineasm:
         disableInlineAsmVersion,
         reportInlineAsmDiagnostics;
@@ -1065,6 +1066,8 @@ private void driveSharedSemantic(
 
     if (global.errors == 0)
         reportInlineAsmDiagnostics(rootModules);
+    if (global.errors == 0 && global.params.betterC)
+        reportBetterCDiagnostics(rootModules);
 }
 
 // Every module under `rootImportPaths` that the phases above loaded and
@@ -1319,6 +1322,11 @@ private struct SavedFrontendFlags {
     CHECKENABLE useArrayBounds;
     CHECKENABLE useSwitchError;
     CHECKACTION checkAction;
+    bool betterC;
+    bool useModuleInfo;
+    bool useTypeInfo;
+    bool useExceptions;
+    bool useGC;
 }
 
 private SavedFrontendFlags saveFrontendFlags() {
@@ -1355,6 +1363,11 @@ private SavedFrontendFlags saveFrontendFlags() {
         global.params.useArrayBounds,
         global.params.useSwitchError,
         global.params.checkAction,
+        global.params.betterC,
+        global.params.useModuleInfo,
+        global.params.useTypeInfo,
+        global.params.useExceptions,
+        global.params.useGC,
     );
 }
 
@@ -1394,6 +1407,11 @@ private void restoreFrontendFlags(ref const SavedFrontendFlags saved) {
     global.params.useArrayBounds = saved.useArrayBounds;
     global.params.useSwitchError = saved.useSwitchError;
     global.params.checkAction = saved.checkAction;
+    global.params.betterC = saved.betterC;
+    global.params.useModuleInfo = saved.useModuleInfo;
+    global.params.useTypeInfo = saved.useTypeInfo;
+    global.params.useExceptions = saved.useExceptions;
+    global.params.useGC = saved.useGC;
 }
 
 private void applyFrontendFlags(in FrontendFlags flags) {
@@ -1518,7 +1536,11 @@ private void applyChecks(in imported!"snakebite.frontend.checks".Checks checks) 
     import dmd.cond: VersionCondition;
     import dmd.globals: global;
 
+    import dmd.cond: VersionCondition;
+
     checks.applyTo(global.params);
+    if (checks.betterC)
+        VersionCondition.addPredefinedGlobalIdent("D_BetterC");
     for (size_t index = global.versionids.length; index-- > 0; )
         if (!checks.defines(global.versionids[index].toString))
             global.versionids.remove(index);

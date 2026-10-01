@@ -81,11 +81,13 @@ public PreparationReport prepareProject(
         );
     if (project.program.dependencyImage !is null)
         project.program.testHooks = project.program.dependencyImage.testHooks;
-    auto startupImage = new DependencyImage;
-    *startupImage = prepareTestStartup(stateDirectory,
-        project.program.rootModules.map!(module_ =>
-            module_.toPrettyChars.fromStringz.idup).array);
-    project.program.testStartupImage = startupImage;
+    if (!project.program.checks.betterC) {
+        auto startupImage = new DependencyImage;
+        *startupImage = prepareTestStartup(stateDirectory,
+            project.program.rootModules.map!(module_ =>
+                module_.toPrettyChars.fromStringz.idup).array);
+        project.program.testStartupImage = startupImage;
+    }
     return PreparationReport(project, discovery, frontendDuration, stopWatch.peek);
 }
 
@@ -119,8 +121,9 @@ public ExecutionReport executeBackend(
     scope backend = makeBackend(name, program);
     TestStartupReport startup;
     int status;
-    // Snippet callers construct Programs without project startup metadata.
-    if (program.testStartupImage is null)
+    // Snippet callers construct Programs without project startup metadata,
+    // and a `-betterC` program has no runtime to run its tests.
+    if (program.testStartupImage is null || program.checks.betterC)
         status = run(backend, program, hostArguments);
     else {
         startup = runTestsAndMain(backend, program, hostArguments);

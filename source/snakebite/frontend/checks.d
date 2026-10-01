@@ -27,6 +27,10 @@ public struct Checks {
     public CHECKENABLE arrayBounds = CHECKENABLE.on;
     public CHECKENABLE switchError = CHECKENABLE.on;
     public CHECKACTION action = CHECKACTION.D;
+    // `-betterC` does not check anything itself: it picks the C `assert` as
+    // the failure action and removes the runtime, which is why it is read
+    // here, with the flags that decide what a failed check does.
+    public bool betterC;
 
     private enum Category {
         assertion,
@@ -50,6 +54,8 @@ public struct Checks {
 
         if (argument == "-release")
             _release = true;
+        else if (argument == "-betterC")
+            betterC = true;
         else if (argument == "-noboundscheck")
             _boundscheck = CHECKENABLE.off;
         else if (argument.startsWith("-boundscheck"))
@@ -117,6 +123,9 @@ public struct Checks {
     public void resolve() @safe pure nothrow @nogc {
         import std.traits: EnumMembers;
 
+        if (betterC && action != CHECKACTION.halt)
+            action = CHECKACTION.C;
+
         static foreach (category; EnumMembers!Category)
             fieldOf(category) = _requested[category] == CHECKENABLE._default
                 ? defaultOf(category)
@@ -160,16 +169,26 @@ public struct Checks {
         params.useArrayBounds = arrayBounds;
         params.useSwitchError = switchError;
         params.checkAction = action;
+        params.betterC = betterC;
+        params.useModuleInfo = !betterC;
+        params.useTypeInfo = !betterC;
+        params.useExceptions = !betterC;
+        params.useGC = !betterC;
     }
 
     // The predefined version identifiers that dmd defines only when the
-    // check is on (`dmd.target.addPredefinedGlobalIdentifiers`).
+    // check is on or the runtime is there
+    // (`dmd.target.addPredefinedGlobalIdentifiers`).
     public bool defines(in const(char)[] identifier) const @safe pure nothrow @nogc {
         switch (identifier) {
             case "assert": return assertion == CHECKENABLE.on;
             case "D_PreConditions": return preconditions == CHECKENABLE.on;
             case "D_PostConditions": return postconditions == CHECKENABLE.on;
             case "D_Invariants": return invariants == CHECKENABLE.on;
+            case "D_ModuleInfo":
+            case "D_Exceptions":
+            case "D_TypeInfo":
+                return !betterC;
             default: return true;
         }
     }
