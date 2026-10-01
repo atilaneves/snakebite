@@ -1086,35 +1086,30 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// dmd's block-exit analysis reads a constant-true condition as "the
+// `if` body always runs", so it accepts this function with no `return`
+// after the `if`.
 static foreach (backend; Matrix!()) {
-    @("functionEndAfterInfiniteFor." ~ backend.stringof)
+    @("functionEndAfterConstantTrueIfReturn." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            int f(int x) { for (;;) { if (x > 3) return x; x++; } }
-            void main() { assert(f(0) == 4); }
-        });
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("functionEndAfterThrow." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int f(int x) { if (x > 3) return x; throw new Exception("no"); }
+            int f(int x) { if (true) return x; }
             void main() { assert(f(5) == 5); }
         });
     }
 }
 
+// A call to a `noreturn` function ends the path for dmd's block-exit
+// analysis, so no `return` is necessary after it.
 static foreach (backend; Matrix!()) {
-    @("functionEndAfterSwitchAllCasesReturn." ~ backend.stringof)
+    @("functionEndAfterNoreturnCall." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            int f(int x) { switch (x) { case 0: return 10; case 1: return 11; default: return 12; } }
-            void main() { assert(f(1) == 11); }
+            noreturn die() { throw new Exception("no"); }
+            int f(int x) { if (x > 3) return x; die(); }
+            void main() { assert(f(5) == 5); }
         });
     }
 }
