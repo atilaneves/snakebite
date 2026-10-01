@@ -1470,6 +1470,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 pending ~= function_;
             }
         }
+        // Whatever dmd reports while an action runs is dropped and not kept
+        // on a declaration: a node that dmd cannot analyse stays for the
+        // execution that reaches it.
         void attempt(scope void delegate() action) {
             try
                 gagged(action);
@@ -5164,7 +5167,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const message = failure.messageExpression is null
             ? failure.message
             : evaluateMessage(failure.messageExpression);
-        throw new GuestException(
+        throw GuestException.make(
             new AssertError(message, failure.file, failure.line));
     }
 

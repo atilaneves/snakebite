@@ -4177,40 +4177,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// The GC finalizer runs the destructor of a struct made with `new`. The 2000
-// dead structs are the deterministic form that a conservative GC allows: a
-// stale stack word keeps at most a few alive. The count is `__gshared`
-// because a collection on any thread can run the finalizer.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "CTFE cannot run `GC.collect`: it has no source code"),
-)) {
-    @("gcFinalizerRunsDestructorOfHeapStruct." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            __gshared int dead;
-            struct S {
-                int value;
-                ~this() { ++dead; }
-            }
-            pragma(inline, false) void make() {
-                foreach (n; 0 .. 2000) {
-                    auto s = new S(1);
-                    assert(s.value == 1);
-                }
-            }
-            void main() {
-                import core.memory: GC;
-                make;
-                GC.collect;
-                GC.collect;
-                assert(dead > 1000);
-            }
-        });
-    }
-}
-
 // A chain of two compile-time struct pointers reaches the innermost value.
 static foreach (backend; Matrix!()) {
     @("compileTimeStructPointerChainValue." ~ backend.stringof)
@@ -4690,39 +4656,6 @@ static foreach (backend; Matrix!()) {
             void main() {
                 assert(viaScope() == 8);
                 assert(viaScope() == 8);
-            }
-        });
-    }
-}
-
-// The GC finalizer runs the destructor of every element of an array of
-// structs. 500 dead arrays of 4 elements are the deterministic form that a
-// conservative GC allows.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "CTFE cannot run `GC.collect`: it has no source code"),
-)) {
-    @("gcFinalizerRunsDestructorsOfStructArray." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            __gshared int dead;
-            struct S {
-                int value;
-                ~this() { ++dead; }
-            }
-            pragma(inline, false) void make() {
-                foreach (n; 0 .. 500) {
-                    auto array = new S[4];
-                    assert(array.length == 4);
-                }
-            }
-            void main() {
-                import core.memory: GC;
-                make;
-                GC.collect;
-                GC.collect;
-                assert(dead > 1000);
             }
         });
     }

@@ -117,6 +117,83 @@ static foreach (backend; Matrix!(
 }
 
 
+private struct FiveBytes {
+    ubyte[5] bytes;
+}
+
+
+public extern(C) FiveBytes snakebite_ut_aggregates_five_bytes(ubyte seed) {
+    FiveBytes result;
+    foreach (i, ref value; result.bytes)
+        value = cast(ubyte) (seed + i);
+    return result;
+}
+
+
+public extern(C) int snakebite_ut_aggregates_five_bytes_callback(
+    FiveBytes function(ubyte) callback, ubyte seed,
+) {
+    int sum;
+    foreach (value; callback(seed).bytes)
+        sum += value;
+    return sum;
+}
+
+
+// An aggregate of five bytes comes back in one register, and only its five
+// low bytes belong to the result.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call an external function without source"),
+)) {
+    @("registerResult.fiveBytesFromNative." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        25.shouldBeRetOf!(backend, q{
+            struct FiveBytes {
+                ubyte[5] bytes;
+            }
+            pragma(mangle, "snakebite_ut_aggregates_five_bytes")
+            extern(C) FiveBytes nativeFiveBytes(ubyte);
+            int answer() {
+                int sum;
+                const result = nativeFiveBytes(3);
+                foreach (value; result.bytes)
+                    sum += value;
+                return sum;
+            }
+        }, "answer");
+    }
+}
+
+
+// Native code reads the five bytes that a guest function returns.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("registerResult.fiveBytesFromGuestCallback." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        25.shouldBeRetOf!(backend, q{
+            struct FiveBytes {
+                ubyte[5] bytes;
+            }
+            alias Callback = extern(C) FiveBytes function(ubyte);
+            pragma(mangle, "snakebite_ut_aggregates_five_bytes_callback")
+            extern(C) int nativeSum(Callback, ubyte);
+            extern(C) FiveBytes make(ubyte seed) {
+                FiveBytes result;
+                foreach (i, ref value; result.bytes)
+                    value = cast(ubyte) (seed + i);
+                return result;
+            }
+            int answer() {
+                return nativeSum(&make, 3);
+            }
+        }, "answer");
+    }
+}
+
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot open native files"),
 )) {
