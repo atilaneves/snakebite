@@ -822,6 +822,33 @@ private imported!"dmd.expression".Expression initialExpression(
     return newInFrontend!defaultInitLiteral(type, loc);
 }
 
+// Whether `value`, through any casts, is the address of a symbol plus an
+// offset: the link-time constant that C allows as the initialiser of an
+// integer, `(unsigned long) &variable`.
+private bool isSymbolAddress(
+    imported!"dmd.expression".Expression value,
+    out imported!"dmd.declaration".Declaration symbol,
+    out ulong offset,
+) {
+    while (auto integerCast = value.isCastExp)
+        value = integerCast.e1;
+
+    if (auto offsetExpression = value.isSymOffExp) {
+        symbol = offsetExpression.var;
+        offset = offsetExpression.offset;
+        return true;
+    }
+
+    if (auto address = value.isAddrExp) {
+        if (auto variable = address.e1.isVarExp) {
+            symbol = variable.var;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 public void storeValue(
     imported!"dmd.mtype".Type type,
     imported!"dmd.expression".Expression value,
@@ -870,6 +897,15 @@ private void storeValue(
     }
 
     if (facts.isIntegral) {
+        imported!"dmd.declaration".Declaration symbol;
+        ulong offset;
+        if (isSymbolAddress(value, symbol, offset)) {
+            assert(symbolAddress !is null);
+            storeIntegral(place,
+                cast(ulong) symbolAddress(symbol) + offset, facts.size);
+            return;
+        }
+
         storeIntegral(place, value.toInteger, facts.size);
         return;
     }

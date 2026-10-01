@@ -58,6 +58,27 @@ static foreach (backend; Matrix!(
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot read a C global, which is a mutable static variable"),
 )) {
+    @("importc.addressAsIntegerInitialiser." ~ backend.stringof)
+    @Tags(backend.stringof)
+    @Serial
+    unittest {
+        42.cProjectStatus!(backend, "address_integer", `
+            int target = 42;
+            unsigned long address = (unsigned long) &target;
+            unsigned long viaChar = (unsigned long) (char *) &target;
+        `, q{
+            import CMOD;
+            int main() {
+                return address == cast(size_t) &target
+                    && viaChar == address ? *cast(int*) address : 1;
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot read a C global, which is a mutable static variable"),
+)) {
     @("importc.scalarAndArrayInitialisers." ~ backend.stringof)
     @Tags(backend.stringof)
     @Serial
