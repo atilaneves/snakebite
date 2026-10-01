@@ -1334,3 +1334,23 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+static foreach (backend; Matrix!(WrongInCtfe)) {
+    @("shift.uint.shrAssign.longCountEqualsWidth." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        uint(0).shouldBeRetOf!(
+            backend,
+            q{
+                uint value() { return uint.max; }
+                long count() { return 32; }
+                uint shifted() {
+                    uint v = value();
+                    v >>= count();
+                    return v;
+                }
+            },
+            "shifted",
+        );
+    }
+}
