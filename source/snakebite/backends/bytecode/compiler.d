@@ -17,6 +17,7 @@ import snakebite.backends.controlflow:
 import snakebite.backends.exceptionplan:
     UnwindPlan, catchPlanOf, unwindPlanOf;
 import snakebite.backends.druntimehooks: DruntimeHook, planOf;
+import snakebite.backends.sliceplan: planSlice;
 import snakebite.ffi: CallbackBridge, CallbackCall, PlanCache;
 
 
@@ -4167,37 +4168,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         else
             evalOperandInto(expression.upr, highOffset, size_t.sizeof);
 
-        // D requires both bounds to be within the source array and the
-        // lower bound to come first. Check before pointer arithmetic so a
-        // bad slice cannot form an address outside the guest array.
-        const orderOffset = reserveTemp(pointerFacts);
-        emit(&opCopy, orderOffset, lowOffset, size_t.sizeof);
-        emit(&opLessOrEqualUnsigned, orderOffset, highOffset,
-            size_t.sizeof);
-        compileBoundsHook(
-            orderOffset,
-            DruntimeHook.sliceBounds,
-            [
-                Arg(lowOffset, 0, size_t.sizeof),
-                Arg(highOffset, 0, size_t.sizeof),
-                Arg(sourceLengthOffset, 0, size_t.sizeof),
-            ],
-            expression.loc,
-        );
-
-        emit(&opCopy, orderOffset, highOffset, size_t.sizeof);
-        emit(&opLessOrEqualUnsigned, orderOffset, sourceLengthOffset,
-            size_t.sizeof);
-        compileBoundsHook(
-            orderOffset,
-            DruntimeHook.sliceBounds,
-            [
-                Arg(lowOffset, 0, size_t.sizeof),
-                Arg(highOffset, 0, size_t.sizeof),
-                Arg(sourceLengthOffset, 0, size_t.sizeof),
-            ],
-            expression.loc,
-        );
+        const plan = planSlice(expression);
+        Arg[3] boundsArgs = [
+            Arg(lowOffset, 0, size_t.sizeof),
+            Arg(highOffset, 0, size_t.sizeof),
+            Arg(sourceLengthOffset, 0, size_t.sizeof),
+        ];
+        // Check before pointer arithmetic so a bad slice cannot form an
+        // address outside the guest array.
+        if (plan.checkOrder)
+            compileSliceCheck(
+                lowOffset, highOffset, boundsArgs[], expression.loc);
+        if (plan.checkUpper)
+            compileSliceCheck(
+                highOffset, sourceLengthOffset, boundsArgs[], expression.loc);
 
         emit(&opCopy, _destination + arrayLengthOffset,
             highOffset, size_t.sizeof);
@@ -4273,24 +4257,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const highOffset = reserveTemp(pointerFacts);
         evalOperandInto(expression.upr, highOffset, size_t.sizeof);
 
-        // Only the order of the bounds can fail; the length reported is
-        // `0`, as compiled D does for a pointer.
-        const orderOffset = reserveTemp(pointerFacts);
-        emit(&opCopy, orderOffset, lowOffset, size_t.sizeof);
-        emit(&opLessOrEqualUnsigned, orderOffset, highOffset,
-            size_t.sizeof);
-        const lengthOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, lengthOffset, addConstant(0), size_t.sizeof);
-        compileBoundsHook(
-            orderOffset,
-            DruntimeHook.sliceBounds,
-            [
-                Arg(lowOffset, 0, size_t.sizeof),
-                Arg(highOffset, 0, size_t.sizeof),
-                Arg(lengthOffset, 0, size_t.sizeof),
-            ],
-            expression.loc,
-        );
+        const plan = planSlice(expression);
+        if (plan.checkOrder) {
+            const lengthOffset = reserveTemp(pointerFacts);
+            emit(&opConstant, lengthOffset, addConstant(0), size_t.sizeof);
+            compileSliceCheck(
+                lowOffset, highOffset,
+                [
+                    Arg(lowOffset, 0, size_t.sizeof),
+                    Arg(highOffset, 0, size_t.sizeof),
+                    Arg(lengthOffset, 0, size_t.sizeof),
+                ],
+                expression.loc,
+            );
+        }
 
         emit(&opSubtract, highOffset, lowOffset, size_t.sizeof);
         emit(&opCopy, _destination + arrayLengthOffset, highOffset,
@@ -6814,6 +6794,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCall, discardResult, _callSites.length - 1, 0);
 
         *branchTargetField(_instructions[branchIndex]) = _instructions.length;
+    }
+
+    // Fails through the druntime hook unless `smaller <= larger`, unsigned.
+    private void compileSliceCheck(
+        in size_t smaller, in size_t larger, Arg[] hookArguments,
+        in Loc location,
+    ) {
+        const resultOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, resultOffset, smaller, size_t.sizeof);
+        emit(&opLessOrEqualUnsigned, resultOffset, larger, size_t.sizeof);
+        compileBoundsHook(
+            resultOffset, DruntimeHook.sliceBounds, hookArguments, location);
     }
 
     private struct StorageAdapter {
