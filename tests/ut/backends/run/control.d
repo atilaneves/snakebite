@@ -874,6 +874,249 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A `goto` may jump back to a label in an earlier `case`.
+static foreach (backend; Matrix!()) {
+    @("gotoBackwardBetweenSwitchCases." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int inner(int value) {
+                int result;
+                int visits;
+                switch (value) {
+                    case 1:
+                    again:
+                        ++visits;
+                        result += 1;
+                        break;
+                    case 2:
+                        if (visits < 3)
+                            goto again;
+                        break;
+                    default:
+                        break;
+                }
+                return result * 10 + visits;
+            }
+            int main() {
+                return inner(2) == 11 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A `goto` to a label in a later `case` runs the rest of that case and stops at its `break`.
+static foreach (backend; Matrix!()) {
+    @("gotoForwardBetweenSwitchCasesAfterLabelRuns." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int inner(int value) {
+                int result;
+                switch (value) {
+                    case 1:
+                        result += 1;
+                        goto tail;
+                    case 2:
+                        result += 100;
+                    tail:
+                        result += 10;
+                        break;
+                    case 3:
+                        result += 1000;
+                        break;
+                    default:
+                        result += 10000;
+                        break;
+                }
+                return result;
+            }
+            int main() {
+                return inner(1) == 11 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A `goto` may target a label in a nested block of a different `case`.
+static foreach (backend; Matrix!()) {
+    @("gotoIntoNestedBlockOfOtherSwitchCase." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int inner(int value) {
+                int result;
+                switch (value) {
+                    case 1:
+                        goto deep;
+                    case 2:
+                        {
+                            result += 20;
+                            if (value == 2) {
+                            deep:
+                                result += 5;
+                            }
+                            result += 1;
+                        }
+                        break;
+                    default:
+                        break;
+                }
+                return result;
+            }
+            int main() {
+                return inner(1) == 6 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A `goto` from `default` may target a label in a `case`.
+static foreach (backend; Matrix!()) {
+    @("gotoFromDefaultToLabelInCase." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int inner(int value) {
+                int result;
+                switch (value) {
+                    case 1:
+                    tail:
+                        result += 5;
+                        break;
+                    default:
+                        goto tail;
+                }
+                return result;
+            }
+            int main() {
+                return inner(9) == 5 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A `goto` from a `case` may target a label in `default`.
+static foreach (backend; Matrix!()) {
+    @("gotoFromCaseToLabelInDefault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int inner(int value) {
+                int result;
+                switch (value) {
+                    case 1:
+                        goto tail;
+                    default:
+                    tail:
+                        result += 7;
+                        break;
+                }
+                return result;
+            }
+            int main() {
+                return inner(1) == 7 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A `goto` out of a nested `switch` may target a label in a `case` of the outer `switch`.
+static foreach (backend; Matrix!()) {
+    @("gotoFromNestedSwitchToLabelInOuterCase." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int inner(int outer, int nested) {
+                int result;
+                switch (outer) {
+                    case 1:
+                        switch (nested) {
+                            case 1:
+                                goto tail;
+                            default:
+                                result += 100;
+                                break;
+                        }
+                        result += 1000;
+                        break;
+                    case 2:
+                    tail:
+                        result += 5;
+                        break;
+                    default:
+                        break;
+                }
+                return result;
+            }
+            int main() {
+                return inner(1, 1) == 5 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A `goto` in a loop body may target a label in a `case` of a `switch` in the same loop.
+static foreach (backend; Matrix!()) {
+    @("gotoToLabelInSwitchCaseInsideLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int inner() {
+                int result;
+                foreach (i; 0 .. 3) {
+                    switch (i) {
+                        case 0:
+                            goto tail;
+                        case 1:
+                            result += 100;
+                            break;
+                        case 2:
+                        tail:
+                            result += 5;
+                            break;
+                        default:
+                            break;
+                    }
+                }
+                return result;
+            }
+            int main() {
+                return inner() == 110 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A `goto` may target a label in another `case` of a `final switch`.
+static foreach (backend; Matrix!()) {
+    @("gotoToLabelInFinalSwitchCase." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum Colour { red, green, blue }
+            int inner(Colour colour) {
+                int result;
+                final switch (colour) {
+                    case Colour.red:
+                        goto tail;
+                    case Colour.green:
+                        result += 20;
+                        break;
+                    case Colour.blue:
+                    tail:
+                        result += 5;
+                        break;
+                }
+                return result;
+            }
+            int main() {
+                return inner(Colour.red) == 5 ? 0 : 1;
+            }
+        });
+    }
+}
+
 static foreach (backend; Matrix!()) {
     @("reviewGotoInsideFinallyScope." ~ backend.stringof)
     @Tags(backend.stringof)
