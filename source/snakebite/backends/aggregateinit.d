@@ -5,6 +5,60 @@ private:
 
 
 import snakebite.nativelayout: TypeFacts;
+import dmd.typesem: toBasetype;
+
+
+// The single decision both backends use for a `NewExp`'s storage. A heap
+// allocation is already recorded in `lowering`; placement construction uses
+// the address of its lvalue, and an on-stack class gets frame storage. The
+// object kind is normalized here so consumers do not classify `newtype`
+// independently.
+public struct NewPlan {
+    import dmd.expression: Expression;
+
+    public enum Destination {
+        lowering,
+        placement,
+        stack,
+    }
+
+    public enum ObjectKind {
+        scalar,
+        struct_,
+        class_,
+    }
+
+    public Destination destination;
+    public ObjectKind objectKind;
+    public Expression placement;
+    public Expression argumentPrefix;
+}
+
+public NewPlan planNew(imported!"dmd.expression".NewExp expression) {
+    auto type = expression.newtype.toBasetype;
+    auto objectKind = type.isTypeClass !is null
+        ? NewPlan.ObjectKind.class_
+        : type.isTypeStruct !is null
+            ? NewPlan.ObjectKind.struct_
+            : NewPlan.ObjectKind.scalar;
+
+    if (expression.placement !is null)
+        return NewPlan(
+            NewPlan.Destination.placement,
+            objectKind,
+            expression.placement,
+            expression.argprefix,
+        );
+
+    return NewPlan(
+        expression.onstack
+            ? NewPlan.Destination.stack
+            : NewPlan.Destination.lowering,
+        objectKind,
+        null,
+        expression.argprefix,
+    );
+}
 
 
 // What each backend's `StructLiteralExp` field loop and `NewExp` positional

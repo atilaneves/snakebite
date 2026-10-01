@@ -365,7 +365,7 @@ private struct CallShape {
 // state, and reads every per-function answer from the `Shared` tables
 // the program's evaluators fill together.
 extern(C++) private final class Evaluator: LoweringVisitor {
-    import snakebite.backends.aggregateinit: InitStep;
+    import snakebite.backends.aggregateinit: InitStep, NewPlan;
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.backend: Program;
     import snakebite.frontend.dmd.delegates: DelegateTarget, outerFunctionOf;
@@ -4925,12 +4925,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private NewDestination[] _newDestinations;
 
     protected override void prepareNew(NewExp expression) {
-        if (expression.placement !is null)
-            throw new SnakebiteException(
-                text("interpreter cannot allocate `", expression.toString,
-                    "` with placement"),
-            );
-
         // Keeps pointed-to storage mutable during destination restoration.
         auto destination = NewDestination(_place, _frames.mark);
         auto place = _frames.reserve(_facts.size, _facts.alignment);
@@ -4977,23 +4971,47 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         memcpy(_newDestinations[$ - 1].place, _place, _facts.size);
     }
 
-    protected override void visitUnloweredNew(NewExp expression) {
+    protected override void visitUnloweredNew(
+        NewExp expression, NewPlan plan,
+    ) {
         import core.stdc.string: memcpy;
         import snakebite.nativelayout: storeIntegral;
 
-        auto classType = expression.newtype.isTypeClass;
-        if (!expression.onstack || classType is null
-                || expression.placement !is null || expression.thisexp !is null)
+        if (plan.destination == NewPlan.Destination.lowering
+                || (expression.thisexp !is null
+                    && plan.destination != NewPlan.Destination.placement
+                    && plan.destination != NewPlan.Destination.stack))
             return visit(cast(Expression) expression);
 
-        auto declaration = classType.sym;
-        auto runtime = classRuntimeInfo(declaration);
-        const alignment = declaration.alignsize == 0
-            ? 1 : declaration.alignsize;
-        auto object = _frames.reserve(declaration.structsize, alignment);
-        memcpy(object, runtime.m_init.ptr, runtime.m_init.length);
-        finishNew(expression, object);
+        if (plan.destination == NewPlan.Destination.stack) {
+            assert(plan.objectKind == NewPlan.ObjectKind.class_);
+            auto classType = expression.newtype.toBasetype.isTypeClass;
+            assert(classType !is null);
+            auto declaration = classType.sym;
+            auto runtime = classRuntimeInfo(declaration);
+            const alignment = declaration.alignsize == 0
+                ? 1 : declaration.alignsize;
+            auto object = _frames.reserve(declaration.structsize, alignment);
+            memcpy(object, runtime.m_init.ptr, runtime.m_init.length);
+            finishNew(expression, object);
+            storeIntegral(_place, cast(size_t) object, _facts.size);
+            return;
+        }
+
+        assert(plan.destination == NewPlan.Destination.placement);
+        prepareNew(expression);
+        scope (exit) restoreNew;
+        auto object = addressOf(plan.placement);
         storeIntegral(_place, cast(size_t) object, _facts.size);
+
+        if (plan.objectKind == NewPlan.ObjectKind.class_) {
+            auto classType = expression.newtype.toBasetype.isTypeClass;
+            assert(classType !is null);
+            auto runtime = classRuntimeInfo(classType.sym);
+            memcpy(object, runtime.m_init.ptr, runtime.m_init.length);
+        }
+
+        visitLoweredNew(expression);
     }
 
     // `driveInit` (`aggregateinit.d`) owns the order `vthis` steps, a
@@ -5061,6 +5079,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // slot in their own `FrameLayout`, so nothing here needs to know
     // which aggregate kind `expression.newtype` names.
     private void constructAggregate(NewExp expression, ubyte* object) {
+        import snakebite.backends.aggregateinit: planNew;
+
         auto constructor = expression.member;
         auto layout = layoutOf(constructor);
         auto frame = _frames.push(layout.size, layout.alignment);
@@ -5083,6 +5103,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             cast(size_t) object,
             size_t.sizeof,
         );
+
+        auto plan = planNew(expression);
+        if (plan.argumentPrefix !is null)
+            runForEffect(plan.argumentPrefix);
 
         auto arguments = expression.arguments;
 
