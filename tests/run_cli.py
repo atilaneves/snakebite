@@ -59,6 +59,180 @@ def test_module_constructor_uses_project_directory(
     assert (tmp_path / "app" / "test-ran.txt").exists()
 
 
+# A module destructor sees the directory that the constructors and `main`
+# of the same program see.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_module_destructor_uses_project_directory(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(tmp_path / "outside" / ".keep")
+    write(tmp_path / "app" / "dub.sdl", dub_project_recipe("project-cwd"))
+    write(
+        tmp_path / "app" / "source" / "main.d",
+        """
+        module main;
+        import std.file: write;
+        shared static ~this() { "shared-destructor.txt".write("yes"); }
+        static ~this() { "thread-destructor.txt".write("yes"); }
+        int main() { return 0; }
+        """,
+    )
+
+    result = run_sb(
+        f"--backend={backend}", "--no-optimise-image", str(tmp_path / "app"),
+        cwd=tmp_path / "outside",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "app" / "shared-destructor.txt").exists()
+    assert (tmp_path / "app" / "thread-destructor.txt").exists()
+    assert not (tmp_path / "outside" / "shared-destructor.txt").exists()
+    assert not (tmp_path / "outside" / "thread-destructor.txt").exists()
+
+
+# The report of the tool is about the run, so it comes after everything that
+# the program prints, the module destructors included.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_timing_lines_follow_module_destructor_output(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        import std.stdio: writeln;
+        shared static ~this() { writeln("dtor"); }
+        void main() { writeln("main"); }
+        """,
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 0, output(result)
+    lines = result.stdout.splitlines()
+    assert lines[:2] == ["main", "dtor"], output(result)
+    assert all(is_timing_line(line) for line in lines[2:]), output(result)
+
+
+# A program that has module constructors needs no compiler at run time: the
+# registration of its modules is made from bytes that the build of the tool
+# holds. The CTFE backend needs no image of the project's dependencies, so
+# nothing else asks for a compiler.
+def test_module_constructor_runs_without_a_compiler(tmp_path: Path) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        shared static this() { }
+        shared static ~this() { }
+        int main() { return 0; }
+        """,
+    )
+    write(tmp_path / "no-compiler" / ".keep")
+
+    result = run_sb(
+        "--backend=ctfe", str(tmp_path / "app"),
+        cwd=tmp_path, env={"PATH": str(tmp_path / "no-compiler")},
+    )
+
+    assert result.returncode == 0, output(result)
+
+
+# The registration of the modules of a program needs no directory that the
+# user can write to, or that can run programs.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_module_constructor_runs_with_a_read_only_temporary_directory(
+    tmp_path: Path, backend: str,
+) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root can write in a read-only directory")
+
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        import std.stdio: writeln;
+        shared static this() { writeln("constructor"); }
+        void main() { writeln("main"); }
+        """,
+    )
+    read_only = tmp_path / "read-only"
+    read_only.mkdir()
+    read_only.chmod(0o555)
+
+    try:
+        result = run_sb(
+            f"--backend={backend}", "--no-optimise-image",
+            str(tmp_path / "app"),
+            cwd=tmp_path, env={"TMPDIR": str(read_only)},
+        )
+    finally:
+        read_only.chmod(0o755)
+
+    assert result.returncode == 0, output(result)
+    assert guest_lines(result) == ["constructor", "main"]
+
+
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_module_constructor_runs_with_a_no_exec_temporary_directory(
+    tmp_path: Path, backend: str,
+) -> None:
+    unshare = shutil.which("unshare")
+    if unshare is None:
+        pytest.skip("unshare is not on PATH")
+
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        import std.stdio: writeln;
+        shared static this() { writeln("constructor"); }
+        void main() { writeln("main"); }
+        """,
+    )
+    no_exec = tmp_path / "no-exec"
+    no_exec.mkdir()
+    script = (
+        'mount -t tmpfs -o noexec tmpfs "$1" && TMPDIR="$1" exec "$2" '
+        '--backend="$3" --no-optimise-image "$4"'
+    )
+
+    result = subprocess.run(
+        [unshare, "--user", "--map-root-user", "--mount", "sh", "-c", script,
+         "sh", str(no_exec), sb_path(), backend, str(tmp_path / "app")],
+        capture_output=True, check=False, text=True, timeout=120,
+        cwd=tmp_path,
+    )
+
+    if "unshare:" in result.stderr:
+        pytest.skip("the system refuses a user and mount namespace")
+
+    assert result.returncode == 0, output(result)
+    assert guest_lines(result) == ["constructor", "main"]
+
+
+# A failure of snakebite itself in a module phase prints the message that the
+# rest of the tool prints, not a stack trace of the host.
+def test_host_failure_in_a_module_destructor_prints_a_message(
+    tmp_path: Path,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        template T(int n) { shared static ~this() { } }
+        alias A = T!1;
+        int main() { return 0; }
+        """,
+    )
+
+    result = run_app(tmp_path, "ctfe")
+
+    assert result.returncode == 1, output(result)
+    assert result.stderr.startswith("snakebite: "), output(result)
+    assert "??:?" not in result.stderr, output(result)
+
+
 # `bin/sb` has no native instance of the druntime template that builds an
 # associative array literal, unlike `bin/ut`, so a static initialiser's
 # literal must run as guest code.
@@ -816,10 +990,14 @@ def run_native_app(tmp_path: Path) -> subprocess.CompletedProcess[str]:
 
 # What the guest wrote to stdout, without the timing report `bin/sb` ends
 # its output with.
+def is_timing_line(line: str) -> bool:
+    return re.fullmatch(r"[a-z ]+:\s+[\d.]+ ms", line) is not None
+
+
 def guest_lines(result: subprocess.CompletedProcess[str]) -> list[str]:
     return [
         line for line in result.stdout.splitlines()
-        if not re.fullmatch(r"[a-z ]+:\s+[\d.]+ ms", line)
+        if not is_timing_line(line)
     ]
 
 

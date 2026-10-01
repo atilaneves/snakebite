@@ -882,3 +882,78 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// A thread that a module destructor starts can stay alive after its program
+// ends. When it ends later, it must not run the thread-local destructors of
+// a different program that runs at that time.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("threadOfEndedProgramDoesNotRunDestructorsOfLaterProgram."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            import core.thread: Thread;
+            import core.time: msecs;
+            static ~this() {}
+            shared static ~this() {
+                new Thread({ Thread.sleep(100.msecs); }).start;
+            }
+            void main() {}
+        }).should == 0;
+        programStatus!backend(sandbox, q{
+            import core.thread: Thread;
+            import core.time: msecs;
+            static ~this() { trace("second program;"); }
+            void main() { Thread.sleep(300.msecs); }
+        }).should == 0;
+        sandbox.shouldEqualContent("trace", "second program;");
+    }
+}
+
+
+// A process that runs many programs must not grow with each program that
+// has module constructors and destructors: when it ended, with no thread left
+// alive, what its registration took is given back. A run takes the mappings
+// of its backend either way, so the test compares with a program that has no
+// module constructor or destructor.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot run module destructors"),
+)) {
+    @("registrationOfEndedProgramIsGivenBack." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        static if (!is(backend == Native)) {
+            import std.algorithm.searching: count;
+            import std.file: readText;
+
+            static size_t mappings() {
+                return "/proc/self/maps".readText.count('\n');
+            }
+
+            static size_t growth(in Sandbox sandbox, in string code) {
+                foreach (_; 0 .. 10)
+                    programStatus!backend(sandbox, code).should == 0;
+
+                const before = mappings;
+                foreach (_; 0 .. 100)
+                    programStatus!backend(sandbox, code).should == 0;
+
+                return mappings - before;
+            }
+
+            const sandbox = Sandbox();
+            const plain = growth(sandbox, q{ void main() {} });
+            const withPhases = growth(sandbox, q{
+                shared static this() {}
+                shared static ~this() {}
+                void main() {}
+            });
+
+            withPhases.shouldBeSmallerThan(plain + 50);
+        }
+    }
+}

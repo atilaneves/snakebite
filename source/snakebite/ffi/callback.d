@@ -29,7 +29,9 @@ private alias FuncDeclaration = imported!"dmd.func".FuncDeclaration;
 // binary. When every slot in every chunk is taken, the pool copies the
 // template's bytes into a new mapping and flips that mapping to
 // read-execute (`allocateChunk`). Memory is never writable and
-// executable at the same time. A slot is never released.
+// executable at the same time. A slot is released only by
+// `CallbackBridge.release`, for a bridge whose entries no host code can
+// call any more; the next reservation reuses it.
 
 
 // What the pool hands a backend when host code calls one of its guest
@@ -94,6 +96,7 @@ public enum ChunkStrategy {
 
 private __gshared Slot[callbackEntriesPerChunk] templateSlots;
 private __gshared Chunk[] chunks;
+private __gshared const(void)*[] freeEntries;
 private __gshared Mutex mutex;
 
 
@@ -142,13 +145,22 @@ private size_t trailerOffset() {
 }
 
 
-// The address host code calls for `slot`: the next free entry, from a new
-// chunk if every existing one is full. Never released.
+// The address host code calls for `slot`: an entry that was released, else
+// the next free entry, from a new chunk if every existing one is full.
 private const(void)* reserve(Slot slot) {
     import core.memory: GC;
 
     mutex.lock;
     scope(exit) mutex.unlock;
+
+    // The GC range of a slot's owner field outlives the slot's use: it was
+    // added when the entry was first reserved.
+    if (freeEntries.length) {
+        const entry = freeEntries[$ - 1];
+        freeEntries = freeEntries[0 .. $ - 1];
+        *slotOf(entry) = slot;
+        return entry;
+    }
 
     if (chunks[$ - 1].used == callbackEntriesPerChunk)
         chunks ~= allocateChunk(ChunkStrategy.protect, true);
@@ -165,6 +177,32 @@ private const(void)* reserve(Slot slot) {
         void*.sizeof,
     );
     return chunk.base + index * callbackEntryBytes;
+}
+
+
+// Makes `entries`, which `reserve` handed out, free for the next
+// reservation. Host code must not call them after this.
+private void releaseEntries(in const(void)*[] entries) {
+    mutex.lock;
+    scope(exit) mutex.unlock;
+
+    foreach (entry; entries) {
+        // A cleared slot keeps its GC range but roots nothing.
+        *slotOf(entry) = Slot.init;
+        freeEntries ~= entry;
+    }
+}
+
+
+private Slot* slotOf(in const(void)* entry) {
+    foreach (ref chunk; chunks) {
+        const offset = cast(const(ubyte)*) entry - chunk.base;
+        if (offset >= 0
+                && offset < callbackEntriesPerChunk * callbackEntryBytes)
+            return &chunk.slots[offset / callbackEntryBytes];
+    }
+
+    assert(0, "the entry belongs to a chunk of the pool");
 }
 
 
@@ -457,6 +495,8 @@ public struct CallbackBridge {
     private CallbackHandler _handler;
     private void* _owner;
     private void function(void*, FuncDeclaration) _prepare;
+    // Every entry this bridge reserved, written under the compiler lock.
+    private const(void)*[] _reserved;
 
     public this(
         CallbackHandler handler,
@@ -509,6 +549,7 @@ public struct CallbackBridge {
                 const entry = reserve(Slot(
                     _handler, _owner, word, registered.declaration, plan));
                 _wordOfEntry.insert(entry, word);
+                _reserved ~= entry;
                 atomicStore!(MemoryOrder.rel)(registered.entry, entry);
             }
         });
@@ -520,6 +561,19 @@ public struct CallbackBridge {
         // acquire load to be certain it sees the stored entry and not
         // a stale `null` (finding 8).
         return atomicLoad!(MemoryOrder.acq)(registered.entry);
+    }
+
+    // Gives every entry of this bridge back to the pool, and with them the
+    // reference to the owner that the pool slots held. The caller promises
+    // that no host code can call an entry again, and does not use the
+    // bridge again.
+    public void release() {
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        withCompilerLock({
+            releaseEntries(_reserved);
+            _reserved = null;
+        });
     }
 
     // The guest word behind one of this bridge's own entries, or null.
@@ -576,6 +630,7 @@ public struct CallbackBridge {
                 _handler, _owner, word, declaration, plan, adjustment,
                 contains(word) ? null : word,
             ));
+            _reserved ~= reserved;
             if (contains(word))
                 _adjustedGuestEntries.insert(reserved, key);
             entry = *_adjustedEntries.insert(key, reserved);

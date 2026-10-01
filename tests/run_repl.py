@@ -681,6 +681,98 @@ def test_live_flag_keeps_repl_open_after_file_arguments(tmp_path: Path) -> None:
     assert child.exitstatus == 0
 
 
+# A thread-local module constructor of a loaded file runs before the first
+# cell reads the state it sets.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_file_argument_runs_its_thread_module_constructor(
+    tmp_path: Path, backend: str,
+) -> None:
+    module = tmp_path / "loaded.d"
+    module.write_text(
+        "int threadValue;\n"
+        "static this() { threadValue = 2; }\n",
+        encoding="utf-8",
+    )
+
+    result = run_sb("-b", backend, str(module), "-c", "threadValue")
+
+    assert result.returncode == 0
+    assert result.stdout == "2\n"
+    assert result.stderr == ""
+
+
+# A thread-local module constructor that a cell declares runs before a later
+# cell reads the state it sets.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_cell_runs_the_thread_module_constructor_it_declares(
+    backend: str,
+) -> None:
+    result = run_sb(
+        "-b", backend,
+        input="int threadValue;\n"
+        "static this() { threadValue = 2; }\n"
+        "threadValue\n",
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "2\n"
+
+
+# A compiled program runs the shared constructors of its modules, then the
+# thread-local ones, before any other code.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_file_argument_runs_its_shared_module_constructor(
+    tmp_path: Path, backend: str,
+) -> None:
+    module = tmp_path / "loaded.d"
+    module.write_text(
+        "__gshared int sharedValue;\n"
+        "int threadValue;\n"
+        "shared static this() { sharedValue = 40; }\n"
+        "static this() { threadValue = 2; }\n",
+        encoding="utf-8",
+    )
+
+    result = run_sb("-b", backend, str(module), "-c", "sharedValue + threadValue")
+
+    assert result.returncode == 0
+    assert result.stdout == "42\n"
+    assert result.stderr == ""
+
+
+# One expression cell is one run of the accumulated module: its shared
+# module constructors run once, before the cell reads any state.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_expression_cell_runs_the_shared_module_constructor_once(
+    backend: str,
+) -> None:
+    result = run_sb(
+        "-b", backend,
+        input="shared static this() { import std.stdio: writeln;"
+        ' writeln("constructor"); }\n'
+        "1 + 1\n",
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "constructor\n2\n"
+
+
+# The module destructors of that run end it, before the REPL shows the value.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_expression_cell_runs_the_module_destructors_it_declares(
+    backend: str,
+) -> None:
+    result = run_sb(
+        "-b", backend,
+        input="shared static ~this() { import std.stdio: writeln;"
+        ' writeln("destructor"); }\n'
+        "1 + 1\n",
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "destructor\n2\n"
+
+
 def run_sb(
     *args: str,
     input: str = "",

@@ -35,7 +35,9 @@ public struct Program {
     private HaltAction _haltAction = &haltProcess;
     // Prepared for this project's execution before any guest code runs.
     const(DependencyImage)* dependencyImage;
-    const(DependencyImage)* testStartupImage;
+    // Whether the program starts as a project does: its unit tests run
+    // before `main`, under the runner that the project's own images name.
+    bool startsAsProject;
     TestHooks testHooks;
 
     // The entry point is found the way a compiled build finds it: the first

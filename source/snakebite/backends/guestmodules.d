@@ -20,7 +20,7 @@ private:
 // registration to its own `rt_term`, which runs the phases in the order
 // druntime defines, and, for a program that calls `exit`, to a handler that
 // `exit` runs first. A caller that runs many programs in one process (`run`,
-// the tests) ends the phases itself with `finish`.
+// the tests, the REPL) ends the phases itself with `finish`.
 public struct GuestModules {
     import core.atomic: cas;
     import core.time: Duration;
@@ -58,6 +58,8 @@ public struct GuestModules {
         in Ends ends,
     ) {
         import core.stdc.stdlib: atexit;
+        import core.sys.posix.pthread: pthread_self;
+        import core.thread: ThreadBase;
         import core.time: MonoTime;
 
         GuestModules modules;
@@ -71,8 +73,10 @@ public struct GuestModules {
         modules.preparation = MonoTime.currTime - preparing;
         const registering = MonoTime.currTime;
         try {
-            run.imagePath = registryImage(program);
-            run.image = Image.open(run.imagePath);
+            run.owner = pthread_self;
+            run.threadsAtStart = ThreadBase.getAll;
+            run.unlistedThreadsAtStart = unlistedThreads;
+            run.image = Image.open;
             if (ends == Ends.process) {
                 run.exit = newExitRecord(run.image.slot);
                 if (cas(&_endHandlerRegistered, false, true))
@@ -81,7 +85,7 @@ public struct GuestModules {
             run.image.register(run.records);
         } catch (Throwable throwable) {
             atomicStore(run.state, Run.State.failed);
-            _d_print_throwable(throwable);
+            print(throwable);
             modules._failed = true;
         }
         modules.constructors = MonoTime.currTime - registering;
@@ -95,70 +99,51 @@ public struct GuestModules {
     // Ends the program. When the process ends with it, `rt_term` runs the
     // destructors and `exit` no longer has to. Otherwise this does what
     // `rt_term` does for the thread that ran the program: that thread's
-    // thread-local destructors, then the shared ones. druntime runs them
-    // through a second registration whose records have only the destructor
-    // fields: the first registration stays, because a thread that the program
-    // started and left running still holds it. Returns 1 when a destructor
-    // threw, as `rt_term` then makes the program fail.
+    // thread-local destructors, then the shared ones, each module in the
+    // reverse of the order in which druntime ran its constructor. Returns 1
+    // when a destructor threw, as `rt_term` then makes the program fail.
+    //
+    // The registration goes with the program when no thread that the
+    // program started is alive: a thread inherits the registrations of the
+    // thread that starts it, and druntime frees a registration for the
+    // thread that removes it only. Otherwise the registration, the image
+    // and the entries stay for the life of the process, and every entry does
+    // nothing, so a process that runs many programs that leave threads alive
+    // grows with each of them.
     public int finish() {
         if (_run is null || _failed)
             return 0;
 
         auto run = _run;
+        _run = null;
         if (_ends == Ends.process) {
             atomicStore(run.exit.returned, true);
             return 0;
         }
 
         int status;
-        if (run.closingRecords.length) {
-            atomicStore(run.state, Run.State.closing);
-            try {
-                auto closing = Image.open(run.imagePath);
-                scope(exit) closing.close;
-                closing.register(run.closingRecords);
-                closing.unregister;
-            } catch (Throwable throwable) {
-                _d_print_throwable(throwable);
-                status = 1;
-            }
+        try {
+            foreach_reverse (phase; run.threadOrder)
+                phase.execute;
+            foreach_reverse (phase; run.sharedOrder)
+                phase.execute;
+        } catch (Throwable throwable) {
+            print(throwable);
+            status = 1;
         }
+
         atomicStore(run.state, Run.State.finished);
+        if (run.noThreadHoldsRegistration)
+            run.release;
         return status;
     }
 }
 
 
-// The image that provides the registration slot of a program, prepared with
-// the other images of a project.
-public imported!"snakebite.dependencyimage".DependencyImage prepareRegistryImage(
-    in string stateDirectory,
-) {
-    import snakebite.dependencyimage: prepareImage, defaultCompiler;
-    import std.path: buildPath;
-
-    return prepareImage(registrySource, stateDirectory.buildPath("startup"),
-        defaultCompiler, null, null, null, ["-betterC"], null, ["-betterC"]);
-}
-
-
 private import core.atomic: atomicLoad, atomicStore;
 private import snakebite.backends.backend: Backend, Program;
+private import snakebite.exception: SnakebiteException;
 private import snakebite.ffi.callback: CallbackBridge, CallbackCall;
-
-
-// The registration slot must belong to an ELF image: druntime uses its
-// address to find the image's segments and keys the image by its loader
-// handle, so each registration loads a copy of this image of its own.
-// BetterC prevents the compiler from registering a second, unrelated
-// ModuleInfo for this small adapter.
-private enum registrySource = q{
-    module snakebite_test_registry;
-    private __gshared void* _slot;
-    export extern(C) void** snakebite_registry_slot() {
-        return &_slot;
-    }
-};
 
 
 // What `endAtExit` needs, in memory that the GC does not own: after a normal
@@ -194,7 +179,7 @@ private extern(C) void endAtExit() {
         try
             Image.unregister(record.slot);
         catch (Throwable throwable)
-            _d_print_throwable(throwable);
+            print(throwable);
     }
 }
 
@@ -207,27 +192,110 @@ private extern(C) void _d_dso_registry(void* data);
 private extern(C) void _d_print_throwable(Throwable);
 
 
+// A failure of snakebite itself while a phase runs. druntime prints what a
+// phase throws, so this prints the message that the rest of the tool prints
+// for such a failure and not a stack trace of the host.
+private final class HostFailure: Exception {
+    this(string message) {
+        super(message);
+    }
+
+    override void toString(scope void delegate(in char[]) sink) const {
+        sink("snakebite: ");
+        sink(msg);
+        sink("\n");
+    }
+}
+
+
+// How many threads the process has that druntime does not list, or -1 when
+// the process cannot say.
+private ptrdiff_t unlistedThreads() {
+    import core.thread: ThreadBase;
+    import std.algorithm.searching: findSplitAfter, startsWith;
+    import std.conv: to;
+    import std.file: readText;
+    import std.string: lineSplitter, strip;
+
+    const listed = ThreadBase.getAll.length;
+    try
+        foreach (line; "/proc/self/status".readText.lineSplitter)
+            if (line.startsWith("Threads:"))
+                return line.findSplitAfter(":")[1].strip.to!ptrdiff_t
+                    - listed;
+    catch (Exception)
+        return -1;
+
+    return -1;
+}
+
+
+private void print(Throwable throwable) {
+    if (auto failure = cast(SnakebiteException) throwable)
+        throwable = new HostFailure(failure.msg);
+
+    _d_print_throwable(throwable);
+}
+
+
 // What one registration holds and what the entries of its records reach.
 private struct Run {
-    // `running` until the program ends. `closing` while `finish` runs the
-    // destructors of the program. `finished` after, when an entry that a
-    // thread still alive reaches does nothing. `failed` when startup threw:
-    // no destructor runs for a program that did not start.
+    import core.sys.posix.pthread: pthread_t;
+    import core.thread: ThreadBase;
+
+    // `running` until the program ends, then `finished`, when an entry that
+    // a thread still alive reaches does nothing. `failed` when startup
+    // threw: no destructor runs for a program that did not start.
     enum State : int {
         running,
-        closing,
         finished,
         failed,
     }
 
     Backend backend;
     shared State state;
-    string imagePath;
     ModuleInfo*[] records;
-    ModuleInfo*[] closingRecords;
     Image image;
     CallbackBridge* bridge;
     ExitRecord* exit;
+    // The thread that registered, and the modules with destructors in the
+    // order druntime ran their constructors on it: `finish` runs the
+    // destructors in the reverse order.
+    pthread_t owner;
+    Phase*[] sharedOrder;
+    Phase*[] threadOrder;
+    ThreadBase[] threadsAtStart;
+    ptrdiff_t unlistedThreadsAtStart;
+
+    // A registration reaches a thread through the thread that starts it, so
+    // a thread alive now that was not alive at the start can hold it. A
+    // thread that was started and has not listed itself yet is not in
+    // druntime's list, but the process has it already.
+    bool noThreadHoldsRegistration() {
+        import std.algorithm.searching: canFind;
+
+        auto self = ThreadBase.getThis;
+        foreach (thread; ThreadBase.getAll)
+            if (thread !is self && !threadsAtStart.canFind!"a is b"(thread))
+                return false;
+
+        return unlistedThreadsAtStart >= 0
+            && unlistedThreads <= unlistedThreadsAtStart;
+    }
+
+    // Removes the registration and everything it holds.
+    void release() {
+        import core.memory: GC;
+
+        try
+            image.unregister;
+        catch (Throwable throwable)
+            print(throwable);
+
+        image.close;
+        bridge.release;
+        GC.removeRoot(&this);
+    }
 }
 
 
@@ -237,36 +305,37 @@ private struct Phase {
 
     enum Kind {
         constructor,
+        threadConstructor,
         destructor,
         unitTests,
     }
 
     Run* run;
     Kind kind;
-    // The destructors that `finish` runs, not the ones of a program that
-    // ends with its process.
-    bool closing;
     FuncDeclaration[] functions;
     // dmd's glue layer increments the gate of each destructor of a template
     // instance while it runs the constructors of the module: the destructor
     // body returns early unless it brings the gate back to zero.
     VarDeclaration[] gates;
+    // For a constructor phase, the destructor phase of the same module.
+    Phase* destructor;
 }
 
 
 private extern(C) void callPhase(void* owner, CallbackCall* call) {
-    execute(cast(Phase*) call.function_);
+    (cast(Phase*) call.function_).execute;
 }
 
 
 private void execute(Phase* phase) {
     import core.atomic: atomicOp;
+    import core.sys.posix.pthread: pthread_equal, pthread_self;
 
     auto run = phase.run;
-    const state = atomicLoad(run.state);
     final switch (phase.kind) with (Phase.Kind) {
         case constructor:
-            if (state != Run.State.running)
+        case threadConstructor:
+            if (atomicLoad(run.state) != Run.State.running)
                 return;
 
             foreach (gate; phase.gates) {
@@ -276,18 +345,26 @@ private void execute(Phase* phase) {
             }
             break;
         case destructor:
-            const expected = phase.closing
-                ? Run.State.closing
-                : Run.State.running;
-            if (state != expected)
+            if (atomicLoad(run.state) != Run.State.running)
                 return;
             break;
         case unitTests:
             break;
     }
 
-    foreach (function_; phase.functions)
-        run.backend.call(function_, null, []);
+    try
+        foreach (function_; phase.functions)
+            run.backend.call(function_, null, []);
+    catch (SnakebiteException failure)
+        throw new HostFailure(failure.msg);
+
+    if (phase.destructor is null || !pthread_equal(pthread_self, run.owner))
+        return;
+
+    if (phase.kind == Phase.Kind.constructor)
+        run.sharedOrder ~= phase.destructor;
+    else
+        run.threadOrder ~= phase.destructor;
 }
 
 
@@ -317,13 +394,7 @@ private Run* newRun(
     GC.addRoot(cast(void*) run);
     run.backend = backend;
     run.bridge = new CallbackBridge(&callPhase, cast(void*) run);
-    run.records = recordsOf(run, specs, tests, false);
-    foreach (spec; specs)
-        if (spec.hasDestructors) {
-            run.closingRecords = recordsOf(
-                run, specs, GuestModules.Tests.no, true);
-            break;
-        }
+    run.records = recordsOf(run, specs, tests);
     return run;
 }
 
@@ -349,13 +420,11 @@ private struct ModuleSpec {
 }
 
 
-// One record for each module. The records of a closing registration have
-// the destructor fields only.
+// One record for each module.
 private ModuleInfo*[] recordsOf(
     Run* run,
     ModuleSpec[] specs,
     in GuestModules.Tests tests,
-    in bool closing,
 ) {
     import std.string: fromStringz;
     import snakebite.frontend.dmd.functions: findUnittests;
@@ -371,40 +440,31 @@ private ModuleInfo*[] recordsOf(
         // destruct, and no import of one: dmd marks it the same way.
         fields.standalone = !spec.module_.needmoduleinfo;
         fields.importCount = imports[i].length;
-        if (!closing) {
-            fields.independentConstructor = run.entryOf(
-                Phase.Kind.constructor,
-                false,
-                functions.independentConstructors,
-            );
-            fields.constructor = run.entryOf(
-                Phase.Kind.constructor,
-                false,
-                functions.sharedConstructors,
-                gatesOf(functions.sharedDestructors),
-                functions.sharedDestructors,
-            );
-            fields.threadConstructor = run.entryOf(
-                Phase.Kind.constructor,
-                false,
-                functions.threadConstructors,
-                gatesOf(functions.threadDestructors),
-                functions.threadDestructors,
-            );
-        }
-        fields.destructor = run.entryOf(
-            Phase.Kind.destructor,
-            closing,
-            reversed(functions.sharedDestructors),
-        );
-        fields.threadDestructor = run.entryOf(
-            Phase.Kind.destructor,
-            closing,
-            reversed(functions.threadDestructors),
-        );
+        // Every module with a destructor also gets a constructor entry, so
+        // that `finish` learns where druntime put it in the order.
+        auto sharedDestructor = run.phaseOf(
+            Phase.Kind.destructor, reversed(functions.sharedDestructors));
+        auto threadDestructor = run.phaseOf(
+            Phase.Kind.destructor, reversed(functions.threadDestructors));
+        fields.independentConstructor = run.entryOf(run.phaseOf(
+            Phase.Kind.constructor, functions.independentConstructors));
+        fields.constructor = run.entryOf(run.phaseOf(
+            Phase.Kind.constructor,
+            functions.sharedConstructors,
+            gatesOf(functions.sharedDestructors),
+            sharedDestructor,
+        ));
+        fields.threadConstructor = run.entryOf(run.phaseOf(
+            Phase.Kind.threadConstructor,
+            functions.threadConstructors,
+            gatesOf(functions.threadDestructors),
+            threadDestructor,
+        ));
+        fields.destructor = run.entryOf(sharedDestructor);
+        fields.threadDestructor = run.entryOf(threadDestructor);
         if (tests == GuestModules.Tests.yes)
-            fields.unitTests = run.entryOf(
-                Phase.Kind.unitTests, false, findUnittests(spec.module_));
+            fields.unitTests = run.entryOf(run.phaseOf(
+                Phase.Kind.unitTests, findUnittests(spec.module_)));
 
         records[i] = newRecord(fields, importSlots[i]);
     }
@@ -462,26 +522,32 @@ private auto reversed(imported!"dmd.func".FuncDeclaration[] functions) {
 }
 
 
-// The native entry that runs `functions` as one phase of a module, or null
-// when the phase has nothing to run. `signature` gives the entry its type
-// when only gates make the phase.
-private const(void)* entryOf(
+// The phase of a module that runs `functions`, or null when there is
+// nothing to run and, for a constructor phase, no destructor phase to place.
+private Phase* phaseOf(
     Run* run,
     in Phase.Kind kind,
-    in bool closing,
     imported!"dmd.func".FuncDeclaration[] functions,
     imported!"dmd.declaration".VarDeclaration[] gates = null,
-    imported!"dmd.func".FuncDeclaration[] signatures = null,
+    Phase* destructor = null,
 ) {
-    if (functions.length == 0 && gates.length == 0)
+    if (functions.length == 0 && destructor is null)
         return null;
 
-    auto phase = new Phase(run, kind, closing, functions, gates);
+    auto phase = new Phase(run, kind, functions, gates, destructor);
+    // The entry takes its type from a function: the destructors have the
+    // type of the constructors.
     run.bridge.register(
         phase,
-        functions.length ? functions[0] : signatures[0],
+        functions.length ? functions[0] : destructor.functions[0],
     );
-    return run.bridge.entryOf(phase);
+    return phase;
+}
+
+
+// The native entry that runs `phase`, or null when there is none.
+private const(void)* entryOf(Run* run, Phase* phase) {
+    return phase is null ? null : run.bridge.entryOf(phase);
 }
 
 
@@ -552,6 +618,13 @@ private ModuleInfo* newRecord(in Fields fields, out ModuleInfo** importSlots) {
 }
 
 
+// The bytes of the ELF image that provides a registration slot, which the
+// build made and linked in (`registry_slot.c`).
+private extern(C) extern __gshared const ubyte snakebite_registry_image_start;
+private extern(C) extern __gshared const ubyte snakebite_registry_image_end;
+private extern(C) int memfd_create(const char* name, uint flags);
+
+
 // What druntime keeps for a registered image: the address of the slot that
 // belongs to an ELF image of its own, and the loader handle of that image.
 private struct Image {
@@ -567,39 +640,49 @@ private struct Image {
 
     private void* _handle;
     private void** _slot;
+    private int _file;
 
-    // A copy of `source` at a path of its own, because druntime keys an image
-    // by its loader handle and the loader returns one handle for one file.
-    // The copies go when the process ends, not before: a path that a new
-    // copy reuses can name the same file to the loader.
-    public static Image open(in string source) {
-        import core.atomic: atomicOp, cas;
-        import core.stdc.stdlib: atexit;
-        import core.sys.posix.unistd: getpid;
+    // A new copy of the image, because druntime keys an image by its loader
+    // handle and the loader returns one handle for one file name. The copy
+    // lives in an anonymous memory file, which needs no writable or
+    // executable directory and leaves nothing behind. The file stays open as
+    // long as the image does: its descriptor number is the file name the
+    // loader sees, so no two images that are alive have the same name.
+    public static Image open() {
+        import core.stdc.errno: errno;
+        import core.stdc.string: strerror;
+        import core.sys.posix.unistd: close, write;
         import std.conv: text;
-        import std.file: copy, tempDir;
-        import std.path: buildPath;
         import std.string: fromStringz, toStringz;
 
-        const prefix = tempDir.buildPath(
-            text("snakebite-registry-", getpid, "-"));
-        const path = text(prefix, atomicOp!"+="(_copies, 1), ".so");
-        source.copy(path);
-        if (cas(&_cleanupRegistered, false, true)) {
-            if (prefix.length >= _copyPrefix.length)
-                assert(0, "the copy path fits the cleanup buffer");
+        enum MFD_CLOEXEC = 1;
+        const file = memfd_create("snakebite-registry", MFD_CLOEXEC);
+        if (file < 0)
+            throw new SnakebiteException(text(
+                "cannot create the registry image: ",
+                strerror(errno).fromStringz));
 
-            _copyPrefix[0 .. prefix.length] = prefix;
-            _copyPrefix[prefix.length] = '\0';
-            atexit(&removeCopies);
+        scope(failure) close(file);
+        const bytes = (&snakebite_registry_image_start)[
+            0 .. &snakebite_registry_image_end - &snakebite_registry_image_start];
+        for (size_t written; written < bytes.length; ) {
+            const count = write(
+                file, bytes.ptr + written, bytes.length - written);
+            if (count <= 0)
+                throw new SnakebiteException(text(
+                    "cannot write the registry image: ",
+                    strerror(errno).fromStringz));
+
+            written += count;
         }
 
         Image image;
-        image._handle = dlopen(path.toStringz, RTLD_NOW | RTLD_LOCAL);
+        image._file = file;
+        image._handle = dlopen(
+            text("/proc/self/fd/", file).toStringz, RTLD_NOW | RTLD_LOCAL);
         if (image._handle is null)
-            throw new Exception(text(
-                "cannot load the registry image ", path, ": ",
-                dlerror.fromStringz));
+            throw new SnakebiteException(text(
+                "cannot load the registry image: ", dlerror.fromStringz));
 
         alias Slot = extern(C) void** function();
         auto slot = cast(Slot) dlsym(image._handle, "snakebite_registry_slot");
@@ -630,51 +713,9 @@ private struct Image {
     }
 
     public void close() {
+        import core.sys.posix.unistd: close;
+
         dlclose(_handle);
+        close(_file);
     }
 }
-
-
-private shared size_t _copies;
-private shared bool _cleanupRegistered;
-
-
-// The runtime is gone when this runs, so it uses no GC memory.
-private extern(C) void removeCopies() @nogc nothrow {
-    import core.stdc.stdio: snprintf;
-    import core.sys.posix.unistd: unlink;
-
-    char[4200] path = void;
-    foreach (copy; 1 .. atomicLoad(_copies) + 1) {
-        snprintf(path.ptr, path.length, "%s%zu.so", _copyPrefix.ptr, copy);
-        unlink(path.ptr);
-    }
-}
-
-
-private __gshared char[4096] _copyPrefix;
-
-
-// The path of the image to copy for `program`: the one prepared with the
-// project's other images, or the one for programs that have no project.
-private string registryImage(Program program) {
-    if (program.testStartupImage !is null)
-        return program.testStartupImage.path;
-
-    if (auto found = atomicLoad(_defaultImage))
-        return *cast(string*) found;
-
-    import core.sys.posix.unistd: getuid;
-    import std.conv: text;
-    import std.file: tempDir;
-    import std.path: buildPath;
-
-    auto path = new string[1];
-    path[0] = prepareRegistryImage(tempDir.buildPath(
-        text("snakebite-registry-", getuid))).path;
-    atomicStore(_defaultImage, cast(shared) path.ptr);
-    return path[0];
-}
-
-
-private shared(string)* _defaultImage;
