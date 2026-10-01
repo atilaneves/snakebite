@@ -1976,6 +1976,36 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A `new` of a `scope class` that is not the initialiser of a `scope`
+// variable is a temporary. dmd gives that `NewExp` no `lowering` (a scope
+// class never uses the GC) and no `onstack` (only a `scope` variable sets
+// it).
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd 2.113.0's code generator crashes on this `NewExp`; ldc "
+            ~ "compiles it and the program exits with status 0"),
+)) {
+    @("scopeClassTemporaryIsConstructed." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            scope class Resource {
+                int value;
+                this(int value) { this.value = value; }
+                int next() { return value + 1; }
+            }
+
+            int run() {
+                return (new Resource(2)).next();
+            }
+
+            void main() {
+                assert(run() == 3);
+            }
+        });
+    }
+}
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE does not implement `typeid(Pointerless).info`"),

@@ -502,9 +502,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         import std.conv: text;
 
         if (function_ is null)
-            throw new SnakebiteException(
-                "bytecode compiler cannot compile a null function",
-            );
+            assert(0, "callers pass a resolved function");
 
         const(Function)* result;
         withCompilerLock({
@@ -548,8 +546,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 
             auto body_ = function_.fbody;
             if (body_ is null)
-                throw rejection(function_, function_.loc,
-                    "a function with no body");
+                assert(0, "`CallSelection` routes a bodyless function to "
+                    ~ "FFI or a builtin, never to the compiler");
 
             auto layout = FrameLayout.of(function_);
 
@@ -916,19 +914,21 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // time, an infinite loop instead of a compile error. A skipped
         // `CaseStatement` is the bug this guards; `reachable` exists to
         // stop it happening in the first place.
-        if (_pendingCaseJumps.length > 0)
-            throw rejection(_function, _function.loc,
-                "a `case` this compiler never reached");
+        if (_pendingCaseJumps.length != 0)
+            assert(0, "every `case` a jump targets was compiled");
+        if (_pendingDefaultJumps.length != 0)
+            assert(0, "every `default` a jump targets was compiled");
 
         removeEmptyLifetimes;
         resolveBranches();
 
         ExceptionHandler[] exceptionHandlers;
         foreach (pending; _exceptionHandlers) {
-            if (pending._handler >= _instructions.length
-                    && pending._cleanupEnd == size_t.max)
-                throw rejection(_function, _function.loc,
-                    "an empty catch handler");
+            if (!(pending._handler < _instructions.length
+                    || pending._cleanupEnd != size_t.max))
+                assert(0, "a catch handler is followed by the code after "
+                    ~ "the statement, or by the function's closing "
+                    ~ "instruction");
 
             exceptionHandlers ~= ExceptionHandler(
                 pending._type,
@@ -1146,13 +1146,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             if (target is null)
                 continue;
 
-            if (*target > _instructions.length
+            if (!(*target < _instructions.length
                     || (*target == _instructions.length
-                        && !isCleanupEndBranch(index, *target)))
-                throw new SnakebiteException(text(
-                    "bytecode compiler produced an out-of-range branch " ~
-                    "target ", *target, " for `", _function.toString, "`",
-                ));
+                        && isCleanupEndBranch(index, *target))))
+                assert(0, text("branch target ", *target,
+                    " is out of range in `", _function.toString, "`"));
 
             *target = cast(size_t) instructionAt(*target);
         }
@@ -1403,7 +1401,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     override void visit(TryCatchStatement statement) {
         // DMD AST nodes stay mutable through this plan for code generation.
         auto plan = catchPlanOf(
-            statement, catch_ => runtimeClassInfo(catch_.type),
+            statement,
+            catch_ => _bytecode._runtimeTypes.unqualifiedClassInfo(catch_.type),
         );
         const finallyDepthAtStart = _pendingFinallyBodies.length;
         const bodyStart = _instructions.length;
@@ -1440,6 +1439,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 );
 
             _finished = false;
+            // The VM stores the exception into the frame slot; a captured
+            // variable reads from its closure slot instead.
+            if (catch_.var !is null && isClosureVariable(catch_.var)) {
+                const slot = _closureLayout.slotOf(catch_.var);
+                emit(&opStoreIndirect, closureSlotAddress(slot.offset),
+                    catchOffset, size_t.sizeof);
+            }
             compileStatement(catch_.handler);
             allHandlersFinished &= _finished;
 
@@ -1497,9 +1503,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileThrow(Expression expression, in Loc loc) {
         import dmd.astenums: Tclass;
 
-        if (expression is null || expression.type.toBasetype.ty != Tclass)
-            throw rejection(_function, loc, expression is null
-                ? "a null throw expression" : expressionText(expression));
+        if (!(expression !is null
+                && expression.type.toBasetype.ty == Tclass))
+            assert(0,
+                "`throwSemantic` only accepts a `Throwable` class reference");
 
         const facts = TypeFacts.of(expression.type);
         const offset = reserveTemp(facts);
@@ -1616,7 +1623,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     override void visit(DefaultStatement statement) {
         if (_switchStack.length == 0)
-            throw rejection(_function, statement.loc, statementText(statement));
+            assert(0, "`visitDefault` rejects a `default` outside a `switch`");
 
         recordDefaultTarget(_switchStack[$ - 1]);
         _finished = false;
@@ -1660,8 +1667,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(GotoStatement statement) {
-        if (statement.label is null || statement.label.statement is null)
-            throw rejection(_function, statement.loc, statementText(statement));
+        if (!(statement.label !is null && statement.label.statement !is null))
+            assert(0, "semantic3 rejects a `goto` to an undefined label");
 
         auto target = statement.label.statement;
         // Finalizer bodies stay mutable DMD statements for code generation.
@@ -1697,19 +1704,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // function this compiler did not itself compile is, through the
     // native FFI boundary in `compileCall`.
     override void visit(SwitchErrorStatement statement) {
-        if (statement.exp !is null)
-            compileEffect(statement.exp);
+        if (statement.exp is null)
+            assert(0, "dmd always gives a `SwitchErrorStatement` its "
+                ~ "`__switch_error` call");
+        compileEffect(statement.exp);
 
         _finished = true;
     }
 
     override void visit(BreakStatement statement) {
         if (_breakables.length == 0)
-            throw rejection(_function, statement.loc, statementText(statement));
+            assert(0,
+                "`visitBreak` rejects a `break` outside a loop or `switch`");
 
         const target = findBreakableIndex(statement.ident);
         if (target == size_t.max)
-            throw rejection(_function, statement.loc, statementText(statement));
+            assert(0, "`visitBreak` rejects a `break` to an unknown label");
 
         runPendingFinallyBodies(unwindPlanOf(
             activeScopePath, _breakables[target].scopePath,
@@ -1724,15 +1734,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     extern(D):
-
-    private TypeInfo_Class runtimeClassInfo(Type declared) {
-        import dmd.astenums: Tclass;
-
-        auto type = declared.toBasetype;
-        assert(type.ty == Tclass);
-
-        return cast(TypeInfo_Class) cast() _bytecode._runtimeTypes.get(type);
-    }
 
     private void compileReturn(ReturnStatement statement) {
         // A `void` return's own expression, when it has one, is only the
@@ -2155,9 +2156,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // this exact shape, and its only effect is to leave statements
         // in the body unlowered (e.g. a `.length` assign keeps no
         // `_d_arraysetlengthT` call) because dmd's CTFE engine interprets
-        // the body directly instead. At run time the body never runs and
-        // dmd rejects a `goto` into it, so nothing reaches it here either.
+        // the body directly instead. At run time the `if` never enters the
+        // body, but a `case` or `default` label in it is still a target
+        // for the `switch` that holds it, so such a body is compiled
+        // behind a jump. dmd rejects a `goto` to any other label in it.
         if (statement.isIfCtfeBlock) {
+            if (statement.ifbody !is null && statement.ifbody.comeFrom)
+                return compileCtfeBlockWithLabels(statement);
+
             if (statement.elsebody !is null)
                 compileStatement(statement.elsebody);
             return;
@@ -2197,6 +2203,32 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _instructions[jumpIndex].destination = _instructions.length;
 
         _finished = ifFinished && elseFinished;
+    }
+
+    private void compileCtfeBlockWithLabels(IfStatement statement) {
+        const skipIndex = _instructions.length;
+        emit(&opJump, 0, 0, 0);
+
+        _finished = false;
+        compileStatement(statement.ifbody);
+        const bodyFinished = _finished;
+
+        size_t endIndex = size_t.max;
+        if (statement.elsebody !is null && !bodyFinished) {
+            endIndex = _instructions.length;
+            emit(&opJump, 0, 0, 0);
+        }
+        patchTarget(skipIndex, _instructions.length);
+
+        _finished = false;
+        if (statement.elsebody !is null)
+            compileStatement(statement.elsebody);
+        const elseFinished = _finished;
+
+        if (endIndex != size_t.max)
+            patchTarget(endIndex, _instructions.length);
+
+        _finished = bodyFinished && statement.elsebody !is null && elseFinished;
     }
 
     // A condition that is a nonzero literal - `1`, in place of `true`,
@@ -2304,11 +2336,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private void compileContinue(ContinueStatement statement) {
         if (_loops.length == 0)
-            throw rejection(_function, statement.loc, statementText(statement));
+            assert(0, "`visitContinue` rejects a `continue` outside a loop");
 
         const index = findLoopIndex(statement.ident);
         if (index == size_t.max)
-            throw rejection(_function, statement.loc, statementText(statement));
+            assert(0,
+                "`visitContinue` rejects a `continue` to an unknown label");
 
         runPendingFinallyBodies(unwindPlanOf(
             activeScopePath, _loops[index].scopePath,
@@ -2787,7 +2820,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const path = ClosurePlan.staticChainPath(_function, owner);
         if (path is null)
-            throw rejection(_function, _function.loc, "a static chain");
+            assert(0, "dmd rejects a reference to a frame the function has "
+                ~ "no context chain to (`checkNestedReference`)");
 
         auto result = reserveTemp(pointerFacts);
         emit(&opCopy, result, path[0].offset, size_t.sizeof);
@@ -2832,7 +2866,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         if (owner is null)
-            throw rejection(_function, variable.loc, "a local variable");
+            assert(0,
+                "a local variable belongs to a function");
 
         auto context = contextAddressOf(owner);
         const closurePlan = closurePlanOf(owner);
@@ -2849,7 +2884,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const layout = FrameLayout.of(owner);
         if (!layout.hasSlot(variable))
-            throw rejection(_function, variable.loc, "a local variable");
+            assert(0,
+                "a frame layout reserves a slot for each of its locals");
 
         context = addPointerOffset(context, layout.offsetOf(variable));
         if (layout.isRef(variable))
@@ -2871,20 +2907,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return _layout.offsetOf(variable);
 
         if (owner is null)
-            throw rejection(_function, variable.loc, "a local variable");
+            assert(0,
+                "a local variable belongs to a function");
 
         auto context = contextAddressOf(owner);
         const closurePlan = closurePlanOf(owner);
         if (closurePlan.needsClosure) {
             const closure = closurePlan.layout;
             if (!closure.hasSlot(variable))
-                throw rejection(_function, variable.loc, "a local variable");
+                assert(0,
+                    "a closure's layout holds every variable captured from it");
             return addPointerOffset(context, closure.slotOf(variable).offset);
         }
 
         const layout = FrameLayout.of(owner);
         if (!layout.hasSlot(variable))
-            throw rejection(_function, variable.loc, "a local variable");
+            assert(0,
+                "a frame layout reserves a slot for each of its locals");
         return addPointerOffset(context, layout.offsetOf(variable));
     }
 
@@ -2917,7 +2956,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ? cast() _layout.hiddenThis.variable
             : variable;
         if (hiddenThis is null)
-            throw rejection(_function, _function.loc, "a `this`");
+            assert(0, "a function that reads `this` reserves a slot for it");
 
         const hidden = hiddenSlotOffset(hiddenThis);
         return receiverOffsetFrom(
@@ -2948,20 +2987,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t contextThisOffset(VarDeclaration hiddenThis) {
         auto owner = outerFunctionOf(hiddenThis);
         if (owner is null)
-            throw rejection(_function, _function.loc, "a `this`");
+            assert(0, "a `this` variable belongs to a function");
 
         auto context = contextAddressOf(owner);
         const closurePlan = closurePlanOf(owner);
         if (closurePlan.needsClosure) {
             const closure = closurePlan.layout;
             if (!closure.hasSlot(hiddenThis))
-                throw rejection(_function, _function.loc, "a `this`");
+                assert(0,
+                    "a closure's layout holds every `this` captured from it");
 
             context = addPointerOffset(context, closure.slotOf(hiddenThis).offset);
         } else {
             const layout = FrameLayout.of(owner);
             if (!layout.hasSlot(hiddenThis))
-                throw rejection(_function, _function.loc, "a `this`");
+                assert(0,
+                    "an owner's frame layout reserves a slot for its `this`");
 
             context = addPointerOffset(context, layout.offsetOf(hiddenThis));
         }
@@ -4001,10 +4042,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         import dmd.astenums: Tdelegate;
 
-        if (expression.type.toBasetype.ty != Tdelegate) {
-            if (expression.fd is null)
-                return visit(cast(Expression) expression);
+        if (expression.fd is null)
+            assert(0,
+                "`FuncExp`'s constructor always resolves its declaration");
 
+        if (expression.type.toBasetype.ty != Tdelegate) {
             const address = _bytecode.callableAddress(expression.fd, 0);
             emit(&opConstant, _destination,
                 addConstant(cast(long) cast(size_t) address), _width);
@@ -4018,6 +4060,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     override void visit(DelegateExp expression) {
         requireDestination(expression);
 
+        if (expression.func is null)
+            assert(0, "a `DelegateExp` names its method");
         compileDelegateValue(
             delegateTargetOf(expression.func, expression.type, expression.e1,
                 expression.vthis2),
@@ -4040,7 +4084,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             delegateContextOffset, delegateFunctionOffset;
 
         if (target.function_ is null)
-            return visit(cast(Expression) expression);
+            assert(0, "a delegate value names its function");
 
         const context = _destination + delegateContextOffset;
         if (target.receiver !is null) {
@@ -4050,6 +4094,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             } else
                 evalInto(target.receiver, context, size_t.sizeof);
         } else if (target.needsContext) {
+            if (target.contextOwner is null)
+                assert(0,
+                    "`delegateTargetOf` asks for a context only with an owner");
+
             const contextOffset = contextAddressOf(target.contextOwner);
             emit(&opCopy, _destination + delegateContextOffset,
                 contextOffset, size_t.sizeof);
@@ -4694,11 +4742,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `ArrayLiteralExp`s. Compiling `lowering` runs that call through the
     // ordinary `CallExp` path, which resolves it as already-compiled
     // druntime code the same way any other native call is resolved -
-    // never a hash table this compiler builds itself. Reaching here means
-    // dmd could not find that hook.
+    // never a hash table this compiler builds itself.
     protected override void visitUnloweredAssocArrayLiteral(
             AssocArrayLiteralExp expression) {
-        visit(cast(Expression) expression);
+        assert(0, "dmd lowers every associative array literal "
+            ~ "(`tryLowerAALiteral`) or reports the missing hook");
     }
 
     private struct NewDestination {
@@ -4742,13 +4790,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     protected override void visitUnloweredNew(
         NewExp expression, NewPlan plan,
     ) {
-        if (expression.thisexp !is null
-                && plan.destination != NewPlan.Destination.placement
-                && plan.destination != NewPlan.Destination.stack)
-            return visit(cast(Expression) expression);
-
         if (plan.destination == NewPlan.Destination.lowering)
-            return visit(cast(Expression) expression);
+            assert(0, "dmd lowers every heap `new` of a class that is not "
+                ~ "a `scope class`, outside a `ctfe` or `-betterC` scope");
 
         prepareNewDestination(expression);
         scope (exit) restoreNew;
@@ -4799,8 +4843,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 && expression.arguments !is null
                 && expression.arguments.length != 0) {
             if (expression.arguments.length != 1)
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
+                assert(0, "dmd rejects `new T(a, b)` for a scalar `T`");
             const facts = TypeFacts.of(expression.newtype);
             const valueOffset = reserveTemp(facts);
             evalInto((*expression.arguments)[0], valueOffset, facts.size);
@@ -4899,10 +4942,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         auto type = isType(expression.obj);
-        if (type is null || type.vtinfo is null)
-            throw rejection(_function, expression.loc,
-                text("`", expression.toString,
-                    "` without resolved type information"));
+        if (!(type !is null && type.vtinfo !is null))
+            assert(0, "`TypeidExp` semantic leaves a type with its `TypeInfo`");
 
         emitRuntimeTypeInfoConstant(type);
     }
@@ -5021,7 +5062,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     protected override void visitUnloweredCat(CatExp expression) {
-        visit(cast(Expression) expression);
+        assert(0, "dmd lowers every `~` outside a `-betterC` scope "
+            ~ "(`trySetCatExpLowering`)");
     }
 
     override void visit(PostExp expression) {
@@ -6283,8 +6325,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto calleeType = typeFunctionOf(callee);
         if (arityMismatches(calleeType.parameterList, expression.arguments,
                 calleeType.parameterList.varargs == VarArg.variadic))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+            assert(0, "dmd rejects a call with the wrong number of arguments");
 
         auto returnType = calleeType.next;
         const isVoidCallee = returnType is null || returnType.ty == Tvoid;
@@ -6292,8 +6333,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             isVoidCallee ? TypeFacts.init
                 : calleeType.isRef ? pointerFacts : TypeFacts.of(returnType);
         if (isVoidCallee && destOffset != discardResult)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+            assert(0, "a `void` call is only ever evaluated for effect");
 
         const objectOffset = reserveTemp(pointerFacts);
         evalInto(dot.e1, objectOffset, size_t.sizeof);
@@ -6333,8 +6373,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         const index = callee.vtblIndex;
         if (index < 0)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+            assert(0,
+                "dmd gives every virtual method a vtbl slot");
 
         const vptrOffset = reserveTemp(pointerFacts);
         emit(&opLoadIndirect, vptrOffset, objectOffset, size_t.sizeof);
@@ -6578,7 +6618,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (arityMismatches(calleeType.parameterList, arguments,
                 calleeType.parameterList.varargs == VarArg.variadic))
-            throw rejection(_function, loc, exprText);
+            assert(0, "dmd rejects a call with the wrong number of arguments");
 
         Arg[] args;
         // `calleeLayout.hiddenThis.variable`, not `hasThis`: a
@@ -6588,7 +6628,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // knows whether this callee's frame reserved it a slot.
         if (calleeLayout.hiddenThis.variable !is null) {
             if (!hasThis)
-                throw rejection(_function, loc, exprText);
+                assert(0,
+                    "dmd binds a hidden `this` to every call of a method");
 
             args ~= Arg(
                 receiverOffset,
@@ -6615,7 +6656,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const returnShape = CallAdapter.ofType(calleeType, isConstructor);
         const isVoidCallee = returnShape.isVoid;
         if (isVoidCallee && !isConstructor && destOffset != discardResult)
-            throw rejection(_function, loc, exprText);
+            assert(0, "a `void` call is only ever evaluated for effect");
 
         const siteIndex = _callSites.length;
         // The delegate outlives this compiler, so it captures the backend
@@ -6705,11 +6746,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.ffi.call: CallAdapter;
 
         if (arityMismatches(type.parameterList, arguments, allowExtraArguments))
-            throw rejection(_function, loc, exprText);
+            assert(0, "dmd rejects a call with the wrong number of arguments");
 
         const returnShape = CallAdapter.ofType(type);
         if (returnShape.isVoid && destOffset != discardResult)
-            throw rejection(_function, loc, exprText);
+            assert(0, "a `void` call is only ever evaluated for effect");
 
         auto preparation = CallAdapter.Arguments.of(type, arguments);
         Arg[] args = initialArgs;
@@ -6958,8 +6999,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         } else {
             functionType = deref is null ? null : deref.type.isTypeFunction;
             if (functionType is null)
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
+                assert(0,
+                    "dmd wraps a function pointer call's callee in a `PtrExp`");
 
             calleeOffset = reserveTemp(pointerFacts);
             evalInto(deref.e1, calleeOffset, size_t.sizeof);
@@ -6967,8 +7008,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (arityMismatches(functionType.parameterList, expression.arguments,
                 functionType.parameterList.varargs == VarArg.variadic))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+            assert(0, "dmd rejects a call with the wrong number of arguments");
 
         // A `ref` return hands back its target's address in the return
         // register regardless of the pointee's own width - the same shape
@@ -6979,8 +7019,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const returnShape = CallAdapter.ofType(functionType);
         const isVoidCallee = returnShape.isVoid;
         if (isVoidCallee && destOffset != discardResult)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+            assert(0, "a `void` call is only ever evaluated for effect");
 
         auto calleeLayout = FrameLayout.ofParameters(functionType, isDelegateCall);
 

@@ -296,17 +296,9 @@ package struct FrameLayout {
         return Parameter(slot.offset, slot.facts, isRefParameter);
     }
 
-    // Where `variable` lives in a frame built from this layout, as a byte
-    // offset from the frame's base - the caller owns the frame's actual
-    // address, so it is the one that turns this into a pointer. Throws,
-    // naming `variable`, if this layout never reserved it a slot: the one
-    // fault the evaluator can hit here, whether it is reading the
-    // variable or running its declaration, so it gets the one message.
     // Whether `variable` has a slot in this layout at all - checked before
-    // `offsetOf`/`isRef` by a reach that must tell "not here, try the
-    // static chain" apart from "not here, and nowhere else either", which
-    // `offsetOf`'s own throw cannot do without exceptions doing double
-    // duty as control flow.
+    // `isRef` by a reach that must tell "not here, try the static chain"
+    // apart from "not here, and nowhere else either".
     package bool hasSlot(VarDeclaration variable) const {
         return slotOf(variable) !is null;
     }
@@ -317,15 +309,17 @@ package struct FrameLayout {
         return variable in _slotOf;
     }
 
+    // Where `variable` lives in a frame built from this layout, as a byte
+    // offset from the frame's base - the caller owns the frame's actual
+    // address, so it is the one that turns this into a pointer. The layout
+    // must own `variable`: `hasSlot` tells whether it does.
     package size_t offsetOf(VarDeclaration variable) const {
         import std.conv: text;
 
         auto slot = slotOf(variable);
         if (slot is null)
-            throw new SnakebiteException(
-                text("cannot reach `", variable.toString,
-                    "`: not a parameter or local in the current frame"),
-            );
+            assert(0, text("`", variable.toString,
+                "` is not a parameter or local of this frame"));
 
         return slot.offset;
     }

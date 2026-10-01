@@ -1691,8 +1691,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return *cached;
 
         return *_catchTypes.build(catch_,
-            () => cast(TypeInfo_Class) _runtimeTypes.get(
-                catch_.type.toBasetype));
+            () => _runtimeTypes.unqualifiedClassInfo(catch_.type));
     }
 
     private void bindCatchVariable(Catch catch_, Throwable guest) {

@@ -115,6 +115,29 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// A closure keeps the caught exception alive past the handler, so the
+// `catch` variable lives in the closure and not in the frame.
+static foreach (backend; Matrix!()) {
+    @("catchVariableCapturedByClosure." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run() {
+                try {
+                    throw new Exception("boom");
+                } catch (Exception caught) {
+                    auto length = () => caught.msg.length;
+                    return cast(int) length();
+                }
+            }
+
+            void main() {
+                assert(run() == 4);
+            }
+        });
+    }
+}
+
 static foreach (backend; Matrix!()) {
     @("catchMatchesGuestClassByBaseType." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -434,6 +457,136 @@ static foreach (backend; Matrix!(
                     threw = t.classinfo is Exception.classinfo;
                 }
                 assert(threw);
+            }
+        });
+    }
+}
+
+
+// A type qualifier on a `catch` parameter does not change which exceptions
+// the clause catches: the match is on the class.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "DMD CTFE does not catch with a qualified `catch` type"),
+)) {
+    @("catchClauseWithConstTypeCatches." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run() {
+                try {
+                    throw new Exception("boom");
+                } catch (const Exception caught) {
+                    return cast(int) caught.msg.length;
+                }
+            }
+
+            void main() {
+                assert(run() == 4);
+            }
+        });
+    }
+}
+
+
+// A `immutable` qualifier on a `catch` parameter does not change which
+// exceptions the clause catches: the match is on the class.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "DMD CTFE does not catch with a qualified `catch` type"),
+)) {
+    @("catchClauseWithImmutableTypeCatches." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run() {
+                try {
+                    throw new Exception("boom");
+                } catch (immutable Exception caught) {
+                    return cast(int) caught.msg.length;
+                }
+            }
+
+            void main() {
+                assert(run() == 4);
+            }
+        });
+    }
+}
+
+
+// A `shared` qualifier on a `catch` parameter does not change which
+// exceptions the clause catches: the match is on the class.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "DMD CTFE does not catch with a qualified `catch` type"),
+)) {
+    @("catchClauseWithSharedTypeCatches." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run() {
+                try {
+                    throw new Exception("boom");
+                } catch (shared Exception caught) {
+                    return cast(int) caught.msg.length;
+                }
+            }
+
+            void main() {
+                assert(run() == 4);
+            }
+        });
+    }
+}
+
+
+// A `const shared` qualifier on a `catch` parameter does not change which
+// exceptions the clause catches: the match is on the class.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "DMD CTFE does not catch with a qualified `catch` type"),
+)) {
+    @("catchClauseWithConstSharedTypeCatches." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run() {
+                try {
+                    throw new Exception("boom");
+                } catch (const shared Exception caught) {
+                    return cast(int) caught.msg.length;
+                }
+            }
+
+            void main() {
+                assert(run() == 4);
+            }
+        });
+    }
+}
+
+
+// `inout` is only valid in an `inout` function; the clause still matches on
+// the class alone.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "DMD CTFE does not catch with a qualified `catch` type"),
+)) {
+    @("catchClauseWithInoutTypeCatches." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run(inout(int)[] values) {
+                try {
+                    throw new Exception("boom");
+                } catch (inout Exception caught) {
+                    return cast(int) caught.msg.length;
+                }
+            }
+
+            void main() {
+                assert(run([1]) == 4);
             }
         });
     }
