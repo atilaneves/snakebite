@@ -195,6 +195,7 @@ static foreach (backend; Matrix!()) {
                 auto square = cast(Square) base;
                 assert(square !is null);
                 assert(square is base);
+                assert(square.id == 1);
                 auto shape = cast(Shape) square;
                 assert(shape.sides == 4);
             }
