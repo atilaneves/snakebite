@@ -4,6 +4,7 @@ module snakebite.framestack;
 private:
 
 import snakebite.backends.temporarystack: TemporaryStack;
+import snakebite.cstack: CStack;
 import snakebite.tlsstorage: TlsDescriptor, TlsSlots;
 
 
@@ -45,11 +46,12 @@ public struct FrameStack {
     // Every base address handed to `GC.addRange` so far: one per grown
     // chunk (see `commit`), each removed in turn when this frame stack
     // goes out of scope.
-    private ubyte*[] _registeredRanges;
+    private CStack!(ubyte*) _registeredRanges;
     private TemporaryStack _cleanups;
     // Fiber frame stacks on one thread share these variable slots. A frame
     // stack used alone creates its own slots on first access.
     private TlsSlots* _tls;
+    private bool _ownsTls;
 
     @disable this(this);
 
@@ -107,15 +109,17 @@ public struct FrameStack {
         }
 
         GC.addRange(_base, _committed);
-        _registeredRanges ~= _base;
+        _registeredRanges.push(_base);
     }
 
     ~this() @system {
         import core.memory: pageSize;
         import core.sys.posix.sys.mman: munmap;
 
-        foreach (registered; _registeredRanges)
+        foreach (registered; _registeredRanges[])
             GC.removeRange(registered);
+        if (_ownsTls)
+            destroy(*_tls);
         if (_base !is null)
             assert(
                 munmap(_base, _reservation + pageSize) == 0,
@@ -230,8 +234,10 @@ public struct FrameStack {
     // touch of it (finding 1.3). No lock: this `FrameStack`, like the
     // `Vm` that owns it, belongs to exactly one thread.
     public void[] tlsSlotFor(const(TlsDescriptor)* descriptor) {
-        if (_tls is null)
+        if (_tls is null) {
             _tls = new TlsSlots;
+            _ownsTls = true;
+        }
         return _tls.slotFor(descriptor);
     }
 
@@ -301,7 +307,7 @@ public struct FrameStack {
         // dropped from the GC's sight.
         auto grown = _base + _committed;
         GC.addRange(grown, committed - _committed);
-        _registeredRanges ~= grown;
+        _registeredRanges.push(grown);
         _committed = committed;
     }
 

@@ -4,6 +4,48 @@ module snakebite.hostthreads;
 private:
 
 import core.thread: Thread, ThreadID;
+import snakebite.cstack: CStack;
+
+
+// Makes the state that a `PerThread` holds on the C heap, which the GC
+// scans. A thread that never ran guest code can still run a destructor in
+// the GC finalizer, and there the GC forbids an allocation.
+public auto heapNew(T, Args...)(auto ref Args args) {
+    import core.lifetime: emplace;
+    import core.memory: GC;
+    import core.stdc.stdlib: calloc, free;
+
+    static if (is(T == class))
+        enum size = __traits(classInstanceSize, T);
+    else
+        enum size = T.sizeof;
+
+    auto memory = calloc(1, size);
+    if (memory is null)
+        assert(0, "out of memory for the state of a thread");
+    GC.addRange(memory, size);
+    scope(failure) {
+        GC.removeRange(memory);
+        free(memory);
+    }
+    static if (is(T == class))
+        return emplace!T(memory[0 .. size], args);
+    else
+        return emplace(cast(T*) memory, args);
+}
+
+// Releases what `heapNew` made.
+public void heapDelete(T)(T state) {
+    import core.memory: GC;
+    import core.stdc.stdlib: free;
+
+    static if (is(T == class))
+        destroy(state);
+    else
+        destroy(*state);
+    GC.removeRange(cast(void*) state);
+    free(cast(void*) state);
+}
 
 
 // How a backend keeps the state one thread needs to run guest code
@@ -28,8 +70,8 @@ import core.thread: Thread, ThreadID;
 // first call on a thread, which creates this thread's own state, calls
 // `attachedThread` to make sure druntime knows the thread (ADR-0005).
 //
-// `State` is a class or a pointer to a struct. `destroy` is applied to
-// the object it names when the state is released.
+// `State` is a class or a pointer to a struct, and `create` makes it with
+// `heapNew`. `heapDelete` releases it when the state is released.
 // Execution state needs a separate entry for each Fiber stack. Native TLS
 // variables use the default so all Fibers on a thread see the same storage.
 public struct PerThread(State, bool fiberLocal = false) {
@@ -44,6 +86,7 @@ public struct PerThread(State, bool fiberLocal = false) {
     }
 
     private struct Held {
+        Key key;
         State state;
     }
 
@@ -56,13 +99,13 @@ public struct PerThread(State, bool fiberLocal = false) {
     }
 
     private Core* _core;
-    private static Held[Key] _held;
+    private static CStack!(Held, true) _held;
     private static bool _hooked;
     // The last `(core, state)` pair `current` returned on this thread,
-    // checked before the associative-array lookup below. Almost every
+    // checked before the scan of `_held` below. Almost every
     // callback in a run comes from the same backend as the one before
     // it, so this turns almost every entry into one integer compare
-    // instead of a hash and a probe (finding 11). `size_t.max` never
+    // instead of a scan (finding 11). `size_t.max` never
     // matches a real `_core.id` (it starts at 1, see `nextId`), so an
     // empty cache never looks like a hit.
     private static Key _cachedKey = Key(size_t.max);
@@ -92,11 +135,12 @@ public struct PerThread(State, bool fiberLocal = false) {
         if (key == _cachedKey)
             return _cachedState;
 
-        if (auto held = key in _held) {
-            _cachedKey = key;
-            _cachedState = held.state;
-            return held.state;
-        }
+        foreach (ref held; _held[])
+            if (held.key == key) {
+                _cachedKey = key;
+                _cachedState = held.state;
+                return held.state;
+            }
 
         return enter(key);
     }
@@ -109,23 +153,19 @@ public struct PerThread(State, bool fiberLocal = false) {
         }
 
         auto state = _core.create();
-        _held[key] = Held(state);
+        _held.push(Held(key, state));
         _cachedKey = key;
         _cachedState = state;
         return state;
     }
 
-    private static void release(State state) {
-        static if (is(State == class))
-            destroy(state);
-        else
-            destroy(*state);
-    }
-
     private static void releaseThisThread() {
-        foreach (held; _held)
-            release(held.state);
-        _held = null;
+        import core.lifetime: move;
+
+        CStack!(Held, true) released;
+        move(_held, released);
+        foreach (held; released[])
+            heapDelete(held.state);
         // Drop the cache along with the table: a state it still points
         // to is about to be destroyed, and a later entry on the same
         // thread must go through `enter` again to notice.
@@ -182,10 +222,10 @@ private extern(C) void rt_moduleTlsDtor();
 // be this module hand-rolling one piece of `rt_moduleTlsDtor` on the
 // side (finding 6).
 private alias ThreadEndHook = void function();
-private ThreadEndHook[] threadEndHooks;
+private CStack!ThreadEndHook threadEndHooks;
 
 private void onThreadEnd(ThreadEndHook hook) {
-    threadEndHooks ~= hook;
+    threadEndHooks.push(hook);
 }
 
 // Reports a `Throwable` to stderr and swallows it: called only where the
@@ -214,9 +254,11 @@ private void report(in char[] what, Throwable throwable) nothrow {
 // finds nothing left to run instead of a hook whose target is already
 // gone (finding 2).
 private void runThreadEndHooks() nothrow {
-    auto hooks = threadEndHooks;
-    threadEndHooks = null;
-    foreach (hook; hooks) {
+    import core.lifetime: move;
+
+    CStack!ThreadEndHook hooks;
+    move(threadEndHooks, hooks);
+    foreach (hook; hooks[]) {
         try
             hook();
         catch (Throwable throwable)

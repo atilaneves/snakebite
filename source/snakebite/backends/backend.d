@@ -168,7 +168,7 @@ public struct CompilationStatistics {
 public abstract class Backend {
     import dmd.dmodule: Module;
     import dmd.func: FuncDeclaration;
-    import snakebite.hostthreads: PerThread;
+    import snakebite.hostthreads: heapNew, PerThread;
 
     // The program this backend runs. Whether a callee is interpreted or
     // called natively is the program's one decision (`isInterpreted`),
@@ -179,7 +179,7 @@ public abstract class Backend {
 
     protected this(const Program program) {
         _program = program;
-        _threadInitialized = PerThread!(bool*)(() => new bool);
+        _threadInitialized = PerThread!(bool*)(() => heapNew!bool);
         foreach (constructor; program.moduleConstructors)
             if (constructor.isStaticCtorDeclaration !is null
                 && constructor.isSharedStaticCtorDeclaration is null)

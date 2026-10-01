@@ -48,7 +48,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import snakebite.sharedtable: SharedTable;
     import snakebite.exception: SnakebiteException;
     import snakebite.framestack: defaultFrameCapacity;
-    import snakebite.hostthreads: PerThread;
+    import snakebite.hostthreads: heapNew, PerThread;
     import snakebite.nativelayout: NativeData, nativeSymbolName;
     import snakebite.backends.runtimetypes: RuntimeTypes;
 
@@ -107,7 +107,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             &classRuntimeInfo,
             (type, loc) => _nativeData.initialValue(type, loc));
         _vms = PerThread!(Vm*, true)(
-            () => new Vm(defaultFrameCapacity, _nativeData.tlsSlots));
+            () => heapNew!Vm(defaultFrameCapacity, _nativeData.tlsSlots));
         _plans.useCallbacks(
             new CallbackBridge(&invokeCallback, cast(void*) this));
     }

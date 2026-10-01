@@ -463,7 +463,7 @@ public struct NativeData {
     import dmd.location: Loc;
     import dmd.mtype: Type;
 
-    import snakebite.hostthreads: PerThread;
+    import snakebite.hostthreads: heapNew, PerThread;
     import snakebite.sharedtable: SharedTable;
     import snakebite.tlsstorage: TlsDescriptor, TlsSlots;
 
@@ -513,7 +513,7 @@ public struct NativeData {
         _threadLocalAddress = threadLocalAddress;
         _classInfo = classInfo;
         _callLowering = call;
-        _tls = PerThread!(TlsSlots*)(() => new TlsSlots);
+        _tls = PerThread!(TlsSlots*)(() => heapNew!TlsSlots);
     }
 
     private void callLowering(
@@ -861,6 +861,22 @@ public string nativeSymbolName(imported!"dmd.declaration".Declaration symbol) {
     return name[].idup;
 }
 
+// Whether two element types are the same type once their qualifiers are
+// dropped. `mutableOf` mutates the type's own cache unless the type has no
+// qualifier, so only a qualified one needs the frontend lock.
+private bool mutableElementsEqual(
+    imported!"dmd.mtype".Type first,
+    imported!"dmd.mtype".Type second,
+) {
+    import dmd.typesem: mutableOf;
+    import snakebite.frontend.compiler: newInFrontend;
+
+    if (first.mod == 0 && second.mod == 0)
+        return first.equals(second);
+
+    return newInFrontend!mutableOf(first).equals(newInFrontend!mutableOf(second));
+}
+
 private imported!"dmd.expression".Expression initialExpression(
     imported!"dmd.mtype".Type type,
     in imported!"dmd.location".Loc loc,
@@ -987,8 +1003,7 @@ private void storeValue(
     if (auto array = type.isTypeSArray) {
         auto sourceElement = value.type.toBasetype.nextOf;
         const wholeArray = sourceElement !is null
-            && newInFrontend!mutableOf(sourceElement)
-                .equals(newInFrontend!mutableOf(array.next));
+            && mutableElementsEqual(sourceElement, array.next);
         if (!wholeArray || value.isStringExp is null) {
             const elementSize = array.next.size;
             auto literal = wholeArray ? value.isArrayLiteralExp : null;
@@ -1088,6 +1103,11 @@ private void storeValue(
         // DMD encodes a zero-initialized struct as an IntegerExp. Resolve
         // that encoding here, not from the destination's byte count.
         assert(value.toInteger == 0);
+        if (nativeData !is null) {
+            memcpy(place, nativeData.initialValue(type, value.loc).ptr,
+                facts.size);
+            return;
+        }
         storeValue(type, facts, initialExpression(type, value.loc), place,
             symbolAddress, nativeData);
         return;

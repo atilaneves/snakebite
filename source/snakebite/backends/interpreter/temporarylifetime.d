@@ -10,6 +10,7 @@ import snakebite.backends.temporarystack: TemporaryStack;
 import snakebite.backends.fullexpression:
     FullExpressionKind, FullExpressionScope;
 import snakebite.framestack: FrameStack, defaultFrameCapacity;
+import snakebite.cstack: CStack;
 import snakebite.nativelayout: TypeFacts;
 
 
@@ -17,7 +18,7 @@ import snakebite.nativelayout: TypeFacts;
 // The evaluator supplies only the operation which executes a DMD-built
 // destructor expression. This keeps destruction in DMD's AST while making
 // every lifetime transition happen at one seam.
-public final class TemporaryLifetime {
+public struct TemporaryLifetime {
     private alias Action = void delegate();
     private alias Destroy = extern(C++) void delegate(Expression);
     private alias Initialize = extern(C++) void delegate(
@@ -39,21 +40,19 @@ public final class TemporaryLifetime {
         size_t floor;
     }
 
-    private Temporary[] _temporaries;
+    private CStack!Temporary _temporaries;
     private TemporaryStack _stack;
     private FrameStack _frames;
     private size_t _floor;
     private FullExpressionScope _expressions;
-    private ExpressionState[] _expressionStates;
+    private CStack!ExpressionState _expressionStates;
     private size_t _expressionDepth;
     private Destroy _destroy;
 
+    @disable this(this);
+
     public this(Destroy destroy) {
         _frames = FrameStack(defaultFrameCapacity);
-        // Reserve the usual call nesting without putting an allocation in
-        // the steady-state expression path. Recursive calls can grow this
-        // stack when they exceed the initial depth.
-        _expressionStates.length = 16;
         _destroy = destroy;
     }
 
@@ -89,7 +88,7 @@ public final class TemporaryLifetime {
             _expressions.rootOwnsTemporary);
         plan.initialize((Expression destructor) {
             const payload = _temporaries.length;
-            _temporaries ~= Temporary(null, _frames.mark, base, destructor);
+            _temporaries.push(Temporary(null, _frames.mark, base, destructor));
             _stack.registerTemporary(base, payload);
         }, evaluate, { _stack.arm(base); });
     }
@@ -137,7 +136,7 @@ public final class TemporaryLifetime {
     ) {
         const mark = _frames.mark;
         auto base = _frames.reserve(size, alignment);
-        _temporaries ~= Temporary(node, mark, base, null);
+        _temporaries.push(Temporary(node, mark, base, null));
         return base;
     }
 
@@ -157,7 +156,7 @@ public final class TemporaryLifetime {
 
     private void beginExpression() {
         if (_expressionDepth == _expressionStates.length)
-            _expressionStates ~= ExpressionState.init;
+            _expressionStates.push(ExpressionState.init);
 
         auto state = &_expressionStates[_expressionDepth++];
         state.mark = _temporaries.length;
@@ -179,7 +178,7 @@ public final class TemporaryLifetime {
         scope(exit) {
             if (_temporaries.length > mark)
                 _frames.release(_temporaries[mark].mark);
-            _temporaries = _temporaries[0 .. mark];
+            _temporaries.truncate(mark);
         }
 
         _stack.finish(stackMark, (in TemporaryStack.Entry entry) {
