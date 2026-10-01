@@ -184,3 +184,36 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A C variadic method has no `TypeInfo` tuple; the extra arguments follow
+// the System V C variadic convention.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("virtualVariadic.cLinkageOverrideReadsExtraArguments."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.stdarg: va_arg;
+            class Base {
+                extern(C) int sum(int count, ...) { return -1; }
+            }
+            class Derived: Base {
+                int bias = 100;
+                extern(C) override int sum(int count, ...) {
+                    int total = bias;
+                    foreach (i; 0 .. count)
+                        total += va_arg!int(_argptr);
+                    return total;
+                }
+            }
+            void main() {
+                Base base = new Derived;
+                assert(base.sum(0) == 100);
+                assert(base.sum(3, 4, 5, 6) == 115);
+            }
+        });
+    }
+}
