@@ -4429,6 +4429,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     override void visit(AddrExp expression) {
         import snakebite.nativelayout: storeIntegral;
 
+        // `&literal` is a pointer the frontend folded from `new S(...)`.
+        if (expression.e1.isStructLiteralExp !is null)
+            return _nativeData.write(_type, _facts, expression, _place);
+
         storeIntegral(
             _place, cast(size_t) addressOf(expression.e1), _facts.size);
     }

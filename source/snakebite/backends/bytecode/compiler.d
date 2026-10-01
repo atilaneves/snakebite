@@ -3957,6 +3957,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // through `ref` binding, so this is nothing more than that answer
     // copied to `_destination`.
     override void visit(AddrExp expression) {
+        // `&literal` is a pointer the frontend folded from `new S(...)`.
+        if (expression.e1.isStructLiteralExp !is null)
+            return compileConstant(expression);
+
         requireDestination(expression);
 
         const addressOffset = compileAddress(expression.e1);

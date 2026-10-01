@@ -552,6 +552,27 @@ public struct NativeData {
         return address;
     }
 
+    // The one static struct value for a compile-time `&literal`.
+    private void* structValue(StructLiteralExp literal) {
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        void* address;
+        withCompilerLock({
+            if (auto found = literal in _classValues) {
+                address = *found;
+                return;
+            }
+            const facts = TypeFacts.of(literal.type);
+            auto bytes = reserve(facts);
+            address = bytes.ptr;
+            // Register before fields: compile-time values can form cycles.
+            _classValues[literal] = address;
+            scope (failure) _classValues.remove(literal);
+            write(literal.type, facts, literal, address);
+        });
+        return address;
+    }
+
     public const(void)[] initialValue(
         Type type,
         in Loc loc,
@@ -939,6 +960,14 @@ private void storeValue(
         type.isTypeClass.sym.isBaseOf(reference.originalClass, &offset);
         *cast(void**) place = cast(ubyte*) address + offset;
         return;
+    }
+
+    if (auto address = value.isAddrExp) {
+        if (auto literal = address.e1.isStructLiteralExp) {
+            assert(nativeData !is null);
+            *cast(void**) place = nativeData.structValue(literal);
+            return;
+        }
     }
 
     if (auto literal = value.isStringExp) {
