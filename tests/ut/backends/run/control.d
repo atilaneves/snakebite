@@ -584,7 +584,7 @@ static foreach (backend; Matrix!()) {
 // `SwitchError`.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
-        "CTFE does not catch this error"),
+        "DMD CTFE cannot interpret a SwitchErrorStatement"),
 )) {
     @("finalSwitchOnNonMemberThrowsSwitchError." ~ backend.stringof)
     @Tags(backend.stringof)
