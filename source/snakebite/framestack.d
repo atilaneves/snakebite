@@ -5,6 +5,7 @@ private:
 
 import snakebite.backends.temporarystack: TemporaryStack;
 import snakebite.cstack: CStack;
+import snakebite.hostthreads: heapDelete, heapNew;
 import snakebite.tlsstorage: TlsDescriptor, TlsSlots;
 
 
@@ -119,7 +120,7 @@ public struct FrameStack {
         foreach (registered; _registeredRanges[])
             GC.removeRange(registered);
         if (_ownsTls)
-            destroy(*_tls);
+            heapDelete(_tls);
         if (_base !is null)
             assert(
                 munmap(_base, _reservation + pageSize) == 0,
@@ -235,7 +236,7 @@ public struct FrameStack {
     // `Vm` that owns it, belongs to exactly one thread.
     public void[] tlsSlotFor(const(TlsDescriptor)* descriptor) {
         if (_tls is null) {
-            _tls = new TlsSlots;
+            _tls = heapNew!TlsSlots;
             _ownsTls = true;
         }
         return _tls.slotFor(descriptor);

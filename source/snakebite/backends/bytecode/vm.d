@@ -596,11 +596,12 @@ private Activation* handleException(
         } catch (Throwable chained) {
             throwable = chained;
         }
+        ExceptionCandidate[handlerBufferLength] handlerBuffer;
         const plan = isHalt(throwable)
             ? UnwindPlan.init
             : exceptionPlanOf(
                 active.exceptionHandlers[firstHandler .. $], active.pc,
-                throwable.classinfo);
+                throwable.classinfo, handlerBuffer);
         const step = plan.finalizers.length != 0
             ? plan.finalizers[0]
             : plan.handler;
@@ -743,17 +744,24 @@ private const(Instruction)* runTemporaryEnd(Decoded)(
 }
 
 
+// The candidates of a throw fit `buffer` unless more than
+// `handlerBufferLength` handlers protect `pc`: a throw in a destructor that
+// the GC finalizer runs cannot allocate, and nesting that deep is rare.
+private enum handlerBufferLength = 16;
+
 private UnwindPlan exceptionPlanOf(
     const(ExceptionHandler)[] handlers,
     const(Instruction)* pc,
     TypeInfo_Class actual,
+    return scope ref ExceptionCandidate[handlerBufferLength] buffer,
 ) {
-    ExceptionCandidate[] candidates;
+    size_t count;
+    ExceptionCandidate[] overflow;
 
     foreach (ref handler; handlers) {
         if (pc < handler.bodyStart || pc >= handler.bodyEnd)
             continue;
-        candidates ~= ExceptionCandidate(
+        auto candidate = ExceptionCandidate(
             null,
             handler.cleanupEnd is null
                 ? ExceptionCandidate.Kind.catch_
@@ -761,9 +769,18 @@ private UnwindPlan exceptionPlanOf(
             cast(TypeInfo_Class) handler.type,
             cast(const(void)*) &handler,
         );
+        if (overflow !is null)
+            overflow ~= candidate;
+        else if (count < buffer.length)
+            buffer[count++] = candidate;
+        else {
+            overflow = buffer[0 .. count].dup;
+            overflow ~= candidate;
+        }
     }
 
-    return unwindPlanOf(candidates, actual);
+    return unwindPlanOf(overflow !is null ? overflow : buffer[0 .. count],
+        actual);
 }
 
 

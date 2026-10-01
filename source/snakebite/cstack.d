@@ -67,19 +67,27 @@ public struct CStack(T, bool scanned = false) {
     }
 
     public void pop() {
+        if (_length == 0)
+            assert(0, "pop of an empty stack");
         --_length;
     }
 
     // Drops every item from `length` on.
     public void truncate(in size_t length) {
+        if (length > _length)
+            assert(0, "truncate beyond the end of a stack");
         _length = length;
     }
 
     public ref inout(T) opIndex(in size_t index) inout {
+        if (index >= _length)
+            assert(0, "index past the end of a stack");
         return _items[index];
     }
 
     public ref inout(T) back() inout {
+        if (_length == 0)
+            assert(0, "back of an empty stack");
         return _items[_length - 1];
     }
 
@@ -92,7 +100,8 @@ public struct CStack(T, bool scanned = false) {
     }
 
     public inout(T)[] opSlice(in size_t from, in size_t to) inout {
-        assert(to <= _length);
+        if (to > _length || from > to)
+            assert(0, "slice past the end of a stack");
         return _items[from .. to];
     }
 }

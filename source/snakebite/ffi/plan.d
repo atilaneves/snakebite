@@ -86,11 +86,14 @@ public struct CallPlan {
     // from `_return` at `buildMoves` time instead of `abi.writeWord`'s
     // runtime dispatch (which also re-validated a width every plan here
     // already fixed at prepare time).
-    private enum Store : ubyte { byte1, byte2, byte4, byte8, copy16 }
+    private enum Store : ubyte { byte1, byte2, byte4, byte8, copy16, partial }
 
     private struct ResultMove {
         private ushort sourceOffset;
         private Store store;
+        // The width of a `partial` store: an eightbyte that holds three,
+        // five, six or seven bytes of the result.
+        private ubyte bytes;
     }
 
     private void* _address;
@@ -635,7 +638,7 @@ public struct CallPlan {
                     frameBytes + move.sourceOffset, 16);
                 returnOffset += 16;
             } else {
-                storeResult(move.store,
+                storeResult(move,
                     *cast(size_t*) (frameBytes + move.sourceOffset),
                     bytes + returnOffset);
                 returnOffset += 8;
@@ -690,28 +693,34 @@ public struct CallPlan {
     // every call.
     pragma(inline, true)
     private static void storeResult(
-        in Store store, in size_t value, void* place,
+        in ResultMove move, in size_t value, void* place,
     ) {
-        if (store == Store.byte8) {
+        if (move.store == Store.byte8) {
             *cast(size_t*) place = value;
             return;
         }
-        if (store == Store.byte4) {
+        if (move.store == Store.byte4) {
             *cast(uint*) place = cast(uint) value;
             return;
         }
-        storeRare(store, value, place);
+        storeRare(move, value, place);
     }
 
     pragma(inline, false)
     private static void storeRare(
-        in Store store, in size_t value, void* place,
+        in ResultMove move, in size_t value, void* place,
     ) {
-        final switch (store) with (Store) {
+        final switch (move.store) with (Store) {
             case byte1: *cast(ubyte*) place = cast(ubyte) value; break;
             case byte2: *cast(ushort*) place = cast(ushort) value; break;
             case byte4: *cast(uint*) place = cast(uint) value; break;
             case byte8: *cast(size_t*) place = value; break;
+            case partial: {
+                import core.stdc.string: memcpy;
+
+                memcpy(place, &value, move.bytes);
+                break;
+            }
             case copy16: assert(false, "16-byte result uses memcpy");
         }
     }
@@ -1029,6 +1038,7 @@ public struct CallPlan {
                 _resultMoves[i] = ResultMove(
                     cast(ushort) sourceOffset,
                     storeOf(_return.registers[i].size),
+                    _return.registers[i].size,
                 );
             }
         _resultCount = _realResultCount != 0 ? 0 : _return.count;
@@ -1096,8 +1106,8 @@ public struct CallPlan {
     }
 
     // `size`'s `Store` tag - see `Store` and `storeResult`. Called only at
-    // prepare time, from `buildMoves`; a plan's `Register`s always carry
-    // one of these four widths (see `abi.Register.size`'s own doc).
+    // prepare time, from `buildMoves`; a plan's `Register`s carry a width
+    // of one to eight bytes, or sixteen.
     private static Store storeOf(in ubyte size) {
         switch (size) {
             case 1: return Store.byte1;
@@ -1105,13 +1115,13 @@ public struct CallPlan {
             case 4: return Store.byte4;
             case 8: return Store.byte8;
             case 16: return Store.copy16;
+            case 3, 5, 6, 7: return Store.partial;
             default: assert(false, "unsupported result register size");
         }
     }
 
     // Whether `storeOf` has a width for each register of the result of
-    // `type`: a struct of five bytes returns in a register of five bytes,
-    // and no store has that width.
+    // `type`.
     private static bool hasResultStore(
         imported!"dmd.mtype".TypeFunction type,
     ) {
@@ -1125,9 +1135,8 @@ public struct CallPlan {
         const result = ArgumentPlan.ofReturn(type.nextOf);
         foreach (register; result.registers[0 .. result.count])
             if (register.kind != Register.Kind.x87
-                    && register.size != 1 && register.size != 2
-                    && register.size != 4 && register.size != 8
-                    && register.size != 16)
+                    && (register.size == 0
+                        || (register.size > 8 && register.size != 16)))
                 return false;
         return true;
     }

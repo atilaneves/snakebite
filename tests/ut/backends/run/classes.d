@@ -605,11 +605,12 @@ static foreach (backend; Matrix!(
 // that the process makes when it ends. Compiled D leaves no trace of a
 // destructor that the guest can read after `main`, so the destructor
 // writes a file, with C functions that do not allocate, and the test reads
-// it. The path belongs to this process and backend, and the test creates the
-// file before the program runs and removes it at the end: a destructor that
-// another test's collection runs later finds no file to open, and makes
-// none. 2000 dead objects are the deterministic form that a conservative GC
-// allows: a stale stack word keeps at most a few alive.
+// it. The path is in the text of the program, and belongs to this checkout
+// and backend, and the test creates the file before the program runs and
+// removes it at the end: a destructor that another test's collection runs
+// later finds no file to open, and makes none. 2000 dead objects are the
+// deterministic form that a conservative GC allows: a stale stack word keeps
+// at most a few alive.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot run `GC.collect`: it has no source code"),
@@ -618,18 +619,17 @@ static foreach (backend; Matrix!(
     @Tags(backend.stringof)
     unittest {
         import core.memory: GC;
-        import std.conv: text;
+        import std.array: replace;
         import std.file: exists, readText, remove, write;
-        import std.process: environment, thisProcessID;
 
-        enum variable = "SNAKEBITE_GC_FINALIZER_MARKER_" ~ backend.stringof;
-        enum code = "enum variable = \"" ~ variable ~ "\\0\";" ~ q{
+        enum marker = "/tmp/snakebite-gc-finalizer-after-main-"
+            ~ __FILE_FULL_PATH__.replace("/", "_") ~ "-" ~ backend.stringof;
+        enum code = "enum marker = \"" ~ marker ~ "\\0\";" ~ q{
             class B {
                 ~this() {
                     import core.stdc.stdio: fclose, fopen, fputs;
-                    import core.stdc.stdlib: getenv;
 
-                    auto file = fopen(getenv(variable.ptr), "r+");
+                    auto file = fopen(marker.ptr, "r+");
                     if (file is null)
                         return;
                     fputs("finalized", file);
@@ -644,9 +644,6 @@ static foreach (backend; Matrix!(
                 make;
             }
         };
-        const marker = text("/tmp/snakebite-gc-finalizer-after-main-",
-            thisProcessID, "-", backend.stringof);
-        environment[variable] = marker;
         marker.write("armed");
         scope(exit) if (exists(marker))
             remove(marker);

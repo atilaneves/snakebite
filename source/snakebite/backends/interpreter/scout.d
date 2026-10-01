@@ -3,12 +3,13 @@ module snakebite.backends.interpreter.scout;
 
 private:
 
+import dmd.dclass: ClassDeclaration;
 import dmd.declaration: Declaration, VarDeclaration;
 import dmd.expression:
     AddAssignExp, AddExp, AssignExp, CallExp, CmpExp, DeclarationExp,
-    DelegateExp, EqualExp, Expression, FuncExp, IndexExp, IntegerExp,
+    DelegateExp, DeleteExp, EqualExp, Expression, FuncExp, IndexExp, IntegerExp,
     MinAssignExp, MinExp, NewExp, PostExp, SliceExp, StructLiteralExp,
-    SymOffExp, ThisExp, VarExp;
+    SymOffExp, ThisExp, TypeidExp, VarExp;
 import dmd.func: FuncDeclaration;
 import dmd.mtype: Type;
 import dmd.typesem: nextOf, toBasetype;
@@ -17,6 +18,7 @@ import dmd.statement:
     Statement, SwitchStatement, TryCatchStatement, TryFinallyStatement;
 import dmd.visitor: SemanticTimeTransitiveVisitor;
 import snakebite.backends.loweringvisitor: LoweredExpressionTypes;
+import snakebite.frontend.dmd.functions: unresolvedCalleeOf;
 import std.meta: staticIndexOf;
 
 
@@ -30,6 +32,9 @@ package struct Preparation {
     package void delegate(VarDeclaration) variable;
     package void delegate(Type) type;
     package void delegate(Type) zeroInitialized;
+    package void delegate(Type) typeInfo;
+    package void delegate(ClassDeclaration) stackClass;
+    package void delegate(DeleteExp) deletion;
     package void delegate(StructLiteralExp) structLiteral;
     package void delegate(TryCatchStatement) tryCatch;
     package void delegate(TryFinallyStatement) tryFinally;
@@ -148,13 +153,41 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
         reference(expression.var);
     }
 
+    // The callee that execution names: `f` when the frontend resolved it,
+    // otherwise the function that the called expression names.
     private extern(D) void handle(CallExp expression) {
-        if (expression.f !is null)
-            _preparation.call(expression, expression.f);
+        auto callee = expression.f is null
+            ? unresolvedCalleeOf(expression) : expression.f;
+        if (callee !is null)
+            _preparation.call(expression, callee);
     }
 
     private extern(D) void handle(StructLiteralExp expression) {
         _preparation.structLiteral(expression);
+    }
+
+    // A `scope` class instance lives in the frame, and its runtime
+    // information is made when the program first needs it: the first
+    // object of a class that a destructor makes is that one.
+    private extern(D) void handle(NewExp expression) {
+        import snakebite.backends.aggregateinit: NewPlan, planNew;
+
+        const plan = planNew(expression);
+        if (plan.destination == NewPlan.Destination.stack
+                && plan.objectKind == NewPlan.ObjectKind.class_)
+            _preparation.stackClass(
+                expression.newtype.toBasetype.isTypeClass.sym);
+    }
+
+    private extern(D) void handle(DeleteExp expression) {
+        _preparation.deletion(expression);
+    }
+
+    private extern(D) void handle(TypeidExp expression) {
+        import dmd.dtemplate: isType;
+
+        if (auto type = isType(expression.obj))
+            _preparation.typeInfo(type);
     }
 
     // The encoding of a struct whose default value is all zero bytes.

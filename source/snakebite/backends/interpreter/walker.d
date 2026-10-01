@@ -275,6 +275,7 @@ private struct Shared {
     SharedTable!(TryFinallyStatement, ExceptionCandidate[]) finallyCandidates;
     SharedTable!(FinallyKey, bool) finallyRuns;
     SharedTable!(CallSiteKey, const(CallPlan)*) callSitePlans;
+    SharedTable!(const(void)*, VariadicCallPlan) variadicCallPlans;
     // The guest functions whose preparation is complete, and how to
     // prepare one more.
     SharedTable!(FuncDeclaration, bool) prepared;
@@ -333,11 +334,18 @@ private struct Shared {
     // also reads directly, so every slot stays a real callable address,
     // never a `FuncDeclaration` only an evaluator knows how to walk.
     TypeInfo_Class classRuntimeInfo(ClassDeclaration declaration) {
-        import snakebite.backends.classinfo:
-            classRuntimeInfo_ = classRuntimeInfo, Hooks;
-
         if (auto found = classRuntime.find(declaration))
             return *found;
+
+        return buildClassRuntimeInfo(declaration);
+    }
+
+    // Apart from `classRuntimeInfo`: the delegates below capture `this`, so
+    // a function that holds them allocates a closure when it starts, and
+    // the lookup of a class that exists must not allocate.
+    private TypeInfo_Class buildClassRuntimeInfo(ClassDeclaration declaration) {
+        import snakebite.backends.classinfo:
+            classRuntimeInfo_ = classRuntimeInfo, Hooks;
 
         return classRuntime.build(() => classRuntimeInfo_(
             declaration,
@@ -416,6 +424,14 @@ private struct FinallyKey {
     Exit exit;
 }
 
+private struct VariadicCallPlan {
+    import snakebite.backends.variadic: VariadicLayout;
+    import snakebite.nativelayout: TypeFacts;
+
+    TypeFacts[] facts;
+    VariadicLayout layout;
+}
+
 private struct CallSiteKey {
     const(void)* callSite;
     const(void)* function_;
@@ -475,7 +491,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import dmd.astenums:
         Tarray, Taarray, Tbool, Tchar, Tclass, Tdelegate, Terror, Tfunction,
         Tnoreturn, Tint64, Tpointer, Tsarray, Tstruct, Ttuple, Tuns32, Tuns8, Tvoid,
-        Twchar, TY, VarArg;
+        Twchar, TY, STC, VarArg;
     import dmd.arraytypes: Expressions;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
@@ -535,6 +551,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // cannot allocate from the GC. A candidate array belongs to the shared
     // plan of its statement, so nothing here needs the GC to keep it.
     private CStack!ActiveExceptionScope _activeExceptionScopes;
+    private CStack!ExceptionCandidate _candidateScratch;
     private RuntimeTypes* _runtimeTypes;
     // dmd gives every `arr[... $ ...]` a `lengthVar` declaration for its
     // `$`, which no statement declares and which therefore has no frame
@@ -1478,6 +1495,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             (variable) => attempt({ prepareVariable(variable); }),
             (type) => attempt({ prepareType(type); }),
             (type) => attempt({ prepareZeroInitialized(type); }),
+            (type) => attempt({ _runtimeTypes.get(type); }),
+            (declaration) => attempt({ classRuntimeInfo(declaration); }),
+            (expression) => attempt({
+                import snakebite.backends.deleteplan: planDelete;
+                import snakebite.backends.druntimehooks: planOf;
+
+                planOf(*_plans, planDelete(expression).hook);
+            }),
             (expression) => attempt({ structLiteralPlanOf(expression); }),
             (statement) => attempt({ tryCatchPlanOf(statement); }),
             (statement) => attempt({
@@ -1535,14 +1560,37 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         layoutOf(callee);
         callShapeOf(callee);
         prepareContext(outerFunctionOf(callee));
+        auto calleeType = typeFunctionOf(callee);
+        foreach (i; 0 .. calleeType.parameterList.length)
+            if ((calleeType.parameterList[i].storageClass & STC.out_) != 0)
+                prepareDefault(calleeType.parameterList[i].type);
         const decision = _callSelection.decisionOf(
             callee,
             (function_) => _program.isInterpreted(function_),
             hasNativeSymbol(callee),
             hasIndependentNativeSymbol(callee),
         );
-        if (decision.route == CallSelection.Route.native
-                && _plans.canPlan(callee))
+
+        if (decision.route == CallSelection.Route.guest
+                && typeFunctionOf(callee).parameterList.varargs
+                    == VarArg.variadic) {
+            const layout = layoutOf(callee);
+            const hasTypes = layout.variadicTypes != size_t.max;
+            variadicCallPlanOf(site.arguments,
+                hasTypes + layout.parameters.length);
+        }
+        if (decision.route != CallSelection.Route.native
+                || !_plans.canPlan(callee))
+            return;
+
+        // The answer to whether a variadic callee has a native symbol is
+        // asked by execution of any call to it, and `decision` may not ask.
+        if (isNativeVariadic(callee)) {
+            auto adapter = CallAdapter.Arguments.of(
+                typeFunctionOf(callee), site.arguments);
+            cachedCallPlan(site, callee,
+                () => adapter.prepare(*_plans, callee));
+        } else
             callPlanOf(site, callee);
     }
 
@@ -1584,10 +1632,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import dmd.typesem: baseElemOf, toBasetype;
 
         auto element = type.baseElemOf.toBasetype;
+        if (element.isTypeStruct !is null)
+            prepareDefault(element);
+    }
+
+    extern(D) private void prepareDefault(Type type) {
         TypeFacts facts;
-        if (element.isTypeStruct !is null && TypeFacts.tryOf(element, facts)
-                && facts.size <= preparedBytesLimit)
-            _nativeData.initialValue(element, Loc.initial);
+        if (TypeFacts.tryOf(type, facts) && facts.size <= preparedBytesLimit)
+            _nativeData.initialValue(type, Loc.initial);
     }
 
     extern(D) private void prepareVariable(VarDeclaration variable) {
@@ -1847,11 +1899,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         ]);
     }
 
-    extern(D) private ExceptionCandidate[] activeExceptionCandidates() {
-        ExceptionCandidate[] candidates;
+    // The result lasts until the next call: it lives on the C heap, because
+    // a throw in a destructor that the GC finalizer runs cannot allocate.
+    extern(D) private const(ExceptionCandidate)[] activeExceptionCandidates() {
+        _candidateScratch.truncate(0);
         foreach_reverse (scope_; _activeExceptionScopes[])
-            candidates ~= scope_._candidates;
-        return candidates;
+            foreach (candidate; scope_._candidates)
+                _candidateScratch.push(candidate);
+        return _candidateScratch[];
     }
 
     extern(D) private ExceptionUnwindPlan exceptionPlan(
@@ -6048,23 +6103,39 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         );
     }
 
+    // Where the extra arguments of one call site go, which depends on
+    // their types alone: built once for the site, by the first evaluator
+    // that reaches it or by the preparation of a callback.
+    private const(VariadicCallPlan)* variadicCallPlanOf(
+        Expressions* arguments, in size_t firstExtra,
+    ) {
+        import snakebite.backends.variadic: VariadicLayout;
+
+        const key = cast(const(void)*) arguments;
+        if (auto found = key in _shared.variadicCallPlans)
+            return found;
+
+        TypeFacts[] facts;
+        foreach (argument; (*arguments)[firstExtra .. $])
+            facts ~= factsOf(argument.type);
+        return _shared.variadicCallPlans.insert(
+            key, VariadicCallPlan(facts, VariadicLayout.of(facts)));
+    }
+
     private void bindVariadicArguments(
         Expressions* arguments, ubyte* frame, const(FrameLayout)* layout,
     ) {
-        import snakebite.backends.variadic: VariadicLayout;
         import snakebite.nativelayout: storeIntegral;
 
         const hasTypes = layout.variadicTypes != size_t.max;
         const firstExtra = hasTypes + layout.parameters.length;
-        TypeFacts[] facts;
-        foreach (argument; (*arguments)[firstExtra .. $])
-            facts ~= factsOf(argument.type);
-        const plan = VariadicLayout.of(facts);
-        auto storage = _frames.reserve(plan.size, plan.alignment);
-        plan.initialize(storage);
-        foreach (i, offset; plan.offsets) {
+        const call = variadicCallPlanOf(arguments, firstExtra);
+        auto storage = _frames.reserve(
+            call.layout.size, call.layout.alignment);
+        call.layout.initialize(storage);
+        foreach (i, offset; call.layout.offsets) {
             auto argument = (*arguments)[firstExtra + i];
-            evaluate(argument, argument.type, facts[i], storage + offset);
+            evaluate(argument, argument.type, call.facts[i], storage + offset);
         }
         storeIntegral(frame + layout.variadicCursor, cast(size_t) storage,
             size_t.sizeof);
