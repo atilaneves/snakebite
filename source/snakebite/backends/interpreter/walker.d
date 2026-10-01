@@ -1852,8 +1852,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (_controlFlow.seeking)
             return;
 
-        if (statement.exp !is null)
-            runFullExpression(statement.exp);
+        assert(statement.exp !is null);
+        runFullExpression(statement.exp);
     }
 
     override void visit(GotoDefaultStatement statement) {
