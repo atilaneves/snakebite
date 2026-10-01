@@ -1087,7 +1087,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     .varargs == VarArg.variadic) {
                 bindArguments(function_, callSite.arguments, callSite.loc,
                     frameBase, layout, true);
-                bindVariadicArguments(callSite, frameBase, layout);
+                bindVariadicArguments(
+                    callSite.arguments, frameBase, layout);
             } else if (callSite !is null)
                 bindArguments(function_, callSite.arguments, callSite.loc,
                     frameBase, layout);
@@ -5336,6 +5337,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             runForEffect(plan.argumentPrefix);
 
         auto arguments = expression.arguments;
+        const isVariadic = typeFunctionOf(constructor).parameterList.varargs
+            == VarArg.variadic;
 
         bindArguments(
             constructor,
@@ -5343,7 +5346,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             expression.loc,
             frame.base,
             layout,
+            isVariadic,
         );
+        if (isVariadic)
+            bindVariadicArguments(arguments, frame.base, layout);
 
         executeCall(constructor, null, frame.base, layout);
     }
@@ -5720,12 +5726,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private void bindVariadicArguments(
-        CallExp expression, ubyte* frame, const(FrameLayout)* layout,
+        Expressions* arguments, ubyte* frame, const(FrameLayout)* layout,
     ) {
         import snakebite.backends.variadic: VariadicLayout;
         import snakebite.nativelayout: storeIntegral;
 
-        auto arguments = expression.arguments;
         const hasTypes = layout.variadicTypes != size_t.max;
         const firstExtra = hasTypes + layout.parameters.length;
         TypeFacts[] facts;
