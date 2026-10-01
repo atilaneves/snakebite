@@ -464,7 +464,7 @@ import dmd.visitor: SemanticTimeTransitiveVisitor;
 extern(C++) private final class LocalsCollector:
     SemanticTimeTransitiveVisitor {
     import dmd.declaration: VarDeclaration;
-    import dmd.expression: DeclarationExp, Expression;
+    import dmd.expression: DeclarationExp, Expression, NewExp;
     import snakebite.backends.loweringvisitor: LoweredExpressionTypes;
     import dmd.statement:
         Catch, CompoundStatement, DoStatement, ExpStatement, ForStatement,
@@ -618,6 +618,8 @@ extern(C++) private final class LocalsCollector:
         override void visit(Node expression) {
             super.visit(expression);
             collectDeclarations(expression.lowering);
+            static if (is(Node == NewExp))
+                collectDeclarations(expression.argprefix);
         }
     }
 
