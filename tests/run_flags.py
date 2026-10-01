@@ -789,5 +789,560 @@ def test_unknown_checkaction_value_is_an_error(
     assert "switch `-checkaction=bogus` is invalid" in output
 
 
+# What a program does when a check is on and fails, or off and does not.
+PASSES = ("pass", "")
+HALTS = ("halt", "")
+
+
+def raises(message: str) -> tuple[str, str]:
+    return ("raise", message)
+
+
+def aborts(message: str) -> tuple[str, str]:
+    return ("abort", message)
+
+
+def assert_outcome(
+    backend: str, outcome: Outcome, expected: tuple[str, str],
+) -> None:
+    kind, message = expected
+    if kind == "pass":
+        assert_passes_after_start(backend, outcome)
+    elif kind == "halt":
+        assert_halts_after_start(backend, outcome)
+    elif kind == "raise":
+        assert_raises_after_start(backend, outcome, message)
+    else:
+        assert_aborts_after_start(outcome, message)
+
+
+# CTFE has no halt and no abort, and always checks bounds.
+def backends_for(expected: tuple[str, str], unchecked: bool = False) -> list[str]:
+    if expected[0] in ("halt", "abort") or unchecked:
+        return [b for b in BACKENDS if b != "ctfe"]
+
+    return BACKENDS
+
+
+def cases(table: list[tuple]) -> list:
+    return [
+        pytest.param(backend, *row, id=f"{backend}-{' '.join(row[0]) or 'none'}")
+        for row in table
+        for backend in backends_for(row[1])
+    ]
+
+
+def run_program(
+    tmp_path: Path, backend: str, flags: list[str], program: str,
+    expected: tuple[str, str],
+) -> None:
+    assert_outcome(
+        backend, run_unittests(tmp_path, backend, flags, program), expected,
+    )
+
+
+ASSERT_PROGRAM = """
+    unittest {
+        int x = 1;
+        log("start\\n");
+        assert(x == 2);
+        log("after\\n");
+    }
+"""
+
+ASSERT_CASES = [
+    ([], raises("unittest failure")),
+    (["-check=assert"], raises("unittest failure")),
+    (["-check=assert=on"], raises("unittest failure")),
+    (["-check=assert=off"], PASSES),
+    (["-check=off"], PASSES),
+    (["-check=on"], raises("unittest failure")),
+    (["-check=assert=off", "-check=assert=on"], raises("unittest failure")),
+    (["-check=assert=on", "-check=assert=off"], PASSES),
+    (["-check=on", "-check=assert=off"], PASSES),
+    (["-check=assert=off", "-check=on"], raises("unittest failure")),
+    (["-check=off", "-check=assert=on"], raises("unittest failure")),
+    (["-release", "-check=assert=off"], PASSES),
+    (["-release", "-check=assert=on"], raises("unittest failure")),
+    (["-check=bounds=off"], raises("unittest failure")),
+    (["-check=assert=on", "-checkaction=halt"], HALTS),
+    (["-check=assert=off", "-checkaction=halt"], PASSES),
+    (["-check=assert=on", "-checkaction=C"], aborts("x == 2")),
+    (["-check=assert=off", "-checkaction=C"], PASSES),
+]
+
+
+@pytest.mark.parametrize("backend,flags,expected", cases(ASSERT_CASES))
+def test_check_assert(
+    tmp_path: Path, backend: str, flags: list[str], expected: tuple[str, str],
+) -> None:
+    run_program(tmp_path, backend, flags, ASSERT_PROGRAM, expected)
+
+
+# The operands of an assert that is off are not evaluated.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_check_assert_off_does_not_evaluate_the_condition(
+    tmp_path: Path, backend: str,
+) -> None:
+    run_program(tmp_path, backend, ["-check=assert=off"], """
+        int fail() { assert(0, "evaluated"); return 0; }
+        unittest {
+            log("start\\n");
+            assert(fail() == 1);
+            log("after\\n");
+        }
+    """, PASSES)
+
+
+IN_PROGRAM = """
+    int positive(int x) in (x > 0) { return x; }
+    unittest {
+        log("start\\n");
+        positive(-1);
+        log("after\\n");
+    }
+"""
+
+IN_CASES = [
+    ([], raises("AssertError")),
+    (["-check=in"], raises("AssertError")),
+    (["-check=in=on"], raises("AssertError")),
+    (["-check=in=off"], PASSES),
+    (["-check=off"], PASSES),
+    (["-check=on"], raises("AssertError")),
+    (["-check=out=off"], raises("AssertError")),
+    (["-check=assert=off"], PASSES),
+    (["-release"], PASSES),
+    (["-release", "-check=in=on"], raises("AssertError")),
+    (["-release", "-check=in"], raises("AssertError")),
+    (["-check=in=off", "-check=in=on"], raises("AssertError")),
+    (["-check=in=on", "-check=in=off"], PASSES),
+    # A contract is an assert: with the assert check off, nothing is left
+    # of it.
+    (["-check=off", "-check=in=on"], PASSES),
+    (["-check=in=off", "-check=on"], raises("AssertError")),
+    (["-check=in=on", "-checkaction=halt"], HALTS),
+    (["-check=in=off", "-checkaction=halt"], PASSES),
+    (["-check=in=on", "-checkaction=C"], aborts("x > 0")),
+]
+
+
+@pytest.mark.parametrize("backend,flags,expected", cases(IN_CASES))
+def test_check_in(
+    tmp_path: Path, backend: str, flags: list[str], expected: tuple[str, str],
+) -> None:
+    run_program(tmp_path, backend, flags, IN_PROGRAM, expected)
+
+
+OUT_PROGRAM = """
+    int positive(int x) out (result; result > 0) { return x; }
+    unittest {
+        log("start\\n");
+        positive(-1);
+        log("after\\n");
+    }
+"""
+
+OUT_CASES = [
+    ([], raises("AssertError")),
+    (["-check=out"], raises("AssertError")),
+    (["-check=out=on"], raises("AssertError")),
+    (["-check=out=off"], PASSES),
+    (["-check=off"], PASSES),
+    (["-check=on"], raises("AssertError")),
+    (["-check=in=off"], raises("AssertError")),
+    (["-check=assert=off"], PASSES),
+    (["-release"], PASSES),
+    (["-release", "-check=out=on"], raises("AssertError")),
+    (["-check=out=off", "-check=out=on"], raises("AssertError")),
+    (["-check=out=on", "-check=out=off"], PASSES),
+    (["-check=off", "-check=out=on"], PASSES),
+    (["-check=out=off", "-check=on"], raises("AssertError")),
+    (["-check=out=on", "-checkaction=halt"], HALTS),
+    (["-check=out=off", "-checkaction=halt"], PASSES),
+]
+
+
+@pytest.mark.parametrize("backend,flags,expected", cases(OUT_CASES))
+def test_check_out(
+    tmp_path: Path, backend: str, flags: list[str], expected: tuple[str, str],
+) -> None:
+    run_program(tmp_path, backend, flags, OUT_PROGRAM, expected)
+
+
+INVARIANT_PROGRAM = """
+    class C {
+        int x = 1;
+        invariant { assert(x > 0); }
+        void set(int value) { x = value; }
+    }
+    unittest {
+        auto c = new C;
+        log("start\\n");
+        c.set(-1);
+        log("after\\n");
+    }
+"""
+
+INVARIANT_CASES = [
+    ([], raises("AssertError")),
+    (["-check=invariant"], raises("AssertError")),
+    (["-check=invariant=on"], raises("AssertError")),
+    (["-check=invariant=off"], PASSES),
+    (["-check=off"], PASSES),
+    (["-check=on"], raises("AssertError")),
+    (["-check=in=off", "-check=out=off"], raises("AssertError")),
+    (["-release"], PASSES),
+    (["-release", "-check=invariant=on"], raises("AssertError")),
+    (["-check=invariant=off", "-check=invariant=on"], raises("AssertError")),
+    (["-check=invariant=on", "-check=invariant=off"], PASSES),
+    (["-check=off", "-check=invariant=on"], PASSES),
+    (["-check=invariant=off", "-check=on"], raises("AssertError")),
+    (["-check=invariant=on", "-checkaction=halt"], HALTS),
+    (["-check=invariant=off", "-checkaction=halt"], PASSES),
+]
+
+
+@pytest.mark.parametrize("backend,flags,expected", cases(INVARIANT_CASES))
+def test_check_invariant(
+    tmp_path: Path, backend: str, flags: list[str], expected: tuple[str, str],
+) -> None:
+    run_program(tmp_path, backend, flags, INVARIANT_PROGRAM, expected)
+
+
+# `assert(c)` on a class reference calls its invariant: that is the
+# invariant check, not the assert check.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_check_invariant_off_skips_the_invariant_of_assert_on_a_class(
+    tmp_path: Path, backend: str,
+) -> None:
+    run_program(tmp_path, backend, ["-check=invariant=off"], """
+        class C {
+            int x = 1;
+            invariant { assert(x > 0); }
+        }
+        unittest {
+            auto c = new C;
+            c.x = -1;
+            log("start\\n");
+            assert(c);
+            log("after\\n");
+        }
+    """, PASSES)
+
+
+# No member of the enum matches, so a `final switch` has nothing to run.
+SWITCH_PROGRAM = """
+    enum E { a, b }
+    @system unittest {
+        E e = cast(E) 7;
+        log("start\\n");
+        final switch (e) { case E.a: break; case E.b: break; }
+        log("after\\n");
+    }
+"""
+
+SWITCH_CASES = [
+    ([], raises("SwitchError")),
+    (["-check=switch"], raises("SwitchError")),
+    (["-check=switch=on"], raises("SwitchError")),
+    (["-check=switch=off"], HALTS),
+    (["-check=off"], HALTS),
+    (["-check=on"], raises("SwitchError")),
+    (["-release"], HALTS),
+    (["-release", "-check=switch=on"], raises("SwitchError")),
+    (["-check=switch=off", "-check=switch=on"], raises("SwitchError")),
+    (["-check=switch=on", "-check=switch=off"], HALTS),
+    (["-check=off", "-check=switch=on"], raises("SwitchError")),
+    (["-check=switch=off", "-check=on"], raises("SwitchError")),
+    (["-check=assert=off"], raises("SwitchError")),
+    (["-check=switch=on", "-checkaction=halt"], HALTS),
+    (["-check=switch=on", "-checkaction=C"], aborts("0")),
+    (["-check=switch=off", "-checkaction=C"], HALTS),
+    (["-check=assert=off", "-check=switch=off"], HALTS),
+]
+
+
+@pytest.mark.parametrize("backend,flags,expected", cases(SWITCH_CASES))
+def test_check_switch(
+    tmp_path: Path, backend: str, flags: list[str], expected: tuple[str, str],
+) -> None:
+    run_program(tmp_path, backend, flags, SWITCH_PROGRAM, expected)
+
+
+# The bounds check that a flag set ends up with.
+ON = "on"
+OFF = "off"
+SAFEONLY = "safeonly"
+
+BOUNDS_FLAGS = [
+    (["-check=bounds"], ON),
+    (["-check=bounds=on"], ON),
+    (["-check=bounds=off"], OFF),
+    (["-boundscheck=on"], ON),
+    (["-boundscheck=safeonly"], SAFEONLY),
+    (["-boundscheck=off"], OFF),
+    (["-noboundscheck"], OFF),
+    (["-release"], SAFEONLY),
+    (["-release", "-check=bounds=on"], ON),
+    (["-release", "-check=bounds=off"], OFF),
+    (["-release", "-boundscheck=on"], ON),
+    (["-release", "-boundscheck=off"], OFF),
+    (["-release", "-boundscheck=safeonly"], SAFEONLY),
+    # `-check=bounds` is the specific flag: it wins over `-boundscheck=`
+    # whichever comes first.
+    (["-check=bounds=on", "-boundscheck=off"], ON),
+    (["-boundscheck=off", "-check=bounds=on"], ON),
+    (["-check=bounds=off", "-boundscheck=on"], OFF),
+    (["-check=bounds=off", "-check=bounds=on"], ON),
+    (["-check=bounds=on", "-check=bounds=off"], OFF),
+    (["-check=off"], OFF),
+    (["-check=on"], ON),
+    (["-check=off", "-boundscheck=on"], OFF),
+    (["-boundscheck=on", "-check=off"], OFF),
+    (["-check=off", "-check=on"], ON),
+    (["-check=off", "-release"], OFF),
+    (["-boundscheck=off", "-boundscheck=safeonly"], SAFEONLY),
+    (["-noboundscheck", "-boundscheck=on"], ON),
+    (["-boundscheck=safeonly", "-check=on"], ON),
+]
+
+ATTRIBUTES = ["@safe", "@trusted", "@system"]
+
+BOUNDS_PROGRAMS = {
+    "index": ("""
+        int[4] storage = [1, 2, 3, 4];
+        int[] slice = storage[0 .. 2];
+        log("start\\n");
+        auto value = slice[3];
+        log("after\\n");
+    """, "ArrayIndexError"),
+    "slice": ("""
+        int[4] storage = [1, 2, 3, 4];
+        int[] slice = storage[0 .. 2];
+        log("start\\n");
+        auto value = slice[0 .. 3];
+        log("after\\n");
+    """, "ArraySliceError"),
+    "slice copy": ("""
+        int[4] target;
+        int[4] source = [1, 2, 3, 4];
+        int[] to = target[0 .. 3];
+        int[] from = source[0 .. 2];
+        log("start\\n");
+        to[] = from[];
+        log("after\\n");
+    """, "RangeError"),
+}
+
+
+def bounds_expectation(
+    effective: str, attribute: str, message: str,
+) -> tuple[tuple[str, str], bool]:
+    checked = effective == ON or (effective == SAFEONLY and attribute == "@safe")
+
+    return (raises(message), False) if checked else (PASSES, True)
+
+
+def bounds_cases(
+    flag_table: list[tuple[list[str], str]],
+    program_names: list[str],
+) -> list:
+    result = []
+    for flags, effective in flag_table:
+        for name in program_names:
+            body, message = BOUNDS_PROGRAMS[name]
+            for attribute in ATTRIBUTES:
+                expected, unchecked = bounds_expectation(
+                    effective, attribute, message,
+                )
+                for backend in backends_for(expected, unchecked):
+                    result.append(pytest.param(
+                        backend, flags, name, attribute, expected,
+                        id=f"{backend}-{' '.join(flags)}-{name}-{attribute}",
+                    ))
+    return result
+
+
+@pytest.mark.parametrize(
+    "backend,flags,name,attribute,expected",
+    bounds_cases(BOUNDS_FLAGS, ["index"]),
+)
+def test_check_bounds_index(
+    tmp_path: Path, backend: str, flags: list[str], name: str,
+    attribute: str, expected: tuple[str, str],
+) -> None:
+    body, _ = BOUNDS_PROGRAMS[name]
+    run_program(
+        tmp_path, backend, flags, f"{attribute} unittest {{ {body} }}", expected,
+    )
+
+
+# The slice and the slice copy are bounds checks that dmd's glue layer
+# emits separately from the index.
+@pytest.mark.parametrize(
+    "backend,flags,name,attribute,expected",
+    bounds_cases(
+        [
+            (["-check=bounds=on"], ON),
+            (["-check=bounds=off"], OFF),
+            (["-boundscheck=safeonly"], SAFEONLY),
+            (["-release"], SAFEONLY),
+        ],
+        ["slice", "slice copy"],
+    ),
+)
+def test_check_bounds_slice_and_copy(
+    tmp_path: Path, backend: str, flags: list[str], name: str,
+    attribute: str, expected: tuple[str, str],
+) -> None:
+    body, _ = BOUNDS_PROGRAMS[name]
+    run_program(
+        tmp_path, backend, flags, f"{attribute} unittest {{ {body} }}", expected,
+    )
+
+
+# A pointer has no length to check an upper bound against, and its slice
+# is never `@safe`; the order of its bounds is checked as any bounds are.
+POINTER_SLICE = """
+    {attribute} unittest {{
+        int[4] storage = [1, 2, 3, 4];
+        int* pointer = storage.ptr;
+        size_t lower = {lower};
+        size_t upper = {upper};
+        log("start\\n");
+        auto value = pointer[lower .. upper];
+        log("after\\n");
+    }}
+"""
+
+
+@pytest.mark.parametrize("attribute", ["@trusted", "@system"])
+@pytest.mark.parametrize("flags", [
+    ["-check=bounds=on"], ["-check=bounds=off"], ["-release"],
+])
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_check_bounds_pointer_slice_has_no_upper_limit(
+    tmp_path: Path, backend: str, flags: list[str], attribute: str,
+) -> None:
+    run_program(
+        tmp_path, backend, flags,
+        POINTER_SLICE.format(attribute=attribute, lower=1, upper=3), PASSES,
+    )
+
+
+@pytest.mark.parametrize("attribute", ["@trusted", "@system"])
+@pytest.mark.parametrize("flags,effective", [
+    (["-check=bounds=on"], ON),
+    (["-check=bounds=off"], OFF),
+    (["-boundscheck=safeonly"], SAFEONLY),
+    (["-release"], SAFEONLY),
+])
+@pytest.mark.parametrize("backend", NO_CTFE_UNCHECKED)
+def test_check_bounds_reversed_pointer_slice(
+    tmp_path: Path, backend: str, flags: list[str], effective: str,
+    attribute: str,
+) -> None:
+    expected = raises("ArraySliceError") if effective == ON else PASSES
+    run_program(
+        tmp_path, backend, flags,
+        POINTER_SLICE.format(attribute=attribute, lower=2, upper=1), expected,
+    )
+
+
+# The two checks are independent: a bounds failure with the assert check
+# off still fails, and a failed assert with the bounds check off too.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_check_assert_off_still_checks_bounds(
+    tmp_path: Path, backend: str,
+) -> None:
+    body, message = BOUNDS_PROGRAMS["index"]
+    run_program(
+        tmp_path, backend, ["-check=assert=off"],
+        f"@safe unittest {{ {body} }}", raises(message),
+    )
+
+
+@pytest.mark.parametrize("backend", NO_CTFE_HALT)
+def test_check_bounds_on_halts_with_checkaction_halt(
+    tmp_path: Path, backend: str,
+) -> None:
+    body, _ = BOUNDS_PROGRAMS["index"]
+    run_program(
+        tmp_path, backend, ["-check=bounds=on", "-checkaction=halt"],
+        f"@system unittest {{ {body} }}", HALTS,
+    )
+
+
+@pytest.mark.parametrize("backend", NO_CTFE_UNCHECKED)
+def test_check_bounds_off_does_not_halt_with_checkaction_halt(
+    tmp_path: Path, backend: str,
+) -> None:
+    body, _ = BOUNDS_PROGRAMS["index"]
+    run_program(
+        tmp_path, backend, ["-check=bounds=off", "-checkaction=halt"],
+        f"@system unittest {{ {body} }}", PASSES,
+    )
+
+
+@pytest.mark.parametrize("backend", NO_CTFE_ABORT)
+def test_check_bounds_on_aborts_with_checkaction_c(
+    tmp_path: Path, backend: str,
+) -> None:
+    body, _ = BOUNDS_PROGRAMS["index"]
+    run_program(
+        tmp_path, backend, ["-boundscheck=on", "-checkaction=C"],
+        f"@system unittest {{ {body} }}", aborts("array index out of bounds"),
+    )
+
+
+# `dmd` refuses a value of `-check=` or `-boundscheck=` that it does not
+# know, and so does every backend, before it runs anything.
+@pytest.mark.parametrize("flag", [
+    "-check=bogus",
+    "-check=bounds=maybe",
+    "-check=bounds=ON",
+    "-check=assertx",
+    "-check=",
+    "-check",
+    "-boundscheck=bogus",
+    "-boundscheck",
+])
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_unknown_check_flag_value_is_an_error(
+    tmp_path: Path, backend: str, flag: str,
+) -> None:
+    if backend == "native":
+        result = subprocess.run(
+            [native_compiler(), flag, "-o-", "-"],
+            input="void main() {}",
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=TIMEOUT,
+        )
+    else:
+        (tmp_path / "dub.sdl").write_text(
+            f'name "app"\ntargetType "library"\ndflags "{flag}"\n',
+            encoding="utf-8",
+        )
+        (tmp_path / "source").mkdir()
+        (tmp_path / "source" / "app.d").write_text(
+            "module app;\nunittest {}\n", encoding="utf-8",
+        )
+        result = subprocess.run(
+            [sb_path(), f"--backend={backend}", "--no-optimise-image",
+             str(tmp_path)],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=TIMEOUT,
+        )
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    assert flag in output
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
