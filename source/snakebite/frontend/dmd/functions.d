@@ -147,31 +147,49 @@ public imported!"dmd.func".FuncDeclaration[] findModuleConstructors(
     return sharedCtors ~ ordinary;
 }
 
-// Every module destructor in `module_`, in declaration order, found the
-// way `findModuleConstructors` finds the constructors.
-public struct ModuleDestructors {
-    imported!"dmd.func".FuncDeclaration[] shared_;
-    imported!"dmd.func".FuncDeclaration[] threadLocal;
+// The module-level functions dmd's glue layer calls from a module's
+// `ModuleInfo`, in declaration order, found the way `findModuleConstructors`
+// finds the constructors. A `@standalone` shared constructor is run by
+// druntime before every other shared one, so it is kept apart.
+public struct ModuleFunctions {
+    imported!"dmd.func".FuncDeclaration[] independentConstructors;
+    imported!"dmd.func".FuncDeclaration[] sharedConstructors;
+    imported!"dmd.func".FuncDeclaration[] threadConstructors;
+    imported!"dmd.func".FuncDeclaration[] sharedDestructors;
+    imported!"dmd.func".FuncDeclaration[] threadDestructors;
 }
 
-public ModuleDestructors findModuleDestructors(
+public ModuleFunctions findModuleFunctions(
     imported!"dmd.dmodule".Module module_,
 ) {
-    ModuleDestructors destructors;
+    ModuleFunctions functions;
     appendFromScope(module_.members, (member) {
-        if (auto destructor = member.isSharedStaticDtorDeclaration()) {
-            destructors.shared_ ~= destructor;
+        if (auto constructor = member.isSharedStaticCtorDeclaration) {
+            if (constructor.standalone)
+                functions.independentConstructors ~= constructor;
+            else
+                functions.sharedConstructors ~= constructor;
             return true;
         }
 
-        if (auto destructor = member.isStaticDtorDeclaration()) {
-            destructors.threadLocal ~= destructor;
+        if (auto constructor = member.isStaticCtorDeclaration) {
+            functions.threadConstructors ~= constructor;
+            return true;
+        }
+
+        if (auto destructor = member.isSharedStaticDtorDeclaration) {
+            functions.sharedDestructors ~= destructor;
+            return true;
+        }
+
+        if (auto destructor = member.isStaticDtorDeclaration) {
+            functions.threadDestructors ~= destructor;
             return true;
         }
 
         return false;
     });
-    return destructors;
+    return functions;
 }
 
 private void appendModuleConstructors(

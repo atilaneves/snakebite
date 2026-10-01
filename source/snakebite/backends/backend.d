@@ -27,16 +27,8 @@ public struct Program {
     // Built once from `rootModules`, for `isRootOwned`'s `O(1)` lookup; see
     // `snakebite.frontend.dmd.functions.isRootOwned`.
     private bool[Module] _rootModuleSet;
-    FuncDeclaration[] moduleConstructors;
     // Built once from `rootModules`; see `linkedFunctionOf`.
     private LinkMap _links;
-    // In the order compiled D runs them at program end: the reverse of
-    // declaration order, so a module's destructors follow those of the
-    // modules that come after it. `threadDestructors` run on each thread
-    // that ran the thread-local constructors, as that thread ends. The
-    // main thread's run before `sharedDestructors`.
-    FuncDeclaration[] sharedDestructors;
-    FuncDeclaration[] threadDestructors;
     Main main;
     string name;
     private Checks _checks;
@@ -68,12 +60,7 @@ public struct Program {
         in Checks checks,
         HaltAction haltAction = &haltProcess,
     ) {
-        import snakebite.frontend.dmd.functions:
-            findFunction,
-            findModuleConstructors,
-            findModuleDestructors;
-        import std.range: retro;
-        import std.array: array;
+        import snakebite.frontend.dmd.functions: findFunction;
 
         this.rootModules = rootModules;
         _links = LinkMap(rootModules);
@@ -82,14 +69,7 @@ public struct Program {
         _haltAction = haltAction;
         foreach (module_; rootModules) {
             _rootModuleSet[module_] = true;
-            moduleConstructors ~= findModuleConstructors(module_);
-            auto destructors = findModuleDestructors(module_);
-            sharedDestructors ~= destructors.shared_;
-            threadDestructors ~= destructors.threadLocal;
         }
-
-        sharedDestructors = sharedDestructors.retro.array;
-        threadDestructors = threadDestructors.retro.array;
 
         foreach (module_; rootModules) {
             auto found = findFunction(module_, "main");
@@ -184,42 +164,14 @@ public struct CompilationStatistics {
 public abstract class Backend {
     import dmd.dmodule: Module;
     import dmd.func: FuncDeclaration;
-    import snakebite.hostthreads: PerThread;
 
     // The program this backend runs. Whether a callee is interpreted or
     // called natively is the program's one decision (`isInterpreted`),
     // so every backend is constructed knowing which program it runs.
     protected const Program _program;
-    private PerThread!(ThreadModules*) _threadModules;
-    private FuncDeclaration[] _threadConstructors;
-    private FuncDeclaration[] _threadDestructors;
 
     protected this(const Program program) {
         _program = program;
-        // DMD declarations retain mutable semantic caches.
-        _threadDestructors = cast(FuncDeclaration[]) program.threadDestructors;
-        _threadModules = PerThread!(ThreadModules*)(
-            () => new ThreadModules(false, false, this, _threadDestructors));
-        foreach (constructor; program.moduleConstructors)
-            if (constructor.isStaticCtorDeclaration !is null
-                && constructor.isSharedStaticCtorDeclaration is null)
-                // DMD declarations retain mutable semantic caches.
-                _threadConstructors ~= cast(FuncDeclaration) constructor;
-    }
-
-    protected void initializeThread() {
-        if (_threadConstructors.length == 0 && _threadDestructors.length == 0)
-            return;
-        auto thread = _threadModules.current;
-        if (thread.constructed)
-            return;
-
-        // Publish before calling guest code: constructors can call back
-        // into this backend on the same thread.
-        thread.constructed = true;
-        scope(failure) thread.constructed = false;
-        foreach (constructor; _threadConstructors)
-            call(constructor, null, []);
     }
 
     // Read-only cumulative statistics. Backends without a compilation phase
@@ -258,6 +210,15 @@ public abstract class Backend {
         FuncDeclaration function_, void* returnPlace, void*[] args,
     );
 
+    // The bytes of the process-wide `static` or `__gshared` variable
+    // `variable`, in native layout, or empty when this backend keeps no
+    // static storage between calls (CTFE evaluates each call in isolation).
+    // Module phases use it to do what dmd's glue layer does with the gate
+    // of a module destructor.
+    public abstract void[] staticStorage(
+        imported!"dmd.declaration".VarDeclaration variable,
+    );
+
     // Execute one synthesised `string`-returning function and return its
     // result. The guest renders the value itself (`std.conv.text`), so the
     // returned string is a natively laid out value like any other; nothing
@@ -274,104 +235,25 @@ public abstract class Backend {
 
 // "Run on this project": do what a compiled build of it does, implemented
 // once on top of `call`, and return the exit status. A `Throwable` that
-// escapes is handled as druntime would handle it: printed, exit status 1.
+// escapes `main` is handled as druntime would handle it: printed, exit
+// status 1. The module constructors and destructors belong to druntime
+// (`GuestModules`): it orders them, runs them on each thread, and prints
+// what a destructor throws.
 public int run(
     Backend backend,
     Program program,
     in string[] hostArguments = null,
 ) {
-    if (runModuleConstructors(backend,
-            program.hasCEntryPoint ? null : program.moduleConstructors))
+    import snakebite.backends.guestmodules: GuestModules;
+
+    auto modules = GuestModules.start(
+        backend, program, GuestModules.Tests.no, GuestModules.Ends.program);
+    if (modules.failed)
         return 1;
 
     const status = runMain(backend, program, hostArguments);
-    const destructorStatus = runModuleDestructors(backend, program);
+    const destructorStatus = modules.finish;
     return status != 0 ? status : destructorStatus;
-}
-
-// What druntime does at program end, once `main` returned or threw: the
-// main thread's thread-local destructors, then the shared ones. An
-// exception from one ends the phase, skips the rest and fails the program.
-// Unlike druntime this does not wait for the other threads first: a caller
-// on a test runner's thread would wait for itself.
-package(snakebite) int runModuleDestructors(
-    Backend backend,
-    Program program,
-) {
-    return failing(() {
-        backend._threadModules.current.finish;
-        foreach (destructor; program.sharedDestructors)
-            backend.call(destructor, null, []);
-    }) ? 1 : 0;
-}
-
-// The thread-local module state of one thread of one backend. When the
-// thread ends, its destructors run, the same way druntime runs them for a
-// thread it started, but only if the thread ran the constructors. A
-// program whose startup failed runs none.
-private struct ThreadModules {
-    import dmd.func: FuncDeclaration;
-
-    bool constructed;
-    bool finished;
-    Backend backend;
-    FuncDeclaration[] destructors;
-
-    void finish() {
-        if (!constructed || finished)
-            return;
-
-        finished = true;
-        foreach (destructor; destructors)
-            backend.call(destructor, null, []);
-    }
-
-    // A GC finalizer must not call guest code.
-    ~this() {
-        import core.memory: GC;
-
-        if (!GC.inFinalizer)
-            failing(&finish);
-    }
-}
-
-// A constructor that cannot run is a failed program startup. Report it
-// loudly so the caller cannot mistake a partial run for success.
-package(snakebite) int runModuleConstructors(
-    Backend backend,
-    imported!"dmd.func".FuncDeclaration[] constructors,
-) {
-    import snakebite.exception: SnakebiteException;
-    import std.stdio: stderr;
-
-    auto thread = backend._threadModules.current;
-    thread.constructed = true;
-    foreach (constructor; constructors) {
-        try
-            backend.call(constructor, null, []);
-        catch (SnakebiteException exception) {
-            stderr.writeln(
-                "snakebite: skipping module constructor `",
-                constructor.toString,
-                "`: ",
-                exception.msg,
-            );
-            thread.finished = true;
-            return 1;
-        }
-        catch (Throwable throwable) {
-            stderr.writeln(
-                "snakebite: module constructor `",
-                constructor.toString,
-                "` failed: ",
-                throwable.msg,
-            );
-            thread.finished = true;
-            return 1;
-        }
-    }
-
-    return 0;
 }
 
 // The program's own `main`. `void main` maps to exit status 0, and no `main`

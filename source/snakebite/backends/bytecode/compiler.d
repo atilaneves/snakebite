@@ -156,6 +156,12 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         runHostToGuest(compiled, function_, returnPlace, args);
     }
 
+    public override void[] staticStorage(
+        imported!"dmd.declaration".VarDeclaration variable,
+    ) {
+        return _nativeData.storageOf(variable);
+    }
+
     // The bytecode backend's one host-to-guest entry. The program
     // runner's top-level call (`call`) and a callback's re-entry
     // (`callGuestFromHost`) both reach the compiled body only here -
@@ -190,7 +196,6 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         void* variadicCursor = null,
         const(void)* variadicTypes = null,
     ) {
-        initializeThread;
         const layout = hostLayoutOf(function_);
         layout.checkHostArgumentCount(args.length, function_, "bytecode");
 
@@ -668,7 +673,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.exception: SnakebiteException;
     import snakebite.nativelayout:
         alignUp, initializerConstructsThroughSlice, initializerValueOf,
-        isIntegralSize, TypeFacts;
+        isIntegralSize, isThreadLocalStorage, TypeFacts;
     import snakebite.nativevalue: CastKind;
 
     alias visit = LoweringVisitor.visit;
@@ -2730,21 +2735,21 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // whichever thread is running - never this compiling thread's own
     // storage, which is what a resolved address here would bake in.
     private size_t staticAddressOf(VarDeclaration variable) {
-        if (variable.isThreadlocal)
+        if (variable.isThreadLocalStorage)
             return cast(size_t) _bytecode._nativeData.tlsDescriptorOf(variable);
         return cast(size_t) _bytecode._nativeData.storageOf(variable).ptr;
     }
 
     private Instruction.Handler staticLoadHandler(VarDeclaration variable) {
-        return variable.isThreadlocal ? &opTlsLoad : &opStaticLoad;
+        return variable.isThreadLocalStorage ? &opTlsLoad : &opStaticLoad;
     }
 
     private Instruction.Handler staticStoreHandler(VarDeclaration variable) {
-        return variable.isThreadlocal ? &opTlsStore : &opStaticStore;
+        return variable.isThreadLocalStorage ? &opTlsStore : &opStaticStore;
     }
 
     private Instruction.Handler staticAddressHandler(VarDeclaration variable) {
-        return variable.isThreadlocal ? &opTlsAddress : &opStaticAddress;
+        return variable.isThreadLocalStorage ? &opTlsAddress : &opStaticAddress;
     }
 
     // A plain `=` to a local or parameter. `destOffset` is where the

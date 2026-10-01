@@ -250,6 +250,89 @@ static foreach (backend; Matrix!(
 }
 
 
+// dmd guards a module destructor of a template instance with a gate: more
+// than one module can emit the same instance. The module's constructor phase
+// increments the gate (dmd glue, `callFuncsAndGates`), and the destructor
+// runs its body only when it decrements the gate to zero.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("moduleDestructorOfTemplateInstanceRuns." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            struct Holder(T) {
+                shared static ~this() { trace("shared;"); }
+                static ~this() { trace("thread;"); }
+            }
+
+            void main() {
+                Holder!int holder;
+                trace("main;");
+            }
+        }).should == 0;
+        sandbox.shouldEqualContent("trace", "main;thread;shared;");
+    }
+}
+
+
+// dmd emits the gate of a thread-local destructor as one variable for the
+// process, not one for each thread. Thus the destructor body runs only on
+// the last thread that ends.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("threadDestructorOfTemplateInstanceRunsWhenThreadEnds." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            import core.thread: Thread;
+
+            struct Holder(T) {
+                static ~this() { trace("dtor;"); }
+            }
+
+            void main() {
+                Holder!int holder;
+                auto thread = new Thread({ trace("worker;"); });
+                thread.start;
+                thread.join;
+                trace("main;");
+            }
+        }).should == 0;
+        sandbox.shouldEqualContent("trace", "worker;main;dtor;");
+    }
+}
+
+
+// druntime runs the thread-local constructors and destructors on every thread
+// it starts, also on one that calls no function of the program.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("threadConstructorRunsOnThreadThatCallsNoProgramCode." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            import std.parallelism: TaskPool;
+
+            static this() { trace("ctor;"); }
+            static ~this() { trace("dtor;"); }
+
+            void main() {
+                auto pool = new TaskPool(1);
+                pool.finish(true);
+                trace("main;");
+            }
+        }).should == 0;
+        sandbox.shouldEqualContent("trace", "ctor;ctor;dtor;main;dtor;");
+    }
+}
+
+
 static foreach (backend; Matrix!()) {
     @("tupleLocalsInitializeEveryMember." ~ backend.stringof)
     @Tags(backend.stringof)

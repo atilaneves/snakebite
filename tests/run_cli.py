@@ -8,6 +8,7 @@
 
 import os
 import re
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -19,6 +20,11 @@ BACKENDS = ["interpreter", "bytecode", "ctfe"]
 # CTFE cannot interpret `open64` from `std.file.readText`, which the
 # guest programs of the tests that use this list call.
 FILE_BACKENDS = ["bytecode", "interpreter"]
+
+# Whole-program tests also run `native`: the same files compiled by dmd, the
+# reference compiler, and run as an executable. The expectations are what
+# compiled D does, not what a backend happens to do.
+PROGRAM_BACKENDS = ["native", *FILE_BACKENDS]
 
 
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
@@ -230,7 +236,7 @@ def test_import_paths_stay_relative_to_caller(
 
 # Compiled D runs the module destructors after `main`, and the output they
 # write is flushed before the process ends.
-@pytest.mark.parametrize("backend", FILE_BACKENDS)
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
 def test_module_destructor_runs_after_main(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -252,7 +258,7 @@ def test_module_destructor_runs_after_main(
 
 # Within a module the destructors run in reverse declaration order. The
 # thread-local ones of the main thread run before the shared ones.
-@pytest.mark.parametrize("backend", FILE_BACKENDS)
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
 def test_module_destructors_run_in_reverse_order(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -279,7 +285,7 @@ def test_module_destructors_run_in_reverse_order(
 
 # A module's destructors run after those of every module that imports it:
 # the reverse of the order its constructors ran.
-@pytest.mark.parametrize("backend", FILE_BACKENDS)
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
 def test_module_destructors_run_in_reverse_import_order(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -313,7 +319,7 @@ def test_module_destructors_run_in_reverse_import_order(
     ]
 
 
-@pytest.mark.parametrize("backend", FILE_BACKENDS)
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
 def test_module_destructor_runs_after_main_throws(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -334,7 +340,7 @@ def test_module_destructor_runs_after_main_throws(
     assert guest_lines(result) == ["dtor"]
 
 
-@pytest.mark.parametrize("backend", FILE_BACKENDS)
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
 def test_module_destructor_that_throws_fails_the_program(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -358,7 +364,7 @@ def test_module_destructor_that_throws_fails_the_program(
 
 # A thread-local destructor runs on every thread that ends, and a joined
 # thread has run it by the time `join` returns.
-@pytest.mark.parametrize("backend", FILE_BACKENDS)
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
 def test_thread_destructor_runs_when_thread_ends(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -433,11 +439,377 @@ def test_module_destructor_runs_after_failed_unittest(
     assert "main" not in guest_lines(result)
 
 
+# Compiled D orders the modules by import: all shared constructors, imported
+# module first, then all thread-local constructors. The destructors run in
+# the reverse order. The file names sort the importing module first, so
+# source order is not import order.
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
+def test_module_constructors_and_destructors_follow_import_order(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "a_main.d",
+        """
+        module a_main;
+        import z_library;
+        import std.stdio: writeln;
+        shared static this() { writeln("main shared constructor"); }
+        static this() { writeln("main thread constructor"); }
+        shared static ~this() { writeln("main shared destructor"); }
+        static ~this() { writeln("main thread destructor"); }
+        void main() { writeln("main"); }
+        """,
+    )
+    write(
+        tmp_path / "app" / "z_library.d",
+        """
+        module z_library;
+        import std.stdio: writeln;
+        shared static this() { writeln("library shared constructor"); }
+        static this() { writeln("library thread constructor"); }
+        shared static ~this() { writeln("library shared destructor"); }
+        static ~this() { writeln("library thread destructor"); }
+        """,
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 0, output(result)
+    assert guest_lines(result) == [
+        "library shared constructor", "main shared constructor",
+        "library thread constructor", "main thread constructor",
+        "main",
+        "main thread destructor", "library thread destructor",
+        "main shared destructor", "library shared destructor",
+    ]
+
+
+# druntime refuses to start a program whose modules with constructors import
+# each other: it cannot order them.
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
+def test_cyclic_module_constructors_fail_the_program(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "first.d",
+        """
+        module first;
+        import second;
+        import std.stdio: writeln;
+        shared static this() { writeln("first constructor"); }
+        void main() { writeln("main"); }
+        """,
+    )
+    write(
+        tmp_path / "app" / "second.d",
+        """
+        module second;
+        import first;
+        import std.stdio: writeln;
+        shared static this() { writeln("second constructor"); }
+        """,
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 1, output(result)
+    assert (
+        "Cyclic dependency between module constructors/destructors"
+        in result.stderr
+    )
+    assert guest_lines(result) == []
+
+
+# druntime waits for the threads that are not daemons after the main
+# thread's thread-local destructors and before the shared destructors.
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
+def test_shared_destructors_wait_for_other_threads(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        import core.thread: Thread;
+        import core.time: msecs;
+        import std.stdio: writeln;
+        shared static ~this() { writeln("shared destructor"); }
+        static ~this() { writeln("thread destructor"); }
+        void main() {
+            new Thread({
+                Thread.sleep(300.msecs);
+                writeln("worker");
+            }).start;
+            writeln("main");
+        }
+        """,
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 0, output(result)
+    assert guest_lines(result) == [
+        "main", "thread destructor", "worker", "thread destructor",
+        "shared destructor",
+    ]
+
+
+# A spawned thread learns that its owner ended from the main thread's
+# thread-local destructor of `std.concurrency`. druntime runs that
+# destructor before it waits for the thread, so the program ends.
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
+def test_spawned_thread_ends_before_shared_destructors(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        import std.concurrency: OwnerTerminated, receive, spawn;
+        import std.stdio: writeln;
+        shared static ~this() { writeln("shared destructor"); }
+        void worker() {
+            try
+                receive((int value) {});
+            catch (OwnerTerminated)
+                writeln("owner terminated");
+        }
+        void main() {
+            spawn(&worker);
+            writeln("main");
+        }
+        """,
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 0, output(result)
+    assert guest_lines(result) == [
+        "main", "owner terminated", "shared destructor",
+    ]
+
+
+# Every thread that druntime starts runs the thread-local constructors and
+# destructors, also a thread that calls no function of the program.
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
+def test_thread_without_program_code_runs_thread_constructors(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        import std.parallelism: TaskPool;
+        import std.stdio: writeln;
+        static this() { writeln("thread constructor"); }
+        static ~this() { writeln("thread destructor"); }
+        void main() {
+            auto pool = new TaskPool(1);
+            pool.finish(true);
+            writeln("main");
+        }
+        """,
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 0, output(result)
+    assert guest_lines(result) == [
+        "thread constructor", "thread constructor", "thread destructor",
+        "main", "thread destructor",
+    ]
+
+
+# druntime prints a throwable that leaves a destructor as it prints one that
+# leaves `main`: the class name, the file and the line, then the message.
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
+def test_module_destructor_exception_has_the_druntime_format(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        shared static ~this() { throw new Exception("dtor failed"); }
+        void main() {}
+        """,
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 1, output(result)
+    assert re.match(
+        r"object\.Exception@.*main\.d\(\d+\): dtor failed\n", result.stderr,
+    ), result.stderr
+
+
+# `Thread.join` gives the caller the exception that left a thread-local
+# destructor of the thread it joined. `join(false)` returns it, where `join`
+# throws it again.
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
+def test_join_returns_thread_destructor_exception(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        import core.thread: Thread;
+        import std.stdio: writeln;
+        bool isWorker;
+        static ~this() { if (isWorker) throw new Exception("dtor failed"); }
+        void main() {
+            auto thread = new Thread({ isWorker = true; });
+            thread.start;
+            writeln("joined: ", thread.join(false).msg);
+            writeln("main");
+        }
+        """,
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 0, output(result)
+    assert guest_lines(result) == ["joined: dtor failed", "main"]
+    assert result.stderr == ""
+
+
+# The C `exit` ends a compiled D program through druntime's image
+# finalizer: the thread-local destructors of the calling thread run, then
+# the shared ones, and the status is the argument of `exit`.
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
+def test_exit_runs_module_destructors(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        import core.stdc.stdlib: exit;
+        import std.stdio: stdout, writeln;
+        shared static ~this() { writeln("shared destructor"); stdout.flush; }
+        static ~this() { writeln("thread destructor"); stdout.flush; }
+        void main() {
+            writeln("main");
+            stdout.flush;
+            exit(5);
+        }
+        """,
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 5, output(result)
+    assert guest_lines(result) == [
+        "main", "thread destructor", "shared destructor",
+    ]
+
+
+# A module's thread-local destructor runs before that of a module it
+# imports, also when the imported module is in a compiled dependency and
+# the thread is not the main thread.
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
+def test_thread_destructor_runs_before_that_of_a_dependency(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "dub.sdl",
+        """
+        name "app"
+        targetType "library"
+        dependency "dep" path="../dep"
+        """,
+    )
+    write(
+        tmp_path / "app" / "source" / "logic.d",
+        """
+        module logic;
+        import dep;
+        import core.thread: Thread;
+        import std.stdio: writeln;
+        static ~this() { writeln("program destructor"); }
+        unittest {
+            use;
+            auto thread = new Thread({ use; writeln("worker"); });
+            thread.start;
+            thread.join;
+            writeln("joined");
+        }
+        """,
+    )
+    write(
+        tmp_path / "dep" / "dub.sdl",
+        """
+        name "dep"
+        targetType "library"
+        """,
+    )
+    write(
+        tmp_path / "dep" / "source" / "dep.d",
+        """
+        module dep;
+        import std.stdio: writeln;
+        static ~this() { writeln("dependency destructor"); }
+        void use() {}
+        """,
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 0, output(result)
+    assert [
+        line for line in guest_lines(result) if "modules passed" not in line
+    ] == [
+        "worker", "program destructor", "dependency destructor", "joined",
+        "program destructor", "dependency destructor",
+    ]
+
+
 def run_app(
     tmp_path: Path, backend: str,
 ) -> subprocess.CompletedProcess[str]:
+    if backend == "native":
+        return run_native_app(tmp_path)
+
     return run_sb(
         f"--backend={backend}", "--no-optimise-image", str(tmp_path / "app"),
+        cwd=tmp_path,
+    )
+
+
+# The program in `app`, built and run as compiled D builds and runs it.
+def run_native_app(tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    dmd = shutil.which("dmd")
+    if dmd is None:
+        pytest.skip("dmd, the reference compiler, is not on PATH")
+
+    if (tmp_path / "app" / "dub.sdl").exists():
+        return subprocess.run(
+            ["dub", "test", "--compiler=dmd", "-q"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=120,
+            cwd=tmp_path / "app",
+        )
+
+    executable = tmp_path / "native"
+    sources = sorted(str(path) for path in (tmp_path / "app").glob("*.d"))
+    compiled = subprocess.run(
+        [dmd, "-unittest", f"-of={executable}", f"-od={tmp_path}", *sources],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=120,
+    )
+    assert compiled.returncode == 0, output(compiled)
+
+    return subprocess.run(
+        [str(executable)],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=120,
         cwd=tmp_path,
     )
 

@@ -54,7 +54,7 @@ public PreparationReport prepareProject(
     import snakebite.project:
         loadProject, projectStateDirectory, sourceSet, prepareDependencies;
     import std.datetime.stopwatch: AutoStart, StopWatch;
-    import snakebite.teststartup: prepareTestStartup;
+    import snakebite.backends.guestmodules: prepareRegistryImage;
     import snakebite.dependencyimage: DependencyImage;
     import std.algorithm.iteration: map;
     import std.array: array;
@@ -82,9 +82,7 @@ public PreparationReport prepareProject(
     if (project.program.dependencyImage !is null)
         project.program.testHooks = project.program.dependencyImage.testHooks;
     auto startupImage = new DependencyImage;
-    *startupImage = prepareTestStartup(stateDirectory,
-        project.program.rootModules.map!(module_ =>
-            module_.toPrettyChars.fromStringz.idup).array);
+    *startupImage = prepareRegistryImage(stateDirectory);
     project.program.testStartupImage = startupImage;
     return PreparationReport(project, discovery, frontendDuration, stopWatch.peek);
 }
@@ -95,6 +93,7 @@ public ExecutionReport executeBackend(
     imported!"snakebite.backends".Program program,
     in string[] hostArguments = null,
     in bool collectGarbage = true,
+    in bool endsProcess = false,
 ) {
     import snakebite.backends: makeBackend;
     import snakebite.backends.backend: run;
@@ -123,7 +122,8 @@ public ExecutionReport executeBackend(
     if (program.testStartupImage is null || program.hasCEntryPoint)
         status = run(backend, program, hostArguments);
     else {
-        startup = runTestsAndMain(backend, program, hostArguments);
+        startup = runTestsAndMain(
+            backend, program, hostArguments, endsProcess);
         status = startup.status;
     }
     // Native objects can hold callback entries for guest destructors. Run

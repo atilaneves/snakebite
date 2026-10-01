@@ -31,6 +31,12 @@ public final class Ctfe: imported!"snakebite.backends.backend".Backend {
         writeResult(function_, result.value, returnPlace);
     }
 
+    public override void[] staticStorage(
+        imported!"dmd.declaration".VarDeclaration,
+    ) {
+        return null;
+    }
+
     public override string eval(FuncDeclaration function_) {
         // `const` would qualify the dmd AST reference inside the result.
         auto result = interpret(function_);

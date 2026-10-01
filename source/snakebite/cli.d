@@ -68,6 +68,7 @@ public int run(string[] args) {
             preparation.project.program,
             [preparation.project.program.name] ~ parsed.options.programArguments,
             false,
+            true,
         );
         printStatistics(preparation, report);
         return report.status;
