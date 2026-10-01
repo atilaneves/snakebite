@@ -7,8 +7,8 @@ import core.vararg;
 // An untyped D variadic receives the call's `TypeInfo` tuple before its
 // declared parameters, and the extra arguments after them.
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed,
-        "CTFE has no D-style variadic functions"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run D-style variadic functions"),
 )) {
     @("virtualVariadic.classOverrideReadsExtraArguments."
         ~ backend.stringof)
@@ -40,8 +40,8 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed,
-        "CTFE has no D-style variadic functions"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run D-style variadic functions"),
 )) {
     @("virtualVariadic.interfaceDispatchReadsExtraArguments."
         ~ backend.stringof)
@@ -71,8 +71,8 @@ static foreach (backend; Matrix!(
 
 // Each receiver and argument is evaluated once, left to right.
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed,
-        "CTFE has no D-style variadic functions"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run D-style variadic functions"),
 )) {
     @("virtualVariadic.evaluatesReceiverAndArgumentsOnceInOrder."
         ~ backend.stringof)
@@ -125,8 +125,8 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed,
-        "CTFE has no D-style variadic functions"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run D-style variadic functions"),
 )) {
     @("virtualVariadic.mixedTypes." ~ backend.stringof)
     @Tags(backend.stringof)
