@@ -156,6 +156,48 @@ public struct TypeFacts {
         );
     }
 
+    // `of`, for a caller that only prepares what execution may ask for
+    // later: a type with no size (an aggregate that is declared and never
+    // defined, an array too large to size) leaves `facts` alone and gives
+    // `false`, where `of` would give a size that no memory has. The
+    // execution that asks for such a type still asks `of`. Run it with
+    // dmd's diagnostics gagged.
+    public static bool tryOf(Type type, out TypeFacts facts) {
+        if (!hasSize(type))
+            return false;
+
+        facts = of(type);
+        return facts.size != size_t.max;
+    }
+
+    private static bool hasSize(Type type) {
+        import dmd.astenums: Sizeok, Tarray, Terror;
+        import dmd.enumsem: getMemtype;
+        import dmd.location: Loc;
+        import dmd.typesem: nextOf;
+        import snakebite.frontend.compiler: newInFrontend;
+
+        if (type.ty == Terror)
+            return false;
+
+        if (auto enumType = type.isTypeEnum) {
+            auto memtype = newInFrontend!getMemtype(enumType.sym, Loc.initial);
+            return memtype !is null && hasSize(memtype);
+        }
+
+        if (auto structType = type.isTypeStruct)
+            return structType.sym.members !is null
+                || structType.sym.sizeok == Sizeok.done;
+
+        if (auto arrayType = type.isTypeSArray)
+            return hasSize(arrayType.next);
+
+        if (type.ty == Tarray)
+            return hasSize(type.nextOf);
+
+        return true;
+    }
+
     // Whether every forward reference `toBasetype`/`size`/`alignsize`
     // could still resolve for `type` is already resolved - an enum's own
     // base type (`EnumDeclaration.getMemtype`, reached through

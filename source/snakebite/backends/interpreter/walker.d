@@ -116,8 +116,18 @@ import snakebite.exception: SnakebiteException;
 // guest construct. The runner catches this wrapper, while interpreter
 // failures travel as `SnakebiteException` and continue through the host
 // unchanged.
+//
+// It lives on the C heap, because a destructor that the GC finalizer runs can
+// throw, and the GC forbids an allocation there. `take` releases it: the
+// unwinder holds no reference to a caught exception.
 private final class GuestException: Exception {
     private Throwable _guest;
+
+    public static GuestException make(Throwable guest) {
+        import snakebite.hostthreads: heapNew;
+
+        return heapNew!GuestException(guest);
+    }
 
     public this(Throwable guest) {
         super(guest.msg);
@@ -132,8 +142,11 @@ private final class GuestException: Exception {
     }
 
     private Throwable take() {
+        import snakebite.hostthreads: heapDelete;
+
         auto guest = _guest;
         _guest = null;
+        heapDelete(this);
         return guest;
     }
 }
@@ -262,7 +275,7 @@ private struct Shared {
     SharedTable!(TryFinallyStatement, ExceptionCandidate[]) finallyCandidates;
     SharedTable!(FinallyKey, bool) finallyRuns;
     SharedTable!(CallSiteKey, const(CallPlan)*) callSitePlans;
-    // The guest functions whose preparation has started, and how to
+    // The guest functions whose preparation is complete, and how to
     // prepare one more.
     SharedTable!(FuncDeclaration, bool) prepared;
     void delegate(FuncDeclaration) prepare;
@@ -559,6 +572,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private Cache!(Type, TypeFacts) _typeFacts;
     // The function whose body the preparation walks.
     private FuncDeclaration _preparing;
+    // The functions that this thread prepares and has not finished: the
+    // preparation of one function reaches the entry of another.
+    private bool[FuncDeclaration] _started;
+    // What a variable's storage or a struct's default value may weigh for
+    // preparation to build it before the program reaches it: a reference
+    // in code that never runs must cost what it costs without preparation.
+    private enum preparedBytesLimit = 64 * 1024;
     // Expression-scoped rvalues and temporary destructors have one owner.
     private TemporaryLifetime _temporaries;
     // The most recently asked-about `Type` and its facts: dmd interns
@@ -1308,7 +1328,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (isHalt(thrown))
                 throw thrown;
 
-            throw new GuestException(thrown);
+            throw GuestException.make(thrown);
         }
     }
 
@@ -1398,36 +1418,44 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // by name, would otherwise fill on first use, while the GC can still
     // allocate: the GC finalizer can run the callback, and there neither
     // an allocation nor a wait for a lock that another thread holds
-    // while it waits for the GC is possible. What this cannot prepare
-    // stays as it was: a call that never executes must not fail, and one
-    // that does fails the way it always did.
+    // while it waits for the GC is possible. Execution decides what runs,
+    // so this asks only what a node of a body would ask, and a node that
+    // this cannot prepare, or that makes dmd report an error, stays as it
+    // was: a call that never executes must not fail, and one that does fails
+    // the way it always did.
     extern(D) final void prepareCallback(FuncDeclaration function_) {
+        import snakebite.frontend.compiler: withCompilerLock;
+
         // A function that refers to itself reaches this again through its
-        // own entry.
-        if (function_ in _shared.prepared)
+        // own entry, and another thread's preparation of the same function
+        // may still be running: only a finished one is in `prepared`.
+        if (function_ in _shared.prepared || function_ in _started)
             return;
 
-        _shared.prepared.insert(function_, true);
-        layoutOf(function_);
-        callShapeOf(function_);
-        functionNeedsClosure(function_);
-        factsOf(function_.type.nextOf);
-        prepareReachable(function_);
+        const outermost = _started.length == 0;
+        _started[function_] = true;
+        scope(failure) _started = null;
+        withCompilerLock({ prepareReachable(function_); });
+        if (outermost) {
+            foreach (started, _; _started)
+                _shared.prepared.insert(started, true);
+            _started = null;
+        }
     }
 
     extern(D) private void prepareReachable(FuncDeclaration root) {
-        bool[FuncDeclaration] seen;
+        import snakebite.frontend.compiler: gagged;
+
         FuncDeclaration[] pending = [root];
-        seen[root] = true;
         void enqueue(FuncDeclaration function_) {
-            if (function_ !in seen && function_ !in _shared.prepared) {
-                seen[function_] = true;
+            if (function_ !in _started && function_ !in _shared.prepared) {
+                _started[function_] = true;
                 pending ~= function_;
             }
         }
         void attempt(scope void delegate() action) {
             try
-                action();
+                gagged(action);
             catch (Exception) {
             }
         }
@@ -1441,11 +1469,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 prepareCall(site, callee);
             }),
             (function_) => attempt({
+                if (!_plans.canPlan(function_))
+                    return;
+
                 _shared.callableAddress(function_, 0);
                 enqueue(function_);
             }),
             (variable) => attempt({ prepareVariable(variable); }),
             (type) => attempt({ prepareType(type); }),
+            (type) => attempt({ prepareZeroInitialized(type); }),
             (expression) => attempt({ structLiteralPlanOf(expression); }),
             (statement) => attempt({ tryCatchPlanOf(statement); }),
             (statement) => attempt({
@@ -1455,6 +1487,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     runsFinally(
                         FinallyKey(cast(const(void)*) statement, null, exit),
                         statement);
+            }),
+            (statement, destination) => attempt({
+                runsFinally(
+                    FinallyKey(cast(const(void)*) statement,
+                        cast(const(void)*) destination,
+                        FinallyKey.Exit.gotoScope),
+                    statement);
             }),
         ));
         while (pending.length) {
@@ -1477,7 +1516,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (decision.route != CallSelection.Route.guest)
             return;
 
-        _shared.prepared.insert(function_, true);
         auto outer = _preparing;
         _preparing = function_;
         scope(exit) _preparing = outer;
@@ -1485,7 +1523,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         layoutOf(function_);
         callShapeOf(function_);
         closurePlanOf(function_);
-        factsOf(function_.type.nextOf);
+        prepareFacts(function_.type.nextOf);
         if (function_.fbody !is null)
             function_.fbody.accept(scout);
     }
@@ -1503,43 +1541,72 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             hasNativeSymbol(callee),
             hasIndependentNativeSymbol(callee),
         );
-        if (decision.route == CallSelection.Route.native)
+        if (decision.route == CallSelection.Route.native
+                && _plans.canPlan(callee))
             callPlanOf(site, callee);
     }
 
-    // The answers about `type` that execution asks for: its own, its base
-    // type's, and its element's. The facts of `type` come first: they
-    // resolve what `toBasetype` would otherwise resolve without the
-    // frontend lock.
+    // The facts that execution asks for about the type of a node, its base
+    // type's, and nothing below them: a pointer is as large as any other
+    // pointer, whatever it points to.
     extern(D) private void prepareType(Type type) {
-        import dmd.typesem: nextOf, toBasetype;
+        import dmd.typesem: toBasetype;
 
-        if (type is null || type.ty == Tfunction || type.ty == Ttuple
-                || type.ty == Terror)
+        if (!hasValueFacts(type))
             return;
 
-        factsOf(type);
+        prepareFacts(type);
         auto base = type.toBasetype;
-        if (base.ty == Tfunction || base.ty == Ttuple || base.ty == Terror)
+        if (base !is type && hasValueFacts(base))
+            prepareFacts(base);
+    }
+
+    private static bool hasValueFacts(Type type) {
+        return type !is null && type.ty != Tfunction && type.ty != Ttuple
+            && type.ty != Terror;
+    }
+
+    extern(D) private void prepareFacts(Type type) {
+        if (!hasValueFacts(type) || type in _typeFacts)
             return;
 
-        factsOf(base);
-        if (base.ty == Tstruct || base.ty == Tsarray)
-            _nativeData.initialValue(type, Loc.initial);
-        prepareType(base.nextOf);
+        TypeFacts facts;
+        if (TypeFacts.tryOf(type, facts))
+            _typeFacts.build(type, () => facts);
+    }
+
+    // The bytes of a struct whose default value is all zero, or of the
+    // struct that a static array repeats: `storeValue` reads them when it
+    // stores that encoding. A struct that is larger than
+    // `preparedBytesLimit` stays for execution, which is the one that knows
+    // whether the value is needed.
+    extern(D) private void prepareZeroInitialized(Type type) {
+        import dmd.typesem: baseElemOf, toBasetype;
+
+        auto element = type.baseElemOf.toBasetype;
+        TypeFacts facts;
+        if (element.isTypeStruct !is null && TypeFacts.tryOf(element, facts)
+                && facts.size <= preparedBytesLimit)
+            _nativeData.initialValue(element, Loc.initial);
     }
 
     extern(D) private void prepareVariable(VarDeclaration variable) {
         // `__ctfe` has no parent, and asking dmd where it lives reports
         // that as an error. Execution folds a read of it to `false`.
-        if (isCtfeVariable(variable))
+        if (isCtfeVariable(variable) || variable.parent is null)
             return;
 
-        if (variable.isThreadlocal)
-            _nativeData.tlsDescriptorOf(variable);
-        else if (variable.isDataseg)
-            _nativeData.storageOf(variable);
-        else
+        if (variable.isThreadlocal || variable.isDataseg) {
+            TypeFacts facts;
+            if (!TypeFacts.tryOf(variable.type, facts)
+                    || facts.size > preparedBytesLimit)
+                return;
+
+            if (variable.isThreadlocal)
+                _nativeData.tlsDescriptorOf(variable);
+            else
+                _nativeData.storageOf(variable);
+        } else
             prepareContext(outerFunctionOf(variable));
     }
 
@@ -1931,7 +1998,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (isHalt(exception))
                 throw exception;
 
-            throw new GuestException(exception);
+            throw GuestException.make(exception);
         }
     }
 
@@ -3095,19 +3162,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             }
         }
 
-        void* delegate(size_t, size_t) reserve =
-            (size_t size, size_t alignment) {
-            return _temporaries.reserveValue(
-                size, cast(uint) alignment);
-        };
-        void delegate(void*) evaluateRhs = (void* value) {
-            evaluate(expression.e2, _type, _facts, value);
-        };
-        void delegate(void*) publish = (void* value) {
-            memcpy(target, value, _facts.size);
-        };
-        executeAssignment!(void*, reserve, evaluateRhs, publish)(
-            isConstruct, target, _facts.size, _facts.alignment);
+        executeAssignment!(void*)(isConstruct, target, _facts.size,
+            _facts.alignment,
+            (size, alignment) => cast(void*) _temporaries.reserveValue(
+                size, cast(uint) alignment),
+            (value) { evaluate(expression.e2, _type, _facts, value); },
+            (value) { memcpy(target, value, _facts.size); });
         if (_place !is null)
             memcpy(_place, target, _facts.size);
         return target;
@@ -5135,7 +5195,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "`: it is null"),
             );
 
-        throw new GuestException(guest);
+        throw GuestException.make(guest);
     }
 
     override void visit(ArrayLengthExp expression) {

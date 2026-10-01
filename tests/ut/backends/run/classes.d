@@ -3630,3 +3630,301 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+// A class gets its vtable when the program first makes an object, and compiled
+// D gives each virtual method its code then. A method that only passes a
+// pointer to an opaque struct needs no size for the struct.
+static foreach (backend; Matrix!()) {
+    @("virtualMethodTakesPointerToOpaqueStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Opaque;
+            class C {
+                int f(Opaque* handle) { return handle is null ? 1 : 2; }
+            }
+            void main() {
+                auto c = new C;
+                assert(c.f(null) == 1);
+            }
+        });
+    }
+}
+
+
+// `void[4]` has a size and no default value: a virtual method can pass a
+// pointer to one.
+static foreach (backend; Matrix!()) {
+    @("virtualMethodTakesPointerToStaticArrayOfVoid." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C {
+                int f(const(void)[4]* bytes) { return bytes is null ? 1 : 2; }
+            }
+            void main() {
+                auto c = new C;
+                assert(c.f(null) == 1);
+            }
+        });
+    }
+}
+
+
+// A branch that the program never takes cannot stop it. The branch takes the
+// address of a function that returns five bytes.
+static foreach (backend; Matrix!()) {
+    @("virtualMethodNeverTakesAddressOfFunctionReturningFiveBytes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Odd {
+                ubyte[5] bytes;
+            }
+            Odd make() {
+                Odd odd;
+                odd.bytes[0] = 7;
+                return odd;
+            }
+            class C {
+                int f(bool take) {
+                    if (take) {
+                        auto pointer = &make;
+                        return pointer().bytes[0];
+                    }
+                    return 1;
+                }
+            }
+            void main() {
+                auto c = new C;
+                assert(c.f(false) == 1);
+            }
+        });
+    }
+}
+
+
+// A destructor that assigns to a local variable allocates nothing in compiled
+// D, so the finalizer can run it.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerRunsDestructorAssigningLocalVariable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared int dead;
+            __gshared int last;
+            class B {
+                ~this() {
+                    int local;
+                    local = 7;
+                    last = local;
+                    ++dead;
+                }
+            }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new B;
+            }
+            void main() {
+                import core.memory: GC;
+                make;
+                GC.collect;
+                GC.collect;
+                assert(dead > 1000);
+                assert(last == 7);
+            }
+        });
+    }
+}
+
+
+// A destructor that calls a C variadic function with a buffer on its stack
+// allocates nothing from the GC.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerRunsDestructorCallingCVariadicFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.stdio: snprintf;
+            __gshared int dead;
+            __gshared long total;
+            class B {
+                ~this() {
+                    char[32] buffer;
+                    total += snprintf(buffer.ptr, buffer.length, "%d", 12);
+                    ++dead;
+                }
+            }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new B;
+            }
+            void main() {
+                import core.memory: GC;
+                make;
+                GC.collect;
+                GC.collect;
+                assert(dead > 1000);
+                assert(total >= 2 * 1000);
+            }
+        });
+    }
+}
+
+
+// A destructor throws an exception that exists already and catches it. The
+// throw and the catch allocate nothing in compiled D.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerRunsDestructorCatchingExistingException." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared int dead;
+            __gshared int caught;
+            __gshared Exception existing;
+            void raise() { throw existing; }
+            class B {
+                ~this() {
+                    try
+                        raise;
+                    catch (Exception e)
+                        ++caught;
+                    ++dead;
+                }
+            }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new B;
+            }
+            void main() {
+                import core.memory: GC;
+                existing = new Exception("existing");
+                make;
+                GC.collect;
+                GC.collect;
+                assert(dead > 1000);
+                assert(caught > 1000);
+            }
+        });
+    }
+}
+
+
+// A `scope` class instance lives on the stack of the destructor that
+// declares it: compiled D allocates nothing from the GC for it.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerRunsDestructorWithScopeClassInstance." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared int dead;
+            __gshared long total;
+            class Part {
+                int value = 2;
+            }
+            class B {
+                ~this() {
+                    scope part = new Part;
+                    total += part.value;
+                    ++dead;
+                }
+            }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new B;
+            }
+            void main() {
+                import core.memory: GC;
+                make;
+                GC.collect;
+                GC.collect;
+                assert(dead > 1000);
+                assert(total >= 2 * 1000);
+            }
+        });
+    }
+}
+
+
+// `foreach` over a string with a `dchar` variable decodes it through a
+// druntime function and a delegate to the loop body, which is not a closure.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerRunsDestructorDecodingString." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared int dead;
+            __gshared long total;
+            class B {
+                ~this() {
+                    foreach (dchar c; "hé")
+                        ++total;
+                    ++dead;
+                }
+            }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new B;
+            }
+            void main() {
+                import core.memory: GC;
+                make;
+                GC.collect;
+                GC.collect;
+                assert(dead > 1000);
+                assert(total >= 2 * 1000);
+            }
+        });
+    }
+}
+
+
+// The thread that collects never ran code of the program: its function is a
+// function of druntime. Compiled D ran the thread-local module constructor
+// when the thread started, so the finalizer on that thread allocates nothing.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerRunsDestructorOnThreadThatRanNoProgramCode." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared int dead;
+            int threadLocal;
+            static this() { ++threadLocal; }
+            class B {
+                ~this() { ++dead; }
+            }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new B;
+            }
+            void main() {
+                import core.memory: GC;
+                import core.thread: Thread;
+                make;
+                auto collector = new Thread(cast(void function()) &GC.collect);
+                collector.start;
+                collector.join;
+                assert(dead > 1000);
+            }
+        });
+    }
+}

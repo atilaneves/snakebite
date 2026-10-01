@@ -1108,6 +1108,29 @@ public struct CallPlan {
             default: assert(false, "unsupported result register size");
         }
     }
+
+    // Whether `storeOf` has a width for each register of the result of
+    // `type`: a struct of five bytes returns in a register of five bytes,
+    // and no store has that width.
+    private static bool hasResultStore(
+        imported!"dmd.mtype".TypeFunction type,
+    ) {
+        import dmd.typesem: nextOf;
+        import snakebite.ffi.abi: needsHiddenReturnPointer;
+
+        if (type.isRef || type.nextOf is null
+                || needsHiddenReturnPointer(type.nextOf))
+            return true;
+
+        const result = ArgumentPlan.ofReturn(type.nextOf);
+        foreach (register; result.registers[0 .. result.count])
+            if (register.kind != Register.Kind.x87
+                    && register.size != 1 && register.size != 2
+                    && register.size != 4 && register.size != 8
+                    && register.size != 16)
+                return false;
+        return true;
+    }
 }
 
 // Split from `callAt`'s body so the hot path itself is only ever a compare
@@ -1204,6 +1227,18 @@ public struct PlanCache {
 
     public bool isGuestWord(const(void)* word) const {
         return _callbacks !is null && _callbacks.contains(word);
+    }
+
+    // Whether `of` and the callback entry of `function_` can plan its
+    // signature. Each of them halts on a signature that this gives `false`
+    // for, so a caller that only prepares calls this first and leaves such a
+    // function for the program to reach.
+    public bool canPlan(FuncDeclaration function_) {
+        import snakebite.frontend.dmd.mangle: completeFunctionType;
+
+        completeFunctionType(function_);
+        auto type = function_.type.isTypeFunction;
+        return type !is null && CallPlan.hasResultStore(type);
     }
 
     public void* addressOf(FuncDeclaration function_) {

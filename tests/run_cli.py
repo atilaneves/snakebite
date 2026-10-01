@@ -622,6 +622,52 @@ def test_destructor_that_allocates_fails_in_finalizer(
     assert "InvalidMemoryOperationError" in output(result)
 
 
+# A destructor that throws an exception which exists already allocates
+# nothing, and druntime reports the exception as a `FinalizeError`.
+@pytest.mark.parametrize("backend", FINALIZER_BACKENDS)
+def test_destructor_that_throws_existing_exception_gives_finalize_error(
+    tmp_path: Path, backend: str,
+) -> None:
+    source = """
+        module main;
+        __gshared Exception existing;
+        class B { ~this() { throw existing; } }
+        pragma(inline, false) void make() {
+            foreach (n; 0 .. 2000)
+                new B;
+        }
+        unittest {
+            import core.memory: GC;
+            existing = new Exception("existing");
+            make;
+            GC.collect;
+            GC.collect;
+        }
+        int main() { return 0; }
+    """
+    write(tmp_path / "app" / "dub.sdl", dub_project_recipe("finalizer"))
+    write(tmp_path / "app" / "source" / "main.d", source)
+
+    if backend == "native":
+        result = subprocess.run(
+            ["dmd", "-unittest", "-of=native", "source/main.d"],
+            capture_output=True, check=False, text=True,
+            cwd=tmp_path / "app",
+        )
+        assert result.returncode == 0, output(result)
+        result = subprocess.run(
+            [str(tmp_path / "app" / "native")],
+            capture_output=True, check=False, text=True,
+            cwd=tmp_path / "app",
+        )
+    else:
+        result = run_sb(
+            f"--backend={backend}", "--no-optimise-image",
+            str(tmp_path / "app"), cwd=tmp_path,
+        )
+
+    assert result.returncode != 0, output(result)
+    assert "FinalizeError" in output(result)
 
 
 # A dub recipe whose unittest configuration is an executable: dub's own
