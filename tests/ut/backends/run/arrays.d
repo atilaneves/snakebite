@@ -716,6 +716,36 @@ static foreach (backend; Matrix!(
     }
 }
 
+// The error names the file and the line of the slice expression.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE rejects the reversed slice as a compile error, which no guest code can catch"),
+)) {
+    @("pointerSlice.reversedBoundsNamesFileAndLine." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+            void main() {
+                int[3] a = [1, 2, 3];
+                int* p = a.ptr;
+                string file;
+                size_t line;
+                size_t expected;
+                try {
+                    expected = __LINE__ + 1;
+                    auto s = p[2 .. 1];
+                } catch (RangeError error) {
+                    file = error.file;
+                    line = error.line;
+                }
+                assert(file == __FILE__);
+                assert(line == expected);
+            }
+        });
+    }
+}
+
 // Equal bounds give an empty slice and the full range is intact.
 static foreach (backend; Matrix!(
 )) {
