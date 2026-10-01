@@ -5523,6 +5523,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         assert(0, "dmd lowers every associative-array literal in semantic");
     }
 
+    override void visit(DotTypeExp expression) {
+        expression.e1.accept(this);
+    }
+
     override void visit(CommaExp expression) {
         // A struct constructor call's rvalue temporary (see
         // `structLiteralAddress`) may already have its fields written by

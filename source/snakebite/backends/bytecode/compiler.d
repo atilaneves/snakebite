@@ -5070,6 +5070,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compilePost(expression, _destination);
     }
 
+    override void visit(DotTypeExp expression) {
+        if (_destination == discardResult)
+            compileEffect(expression.e1);
+        else
+            evalInto(expression.e1, _destination, _width);
+    }
+
     override void visit(CommaExp expression) {
         import dmd.sideeffect: hasSideEffect;
 

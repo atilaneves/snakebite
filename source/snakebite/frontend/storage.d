@@ -50,6 +50,10 @@ public struct StorageResolver(Result, Adapter) {
         if (auto varExp = expression.isVarExp)
             return _adapter.storageVariable(varExp);
 
+        // `obj.Base` names the same object as `obj`.
+        if (auto dotType = expression.isDotTypeExp)
+            return resolve(dotType.e1);
+
         if (auto cast_ = expression.isCastExp) {
             if (isIntegral(cast_.e1.type) && isIntegral(expression.type))
                 return resolve(cast_.e1);
