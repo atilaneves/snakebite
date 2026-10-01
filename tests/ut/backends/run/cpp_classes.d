@@ -330,3 +330,241 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE hits an internal assertion (`dinterpret.d:4777`) on "
+        ~ "`destroy` of a derived C++ class"),
+)) {
+    @("cppClass.destroyThroughBaseRunsBothDestructors." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C++) class Base {
+                int* log;
+                this(int* log) { this.log = log; }
+                ~this() { *log = *log * 10 + 1; }
+            }
+            extern(C++) class Derived: Base {
+                this(int* log) { super(log); }
+                ~this() { *log = *log * 10 + 2; }
+            }
+            void main() {
+                int log;
+                Base base = new Derived(&log);
+                destroy(base);
+                assert(log == 21);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("cppClass.cppClassHoldsDClassAndReverse." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Plain {
+                Cpp cpp;
+                int value() { return 3; }
+            }
+            extern(C++) class Cpp {
+                Plain plain;
+                int value() { return 4; }
+            }
+            void main() {
+                auto plain = new Plain;
+                auto cpp = new Cpp;
+                plain.cpp = cpp;
+                cpp.plain = plain;
+                assert(plain.cpp.value == 4);
+                assert(cpp.plain.value == 3);
+                assert(cpp.plain.cpp.plain.value == 3);
+                assert(plain.toString.length > 0);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("cppClass.cppStructWithMethods." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C++) struct Point {
+                int x;
+                int y;
+                int sum() const { return x + y; }
+                void move(int dx, int dy) { x += dx; y += dy; }
+                static Point origin() { return Point(0, 0); }
+            }
+            void main() {
+                auto point = Point(1, 2);
+                assert(point.sum == 3);
+                point.move(10, 20);
+                assert(point.sum == 33);
+                assert(Point.origin.sum == 0);
+                assert(Point.sizeof == 8);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("cppClass.namespaceClassAndFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C++, "geometry") {
+                class Shape {
+                    int sides() { return 0; }
+                }
+                class Square: Shape {
+                    override int sides() { return 4; }
+                }
+                int twice(int value) { return value * 2; }
+                struct Size { int width; int area() { return width * width; } }
+            }
+            void main() {
+                Shape shape = new Square;
+                assert(shape.sides == 4);
+                assert(twice(shape.sides) == 8);
+                assert(Size(3).area == 9);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("cppClass.finalClass." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C++) class Base {
+                int value() { return 1; }
+            }
+            extern(C++) final class Leaf: Base {
+                int extra = 5;
+                override int value() { return extra; }
+                int more() { return extra + 1; }
+            }
+            extern(C++) final class Alone {
+                int value() { return 8; }
+            }
+            void main() {
+                auto leaf = new Leaf;
+                Base base = leaf;
+                assert(base.value == 5);
+                assert(leaf.more == 6);
+                assert((new Alone).value == 8);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("cppClass.abstractClass." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C++) abstract class Shape {
+                abstract int sides();
+                int twice() { return sides * 2; }
+            }
+            extern(C++) class Square: Shape {
+                override int sides() { return 4; }
+            }
+            void main() {
+                Shape shape = new Square;
+                assert(shape.sides == 4);
+                assert(shape.twice == 8);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("cppClass.superCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C++) class Base {
+                int value() { return 1; }
+            }
+            extern(C++) class Middle: Base {
+                override int value() { return super.value + 10; }
+            }
+            extern(C++) class Derived: Middle {
+                override int value() { return super.value + 100; }
+            }
+            void main() {
+                Base base = new Derived;
+                assert(base.value == 111);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not support a pointer cast from an interface to `void*`"),
+)) {
+    @("cppClass.secondInterfaceAdjustsThis." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C++) interface Shape {
+                int sides();
+            }
+            extern(C++) interface Named {
+                int code();
+                int more(int extra);
+            }
+            extern(C++) class Square: Shape, Named {
+                int field = 7;
+                int sides() { return field + 1; }
+                int code() { return field + 2; }
+                int more(int extra) { return field + extra; }
+            }
+            extern(C++) class Big: Square {
+                int other = 100;
+                override int code() { return field + other; }
+            }
+            void main() {
+                auto square = new Square;
+                Shape shape = square;
+                Named named = square;
+                assert(cast(void*) shape !is cast(void*) named);
+                assert(shape.sides == 8);
+                assert(named.code == 9);
+                assert(named.more(3) == 10);
+                Named big = new Big;
+                assert(big.code == 107);
+                assert(big.more(1) == 8);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the static variable `typeid(Counter)`"),
+)) {
+    @("cppClass.typeidOfType." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C++) class Counter {
+                int count = 6;
+                int value() { return count; }
+            }
+            void main() {
+                assert(typeid(Counter).initializer.length
+                    == __traits(classInstanceSize, Counter));
+                assert(Counter.classinfo is typeid(Counter));
+                assert(typeid(Counter).base is null);
+            }
+        });
+    }
+}
