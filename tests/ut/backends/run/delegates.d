@@ -615,3 +615,75 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+// A dual-context member returns a delegate that reads both contexts. The
+// delegate's context is the frame of the member, which holds the address
+// of the pair, so the pair must outlive the function that made the call:
+// dmd declares it as a closure variable of the caller (`CallExp.vthis2`).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE does not support closures"),
+)) {
+    @("callDelegateFromDualContextMemberAfterCallerReturned."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder {
+                int base;
+                int delegate() make(alias callee)() {
+                    return () => base + callee();
+                }
+            }
+            int delegate() build(Holder* holder) {
+                int local = 40;
+                int nested() { return local; }
+                return holder.make!nested();
+            }
+            int clobber(int depth) {
+                int[32] junk = 7;
+                return depth == 0 ? junk[3] : clobber(depth - 1) + junk[5];
+            }
+            int main() {
+                auto holder = new Holder(2);
+                auto callback = build(holder);
+                clobber(8);
+                return callback() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// As above with a class receiver.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE does not support closures"),
+)) {
+    @("callDelegateFromDualContextClassMemberAfterCallerReturned."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Holder {
+                int base = 2;
+                int delegate() make(alias callee)() {
+                    return () => base + callee();
+                }
+            }
+            int delegate() build(Holder holder) {
+                int local = 40;
+                int nested() { return local; }
+                return holder.make!nested();
+            }
+            int clobber(int depth) {
+                int[32] junk = 7;
+                return depth == 0 ? junk[3] : clobber(depth - 1) + junk[5];
+            }
+            int main() {
+                auto holder = new Holder;
+                auto callback = build(holder);
+                clobber(8);
+                return callback() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
