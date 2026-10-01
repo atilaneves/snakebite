@@ -253,3 +253,79 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// druntime reads `ClassFlags.isCPPclass` to know that vtable slot 0 of an
+// object holds a method, not a `TypeInfo_Class`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not implement `typeid(Resource).m_flags`"),
+)) {
+    @("cppClass.classInfoSaysCppClass." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C++) class Resource {
+                int value() { return 1; }
+                ~this() {}
+            }
+            void main() {
+                assert(typeid(Resource).m_flags
+                    & TypeInfo_Class.ClassFlags.isCPPclass);
+            }
+        });
+    }
+}
+
+// `TypeInfo_Class.create` allocates through `_d_newclass`. That function
+// asks the GC to finalize an object with a destructor, unless the class is
+// an `extern(C++)` class: the finalizer reads the `TypeInfo_Class` from
+// vtable slot 0, and an `extern(C++)` class has a method there.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read `typeid(Resource)`: it is a static variable"),
+)) {
+    @("cppClass.createdThroughClassInfoIsNotFinalized." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C++) class Resource {
+                int value() { return 1; }
+                ~this() {}
+            }
+            void main() {
+                import core.memory: GC;
+                auto created = cast(void*) typeid(Resource).create;
+                assert(created !is null);
+                assert(!(GC.getAttr(created) & GC.BlkAttr.FINALIZE));
+                assert((cast(Resource) created).value == 1);
+            }
+        });
+    }
+}
+
+// A class that implements an interface named `IUnknown` is a COM class.
+// druntime reads `ClassFlags.isCOMclass` to allocate it outside the GC.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not implement `typeid(Impl).m_flags`"),
+)) {
+    @("comClass.classInfoSaysComClass." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            interface IUnknown {
+                int ping();
+            }
+            class Impl: IUnknown {
+                extern(Windows) int ping() { return 5; }
+            }
+            void main() {
+                assert(typeid(Impl).m_flags
+                    & TypeInfo_Class.ClassFlags.isCOMclass);
+                assert(typeid(IUnknown).info.m_flags
+                    & TypeInfo_Class.ClassFlags.isCOMclass);
+            }
+        });
+    }
+}
