@@ -346,3 +346,85 @@ unittest {
         }
     });
 }
+
+
+// A delegate literal outside every function has no frame to point at, so
+// calling it through a manifest constant gives it a null context.
+static foreach (backend; Matrix!()) {
+    @("callEnumDelegateLiteral." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        3.shouldBeRetOf!(backend, q{
+            enum dg = delegate int() => 3;
+            int run() { return dg(); }
+        }, "run");
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("callEnumDelegateLiteralWithParameters." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            enum dg = delegate int(int a, int b) => a * 10 + b;
+            int run() { return dg(4, 2); }
+        }, "run");
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("callEnumDelegateLiteralReturningStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        63L.shouldBeRetOf!(backend, q{
+            struct Pair { int a; long b; }
+            enum dg = delegate Pair(int x) => Pair(x, x * 2L);
+            long run() {
+                const pair = dg(21);
+                return pair.a + pair.b;
+            }
+        }, "run");
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("callEnumDelegateLiteralThroughAlias." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        3.shouldBeRetOf!(backend, q{
+            enum dg = delegate int() => 3;
+            alias same = dg;
+            int run() { return same(); }
+        }, "run");
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("callEnumDelegateLiteralInTemplate." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(backend, q{
+            template Make(int n) {
+                enum Make = delegate int() => n;
+            }
+            int run() { return Make!7(); }
+        }, "run");
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("callDelegateLiteralImmediately." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                assert((delegate int() => 3)() == 3);
+            }
+        });
+    }
+}

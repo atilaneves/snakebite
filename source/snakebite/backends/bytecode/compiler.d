@@ -632,8 +632,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import dmd.expressionsem: toInteger;
     import dmd.typesem: nextOf, toBasetype;
     import snakebite.frontend.dmd.delegates:
-        DelegateTarget, delegateTargetOf,
-        outerFunctionOf;
+        DelegateTarget, delegateTargetOf, outerFunctionOf;
     import snakebite.backends.aggregateinit: InitStep, NewPlan;
     import snakebite.backends.builtins: BuiltinCall;
     import snakebite.backends.calls: CallSelection;
@@ -6181,9 +6180,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // static chain rather than through `expression.e1` - the same
         // reach `contextAddressOf` gives any other captured variable.
         if (callee.isThis is null) {
-            auto parent = callee.toParent2();
-            auto parentFunction =
-                parent is null ? null : parent.isFuncDeclaration;
+            auto parentFunction = outerFunctionOf(callee);
             if (parentFunction is null) {
                 const context = reserveTemp(pointerFacts);
                 emit(&opConstant, context, addConstant(0), size_t.sizeof);

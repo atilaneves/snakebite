@@ -5767,6 +5767,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     ) {
         import snakebite.nativelayout: storeIntegral;
         import snakebite.backends.calls: arityMismatches;
+        import snakebite.frontend.dmd.delegates: outerFunctionOf;
         import std.conv: text;
         import dmd.astenums: STC;
 
@@ -5834,17 +5835,19 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 // A nested callee's `vthis` is its enclosing context. A
                 // delegate supplies this context directly because it may
                 // outlive the call that created it; a direct call finds it
-                // by walking the current static chain.
-                auto enclosing = function_.toParent2() is null
-                    ? null : function_.toParent2().isFuncDeclaration;
-                if (enclosing is null)
-                    throw new SnakebiteException(
-                        text("interpreter cannot call `",
-                            function_.toString, "`: its enclosing ",
-                            "function could not be determined"),
+                // by walking the current static chain. A callee with no
+                // enclosing function has no frame to point at.
+                auto enclosing = outerFunctionOf(function_);
+                size_t context;
+                if (enclosing !is null) {
+                    auto base = tryContextOf(enclosing);
+                    assert(
+                        base !is null,
+                        "a direct call's enclosing function is on the "
+                            ~ "static chain",
                     );
-
-                const context = cast(size_t) tryContextOf(enclosing);
+                    context = cast(size_t) base;
+                }
                 storeIntegral(
                     frame.base + layout.hiddenThis.parameter.offset,
                     context, size_t.sizeof);
