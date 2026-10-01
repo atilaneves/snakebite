@@ -24,7 +24,7 @@ private alias DependencyImage =
 public struct Repl {
     import dmd.dmodule: Module;
     import snakebite.backends: Backend, BackendName;
-    import snakebite.frontend.compiler: FrontendFlags;
+    import snakebite.frontend.compiler: checksOf, FrontendFlags;
 
     private BackendName _backendName;
     private string[] _importPaths;
@@ -143,6 +143,7 @@ public struct Repl {
 
         auto function_ = findFunction(module_, evalName);
         auto program = Program(interpretedModules(module_, _importPaths));
+        program.checks = checksOf(_flags);
         program.dependencyImage = _dependencyImage;
         auto backend = makeBackend(
             _backendName,
@@ -214,6 +215,7 @@ public struct Repl {
         }
 
         auto program = Program(interpretedModules(module_, _importPaths));
+        program.checks = checksOf(_flags);
         program.dependencyImage = _dependencyImage;
         accept(
             fullSource,

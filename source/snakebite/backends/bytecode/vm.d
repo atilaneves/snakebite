@@ -351,6 +351,7 @@ package struct AssertSite {
     package string message;
     package string file;
     package size_t line;
+    package bool halt;
 }
 
 
@@ -917,9 +918,25 @@ private const(Instruction)* runAssert(Decoded)(
         return execution.next;
 
     import core.exception: AssertError;
+    import snakebite.backends.haltprocess: haltProcess;
 
     const site = execution.assertSites[execution.source];
+    if (site.halt)
+        haltProcess;
     throw new AssertError(site.message, site.file, site.line);
+}
+
+
+// Ends the process, as a `HaltExp` does in compiled code.
+package alias opHalt =
+    execute!(runHalt, OperandKind.immediate, OperandKind.immediate);
+
+private const(Instruction)* runHalt(Decoded)(
+    ref Decoded execution,
+) {
+    import snakebite.backends.haltprocess: haltProcess;
+
+    haltProcess;
 }
 
 

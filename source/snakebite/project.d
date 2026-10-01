@@ -34,7 +34,8 @@ public struct Project {
 // the second alone; see `snakebite.execution.prepareProject`.
 public Project loadProject(in string directory, SourceSet sources) {
     import snakebite.backends: Program;
-    import snakebite.frontend.compiler: FrontendFlags, parseRootModules;
+    import snakebite.frontend.compiler:
+        checksOf, FrontendFlags, parseRootModules;
     import std.algorithm.iteration: map;
     import std.array: array;
     import std.path: absolutePath, baseName, buildNormalizedPath;
@@ -57,6 +58,7 @@ public Project loadProject(in string directory, SourceSet sources) {
         project.directory,
     );
     project.program = Program(parsed, project.name);
+    project.program.checks = checksOf(flags);
 
     return project;
 }

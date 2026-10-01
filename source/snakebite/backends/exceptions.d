@@ -93,14 +93,18 @@ public struct AssertInvariantPlan {
 // mangled linker symbol.
 public AssertInvariantPlan assertInvariantPlanOf(
     imported!"dmd.expression".AssertExp expression,
+    in imported!"snakebite.frontend.checks".Checks checks,
 ) {
     import dmd.astenums: CHECKENABLE, Tclass, Tpointer, Tstruct;
-    import dmd.globals: global;
     import dmd.typesem: nextOf, toBasetype;
+    import snakebite.frontend.checks: Checks;
 
     auto none = AssertInvariantPlan(AssertInvariantPlan.Kind.none);
 
-    if (global.params.useInvariants != CHECKENABLE.on)
+    // `-checkaction=halt` compiles `assert(e)` as `e || halt`, which has no
+    // invariant call.
+    if (checks.invariants != CHECKENABLE.on
+            || checks.failure == Checks.Failure.halt)
         return none;
 
     auto type = expression.e1.type.toBasetype;

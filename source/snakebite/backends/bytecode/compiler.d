@@ -42,6 +42,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import snakebite.backends.classinfo;
     import snakebite.backends.bytecode.vm: Function, Vm;
     import snakebite.backends.layout: FrameLayout;
+    import snakebite.frontend.checks: Checks;
     import snakebite.sharedtable: SharedTable;
     import snakebite.exception: SnakebiteException;
     import snakebite.framestack: defaultFrameCapacity;
@@ -261,6 +262,10 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 
     package bool isGuestFunction(FuncDeclaration function_) const {
         return _program.isInterpreted(function_);
+    }
+
+    package Checks checks() const {
+        return _program.checks;
     }
 
     // Records that `compiled` is the word this backend stores for
@@ -606,7 +611,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opCastAs, opCastFixedAs,
         opCastToBool, opCastWidenSigned, opCastWidenUnsigned, opComplement,
         opAlloca, opArrayEqual, opComplex, opComplexNegate, opConstant, opCopy,
-        opCopyFixed, opThenReturn,
+        opCopyFixed, opHalt, opThenReturn,
         opDivideSigned, opDivideUnsigned,
         opEqual, opEqualBranch, opGreaterOrEqualSignedBranch,
         opGreaterOrEqualUnsignedBranch, opGreaterThanSignedBranch,
@@ -1933,13 +1938,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     //
     private void compileAssert(AssertExp expression) {
         import dmd.astenums: Tnoreturn;
+        import snakebite.backends.checkplan: assertPlanOf, FailurePlan;
         import snakebite.backends.exceptions: assertFailureOf;
+
+        const plan = assertPlanOf(_bytecode.checks);
+        if (plan.kind == FailurePlan.Kind.ignore)
+            return;
 
         const conditionOffset = compileCondition(expression.e1);
         const width = conditionWidth(expression.e1);
 
         const failure = assertFailureOf(expression);
-        _assertSites ~= AssertSite(failure.message, failure.file, failure.line);
+        _assertSites ~= AssertSite(
+            failure.message, failure.file, failure.line,
+            plan.kind == FailurePlan.Kind.halt);
         emit(&opAssert, conditionOffset, _assertSites.length - 1, width);
         _finished = expression.type.ty == Tnoreturn;
 
@@ -1965,7 +1977,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.backends.exceptions:
             AssertInvariantPlan, assertInvariantPlanOf;
 
-        auto plan = assertInvariantPlanOf(expression);
+        auto plan = assertInvariantPlanOf(expression, _bytecode.checks);
         final switch (plan.kind) with (AssertInvariantPlan.Kind) {
             case none:
                 return;
@@ -4758,6 +4770,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileAssert(expression);
     }
 
+    override void visit(HaltExp) {
+        emit(&opHalt, 0, 0, 0);
+        _finished = true;
+    }
+
     override void visit(AssignExp expression) {
         compileAssign(expression, _destination);
     }
@@ -6824,17 +6841,37 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // bounds, and the call is skipped. `extraArgs` are the hook's
     // parameters after `(file, line)`, already evaluated into frame slots
     // by the caller - `index`/`length` for an index check, `lower`/
-    // `upper`/`length` for a slice.
+    // `upper`/`length` for a slice. A function compiled without bounds
+    // checks gets nothing.
     private void compileBoundsHook(
         in size_t inBoundsOffset,
         in DruntimeHook hook,
         Arg[] extraArgs,
         in Loc loc,
     ) {
-        auto plan = planOf(_bytecode._plans, hook);
+        import snakebite.backends.checkplan: boundsPlanOf, FailurePlan;
+
+        const plan = boundsPlanOf(_bytecode.checks, _function);
+        if (plan.kind == FailurePlan.Kind.ignore)
+            return;
 
         const branchIndex = _instructions.length;
         emit(&opBranchTrue, inBoundsOffset, 0, 1);
+
+        if (plan.kind == FailurePlan.Kind.halt)
+            emit(&opHalt, 0, 0, 0);
+        else
+            compileBoundsHookCall(hook, extraArgs, loc);
+
+        *branchTargetField(_instructions[branchIndex]) = _instructions.length;
+    }
+
+    private void compileBoundsHookCall(
+        in DruntimeHook hook,
+        Arg[] extraArgs,
+        in Loc loc,
+    ) {
+        auto plan = planOf(_bytecode._plans, hook);
 
         const fileOffset = reserveTemp(pointerFacts);
         emit(&opConstant, fileOffset,
@@ -6851,8 +6888,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         ] ~ extraArgs;
         _callSites ~= CallSite.native(cast(const(void)*) plan, args, 0);
         emit(&opCall, discardResult, _callSites.length - 1, 0);
-
-        *branchTargetField(_instructions[branchIndex]) = _instructions.length;
     }
 
     // Fails through the druntime hook unless `smaller <= larger`, unsigned.

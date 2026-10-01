@@ -13,6 +13,7 @@ public struct Program {
     import dmd.dmodule: Module;
     import dmd.func: FuncDeclaration;
     import dmd.dsymbol: Dsymbol;
+    import snakebite.frontend.checks: Checks;
 
     // `func` is null when the program has no `main`, which is not an error: a
     // bare directory of `.d` files can be a library.
@@ -27,6 +28,7 @@ public struct Program {
     FuncDeclaration[] moduleConstructors;
     Main main;
     string name;
+    Checks checks;
     // Prepared for this project's execution before any guest code runs.
     const(DependencyImage)* dependencyImage;
     const(DependencyImage)* testStartupImage;

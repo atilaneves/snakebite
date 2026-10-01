@@ -1201,7 +1201,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     // Every crossing of the barrier through a `CallPlan` shares this catch
-    // chain (`callHost`, `throwArrayBounds`, `callVariadicNative`): native
+    // chain (`callHost`, `failArrayBounds`, `callVariadicNative`): native
     // code throws a real `Throwable`, not the `GuestException` wrapper a
     // guest `throw` or a failed native `assert` produces (`throwGuest`,
     // `visit(HaltStatement)`) - a guest `catch` only ever looks for that
@@ -1228,18 +1228,31 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     // Calls druntime's own bounds-failure hook - `_d_arraybounds_indexp`
     // or `_d_arraybounds_slicep`, see `snakebite.backends.druntimehooks`
-    // - the same one the bytecode compiler emits a call to. It never
-    // returns, so every caller here only reaches this once its own bounds
-    // check already failed; wrapping its throw through `callPlan`, the
-    // same as any other native call, lets a guest `catch (RangeError)`
-    // see it, instead of the interpreter's own refusal or a hand-built
-    // guest exception.
-    extern(D) private void throwArrayBounds(
+    // - the same one the bytecode compiler emits a call to. Every caller
+    // here only reaches this once its own bounds check already failed;
+    // wrapping the hook's throw through `callPlan`, the same as any other
+    // native call, lets a guest `catch (RangeError)` see it, instead of
+    // the interpreter's own refusal or a hand-built guest exception. It
+    // returns only when the current function is not compiled with bounds
+    // checks, and the caller then goes on as unchecked code does.
+    extern(D) private void failArrayBounds(
         in DruntimeHook hook,
         in Loc loc,
         scope const(void*)[] extraArguments,
     ) {
+        import snakebite.backends.checkplan: boundsPlanOf, FailurePlan;
         import snakebite.backends.druntimehooks: planOf;
+        import snakebite.backends.haltprocess: haltProcess;
+
+        const failure = boundsPlanOf(_program.checks, _function);
+        final switch (failure.kind) with (FailurePlan.Kind) {
+            case ignore:
+                return;
+            case halt:
+                haltProcess;
+            case raise:
+                break;
+        }
 
         auto plan = planOf(*_plans, hook);
 
@@ -1953,7 +1966,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // into a `null` place, the same convention `execute` already uses for
     // a discarded `void` return.
     private void runForEffect(Expression expression) {
-        if (expression.isDeclarationExp !is null) {
+        // dmd builds the `HaltExp` of a `switch` default without analysing
+        // it, so it has no type.
+        if (expression.isDeclarationExp !is null
+                || expression.isHaltExp !is null) {
             expression.accept(this);
             return;
         }
@@ -3063,7 +3079,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (value < length)
                 return;
 
-            evaluator.throwArrayBounds(
+            evaluator.failArrayBounds(
                 DruntimeHook.indexBounds, expression.loc,
                 [cast(const(void)*) index,
                     cast(const(void)*) &length],
@@ -4581,17 +4597,27 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // still raises the same guest-visible `AssertError` as any failed
     // assertion.
     override void visit(AssertExp expression) {
+        import snakebite.backends.checkplan: assertPlanOf, FailurePlan;
         import snakebite.backends.exceptions:
             AssertInvariantPlan, assertInvariantPlanOf;
+
+        const failure = assertPlanOf(_program.checks);
+        final switch (failure.kind) with (FailurePlan.Kind) {
+            case ignore:
+                return;
+            case raise:
+            case halt:
+                break;
+        }
 
         // `assertInvariantPlanOf` answers the same question dmd's own
         // glue layer (`e2ir.d`'s `visitAssert`) asks of `e1`'s type alone,
         // gated the same way on `useInvariants`: every other assert - the
         // overwhelming majority - takes the plain path unchanged below.
-        auto plan = assertInvariantPlanOf(expression);
+        auto plan = assertInvariantPlanOf(expression, _program.checks);
         if (plan.kind == AssertInvariantPlan.Kind.none) {
             if (!truthOf(expression.e1))
-                throwAssertFailure(expression);
+                failAssertion(expression);
             return;
         }
 
@@ -4612,7 +4638,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         auto object =
             cast(void*) loadIntegral(buffer.ptr, size_t.sizeof, false);
         if (object is null) {
-            throwAssertFailure(expression);
+            failAssertion(expression);
             return;
         }
 
@@ -4622,11 +4648,23 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             callStructInvariant(plan.structInvariant, object);
     }
 
-    // What a failed `assert` throws to the guest, shared by every path
-    // through `visit(AssertExp)` above.
-    private void throwAssertFailure(AssertExp expression) {
+    // What a failed `assert` does, shared by every path through
+    // `visit(AssertExp)` above: halt the process, or throw to the guest.
+    private void failAssertion(AssertExp expression) {
         import core.exception: AssertError;
+        import snakebite.backends.checkplan: assertPlanOf, FailurePlan;
+        import snakebite.backends.haltprocess: haltProcess;
         import snakebite.backends.exceptions: assertFailureOf;
+
+        const plan = assertPlanOf(_program.checks);
+        final switch (plan.kind) with (FailurePlan.Kind) {
+            case ignore:
+                assert(0);
+            case halt:
+                haltProcess;
+            case raise:
+                break;
+        }
 
         // What D does here is throw an `AssertError` the guest can catch.
         // Keep it inside an interpreter-owned wrapper so a guest catch does
@@ -4634,6 +4672,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const failure = assertFailureOf(expression);
         throw new GuestException(
             new AssertError(failure.message, failure.file, failure.line));
+    }
+
+    // dmd makes one for a `switch` default under `-release` or
+    // `-checkaction=halt`, and for `assert(0)` with assertions off.
+    override void visit(HaltExp) {
+        import snakebite.backends.haltprocess: haltProcess;
+
+        haltProcess;
     }
 
     // A class reference's own invariant is druntime's job, not this
@@ -4814,7 +4860,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             import snakebite.backends.druntimehooks: DruntimeHook;
 
             const reportedLength = plan.reportsSourceLength ? sourceLength : 0;
-            throwArrayBounds(
+            failArrayBounds(
                 DruntimeHook.sliceBounds, expression.loc,
                 [cast(const(void)*) &lower, cast(const(void)*) &upper,
                     cast(const(void)*) &reportedLength],
@@ -5401,7 +5447,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // directly by linker symbol - never through an AST `CallExp` any visitor
     // could walk. This resolves and calls that same compiled hook a real
     // build would, rather than reimplementing the UTF-8/UTF-16 encoding
-    // here, through the same `rawPlanOf`/`callPlan` shape `throwArrayBounds`
+    // here, through the same `rawPlanOf`/`callPlan` shape `failArrayBounds`
     // uses for a druntime hook with no `FuncDeclaration` of its own - the
     // bytecode compiler's own `visitUnloweredCatDcharAssign` does the
     // same. A plain cast of the resolved address to a function pointer
