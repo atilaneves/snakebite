@@ -597,3 +597,328 @@ static foreach (backend; Matrix!(
         }, "answer");
     }
 }
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("call.variadicC.startArg.int." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        15.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg, va_end, va_list, va_start;
+            extern(C) int sum(int count, ...) {
+                va_list args;
+                va_start(args, count);
+                int total;
+                foreach (i; 0 .. count)
+                    total += va_arg!int(args);
+                va_end(args);
+                return total;
+            }
+            int answer() { return sum(3, 4, 5, 6); }
+        }, "answer");
+    }
+}
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("call.variadicC.startArg.long." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        6000000007.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg, va_end, va_list, va_start;
+            extern(C) long sum(int count, ...) {
+                va_list args;
+                va_start(args, count);
+                long total;
+                foreach (i; 0 .. count)
+                    total += va_arg!long(args);
+                va_end(args);
+                return total;
+            }
+            long answer() { return sum(2, 3_000_000_000L, 3_000_000_007L); }
+        }, "answer");
+    }
+}
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("call.variadicC.startArg.double." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.5.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg, va_end, va_list, va_start;
+            extern(C) double sum(int count, ...) {
+                va_list args;
+                va_start(args, count);
+                double total = 0;
+                foreach (i; 0 .. count)
+                    total += va_arg!double(args);
+                va_end(args);
+                return total;
+            }
+            double answer() { return sum(3, 1.5, 2.0, 4.0); }
+        }, "answer");
+    }
+}
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("call.variadicC.startArg.pointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg, va_end, va_list, va_start;
+            extern(C) int first(int count, ...) {
+                va_list args;
+                va_start(args, count);
+                auto pointer = va_arg!(int*)(args);
+                va_end(args);
+                return *pointer;
+            }
+            int answer() {
+                int value = 42;
+                return first(1, &value);
+            }
+        }, "answer");
+    }
+}
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("call.variadicC.startArg.struct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1234.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg, va_end, va_list, va_start;
+            struct Pair { int first; int second; }
+            extern(C) int firstPair(int count, ...) {
+                va_list args;
+                va_start(args, count);
+                const pair = va_arg!Pair(args);
+                va_end(args);
+                return pair.first * 100 + pair.second;
+            }
+            int answer() { return firstPair(1, Pair(12, 34)); }
+        }, "answer");
+    }
+}
+// `va_arg(ap, ref T)` stores the next extra argument in the variable.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("call.variadicC.startArg.ref." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        9.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg, va_end, va_list, va_start;
+            extern(C) int sum(int count, ...) {
+                va_list args;
+                va_start(args, count);
+                int total;
+                foreach (i; 0 .. count) {
+                    int next;
+                    va_arg(args, next);
+                    total += next;
+                }
+                va_end(args);
+                return total;
+            }
+            int answer() { return sum(2, 4, 5); }
+        }, "answer");
+    }
+}
+
+
+// A second `va_start` starts again from the first extra argument.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("call.variadicC.startRestart." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        18.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg, va_end, va_list, va_start;
+            extern(C) int twice(int count, ...) {
+                va_list args;
+                int total;
+                foreach (pass; 0 .. 2) {
+                    va_start(args, count);
+                    foreach (i; 0 .. count)
+                        total += va_arg!int(args);
+                    va_end(args);
+                }
+                return total;
+            }
+            int answer() { return twice(3, 1, 3, 5); }
+        }, "answer");
+    }
+}
+// A `va_copy` has its own position: reading it leaves the original alone.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("call.variadicC.copy." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        18.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg, va_copy, va_end, va_list, va_start;
+            extern(C) int sumTwice(int count, ...) {
+                va_list args;
+                va_start(args, count);
+                va_list copy;
+                va_copy(copy, args);
+                int total;
+                foreach (i; 0 .. count)
+                    total += va_arg!int(args);
+                foreach (i; 0 .. count)
+                    total += va_arg!int(copy);
+                va_end(copy);
+                va_end(args);
+                return total;
+            }
+            int answer() { return sumTwice(3, 1, 3, 5); }
+        }, "answer");
+    }
+}
+
+
+// A `va_list` parameter refers to the caller's cursor, so the callee reads
+// the caller's extra arguments.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("call.variadicC.toGuest." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        12.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg, va_end, va_list, va_start;
+            static int vsum(int count, va_list args) {
+                int total;
+                foreach (i; 0 .. count)
+                    total += va_arg!int(args);
+                return total;
+            }
+            extern(C) int sum(int count, ...) {
+                va_list args;
+                va_start(args, count);
+                const total = vsum(count, args);
+                va_end(args);
+                return total;
+            }
+            int answer() { return sum(3, 3, 4, 5); }
+        }, "answer");
+    }
+}
+
+
+// A `va_list` can be passed to a C function such as `vsnprintf`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("call.variadicC.toHost." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_end, va_list, va_start;
+            import core.stdc.stdio: vsnprintf;
+            extern(C) int format(const(char)* pattern, ...) {
+                char[32] buffer;
+                va_list args;
+                va_start(args, pattern);
+                const length = vsnprintf(buffer.ptr, buffer.length, pattern, args);
+                va_end(args);
+                return length == 11 && buffer[0 .. 11] == "12 3.5 word" ? 1 : 0;
+            }
+            int answer() { return format("%d %.1f %s", 12, 3.5, "word".ptr); }
+        }, "answer");
+    }
+}
+
+
+// The compiler turns a call to `alloca` into stack allocation, so the
+// memory lasts until the calling function returns and has no host symbol.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call alloca"),
+)) {
+    @("call.alloca." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            import core.stdc.stdlib: alloca;
+            int answer() {
+                auto numbers = cast(int*) alloca(2 * int.sizeof);
+                numbers[0] = 40;
+                numbers[1] = 2;
+                return numbers[0] + numbers[1];
+            }
+        }, "answer");
+    }
+}
+
+
+// Alloca memory is stack memory, which the GC scans: it can hold the
+// only pointer to a GC object.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call alloca"),
+)) {
+    @("call.alloca.holdsGcPointers." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        8028.shouldBeRetOf!(backend, q{
+            import core.memory: GC;
+            import core.stdc.stdlib: alloca;
+            static void fill(int** slots) {
+                foreach (i; 0 .. 8) {
+                    slots[i] = new int;
+                    *slots[i] = 1000 + i;
+                }
+            }
+            static void churn(int** slots) {
+                foreach (i; 0 .. 100_000) {
+                    auto other = new int;
+                    *other = -1;
+                }
+            }
+            int answer() {
+                auto slots = cast(int**) alloca(8 * (int*).sizeof);
+                fill(slots);
+                GC.collect;
+                churn(slots);
+                int total;
+                foreach (i; 0 .. 8)
+                    total += *slots[i];
+                return total;
+            }
+        }, "answer");
+    }
+}
+
+
+// The compiler finds `alloca` by its symbol name. A function with that
+// identifier and a different symbol is a normal host function.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("call.alloca.otherSymbol." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        5.shouldBeRetOf!(backend, q{
+            pragma(mangle, "abs") extern(C) int alloca(int);
+            int answer() { return alloca(-5); }
+        }, "answer");
+    }
+}

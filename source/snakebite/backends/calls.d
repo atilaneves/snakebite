@@ -13,7 +13,8 @@ public struct CallSelection {
 
     import dmd.func: BUILTIN, FuncDeclaration;
 
-    import snakebite.backends.builtins: BuiltinCall, ParameterType;
+    import snakebite.backends.builtins:
+        BuiltinCall, ParameterType, startVariadicEntry;
     import snakebite.sharedtable: SharedTable;
 
     // Every call site resolves to exactly one of these. `guest` and
@@ -24,7 +25,13 @@ public struct CallSelection {
     // host symbol FFI could ever resolve (they compile to an inline
     // instruction, not a call). `snakebite.backends.builtins` holds the
     // wrapper `builtinEntry` calls for that route.
-    public enum Route { guest, native, builtin }
+    //
+    // `vaStart` is the one intrinsic that is not a pure function of its
+    // arguments: it also reads the cursor of the function that calls it,
+    // so each backend appends that cursor to the call's arguments.
+    // `alloca` is the other: its memory lives as long as the activation
+    // that calls it, which only the backend knows how to hold.
+    public enum Route { guest, native, builtin, vaStart, alloca }
 
     // The dmd-touching questions a function's route needs, decided once
     // per function and read back without a lock (ADR-0006, finding
@@ -153,7 +160,10 @@ public struct CallSelection {
         // a builtin - never a guest one, since there is no guest body to
         // run.
         if (function_.fbody is null)
-            return builtinDecision(function_);
+            return isVaStart(function_)
+                ? Decision(Route.vaStart, &startVariadicEntry)
+                : isAlloca(function_) ? Decision(Route.alloca)
+                : builtinDecision(function_);
 
         const type = typeFunctionOf(function_);
         if (type.parameterList.varargs == VarArg.variadic && hasNativeSymbol)
@@ -186,6 +196,26 @@ public struct CallSelection {
         const prefers = function_.isInstantiated() !is null
             ? !hasIndependentNativeSymbol : isGuest(function_);
         return Decision(prefers ? Route.guest : Route.native);
+    }
+
+    // The test dmd's own glue applies (`dmd.glue.toir.intrinsic_op`) to
+    // find `core.stdc.stdarg.va_start`, which `dmd.builtin` does not
+    // classify: a template instance named `va_start` in that module.
+    private static bool isVaStart(FuncDeclaration function_) {
+        const module_ = function_.getModule;
+        return function_.ident.toString == "va_start"
+            && function_.toParent.isTemplateInstance !is null
+            && module_ !is null && module_.md !is null
+            && module_.md.toString == "core.stdc.stdarg";
+    }
+
+    // dmd's backend turns a call to the function with the symbol `alloca`
+    // into stack allocation (`dmd.backend.x86.cod1`, by symbol name), not
+    // one with the identifier: `pragma(mangle)` can make them differ.
+    private static bool isAlloca(FuncDeclaration function_) {
+        import snakebite.frontend.dmd.mangle: mangledNameOf;
+
+        return function_.mangledNameOf == "alloca";
     }
 
     // Asks dmd for `function_`'s own compiler-intrinsic classification

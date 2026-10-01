@@ -16,6 +16,20 @@ public alias BuiltinCall = extern(C) void function(
 ) nothrow @nogc;
 
 
+// `core.stdc.stdarg.va_start` as compiled D treats it: an intrinsic of the
+// function that calls it, so it also reads that function's own cursor. The
+// backend appends the cursor to the two declared arguments, `ap` and the
+// last named parameter, which is ignored.
+public extern(C) void startVariadicEntry(
+    void*, scope const(void*)* arguments, size_t,
+) nothrow @nogc {
+    import snakebite.backends.variadic: startVariadic;
+
+    startVariadic(
+        *cast(void**) arguments[0], *cast(void**) arguments[2]);
+}
+
+
 // The concrete type a call's own first parameter declares - the other
 // half of this table's lookup key, since dmd's own `BUILTIN`
 // classification (`dmd.builtin.isBuiltin`) does not carry it: `sin

@@ -525,6 +525,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // so every enclosing visitor can continue its normal statement sequence.
     private ControlFlowState _controlFlow;
     private SwitchStatement _switchStatement;
+    private void[][] _activationAllocations;
     // `extern(D)`: only `Visitor`'s `visit` overloads need the C++
     // linkage.
     extern(D) public this(Shared* shared_) {
@@ -1126,6 +1127,22 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         case builtin:
             decision.builtinEntry(returnPlace, arguments, argumentCount);
             return;
+        case vaStart:
+            // The function that calls `va_start` is still the running one:
+            // `_layout` is only replaced below, for a guest callee.
+            const(void)*[3] withCursor;
+            withCursor[0 .. argumentCount] = arguments[0 .. argumentCount];
+            void* noCursor;
+            withCursor[argumentCount] = _layout.variadicCursor == size_t.max
+                ? cast(void*) &noCursor
+                : cast(void*) (_frameBase + _layout.variadicCursor);
+            decision.builtinEntry(
+                returnPlace, withCursor.ptr, withCursor.length);
+            return;
+        case alloca:
+            *cast(void**) returnPlace = allocateForActivation(
+                *cast(const(size_t)*) arguments[0]);
+            return;
         case guest:
             break;
         }
@@ -1152,6 +1169,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
             _controlFlow.resume;
         }
+    }
+
+    // `alloca`'s memory is the running function's, as compiled D has it:
+    // the guard of that function's activation lets go of it on return.
+    private void* allocateForActivation(in size_t size) {
+        enum alignment = 16;
+        // A block with pointers: the GC scans it, as it scans a stack.
+        auto block = new void[](size + alignment);
+        _activationAllocations ~= block;
+        return cast(void*) ((cast(size_t) block.ptr + alignment - 1)
+            & ~size_t(alignment - 1));
     }
 
     private void callHost(
@@ -1294,6 +1322,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         private Identifier _pendingLoopLabel;
         private ControlFlowState _controlFlow;
         private SwitchStatement _switchStatement;
+        private void[][] _activationAllocations;
 
         @disable this();
         @disable this(this);
@@ -1310,6 +1339,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _pendingLoopLabel = evaluator._pendingLoopLabel;
             _controlFlow = evaluator._controlFlow;
             _switchStatement = evaluator._switchStatement;
+            _activationAllocations = evaluator._activationAllocations;
+            evaluator._activationAllocations = null;
         }
 
         ~this() {
@@ -1323,6 +1354,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _evaluator._pendingLoopLabel = _pendingLoopLabel;
             _evaluator._controlFlow = _controlFlow;
             _evaluator._switchStatement = _switchStatement;
+            _evaluator._activationAllocations = _activationAllocations;
         }
     }
 

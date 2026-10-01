@@ -602,7 +602,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opBranchTrue, opCall,
         opCastAs, opCastFixedAs,
         opCastToBool, opCastWidenSigned, opCastWidenUnsigned, opComplement,
-        opArrayEqual, opComplex, opComplexNegate, opConstant, opCopy,
+        opAlloca, opArrayEqual, opComplex, opComplexNegate, opConstant, opCopy,
         opCopyFixed, opThenReturn,
         opDivideSigned, opDivideUnsigned,
         opEqual, opEqualBranch, opGreaterOrEqualSignedBranch,
@@ -6300,6 +6300,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             compileBuiltinCall(type, arguments, loc, exprText,
                 destOffset, decision.builtinEntry);
             return;
+        case vaStart:
+            compileVaStart(type, arguments, loc, exprText,
+                destOffset, decision.builtinEntry);
+            return;
+        case alloca:
+            const size = reserveTemp(pointerFacts);
+            evalInto((*arguments)[0], size, size_t.sizeof);
+            emit(&opAlloca,
+                destOffset == discardResult
+                    ? reserveTemp(pointerFacts) : destOffset,
+                size, size_t.sizeof);
+            return;
         case guest:
             break;
         }
@@ -6523,6 +6535,28 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             (args, returnWidth) => CallSite.builtin(entry, args, returnWidth));
     }
 
+    // The cursor is the one input of `va_start` that is not an argument:
+    // it is a slot of the frame being compiled, so it joins the arguments
+    // here. A function with no cursor slot passes a null cursor.
+    private void compileVaStart(
+        TypeFunction type,
+        Expressions* arguments,
+        Loc loc,
+        string exprText,
+        in size_t destOffset,
+        BuiltinCall entry,
+    ) {
+        size_t cursor = _layout.variadicCursor;
+        if (cursor == size_t.max) {
+            cursor = reserveTemp(pointerFacts);
+            emit(&opZero, cursor, 0, size_t.sizeof);
+        }
+        compileBarrierCall(type, arguments, loc, exprText,
+            null, destOffset, /* allowExtraArguments */ false,
+            (args, returnWidth) => CallSite.builtin(
+                entry, args ~ Arg(cursor, 0, size_t.sizeof), returnWidth));
+    }
+
     // Where a native callee's result lands. A caller at statement level
     // discards it, but a MEMORY-class result is written through the
     // hidden return pointer whatever the caller does with it, so the
@@ -6548,7 +6582,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Expressions* arguments,
         in FrameLayout layout,
     ) {
-        import snakebite.backends.variadic: VariadicLayout;
+        import snakebite.backends.variadic: FirstState, VariadicLayout;
 
         const hasTypes = layout.variadicTypes != size_t.max;
         const firstExtra = hasTypes + layout.parameters.length;
@@ -6572,6 +6606,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 facts[i].size);
             result.values ~= Arg(storage + offset, 0, facts[i].size);
         }
+        emit(&opCopy, storage + FirstState.offset, storage, FirstState.size);
         const cursor = reserveTemp(pointerFacts);
         emit(&opFrameAddress, cursor, storage, size_t.sizeof);
         if (hasTypes) {

@@ -2019,6 +2019,23 @@ private const(Instruction)* runFrameAddress(Decoded)(
     return execution.next;
 }
 
+// Reserves the `size_t` bytes held at `execution.source` and writes their
+// address to `execution.destination`. The reservation lies above the
+// running activation, so it goes when that activation returns - how long
+// `alloca` memory lives.
+package alias opAlloca =
+    execute!(runAlloca, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runAlloca(Decoded)(
+    ref Decoded execution,
+) {
+    const size = *cast(const(size_t)*) (execution.source);
+    *cast(void**) (execution.destination) =
+        execution.frames.reserve(size, 16);
+    return execution.next;
+}
+
+
 // Zeroes `execution.width` bytes at `execution.destination` - a zero-init
 // struct
 // local or array element wider than the 8 bytes `opConstant`'s `storeWidth`
