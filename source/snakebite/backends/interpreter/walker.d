@@ -433,7 +433,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import snakebite.backends.aggregateinit: InitStep, NewPlan;
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.backend: Program;
-    import snakebite.frontend.dmd.delegates: DelegateTarget, outerFunctionOf;
+    import snakebite.frontend.dmd.delegates:
+        DelegateTarget, isCtfeVariable, outerFunctionOf;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.backends.closureplan: ClosurePlan, Hop;
     import snakebite.backends.dualcontext:
@@ -1507,18 +1508,21 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     // The answers about `type` that execution asks for: its own, its base
-    // type's, and its element's.
+    // type's, and its element's. The facts of `type` come first: they
+    // resolve what `toBasetype` would otherwise resolve without the
+    // frontend lock.
     extern(D) private void prepareType(Type type) {
         import dmd.typesem: nextOf, toBasetype;
 
-        if (type is null)
+        if (type is null || type.ty == Tfunction || type.ty == Ttuple
+                || type.ty == Terror)
             return;
 
+        factsOf(type);
         auto base = type.toBasetype;
         if (base.ty == Tfunction || base.ty == Ttuple || base.ty == Terror)
             return;
 
-        factsOf(type);
         factsOf(base);
         if (base.ty == Tstruct || base.ty == Tsarray)
             _nativeData.initialValue(type, Loc.initial);
@@ -1526,6 +1530,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     extern(D) private void prepareVariable(VarDeclaration variable) {
+        // `__ctfe` has no parent, and asking dmd where it lives reports
+        // that as an error. Execution folds a read of it to `false`.
+        if (isCtfeVariable(variable))
+            return;
+
         if (variable.isThreadlocal)
             _nativeData.tlsDescriptorOf(variable);
         else if (variable.isDataseg)
