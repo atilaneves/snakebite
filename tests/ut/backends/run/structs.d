@@ -4110,3 +4110,308 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// A pointer field of a compile-time object refers to a struct value that the
+// frontend also made at compile time.
+static foreach (backend; Matrix!()) {
+    @("compileTimeClassWithPointerToStructField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            class C { S* p; this() { p = new S(7); } }
+            struct W { C c = new C; }
+            void main() { assert(W().c.p.a == 7); }
+        });
+    }
+}
+
+// A `__gshared` class object made at compile time can hold a pointer to a struct
+// value that the frontend also made at compile time.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a `__gshared` variable"),
+)) {
+    @("compileTimeGsharedClassWithPointerToStructField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            class C { S* p; this() { p = new S(7); } }
+            __gshared C global = new C;
+            void main() { assert(global.p.a == 7); }
+        });
+    }
+}
+
+// A struct field default `new S(7)` is evaluated by the frontend once; every
+// `W()` holds the address of that one static struct value.
+static foreach (backend; Matrix!()) {
+    @("compileTimeStructPointerInStructFieldDefaultIsShared." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            struct W { S* p = new S(7); }
+            void main() { assert(W().p is W().p); }
+        });
+    }
+}
+
+// A write through a compile-time struct pointer is seen through every other
+// value that holds the same pointer.
+static foreach (backend; Matrix!()) {
+    @("compileTimeStructPointerMutationIsSeenByEveryUse." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            struct W { S* p = new S(7); }
+            void main() {
+                W x;
+                W y;
+                x.p.a = 9;
+                assert(y.p.a == 9);
+            }
+        });
+    }
+}
+
+// A compile-time struct can hold a pointer to a struct that holds a pointer to
+// another struct, and each one keeps its identity.
+static foreach (backend; Matrix!()) {
+    @("compileTimeStructPointerChain." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct B { int v; }
+            struct A { B* b; }
+            struct W { A* a = new A(new B(3)); }
+            void main() {
+                assert(W().a.b.v == 3);
+                assert(W().a.b is W().a.b);
+            }
+        });
+    }
+}
+
+// A class field default `new S(7)` gives every use of the compile-time object
+// the same struct value.
+static foreach (backend; Matrix!()) {
+    @("compileTimeStructPointerInClassFieldDefault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            class D { S* p = new S(7); }
+            struct W { D d = new D; }
+            void main() {
+                assert(W().d.p is W().d.p);
+                assert(W().d.p.a == 7);
+            }
+        });
+    }
+}
+
+// A `__gshared` class object whose field default is `new S(7)` holds a pointer
+// to a struct value that the frontend made.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a `__gshared` variable"),
+)) {
+    @("compileTimeStructPointerInGsharedClassFieldDefault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            class D { S* p = new S(7); }
+            __gshared D d = new D;
+            void main() { assert(d.p.a == 7); }
+        });
+    }
+}
+
+// A `__gshared` module variable initialised with `new S(7)` points to a struct
+// value that the program can write to.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a `__gshared` variable"),
+)) {
+    @("compileTimeStructPointerInGsharedModuleVariable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            __gshared S* g = new S(7);
+            void main() {
+                assert(g.a == 7);
+                g.a = 8;
+                assert(g.a == 8);
+            }
+        });
+    }
+}
+
+// A `__gshared` struct variable gets the same struct pointer as the field
+// default of a `W()` value.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a `__gshared` variable"),
+)) {
+    @("compileTimeStructPointerInGsharedStructVariable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            struct W { S* p = new S(7); }
+            __gshared W w;
+            void main() {
+                assert(w.p.a == 7);
+                assert(w.p is W().p);
+            }
+        });
+    }
+}
+
+// A `static immutable` pointer initialised with `new immutable(S)(7)` points
+// to a struct value that the frontend made.
+static foreach (backend; Matrix!()) {
+    @("compileTimeStructPointerInStaticImmutable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            static immutable S* ip = new immutable(S)(7);
+            void main() {
+                assert(ip.a == 7);
+                assert(ip is ip);
+            }
+        });
+    }
+}
+
+// Pointers to `const` and `immutable` struct values made at compile time keep
+// their identity.
+static foreach (backend; Matrix!()) {
+    @("compileTimeStructPointerConstAndImmutablePointee." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            struct W {
+                const(S)* p = new const(S)(7);
+                immutable(S)* q = new immutable(S)(8);
+            }
+            void main() {
+                assert(W().p.a == 7 && W().q.a == 8);
+                assert(W().p is W().p);
+                assert(W().q is W().q);
+            }
+        });
+    }
+}
+
+// The elements of a `__gshared` static array of struct pointers each point to
+// their own writable struct value.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a `__gshared` variable"),
+)) {
+    @("compileTimeStructPointersInGsharedStaticArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            __gshared S*[2] arr = [new S(1), new S(2)];
+            void main() {
+                assert(arr[0].a == 1 && arr[1].a == 2);
+                arr[1].a = 5;
+                assert(arr[1].a == 5);
+                assert(arr[0].a == 1);
+            }
+        });
+    }
+}
+
+// The elements of a `static immutable` dynamic array of struct pointers each
+// point to a struct value that the frontend made.
+static foreach (backend; Matrix!()) {
+    @("compileTimeStructPointersInStaticImmutableDynamicArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            static immutable S*[] arr = [new S(1), new S(2)];
+            void main() {
+                assert(arr[0].a == 1 && arr[1].a == 2);
+                assert(arr[1] is arr[1]);
+                assert(arr[0] !is arr[1]);
+            }
+        });
+    }
+}
+
+// A static array field default holds one struct value for each element, shared
+// by every `W()`.
+static foreach (backend; Matrix!()) {
+    @("compileTimeStructPointersInStructStaticArrayField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            struct W { S*[2] ps = [new S(1), new S(1)]; }
+            void main() {
+                assert(W().ps[0] !is W().ps[1]);
+                assert(W().ps[0] is W().ps[0]);
+                assert(W().ps[1].a == 1);
+            }
+        });
+    }
+}
+
+// A dynamic array field default holds one struct value for each element, shared
+// by every `W()`.
+static foreach (backend; Matrix!()) {
+    @("compileTimeStructPointersInStructDynamicArrayField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            struct W { S*[] ps = [new S(1), new S(2)]; }
+            void main() {
+                assert(W().ps[0].a == 1);
+                assert(W().ps[1] is W().ps[1]);
+            }
+        });
+    }
+}
+
+// A base class field and a derived class field that hold the same compile-time
+// struct pointer still compare equal.
+static foreach (backend; Matrix!()) {
+    @("compileTimeStructPointerSharedByBaseAndDerivedFields." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            class C { S* p; this() { p = new S(7); } }
+            class D : C { S* r; this() { r = p; } }
+            struct W { D c = new D; }
+            void main() { assert(W().c.r is W().c.p); }
+        });
+    }
+}
+
+// Two field defaults that each say `new S(7)` make two struct values.
+static foreach (backend; Matrix!()) {
+    @("compileTimeStructPointersOfDifferentFieldsAreDistinct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            struct W { S* p = new S(7); }
+            struct V { S* q = new S(7); }
+            void main() { assert(W().p !is V().q); }
+        });
+    }
+}
