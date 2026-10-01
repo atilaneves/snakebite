@@ -488,7 +488,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // times. The plan cache remains the cold path; this side cache keeps
     // the prepared plan with the AST call site that uses it.
     private struct CallSitePlan {
-        private CallExp _callSite;
+        private Expression _callSite;
         private FuncDeclaration _function;
         private const(CallPlan)* _plan;
     }
@@ -1051,7 +1051,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         void* returnPlace,
         ubyte* frameBase,
         const(FrameLayout)* layout,
-        CallExp callSite = null,
+        Expression callSite = null,
+        Expressions* callArguments = null,
     ) {
         auto arguments = argumentSlots(frameBase, layout);
         auto adapter = callShapeOf(function_).adapter;
@@ -1085,12 +1086,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }, {
             if (callSite !is null && typeFunctionOf(function_).parameterList
                     .varargs == VarArg.variadic) {
-                bindArguments(function_, callSite.arguments, callSite.loc,
+                bindArguments(function_, callArguments, callSite.loc,
                     frameBase, layout, true);
-                bindVariadicArguments(
-                    callSite.arguments, frameBase, layout);
+                bindVariadicArguments(callArguments, frameBase, layout);
             } else if (callSite !is null)
-                bindArguments(function_, callSite.arguments, callSite.loc,
+                bindArguments(function_, callArguments, callSite.loc,
                     frameBase, layout);
             result = adapter.invoke(
                 returnPlace, arguments.values, &executeCallee);
@@ -1109,7 +1109,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         void* returnPlace,
         ubyte* frameBase,
         const(FrameLayout)* layout,
-        CallExp callSite = null,
+        Expression callSite = null,
         const(void*)* arguments,
         size_t argumentCount,
         bool callbackEntry = false,
@@ -1344,7 +1344,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private const(CallPlan)* callPlanOf(
-        CallExp callSite,
+        Expression callSite,
         FuncDeclaration function_,
     ) {
         return cachedCallPlan(
@@ -1357,7 +1357,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // (`PlanCache._plans`/`.of`) stays the cold path, reached only once
     // per site through `build`.
     extern(D) private const(CallPlan)* cachedCallPlan(
-        CallExp callSite,
+        Expression callSite,
         FuncDeclaration function_,
         scope const(CallPlan)* delegate() build,
     ) {
@@ -2399,8 +2399,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, storeIntegral;
 
-        assert(target.function_ !is null,
-            "a delegate expression names a function and has a delegate type");
+        if (target.function_ is null)
+            assert(0, "a delegate expression names a function and has a "
+                ~ "delegate type");
 
         auto context = cast(size_t) 0;
         if (target.receiver !is null) {
@@ -2573,15 +2574,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // either a frame or a heap closure, as dmd decides for that owner.
     private ubyte* contextOf(FuncDeclaration owner) {
         auto base = tryContextOf(owner);
-        assert(base !is null,
-            "a variable's owner is an enclosing function of its user");
+        if (base is null)
+            assert(0, "a variable's owner is an enclosing function of its "
+                ~ "user");
 
         return base;
     }
 
-    // As `contextOf`, but `null` rather than a thrown exception when
-    // `owner`'s context is not reachable from here. The null result is
-    // useful for a non-capturing delegate, whose context is never read.
+    // As `contextOf`, but `null` when `owner`'s context is not reachable
+    // from here, which a non-capturing delegate allows: its context is
+    // never read.
     private ubyte* tryContextOf(FuncDeclaration owner) {
         import snakebite.nativelayout: loadIntegral;
 
@@ -2652,7 +2654,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (auto slot = _layout.slotOf(variable))
             return _frameBase + slot.offset;
 
-        assert(owner !is null, "a local variable has an enclosing function");
+        if (owner is null)
+            assert(0, "a local variable has an enclosing function");
 
         return contextOf(owner) + layoutOf(owner).offsetOf(variable);
     }
@@ -2685,12 +2688,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import snakebite.nativelayout: loadIntegral;
 
         auto variable = declaration.isVarDeclaration;
-        assert(variable !is null,
-            text("function and TypeInfo addresses are `SymOffExp`s, an ",
-                "initializer symbol is handled before this, so a name here ",
-                "is a variable: `",
-                original is null ? declaration.toString : original.toString,
-                "` (", declaration.kind, ")"));
+        if (variable is null)
+            assert(0, "function and TypeInfo addresses are `SymOffExp`s, an "
+                ~ "initializer symbol is handled before this, so a name here "
+                ~ "is a variable: `"
+                ~ (original is null ? declaration.toString : original.toString)
+                ~ "`");
 
         if (variable.isDataseg)
             return staticSlotOf(variable);
@@ -2720,8 +2723,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         auto layout = _layout;
         auto slot = layout.slotOf(variable);
         if (slot is null) {
-            assert(owner !is null,
-                text("a local variable has an enclosing function: `",
+            if (owner is null)
+                assert(0, text("a local variable has an enclosing function: `",
                     original is null ? variable.toString : original.toString,
                     "`"));
 
@@ -5287,22 +5290,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (plan.argumentPrefix !is null)
             runForEffect(plan.argumentPrefix);
 
-        auto arguments = expression.arguments;
-        const isVariadic = typeFunctionOf(constructor).parameterList.varargs
-            == VarArg.variadic;
+        if (isNativeVariadic(constructor)) {
+            callVariadicNative(expression, expression.arguments, constructor,
+                frame.base, layout, null);
+            return;
+        }
 
-        bindArguments(
-            constructor,
-            arguments,
-            expression.loc,
-            frame.base,
-            layout,
-            isVariadic,
-        );
-        if (isVariadic)
-            bindVariadicArguments(arguments, frame.base, layout);
-
-        executeCall(constructor, null, frame.base, layout);
+        executeCall(constructor, null, frame.base, layout, expression,
+            expression.arguments);
     }
 
     private void bindArguments(
@@ -5324,9 +5319,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     ) {
         import snakebite.backends.calls: arityMismatches;
 
-        assert(!arityMismatches(type.parameterList, arguments, allowExtra),
-            "dmd checks a call's arity; a variadic call allows extra "
-            ~ "arguments");
+        if (arityMismatches(type.parameterList, arguments, allowExtra))
+            assert(0, "dmd checks a call's arity; a variadic call allows "
+                ~ "extra arguments");
 
         auto preparation = CallAdapter.Arguments.of(
             type, arguments,
@@ -5339,10 +5334,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             void* address;
 
             void* argumentAddress() {
-                auto argumentType = argument.type.toBasetype;
-                if (argumentType.ty == Tpointer
-                        && argumentType.nextOf.equals(value.parameterType))
-                    return asPointer(argument);
                 address = addressOf(argument);
                 return address;
             }
@@ -5536,9 +5527,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     // An associative-array literal has no glue-layer codegen of its own to
-    // interpret: dmd never leaves `AssocArrayLiteralExp.lowering` null once
-    // it finds `object._d_assocarrayliteralTX!(K, V)`, so reaching here
-    // means that lookup itself failed.
+    // interpret. dmd stops with an error when it cannot find
+    // `object._d_assocarrayliteralTX!(K, V)`, so every literal that reaches
+    // a backend has its `lowering`.
     protected override void visitUnloweredAssocArrayLiteral(
             AssocArrayLiteralExp expression) {
         assert(0, "dmd lowers every associative-array literal in semantic");
@@ -5607,15 +5598,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         auto funcType = typeFunctionOf(function_);
 
+        // A callee reached through a value has no receiver expression: a
+        // delegate carries its context, and a function pointer to a method
+        // (`&C.f`) carries none, so that method runs with a null `this`.
         void* classReceiver;
-        bool hasClassReceiver;
         auto aggregate = function_.isThis;
         if (aggregate !is null && aggregate.isClassDeclaration !is null
-                && !callee.fromDelegate) {
+                && resolved !is null) {
             auto dot = expression.e1.isDotVarExp;
             auto receiver = dot is null ? expression.e1 : dot.e1;
             classReceiver = classReferenceOf(receiver);
-            hasClassReceiver = true;
             if (classReceiver is null)
                 throw new SnakebiteException(
                     text("interpreter cannot call `", expression.toString,
@@ -5638,30 +5630,29 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         funcType = typeFunctionOf(function_);
-        const isVariadic = funcType.parameterList.varargs == VarArg.variadic;
-        if (isVariadic
-                && (function_.fbody is null
-                    || !_program.isInterpreted(function_)
-                    || _plans.hasNativeSymbol(function_))) {
-            callVariadicNative(expression, function_, funcType,
-                classReceiver, hasClassReceiver);
+        auto layout = layoutOf(function_);
+        if (isNativeVariadic(function_)) {
+            auto frame = bindFrame(
+                expression, function_, layout, true, classReceiver);
+            callVariadicNative(expression, expression.arguments, function_,
+                frame.base, layout, _place);
             return CallResult.init;
         }
 
-        auto layout = layoutOf(function_);
+        const isVariadic = funcType.parameterList.varargs == VarArg.variadic;
         auto frame = bindFrame(
             expression,
             function_,
             layout,
             isVariadic,
             classReceiver,
-            hasClassReceiver,
             callee.context,
             callee.fromDelegate,
         );
 
         return executeCall(
             function_, returnPlace, frame.base, layout, expression,
+            expression.arguments,
         );
     }
 
@@ -5692,35 +5683,45 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             frame + layout.variadicTypes);
     }
 
-    // Build the plan before evaluating arguments, so an unsupported call
-    // cannot run guest argument effects before its refusal.
+    // The one decision between a D-variadic function that runs as guest
+    // code and one that host code runs, shared with every other way of
+    // taking a function's address or calling it.
+    private bool isNativeVariadic(FuncDeclaration function_) {
+        import dmd.astenums: VarArg;
+
+        return typeFunctionOf(function_).parameterList.varargs
+                == VarArg.variadic
+            && !_callSelection.isVariadicGuest(
+                function_, hasNativeSymbol(function_));
+    }
+
+    // The call plan depends on the types of the extra arguments at this
+    // call site, so it is built here from `arguments`, before any of them
+    // is evaluated. `frame` already holds the hidden `this`, if any.
     private void callVariadicNative(
-        CallExp expression,
+        Expression callSite,
+        Expressions* arguments,
         FuncDeclaration function_,
-        TypeFunction funcType,
-        void* classReceiver,
-        bool hasClassReceiver,
+        ubyte* frame,
+        const(FrameLayout)* layout,
+        void* returnPlace,
     ) {
         auto preparation = CallAdapter.Arguments.of(
-            funcType, expression.arguments,
+            typeFunctionOf(function_), arguments,
         );
-        const plan = cachedCallPlan(expression, function_,
+        const plan = cachedCallPlan(callSite, function_,
             () => preparation.prepare(*_plans, function_));
-        auto layout = layoutOf(function_);
-        auto frame = bindFrame(expression, function_, layout, true,
-            classReceiver, hasClassReceiver);
-        bindArguments(function_, expression.arguments, expression.loc,
-            frame.base, layout, true);
+        bindArguments(function_, arguments, callSite.loc, frame, layout, true);
 
         const mark = _frames.mark;
         scope(exit) _frames.release(mark);
         auto slots = preparation.bind(
             layout.hiddenThis.variable is null ? null
-                : frame.base + layout.hiddenThis.parameter.offset,
-            (i) => frame.base + layout.parameters[i].offset,
+                : frame + layout.hiddenThis.parameter.offset,
+            (i) => frame + layout.parameters[i].offset,
             &evaluateBarrierArgument,
         );
-        callPlan(plan, _place, slots.values);
+        callPlan(plan, returnPlace, slots.values);
     }
 
     extern(D) private void* evaluateBarrierArgument(
@@ -5840,8 +5841,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         auto callee = expression.e1;
         if (!isIndirectDelegateCall(callee.type)) {
             auto deref = callee.isPtrExp;
-            assert(deref !is null,
-                "dmd wraps a call through a function pointer in a `PtrExp`");
+            if (deref is null)
+                assert(0, "dmd wraps a call through a function pointer in a "
+                    ~ "`PtrExp`");
 
             auto function_ = cast(FuncDeclaration) asPointer(deref.e1);
             if (function_ is null)
@@ -5892,7 +5894,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import std.conv: text;
 
         assert(expression.type.toBasetype.ty == Tclass,
-            "a class receiver has a class type");
+            "dmd gives a member call a receiver expression of class type");
 
         const facts = factsOf(expression.type);
         align(size_t.sizeof) ubyte[size_t.sizeof] value = void;
@@ -5909,7 +5911,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const(FrameLayout)* layout,
         in bool allowExtra = false,
         void* classReceiver = null,
-        bool hasClassReceiver = false,
         void* delegateContext = null,
         bool fromDelegate = false,
     ) {
@@ -5941,8 +5942,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (layout.hiddenThis.variable !is null) {
             const hidden = fromDelegate
                 ? cast(size_t) delegateContext
-                : hiddenArgumentOf(expression, function_, classReceiver,
-                    hasClassReceiver);
+                : hiddenArgumentOf(expression, function_, classReceiver);
             storeIntegral(
                 frame.base + layout.hiddenThis.parameter.offset,
                 hidden, size_t.sizeof,
@@ -5959,10 +5959,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         CallExp expression,
         FuncDeclaration function_,
         void* classReceiver,
-        bool hasClassReceiver,
     ) {
-        const first = firstContextOf(
-            expression, function_, classReceiver, hasClassReceiver);
+        const first = firstContextOf(expression, function_, classReceiver);
         const plan = pairPlanOf(_function, function_, expression.vthis2);
         return plan.variable is null ? first : storeContextPair(plan, first);
     }
@@ -5973,7 +5971,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         CallExp expression,
         FuncDeclaration function_,
         void* classReceiver,
-        bool hasClassReceiver,
     ) {
         import snakebite.frontend.dmd.delegates: nestedContextOwnerOf;
         import std.conv: text;
@@ -5982,13 +5979,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             auto dot = expression.e1.isDotVarExp;
             const classDeclaration =
                 cast(ClassDeclaration) function_.isThis.isClassDeclaration;
-            if (classDeclaration !is null) {
-                if (hasClassReceiver)
-                    return cast(size_t) classReceiver;
-                return cast(size_t) classReferenceOf(
-                    dot is null ? expression.e1 : dot.e1,
-                );
-            }
+            if (classDeclaration !is null)
+                return cast(size_t) classReceiver;
             if (dot is null)
                 throw new SnakebiteException(
                     text("interpreter cannot call `", function_.toString,

@@ -113,8 +113,8 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
 
     // An associative-array literal is always a call to
     // `_d_assocarrayliteralTX`; dmd leaves `lowering` null only when that
-    // hook could not be found, which is refused the same as any other
-    // unsupported node.
+    // hook could not be found, and dmd then reports an error, so a backend
+    // never runs such a literal.
     final override void visit(AssocArrayLiteralExp expression) {
         if (expression.lowering !is null) {
             expression.lowering.accept(this);
