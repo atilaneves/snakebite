@@ -3384,6 +3384,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         size_t operationWidth = operationFacts.size;
         size_t operands;
         bool shiftSignExtend = !targetFacts.isUnsigned;
+        bool isShift;
         with (ArithmeticPlan.Kind) final switch (plan.kind) {
             case integral, pointerOffset:
                 if (expression.isShlAssignExp || expression.isShrAssignExp
@@ -3392,6 +3393,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     handler = shiftHandler(shift);
                     operationWidth = shift.width;
                     shiftSignExtend = shift.signExtend;
+                    isShift = true;
                 } else
                     handler = compoundHandler(
                         expression, operationFacts.isUnsigned, false);
@@ -3432,7 +3434,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             valueOffset = readScalar(storage, operationFacts);
 
         const rightOffset = reserveTemp(rightFacts);
-        evalInto(expression.e2, rightOffset, rightFacts.size);
+        // A shift count keeps its own promoted type, which can differ in
+        // width from the operation type.
+        if (isShift)
+            evalOperandInto(expression.e2, rightOffset, operationWidth);
+        else
+            evalInto(expression.e2, rightOffset, rightFacts.size);
         if (!promotedFirst)
             valueOffset = readScalar(storage, operationFacts);
         emit(handler, valueOffset, rightOffset, operationWidth, operands);
