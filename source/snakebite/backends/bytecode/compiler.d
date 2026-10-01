@@ -4094,10 +4094,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             } else
                 evalInto(target.receiver, context, size_t.sizeof);
         } else if (target.needsContext) {
-            if (target.contextOwner is null)
-                assert(0,
-                    "`delegateTargetOf` asks for a context only with an owner");
-
             const contextOffset = contextAddressOf(target.contextOwner);
             emit(&opCopy, _destination + delegateContextOffset,
                 contextOffset, size_t.sizeof);

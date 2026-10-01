@@ -2411,8 +2411,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     factsOf(target.receiver.type), &context);
 
         } else if (target.needsContext) {
-            assert(target.contextOwner !is null,
-                "`delegateTargetOf` asks for a context only with an owner");
             context = cast(size_t) tryContextOf(target.contextOwner);
         }
 
