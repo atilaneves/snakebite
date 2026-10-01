@@ -80,6 +80,7 @@ The end of a run with no more guest code. No `catch`, `finally`,
 makes the program chooses it. `bin/sb` ends the process. A REPL cell or an
 in-process test fails and the session goes on. A failed check under
 `-checkaction=halt` and a guest fault are halts.
+A `synchronized` block that a halt leaves does not unlock its mutex.
 _Avoid_: abort, crash
 
 **Guest fault**:

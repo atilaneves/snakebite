@@ -958,6 +958,28 @@ def test_array_operation_division_of_an_intermediate_result_is_a_fault(
     assert f"app.d(5): fatal: {message}" in result.stderr.splitlines()
 
 
+# An operand that is shorter than the result is the error of the array
+# operation itself: no element after its end is divided.
+@pytest.mark.parametrize("backend", FAULT_BACKENDS)
+def test_array_operation_with_a_short_operand_is_not_a_division_fault(
+    tmp_path: Path, backend: str,
+) -> None:
+    result = run_program(
+        tmp_path, backend,
+        "void main() {\n"
+        "    int[] a = [8, 6, 4, 2];\n"
+        "    int[] wide = [2, 1, 0, 0, 5];\n"
+        "    int[] b = wide[0 .. 2];\n"
+        "    int[4] c;\n"
+        "    c[] = a[] / b[];\n"
+        "}\n",
+    )
+
+    assert result.returncode == 1, output(result)
+    assert "Mismatched array lengths for vector operation" in result.stderr
+    assert "fatal:" not in result.stderr
+
+
 # `0 ^^ -1` is `1 / 0` for integers: compiled D dies of SIGFPE.
 @pytest.mark.parametrize("backend", FAULT_BACKENDS)
 @pytest.mark.parametrize("type_", ["int", "long"])

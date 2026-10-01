@@ -264,6 +264,13 @@ private bool fails(
     alias Kind = NativeCallCheck.ArrayOperation.Step.Kind;
 
     const length = *cast(const(size_t)*) arguments[0];
+    // The array operation reports a length mismatch itself.
+    foreach (step; operation.steps) {
+        if (step.kind == Kind.operand && step.operand.isSlice
+            && *cast(const(size_t)*) arguments[step.operand.argument] != length)
+            return false;
+    }
+
     auto stack = new Value[operation.steps.length];
     foreach (index; 0 .. length) {
         size_t top;
