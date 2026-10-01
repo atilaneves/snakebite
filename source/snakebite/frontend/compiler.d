@@ -1285,12 +1285,14 @@ private string[] moduleQualifiedName(
 }
 
 private struct SavedFrontendFlags {
+    import dmd.astenums: CHECKACTION, CHECKENABLE;
     import dmd.globals: FeatureState;
+    import dmd.identifier: Identifier;
 
     bool previewIn;
     bool transitionIn;
     bool ddocOutput;
-    size_t versionIdentifierLength;
+    Identifier[] versionIdentifiers;
     size_t debugIdentifierLength;
     size_t stringImportPathLength;
     FeatureState useDIP25;
@@ -1310,6 +1312,13 @@ private struct SavedFrontendFlags {
     FeatureState systemVariables;
     bool bitfields;
     bool debugEnabled;
+    CHECKENABLE useAssert;
+    CHECKENABLE useIn;
+    CHECKENABLE useOut;
+    CHECKENABLE useInvariants;
+    CHECKENABLE useArrayBounds;
+    CHECKENABLE useSwitchError;
+    CHECKACTION checkAction;
 }
 
 private SavedFrontendFlags saveFrontendFlags() {
@@ -1319,7 +1328,7 @@ private SavedFrontendFlags saveFrontendFlags() {
         global.compileEnv.previewIn,
         global.compileEnv.transitionIn,
         global.compileEnv.ddocOutput,
-        global.versionids.length,
+        global.versionids[].dup,
         global.debugids.length,
         global.filePath.length,
         global.params.useDIP25,
@@ -1339,6 +1348,13 @@ private SavedFrontendFlags saveFrontendFlags() {
         global.params.systemVariables,
         global.params.bitfields,
         global.params.debugEnabled,
+        global.params.useAssert,
+        global.params.useIn,
+        global.params.useOut,
+        global.params.useInvariants,
+        global.params.useArrayBounds,
+        global.params.useSwitchError,
+        global.params.checkAction,
     );
 }
 
@@ -1348,7 +1364,9 @@ private void restoreFrontendFlags(ref const SavedFrontendFlags saved) {
     global.compileEnv.previewIn = saved.previewIn;
     global.compileEnv.transitionIn = saved.transitionIn;
     global.compileEnv.ddocOutput = saved.ddocOutput;
-    global.versionids.setDim(saved.versionIdentifierLength);
+    global.versionids.setDim(0);
+    foreach (identifier; saved.versionIdentifiers)
+        global.versionids.push(cast() identifier);
     global.debugids.setDim(saved.debugIdentifierLength);
     global.filePath.setDim(saved.stringImportPathLength);
     global.params.useDIP25 = saved.useDIP25;
@@ -1369,6 +1387,13 @@ private void restoreFrontendFlags(ref const SavedFrontendFlags saved) {
     global.params.systemVariables = saved.systemVariables;
     global.params.bitfields = saved.bitfields;
     global.params.debugEnabled = saved.debugEnabled;
+    global.params.useAssert = saved.useAssert;
+    global.params.useIn = saved.useIn;
+    global.params.useOut = saved.useOut;
+    global.params.useInvariants = saved.useInvariants;
+    global.params.useArrayBounds = saved.useArrayBounds;
+    global.params.useSwitchError = saved.useSwitchError;
+    global.params.checkAction = saved.checkAction;
 }
 
 private void applyFrontendFlags(in FrontendFlags flags) {
@@ -1377,25 +1402,16 @@ private void applyFrontendFlags(in FrontendFlags flags) {
     import dmd.cond: DebugCondition, VersionCondition;
     import dmd.frontend: addStringImport;
     import dmd.globals: FeatureState, Param, global;
-    import dmd.root.response: responseExpand;
     import dmd.root.string: toDString;
     import std.algorithm.searching: startsWith;
     import std.conv: text;
-    import std.string: toStringz;
 
     if (flags.compilerArguments.length == 0)
         return;
 
-    auto argumentText = ["dmd"] ~ owned(flags.compilerArguments);
-    auto arguments = Strings(argumentText.length);
-    foreach (i, argument; argumentText)
-        arguments[i] = argument.toStringz;
-
-    if (const missing = responseExpand(arguments))
-        throw new Exception(text(
-            "failed to expand dub compiler response file ",
-            missing.toDString,
-        ));
+    Strings arguments;
+    expandArguments(flags, arguments);
+    const checks = checksOfArguments(arguments);
 
     Param parsedParams;
     foreach (argz; arguments[]) {
@@ -1432,9 +1448,79 @@ private void applyFrontendFlags(in FrontendFlags flags) {
     }
 
     applyParsedFrontendParams(parsedParams);
+    applyChecks(checks);
     global.compileEnv.previewIn = global.params.previewIn;
     global.compileEnv.transitionIn = global.params.v.vin;
     global.compileEnv.ddocOutput = global.params.ddoc.doOutput;
+}
+
+// What the project's compiler arguments select for run-time checks: the
+// one place that reads them, for the frontend (`applyFrontendFlags`) and
+// for the `Program` the backends run, which `Program.checks` carries them
+// to after the arguments stopped being in effect.
+public imported!"snakebite.frontend.checks".Checks checksOf(
+    in FrontendFlags flags,
+) {
+    import dmd.arraytypes: Strings;
+    import snakebite.frontend.checks: Checks;
+
+    if (flags.compilerArguments.length == 0)
+        return Checks();
+
+    Strings arguments;
+    expandArguments(flags, arguments);
+
+    return checksOfArguments(arguments);
+}
+
+private imported!"snakebite.frontend.checks".Checks checksOfArguments(
+    ref imported!"dmd.arraytypes".Strings arguments,
+) {
+    import dmd.root.string: toDString;
+    import snakebite.frontend.checks: Checks;
+    import std.conv: text;
+
+    Checks checks;
+    foreach (argument; arguments[])
+        if (!checks.accept(argument.toDString))
+            throw new Exception(text(
+                "switch `", argument.toDString, "` is invalid"));
+    checks.resolve;
+
+    return checks;
+}
+
+// `arguments` is the caller's: dmd's `Array` keeps a short array inside
+// itself, so it cannot be returned by value.
+private void expandArguments(
+    in FrontendFlags flags,
+    ref imported!"dmd.arraytypes".Strings arguments,
+) {
+    import dmd.arraytypes: Strings;
+    import dmd.root.response: responseExpand;
+    import dmd.root.string: toDString;
+    import std.conv: text;
+    import std.string: toStringz;
+
+    auto argumentText = ["dmd"] ~ owned(flags.compilerArguments);
+    arguments = Strings(argumentText.length);
+    foreach (i, argument; argumentText)
+        arguments[i] = argument.toStringz;
+
+    if (const missing = responseExpand(arguments))
+        throw new Exception(text(
+            "failed to expand dub compiler response file ",
+            missing.toDString,
+        ));
+}
+
+private void applyChecks(in imported!"snakebite.frontend.checks".Checks checks) {
+    import dmd.globals: global;
+
+    checks.applyTo(global.params);
+    for (size_t index = global.versionids.length; index-- > 0; )
+        if (!checks.defines(global.versionids[index].toString))
+            global.versionids.remove(index);
 }
 
 private bool applyFeature(alias features)(

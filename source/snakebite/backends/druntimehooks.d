@@ -20,12 +20,15 @@ import snakebite.ffi.abi: Register;
 public enum DruntimeHook {
     indexBounds,
     sliceBounds,
+    rangeError,
     classInvariant,
     gcMalloc,
     callFinalizer,
     callInterfaceFinalizer,
     arrayAppendChar,
     arrayAppendWchar,
+    assertMessage,
+    cAssertFail,
 }
 
 
@@ -47,6 +50,13 @@ private immutable Register[5] _sliceBoundsRegisters = [
     Register(Register.Kind.unsigned, 8),
     Register(Register.Kind.unsigned, 8),
     Register(Register.Kind.unsigned, 8),
+];
+
+// `_d_arrayboundsp(immutable(char*) file, uint line)`: the `RangeError` of
+// a check that has no index or bounds to report, such as a slice copy.
+private immutable Register[2] _rangeErrorRegisters = [
+    Register(Register.Kind.pointer, 8),
+    Register(Register.Kind.unsigned, 4),
 ];
 
 // `_d_invariant(Object)`, `_d_callfinalizer(void*)` and
@@ -75,6 +85,26 @@ private immutable Register _gcMallocReturnRegister =
 private immutable Register[2] _arrayAppendRegisters = [
     Register(Register.Kind.pointer, 8),
     Register(Register.Kind.unsigned, 4),
+];
+
+// `_d_assert_msg(string msg, string file, uint line)`: a D string is two
+// registers, length first.
+private immutable Register[5] _assertMessageRegisters = [
+    Register(Register.Kind.unsigned, 8),
+    Register(Register.Kind.pointer, 8),
+    Register(Register.Kind.unsigned, 8),
+    Register(Register.Kind.pointer, 8),
+    Register(Register.Kind.unsigned, 4),
+];
+
+// The C runtime's `__assert_fail(const char* assertion, const char* file,
+// uint line, const char* function)` that `-checkaction=C` calls. It is not
+// druntime's, but a backend reaches it the same way: by linker symbol.
+private immutable Register[4] _cAssertFailRegisters = [
+    Register(Register.Kind.pointer, 8),
+    Register(Register.Kind.pointer, 8),
+    Register(Register.Kind.unsigned, 4),
+    Register(Register.Kind.pointer, 8),
 ];
 
 // druntime's `_d_invariant` (`rt.invariant_`) has plain `extern(D)`
@@ -109,6 +139,9 @@ public DruntimeHookSpec specOf(in DruntimeHook hook) @safe @nogc nothrow pure {
         case sliceBounds:
             return DruntimeHookSpec(
                 "_d_arraybounds_slicep", _sliceBoundsRegisters);
+        case rangeError:
+            return DruntimeHookSpec(
+                "_d_arrayboundsp", _rangeErrorRegisters);
         case classInvariant:
             return DruntimeHookSpec(
                 _classInvariantSymbol, _pointerOnlyRegisters);
@@ -126,6 +159,11 @@ public DruntimeHookSpec specOf(in DruntimeHook hook) @safe @nogc nothrow pure {
         case arrayAppendWchar:
             return DruntimeHookSpec(
                 "_d_arrayappendwd", _arrayAppendRegisters);
+        case assertMessage:
+            return DruntimeHookSpec(
+                "_d_assert_msg", _assertMessageRegisters);
+        case cAssertFail:
+            return DruntimeHookSpec("__assert_fail", _cAssertFailRegisters);
     }
 }
 

@@ -136,6 +136,168 @@ static foreach (backend; EnumMembers!ReplBackendName) {
 }
 
 
+// Compiled `-checkaction=halt` code stops at the failed check: no
+// `finally` block runs. A halted cell must stop in the same way.
+static foreach (backend; EnumMembers!ReplBackendName) {
+    @("submit.haltedCellDoesNotRunFinally." ~ backend.stringof)
+    unittest {
+        import snakebite.frontend.compiler: FrontendFlags;
+        import std.process: environment;
+
+        enum ran = "SNAKEBITE_HALT_FINALLY_" ~ backend.stringof;
+        auto repl = Repl(
+            backend, [], [], FrontendFlags(["-checkaction=halt"]),
+        );
+        repl.submit(
+            "int check(int v) {"
+            ~ " import core.sys.posix.stdlib: setenv;"
+            ~ " try assert(v == 2);"
+            ~ " finally setenv(\"" ~ ran ~ "\", \"1\", 1);"
+            ~ " return v; }",
+        ).kind.should == SubmitResult.Kind.none;
+
+        repl.submit("check(1)").kind.should == SubmitResult.Kind.error;
+        environment.get(ran, "did not run").should == "did not run";
+    }
+}
+
+
+// As above, for `scope(exit)`.
+static foreach (backend; EnumMembers!ReplBackendName) {
+    @("submit.haltedCellDoesNotRunScopeExit." ~ backend.stringof)
+    unittest {
+        import snakebite.frontend.compiler: FrontendFlags;
+        import std.process: environment;
+
+        enum ran = "SNAKEBITE_HALT_SCOPE_EXIT_" ~ backend.stringof;
+        auto repl = Repl(
+            backend, [], [], FrontendFlags(["-checkaction=halt"]),
+        );
+        repl.submit(
+            "int check(int v) {"
+            ~ " import core.sys.posix.stdlib: setenv;"
+            ~ " scope(exit) setenv(\"" ~ ran ~ "\", \"1\", 1);"
+            ~ " assert(v == 2);"
+            ~ " return v; }",
+        ).kind.should == SubmitResult.Kind.none;
+
+        repl.submit("check(1)").kind.should == SubmitResult.Kind.error;
+        environment.get(ran, "did not run").should == "did not run";
+    }
+}
+
+
+// As above, for the destructor of a local variable.
+static foreach (backend; EnumMembers!ReplBackendName) {
+    @("submit.haltedCellDoesNotRunDestructors." ~ backend.stringof)
+    unittest {
+        import snakebite.frontend.compiler: FrontendFlags;
+        import std.process: environment;
+
+        enum ran = "SNAKEBITE_HALT_DESTRUCTOR_" ~ backend.stringof;
+        auto repl = Repl(
+            backend, [], [], FrontendFlags(["-checkaction=halt"]),
+        );
+        repl.submit(
+            "struct Guard { ~this() {"
+            ~ " import core.sys.posix.stdlib: setenv;"
+            ~ " setenv(\"" ~ ran ~ "\", \"1\", 1); } }",
+        ).kind.should == SubmitResult.Kind.none;
+        repl.submit(
+            "int check(int v) { Guard guard; assert(v == 2); return v; }",
+        ).kind.should == SubmitResult.Kind.none;
+
+        repl.submit("check(1)").kind.should == SubmitResult.Kind.error;
+        environment.get(ran, "did not run").should == "did not run";
+    }
+}
+
+
+// As above, for the destructor of a temporary that an expression makes.
+static foreach (backend; EnumMembers!ReplBackendName) {
+    @("submit.haltedCellDoesNotRunTemporaryDestructors." ~ backend.stringof)
+    unittest {
+        import snakebite.frontend.compiler: FrontendFlags;
+        import std.process: environment;
+
+        enum ran = "SNAKEBITE_HALT_TEMPORARY_" ~ backend.stringof;
+        auto repl = Repl(
+            backend, [], [], FrontendFlags(["-checkaction=halt"]),
+        );
+        repl.submit(
+            "struct Guard { int v; ~this() {"
+            ~ " import core.sys.posix.stdlib: setenv;"
+            ~ " setenv(\"" ~ ran ~ "\", \"1\", 1); } }",
+        ).kind.should == SubmitResult.Kind.none;
+        repl.submit(
+            "Guard make() { return Guard(1); }",
+        ).kind.should == SubmitResult.Kind.none;
+        repl.submit(
+            "int boom(int v) { assert(v == 2); return v; }",
+        ).kind.should == SubmitResult.Kind.none;
+        repl.submit(
+            "int check(int v) { return make().v + boom(v); }",
+        ).kind.should == SubmitResult.Kind.none;
+
+        repl.submit("check(1)").kind.should == SubmitResult.Kind.error;
+        environment.get(ran, "did not run").should == "did not run";
+    }
+}
+
+
+// A `foreach` over a string with a `dchar` variable calls druntime's
+// compiled `_aApplycd1` with the loop body as a delegate, so the halt
+// goes through a native frame before it reaches the `catch`. A halt is
+// not an error that guest code handles.
+static foreach (backend; EnumMembers!ReplBackendName) {
+    @("submit.guestCatchDoesNotSeeAHaltFromACallback." ~ backend.stringof)
+    unittest {
+        import snakebite.frontend.compiler: FrontendFlags;
+
+        auto repl = Repl(
+            backend, [], [], FrontendFlags(["-checkaction=halt"]),
+        );
+        repl.submit(
+            "int check(int v) {"
+            ~ " try foreach (dchar c; \"ab\") assert(v == 2);"
+            ~ " catch (Throwable t) return 7;"
+            ~ " return v; }",
+        ).kind.should == SubmitResult.Kind.none;
+
+        repl.submit("check(1)").kind.should == SubmitResult.Kind.error;
+        repl.submit("check(2)").text.should == "2";
+    }
+}
+
+
+// `destroy` calls druntime's compiled `rt_finalize2`, which catches each
+// `Exception` from a class destructor and throws a `FinalizeError`
+// instead. A halt in the destructor must not become an error that the
+// guest `catch` handles.
+static foreach (backend; EnumMembers!ReplBackendName) {
+    @("submit.guestCatchDoesNotSeeAHaltFromAClassDestructor." ~ backend.stringof)
+    unittest {
+        import snakebite.frontend.compiler: FrontendFlags;
+
+        auto repl = Repl(
+            backend, [], [], FrontendFlags(["-checkaction=halt"]),
+        );
+        repl.submit(
+            "class Checked { int v; ~this() { assert(v == 2); } }",
+        ).kind.should == SubmitResult.Kind.none;
+        repl.submit(
+            "int check() {"
+            ~ " auto checked = new Checked;"
+            ~ " try destroy(checked);"
+            ~ " catch (Throwable t) return 7;"
+            ~ " return 1; }",
+        ).kind.should == SubmitResult.Kind.none;
+
+        repl.submit("check()").kind.should == SubmitResult.Kind.error;
+    }
+}
+
+
 @("submit.evaluatesAnExpression")
 unittest {
     auto repl = Repl(ReplBackendName.interpreter);
@@ -277,7 +439,7 @@ unittest {
 
     result.kind.should == SubmitResult.Kind.error;
     result.text.should == "unittest at <repl cell 1>(1) failed: " ~
-        "Assertion failure";
+        "unittest failure";
 }
 
 

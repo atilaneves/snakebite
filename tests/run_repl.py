@@ -42,6 +42,52 @@ def test_repl() -> None:
     assert child.exitstatus == 0
 
 
+# A REPL session is not the guest program: a cell that halts must not end
+# the session.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_halting_cell_does_not_end_the_session(
+    tmp_path: Path, backend: str,
+) -> None:
+    (tmp_path / "dub.sdl").write_text(
+        'name "repl-halt-test"\n'
+        'dflags "-checkaction=halt"\n',
+        encoding="utf-8",
+    )
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "repl_halt_test.d").write_text(
+        "module repl_halt_test;\n", encoding="utf-8",
+    )
+
+    child = pexpect.spawn(
+        sb_path(),
+        ["--project", str(tmp_path), "-b", backend],
+        timeout=TIMEOUT,
+        encoding="utf-8",
+    )
+    try:
+        child.expect_exact("Snakebite REPL")
+        child.expect_exact("[   0.0 ms] > ")
+
+        child.sendline("int check(int v) { assert(v == 2); return v; }")
+        child.expect(r"\[\s+\d+\.\d ms\] > ")
+
+        child.sendline("check(1)")
+        child.expect(r"\[\s+\d+\.\d ms\] > ")
+        assert "Error" in clean(child.before)
+
+        child.sendline("40 + 2")
+        child.expect(r"\[\s+\d+\.\d ms\] > ")
+        assert "42\n" in clean(child.before)
+
+        child.sendline(":q")
+        child.expect(pexpect.EOF)
+    finally:
+        child.close(force=True)
+
+    assert child.exitstatus == 0
+
+
 @pytest.mark.parametrize("backend", ["interpreter", "bytecode", "ctfe"])
 def test_project_import_without_semicolon(tmp_path: Path, backend: str) -> None:
     (tmp_path / "dub.sdl").write_text(

@@ -34,33 +34,92 @@ public bool catchMatches(
     return expected !is null && actual !is null && expected.isBaseOf(actual);
 }
 
-// What a failed `assert` throws, decided once from the assertion itself
-// so that a guest catch sees the same `AssertError` whichever backend
-// evaluated it: `message` is D's own (`core.exception.onAssertError`'s
-// wording, or the literal an `assert(cond, "text")` names), and
-// `file`/`line` are the assertion's own guest source location, not
-// wherever in this project's sources a backend happened to build the
-// error. A message that is not a literal is not evaluated here.
+// What a failed `assert` reports, decided once from the assertion itself
+// so that every backend and mode says the same thing: `message` is D's own
+// (`core.exception.onAssertError`'s wording, or the literal an
+// `assert(cond, "text")` names), and `file`/`line` are the assertion's own
+// guest source location, not wherever in this project's sources a backend
+// happened to build the error. A message that is not a literal is
+// `messageExpression`, which the backend evaluates when the assertion
+// fails: it is what `assert(c, m())` names and what `-checkaction=context`
+// makes of a plain `assert(a == b)`.
 public struct AssertFailure {
     public string message;
     public string file;
     public size_t line;
+    public imported!"dmd.expression".Expression messageExpression;
 }
 
+// `function_` is the function that holds the assertion: druntime's failure
+// hook for an assertion directly in a `unittest` block has its own default
+// message.
 public AssertFailure assertFailureOf(
     imported!"dmd.expression".AssertExp expression,
+    imported!"dmd.func".FuncDeclaration function_,
 ) {
     import std.string: fromStringz;
 
     auto literal = expression.msg is null ? null : expression.msg.isStringExp;
+    const inUnittest = function_ !is null
+        && function_.isUnitTestDeclaration !is null;
+    const defaultMessage = inUnittest
+        ? "unittest failure"
+        : "Assertion failure";
     const message = literal is null
-        ? "Assertion failure"
+        ? defaultMessage
         : literal.toStringz.fromStringz.idup;
 
     return AssertFailure(
         message,
         expression.loc.filename.fromStringz.idup,
         expression.loc.linnum,
+        messageExpressionOf(expression),
+    );
+}
+
+// The message of `expression` when it is not a literal, which the backend
+// evaluates only if the assertion fails.
+public imported!"dmd.expression".Expression messageExpressionOf(
+    imported!"dmd.expression".AssertExp expression,
+) {
+    const dynamic = expression.msg !is null
+        && expression.msg.isStringExp is null;
+
+    return dynamic ? expression.msg : null;
+}
+
+// The text `-checkaction=C` hands the C runtime for an assertion whose
+// message is not an expression: the literal, or the asserted expression
+// itself. It prints the expression, so it is made only when this mode
+// asks for it.
+public const(char)* cAssertionOf(
+    imported!"dmd.expression".AssertExp expression,
+) {
+    auto literal = expression.msg is null ? null : expression.msg.isStringExp;
+
+    return literal is null ? expression.e1.toChars : literal.toStringz.ptr;
+}
+
+// The arguments of the C runtime's assert failure function
+// (`__assert_fail` of glibc and musl), as dmd's glue layer builds them for
+// `-checkaction=C` (`e2ir.d`'s `callCAssert`).
+public struct CAssertCall {
+    public const(char)* assertion;
+    public const(char)* file;
+    public uint line;
+    public const(char)* function_;
+}
+
+public CAssertCall cAssertCallOf(
+    in const(char)* assertion,
+    in imported!"dmd.location".Loc loc,
+    imported!"dmd.func".FuncDeclaration function_,
+) {
+    return CAssertCall(
+        assertion,
+        loc.filename,
+        cast(uint) loc.linnum,
+        function_ is null ? "" : function_.toPrettyChars,
     );
 }
 
@@ -93,14 +152,18 @@ public struct AssertInvariantPlan {
 // mangled linker symbol.
 public AssertInvariantPlan assertInvariantPlanOf(
     imported!"dmd.expression".AssertExp expression,
+    in imported!"snakebite.frontend.checks".Checks checks,
 ) {
     import dmd.astenums: CHECKENABLE, Tclass, Tpointer, Tstruct;
-    import dmd.globals: global;
     import dmd.typesem: nextOf, toBasetype;
+    import snakebite.backends.checkplan: assertPlanOf, FailurePlan;
 
     auto none = AssertInvariantPlan(AssertInvariantPlan.Kind.none);
 
-    if (global.params.useInvariants != CHECKENABLE.on)
+    // `-checkaction=halt` compiles `assert(e)` as `e || halt`, and `C` as
+    // `e || __assert_fail(...)`: neither has an invariant call.
+    if (checks.invariants != CHECKENABLE.on
+            || assertPlanOf(checks).kind != FailurePlan.Kind.raise)
         return none;
 
     auto type = expression.e1.type.toBasetype;

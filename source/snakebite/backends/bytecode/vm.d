@@ -18,6 +18,7 @@ extern(C) bool executeIndirectCallPlan(
 );
 
 import snakebite.backends.builtins: BuiltinCall;
+import snakebite.backends.haltprocess: HaltAction, isHalt;
 import snakebite.backends.unwindplan:
     ExceptionCandidate, UnwindPlan, unwindPlanOf;
 import snakebite.callarguments: CallArguments;
@@ -351,6 +352,8 @@ package struct AssertSite {
     package string message;
     package string file;
     package size_t line;
+    // Not null for a check that halts rather than throws.
+    package HaltAction halt;
 }
 
 
@@ -501,6 +504,11 @@ private struct Activation {
         cleanupSince(cleanupMark, frame, constants, callSites, assertSites,
             frames);
     }
+
+    // Forgets the temporaries that `cleanup` would destroy.
+    void discardCleanups(FrameStack* frames) {
+        frames.finishCleanups(cleanupMark, (in size_t) {});
+    }
 }
 
 private struct DispatchState {
@@ -575,14 +583,24 @@ private Activation* handleException(
 ) {
     size_t firstHandler;
     while (true) {
+        // A halt that ends a cell is not an error guest code handles: no
+        // temporary's destructor, `catch` or `finally` sees it.
+        const halting = isHalt(throwable);
         try {
-            unwindFinally(throwable, () { active.cleanup(frames); });
+            unwindFinally(throwable, () {
+                if (halting)
+                    active.discardCleanups(frames);
+                else
+                    active.cleanup(frames);
+            });
         } catch (Throwable chained) {
             throwable = chained;
         }
-        const plan = exceptionPlanOf(
-            active.exceptionHandlers[firstHandler .. $], active.pc,
-            throwable.classinfo);
+        const plan = isHalt(throwable)
+            ? UnwindPlan.init
+            : exceptionPlanOf(
+                active.exceptionHandlers[firstHandler .. $], active.pc,
+                throwable.classinfo);
         const step = plan.finalizers.length != 0
             ? plan.finalizers[0]
             : plan.handler;
@@ -919,6 +937,8 @@ private const(Instruction)* runAssert(Decoded)(
     import core.exception: AssertError;
 
     const site = execution.assertSites[execution.source];
+    if (site.halt !is null)
+        site.halt();
     throw new AssertError(site.message, site.file, site.line);
 }
 
@@ -2091,22 +2111,41 @@ private const(Instruction)* runStoreBitfield(Decoded)(
 // `dest[] = src[]`, `{length, pointer}` pairs at `execution.destination`
 // and `execution.source`, with `execution.width` the element size baked in at
 // compile time (both sides share one element size - the compiler checked
-// that before emitting this). Druntime owns the length and overlap checks.
+// that before emitting this). It copies `dest.length` elements and checks
+// nothing: the compiler has already decided the length and overlap checks
+// (`opSlicesConform`), or the flags have none.
 package alias opSliceCopy =
     execute!(runSliceCopy, OperandKind.storage, OperandKind.storage);
 
 private const(Instruction)* runSliceCopy(Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.druntime.arraycopy: _d_arraycopy;
+    import snakebite.backends.slicecopy: copyUnchecked;
+
+    copyUnchecked(
+        *cast(void[]*) execution.destination,
+        *cast(void[]*) execution.source,
+        execution.width);
+
+    return execution.next;
+}
+
+
+// Whether `dest[] = src[]` passes dmd's length and overlap check, as one
+// byte that replaces the `{length, pointer}` pair at `execution.destination`
+// (a scratch copy: a binary opcode overwrites its left operand).
+package alias opSlicesConform =
+    execute!(runSlicesConform, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runSlicesConform(Decoded)(
+    ref Decoded execution,
+) {
+    import snakebite.backends.slicecopy: slicesConform;
 
     auto dest = execution.destination;
-    auto src = execution.source;
-    _d_arraycopy(
-        execution.width,
-        *cast(void[]*) src,
-        *cast(void[]*) dest,
-    );
+    *cast(ubyte*) dest = slicesConform(
+        *cast(void[]*) dest, *cast(void[]*) execution.source,
+        execution.width);
 
     return execution.next;
 }

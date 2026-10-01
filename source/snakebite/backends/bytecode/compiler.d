@@ -16,8 +16,10 @@ import snakebite.backends.controlflow:
     ScopeFrame, scopePath;
 import snakebite.backends.exceptionplan:
     UnwindPlan, catchPlanOf, unwindPlanOf;
+import snakebite.backends.checkplan: BoundsCheck, hookOf;
 import snakebite.backends.druntimehooks: DruntimeHook, planOf;
 import snakebite.backends.sliceplan: planSlice;
+import snakebite.backends.exceptions: AssertFailure, CAssertCall;
 import snakebite.ffi: CallbackBridge, CallbackCall, PlanCache;
 
 
@@ -42,6 +44,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import snakebite.backends.classinfo;
     import snakebite.backends.bytecode.vm: Function, Vm;
     import snakebite.backends.layout: FrameLayout;
+    import snakebite.frontend.checks: Checks;
     import snakebite.sharedtable: SharedTable;
     import snakebite.exception: SnakebiteException;
     import snakebite.framestack: defaultFrameCapacity;
@@ -261,6 +264,15 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 
     package bool isGuestFunction(FuncDeclaration function_) const {
         return _program.isInterpreted(function_);
+    }
+
+    package Checks checks() const {
+        return _program.checks;
+    }
+
+    package imported!"snakebite.backends.haltprocess".HaltAction
+    haltAction() const {
+        return _program.haltAction;
     }
 
     // Records that `compiled` is the word this backend stores for
@@ -628,7 +640,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opTemporaryArm, opTemporaryArmAddress, opTemporaryBegin,
         opTemporaryEnd,
         opTemporaryRegister, opTemporarySuspend,
-        opSliceCopy, opSliceFill,
+        opSliceCopy, opSliceFill, opSlicesConform,
         opStaticAddress, opStaticArrayEqual, opStaticLoad, opStaticStore,
         opStoreBitfield, opStoreIndirect, opSubtract, opThrow, opZero,
         opTlsAddress, opTlsLoad, opTlsStore;
@@ -670,6 +682,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private long[] _constants;
     private CallSite[] _callSites;
     private AssertSite[] _assertSites;
+    private size_t _haltSite = size_t.max;
     private PendingExceptionHandler[] _exceptionHandlers;
     private size_t _tempSize;
     private uint _tempAlignment;
@@ -1933,18 +1946,150 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     //
     private void compileAssert(AssertExp expression) {
         import dmd.astenums: Tnoreturn;
+        import dmd.typesem: toBasetype;
+        import snakebite.backends.checkplan:
+            assertPlanOf, FailurePlan, isUnanalysed;
         import snakebite.backends.exceptions: assertFailureOf;
+
+        const plan = assertPlanOf(_bytecode.checks);
+        if (plan.kind == FailurePlan.Kind.ignore)
+            return;
 
         const conditionOffset = compileCondition(expression.e1);
         const width = conditionWidth(expression.e1);
+        const never = isUnanalysed(expression)
+            || expression.type.toBasetype.ty == Tnoreturn;
 
-        const failure = assertFailureOf(expression);
-        _assertSites ~= AssertSite(failure.message, failure.file, failure.line);
-        emit(&opAssert, conditionOffset, _assertSites.length - 1, width);
-        _finished = expression.type.ty == Tnoreturn;
+        final switch (plan.kind) with (FailurePlan.Kind) {
+            case ignore:
+                assert(0);
+            case halt:
+                emit(&opAssert, conditionOffset, haltSite, width);
+                break;
+            case cAssert:
+                compileUnlessHolds(conditionOffset, width, never,
+                    () => compileCAssert(expression));
+                break;
+            case raise:
+                // `auto`: dmd's nodes are not `const`, and
+                // `messageExpression` would be if `failure` were.
+                auto failure = assertFailureOf(expression, _function);
+                if (failure.messageExpression is null) {
+                    _assertSites ~= AssertSite(
+                        failure.message, failure.file, failure.line);
+                    emit(&opAssert, conditionOffset,
+                        _assertSites.length - 1, width);
+                } else
+                    compileUnlessHolds(conditionOffset, width, never,
+                        () => compileAssertMessage(expression, failure));
+                break;
+        }
+        _finished = never;
 
         if (!_finished)
             compileAssertInvariant(expression, conditionOffset);
+    }
+
+    // The one `AssertSite` a function needs for every halt: a halt reports
+    // nothing.
+    private size_t haltSite() {
+        if (_haltSite == size_t.max) {
+            _assertSites ~= AssertSite("", "", 0, _bytecode.haltAction);
+            _haltSite = _assertSites.length - 1;
+        }
+
+        return _haltSite;
+    }
+
+    // Runs `failure` unless the `width` bytes at `conditionOffset` are
+    // nonzero. `never` says that they are known to be zero, so that there
+    // is nothing to branch over.
+    private void compileUnlessHolds(
+        in size_t conditionOffset,
+        in size_t width,
+        in bool never,
+        scope void delegate() failure,
+    ) {
+        if (never) {
+            failure();
+            return;
+        }
+
+        const branchIndex = _instructions.length;
+        emit(&opBranchTrue, conditionOffset, 0, width);
+        failure();
+        *branchTargetField(_instructions[branchIndex]) = _instructions.length;
+    }
+
+    // `assert(c, m())`: druntime's own `_d_assert_msg` builds and throws the
+    // `AssertError`, once the message has run.
+    private void compileAssertMessage(
+        AssertExp expression, AssertFailure failure,
+    ) {
+        import core.stdc.string: strlen;
+        import snakebite.backends.druntimehooks: DruntimeHook, planOf;
+        import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
+
+        const message = compileMessage(failure.messageExpression);
+        const file = expression.loc.filename;
+        Arg[] args = [
+            Arg(message + arrayLengthOffset, 0, size_t.sizeof),
+            Arg(message + arrayPointerOffset, 0, size_t.sizeof),
+            constantArgument(strlen(file), size_t.sizeof),
+            constantArgument(cast(size_t) file, size_t.sizeof),
+            constantArgument(expression.loc.linnum, uint.sizeof),
+        ];
+        auto plan = planOf(_bytecode._plans, DruntimeHook.assertMessage);
+        _callSites ~= CallSite.native(cast(const(void)*) plan, args, 0);
+        emit(&opCall, discardResult, _callSites.length - 1, 0);
+    }
+
+    // `-checkaction=C`: the C runtime aborts the process.
+    private void compileCAssert(AssertExp expression) {
+        import snakebite.backends.exceptions:
+            cAssertCallOf, cAssertionOf, messageExpressionOf;
+        import snakebite.nativelayout: arrayPointerOffset;
+
+        auto messageExpression = messageExpressionOf(expression);
+        if (messageExpression is null) {
+            const call = cAssertCallOf(
+                cAssertionOf(expression), expression.loc, _function);
+            compileCAssertCall(call, constantArgument(
+                cast(size_t) call.assertion, size_t.sizeof));
+        } else {
+            const call = cAssertCallOf(null, expression.loc, _function);
+            const message = compileMessage(messageExpression);
+            compileCAssertCall(call, Arg(
+                message + arrayPointerOffset, 0, size_t.sizeof));
+        }
+    }
+
+    private void compileCAssertCall(in CAssertCall call, in Arg assertion) {
+        import snakebite.backends.druntimehooks: DruntimeHook, planOf;
+
+        Arg[] args = [
+            assertion,
+            constantArgument(cast(size_t) call.file, size_t.sizeof),
+            constantArgument(call.line, uint.sizeof),
+            constantArgument(cast(size_t) call.function_, size_t.sizeof),
+        ];
+        auto plan = planOf(_bytecode._plans, DruntimeHook.cAssertFail);
+        _callSites ~= CallSite.native(cast(const(void)*) plan, args, 0);
+        emit(&opCall, discardResult, _callSites.length - 1, 0);
+    }
+
+    // The message of a failed assertion runs only then.
+    private size_t compileMessage(Expression message) {
+        const facts = TypeFacts.of(message.type);
+        const offset = reserveTemp(facts);
+        evalInto(message, offset, facts.size);
+        return offset;
+    }
+
+    private Arg constantArgument(in size_t value, in size_t width) {
+        const offset = reserveTemp(pointerFacts);
+        emit(&opConstant, offset, addConstant(cast(long) value), width);
+        return Arg(offset, 0, width);
     }
 
     // `assert(e1)`'s own invariant call, reached only once `opAssert` above
@@ -1965,7 +2110,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.backends.exceptions:
             AssertInvariantPlan, assertInvariantPlanOf;
 
-        auto plan = assertInvariantPlanOf(expression);
+        auto plan = assertInvariantPlanOf(expression, _bytecode.checks);
         final switch (plan.kind) with (AssertInvariantPlan.Kind) {
             case none:
                 return;
@@ -3027,22 +3172,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             evalInto(expression.e2, valueOffset, facts.size, sarrayType);
             emit(&opStoreIndirect, baseOffset, valueOffset, facts.size);
         } else {
-            size_t sourceOffset;
-            if (rightTy == Tsarray) {
-                sourceOffset = compileAddress(expression.e2);
-            } else {
-                const arrayFacts = TypeFacts.of(expression.e2.type);
-                const arrayOffset = reserveTemp(arrayFacts);
-                evalInto(expression.e2, arrayOffset, arrayFacts.size);
-                sourceOffset = arrayOffset + arrayPointerOffset;
-            }
-
-            // `dim` is a compile-time constant for a static array, on
-            // both sides of the copy, so the two synthetic `{length,
-            // pointer}` pairs `opSliceCopy` reads are trusted equal
-            // without a run-time check - unlike
-            // `compileDynamicSliceAssign`'s own use of the same opcode,
-            // where neither side's length is known until run time.
             import snakebite.nativelayout: arrayValueSize;
 
             const sliceFacts = TypeFacts(
@@ -3055,14 +3184,25 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opCopy, destSliceOffset + arrayPointerOffset, baseOffset,
                 size_t.sizeof);
 
-            const sourceSliceOffset = reserveTemp(sliceFacts);
-            emit(&opConstant, sourceSliceOffset + arrayLengthOffset,
-                addConstant(cast(long) dim), size_t.sizeof);
-            emit(&opCopy, sourceSliceOffset + arrayPointerOffset,
-                sourceOffset, size_t.sizeof);
+            // A static array on the right has the target's length by its
+            // type, but a dynamic array has whatever length it has.
+            size_t sourceSliceOffset;
+            if (rightTy == Tsarray) {
+                const sourceOffset = compileAddress(expression.e2);
+                sourceSliceOffset = reserveTemp(sliceFacts);
+                emit(&opConstant, sourceSliceOffset + arrayLengthOffset,
+                    addConstant(cast(long) dim), size_t.sizeof);
+                emit(&opCopy, sourceSliceOffset + arrayPointerOffset,
+                    sourceOffset, size_t.sizeof);
+            } else {
+                sourceSliceOffset = reserveTemp(sliceFacts);
+                evalInto(
+                    expression.e2, sourceSliceOffset, arrayValueSize);
+            }
 
-            emit(&opSliceCopy, destSliceOffset, sourceSliceOffset,
-                elementFacts.size);
+            compileSliceCopy(
+                destSliceOffset, sourceSliceOffset, elementFacts.size,
+                sliceFacts, expression.loc);
         }
 
         if (destOffset != discardResult && destOffset != targetOffset) {
@@ -3133,7 +3273,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const sourceSliceOffset = reserveTemp(sourceFacts);
         evalInto(expression.e2, sourceSliceOffset, sourceFacts.size);
 
-        emit(&opSliceCopy, destSliceOffset, sourceSliceOffset, elementSize);
+        compileSliceCopy(
+            destSliceOffset, sourceSliceOffset, elementSize, arrayFacts,
+            expression.loc);
 
         if (destOffset != discardResult) {
             emit(&opCopy, destOffset + arrayLengthOffset,
@@ -3141,6 +3283,30 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opCopy, destOffset + arrayPointerOffset,
                 destSliceOffset + arrayPointerOffset, size_t.sizeof);
         }
+    }
+
+    // The equal-length and no-overlap check of `to[] = from[]` is a bounds
+    // check in dmd's glue layer, so it follows the program's flags like an
+    // index check does, and what it raises is `RangeError`.
+    private void compileSliceCopy(
+        in size_t to,
+        in size_t from,
+        in size_t elementSize,
+        in TypeFacts sliceFacts,
+        in Loc loc,
+    ) {
+        import snakebite.backends.checkplan: boundsPlanOf, FailurePlan;
+        import snakebite.nativelayout: arrayValueSize;
+
+        const plan = boundsPlanOf(_bytecode.checks, _function);
+        if (plan.kind != FailurePlan.Kind.ignore) {
+            const conforms = reserveTemp(sliceFacts);
+            emit(&opCopy, conforms, to, arrayValueSize);
+            emit(&opSlicesConform, conforms, from, elementSize);
+            compileBoundsHook(conforms, BoundsCheck.sliceCopy, null, loc);
+        }
+
+        emit(&opSliceCopy, to, from, elementSize);
     }
 
     // dmd's `blockAssign` gives `v` the element type, even when the
@@ -4756,6 +4922,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // this ignores `_destination` rather than requiring one.
     override void visit(AssertExp expression) {
         compileAssert(expression);
+    }
+
+    override void visit(HaltExp) {
+        const never = reserveTemp(pointerFacts);
+        emit(&opConstant, never, addConstant(0), size_t.sizeof);
+        emit(&opAssert, never, haltSite, size_t.sizeof);
+        _finished = true;
     }
 
     override void visit(AssignExp expression) {
@@ -6824,17 +6997,46 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // bounds, and the call is skipped. `extraArgs` are the hook's
     // parameters after `(file, line)`, already evaluated into frame slots
     // by the caller - `index`/`length` for an index check, `lower`/
-    // `upper`/`length` for a slice.
+    // `upper`/`length` for a slice. A function compiled without bounds
+    // checks gets nothing.
     private void compileBoundsHook(
         in size_t inBoundsOffset,
-        in DruntimeHook hook,
+        in BoundsCheck check,
         Arg[] extraArgs,
         in Loc loc,
     ) {
-        auto plan = planOf(_bytecode._plans, hook);
+        import snakebite.backends.checkplan:
+            boundsPlanOf, cMessageOf, FailurePlan;
+        import snakebite.backends.exceptions: cAssertCallOf;
 
-        const branchIndex = _instructions.length;
-        emit(&opBranchTrue, inBoundsOffset, 0, 1);
+        const plan = boundsPlanOf(_bytecode.checks, _function);
+        final switch (plan.kind) with (FailurePlan.Kind) {
+            case ignore:
+                break;
+            case halt:
+                emit(&opAssert, inBoundsOffset, haltSite, 1);
+                break;
+            case cAssert: {
+                const call = cAssertCallOf(
+                    cMessageOf(check).ptr, loc, _function);
+                compileUnlessHolds(inBoundsOffset, 1, false, () =>
+                    compileCAssertCall(call, constantArgument(
+                        cast(size_t) call.assertion, size_t.sizeof)));
+                break;
+            }
+            case raise:
+                compileUnlessHolds(inBoundsOffset, 1, false, () =>
+                    compileBoundsHookCall(check, extraArgs, loc));
+                break;
+        }
+    }
+
+    private void compileBoundsHookCall(
+        in BoundsCheck check,
+        Arg[] extraArgs,
+        in Loc loc,
+    ) {
+        auto plan = planOf(_bytecode._plans, hookOf(check));
 
         const fileOffset = reserveTemp(pointerFacts);
         emit(&opConstant, fileOffset,
@@ -6851,8 +7053,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         ] ~ extraArgs;
         _callSites ~= CallSite.native(cast(const(void)*) plan, args, 0);
         emit(&opCall, discardResult, _callSites.length - 1, 0);
-
-        *branchTargetField(_instructions[branchIndex]) = _instructions.length;
     }
 
     // Fails through the druntime hook unless `smaller <= larger`, unsigned.
@@ -6864,7 +7064,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCopy, resultOffset, smaller, size_t.sizeof);
         emit(&opLessOrEqualUnsigned, resultOffset, larger, size_t.sizeof);
         compileBoundsHook(
-            resultOffset, DruntimeHook.sliceBounds, hookArguments, location);
+            resultOffset, BoundsCheck.slice, hookArguments, location);
     }
 
     private struct StorageAdapter {
@@ -7058,7 +7258,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 size_t.sizeof);
             compiler.compileBoundsHook(
                 inBounds,
-                DruntimeHook.indexBounds,
+                BoundsCheck.index,
                 [
                     Arg(index, 0, size_t.sizeof),
                     Arg(length, 0, size_t.sizeof),
