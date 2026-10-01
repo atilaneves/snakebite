@@ -844,6 +844,36 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A `goto` may target a label in a different `case` of the same `switch`.
+static foreach (backend; Matrix!()) {
+    @("gotoLabelInOtherSwitchCase." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int inner(int value) {
+                int result;
+                switch (value) {
+                    case 1:
+                        goto tail;
+                    case 2:
+                        result += 20;
+                        break;
+                    case 3:
+                    tail:
+                        result += 5;
+                        break;
+                    default:
+                        break;
+                }
+                return result;
+            }
+            int main() {
+                return inner(1) == 5 ? 0 : 1;
+            }
+        });
+    }
+}
+
 static foreach (backend; Matrix!()) {
     @("reviewGotoInsideFinallyScope." ~ backend.stringof)
     @Tags(backend.stringof)
