@@ -497,6 +497,7 @@ private imported!"object".TypeInfo eightbyteRepresentative(
         case 1: return typeid(byte);
         case 2: return typeid(short);
         case 3: case 4: return typeid(int);
-        default: return typeid(long);
+        case 5: .. case 8: return typeid(long);
+        default: assert(false);
     }
 }
