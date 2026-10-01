@@ -2,6 +2,7 @@ module ut.backends.run.virtual_variadic;
 
 
 import ut.backends;
+import core.vararg;
 
 // An untyped D variadic receives the call's `TypeInfo` tuple before its
 // declared parameters, and the extra arguments after them.
@@ -213,6 +214,78 @@ static foreach (backend; Matrix!(
                 Base base = new Derived;
                 assert(base.sum(0) == 100);
                 assert(base.sum(3, 4, 5, 6) == 115);
+            }
+        });
+    }
+}
+
+private interface HostSummer {
+    int sum(int first, ...);
+}
+
+private class HostSummerBase {
+    int sum(int first, ...) { return -1; }
+}
+
+private final class HostSummerImplementation: HostSummerBase, HostSummer {
+    int bias = 1000;
+    override int sum(int first, ...) {
+        int total = first + bias;
+        foreach (type; _arguments) {
+            assert(type == typeid(int));
+            total += va_arg!int(_argptr);
+        }
+        return total;
+    }
+}
+
+private extern(C) void* snakebite_ut_virtual_variadic_host_interface() {
+    return cast(void*) cast(HostSummer) new HostSummerImplementation;
+}
+
+private extern(C) void* snakebite_ut_virtual_variadic_host_class() {
+    return cast(void*) new HostSummerImplementation;
+}
+
+// The vtable slot of a host object holds compiled code, so the call
+// crosses the barrier with the `TypeInfo` tuple and the extra arguments.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("virtualVariadic.hostInterfaceTarget." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            interface Summer {
+                int sum(int first, ...);
+            }
+            pragma(mangle, "snakebite_ut_virtual_variadic_host_interface")
+            extern(C) void* hostSummer();
+            void main() {
+                auto summer = cast(Summer) hostSummer();
+                assert(summer.sum(1) == 1001);
+                assert(summer.sum(1, 2, 3) == 1006);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("virtualVariadic.hostClassTarget." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base {
+                int sum(int first, ...) { return -1; }
+            }
+            pragma(mangle, "snakebite_ut_virtual_variadic_host_class")
+            extern(C) void* hostSummer();
+            void main() {
+                auto base = cast(Base) hostSummer();
+                assert(base.sum(1) == 1001);
+                assert(base.sum(1, 2, 3) == 1006);
             }
         });
     }
