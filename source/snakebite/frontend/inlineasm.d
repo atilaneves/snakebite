@@ -23,17 +23,20 @@ public void reportInlineAsmDiagnostics(
 }
 
 // Snakebite does not implement `D_InlineAsm_X86_64` (see docs/adr/0012).
-// Walk `rootModule`'s freshly parsed, not yet semantically analysed
-// syntax tree once. Pre-compute every `D_InlineAsm_X86_64`
-// `VersionCondition` to `Include.no`. This is exactly what dmd would
-// compute if the identifier were undefined. Do this before any semantic
-// pass reaches the condition. Call this once per freshly parsed root
-// module, before the shared semantic phases run. See docs/adr/0012 for
-// why the walk must run this early.
+// Walk `rootModule`'s syntax tree once. Pre-compute every
+// `D_InlineAsm_X86_64` `VersionCondition` that no semantic pass has
+// resolved yet to `Include.no`. This is exactly what dmd would compute if
+// the identifier were undefined. Call this once per freshly parsed root
+// module, before the shared semantic phases run, so that no condition is
+// resolved yet. See docs/adr/0012 for why the walk must run this early.
+// A module that becomes root-owned only after dmd loaded it as a plain
+// import (`analyseLoadedRootOwnedImports`) has its module-scope
+// conditions resolved already; a resolved condition keeps its answer,
+// because dmd has already built the module's symbols from it.
 public void disableInlineAsmVersion(
     imported!"dmd.dmodule".Module rootModule,
 ) {
-    scope gate = new InlineAsmVersionGate;
+    scope gate = new InlineAsmVersionGate(rootModule);
     rootModule.accept(gate);
 }
 
@@ -155,6 +158,9 @@ private extern(C++) class InlineAsmVersionGate
     alias visit = SemanticTimeTransitiveVisitor.visit;
 
     import dmd.cond: Include, VersionCondition;
+    import dmd.declaration: AliasDeclaration;
+    import dmd.dmodule: Module;
+    import dmd.dsymbol: Dsymbol;
     import dmd.identifier: Identifier;
 
     // Pooled once per walk, not on every `VersionCondition` visited:
@@ -162,9 +168,32 @@ private extern(C++) class InlineAsmVersionGate
     // identifier table on every call, and a root module's syntax tree can
     // hold many `version (...)` conditions.
     private const Identifier _inlineAsmIdent;
+    private Module _module;
+    private bool[Dsymbol] _aliasTargets;
 
-    private extern(D) this() {
+    private extern(D) this(Module module_) {
         _inlineAsmIdent = Identifier.idPool("D_InlineAsm_X86_64");
+        _module = module_;
+    }
+
+    // Once dmd has analysed an alias, `aliassym` is the declaration it
+    // names: one in another module, whose conditions are not this
+    // module's to gate, or one in this module, possibly the alias's own
+    // enclosing function (`alias self = f;` in `f`). Only this module's
+    // own declarations are walked, each once. Before analysis `aliassym`
+    // is the alias's own syntax (a function literal, say), with no parent.
+    override void visit(AliasDeclaration declaration) {
+        auto target = declaration.aliassym;
+        if (target is null) {
+            SemanticTimeTransitiveVisitor.visit(declaration);
+            return;
+        }
+
+        const owner = target.getModule;
+        if ((owner !is null && owner !is _module) || target in _aliasTargets)
+            return;
+        _aliasTargets[target] = true;
+        target.accept(this);
     }
 
     // A version LEVEL condition, `version (2) { ... }`, has a `null`
@@ -174,7 +203,8 @@ private extern(C++) class InlineAsmVersionGate
     // simply compares unequal to the pooled identifier below; it can never
     // be `D_InlineAsm_X86_64`, which is never anonymous.
     override void visit(VersionCondition condition) {
-        if (condition.ident is _inlineAsmIdent)
+        if (condition.ident is _inlineAsmIdent
+                && condition.inc == Include.notComputed)
             condition.inc = Include.no;
     }
 }

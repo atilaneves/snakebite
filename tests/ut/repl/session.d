@@ -70,6 +70,69 @@ static foreach (backend; EnumMembers!ReplBackendName) {
         repl.submit("abs").kind.should == SubmitResult.Kind.none;
         repl.submit("abs(-42)").text.should == "42";
     }
+
+    // Compiled D analyses every module of a project with the project's
+    // versions, however the module is reached: through a package's
+    // `package.d` and `public import`, an import in a function body, or an
+    // import in a `version` block. Another session does not see them.
+    @("submit.projectVersionsReachEveryImportedModule." ~ backend.stringof)
+    unittest {
+        import snakebite.frontend.compiler: FrontendFlags;
+        import std.conv: text;
+        import std.file: mkdirRecurse, rmdirRecurse, write;
+        import std.path: buildPath;
+        import std.process: thisProcessID;
+
+        const name = text("versioned_", backend);
+        const directory = buildPath(
+            tempDirectory, text("repl_session_", name, "_", thisProcessID),
+        );
+        mkdirRecurse(buildPath(directory, name));
+        scope(exit) rmdirRecurse(directory);
+
+        write(
+            buildPath(directory, name, "package.d"),
+            text("module ", name, ";\npublic import ", name, ".foo;\n"),
+        );
+        write(
+            buildPath(directory, name, "foo.d"),
+            text(
+                "module ", name, ".foo;\n",
+                "version (ProjV) import ", name, ".conditional;\n",
+                "int answer() { version (ProjV) return 42; else return 0; }\n",
+                "int local() { import ", name, ".inner; return inner(); }\n",
+                "int viaVersion() { return conditional(); }\n",
+            ),
+        );
+        write(
+            buildPath(directory, name, "inner.d"),
+            text(
+                "module ", name, ".inner;\n",
+                "int inner() { version (ProjV) return 43; else return 0; }\n",
+            ),
+        );
+        write(
+            buildPath(directory, name, "conditional.d"),
+            text(
+                "module ", name, ".conditional;\n",
+                "int conditional() { version (ProjV) return 44; else return 0; }\n",
+            ),
+        );
+
+        auto repl = Repl(
+            backend, [directory], [], FrontendFlags(["-version=ProjV"]),
+        );
+        repl.submit(text("import ", name, ";")).kind.should
+            == SubmitResult.Kind.none;
+        repl.submit("answer()").text.should == "42";
+        repl.submit("local()").text.should == "43";
+        repl.submit("viaVersion()").text.should == "44";
+
+        auto plain = Repl(backend);
+        plain.submit("version (ProjV) enum projV = 1; else enum projV = 0;")
+            .kind.should == SubmitResult.Kind.none;
+        plain.submit("projV").text.should == "0";
+    }
 }
 
 

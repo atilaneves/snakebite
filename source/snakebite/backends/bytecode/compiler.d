@@ -16,7 +16,7 @@ import snakebite.backends.controlflow:
     ScopeFrame, scopePath;
 import snakebite.backends.exceptionplan:
     UnwindPlan, catchPlanOf, unwindPlanOf;
-import snakebite.backends.druntimehooks: DruntimeHook, planOf, specOf;
+import snakebite.backends.druntimehooks: DruntimeHook, planOf;
 import snakebite.ffi: CallbackBridge, CallbackCall, PlanCache;
 
 
@@ -312,11 +312,6 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         // same value; the store just needs to be visible to a later
         // reader.
         auto plan = planOf(_plans, DruntimeHook.gcMalloc);
-        if (plan is null)
-            throw new SnakebiteException(
-                "bytecode compiler cannot resolve druntime's " ~
-                    "`gc_malloc`",
-            );
         atomicStore!(MemoryOrder.rel)(_allocatorPlan, plan);
         return plan;
     }
@@ -1368,8 +1363,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // only the body needs compiling.
     override void visit(WithStatement statement) {
         if (statement.wthis !is null)
-            compileVariableInitializer(statement.wthis, statement.loc,
-                statementText(statement));
+            compileVariableInitializer(statement.wthis);
 
         if (statement._body !is null)
             compileStatement(statement._body);
@@ -1960,7 +1954,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             case none:
                 return;
             case class_:
-                compileClassInvariantCall(expression, objectOffset);
+                compileClassInvariantCall(objectOffset);
                 return;
             case struct_:
                 compileResolvedCall(plan.structInvariant, null,
@@ -1978,12 +1972,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // through the FFI barrier - and called here with the object reference
     // as its one argument.
     private void compileClassInvariantCall(
-        AssertExp expression, in size_t objectOffset,
+        in size_t objectOffset,
     ) {
         auto plan = planOf(_bytecode._plans, DruntimeHook.classInvariant);
-        if (plan is null)
-            throw rejection(
-                _function, expression.loc, expressionText(expression));
 
         _callSites ~= CallSite.native(
             plan, [Arg(objectOffset, 0, size_t.sizeof)], 0);
@@ -2440,8 +2431,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             plan.initialize((Expression destructor) {
                 temporary = registerTemporary(variable, destructor);
             }, {
-                compileVariableInitializer(variable, expression.loc,
-                    expressionText(expression));
+                compileVariableInitializer(variable);
             }, {
                 emit(&opTemporaryArmAddress, 0, temporary, 0);
             });
@@ -2460,19 +2450,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // local), or a frame slot holding a value. `with (aggregate) ...`'s
     // own `wthis` takes the last path: its slot holds the pointer or
     // class reference value its initialiser evaluates to, not a `ref`
-    // local's address. Shared between a local declaration
-    // (`compileDeclaration`, where `loc`/`operation` name the whole
-    // `int sum = 0;`) and a `with` statement's own compiler-generated
-    // temporary (where they name the `with (...)` itself, since it has no
-    // declaration of its own to render).
-    private void compileVariableInitializer(
-        VarDeclaration variable,
-        Loc loc,
-        lazy string operation,
-    ) {
+    // local's address. Shared by local declarations and with-statement
+    // temporaries.
+    private void compileVariableInitializer(VarDeclaration variable) {
         auto expInitializer = variable._init.isExpInitializer;
-        if (expInitializer is null)
-            throw rejection(_function, loc, operation);
+        assert(expInitializer !is null,
+            "a runtime variable initializer is an expression initializer");
 
         if (initializerConstructsThroughSlice(expInitializer, variable))
             return compileEffect(expInitializer.exp);
@@ -2886,9 +2869,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         AssignExp expression, DotVarExp target, in size_t destOffset,
     ) {
         auto field = target.var.isVarDeclaration;
-        if (field is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+        assert(field !is null, "an assignable field is a variable");
 
         if (auto bitfield = field.isBitFieldDeclaration) {
             const facts = TypeFacts.of(field.type);
@@ -2915,9 +2896,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: Tclass;
 
         auto field = expression.var.isVarDeclaration;
-        if (field is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+        assert(field !is null, "a field address names a variable");
 
         size_t addressOffset;
         auto aggregateType = expression.e1.type.toBasetype;
@@ -2925,9 +2904,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             addressOffset = reserveTemp(pointerFacts);
             evalInto(expression.e1, addressOffset, size_t.sizeof);
         } else {
-            if (aggregateType.isTypeStruct is null)
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
+            assert(aggregateType.isTypeStruct !is null,
+                "a struct field has a struct or class receiver");
             addressOffset = compileAddress(expression.e1);
         }
 
@@ -3618,8 +3596,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     override void visit(DeclarationExp expression) {
         if (_destination != discardResult && _expressions.active())
             return compileDeclaration(expression);
-        if (_destination != discardResult)
-            return visit(cast(Expression) expression);
+        assert(_destination == discardResult,
+            "a declaration expression does not produce a value");
 
         compileDeclaration(expression);
     }
@@ -3721,8 +3699,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             }
 
             auto declaration = symbol.dsym.isAggregateDeclaration;
-            if (declaration is null)
-                return visit(cast(Expression) expression);
+            assert(declaration !is null,
+                "an initializer symbol names an aggregate");
             const initial = _bytecode._runtimeTypes.initializer(declaration);
 
             import snakebite.nativelayout:
@@ -3737,8 +3715,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         auto variable = expression.var.isVarDeclaration;
-        if (variable is null)
-            return visit(cast(Expression) expression);
+        assert(variable !is null,
+            "a runtime variable expression names a variable");
 
         if (variable.isDataseg) {
             emitStaticLoad(variable, _destination, _width);
@@ -3982,8 +3960,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         requireDestination(expression);
 
         auto field = expression.var.isVarDeclaration;
-        if (field is null)
-            return visit(cast(Expression) expression);
+        assert(field !is null, "a field read names a variable");
 
         if (auto bitfield = field.isBitFieldDeclaration) {
             const facts = TypeFacts.of(field.type);
@@ -4007,8 +3984,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        if (aggregateType.isTypeStruct is null)
-            return visit(cast(Expression) expression);
+        assert(aggregateType.isTypeStruct !is null,
+            "a struct field has a struct or class receiver");
 
         const baseFacts = TypeFacts.of(expression.e1.type);
         const baseOffset = reserveTemp(baseFacts);
@@ -4789,9 +4766,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const hook = elementBase.ty == Twchar
             ? DruntimeHook.arrayAppendWchar : DruntimeHook.arrayAppendChar;
         auto plan = planOf(_bytecode._plans, hook);
-        if (plan is null)
-            throw rejection(_function, expression.loc,
-                "host setup: druntime append hook is not available");
 
         const arrayOffset = compileAddress(expression.e1);
 
@@ -6745,8 +6719,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in Loc loc,
     ) {
         auto plan = planOf(_bytecode._plans, hook);
-        if (plan is null)
-            throw rejection(_function, loc, specOf(hook).name);
 
         const branchIndex = _instructions.length;
         emit(&opBranchTrue, inBoundsOffset, 0, 1);
@@ -6796,9 +6768,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             auto variable = expression.e1.isVarExp;
             auto declaration = variable is null
                 ? null : variable.var.isVarDeclaration;
-            if (declaration is null)
-                throw rejection(compiler._function, expression.loc,
-                    expressionText(expression));
+            assert(declaration !is null,
+                "reference construction targets a variable declaration");
 
             const target = compiler.referenceSlotAddress(
                 declaration);
@@ -7089,11 +7060,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             }
 
             auto variable = expression.var.isVarDeclaration;
-            if (variable is null)
-                throw rejection(
-                    compiler._function, expression.loc,
-                    expressionText(expression),
-                );
+            assert(variable !is null,
+                "a non-special symbol address names a variable");
 
             return variable.isDataseg
                 ? compiler.compileStaticAddress(variable)

@@ -926,10 +926,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // Acquire load - see `forceIfNeeded`'s own doc
         // (`snakebite.frontend.compiler`) for why the unlocked check
         // needs that much, not a plain field read.
-        forceIfNeeded(
+        forceIfNeeded!functionSemantic3(
             () => atomicLoad!(MemoryOrder.acq)(function_.semanticRun)
                 >= PASS.semantic3done,
-            () { functionSemantic3(function_); },
+            function_,
         );
 
         return FrameLayout.of(function_);
@@ -1203,14 +1203,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         in Loc loc,
         scope const(void*)[] extraArguments,
     ) {
-        import snakebite.backends.druntimehooks: planOf, specOf;
+        import snakebite.backends.druntimehooks: planOf;
 
         auto plan = planOf(*_plans, hook);
-        if (plan is null)
-            throw new SnakebiteException(
-                text("interpreter cannot resolve the symbol `",
-                    specOf(hook).name, "`: it is not in this process"),
-            );
 
         const file = cast(const(char)*) loc.filename;
         const line = cast(uint) loc.linnum;
@@ -1658,10 +1653,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         if (statement.wthis !is null) {
             auto initializer = statement.wthis._init.isExpInitializer;
-            if (initializer is null)
-                throw new SnakebiteException(
-                    "interpreter cannot initialize `with` expression",
-                );
+            assert(initializer !is null,
+                "a with statement temporary has an expression initializer");
 
             evaluate(
                 initializerValueOf(initializer),
@@ -2359,7 +2352,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import core.stdc.string: memcpy;
         import snakebite.frontend.dmd.delegates: isCtfeVariable;
         import snakebite.nativelayout: storeIntegral;
-        import std.conv: text;
 
         // See `snakebite.frontend.dmd.delegates.isCtfeVariable`: shared with
         // the bytecode backend.
@@ -2384,11 +2376,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             }
 
             auto declaration = symbol.dsym.isAggregateDeclaration;
-            if (declaration is null)
-                throw new SnakebiteException(
-                    text("interpreter cannot evaluate `", expression.toString,
-                        "`: unsupported initializer symbol"),
-                );
+            assert(declaration !is null,
+                "an initializer symbol names an aggregate");
             const initial = _runtimeTypes.initializer(declaration);
 
             import snakebite.nativelayout:
@@ -2642,8 +2631,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private void initializeDeclaredVariable(
         VarDeclaration variable, DeclarationExp expression,
     ) {
-        import std.conv: text;
-
         // A data-segment variable is initialised once, when the guest
         // first reaches it, not every time its declaration executes.
         if (variable.isDataseg)
@@ -2656,12 +2643,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
 
         auto expInitializer = variable._init.isExpInitializer;
-        if (expInitializer is null)
-            throw new SnakebiteException(
-                text("interpreter cannot run the initializer for `",
-                    expression.toString, "`: only a plain expression ",
-                    "initializer is supported"),
-            );
+        assert(expInitializer !is null,
+            "a runtime variable initializer is an expression initializer");
 
         auto slot = storageOf(variable);
 
@@ -2852,10 +2835,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             auto variable = expression.e1.isVarExp;
             auto declaration = variable is null
                 ? null : variable.var.isVarDeclaration;
-            if (declaration is null)
-                throw new SnakebiteException(
-                    "interpreter cannot initialize a non-variable reference",
-                );
+            assert(declaration !is null,
+                "reference construction targets a variable declaration");
 
             import snakebite.nativelayout: storeIntegral;
 
@@ -3089,12 +3070,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         public void* storageField(DotVarExp expression) {
             auto field = expression.var.isVarDeclaration;
-            if (field is null)
-                throw new SnakebiteException(
-                    text("interpreter cannot take the address of `",
-                        expression.toString,
-                        "`: only a struct field is supported"),
-                );
+            assert(field !is null, "a field address names a variable");
             return cast(ubyte*) evaluator.fieldBaseAddress(expression.e1)
                 + field.offset;
         }
@@ -3139,7 +3115,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (auto typeInfo = expression.var.isTypeInfoDeclaration)
                 return cast(void*) evaluator._runtimeTypes.get(typeInfo.tinfo);
 
-            return evaluator.slotOf(expression, expression.var);
+            auto variable = expression.var.isVarDeclaration;
+            assert(variable !is null,
+                "a non-special symbol address names a variable");
+            return evaluator.slotOf(expression, variable);
         }
 
         public void* addSymbolOffset(
@@ -4402,14 +4381,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     override void visit(DotVarExp expression) {
         import core.stdc.string: memcpy;
         import snakebite.nativelayout: storeIntegral;
-        import std.conv: text;
 
         auto field = expression.var.isVarDeclaration;
-        if (field is null)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate `", expression.toString,
-                    "`: only a field read is supported"),
-            );
+        assert(field !is null, "a field read names a variable");
 
         if (field.isBitFieldDeclaration !is null) {
             storeIntegral(_place,
@@ -4593,17 +4567,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // no `FuncDeclaration` of its own - and called here with the object
     // reference as its one argument.
     private void callClassInvariant(void* objectPointer) {
-        import snakebite.backends.druntimehooks: planOf, specOf;
-        import std.conv: text;
+        import snakebite.backends.druntimehooks: planOf;
 
         countForeignNameLookup;
         auto plan = planOf(*_plans, DruntimeHook.classInvariant);
-        if (plan is null)
-            throw new SnakebiteException(
-                text("interpreter cannot resolve the symbol `",
-                    specOf(DruntimeHook.classInvariant).name,
-                    "`: it is not in this process"),
-            );
 
         const(void*)[1] arguments = [cast(const(void)*) &objectPointer];
         callPlan(plan, null, arguments[]);
@@ -5331,18 +5298,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         auto structType = _type.toBasetype.isTypeStruct;
-        if (structType is null || structType.sym != expression.sd)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate `", expression.toString,
-                    "`: struct literal layout mismatch"),
-            );
-
-        if (expression.elements !is null
-                && expression.elements.length > expression.sd.fields.length)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate `", expression.toString,
-                    "`: its fields do not match the struct layout"),
-            );
+        assert(structType !is null && structType.sym == expression.sd,
+            "a struct literal destination has the same struct type");
 
         import snakebite.backends.aggregateinit: applyStep, planStructLiteral;
 
@@ -5382,8 +5339,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // own storage instead.
     override void visitUnloweredCatDcharAssign(CatDcharAssignExp expression) {
         import core.stdc.string: memcpy;
-        import snakebite.backends.druntimehooks: planOf, specOf;
-        import std.conv: text;
+        import snakebite.backends.druntimehooks: planOf;
 
         auto elementType = expression.e1.type.nextOf;
         assert(elementType !is null);
@@ -5394,12 +5350,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         countForeignNameLookup;
         auto plan = planOf(*_plans, hook);
-        if (plan is null)
-            throw new SnakebiteException(
-                text("host setup: cannot resolve druntime symbol `",
-                    specOf(hook).name, "` for `", expression.toString,
-                    "`: it is not in this process"),
-            );
 
         auto array = addressOf(expression.e1);
         const value = cast(dchar) asIntegral(expression.e2);

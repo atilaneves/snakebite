@@ -206,6 +206,10 @@ if (isAggregateInitHooks!Hooks)
 public AggregateInitPlan planStructLiteral(
     imported!"dmd.expression".StructLiteralExp expression,
 ) {
+    assert(expression.elements is null
+        || expression.elements.length <= expression.sd.fields.length,
+        "a struct literal has no more elements than fields");
+
     InitStep[] steps;
 
     InitStep vthisStep;

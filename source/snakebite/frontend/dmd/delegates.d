@@ -57,10 +57,10 @@ public bool functionNeedsClosure(FuncDeclaration function_) {
     // `atomicLoad!(MemoryOrder.acq)`, not a plain field read - see
     // `forceIfNeeded`'s doc for why the unlocked check needs that much,
     // even though `semanticRun` is dmd's own plain field.
-    forceIfNeeded(
+    forceIfNeeded!functionSemantic3(
         () => atomicLoad!(MemoryOrder.acq)(function_.semanticRun)
             >= PASS.semantic3done,
-        () { functionSemantic3(function_); },
+        function_,
     );
     return function_.needsClosure();
 }
@@ -104,10 +104,10 @@ public bool hasHiddenThis(FuncDeclaration function_) {
     // lock once `function_` is already past `semantic3`, which is
     // exactly the condition `functionSemantic3` itself checks before
     // doing anything. Acquire load - see `forceIfNeeded`'s doc.
-    forceIfNeeded(
+    forceIfNeeded!functionSemantic3(
         () => atomicLoad!(MemoryOrder.acq)(function_.semanticRun)
             >= PASS.semantic3done,
-        () { functionSemantic3(function_); },
+        function_,
     );
 
     // Inferred function pointers can retain the provisional context variable

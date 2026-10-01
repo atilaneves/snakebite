@@ -18,6 +18,116 @@ public struct Options {
     // run time, not just its build time. This flag trades that away for
     // faster image builds, for a caller that only checks behaviour.
     public bool noOptimiseImage;
+    public bool lowmem;
+}
+
+
+// `bin/sb`: run a project's unit tests and its `main` on one backend.
+public int run(string[] args) {
+    import snakebite.backends: BackendName;
+    import snakebite.dependencyimage: Optimise;
+    import snakebite.dub: fetchProject;
+    import snakebite.execution: executeBackend, prepareProject;
+    import snakebite.gc: selectFrontendMemory;
+    import std.algorithm.iteration: map;
+    import std.array: array;
+    import std.file: chdir, exists, getcwd, isDir;
+    import std.path: absolutePath;
+    import std.stdio: stderr, stdout, write;
+
+    const parsed = parseArgs(args);
+    if (parsed.diagnostic.length)
+        (parsed.status == 0 ? stdout : stderr)
+            .write(parsed.diagnostic);
+    if (parsed.status != 0 || parsed.options.showHelp)
+        return parsed.status;
+    selectFrontendMemory(parsed.options.lowmem);
+
+    try {
+        string projectDirectory = parsed.options.projectDirectory;
+        if (!projectDirectory.exists || !projectDirectory.isDir)
+            projectDirectory = fetchProject(projectDirectory);
+        projectDirectory = projectDirectory.absolutePath;
+        const originalDirectory = getcwd;
+        const importPaths = parsed.options.importPaths
+            .map!(path => path.absolutePath).array;
+        const stringImportPaths = parsed.options.stringImportPaths
+            .map!(path => path.absolutePath).array;
+        chdir(projectDirectory);
+        scope (exit) chdir(originalDirectory);
+        auto preparation = prepareProject(
+            projectDirectory,
+            importPaths,
+            stringImportPaths,
+            parsed.options.backend != BackendName.ctfe,
+            parsed.options.versions,
+            parsed.options.noOptimiseImage ? Optimise.no : Optimise.yes,
+        );
+        const report = executeBackend(
+            parsed.options.backend,
+            preparation.project.program,
+            [preparation.project.program.name] ~ parsed.options.programArguments,
+            false,
+        );
+        printStatistics(preparation, report);
+        return report.status;
+    } catch (Exception exception) {
+        stderr.write("snakebite: ", exception.msg, "\n");
+        return 1;
+    }
+}
+
+
+private void printStatistics(
+    in imported!"snakebite.execution".PreparationReport preparation,
+    in imported!"snakebite.execution".ExecutionReport report,
+) {
+    import snakebite.execution: discoveryLabel;
+    import std.stdio: writefln;
+
+    // Two one-off costs before any backend runs: finding out what to run
+    // the frontend on, then the frontend itself.
+    writefln(
+        "%-20s %8.1f ms",
+        discoveryLabel(preparation) ~ ":",
+        milliseconds(preparation.discovery),
+    );
+    writefln(
+        "%-20s %8.1f ms",
+        "frontend time:",
+        milliseconds(preparation.duration),
+    );
+    writefln(
+        "%-20s %8.1f ms",
+        "image time:",
+        milliseconds(preparation.imageDuration),
+    );
+    writefln(
+        "%-20s %8.1f ms",
+        "module constructors:",
+        milliseconds(report.constructorDuration),
+    );
+    writefln(
+        "%-20s %8.1f ms",
+        "test registration:",
+        milliseconds(report.activationDuration),
+    );
+    writefln(
+        "%-20s %8.1f ms",
+        "run time:",
+        milliseconds(report.runTime),
+    );
+    if (report.compilation.hasCompiler)
+        writefln(
+            "%-20s %8.1f ms",
+            "compile time:",
+            milliseconds(report.compilation.duration),
+        );
+}
+
+
+private double milliseconds(in imported!"core.time".Duration duration) {
+    return duration.total!"hnsecs" / 10_000.0;
 }
 
 
@@ -30,6 +140,7 @@ public struct CliResult {
 
 public CliResult parseArgs(string[] args) {
     import snakebite.backends: parseBackendName, validBackendNames;
+    import snakebite.gc: lowmemHelp;
     import std.algorithm.searching: countUntil;
     import std.getopt: getopt, GetOptException;
 
@@ -55,6 +166,7 @@ public CliResult parseArgs(string[] args) {
                 &result.options.versions,
             "no-optimise-image", "Build the dependency image without optimisation (faster build, slower run).",
                 &result.options.noOptimiseImage,
+            "lowmem", lowmemHelp, &result.options.lowmem,
         );
     } catch (GetOptException exception) {
         return CliResult(1, exception.msg);
@@ -97,4 +209,6 @@ private enum helpText =
     "  --version=<identifier>    Define a version identifier (repeatable)\n" ~
     "  --no-optimise-image       Build the dependency image without\n" ~
     "                            optimisation (faster build, slower run)\n" ~
+    "  --lowmem                  "
+        ~ imported!"snakebite.gc".lowmemHelp ~ "\n" ~
     "  -h, --help                Show this help\n";

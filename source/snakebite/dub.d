@@ -50,19 +50,16 @@ public struct DubDescription {
 }
 
 
+// `dub fetch` without a version always asks the registry for the latest
+// one, over the network, even when the package is already on disk. So ask
+// the local cache first and fetch only when the package is not there.
 public string fetchProject(in string packageName) {
-    import std.process: Config, execute;
     import std.string: strip;
 
-    const fetched = execute(["dub", "fetch", packageName], null, Config.none);
-    if (fetched.status != 0)
-        throw new Exception("dub fetch failed for `" ~ packageName ~ "`:\n"
-            ~ fetched.output);
-
-    const described = execute([
-        "dub", "describe", packageName,
-        "--data=working-directory", "--data-list",
-    ], null, Config.none);
+    const firstDescribe = describeWorkingDirectory(packageName);
+    const described = firstDescribe.status == 0
+        ? firstDescribe
+        : fetchAndDescribe(packageName, firstDescribe.output);
     if (described.status != 0)
         throw new Exception("dub describe failed for `" ~ packageName ~ "`:\n"
             ~ described.output);
@@ -74,6 +71,26 @@ public string fetchProject(in string packageName) {
             ~ packageName ~ "`",
         );
     return directories[0].strip;
+}
+
+private auto fetchAndDescribe(in string packageName, in string describeOutput) {
+    import std.process: Config, execute;
+
+    const fetched = execute(["dub", "fetch", packageName], null, Config.none);
+    if (fetched.status != 0)
+        throw new Exception("dub fetch failed for `" ~ packageName ~ "`:\n"
+            ~ fetched.output
+            ~ "after dub describe failed:\n" ~ describeOutput);
+    return describeWorkingDirectory(packageName);
+}
+
+private auto describeWorkingDirectory(in string packageName) {
+    import std.process: Config, execute;
+
+    return execute([
+        "dub", "describe", packageName,
+        "--data=working-directory", "--data-list",
+    ], null, Config.none);
 }
 
 
