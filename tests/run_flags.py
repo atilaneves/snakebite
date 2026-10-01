@@ -1444,6 +1444,7 @@ def test_check_flag_applies_to_a_dependency_template(
 
     assert result.returncode == 0, result.stdout + result.stderr
 
+
 # A `-betterC` program has no druntime: no unittest block or module
 # constructor runs by itself, and a failed check calls the C `assert`. What
 # runs the tests is the `main` that dub generates for `dub test` when
@@ -1958,6 +1959,305 @@ def test_betterc_rejects_array_concatenation(
         "array concatenation of expression `a ~ b` requires the GC "
         "which is not available with -betterC"
     ) in outcome.output
+
+
+# A thread-local `static this` needs the runtime as much as a
+# `shared static this` does: nothing calls it in a `-betterC` program.
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_does_not_run_thread_local_module_constructors(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, [], """
+        __gshared int value = 1;
+        static this() { value = 2; }
+        unittest {
+            assert(value == 1);
+            log("not run\\n");
+        }
+    """)
+    assert outcome.status == 0, outcome.output
+    assert "not run" in outcome.output
+
+
+# dmd generates no code for what only CTFE can reach, so the GC is free
+# to use there: the branch of `if (__ctfe)` and of `__ctfe ? :`, and the
+# argument of a `mixin` declaration.
+COMPILE_TIME_ONLY = [
+    ("if_ctfe", """
+        int[] join(int[] a, int[] b) {
+            if (__ctfe)
+                return a ~ b;
+            return a;
+        }
+    """),
+    ("if_not_ctfe_else", """
+        int[] join(int[] a, int[] b) {
+            if (!__ctfe)
+                return a;
+            else
+                return a ~ b;
+        }
+    """),
+    ("conditional_on_ctfe", """
+        int[] join(int[] a, int[] b) { return __ctfe ? a ~ b : a; }
+    """),
+    ("mixin_statement", """
+        int[] join(int[] a, int[] b) {
+            enum string name = "a";
+            mixin("int[] result = " ~ name ~ ";");
+            return result;
+        }
+    """),
+    ("mixin_declaration", """
+        enum string name = "joined";
+        mixin("enum " ~ name ~ " = 3;");
+        int[] join(int[] a, int[] b) { return a[0 .. joined - 1]; }
+    """),
+]
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+@pytest.mark.parametrize(
+    "declarations",
+    [row[1] for row in COMPILE_TIME_ONLY],
+    ids=[row[0] for row in COMPILE_TIME_ONLY],
+)
+def test_betterc_accepts_concatenation_that_only_ctfe_reaches(
+    tmp_path: Path, backend: str, declarations: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, [], declarations + """
+        unittest {
+            int[2] storage = [1, 2];
+            assert(join(storage[], storage[]).length == 2);
+            log("joined\\n");
+        }
+    """)
+    assert outcome.status == 0, outcome.output
+    assert "joined" in outcome.output
+
+
+# A function of a mixin template is a function of the aggregate that
+# mixes it in: dmd generates code for it with the root module.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_betterc_rejects_array_concatenation_in_a_mixin_template(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = reject_betterc(tmp_path, backend, [], """
+        mixin template Joins() {
+            int[] join(int[] a, int[] b) { return a ~ b; }
+        }
+        struct S { mixin Joins; }
+        unittest {
+        }
+    """)
+    assert outcome.status == 1, outcome.output
+    assert (
+        "array concatenation of expression `a ~ b` requires the GC "
+        "which is not available with -betterC"
+    ) in outcome.output
+
+
+# dmd reports each expression one time: it does not generate code for the
+# operands of a concatenation that it rejects.
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize(
+    "body,message",
+    [
+        ("int[] a; a ~= 1;", "appending to array in `a ~= 1`"),
+        (
+            "int[] a; int[] b = a ~ a ~ a;",
+            "array concatenation of expression",
+        ),
+    ],
+    ids=["append_element", "nested_concatenation"],
+)
+def test_betterc_reports_a_rejected_expression_one_time(
+    tmp_path: Path, backend: str, body: str, message: str,
+) -> None:
+    outcome = reject_betterc(tmp_path, backend, [], f"""
+        unittest {{
+            {body}
+        }}
+    """)
+    assert outcome.status == 1, outcome.output
+    assert outcome.output.count(message) == 1, outcome.output
+
+
+# The semantic analysis of a static initializer is CTFE, which permits
+# `typeid`. dmd reports the `TypeInfo` when it writes the initializer to
+# the object file (`glue/todt.d`).
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_betterc_rejects_typeid_in_a_static_initializer(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = reject_betterc(tmp_path, backend, [], """
+        __gshared TypeInfo info = typeid(int);
+        unittest {
+        }
+    """)
+    assert outcome.status == 1, outcome.output
+    assert (
+        "expression `typeid(int)` uses the GC and cannot be used with "
+        "switch `-betterC`"
+    ) in outcome.output
+
+
+# A template instance can make a function need a closure after its
+# semantic analysis is complete. dmd reports that closure when it
+# generates code for the function (`glue/toir.d`, `buildClosure`).
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_betterc_rejects_a_closure_that_a_template_instance_causes(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = reject_betterc(tmp_path, backend, [], """
+        struct Forward(alias F) {
+            auto call()() { return F(); }
+        }
+        auto bar(int a) nothrow @safe {
+            auto f() { return a; }
+            return Forward!f();
+        }
+        unittest {
+            assert(bar(3).call() == 3);
+        }
+    """)
+    assert outcome.status == 1, outcome.output
+    assert "allocates closure for `bar()` with the GC" in outcome.output
+
+
+# A native build compiles the instance of a dependency's template into the
+# object file of the root module that instantiates it, with the flags of
+# the root.
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_applies_to_a_dependency_template_that_a_root_instantiates(
+    tmp_path: Path, backend: str,
+) -> None:
+    dependency = tmp_path / "dep"
+    (dependency / "source").mkdir(parents=True)
+    (dependency / "dub.sdl").write_text(
+        'name "dep"\ntargetType "library"\n', encoding="utf-8",
+    )
+    (dependency / "source" / "dep.d").write_text(
+        """
+        module dep;
+        int mode()() {
+            version (D_BetterC) return 1;
+            else return 2;
+        }
+        """,
+        encoding="utf-8",
+    )
+    code = PRELUDE + """
+        import dep;
+        unittest {
+            assert(mode() == 1);
+            log("instantiated\\n");
+        }
+    """
+    root = tmp_path / "root"
+    (root / "source").mkdir(parents=True)
+    if backend == "native":
+        outcome = run_native(
+            root, ["-betterC", f"-I{dependency / 'source'}"],
+            code + DUB_TEST_MAIN, BETTERC,
+        )
+    else:
+        (root / "dub.sdl").write_text(
+            'name "app"\ntargetType "library"\ndflags "-betterC"\n'
+            'dependency "dep" path="../dep"\n',
+            encoding="utf-8",
+        )
+        (root / "source" / "app.d").write_text(code, encoding="utf-8")
+        outcome = outcome_of(
+            subprocess.run(
+                [sb_path(), f"--backend={backend}", "--no-optimise-image",
+                 str(root)],
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=TIMEOUT,
+            ),
+        )
+    assert outcome.status == 0, outcome.output
+    assert "instantiated" in outcome.output
+
+# A `-betterC` program links with no druntime, so code that calls a runtime
+# function, or a function that dmd leaves out because it uses the GC, does
+# not link. The load reports the same programs that the native link rejects.
+LINK_ERRORS = [
+    ("new_class", """
+        class C { int x; }
+        void make() { auto c = new C; }
+        unittest { make; }
+    """),
+    ("array_length", """
+        void grow(int[] a) { a.length = 3; }
+        unittest { int[2] storage; grow(storage[]); }
+    """),
+    ("synchronized", """
+        void lock() { synchronized {} }
+        unittest { lock; }
+    """),
+    ("foreach_dchar", """
+        void each(string text) { foreach (dchar c; text) {} }
+        unittest { each("a"); }
+    """),
+    ("append_dchar", """
+        void append() { char[] text; dchar c = 1; text ~= c; }
+        unittest { append; }
+    """),
+    ("new_array_in_a_plain_function", """
+        int make() { auto p = new int[3]; return 0; }
+        unittest { make; }
+    """),
+    ("call_of_a_function_dmd_leaves_out", """
+        int[] join()(int[] a, int[] b) @nogc { return a ~ b; }
+        unittest { int[2] storage; join(storage[], storage[]); }
+    """),
+    ("lambda_that_uses_the_gc", """
+        unittest { auto join = (int[] a) @nogc => a ~ a; }
+    """),
+]
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+@pytest.mark.parametrize(
+    "source",
+    [row[1] for row in LINK_ERRORS],
+    ids=[row[0] for row in LINK_ERRORS],
+)
+def test_betterc_rejects_what_the_native_link_rejects(
+    tmp_path: Path, backend: str, source: str,
+) -> None:
+    outcome = reject_betterc(tmp_path, backend, [], source)
+
+    assert outcome.status == 1, outcome.output
+    if backend == "native":
+        assert "undefined" in outcome.output
+    else:
+        assert "-betterC" in outcome.output
+
+
+# `__ArrayCast` reports a bad length through `onArrayCastError`, a druntime
+# template that a native `-betterC` build compiles with the root module, so
+# its `assert` is the C one.
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_array_cast_of_a_bad_length_aborts_with_the_c_message(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, [], """
+        unittest {
+            ubyte[7] storage;
+            ubyte[] bytes = storage[];
+            log("start\\n");
+            int[] ints = cast(int[]) bytes;
+            log("after\\n");
+        }
+    """)
+    assert outcome.status == -SIGABRT, outcome.output
+    assert "cannot be cast to `int[]`" in outcome.output
+    assert "start" in outcome.output
+    assert "after" not in outcome.output
 
 
 if __name__ == "__main__":

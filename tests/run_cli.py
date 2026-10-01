@@ -364,5 +364,56 @@ def sb_path() -> str:
     return sb
 
 
+# A C `main` gets what the C runtime gives it, not the `string[]` of a D
+# `main`: the argument count, the argument vector, and for the three-argument
+# form the environment. A bare directory runs its own `main`.
+C_MAINS = [
+    ("no_parameters", "extern(C) int main() { return 0; }", ""),
+    (
+        "count_and_vector",
+        """
+        extern(C) int main(int argc, char** argv) {
+            printf("argc %d\\n", argc);
+            return argc == 1 && argv[0] !is null && argv[1] is null ? 0 : 3;
+        }
+        """,
+        "argc 1",
+    ),
+    (
+        "environment",
+        """
+        extern(C) int main(int argc, char** argv, char** envp) {
+            printf("env %d\\n", envp !is null && envp[0] !is null);
+            return argc == 1 && envp !is null ? 0 : 3;
+        }
+        """,
+        "env 1",
+    ),
+]
+
+
+@pytest.mark.parametrize("backend", ["bytecode", "interpreter"])
+@pytest.mark.parametrize(
+    "source,expected",
+    [row[1:] for row in C_MAINS],
+    ids=[row[0] for row in C_MAINS],
+)
+def test_bare_directory_c_main_gets_what_the_c_runtime_gives(
+    tmp_path: Path, backend: str, source: str, expected: str,
+) -> None:
+    write(
+        tmp_path / "app" / "app.d",
+        "import core.stdc.stdio: printf;\n" + source,
+    )
+
+    result = run_sb(
+        f"--backend={backend}", "--no-optimise-image", str(tmp_path / "app"),
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, output(result)
+    assert expected in output(result)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
