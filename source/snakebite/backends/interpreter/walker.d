@@ -6013,7 +6013,7 @@ private ulong combine(string op)(
     imported!"dmd.expression".Expression expression,
 ) {
     static if (op == "<<" || op == ">>" || op == ">>>")
-        return shifted!op(a, b, aFacts, expression);
+        return shifted!op(a, b, aFacts);
     else static if (op == "/" || op == "%")
         return divided!op(
             a, b, sharedSignedness(aFacts, bFacts), expression);
@@ -6080,25 +6080,17 @@ private ulong divided(string op)(
 // the same domain - dmd leaves it its own type, which can differ in
 // signedness from the left one - so its facts say nothing here.
 //
-// A count outside `[0, width)` is undefined in D, and the host's shift
-// instruction answers it by taking the count modulo the register width,
-// which is a plausible wrong answer rather than the guest's own. Report
-// the invalid count instead.
+// A count outside `[0, width)` is undefined in D; the count is masked as
+// compiled D does on the host.
 private ulong shifted(string op)(
     in long a,
-    in long b,
+    in long count,
     in imported!"snakebite.nativelayout".TypeFacts aFacts,
-    imported!"dmd.expression".Expression expression,
 ) {
-    import std.conv: text;
+    import snakebite.nativevalue: shiftCount;
 
     const width = aFacts.size * 8;
-    if (b < 0 || b >= width)
-        throw new SnakebiteException(
-            text("interpreter: invalid shift count ", b, " in `",
-                expression.toString, "`: the left operand has ", width,
-                " bits"),
-        );
+    const b = shiftCount(count, aFacts.size);
 
     static if (op == "<<")
         return cast(ulong) a << b;

@@ -23,7 +23,7 @@ import snakebite.backends.unwindplan:
 import snakebite.callarguments: CallArguments;
 import snakebite.nativevalue:
     CastKind, ComplexOperation, floatingToBool, loadFloating, loadSigned,
-    loadUnsigned, storeFloating, storeIntegral;
+    loadUnsigned, shiftCount, storeFloating, storeIntegral;
 import object: Throwable, TypeInfo_Class;
 
 private alias storeWidth = storeIntegral;
@@ -1314,7 +1314,8 @@ private const(Instruction)* runShiftLeft(Decoded)(
 ) {
     auto place = execution.destination;
     const a = loadUnsigned(place, execution.width);
-    const b = loadUnsigned(execution.source, execution.width);
+    const b = shiftCount(
+        loadUnsigned(execution.source, execution.width), execution.width);
     storeWidth(place, cast(long) (a << b), execution.width);
     return execution.next;
 }
@@ -1329,7 +1330,8 @@ private const(Instruction)* runShiftRightLogical(Decoded)(
 ) {
     auto place = execution.destination;
     const a = loadUnsigned(place, execution.width);
-    const b = loadUnsigned(execution.source, execution.width);
+    const b = shiftCount(
+        loadUnsigned(execution.source, execution.width), execution.width);
     storeWidth(place, cast(long) (a >> b), execution.width);
     return execution.next;
 }
@@ -1348,7 +1350,8 @@ private const(Instruction)* runShiftRightArithmetic(Decoded)(
 ) {
     auto place = execution.destination;
     const a = loadSigned(place, execution.width);
-    const b = loadUnsigned(execution.source, execution.width);
+    const b = shiftCount(
+        loadUnsigned(execution.source, execution.width), execution.width);
     storeWidth(place, a >> b, execution.width);
     return execution.next;
 }
