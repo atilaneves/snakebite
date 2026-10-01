@@ -124,13 +124,13 @@ public struct Checks {
     }
 
     private ref CHECKENABLE fieldOf(in Category category) return @safe pure nothrow @nogc {
-        final switch (category) {
-            case Category.assertion: return assertion;
-            case Category.preconditions: return preconditions;
-            case Category.postconditions: return postconditions;
-            case Category.invariants: return invariants;
-            case Category.arrayBounds: return arrayBounds;
-            case Category.switchError: return switchError;
+        final switch (category) with (Category) {
+            case assertion: return this.assertion;
+            case preconditions: return this.preconditions;
+            case postconditions: return this.postconditions;
+            case invariants: return this.invariants;
+            case arrayBounds: return this.arrayBounds;
+            case switchError: return this.switchError;
         }
     }
 
@@ -173,4 +173,85 @@ public struct Checks {
             default: return true;
         }
     }
+
+    // The predefined version identifiers that dmd defines only when the
+    // check is off.
+    public immutable(string)[] definitions() const @safe pure nothrow @nogc {
+        static immutable noBounds = ["D_NoBoundsChecks"];
+
+        return arrayBounds == CHECKENABLE.off ? noBounds : null;
+    }
+
+    // The `ldc2` flags for the checks that a flag named: `ldc2` reads none
+    // of the flags that `accept` reads, and it keeps the last of two flags
+    // for one check where dmd lets `-check=bounds` win over
+    // `-boundscheck=`, so these come from the resolved checks. A check that
+    // no flag named keeps the default of `ldc2`. `ldc2` has no null check.
+    public string[] ldcFlags() const @safe pure nothrow {
+        import std.traits: EnumMembers;
+
+        string[] flags;
+        static foreach (category; EnumMembers!Category)
+            if (isNamed(category))
+                flags ~= ldcFlag(category);
+
+        return flags;
+    }
+
+    private bool isNamed(in Category category) const @safe pure nothrow @nogc {
+        return _requested[category] != CHECKENABLE._default
+            || (category == Category.arrayBounds
+                && _boundscheck != CHECKENABLE._default);
+    }
+
+    private string ldcFlag(in Category category) const @safe pure nothrow {
+        final switch (category) with (Category) {
+            case assertion:
+                return "--enable-asserts=" ~ ldcBool(this.assertion);
+            case preconditions:
+                return "--enable-preconditions=" ~ ldcBool(this.preconditions);
+            case postconditions:
+                return "--enable-postconditions=" ~ ldcBool(this.postconditions);
+            case invariants:
+                return "--enable-invariants=" ~ ldcBool(this.invariants);
+            case switchError:
+                return "--enable-switch-errors=" ~ ldcBool(this.switchError);
+            case arrayBounds:
+                return "--boundscheck=" ~ ldcBounds;
+        }
+    }
+
+    private static string ldcBool(in CHECKENABLE enable) @safe pure nothrow @nogc {
+        return enable == CHECKENABLE.on ? "true" : "false";
+    }
+
+    private string ldcBounds() const @safe pure nothrow @nogc {
+        final switch (arrayBounds) with (CHECKENABLE) {
+            case on: return "on";
+            case safeonly: return "safeonly";
+            case off: return "off";
+            case _default: assert(0, "bounds check was not resolved");
+        }
+    }
+}
+
+// `arguments` for `ldc2`: the flags that `Checks` reads and `ldc2` does not
+// understand give way to the `ldc2` flags of the checks they select.
+public string[] ldcArguments(in string[] arguments) @safe pure nothrow {
+    import std.algorithm.searching: startsWith;
+
+    Checks checks;
+    string[] kept;
+    foreach (argument; arguments) {
+        const isCheckFlag = argument == "-noboundscheck"
+            || argument.startsWith("-boundscheck")
+            || (argument.startsWith("-check")
+                && !argument.startsWith("-checkaction="));
+        // The compiler reports a flag that is not valid.
+        if (!checks.accept(argument) || !isCheckFlag)
+            kept ~= argument;
+    }
+    checks.resolve;
+
+    return kept ~ checks.ldcFlags;
 }

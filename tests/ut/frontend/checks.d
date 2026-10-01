@@ -7,7 +7,7 @@ module ut.frontend.checks;
 
 
 import dmd.astenums: CHECKACTION, CHECKENABLE;
-import snakebite.frontend.checks: Checks;
+import snakebite.frontend.checks: Checks, ldcArguments;
 import ut;
 
 
@@ -94,4 +94,73 @@ unittest {
     Checks checks;
     foreach (flag; ["-unittest", "-g", "-version=check"])
         checks.accept(flag).should == true;
+}
+
+
+@("checks.nullderef.accepted")
+unittest {
+    foreach (flag; ["-check=nullderef", "-check=nullderef=off"]) {
+        Checks checks;
+        checks.accept(flag).should == true;
+    }
+    Checks checks;
+    checks.accept("-check=nullderef=x").should == false;
+}
+
+
+@("checks.noBoundsChecksDefinition")
+unittest {
+    resolved(["-check=bounds=off"]).definitions.should == ["D_NoBoundsChecks"];
+    resolved(["-boundscheck=off"]).definitions.should == ["D_NoBoundsChecks"];
+    resolved(["-noboundscheck"]).definitions.should == ["D_NoBoundsChecks"];
+    resolved(["-boundscheck=off", "-check=bounds=on"]).definitions.length.should == 0;
+    resolved([]).definitions.length.should == 0;
+    resolved(["-release"]).definitions.length.should == 0;
+}
+
+
+@("checks.ldc.noFlagChangesNothing")
+unittest {
+    ldcArguments(null).length.should == 0;
+    ldcArguments(["-g", "-release", "-checkaction=C", "-version=x"])
+        .should == ["-g", "-release", "-checkaction=C", "-version=x"];
+}
+
+
+@("checks.ldc.eachCheck")
+unittest {
+    ldcArguments(["-check=assert=off"]).should == ["--enable-asserts=false"];
+    ldcArguments(["-check=in"]).should == ["--enable-preconditions=true"];
+    ldcArguments(["-check=out=off"]).should == ["--enable-postconditions=false"];
+    ldcArguments(["-check=invariant=off"]).should == ["--enable-invariants=false"];
+    ldcArguments(["-check=switch=off"]).should == ["--enable-switch-errors=false"];
+    ldcArguments(["-check=bounds=on"]).should == ["--boundscheck=on"];
+    ldcArguments(["-check=nullderef"]).length.should == 0;
+}
+
+
+@("checks.ldc.boundscheckForms")
+unittest {
+    ldcArguments(["-boundscheck=safeonly"]).should == ["--boundscheck=safeonly"];
+    ldcArguments(["-noboundscheck"]).should == ["--boundscheck=off"];
+    ldcArguments(["-g", "-boundscheck=off"]).should == ["-g", "--boundscheck=off"];
+}
+
+
+@("checks.ldc.checkBoundsWinsOverBoundscheck")
+unittest {
+    ldcArguments(["-check=bounds=on", "-boundscheck=off"])
+        .should == ["--boundscheck=on"];
+    ldcArguments(["-boundscheck=off", "-check=bounds=on"])
+        .should == ["--boundscheck=on"];
+}
+
+
+@("checks.ldc.allChecks")
+unittest {
+    ldcArguments(["-check=off"]).should == [
+        "--enable-asserts=false", "--enable-preconditions=false",
+        "--enable-postconditions=false", "--enable-invariants=false",
+        "--boundscheck=off", "--enable-switch-errors=false",
+    ];
 }
