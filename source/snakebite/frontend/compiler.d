@@ -770,12 +770,7 @@ final class Compiler {
             const sourceOverride = filePath in sourceOverrides;
             auto result = sourceOverride is null && isCSourceFile(filePath)
                 ? parseCRoot(filePath)
-                : dmdParseModule(
-                    owned(dmdFileName(filePath, importPaths, rootDirectory)),
-                    sourceOverride is null
-                        ? filePath.readText
-                        : owned(*sourceOverride),
-                );
+                : parseRootText(filePath, sourceOverride, importPaths, rootDirectory);
             if (result.diagnostics.hasErrors)
                 throw new Exception(diagnosticMessageWithLocations);
             modules ~= result.module_;
@@ -990,6 +985,26 @@ final class Compiler {
         }
 
         return false;
+    }
+
+    private auto parseRootText(
+        in string filePath,
+        in string* sourceOverride,
+        in string[] importPaths,
+        in string rootDirectory,
+    ) const {
+        import dmd.frontend: dmdParseModule = parseModule;
+        import std.file: readText;
+
+        const source = sourceOverride is null
+            ? filePath.readText
+            : owned(*sourceOverride);
+        // DMD treats null as a request to reopen the filename, which
+        // is relative for __FILE__ and may not exist in the current directory.
+        return dmdParseModule(
+            owned(dmdFileName(filePath, importPaths, rootDirectory)),
+            source is null ? "" : source,
+        );
     }
 
     // The name dmd sees for a root file, and so its `__FILE__`. dub compiles

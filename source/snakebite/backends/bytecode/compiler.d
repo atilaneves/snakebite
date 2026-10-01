@@ -5154,13 +5154,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         requireDestination(expression);
         compileComparison(expression, plan, _destination);
-        widenBoolean;
+        if (plan.kind != ComparisonPlan.Kind.vector)
+            widenBoolean;
     }
 
     protected override void visitUnloweredEqual(EqualExp expression) {
         requireDestination(expression);
         compileEquality(expression);
-        widenBoolean;
+        if (comparisonPlan(expression).kind != ComparisonPlan.Kind.vector)
+            widenBoolean;
     }
 
     private void compileEquality(EqualExp expression) {

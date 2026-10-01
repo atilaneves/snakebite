@@ -55,6 +55,27 @@ static foreach (backend; Matrix!(
 }
 
 
+static foreach (backend; Matrix!()) {
+    @("importc.compilerBuiltins." ~ backend.stringof)
+    @Tags(backend.stringof)
+    @Serial
+    unittest {
+        // ImportC gives each C file the `__builtin_*` functions through a
+        // module of its own, which no `import` finds by name.
+        42.cProjectStatus!(backend, "compiler_builtins", `
+            int swapped(int x) { return __builtin_bswap32(x); }
+            int leading(unsigned x) { return __builtin_clz(x); }
+            int expected(int x) { return __builtin_expect(x, 1); }
+        `, q{
+            import CMOD;
+            int main() {
+                return swapped(1) == 0x01000000 && leading(1) == 31
+                    && expected(42) == 42 ? 42 : 1;
+            }
+        });
+    }
+}
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot read a C global, which is a mutable static variable"),
 )) {

@@ -206,6 +206,12 @@ public struct CallSelection {
                 && (isGuest(function_) || !hasNativeSymbol))
             return Decision(Route.guest);
 
+        // The host compiler's druntime implements `va_copy` as an
+        // intrinsic, so the process has no symbol for it, but the frontend's
+        // druntime gives it a body.
+        if (isVaCopy(function_))
+            return Decision(Route.guest);
+
         // A root-owned body must run as guest even when its linker name
         // is in the host (notably _Dmain). A template instance can reuse
         // a native copy only when that copy is independent of the running
@@ -217,13 +223,8 @@ public struct CallSelection {
         // carry the host compiler's frame layout, not this backend's -
         // reusing it for a guest call reads that closure with the wrong
         // layout. A missing independent symbol leaves the guest body.
-        // A function that is neither a template instance nor root-owned,
-        // yet has a body and no machine code in this process, has only its
-        // body to run: `core.stdc.stdarg.va_copy` is such a function when
-        // the host compiler's druntime implements it as an intrinsic.
         const prefers = function_.isInstantiated() !is null
-            ? !hasIndependentNativeSymbol
-            : isGuest(function_) || !hasNativeSymbol;
+            ? !hasIndependentNativeSymbol : isGuest(function_);
         return Decision(prefers ? Route.guest : Route.native);
     }
 
@@ -234,6 +235,14 @@ public struct CallSelection {
         const module_ = function_.getModule;
         return function_.ident.toString == "va_start"
             && function_.toParent.isTemplateInstance !is null
+            && module_ !is null && module_.md !is null
+            && module_.md.toString == "core.stdc.stdarg";
+    }
+
+    private static bool isVaCopy(FuncDeclaration function_) {
+        const module_ = function_.getModule;
+        return function_.ident.toString == "va_copy"
+            && function_.toParent.isTemplateInstance is null
             && module_ !is null && module_.md !is null
             && module_.md.toString == "core.stdc.stdarg";
     }
