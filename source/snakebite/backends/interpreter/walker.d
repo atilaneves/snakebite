@@ -2387,7 +2387,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         storeDelegateValue(
             delegateTargetOf(expression.func, _type, expression.e1,
                 expression.vthis2),
-            expression, _place);
+            _place);
     }
 
     // A delegate keeps its native context word so compiled code can pass
@@ -2531,18 +2531,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // address of a struct.
     private size_t thisValueOf(ThisExp expression) {
         return thisValueOf(
-            expression,
             expression.var is null
                 ? cast() _layout.hiddenThis.variable : expression.var);
     }
 
     // As above for `variable`, the hidden `this` of some function on the
-    // static chain. `original` is the expression the read is for, `null`
-    // for none, and only names the read in an error message.
-    private size_t thisValueOf(Expression original, VarDeclaration variable) {
+    // static chain.
+    private size_t thisValueOf(VarDeclaration variable) {
         import snakebite.nativelayout: loadIntegral;
 
-        auto slot = slotOf(original, variable);
+        auto slot = slotOf(variable);
         auto owner = outerFunctionOf(variable);
         const hops = owner is null ? null : ClosurePlan.receiverHops(owner);
         if (hops.length == 0)
@@ -2563,7 +2561,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import snakebite.nativelayout: loadIntegral;
 
         const pair = cast(size_t) loadIntegral(
-            slotOf(null, variable), size_t.sizeof, false);
+            slotOf(variable), size_t.sizeof, false);
         return cast(size_t) loadIntegral(
             cast(ubyte*) pair + offset, size_t.sizeof, false);
     }
@@ -2678,22 +2676,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // rather than a `VarExp` naming it - `SymOffExp`/`AddrExp` reach a
     // variable's storage the same way a read does, just to take its
     // address instead of copying its bytes, so this is the one place both
-    // paths resolve a name to a slot. `original` is only for the error
-    // message: it is the node the guest wrote, which may differ from
-    // `declaration` itself (a `SymOffExp` names its variable directly, but
-    // `original.toString` still renders the source expression). It is
-    // `null` for a read that no guest node names, such as the `this` a
-    // pair of contexts holds.
-    private ubyte* slotOf(Expression original, Declaration declaration) {
+    // paths resolve a name to a slot.
+    private ubyte* slotOf(Declaration declaration) {
         import snakebite.nativelayout: loadIntegral;
 
         auto variable = declaration.isVarDeclaration;
         if (variable is null)
             assert(0, "function and TypeInfo addresses are `SymOffExp`s, an "
                 ~ "initializer symbol is handled before this, so a name here "
-                ~ "is a variable: `"
-                ~ (original is null ? declaration.toString : original.toString)
-                ~ "`");
+                ~ "is a variable");
 
         if (variable.isDataseg)
             return staticSlotOf(variable);
@@ -2724,9 +2715,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         auto slot = layout.slotOf(variable);
         if (slot is null) {
             if (owner is null)
-                assert(0, text("a local variable has an enclosing function: `",
-                    original is null ? variable.toString : original.toString,
-                    "`"));
+                assert(0, "a local variable has an enclosing function");
 
             base = contextOf(owner);
             layout = layoutOf(owner);
@@ -6017,7 +6006,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         case receiver:
             auto value = source.throughPair
                 ? hiddenValueOf(cast() source.function_.vthis, source.pairOffset)
-                : thisValueOf(null, cast() source.function_.vthis);
+                : thisValueOf(cast() source.function_.vthis);
             foreach (offset; source.fields)
                 value = cast(size_t) loadIntegral(
                     cast(ubyte*) value + offset, size_t.sizeof, false);
