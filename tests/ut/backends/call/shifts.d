@@ -1114,3 +1114,223 @@ static foreach (backend; Matrix!()) {
             backend, shiftCode("short", ">>>", "assign", "16"), "shifted");
     }
 }
+
+static foreach (backend; Matrix!()) {
+    @("shift.int.shlAssign.longCountAboveWidth." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        int(0).shouldBeRetOf!(
+            backend,
+            q{
+                int value() { return -100; }
+                long count() { return 33; }
+                int shifted() {
+                    int v = value();
+                    v <<= count();
+                    return v;
+                }
+            },
+            "shifted",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(WrongInCtfe)) {
+    @("shift.int.shrAssign.longCountAboveWidth." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        int(-1).shouldBeRetOf!(
+            backend,
+            q{
+                int value() { return -100; }
+                long count() { return 33; }
+                int shifted() {
+                    int v = value();
+                    v >>= count();
+                    return v;
+                }
+            },
+            "shifted",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("shift.uint.shlAssign.ulongCountEqualsWidth." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        uint(0).shouldBeRetOf!(
+            backend,
+            q{
+                uint value() { return uint.max; }
+                ulong count() { return 32; }
+                uint shifted() {
+                    uint v = value();
+                    v <<= count();
+                    return v;
+                }
+            },
+            "shifted",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("shift.byte.shrAssign.longCountEqualsOperandWidth." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        byte(-1).shouldBeRetOf!(
+            backend,
+            q{
+                byte value() { return -100; }
+                long count() { return 8; }
+                byte shifted() {
+                    byte v = value();
+                    v >>= count();
+                    return v;
+                }
+            },
+            "shifted",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("shift.short.shrAssign.uintCountEqualsOperandWidth." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        short(-1).shouldBeRetOf!(
+            backend,
+            q{
+                short value() { return -100; }
+                uint count() { return 16; }
+                short shifted() {
+                    short v = value();
+                    v >>= count();
+                    return v;
+                }
+            },
+            "shifted",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(WrongInCtfe)) {
+    @("shift.byte.ushrAssign.longCountEqualsOperandWidth." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        byte(-1).shouldBeRetOf!(
+            backend,
+            q{
+                byte value() { return -100; }
+                long count() { return 8; }
+                byte shifted() {
+                    byte v = value();
+                    v >>>= count();
+                    return v;
+                }
+            },
+            "shifted",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(WrongInCtfe)) {
+    @("shift.int.ushrAssign.longCountAboveWidth." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        int(int.max).shouldBeRetOf!(
+            backend,
+            q{
+                int value() { return -100; }
+                long count() { return 33; }
+                int shifted() {
+                    int v = value();
+                    v >>>= count();
+                    return v;
+                }
+            },
+            "shifted",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(WrongInCtfe)) {
+    @("shift.byte.ushrAssign.longCountInRange." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        byte(-50).shouldBeRetOf!(
+            backend,
+            q{
+                byte value() { return -100; }
+                long count() { return 1; }
+                byte shifted() {
+                    byte v = value();
+                    v >>>= count();
+                    return v;
+                }
+            },
+            "shifted",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(WrongInCtfe)) {
+    @("shift.int.ushrAssign.longCountInRange." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        int(-50).shouldBeRetOf!(
+            backend,
+            q{
+                int value() { return -100; }
+                long count() { return 1; }
+                int shifted() {
+                    int v = value();
+                    v >>>= count();
+                    return v;
+                }
+            },
+            "shifted",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("shift.int.shrAssign.uintCountInRange." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        int(-50).shouldBeRetOf!(
+            backend,
+            q{
+                int value() { return -100; }
+                uint count() { return 1; }
+                int shifted() {
+                    int v = value();
+                    v >>= count();
+                    return v;
+                }
+            },
+            "shifted",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("shift.long.shrAssign.ulongCountInRange." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        long(-50).shouldBeRetOf!(
+            backend,
+            q{
+                long value() { return -100; }
+                ulong count() { return 1; }
+                long shifted() {
+                    long v = value();
+                    v >>= count();
+                    return v;
+                }
+            },
+            "shifted",
+        );
+    }
+}
