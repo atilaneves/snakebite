@@ -114,6 +114,28 @@ public struct CallSelection {
                 == VarArg.variadic;
     }
 
+    // A guest D variadic method called without a receiver adjustment is
+    // stored as its guest word. Its call plan depends on the extra
+    // arguments at each call site, so no entry stands in for it. With an
+    // adjustment the vtable slot still needs an entry to carry the offset.
+    public bool storesGuestWord(
+        FuncDeclaration function_, bool hasNativeSymbol,
+        in ptrdiff_t adjustment,
+    ) {
+        return adjustment == 0 && isVariadicGuest(function_, hasNativeSymbol);
+    }
+
+    public bool isVariadicGuest(
+        FuncDeclaration function_, bool hasNativeSymbol,
+    ) {
+        import dmd.astenums: VarArg;
+        import snakebite.frontend.dmd.functions: typeFunctionOf;
+
+        return typeFunctionOf(function_).parameterList.varargs
+                == VarArg.variadic
+            && function_.fbody !is null && !hasNativeSymbol;
+    }
+
     // Every dmd query a function's decision needs, resolved once and
     // never again - no lock, `decisionOf`'s own doc explains why none of
     // these reads needs one.

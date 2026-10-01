@@ -307,9 +307,7 @@ private struct Shared {
     // for it, so every evaluator forwards here instead of keeping its
     // own answer.
     private void* callableAddress(FuncDeclaration method, ptrdiff_t adjustment) {
-        import dmd.astenums: VarArg;
         import dmd.dsymbolsem: isAbstract;
-        import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         // getOverloads can leave an alias in a function-pointer constant.
         method = method.toAliasFunc;
@@ -319,8 +317,7 @@ private struct Shared {
         const(void)* word;
         const hasNativeSymbol = plans.hasNativeSymbol(method);
         const isVariadicGuest =
-            typeFunctionOf(method).parameterList.varargs == VarArg.variadic
-            && method.fbody !is null && !hasNativeSymbol;
+            callSelection.isVariadicGuest(method, hasNativeSymbol);
         if (callSelection.usesNativeVariadicAddress(method, hasNativeSymbol))
             return plans.addressOf(method);
         if (isVariadicGuest || callSelection.usesGuestBody(method,
@@ -329,7 +326,8 @@ private struct Shared {
                 plans.hasIndependentNativeSymbol(method))) {
             plans.registerGuestFunction(cast(void*) method, method);
             word = cast(void*) method;
-            if (isVariadicGuest)
+            if (callSelection.storesGuestWord(
+                    method, hasNativeSymbol, adjustment))
                 return cast(void*) word;
         }
         auto address = plans.callableAddress(word, method, adjustment);

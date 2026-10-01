@@ -347,9 +347,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // Function pointers can reach host code inside aggregates or through
     // pointers to guest data, where the call barrier cannot replace them.
     private void* callableAddress(FuncDeclaration method, ptrdiff_t adjustment) {
-        import dmd.astenums: VarArg;
         import dmd.dsymbolsem: isAbstract;
-        import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         // getOverloads can leave an alias in a function-pointer constant.
         method = method.toAliasFunc;
@@ -358,8 +356,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         const(void)* word;
         const hasNativeSymbol = _plans.hasNativeSymbol(method);
         const isVariadicGuest =
-            typeFunctionOf(method).parameterList.varargs == VarArg.variadic
-            && method.fbody !is null && !hasNativeSymbol;
+            _callSelection.isVariadicGuest(method, hasNativeSymbol);
         if (_callSelection.usesNativeVariadicAddress(
                 method, hasNativeSymbol))
             return _plans.addressOf(method);
@@ -370,7 +367,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             _callbackRoots ~= cast(const(Function)*) word;
             if (_compilationDepth == 0)
                 prepareCallbackBodies;
-            if (isVariadicGuest)
+            if (_callSelection.storesGuestWord(
+                    method, hasNativeSymbol, adjustment))
                 return cast(void*) word;
         }
         return _plans.callableAddress(word, method, adjustment);
