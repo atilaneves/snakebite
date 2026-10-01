@@ -2645,6 +2645,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         foreach (hop; hops)
             value = cast(size_t) loadIntegral(
                 cast(ubyte*) value + hop.offset, size_t.sizeof, false);
+        if (original !is null)
+            faultIfNull(cast(void*) value, original);
         return value;
     }
 
@@ -2852,7 +2854,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import snakebite.nativelayout: loadIntegral;
 
         auto target = cast(ubyte*) loadIntegral(slot, size_t.sizeof, false);
-        faultIfNull(target, original);
+        if (original !is null)
+            faultIfNull(target, original);
         return target;
     }
 
@@ -6090,7 +6093,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     private void* classReferenceOf(Expression expression) {
         import snakebite.nativelayout: loadIntegral;
-        import std.conv: text;
 
         assert(expression.type.toBasetype.ty == Tclass,
             "dmd gives a member call a receiver expression of class type");
@@ -6194,11 +6196,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return callContextOf(calleeContextSourceOf(_function, function_));
     }
 
-    // The context a direct call hands over, which is always reachable from
-    // the caller.
+    // The context a direct call hands over. A frame is always reachable from
+    // the caller. A receiver can be null, and the access that reads it in the
+    // callee faults.
     private size_t callContextOf(in ContextSource source) {
         const context = contextValueOf(source);
-        assert(context != 0 || source.kind == ContextSource.Kind.none,
+        assert(context != 0 || source.kind != ContextSource.Kind.frame,
             "a direct call's enclosing function is on the static chain");
         return context;
     }

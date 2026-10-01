@@ -1875,3 +1875,156 @@ void main() {
 })(6);
     }
 }
+
+
+
+
+// A dual-context function reads the field of its alias argument through
+// word 1 of its pair of contexts. A null `this` of the caller makes that
+// word null: the call passes it on, the read of the field faults.
+static foreach (backend; FaultBackends) {
+    @("fault.nullSecondContextOfDualContextMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        GuestFault.Kind.nullPointer.shouldBeFaultOf!(backend, q{
+struct Holder {
+    int base = 2;
+    int add(alias field)() { return base + field; }
+}
+struct Owner {
+    int value = 40;
+    int run(ref Holder holder) { return holder.add!value(); }
+}
+void main() {
+    Holder holder;
+    Owner* owner;
+    owner.run(holder);
+}
+})(4);
+    }
+}
+
+
+// As above for word 0 of the pair, the receiver of the dual-context member.
+static foreach (backend; FaultBackends) {
+    @("fault.nullReceiverOfDualContextMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        GuestFault.Kind.nullPointer.shouldBeFaultOf!(backend, q{
+struct Holder {
+    int base = 2;
+    int add(alias field)() { return base + field; }
+}
+struct Owner {
+    int value = 40;
+    int run(Holder* holder) { return holder.add!value(); }
+}
+void main() {
+    Owner owner;
+    Holder* holder;
+    owner.run(holder);
+}
+})(4);
+    }
+}
+
+
+static foreach (backend; FaultBackends) {
+    @("fault.nullSecondContextCompoundAssignment." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        GuestFault.Kind.nullPointer.shouldBeFaultOf!(backend, q{
+struct Inner { int v = 1; }
+struct Holder {
+    int bump(alias field)() { field.v += 2; return field.v; }
+}
+struct Owner {
+    int pad;
+    Inner inner;
+    int run(ref Holder holder) { return holder.bump!inner(); }
+}
+void main() {
+    Holder holder;
+    Owner* owner;
+    owner.run(holder);
+}
+})(4);
+    }
+}
+
+
+// The method call on a field through a null second context passes the
+// address of the field on. The read of `this` in the method faults.
+static foreach (backend; FaultBackends) {
+    @("fault.nullSecondContextMethodOfField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        GuestFault.Kind.nullPointer.shouldBeFaultOf!(backend, q{
+struct Inner { int v = 1; int get() { return v; } }
+struct Holder {
+    int call(alias field)() { return field.get(); }
+}
+struct Owner {
+    int pad;
+    Inner inner;
+    int run(ref Holder holder) { return holder.call!inner(); }
+}
+void main() {
+    Holder holder;
+    Owner* owner;
+    owner.run(holder);
+}
+})(2);
+    }
+}
+
+
+// The lambda passes the pair of contexts of its enclosing dual-context
+// member on to the call. A null `this` of the caller makes word 1 null.
+static foreach (backend; FaultBackends) {
+    @("fault.nullSecondContextOfLambdaCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        GuestFault.Kind.nullPointer.shouldBeFaultOf!(backend, q{
+struct Holder {
+    int base = 2;
+    int add(alias field)() { return base + field; }
+    int relay(alias field)() { auto l = () => add!field(); return l(); }
+}
+struct Owner {
+    int value = 40;
+    int run(ref Holder holder) { return holder.relay!value(); }
+}
+void main() {
+    Holder holder;
+    Owner* owner;
+    owner.run(holder);
+}
+})(4);
+    }
+}
+
+
+// The delegate to a dual-context member takes the pair of contexts of the
+// caller. A null `this` of the caller makes word 1 null.
+static foreach (backend; FaultBackends) {
+    @("fault.nullSecondContextOfMemberDelegate." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        GuestFault.Kind.nullPointer.shouldBeFaultOf!(backend, q{
+struct Holder {
+    int base = 2;
+    int add(alias field)() { return base + field; }
+}
+struct Owner {
+    int value = 40;
+    int run(ref Holder holder) { auto dg = &holder.add!value; return dg(); }
+}
+void main() {
+    Holder holder;
+    Owner* owner;
+    owner.run(holder);
+}
+})(4);
+    }
+}

@@ -52,9 +52,14 @@ public Nullable!FaultCheck accessFaultOf(
         return kind == Tpointer || kind == Tarray ? pointer : Check.init;
     }
 
-    if (auto field = expression.isDotVarExp)
-        return field.var.isField && field.e1.type.toBasetype.ty == Tclass
-            ? classReference : Check.init;
+    if (auto field = expression.isDotVarExp) {
+        if (!field.var.isField)
+            return Check.init;
+
+        const kind = field.e1.type.toBasetype.ty;
+        return kind == Tclass ? classReference
+            : kind == Tpointer ? pointer : Check.init;
+    }
 
     if (auto name = expression.isVarExp)
         return accessFaultOfVariable(name);
