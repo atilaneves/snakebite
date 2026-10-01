@@ -176,7 +176,10 @@ public TypeInfo_Class classRuntimeInfo(
     info.vtbl = new void*[length];
     if (info.base !is null)
         info.vtbl[0 .. baseLength] = info.base.vtbl[];
-    if (length)
+    // An `extern(C++)` class has no classinfo slot: its first virtual
+    // method is at index 0.
+    const firstMethod = declaration.vtblOffset;
+    if (firstMethod)
         info.vtbl[0] = cast(void*) info;
 
     if (!isInterface) {
@@ -197,7 +200,7 @@ public TypeInfo_Class classRuntimeInfo(
         if (declaration.inv !is null)
             info.classInvariant = cast(void function(Object))
                 hooks.methodAddress(declaration.inv, 0);
-        foreach (i; 1 .. declaration.vtbl.length) {
+        foreach (i; firstMethod .. declaration.vtbl.length) {
             auto method = declaration.vtbl[i].isFuncDeclaration;
             import dmd.dsymbolsem: isAbstract;
 

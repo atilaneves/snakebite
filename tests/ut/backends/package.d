@@ -147,7 +147,7 @@ public void shouldBeStatusOf(
     in size_t line = __LINE__,
 ) {
     static if (is(BackendType == Native))
-        nativeMainStatus!code.should == expected;
+        nativeMainStatus!(SourceCharacters!code).should == expected;
     else {
         enum program_ = RegisterProgram!(module_, code).program;
         auto program = Program([parsedProgram(program_)], "snakebite");
@@ -164,10 +164,14 @@ public void shouldBeStatusOf(
 // guest side, so `hasMember` only ever finds a `main` `code` itself declared
 // - an unqualified lookup would instead walk out to this module's public
 // imports and could silently resolve to an unrelated `main`.
-private int nativeMainStatus(string code)() {
+//
+// The source arrives as one type per character, not as a `string` template
+// argument: dmd cannot mangle a `string` value in the parent chain of an
+// `extern(C++)` class, and `Guest` is nested in this instance.
+private int nativeMainStatus(Characters...)() {
     struct Guest {
         static:
-        mixin(code);
+        mixin(sourceText!Characters);
     }
 
     static if (!__traits(hasMember, Guest, "main"))
@@ -199,6 +203,31 @@ private int nativeMainStatus(string code)() {
             }
         }
     }
+}
+
+private struct Character(char value_) {
+    enum value = value_;
+}
+
+// Halves the string at each step so the recursion depth stays logarithmic
+// in the length of a guest program.
+private template SourceCharacters(string source) {
+    static if (source.length == 0)
+        alias SourceCharacters = AliasSeq!();
+    else static if (source.length == 1)
+        alias SourceCharacters = AliasSeq!(Character!(source[0]));
+    else
+        alias SourceCharacters = AliasSeq!(
+            SourceCharacters!(source[0 .. $ / 2]),
+            SourceCharacters!(source[$ / 2 .. $]),
+        );
+}
+
+private string sourceText(Characters...)() {
+    string result;
+    static foreach (Character_; Characters)
+        result ~= Character_.value;
+    return result;
 }
 
 // UFCS assertion: `42.shouldBeRetOf!(backend, code, "answer")` invokes one
