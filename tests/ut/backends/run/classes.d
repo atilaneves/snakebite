@@ -1488,6 +1488,68 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `W.init` holds the same static object as `W()`.
+static foreach (backend; Matrix!()) {
+    @("compileTimeClassInStructFieldDefaultSharedByWInit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C { int v; this(int x) { v = x; } }
+            struct W { C c = new C(1); }
+            void main() {
+                assert(W.init.c is W().c);
+            }
+        });
+    }
+}
+
+// A default-initialised `W` holds the same static object as `W()`.
+static foreach (backend; Matrix!()) {
+    @("compileTimeClassInStructFieldDefaultSharedByDefaultVariable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C { int v; this(int x) { v = x; } }
+            struct W { C c = new C(1); }
+            void main() {
+                W v;
+                assert(v.c is W().c);
+            }
+        });
+    }
+}
+
+// The elements of a default-initialised `W[2]` hold the same static object as `W()`.
+static foreach (backend; Matrix!()) {
+    @("compileTimeClassInStructFieldDefaultSharedByStaticArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C { int v; this(int x) { v = x; } }
+            struct W { C c = new C(1); }
+            void main() {
+                W[2] ws;
+                assert(ws[1].c is W().c);
+            }
+        });
+    }
+}
+
+// A `W` made with `new` holds the same static object as `W()`.
+static foreach (backend; Matrix!()) {
+    @("compileTimeClassInStructFieldDefaultSharedByNew." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C { int v; this(int x) { v = x; } }
+            struct W { C c = new C(1); }
+            void main() {
+                assert((new W).c is W().c);
+            }
+        });
+    }
+}
+
 // A write through one `W` is seen through another, since both use the one static object.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
@@ -1519,9 +1581,23 @@ static foreach (backend; Matrix!()) {
             class C { int v; this(int x) { v = x; } }
             class D { C c = new C(3); }
             void main() {
+                assert((new D).c.v == 3);
+            }
+        });
+    }
+}
+
+// All instances of a class share the object made for a class field default.
+static foreach (backend; Matrix!()) {
+    @("compileTimeClassInClassFieldDefaultIsShared." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C { int v; this(int x) { v = x; } }
+            class D { C c = new C(3); }
+            void main() {
                 auto a = new D;
                 auto b = new D;
-                assert(a.c.v == 3);
                 assert(a.c is b.c);
             }
         });
@@ -1539,6 +1615,20 @@ static foreach (backend; Matrix!()) {
             int get() { return W.c.v; }
             void main() {
                 assert(get() == 4);
+            }
+        });
+    }
+}
+
+// Two reads of a `static immutable` class instance give the same object.
+static foreach (backend; Matrix!()) {
+    @("compileTimeClassInStaticImmutableIsShared." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C { int v; this(int x) immutable { v = x; } }
+            struct W { static immutable C c = new immutable C(4); }
+            void main() {
                 assert(W.c is W.c);
             }
         });
@@ -1575,7 +1665,21 @@ static foreach (backend; Matrix!()) {
                 auto w = W();
                 assert(w.cs[0].v == 1);
                 assert(w.cs[1].v == 2);
-                assert(w.cs[0] is W().cs[0]);
+            }
+        });
+    }
+}
+
+// Every `W()` holds the same objects in its static array of class references.
+static foreach (backend; Matrix!()) {
+    @("compileTimeClassInStaticArrayFieldIsShared." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C { int v; this(int x) { v = x; } }
+            struct W { C[2] cs = [new C(1), new C(2)]; }
+            void main() {
+                assert(W().cs[0] is W().cs[0]);
             }
         });
     }
@@ -1613,6 +1717,21 @@ static foreach (backend; Matrix!()) {
             struct W { Base b = new Derived(1, 2); }
             void main() {
                 assert(W().b.get() == 3);
+            }
+        });
+    }
+}
+
+// The static object has its dynamic type, so a downcast succeeds.
+static foreach (backend; Matrix!()) {
+    @("compileTimeClassWithBaseClassAndDowncast." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base { }
+            class Derived : Base { }
+            struct W { Base b = new Derived; }
+            void main() {
                 assert(cast(Derived) W().b !is null);
             }
         });
@@ -1751,8 +1870,44 @@ static foreach (backend; Matrix!(
             __gshared I global = new C(11);
             void main() {
                 assert(global.get() == 11);
+            }
+        });
+    }
+}
+
+// A downcast of a `__gshared` interface reference finds the object.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a static variable"),
+)) {
+    @("compileTimeClassInterfaceGlobalDowncast." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            interface I { int get(); }
+            class C : I { int v; this(int x) { v = x; } int get() { return v; } }
+            __gshared I global = new C(11);
+            void main() {
+                assert(cast(C) global !is null);
+            }
+        });
+    }
+}
+
+// Converting the object back to the interface gives the address in the `__gshared` reference.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a static variable"),
+)) {
+    @("compileTimeClassInterfaceGlobalIdentity." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            interface I { int get(); }
+            class C : I { int v; this(int x) { v = x; } int get() { return v; } }
+            __gshared I global = new C(11);
+            void main() {
                 auto c = cast(C) global;
-                assert(c !is null);
                 assert(cast(I) c is global);
             }
         });
