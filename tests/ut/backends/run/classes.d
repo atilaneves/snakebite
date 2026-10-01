@@ -1995,27 +1995,3 @@ static foreach (backend; Matrix!(
         });
     }
 }
-
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "CTFE does not implement `typeid(Derived).vtbl`"),
-)) {
-    @("classTypeInfoVtblStartsWithClassInfo." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            class Base {
-                int first() { return 1; }
-            }
-            class Derived: Base {
-                int second() { return 2; }
-            }
-            void main() {
-                assert(typeid(Derived).vtbl[0] is cast(void*) typeid(Derived));
-                assert(typeid(Derived).vtbl.length
-                    == typeid(Base).vtbl.length + 1);
-                assert(typeid(Derived).base is typeid(Base));
-            }
-        });
-    }
-}

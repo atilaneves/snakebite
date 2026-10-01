@@ -170,8 +170,8 @@ public void shouldBeStatusOf(
 // `string` value in the parent chain of an `extern(C++)` class, and `Guest`
 // is nested in this instance. Other guests keep the `string`, which is much
 // cheaper to compile. The text test misses a spelling such as
-// `extern (C++)`; that fails at build time with dmd's "C++ `string`
-// template value parameter is not supported", never silently.
+// `extern (C++)`; that fails at build time with dmd's "template value
+// parameter is not supported" internal compiler error, never silently.
 private int nativeMainStatus(Characters...)() {
     struct Guest {
         static:

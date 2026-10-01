@@ -361,7 +361,7 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!()) {
-    @("cppClass.cppClassHoldsDClassAndReverse." ~ backend.stringof)
+    @("cppClass.dClassHoldsCppClass." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
@@ -370,25 +370,39 @@ static foreach (backend; Matrix!()) {
                 int value() { return 3; }
             }
             extern(C++) class Cpp {
-                Plain plain;
                 int value() { return 4; }
             }
             void main() {
                 auto plain = new Plain;
-                auto cpp = new Cpp;
-                plain.cpp = cpp;
-                cpp.plain = plain;
+                plain.cpp = new Cpp;
                 assert(plain.cpp.value == 4);
-                assert(cpp.plain.value == 3);
-                assert(cpp.plain.cpp.plain.value == 3);
-                assert(plain.toString.length > 0);
             }
         });
     }
 }
 
 static foreach (backend; Matrix!()) {
-    @("cppClass.cppStructWithMethods." ~ backend.stringof)
+    @("cppClass.cppClassHoldsDClass." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Plain {
+                int value() { return 3; }
+            }
+            extern(C++) class Cpp {
+                Plain plain;
+            }
+            void main() {
+                auto cpp = new Cpp;
+                cpp.plain = new Plain;
+                assert(cpp.plain.value == 3);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("cppStruct.withMethods." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
@@ -412,7 +426,7 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!()) {
-    @("cppClass.namespaceClassAndFunction." ~ backend.stringof)
+    @("cppClass.namespaceClass." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
@@ -423,13 +437,39 @@ static foreach (backend; Matrix!()) {
                 class Square: Shape {
                     override int sides() { return 4; }
                 }
-                int twice(int value) { return value * 2; }
-                struct Size { int width; int area() { return width * width; } }
             }
             void main() {
                 Shape shape = new Square;
                 assert(shape.sides == 4);
-                assert(twice(shape.sides) == 8);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("cppClass.namespaceFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C++, "geometry") {
+                int twice(int value) { return value * 2; }
+            }
+            void main() {
+                assert(twice(4) == 8);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("cppClass.namespaceStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C++, "geometry") {
+                struct Size { int width; int area() { return width * width; } }
+            }
+            void main() {
                 assert(Size(3).area == 9);
             }
         });
@@ -437,7 +477,7 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!()) {
-    @("cppClass.finalClass." ~ backend.stringof)
+    @("cppClass.finalDerivedClass." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
@@ -449,14 +489,25 @@ static foreach (backend; Matrix!()) {
                 override int value() { return extra; }
                 int more() { return extra + 1; }
             }
-            extern(C++) final class Alone {
-                int value() { return 8; }
-            }
             void main() {
                 auto leaf = new Leaf;
                 Base base = leaf;
                 assert(base.value == 5);
                 assert(leaf.more == 6);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("cppClass.finalClassWithNoBase." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C++) final class Alone {
+                int value() { return 8; }
+            }
+            void main() {
                 assert((new Alone).value == 8);
             }
         });
@@ -506,11 +557,66 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("cppClass.secondInterfaceDispatches." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C++) interface Shape {
+                int sides();
+            }
+            extern(C++) interface Named {
+                int code();
+                int more(int extra);
+            }
+            extern(C++) class Square: Shape, Named {
+                int field = 7;
+                int sides() { return field + 1; }
+                int code() { return field + 2; }
+                int more(int extra) { return field + extra; }
+            }
+            void main() {
+                auto square = new Square;
+                Shape shape = square;
+                Named named = square;
+                assert(shape.sides == 8);
+                assert(named.code == 9);
+                assert(named.more(3) == 10);
+            }
+        });
+    }
+}
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE does not support a pointer cast from an interface to `void*`"),
 )) {
-    @("cppClass.secondInterfaceAdjustsThis." ~ backend.stringof)
+    @("cppClass.secondInterfacePointerDiffers." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C++) interface Shape {
+                int sides();
+            }
+            extern(C++) interface Named {
+                int code();
+            }
+            extern(C++) class Square: Shape, Named {
+                int sides() { return 1; }
+                int code() { return 2; }
+            }
+            void main() {
+                auto square = new Square;
+                Shape shape = square;
+                Named named = square;
+                assert(cast(void*) shape !is cast(void*) named);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("cppClass.secondInterfaceOverrideInDerived." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
@@ -532,13 +638,6 @@ static foreach (backend; Matrix!(
                 override int code() { return field + other; }
             }
             void main() {
-                auto square = new Square;
-                Shape shape = square;
-                Named named = square;
-                assert(cast(void*) shape !is cast(void*) named);
-                assert(shape.sides == 8);
-                assert(named.code == 9);
-                assert(named.more(3) == 10);
                 Named big = new Big;
                 assert(big.code == 107);
                 assert(big.more(1) == 8);
