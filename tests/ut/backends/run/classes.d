@@ -880,6 +880,40 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A `scope` variable of interface type holds a class instance on the
+// stack. Its scope-exit `DeleteExp` runs through `_d_callinterfacefinalizer`,
+// which finds the object from the interface pointer's own offset.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the mutable static destruction counter"),
+)) {
+    @("scopeVariableOfInterfaceTypeRunsDestructorAtScopeExit." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int destructions;
+
+            interface Marker { }
+            class Padding {
+                long padding;
+            }
+            class Resource : Padding, Marker {
+                ~this() {
+                    ++destructions;
+                }
+            }
+
+            void main() {
+                {
+                    scope Marker marker = new Resource;
+                }
+                assert(destructions == 1);
+            }
+        });
+    }
+}
+
 // A call through an interface reference finds the class's override, which
 // needs the interface's own offset rather than the class vtable.
 static foreach (backend; Matrix!()) {

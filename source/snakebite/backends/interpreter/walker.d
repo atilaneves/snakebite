@@ -5035,16 +5035,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     override void visit(DeleteExp expression) {
-        import snakebite.druntime.classfinalizer: _d_callfinalizer;
+        import snakebite.backends.deleteplan: planDelete;
+        import snakebite.backends.druntimehooks: planOf;
 
-        if (expression.e1.type.ty != Tclass)
-            throw new SnakebiteException(
-                text("interpreter cannot delete `", expression.e1.toString,
-                    "`: it is not a class reference"),
-            );
+        auto deletion = planDelete(expression);
+        auto object = classReferenceOf(deletion.object);
+        auto plan = planOf(*_plans, deletion.hook);
 
-        auto object = classReferenceOf(expression.e1);
-        _d_callfinalizer(object);
+        const(void*)[1] arguments = [cast(const(void)*) &object];
+        callPlan(plan, null, arguments[]);
     }
 
     // Parsed guest classes have no emitted native ClassInfo. `Shared`

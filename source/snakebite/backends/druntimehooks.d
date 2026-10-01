@@ -23,6 +23,7 @@ public enum DruntimeHook {
     classInvariant,
     gcMalloc,
     callFinalizer,
+    callInterfaceFinalizer,
     arrayAppendChar,
     arrayAppendWchar,
 }
@@ -48,7 +49,8 @@ private immutable Register[5] _sliceBoundsRegisters = [
     Register(Register.Kind.unsigned, 8),
 ];
 
-// `_d_invariant(Object)` and `_d_callfinalizer(void*)` both take one
+// `_d_invariant(Object)`, `_d_callfinalizer(void*)` and
+// `_d_callinterfacefinalizer(void*)` all take one
 // pointer-sized argument and return nothing.
 private immutable Register[1] _pointerOnlyRegisters = [
     Register(Register.Kind.pointer, size_t.sizeof),
@@ -115,6 +117,9 @@ public DruntimeHookSpec specOf(in DruntimeHook hook) @safe @nogc nothrow pure {
                 "gc_malloc", _gcMallocRegisters, _gcMallocReturnRegister);
         case callFinalizer:
             return DruntimeHookSpec("_d_callfinalizer", _pointerOnlyRegisters);
+        case callInterfaceFinalizer:
+            return DruntimeHookSpec(
+                "_d_callinterfacefinalizer", _pointerOnlyRegisters);
         case arrayAppendChar:
             return DruntimeHookSpec(
                 "_d_arrayappendcd", _arrayAppendRegisters);

@@ -4627,13 +4627,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(DeleteExp expression) {
-        auto classType = expression.e1.type.isTypeClass;
-        if (classType is null)
-            return visit(cast(Expression) expression);
+        import snakebite.backends.deleteplan: planDelete;
 
+        auto deletion = planDelete(expression);
         const object = reserveTemp(pointerFacts);
-        evalInto(expression.e1, object, size_t.sizeof);
-        auto plan = planOf(_bytecode._plans, DruntimeHook.callFinalizer);
+        evalInto(deletion.object, object, size_t.sizeof);
+        auto plan = planOf(_bytecode._plans, deletion.hook);
         _callSites ~= CallSite.native(plan,
             [Arg(object, 0, size_t.sizeof)], 0);
         emit(&opCall, discardResult, _callSites.length - 1, 0);
