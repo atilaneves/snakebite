@@ -597,3 +597,265 @@ static foreach (backend; Matrix!(
         }, "answer");
     }
 }
+
+
+// Va_start then va_arg!int in a guest C variadic function that starts
+// its own `va_list` with `va_start`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("call.variadicC.startArg.int." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        15.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg, va_end, va_list, va_start;
+            extern(C) int sum(int count, ...) {
+                va_list args;
+                va_start(args, count);
+                int total;
+                foreach (i; 0 .. count)
+                    total += va_arg!int(args);
+                va_end(args);
+                return total;
+            }
+            int answer() { return sum(3, 4, 5, 6); }
+        }, "answer");
+    }
+}
+// Va_arg!long in a guest C variadic function that starts
+// its own `va_list` with `va_start`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("call.variadicC.startArg.long." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        6000000007.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg, va_end, va_list, va_start;
+            extern(C) long sum(int count, ...) {
+                va_list args;
+                va_start(args, count);
+                long total;
+                foreach (i; 0 .. count)
+                    total += va_arg!long(args);
+                va_end(args);
+                return total;
+            }
+            long answer() { return sum(2, 3_000_000_000L, 3_000_000_007L); }
+        }, "answer");
+    }
+}
+// Va_arg!double in a guest C variadic function that starts
+// its own `va_list` with `va_start`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("call.variadicC.startArg.double." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.5.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg, va_end, va_list, va_start;
+            extern(C) double sum(int count, ...) {
+                va_list args;
+                va_start(args, count);
+                double total = 0;
+                foreach (i; 0 .. count)
+                    total += va_arg!double(args);
+                va_end(args);
+                return total;
+            }
+            double answer() { return sum(3, 1.5, 2.0, 4.0); }
+        }, "answer");
+    }
+}
+// Va_arg of a pointer in a guest C variadic function that starts
+// its own `va_list` with `va_start`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("call.variadicC.startArg.pointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg, va_end, va_list, va_start;
+            extern(C) int first(int count, ...) {
+                va_list args;
+                va_start(args, count);
+                auto pointer = va_arg!(int*)(args);
+                va_end(args);
+                return *pointer;
+            }
+            int answer() {
+                int value = 42;
+                return first(1, &value);
+            }
+        }, "answer");
+    }
+}
+// Va_arg of a small struct in a guest C variadic function that starts
+// its own `va_list` with `va_start`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("call.variadicC.startArg.struct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1234.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg, va_end, va_list, va_start;
+            struct Pair { int first; int second; }
+            extern(C) int firstPair(int count, ...) {
+                va_list args;
+                va_start(args, count);
+                const pair = va_arg!Pair(args);
+                va_end(args);
+                return pair.first * 100 + pair.second;
+            }
+            int answer() { return firstPair(1, Pair(12, 34)); }
+        }, "answer");
+    }
+}
+// The va_arg(ap, ref T) form in a guest C variadic function that starts
+// its own `va_list` with `va_start`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("call.variadicC.startArg.ref." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        9.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg, va_end, va_list, va_start;
+            extern(C) int sum(int count, ...) {
+                va_list args;
+                va_start(args, count);
+                int total;
+                foreach (i; 0 .. count) {
+                    int next;
+                    va_arg(args, next);
+                    total += next;
+                }
+                va_end(args);
+                return total;
+            }
+            int answer() { return sum(2, 4, 5); }
+        }, "answer");
+    }
+}
+
+
+// A second va_start starts again from the first extra argument in a guest C variadic function that starts
+// its own `va_list` with `va_start`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("call.variadicC.startRestart." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        18.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg, va_end, va_list, va_start;
+            extern(C) int twice(int count, ...) {
+                va_list args;
+                int total;
+                foreach (pass; 0 .. 2) {
+                    va_start(args, count);
+                    foreach (i; 0 .. count)
+                        total += va_arg!int(args);
+                    va_end(args);
+                }
+                return total;
+            }
+            int answer() { return twice(3, 1, 3, 5); }
+        }, "answer");
+    }
+}
+// Va_copy keeps its own position in a guest C variadic function that starts
+// its own `va_list` with `va_start`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("call.variadicC.copy." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        18.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg, va_copy, va_end, va_list, va_start;
+            extern(C) int sumTwice(int count, ...) {
+                va_list args;
+                va_start(args, count);
+                va_list copy;
+                va_copy(copy, args);
+                int total;
+                foreach (i; 0 .. count)
+                    total += va_arg!int(args);
+                foreach (i; 0 .. count)
+                    total += va_arg!int(copy);
+                va_end(copy);
+                va_end(args);
+                return total;
+            }
+            int answer() { return sumTwice(3, 1, 3, 5); }
+        }, "answer");
+    }
+}
+
+
+// A va_list passed to a second guest function in a guest C variadic function that starts
+// its own `va_list` with `va_start`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("call.variadicC.toGuest." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        12.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg, va_end, va_list, va_start;
+            static int vsum(int count, va_list args) {
+                int total;
+                foreach (i; 0 .. count)
+                    total += va_arg!int(args);
+                return total;
+            }
+            extern(C) int sum(int count, ...) {
+                va_list args;
+                va_start(args, count);
+                const total = vsum(count, args);
+                va_end(args);
+                return total;
+            }
+            int answer() { return sum(3, 3, 4, 5); }
+        }, "answer");
+    }
+}
+
+
+// A va_list passed to vsnprintf in a guest C variadic function that starts
+// its own `va_list` with `va_start`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("call.variadicC.toHost." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_end, va_list, va_start;
+            import core.stdc.stdio: vsnprintf;
+            extern(C) int format(const(char)* pattern, ...) {
+                char[32] buffer;
+                va_list args;
+                va_start(args, pattern);
+                const length = vsnprintf(buffer.ptr, buffer.length, pattern, args);
+                va_end(args);
+                return length == 11 && buffer[0 .. 11] == "12 3.5 word" ? 1 : 0;
+            }
+            int answer() { return format("%d %.1f %s", 12, 3.5, "word".ptr); }
+        }, "answer");
+    }
+}
