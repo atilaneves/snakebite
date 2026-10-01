@@ -164,3 +164,23 @@ unittest {
         "--boundscheck=off", "--enable-switch-errors=false",
     ];
 }
+
+
+@("checks.betterC")
+unittest {
+    resolved([]).betterC.should == false;
+    resolved(["-betterC"]).betterC.should == true;
+    resolved([]).action.should == CHECKACTION.D;
+    resolved(["-betterC"]).action.should == CHECKACTION.C;
+    resolved(["-betterC", "-checkaction=D"]).action.should == CHECKACTION.C;
+    resolved(["-checkaction=halt", "-betterC"]).action.should == CHECKACTION.halt;
+}
+
+
+@("checks.betterC.runtimeVersions")
+unittest {
+    resolved([]).defines("D_ModuleInfo").should == true;
+    resolved(["-betterC"]).defines("D_ModuleInfo").should == false;
+    resolved(["-betterC"]).defines("D_Exceptions").should == false;
+    resolved(["-betterC"]).defines("D_TypeInfo").should == false;
+}
