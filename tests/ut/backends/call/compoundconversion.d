@@ -29,6 +29,15 @@ private struct CompoundCase {
     string expected;
     Outcome ctfe;
     string ctfeValue;
+    // Declarations that `type` needs.
+    string declarations;
+    // The type the test function returns, when `type` is an enum that the
+    // test file cannot name.
+    string returns;
+
+    string hostType() const {
+        return returns.length == 0 ? type : returns;
+    }
 }
 
 private enum agrees = CompoundCase.Outcome.agrees;
@@ -387,6 +396,66 @@ private enum compoundCases = [
         "21.5", "2", "10.75", agrees),
     CompoundCase("real", "%", "ulong", "modByUlong",
         "21.5", "2", "1.5", agrees),
+    CompoundCase("int", "*", "float", "mulByInexactFloat",
+        "100", "0.01", "0", agrees),
+    CompoundCase("int", "/", "float", "divByInexactFloat",
+        "11", "1.1", "9", differs, "11"),
+    CompoundCase("long", "-", "float", "subByTinyFloat",
+        "100", "0.00000001", "99", differs, "100"),
+    CompoundCase("ulong", "/", "double", "divByInexactDouble",
+        "11", "1.1", "9", differs, "11"),
+    CompoundCase("int", "+", "float", "addTinyFraction",
+        "1", "0.1", "1", agrees),
+    CompoundCase("int", "-", "double", "subSmallFraction",
+        "10", "0.1", "9", differs, "10"),
+    CompoundCase("int", "*", "float", "mulBelowOne",
+        "3", "0.3", "0", agrees),
+    CompoundCase("short", "/", "float", "divByInexactFloat",
+        "7", "1.1", "6", differs, "7"),
+    CompoundCase("uint", "*", "float", "mulByInexactFloat",
+        "100", "0.01", "0", agrees),
+    CompoundCase("uint", "/", "double", "divByInexactDouble",
+        "11", "1.1", "10", differs, "11"),
+    CompoundCase("long", "*", "double", "mulByInexactDouble",
+        "100", "0.01", "1", differs, "0"),
+    CompoundCase("long", "+", "float", "addToLongAtFloatPrecision",
+        "9007199254740993", "1.0", "9007199254740992", differs,
+        "9007199254740994"),
+    CompoundCase("long", "+", "double", "addToLongAtDoublePrecision",
+        "9007199254740993", "1.0", "9007199254740992", differs,
+        "9007199254740994"),
+    CompoundCase("long", "+", "real", "addToLongAtRealPrecision",
+        "9007199254740993", "1.0", "9007199254740994", agrees),
+    CompoundCase("ulong", "+", "real", "addToUlongAtRealPrecision",
+        "9007199254740993", "1.0", "9007199254740994", agrees),
+    CompoundCase("uint", "-", "double", "subBelowZero",
+        "5", "7.5", "4294967294", agrees),
+    CompoundCase("ushort", "-", "float", "subBelowZero",
+        "5", "7.5", "65534", agrees),
+    CompoundCase("ubyte", "-", "double", "subBelowZero",
+        "5", "7.5", "254", agrees),
+    CompoundCase("ulong", "-", "double", "subBelowZero",
+        "5", "7.5", "18446744073709551614", agrees),
+    CompoundCase("ulong", "-", "float", "subBelowZero",
+        "5", "7.5", "18446744073709551614", agrees),
+    CompoundCase("byte", "-", "float", "subBelowMin",
+        "-100", "30.5", "126", agrees),
+    CompoundCase("char", "+", "double", "addByDouble",
+        "65", "1.5", "66", agrees),
+    CompoundCase("wchar", "+", "double", "addByDouble",
+        "65", "1.5", "66", agrees),
+    CompoundCase("dchar", "+", "double", "addByDouble",
+        "65", "1.5", "66", agrees),
+    CompoundCase("char", "*", "float", "mulByFloat",
+        "10", "6.5", "65", differs, "60"),
+    CompoundCase("dchar", "/", "float", "divByInexactFloat",
+        "11", "1.1", "9", differs, "11"),
+    CompoundCase("Level", "+", "double", "addByDouble",
+        "cast(Level) 21", "2.5", "23", agrees, "",
+        "enum Level : int { first = 21 }", "int"),
+    CompoundCase("Small", "-", "double", "subByDouble",
+        "cast(Small) 21", "2.5", "18", differs, "19",
+        "enum Small : ubyte { first = 21 }", "ubyte"),
 ];
 
 private string testName(in CompoundCase row) {
@@ -394,9 +463,10 @@ private string testName(in CompoundCase row) {
 }
 
 private string compoundCode(in CompoundCase row) {
-    return row.type ~ " value() { return " ~ row.init ~ "; }\n"
+    return row.declarations ~ "\n"
+        ~ row.type ~ " value() { return " ~ row.init ~ "; }\n"
         ~ row.stepType ~ " step() { return " ~ row.step ~ "; }\n"
-        ~ row.type ~ " compound() {\n    " ~ row.type
+        ~ row.hostType ~ " compound() {\n    " ~ row.type
         ~ " v = value();\n    v " ~ row.op ~ "= step();\n    return v;\n}\n";
 }
 
@@ -412,7 +482,7 @@ static foreach (row; compoundCases) {
         @(row.testName ~ "." ~ backend.stringof)
         @Tags(backend.stringof)
         unittest {
-            mixin(row.type, "(", row.expected, ")").shouldBeRetOf!(
+            mixin("cast(", row.hostType, ")(", row.expected, ")").shouldBeRetOf!(
                 backend, row.compoundCode, "compound");
         }
     }
@@ -424,7 +494,7 @@ static foreach (row; compoundCases) {
         @(row.testName ~ ".Ctfe.diverges")
         @Tags("Ctfe")
         unittest {
-            mixin(row.type, "(", row.ctfeValue, ")").shouldBeRetOf!(
+            mixin("cast(", row.hostType, ")(", row.ctfeValue, ")").shouldBeRetOf!(
                 Ctfe, row.compoundCode, "compound");
         }
     }
