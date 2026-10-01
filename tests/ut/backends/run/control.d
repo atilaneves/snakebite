@@ -1117,6 +1117,70 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A `goto` may leave a `final switch` for a label after it.
+static foreach (backend; Matrix!()) {
+    @("gotoOutOfFinalSwitch." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum Colour { red, green, blue }
+            int inner(Colour colour) {
+                int result;
+                final switch (colour) {
+                    case Colour.red:
+                        goto done;
+                    case Colour.green:
+                        result += 20;
+                        break;
+                    case Colour.blue:
+                        result += 5;
+                        break;
+                }
+                result += 100;
+            done:
+                return result;
+            }
+            int main() {
+                return inner(Colour.red) == 0 && inner(Colour.green) == 120
+                    ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A `goto` may jump over a `final switch` that it is not in.
+static foreach (backend; Matrix!()) {
+    @("gotoOverFinalSwitch." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum Colour { red, green, blue }
+            int inner(Colour colour, bool skip) {
+                int result;
+                if (skip)
+                    goto done;
+                final switch (colour) {
+                    case Colour.red:
+                        result += 1;
+                        break;
+                    case Colour.green:
+                        result += 20;
+                        break;
+                    case Colour.blue:
+                        result += 5;
+                        break;
+                }
+            done:
+                return result;
+            }
+            int main() {
+                return inner(Colour.red, true) == 0
+                    && inner(Colour.green, false) == 20 ? 0 : 1;
+            }
+        });
+    }
+}
+
 static foreach (backend; Matrix!()) {
     @("reviewGotoInsideFinallyScope." ~ backend.stringof)
     @Tags(backend.stringof)
