@@ -72,6 +72,13 @@ public struct ContextSource {
         // hidden argument is the address of a pair, and the `this` to start
         // from is the word at `pairOffset` in it, not the receiver.
         receiver,
+        // The `this` of the function that makes the call, which overrides
+        // `function_`: an inherited `in` or `out` contract is a nested
+        // function of `function_`, and reads nothing of its context but
+        // that function's `this`. The context is the address that makes
+        // this read, at `slotOffset` from it, find the receiver moved by
+        // `receiverAdjustment` to the view of `function_`'s class.
+        overrider,
     }
 
     public Kind kind;
@@ -79,6 +86,8 @@ public struct ContextSource {
     public const(size_t)[] fields;
     public bool throughPair;
     public size_t pairOffset;
+    public size_t receiverAdjustment;
+    public size_t slotOffset;
 }
 
 // What a call or a delegate to a dual-context function stores before it
@@ -118,6 +127,66 @@ public PairPlan pairPlanOf(
         DualContext.outerWord * size_t.sizeof,
         contextSourceOf(caller, callee.toParent2()),
     );
+}
+
+// The source of the context that a call from `caller` hands to the nested
+// function `callee`. dmd's code generator gives the `__require` and
+// `__ensure` of an overridden function to the overriding function that
+// calls them: the call is the `in` contract merged into an override, and
+// the same holds for `out`.
+public ContextSource calleeContextSourceOf(
+    imported!"dmd.func".FuncDeclaration caller,
+    imported!"dmd.func".FuncDeclaration callee,
+) {
+    import snakebite.frontend.dmd.delegates: nestedContextOwnerOf;
+
+    auto owner = nestedContextOwnerOf(callee);
+    if (owner is null || owner is caller || !isContract(callee)
+            || !overrides(caller, owner))
+        return contextSourceOf(caller, owner);
+
+    return overriderSourceOf(caller, owner);
+}
+
+private bool isContract(imported!"dmd.func".FuncDeclaration function_) {
+    import dmd.id: Id;
+
+    return function_.ident == Id.require || function_.ident == Id.ensure;
+}
+
+private bool overrides(
+    imported!"dmd.func".FuncDeclaration function_,
+    imported!"dmd.func".FuncDeclaration base,
+) {
+    foreach (overridden; function_.foverrides[])
+        if (overridden is base || overrides(overridden, base))
+            return true;
+    return false;
+}
+
+private ContextSource overriderSourceOf(
+    imported!"dmd.func".FuncDeclaration caller,
+    imported!"dmd.func".FuncDeclaration owner,
+) {
+    import snakebite.backends.closureplan: ClosurePlan;
+    import snakebite.backends.layout: FrameLayout;
+
+    int adjustment;
+    const isBase = owner.isThis.isClassDeclaration.isBaseOf(
+        caller.isThis.isClassDeclaration, &adjustment);
+    if (!isBase)
+        assert(0, "an overridden method belongs to a base of the overrider");
+
+    const closure = ClosurePlan.of(owner);
+    const layout = FrameLayout.of(owner);
+    // `auto`: `hasSlot` and `offsetOf` take a mutable `VarDeclaration`.
+    auto variable = cast() layout.hiddenThis.variable;
+    const slotOffset = closure.needsClosure && closure.layout.hasSlot(variable)
+        ? closure.layout.slotOf(variable).offset
+        : layout.offsetOf(variable);
+    return ContextSource(
+        ContextSource.Kind.overrider, owner, null, false, 0, adjustment,
+        slotOffset);
 }
 
 // The source, as seen from `caller`, of the context of `owner`: the symbol

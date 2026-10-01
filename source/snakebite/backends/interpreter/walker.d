@@ -385,7 +385,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.backends.closureplan: ClosurePlan, Hop;
     import snakebite.backends.dualcontext:
-        ContextSource, PairPlan, contextSourceOf, pairPlanOf;
+        ContextSource, PairPlan, calleeContextSourceOf, contextSourceOf,
+        pairPlanOf;
     import snakebite.backends.classinfo;
     import dmd.dclass: ClassDeclaration;
     import dmd.dstruct: StructDeclaration;
@@ -5964,7 +5965,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         FuncDeclaration function_,
         void* classReceiver,
     ) {
-        import snakebite.frontend.dmd.delegates: nestedContextOwnerOf;
         import std.conv: text;
 
         if (function_.isThis !is null) {
@@ -5985,8 +5985,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // delegate supplies this context directly because it may
         // outlive the call that created it; a direct call finds it
         // by walking the current static chain.
-        return callContextOf(
-            contextSourceOf(_function, nestedContextOwnerOf(function_)));
+        return callContextOf(calleeContextSourceOf(_function, function_));
     }
 
     // The context a direct call hands over, which is always reachable from
@@ -6014,6 +6013,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 value = cast(size_t) loadIntegral(
                     cast(ubyte*) value + offset, size_t.sizeof, false);
             return value;
+        case overrider:
+            import snakebite.nativelayout: storeIntegral;
+
+            auto word = _frames.reserve(size_t.sizeof, size_t.alignof);
+            storeIntegral(
+                word,
+                thisValueOf(null, _function.vthis) + source.receiverAdjustment,
+                size_t.sizeof,
+            );
+            return cast(size_t) word - source.slotOffset;
         }
     }
 
