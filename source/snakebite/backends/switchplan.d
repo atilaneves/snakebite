@@ -34,20 +34,6 @@ package imported!"dmd.statement".CaseStatement selectCase(
     return null;
 }
 
-package bool containsTarget(
-    SwitchPlan plan,
-    imported!"dmd.statement".Statement target,
-)
-    @safe @nogc nothrow scope
-{
-    if (target is plan.defaultTarget)
-        return true;
-    foreach (case_; plan.cases)
-        if (target is case_)
-            return true;
-    return false;
-}
-
 package bool switchCaseMatches(long value, long caseValue)
     @safe @nogc nothrow pure scope
 {
