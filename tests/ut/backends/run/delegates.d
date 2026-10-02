@@ -1395,3 +1395,209 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// An `extern(C)` function with two `int` parameters through a pointer type
+// with two `long` parameters. The C ABI passes each in the same integer
+// register, so the callee reads the low half of each argument.
+static foreach (backend; Matrix!()) {
+    @("callThroughFunctionPointerCastFromIntToLongParameters." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C) int join(int a, int b) { return a * 10 + b; }
+            alias Longs = extern(C) int function(long, long);
+            int main() {
+                auto pointer = cast(Longs) &join;
+                return pointer(1, 2) == 12 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// The same mismatch through a delegate type: the context does not change
+// which register each parameter is in.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine cannot cast a delegate to a different delegate type"),
+)) {
+    @("callThroughDelegateCastFromIntToLongParameters." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Base {
+                int base;
+                extern(C) int join(int a, int b) { return base + a * 10 + b; }
+            }
+            alias Longs = extern(C) int delegate(long, long);
+            int main() {
+                auto base = Base(100);
+                auto value = cast(Longs) &base.join;
+                return value(1, 2) == 112 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A `float` parameter between two integer parameters, through a pointer
+// type whose integer parameters are wider. The `float` is in a vector
+// register in the two types, and the integers are in the same registers.
+static foreach (backend; Matrix!()) {
+    @("callThroughFunctionPointerCastWithFloatBetweenWiderIntegers." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C) int join(int a, float x, int b) {
+                return a * 100 + cast(int) x * 10 + b;
+            }
+            alias Wider = extern(C) int function(long, float, long);
+            int main() {
+                auto pointer = cast(Wider) &join;
+                return pointer(1, 2f, 3) == 123 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A C-variadic function through a C-variadic pointer type that declares
+// one more parameter. The callee reads that parameter as its first variadic
+// argument.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine does not implement C-style variadic functions"),
+)) {
+    @("callCVariadicThroughVariadicPointerWithOneMoreParameter." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.stdarg;
+            extern(C) int join(int a, ...) {
+                va_list list;
+                va_start(list, a);
+                const b = va_arg!int(list);
+                const c = va_arg!int(list);
+                va_end(list);
+                return a * 100 + b * 10 + c;
+            }
+            alias More = extern(C) int function(int, int, ...);
+            int main() {
+                auto pointer = cast(More) &join;
+                return pointer(1, 2, 3) == 123 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A C-variadic function through a C-variadic pointer type that declares
+// one fewer parameter. The callee reads the first variadic argument of the
+// call as its second parameter.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine does not implement C-style variadic functions"),
+)) {
+    @("callCVariadicThroughVariadicPointerWithOneFewerParameter." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.stdarg;
+            extern(C) int join(int a, int b, ...) {
+                va_list list;
+                va_start(list, b);
+                const c = va_arg!int(list);
+                va_end(list);
+                return a * 100 + b * 10 + c;
+            }
+            alias Fewer = extern(C) int function(int, ...);
+            int main() {
+                auto pointer = cast(Fewer) &join;
+                return pointer(1, 2, 3) == 123 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A function literal that needs no context, passed to a delegate
+// parameter and called through a delegate type with one more parameter.
+// The callee does not read its parameter.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine cannot cast a delegate to a different delegate type"),
+)) {
+    @("callContextFreeLiteralThroughDelegateWithOneMoreParameter." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            alias One = int delegate(int);
+            alias Two = int delegate(int, int);
+            int call(One one) {
+                auto two = cast(Two) one;
+                return two(3, 9);
+            }
+            int main() {
+                return call((int unused) => 6) == 6 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// Two `int` parameters through a pointer type that has a `double` and a
+// `float` between them. Each `int` is in the next integer register, so the
+// floating-point arguments do not move them.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine cannot call a function through a pointer of another type"),
+)) {
+    @("callThroughFunctionPointerCastWithFloatingPointParametersAddedBetween." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C) int join(int a, int b) { return a * 10 + b; }
+            alias Mixed = extern(C) int function(double, int, float, int);
+            int main() {
+                auto pointer = cast(Mixed) &join;
+                return pointer(0.5, 1, 0.5f, 2) == 12 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// Two `double` parameters through a pointer type that has an `int` and a
+// `long` between them. Each `double` is in the next vector register.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine cannot call a function through a pointer of another type"),
+)) {
+    @("callThroughFunctionPointerCastWithIntegerParametersAddedBetween." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C) double join(double a, double b) { return a * 10 + b; }
+            alias Mixed = extern(C) double function(int, double, long, double);
+            int main() {
+                auto pointer = cast(Mixed) &join;
+                return pointer(7, 1.0, 7, 2.0) == 12.0 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A `double` and an `int` through a pointer type with the same two types in
+// the other order. Each is in the register of its own class.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine cannot call a function through a pointer of another type"),
+)) {
+    @("callThroughFunctionPointerCastWithParametersInOtherOrder." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C) int join(int a, double b) {
+                return a * 10 + cast(int) b;
+            }
+            alias Swapped = extern(C) int function(double, int);
+            int main() {
+                auto pointer = cast(Swapped) &join;
+                return pointer(3.0, 1) == 13 ? 0 : 1;
+            }
+        });
+    }
+}
