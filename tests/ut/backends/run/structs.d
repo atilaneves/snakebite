@@ -1294,7 +1294,13 @@ static foreach (backend; Matrix!()) {
 // A bit field as wide as its declared type that follows narrower bit
 // fields: dmd gives `c` the offset 2 and the bit offset 16, so its 32 bits
 // start at byte 4, in the unit of its type aligned from the struct start.
-static foreach (backend; Matrix!()) {
+// The test stores a value that needs all 32 bits. gcc and ldc agree with
+// the layout; the code that dmd generates reads and writes only the low
+// 16 bits, which the `Native` test next to this one pins.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd reads and writes only the low 16 bits of `c`"),
+)) {
     @("bitfields.fullWidthAfterNarrowerTypes." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1302,14 +1308,32 @@ static foreach (backend; Matrix!()) {
             struct S { ubyte a : 8; ushort b : 16; uint c : 32; }
             void main() {
                 S s;
-                s.a = 1; s.b = 2; s.c = 3;
-                assert(s.a == 1 && s.b == 2 && s.c == 3);
+                s.a = 0xA5; s.b = 0xBEEF; s.c = 0xDEAD_C0DE;
+                assert(s.a == 0xA5 && s.b == 0xBEEF && s.c == 0xDEAD_C0DE);
+                s.c = 0;
+                assert(s.a == 0xA5 && s.b == 0xBEEF && s.c == 0);
             }
         });
     }
 }
 
-static foreach (backend; Matrix!()) {
+@("bitfields.fullWidthAfterNarrowerTypes.Native")
+@Tags(Native.stringof)
+unittest {
+    0.shouldBeStatusOf!(Native, q{
+        struct S { ubyte a : 8; ushort b : 16; uint c : 32; }
+        void main() {
+            S s;
+            s.a = 0xA5; s.b = 0xBEEF; s.c = 0xDEAD_C0DE;
+            assert(s.a == 0xA5 && s.b == 0xBEEF && s.c == 0xC0DE);
+        }
+    });
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd reads and writes only the low 8 bits of `c`"),
+)) {
     @("bitfields.fullWidthUshortAfterUbytes." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1317,16 +1341,33 @@ static foreach (backend; Matrix!()) {
             struct S { ubyte a : 5; ubyte b : 8; ushort c : 16; }
             void main() {
                 S s;
-                s.a = 1; s.b = 2; s.c = 3;
-                assert(s.a == 1 && s.b == 2 && s.c == 3);
+                s.a = 0x15; s.b = 0xA5; s.c = 0xBEEF;
+                assert(s.a == 0x15 && s.b == 0xA5 && s.c == 0xBEEF);
+                s.c = 0;
+                assert(s.a == 0x15 && s.b == 0xA5 && s.c == 0);
             }
         });
     }
 }
 
+@("bitfields.fullWidthUshortAfterUbytes.Native")
+@Tags(Native.stringof)
+unittest {
+    0.shouldBeStatusOf!(Native, q{
+        struct S { ubyte a : 5; ubyte b : 8; ushort c : 16; }
+        void main() {
+            S s;
+            s.a = 0x15; s.b = 0xA5; s.c = 0xBEEF;
+            assert(s.a == 0x15 && s.b == 0xA5 && s.c == 0xEF);
+        }
+    });
+}
+
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE reads a 64-bit bit field after narrower ones wrongly"),
+    Omit!(Native, Because.diverges,
+        "dmd reads and writes only the low 16 bits of `c` and of `d`"),
+    Omit!(Ctfe, Because.diverges,
+        "dmd's CTFE reads 0 from a 64-bit bit field after narrower ones"),
 )) {
     @("bitfields.fullWidthUlongAfterNarrowerTypes." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -1335,18 +1376,53 @@ static foreach (backend; Matrix!(
             struct S { ubyte a : 8; ushort b : 16; uint c : 32; ulong d : 64; }
             void main() {
                 S s;
-                s.a = 1; s.b = 2; s.c = 3; s.d = 4;
-                assert(s.a == 1 && s.b == 2 && s.c == 3 && s.d == 4);
+                s.a = 0xA5; s.b = 0xBEEF; s.c = 0xDEAD_C0DE;
+                s.d = 0x0123_4567_89AB_CDEF;
+                assert(s.a == 0xA5 && s.b == 0xBEEF && s.c == 0xDEAD_C0DE);
+                assert(s.d == 0x0123_4567_89AB_CDEF);
             }
         });
     }
 }
 
+@("bitfields.fullWidthUlongAfterNarrowerTypes.Native")
+@Tags(Native.stringof)
+unittest {
+    0.shouldBeStatusOf!(Native, q{
+        struct S { ubyte a : 8; ushort b : 16; uint c : 32; ulong d : 64; }
+        void main() {
+            S s;
+            s.a = 0xA5; s.b = 0xBEEF; s.c = 0xDEAD_C0DE;
+            s.d = 0x0123_4567_89AB_CDEF;
+            assert(s.a == 0xA5 && s.b == 0xBEEF && s.c == 0xC0DE);
+            assert(s.d == 0xCDEF);
+        }
+    });
+}
+
+@("bitfields.fullWidthUlongAfterNarrowerTypes.Ctfe")
+@Tags(Ctfe.stringof)
+unittest {
+    0.shouldBeStatusOf!(Ctfe, q{
+        struct S { ubyte a : 8; ushort b : 16; uint c : 32; ulong d : 64; }
+        void main() {
+            S s;
+            s.a = 0xA5; s.b = 0xBEEF; s.c = 0xDEAD_C0DE;
+            s.d = 0x0123_4567_89AB_CDEF;
+            assert(s.a == 0xA5 && s.b == 0xBEEF && s.c == 0xDEAD_C0DE);
+            assert(s.d == 0);
+        }
+    });
+}
+
 // A bit field that does not fill its type, after narrower ones, still
 // starts in the aligned unit of its own type: `c` has the offset 2 and the
 // bit offset 16, and 20 bits do not fit the 16 bits left in the unit that
-// starts at the offset.
-static foreach (backend; Matrix!()) {
+// starts at the offset. The value needs all 20 bits.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd reads and writes only the low 16 bits of `c`"),
+)) {
     @("bitfields.partialWidthAfterNarrowerTypes." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1354,11 +1430,55 @@ static foreach (backend; Matrix!()) {
             struct S { ubyte a : 8; ushort b : 16; uint c : 20; ubyte d : 4; }
             void main() {
                 S s;
-                s.a = 1; s.b = 2; s.c = 700; s.d = 9;
-                assert(s.a == 1 && s.b == 2 && s.c == 700 && s.d == 9);
+                s.a = 0xA5; s.b = 0xBEEF; s.c = 0xABCDE; s.d = 9;
+                assert(s.a == 0xA5 && s.b == 0xBEEF && s.c == 0xABCDE && s.d == 9);
             }
         });
     }
+}
+
+@("bitfields.partialWidthAfterNarrowerTypes.Native")
+@Tags(Native.stringof)
+unittest {
+    0.shouldBeStatusOf!(Native, q{
+        struct S { ubyte a : 8; ushort b : 16; uint c : 20; ubyte d : 4; }
+        void main() {
+            S s;
+            s.a = 0xA5; s.b = 0xBEEF; s.c = 0xABCDE; s.d = 9;
+            assert(s.a == 0xA5 && s.b == 0xBEEF && s.c == 0xBCDE && s.d == 9);
+        }
+    });
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd reads the bits of `b` as the high half of `c`"),
+)) {
+    @("bitfields.signedFullWidthAfterNarrowerTypes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { byte a : 8; short b : 16; int c : 32; }
+            void main() {
+                S s;
+                s.a = -5; s.b = -300; s.c = -70_000;
+                assert(s.a == -5 && s.b == -300 && s.c == -70_000);
+            }
+        });
+    }
+}
+
+@("bitfields.signedFullWidthAfterNarrowerTypes.Native")
+@Tags(Native.stringof)
+unittest {
+    0.shouldBeStatusOf!(Native, q{
+        struct S { byte a : 8; short b : 16; int c : 32; }
+        void main() {
+            S s;
+            s.a = -5; s.b = -300; s.c = -70_000;
+            assert(s.a == -5 && s.c != -70_000);
+        }
+    });
 }
 
 static foreach (backend; Matrix!()) {
@@ -1369,8 +1489,8 @@ static foreach (backend; Matrix!()) {
             align(1) struct S { ubyte x; uint a : 3; uint b : 32; }
             void main() {
                 S s;
-                s.x = 9; s.a = 5; s.b = 77;
-                assert(s.x == 9 && s.a == 5 && s.b == 77);
+                s.x = 9; s.a = 5; s.b = 0xDEAD_C0DE;
+                assert(s.x == 9 && s.a == 5 && s.b == 0xDEAD_C0DE);
             }
         });
     }
