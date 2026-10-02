@@ -23,6 +23,7 @@ import snakebite.backends.unwindplan:
     ExceptionCandidate, UnwindPlan, unwindPlanOf;
 import snakebite.backends.guestfault: GuestFault, NativeCallCheck;
 import snakebite.callarguments: CallArguments;
+import snakebite.nativelayout: TypeFacts;
 import snakebite.nativevalue:
     CastKind, ComplexOperation, floatingToBool, loadFloating, loadSigned,
     loadUnsigned, shiftCount, storeFloating, storeIntegral;
@@ -152,7 +153,18 @@ public struct CallSite {
         return site;
     }
 
+    // What a call through a value of a function type tells a C-variadic
+    // callee: the facts of each parameter of the type when the type has no
+    // variadic arguments of its own, or the offset of the cursor that the
+    // call site built when it has.
+    public struct ValueArguments {
+        package bool isValueCall;
+        package const(TypeFacts)[] parameters;
+        package size_t cursor = size_t.max;
+    }
+
     package Kind kind;
+    package ValueArguments value;
     package Arg[] args;
     package Arg[] nativeArgs;
     package size_t returnWidth;
@@ -449,6 +461,10 @@ public struct Function {
     package string name;
     package string file;
     package size_t line;
+    // Where a C-variadic function reads its cursor, and how many parameters
+    // it declares before it; `size_t.max` for any other function.
+    package size_t cursorOffset = size_t.max;
+    package size_t declaredParameters;
 }
 
 
@@ -1108,8 +1124,12 @@ private const(Instruction)* runCall(Decoded)(
                     contextAdjustment))
                 return execution.next;
         }
-        return callFunction(execution, *site, cast(const(Function)*) callee,
-            contextAdjustment);
+        auto function_ = cast(const(Function)*) callee;
+        const next = callFunction(
+            execution, *site, function_, contextAdjustment);
+        if (function_.cursorOffset != size_t.max && site.value.isValueCall)
+            bindVariadicCallee(execution, *site, function_);
+        return next;
     case native:
         auto arguments = gatherArguments(execution, site.args);
         auto values = arguments.values;
@@ -1127,6 +1147,40 @@ private const(Instruction)* runCall(Decoded)(
         site.builtinEntry(execution.destination, values.ptr, values.length);
         return execution.next;
     }
+}
+
+
+// A C-variadic callee reads the arguments after its own parameters from a
+// cursor. A call through a value gives it one that holds the parameters of the
+// value's type that the callee does not declare, or, if that type is variadic
+// too, the cursor that the call site built.
+pragma(inline, false)
+private void bindVariadicCallee(Decoded)(
+    ref Decoded execution, scope const ref CallSite site,
+    const(Function)* callee,
+) {
+    import core.stdc.string: memcpy, memmove;
+    import snakebite.backends.variadic: VariadicLayout;
+
+    auto frame = execution._dispatch.pending.frame;
+    auto cursor = frame + callee.cursorOffset;
+    if (site.value.cursor != size_t.max) {
+        memmove(cursor, frame + site.value.cursor, size_t.sizeof);
+        return;
+    }
+
+    const first = site.hasContext ? 1 : 0;
+    const declared = callee.declaredParameters;
+    const facts = declared < site.value.parameters.length
+        ? site.value.parameters[declared .. $] : null;
+    const plan = VariadicLayout.of(facts);
+    auto storage = execution.frames.reserve(plan.size, plan.alignment);
+    plan.initialize(storage);
+    foreach (i, offset; plan.offsets)
+        memcpy(storage + offset,
+            execution.storage(site.args[first + declared + i].callerOffset),
+            facts[i].size);
+    *cast(ubyte**) cursor = storage;
 }
 
 
@@ -1186,8 +1240,9 @@ private const(Instruction)* callFunction(Decoded)(
     // removing a context word can also change argument alignment.
     if (site.hasContext && callee.contextOffset == size_t.max) {
         foreach (i, arg; site.args[1 .. $])
-            memcpy(activation.frame + callee.parameterOffsets[i],
-                execution.storage(arg.callerOffset), arg.width);
+            if (i < callee.parameterOffsets.length)
+                memcpy(activation.frame + callee.parameterOffsets[i],
+                    execution.storage(arg.callerOffset), arg.width);
     } else {
         foreach (arg; site.args)
             memcpy(activation.frame + arg.calleeOffset,

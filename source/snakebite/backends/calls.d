@@ -374,24 +374,75 @@ public struct CallSelection {
 // typesafe call's trailing arguments into one array-typed argument by
 // the time this ever runs, so `>=` never actually admits more arguments
 // than `parameterList.length` for that kind.
-//
-// A call through a function pointer has the arity of the pointer's type,
-// which a cast can make different from the arity of the function that the
-// pointer holds (`throughValue`).
-
 public bool arityMismatches(
     imported!"dmd.mtype".ParameterList parameterList,
     imported!"dmd.arraytypes".Expressions* arguments,
     in bool allowExtra = false,
-    in bool throughValue = false,
 ) {
-    if (throughValue)
-        return false;
-
     const count = arguments is null ? 0 : arguments.length;
     return allowExtra
         ? count < parameterList.length
         : count != parameterList.length;
+}
+
+// The caller side of a call through a function pointer or a delegate
+// value. A cast can give the value a type that is not the type of the
+// function that it holds, so the type of the value decides what the
+// arguments are, how each converts and where each is packed. The callee
+// reads its own parameters from where the ABI puts them, as native code
+// does. For the C convention that gives native code's result. For `extern(D)`
+// dmd passes the arguments in reverse register order, so an extra argument of
+// a mismatched call is not in the register that native code reads it from;
+// only the C convention is matched.
+//
+// The callee takes the parameters at the offsets of `layout`. A callee that
+// has no context slot, such as a function literal that a delegate type holds,
+// takes them at the offsets of `withoutContext`. A C-variadic callee that
+// declares fewer parameters than the value's type has reads the others as its
+// variadic arguments (`variadicSurplus`).
+public struct ValueCall {
+    import dmd.mtype: TypeFunction;
+    import snakebite.backends.layout: FrameLayout;
+
+    public TypeFunction type;
+    public bool hasContext;
+    public FrameLayout layout;
+    public FrameLayout withoutContext;
+
+    public static ValueCall of(TypeFunction type, in bool hasContext) {
+        return ValueCall(
+            type,
+            hasContext,
+            FrameLayout.ofParameters(type, hasContext),
+            FrameLayout.ofParameters(type, false),
+        );
+    }
+
+    public bool isVariadic() {
+        import dmd.astenums: VarArg;
+
+        return type.parameterList.varargs == VarArg.variadic;
+    }
+
+    public bool mismatches(
+        imported!"dmd.arraytypes".Expressions* arguments,
+    ) {
+        return arityMismatches(type.parameterList, arguments, isVariadic);
+    }
+
+    // The layout that the callee reads its arguments by.
+    public const(FrameLayout)* layoutFor(in bool calleeHasContext) {
+        return hasContext && !calleeHasContext ? &withoutContext : &layout;
+    }
+
+    // The parameters of the value's type that a C-variadic callee with
+    // `declared` parameters of its own reads as variadic arguments.
+    public static const(FrameLayout.Parameter)[] variadicSurplus(
+        in FrameLayout slots, in size_t declared,
+    ) {
+        const count = slots.parameters.length;
+        return declared < count ? slots.parameters[declared .. $] : null;
+    }
 }
 
 // An indirect call - one whose callee `expression.e1` is a bare value,

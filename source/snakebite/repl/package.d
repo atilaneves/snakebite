@@ -340,7 +340,8 @@ private string failureText(in Throwable throwable) {
 
     const fault = cast(const(GuestFaultException)) throwable;
     return fault !is null && fault.reported
-        ? "a thread that the cell joined ended with the fault reported above"
+        ? "a thread that the cell joined ended with a fault that the host "
+            ~ "already reported"
         : throwable.msg.idup;
 }
 
