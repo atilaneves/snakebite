@@ -157,6 +157,10 @@ public struct ModuleFunctions {
     imported!"dmd.func".FuncDeclaration[] threadConstructors;
     imported!"dmd.func".FuncDeclaration[] sharedDestructors;
     imported!"dmd.func".FuncDeclaration[] threadDestructors;
+    // The functions of `pragma(crt_constructor)` and
+    // `pragma(crt_destructor)`, in declaration order.
+    imported!"dmd.func".FuncDeclaration[] crtConstructors;
+    imported!"dmd.func".FuncDeclaration[] crtDestructors;
 }
 
 public ModuleFunctions findModuleFunctions(
@@ -184,6 +188,20 @@ public ModuleFunctions findModuleFunctions(
 
         if (auto destructor = member.isStaticDtorDeclaration) {
             functions.threadDestructors ~= destructor;
+            return true;
+        }
+
+        if (auto function_ = member.isFuncDeclaration) {
+            // A declaration with no body has nothing to run. One function can
+            // have both pragmas, and then is in both lists.
+            if (function_.fbody is null
+                || !(function_.isCrtCtor || function_.isCrtDtor))
+                return false;
+
+            if (function_.isCrtCtor)
+                functions.crtConstructors ~= function_;
+            if (function_.isCrtDtor)
+                functions.crtDestructors ~= function_;
             return true;
         }
 
