@@ -22,7 +22,6 @@ private:
 // `exit` runs first. A caller that runs many programs in one process (`run`,
 // the tests, the REPL) ends the phases itself with `finish`.
 public struct GuestModules {
-    import core.atomic: cas;
     import core.time: Duration;
     import snakebite.backends.backend: Backend, Program;
 
@@ -57,9 +56,7 @@ public struct GuestModules {
         in Tests tests,
         in Ends ends,
     ) {
-        import core.stdc.stdlib: atexit;
         import core.sys.posix.pthread: pthread_self;
-        import core.thread: ThreadBase;
         import core.time: MonoTime;
 
         GuestModules modules;
@@ -74,19 +71,22 @@ public struct GuestModules {
         const registering = MonoTime.currTime;
         try {
             run.owner = pthread_self;
-            run.threadsAtStart = ThreadBase.getAll;
-            run.unlistedThreadsAtStart = unlistedThreads;
+            run.threadsAtStart = kernelThreads;
             run.image = Image.open;
-            if (ends == Ends.process) {
+            if (ends == Ends.process)
                 run.exit = newExitRecord(run.image.slot);
-                if (cas(&_endHandlerRegistered, false, true))
-                    atexit(&endAtExit);
-            }
+
             run.image.register(run.records);
         } catch (Throwable throwable) {
             atomicStore(run.state, Run.State.failed);
             print(throwable);
             modules._failed = true;
+            // No caller ends a program that did not start, and what startup
+            // registered is still there.
+            if (ends == Ends.program) {
+                modules._run = null;
+                run.end;
+            }
         }
         modules.constructors = MonoTime.currTime - registering;
         return modules;
@@ -94,6 +94,21 @@ public struct GuestModules {
 
     public bool failed() const {
         return _failed;
+    }
+
+    // What the calling thread registered with druntime and did not unregister,
+    // and the registry images it opened and did not close. Unlike the maps of
+    // the process, other threads cannot change them.
+    version(unittest)
+    public static Held held() {
+        return Held(_registrations, _images, _leftToExit);
+    }
+
+    public struct Held {
+        ptrdiff_t registrations;
+        ptrdiff_t images;
+        // The registrations that this thread left to the end of the process.
+        ptrdiff_t leftToExit;
     }
 
     // Ends the program. When the process ends with it, `rt_term` runs the
@@ -107,9 +122,10 @@ public struct GuestModules {
     // program started is alive: a thread inherits the registrations of the
     // thread that starts it, and druntime frees a registration for the
     // thread that removes it only. Otherwise the registration, the image
-    // and the entries stay for the life of the process, and every entry does
-    // nothing, so a process that runs many programs that leave threads alive
-    // grows with each of them.
+    // and the entries stay, and every entry does nothing, so a process that
+    // runs many programs that leave threads alive grows with each of them.
+    // The end of the process removes what stayed: druntime aborts the process
+    // when an image is still registered at that time.
     public int finish() {
         if (_run is null || _failed)
             return 0;
@@ -133,14 +149,13 @@ public struct GuestModules {
         }
 
         atomicStore(run.state, Run.State.finished);
-        if (run.noThreadHoldsRegistration)
-            run.release;
+        run.end;
         return status;
     }
 }
 
 
-private import core.atomic: atomicLoad, atomicStore;
+private import core.atomic: atomicLoad, atomicStore, cas;
 private import snakebite.backends.backend: Backend, Program;
 private import snakebite.exception: SnakebiteException;
 private import snakebite.ffi.callback: CallbackBridge, CallbackCall;
@@ -151,6 +166,9 @@ private import snakebite.ffi.callback: CallbackBridge, CallbackCall;
 private struct ExitRecord {
     // Whether the program ended with `main`, so `rt_term` runs its phases.
     shared bool returned;
+    // Whether the program ended and its registration stayed, so that the
+    // end of the process removes it.
+    bool left;
     void** slot;
     ExitRecord* next;
 }
@@ -161,10 +179,33 @@ private ExitRecord* newExitRecord(void** slot) {
 
     auto record = cast(ExitRecord*) malloc(ExitRecord.sizeof);
     record.returned = false;
+    record.left = false;
     record.slot = slot;
-    record.next = _ending;
-    _ending = record;
+    registerEndHandler;
+    ExitRecord* head;
+    do {
+        head = cast(ExitRecord*) atomicLoad(_ending);
+        record.next = head;
+    } while (!cas(&_ending, cast(shared) head, cast(shared) record));
+
     return record;
+}
+
+
+// A registration that stays after its program ended: the end of the process
+// removes it, and runs none of its entries.
+private void leaveToExit(Run* run) {
+    run.exit = newExitRecord(run.image.slot);
+    run.exit.left = true;
+    ++_leftToExit;
+}
+
+
+private void registerEndHandler() {
+    import core.stdc.stdlib: atexit;
+
+    if (cas(&_endHandlerRegistered, false, true))
+        atexit(&endAtExit);
 }
 
 
@@ -172,7 +213,8 @@ private ExitRecord* newExitRecord(void** slot) {
 // initialised: unregistering the records makes druntime run the destructors
 // of the calling thread and then the shared ones.
 private extern(C) void endAtExit() {
-    for (auto record = _ending; record !is null; record = record.next) {
+    for (auto record = cast(ExitRecord*) atomicLoad(_ending); record !is null;
+            record = record.next) {
         if (atomicLoad(record.returned) || *record.slot is null)
             continue;
 
@@ -184,7 +226,28 @@ private extern(C) void endAtExit() {
 }
 
 
-private __gshared ExitRecord* _ending;
+// A process that ends with `main` removes the registrations that stayed here,
+// when the runtime still has the images of the process: druntime aborts the
+// process when it unregisters the last image of the main thread while another
+// image is still registered, and the handler of `exit` runs after that.
+shared static ~this() {
+    for (auto record = cast(ExitRecord*) atomicLoad(_ending); record !is null;
+            record = record.next) {
+        if (!record.left || *record.slot is null)
+            continue;
+
+        try
+            Image.unregister(record.slot);
+        catch (Throwable throwable)
+            print(throwable);
+    }
+}
+
+
+private shared(ExitRecord*) _ending;
+private ptrdiff_t _registrations;
+private ptrdiff_t _images;
+private ptrdiff_t _leftToExit;
 private shared bool _endHandlerRegistered;
 
 
@@ -208,25 +271,23 @@ private final class HostFailure: Exception {
 }
 
 
-// How many threads the process has that druntime does not list, or -1 when
+// The ids of the threads of the process that are alive, sorted, or null when
 // the process cannot say.
-private ptrdiff_t unlistedThreads() {
-    import core.thread: ThreadBase;
-    import std.algorithm.searching: findSplitAfter, startsWith;
+private int[] kernelThreads() {
+    import std.algorithm.sorting: sort;
     import std.conv: to;
-    import std.file: readText;
-    import std.string: lineSplitter, strip;
+    import std.file: dirEntries, SpanMode;
+    import std.path: baseName;
 
-    const listed = ThreadBase.getAll.length;
+    int[] ids;
     try
-        foreach (line; "/proc/self/status".readText.lineSplitter)
-            if (line.startsWith("Threads:"))
-                return line.findSplitAfter(":")[1].strip.to!ptrdiff_t
-                    - listed;
+        foreach (entry; dirEntries("/proc/self/task", SpanMode.shallow))
+            ids ~= entry.name.baseName.to!int;
     catch (Exception)
-        return -1;
+        return null;
 
-    return -1;
+    ids.sort;
+    return ids;
 }
 
 
@@ -241,7 +302,6 @@ private void print(Throwable throwable) {
 // What one registration holds and what the entries of its records reach.
 private struct Run {
     import core.sys.posix.pthread: pthread_t;
-    import core.thread: ThreadBase;
 
     // `running` until the program ends, then `finished`, when an entry that
     // a thread still alive reaches does nothing. `failed` when startup
@@ -264,23 +324,29 @@ private struct Run {
     pthread_t owner;
     Phase*[] sharedOrder;
     Phase*[] threadOrder;
-    ThreadBase[] threadsAtStart;
-    ptrdiff_t unlistedThreadsAtStart;
+    int[] threadsAtStart;
 
     // A registration reaches a thread through the thread that starts it, so
-    // a thread alive now that was not alive at the start can hold it. A
-    // thread that was started and has not listed itself yet is not in
-    // druntime's list, but the process has it already.
+    // a thread that the program started holds it, and such a thread was not
+    // alive at the start. The ids of the process find a thread that was
+    // started and has not listed itself in druntime yet; the list of druntime
+    // does not.
     bool noThreadHoldsRegistration() {
-        import std.algorithm.searching: canFind;
+        import std.algorithm.searching: all, canFind;
 
-        auto self = ThreadBase.getThis;
-        foreach (thread; ThreadBase.getAll)
-            if (thread !is self && !threadsAtStart.canFind!"a is b"(thread))
-                return false;
+        const now = kernelThreads;
+        return threadsAtStart.length != 0
+            && now.length != 0
+            && now.all!(id => threadsAtStart.canFind(id));
+    }
 
-        return unlistedThreadsAtStart >= 0
-            && unlistedThreads <= unlistedThreadsAtStart;
+    // Gives the registration back, or leaves it to the end of the process when
+    // a thread holds it.
+    void end() {
+        if (image.slot is null || noThreadHoldsRegistration)
+            release;
+        else
+            leaveToExit(&this);
     }
 
     // Removes the registration and everything it holds.
@@ -641,6 +707,7 @@ private struct Image {
     private void* _handle;
     private void** _slot;
     private int _file;
+    private bool _registered;
 
     // A new copy of the image, because druntime keys an image by its loader
     // handle and the loader returns one handle for one file name. The copy
@@ -690,22 +757,31 @@ private struct Image {
             assert(0, "the registry image exports its slot");
 
         image._slot = slot();
+        ++_images;
         return image;
     }
 
     public void register(ModuleInfo*[] records) {
         auto data = CompilerDSOData(
             1, _slot, records.ptr, records.ptr + records.length);
+        // druntime keeps the registration when a constructor throws.
+        _registered = true;
+        ++_registrations;
         _d_dso_registry(&data);
     }
 
     public void unregister() {
+        if (!_registered)
+            return;
+
+        _registered = false;
         unregister(_slot);
     }
 
     public static void unregister(void** slot) {
         auto data = CompilerDSOData(1, slot, null, null);
         _d_dso_registry(&data);
+        --_registrations;
     }
 
     public void** slot() {
@@ -715,7 +791,11 @@ private struct Image {
     public void close() {
         import core.sys.posix.unistd: close;
 
+        if (_handle is null)
+            return;
+
         dlclose(_handle);
         close(_file);
+        --_images;
     }
 }

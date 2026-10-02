@@ -915,45 +915,96 @@ static foreach (backend; Matrix!(
 }
 
 
+// How many of `runs` runs of `code` leave nothing registered with druntime,
+// no registry image and no callback entry that the calling thread took. The
+// test counts what the calling thread took and did not give back, because the
+// mappings of the process also change with every other test that runs at the
+// same time. A thread that another test starts during one run can hold the
+// registration of that run, so the registration stays for that run and the end
+// of the process removes it. Thus most of the runs, not every one, give their
+// registration back.
+private size_t runsThatGiveBack(Backend)(
+    in Sandbox sandbox,
+    in string code,
+    in int status,
+    in size_t runs,
+) {
+    import snakebite.backends.guestmodules: GuestModules;
+    import snakebite.ffi.callback: callbackEntriesInUse;
+
+    size_t givenBack;
+    foreach (_; 0 .. runs) {
+        const held = GuestModules.held;
+        const entries = callbackEntriesInUse;
+        programStatus!Backend(sandbox, code).should == status;
+        if (GuestModules.held == held && callbackEntriesInUse == entries)
+            ++givenBack;
+    }
+
+    return givenBack;
+}
+
+
 // A process that runs many programs must not grow with each program that
 // has module constructors and destructors: when it ended, with no thread left
-// alive, what its registration took is given back. A run takes the mappings
-// of its backend either way, so the test compares with a program that has no
-// module constructor or destructor.
+// alive, what its registration took is given back.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot run module destructors"),
 )) {
     @("registrationOfEndedProgramIsGivenBack." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        static if (!is(backend == Native)) {
-            import std.algorithm.searching: count;
-            import std.file: readText;
+        enum runs = 20;
+        runsThatGiveBack!backend(Sandbox(), q{
+            shared static this() {}
+            shared static ~this() {}
+            void main() {}
+        }, 0, runs).shouldBeGreaterThan(runs / 2);
+    }
+}
 
-            static size_t mappings() {
-                return "/proc/self/maps".readText.count('\n');
+
+// A program whose startup failed is not run, and its registration is given
+// back all the same.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot run module destructors"),
+)) {
+    @("registrationOfProgramThatFailedToStartIsGivenBack." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        enum runs = 20;
+        runsThatGiveBack!backend(Sandbox(), q{
+            shared static this() { throw new Exception("ctor failed"); }
+            shared static ~this() {}
+            void main() {}
+        }, 1, runs).shouldBeGreaterThan(runs / 2);
+    }
+}
+
+
+// A registration that stays because a thread of its program is alive is not
+// lost: the end of the process removes it.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot run module destructors"),
+)) {
+    @("registrationHeldByThreadIsLeftToTheEndOfTheProcess." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        import snakebite.backends.guestmodules: GuestModules;
+
+        const sandbox = Sandbox();
+        const before = GuestModules.held.leftToExit;
+        programStatus!backend(sandbox, q{
+            import core.thread: Thread;
+            import core.time: msecs;
+            shared static ~this() {
+                new Thread({ Thread.sleep(50.msecs); }).start;
             }
+            void main() {}
+        }).should == 0;
 
-            static size_t growth(in Sandbox sandbox, in string code) {
-                foreach (_; 0 .. 10)
-                    programStatus!backend(sandbox, code).should == 0;
-
-                const before = mappings;
-                foreach (_; 0 .. 100)
-                    programStatus!backend(sandbox, code).should == 0;
-
-                return mappings - before;
-            }
-
-            const sandbox = Sandbox();
-            const plain = growth(sandbox, q{ void main() {} });
-            const withPhases = growth(sandbox, q{
-                shared static this() {}
-                shared static ~this() {}
-                void main() {}
-            });
-
-            withPhases.shouldBeSmallerThan(plain + 50);
-        }
+        // A native program runs in a process of its own.
+        const expected = is(backend == Native) ? before : before + 1;
+        GuestModules.held.leftToExit.should == expected;
     }
 }

@@ -97,6 +97,8 @@ public enum ChunkStrategy {
 private __gshared Slot[callbackEntriesPerChunk] templateSlots;
 private __gshared Chunk[] chunks;
 private __gshared const(void)*[] freeEntries;
+// The entries in use that the calling thread reserved and did not release.
+private ptrdiff_t _entriesInUse;
 private __gshared Mutex mutex;
 
 
@@ -159,6 +161,7 @@ private const(void)* reserve(Slot slot) {
         const entry = freeEntries[$ - 1];
         freeEntries = freeEntries[0 .. $ - 1];
         *slotOf(entry) = slot;
+        ++_entriesInUse;
         return entry;
     }
 
@@ -168,6 +171,7 @@ private const(void)* reserve(Slot slot) {
     auto chunk = &chunks[$ - 1];
     const index = chunk.used++;
     chunk.slots[index] = slot;
+    ++_entriesInUse;
     // A slot is permanent, and host code can call it until process exit.
     // The template slot table is static storage, which the GC does not scan.
     // Root the owner field explicitly so its backend remains valid for every
@@ -191,6 +195,8 @@ private void releaseEntries(in const(void)*[] entries) {
         *slotOf(entry) = Slot.init;
         freeEntries ~= entry;
     }
+
+    _entriesInUse -= entries.length;
 }
 
 
@@ -203,6 +209,14 @@ private Slot* slotOf(in const(void)* entry) {
     }
 
     assert(0, "the entry belongs to a chunk of the pool");
+}
+
+
+// How many entries the calling thread reserved and did not give back. Unlike
+// the chunk count, other threads cannot change it.
+version(unittest)
+public ptrdiff_t callbackEntriesInUse() {
+    return _entriesInUse;
 }
 
 
