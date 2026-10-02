@@ -861,3 +861,201 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A static array that lives in a temporary - a member of a returned
+// struct, a returned array itself - iterates and slices like one in a
+// variable.
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.memberOfReturnedStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte[4] bytes; }
+            S make() { return S([1, 2, 3, 4]); }
+            void main() {
+                int sum;
+                foreach (v; make().bytes)
+                    sum += v;
+                assert(sum == 10);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.returnedStaticArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int[3] make() { return [4, 5, 6]; }
+            void main() {
+                int sum;
+                foreach (v; make())
+                    sum += v;
+                assert(sum == 15);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.nestedMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Inner { int[3] values; }
+            struct Outer { int tag; Inner inner; }
+            Outer make() { return Outer(9, Inner([1, 2, 3])); }
+            void main() {
+                int sum;
+                foreach (v; make().inner.values)
+                    sum += v;
+                assert(sum == 6);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.sliceOfMemberPassedToFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[3] values; }
+            S make() { return S([7, 8, 9]); }
+            int sum(int[] values) {
+                int total;
+                foreach (v; values)
+                    total += v;
+                return total;
+            }
+            void main() {
+                assert(sum(make().values[]) == 24);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.boundedSliceOfMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[4] values; }
+            S make() { return S([1, 2, 3, 4]); }
+            int sum(int[] values) {
+                int total;
+                foreach (v; values)
+                    total += v;
+                return total;
+            }
+            void main() {
+                assert(sum(make().values[1 .. 3]) == 5);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.memberOfStructLiteral." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int tag; int[3] values; }
+            void main() {
+                int sum;
+                foreach (v; S(1, [2, 3, 4]).values)
+                    sum += v;
+                assert(sum == 9);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.refOverMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[3] values; }
+            S make() { return S([1, 2, 3]); }
+            void main() {
+                int sum;
+                foreach (ref v; make().values)
+                    sum += v;
+                assert(sum == 6);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.indexOfMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[3] values; }
+            S make() { return S([5, 6, 7]); }
+            int index() { return 2; }
+            void main() {
+                assert(make().values[index()] == 7);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.lengthOfMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[5] values; }
+            S make() { return S([1, 2, 3, 4, 5]); }
+            void main() {
+                assert(make().values.length == 5);
+                int count;
+                foreach (i, v; make().values)
+                    count += cast(int) i + v;
+                assert(count == 25);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.memberOfMethodChain." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S {
+                int[3] values;
+                S next() { return S([values[0] + 1, values[1] + 1, values[2] + 1]); }
+            }
+            S make() { return S([1, 2, 3]); }
+            void main() {
+                int sum;
+                foreach (v; make().next().next().values)
+                    sum += v;
+                assert(sum == 12);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.reverseOverMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[3] values; }
+            S make() { return S([1, 2, 3]); }
+            void main() {
+                int[3] seen;
+                size_t at;
+                foreach_reverse (v; make().values)
+                    seen[at++] = v;
+                assert(seen == [3, 2, 1]);
+            }
+        });
+    }
+}
