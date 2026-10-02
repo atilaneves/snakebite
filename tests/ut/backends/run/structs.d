@@ -1291,6 +1291,201 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A bit field as wide as its declared type that follows narrower bit
+// fields: dmd gives `c` the offset 2 and the bit offset 16, so its 32 bits
+// start at byte 4, in the unit of its type aligned from the struct start.
+static foreach (backend; Matrix!()) {
+    @("bitfields.fullWidthAfterNarrowerTypes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte a : 8; ushort b : 16; uint c : 32; }
+            void main() {
+                S s;
+                s.a = 1; s.b = 2; s.c = 3;
+                assert(s.a == 1 && s.b == 2 && s.c == 3);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.fullWidthUshortAfterUbytes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte a : 5; ubyte b : 8; ushort c : 16; }
+            void main() {
+                S s;
+                s.a = 1; s.b = 2; s.c = 3;
+                assert(s.a == 1 && s.b == 2 && s.c == 3);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads a 64-bit bit field after narrower ones wrongly"),
+)) {
+    @("bitfields.fullWidthUlongAfterNarrowerTypes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte a : 8; ushort b : 16; uint c : 32; ulong d : 64; }
+            void main() {
+                S s;
+                s.a = 1; s.b = 2; s.c = 3; s.d = 4;
+                assert(s.a == 1 && s.b == 2 && s.c == 3 && s.d == 4);
+            }
+        });
+    }
+}
+
+// A bit field that does not fill its type, after narrower ones, still
+// starts in the aligned unit of its own type: `c` has the offset 2 and the
+// bit offset 16, and 20 bits do not fit the 16 bits left in the unit that
+// starts at the offset.
+static foreach (backend; Matrix!()) {
+    @("bitfields.partialWidthAfterNarrowerTypes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte a : 8; ushort b : 16; uint c : 20; ubyte d : 4; }
+            void main() {
+                S s;
+                s.a = 1; s.b = 2; s.c = 700; s.d = 9;
+                assert(s.a == 1 && s.b == 2 && s.c == 700 && s.d == 9);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.fullWidthInPackedStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            align(1) struct S { ubyte x; uint a : 3; uint b : 32; }
+            void main() {
+                S s;
+                s.x = 9; s.a = 5; s.b = 77;
+                assert(s.x == 9 && s.a == 5 && s.b == 77);
+            }
+        });
+    }
+}
+
+// The value of an assignment to a bit field is the value the field holds
+// after the store.
+static foreach (backend; Matrix!()) {
+    @("bitfields.assignmentValueIsTheStoredField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { uint a : 4; uint b : 20; }
+            void main() {
+                S s;
+                const uint result = (s.b = 0xFFF_FFFF);
+                assert(s.b == 0xF_FFFF);
+                assert(result == 0xF_FFFF);
+            }
+        });
+    }
+}
+
+// A class object starts with the default initialisers of its bit fields,
+// each in its own bits.
+static foreach (backend; Matrix!()) {
+    @("bitfields.classDefaultInitialisers." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C { int x = 3; ubyte a : 3 = 5; uint b : 20 = 77777; uint c : 5 = 9; }
+            void main() {
+                auto c = new C;
+                assert(c.x == 3);
+                assert(c.a == 5);
+                assert(c.b == 77777);
+                assert(c.c == 9);
+            }
+        });
+    }
+}
+
+// dmd drops a compound assignment to a bit field narrower than `int`:
+// the first test states what a bit field must hold after one, and the
+// `Native` test next to it pins what dmd gives.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd drops a compound assignment to a bit field narrower than int"),
+)) {
+    @("bitfields.compoundAssign.narrowFieldValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte a : 3; uint b : 20; short c : 5; }
+            void main() {
+                S s;
+                s.a = 4; s.b = 703710; s.c = -7;
+                s.a ^= 1;
+                assert(s.a == 5 && s.b == 703710 && s.c == -7);
+                s.a += 3;
+                assert(s.a == 0 && s.b == 703710 && s.c == -7);
+                s.c -= 1;
+                assert(s.a == 0 && s.b == 703710 && s.c == -8);
+            }
+        });
+    }
+}
+
+@("bitfields.compoundAssign.narrowFieldValue.Native")
+@Tags(Native.stringof)
+unittest {
+    0.shouldBeStatusOf!(Native, q{
+        struct S { ubyte a : 3; uint b : 20; short c : 5; }
+        void main() {
+            S s;
+            s.a = 4; s.b = 703710; s.c = -7;
+            s.a ^= 1;
+            assert(s.a == 4 && s.b == 703710 && s.c == -7);
+        }
+    });
+}
+
+// dmd builds a wrong struct literal when a `short` bit field follows a
+// `long` one; the `Native` test next to the first pins what dmd gives.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd builds a wrong literal when a short bit field follows a long one"),
+)) {
+    @("bitfields.structLiteral.ShortAfterLong." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a : 3; long b : 40; short c : 5; }
+            T value(T)(T input) { return input; }
+            void main() {
+                S s = S(value!int(-3), value!long(-300000000000), value!short(-7));
+                assert(s.a == -3 && s.b == -300000000000 && s.c == -7);
+            }
+        });
+    }
+}
+
+@("bitfields.structLiteral.ShortAfterLong.Native")
+@Tags(Native.stringof)
+unittest {
+    0.shouldBeStatusOf!(Native, q{
+        struct S { int a : 3; long b : 40; short c : 5; }
+        T value(T)(T input) { return input; }
+        void main() {
+            S s = S(value!int(-3), value!long(-300000000000), value!short(-7));
+            assert(s.a == -3 && s.b == -300000000000 && s.c == 15);
+        }
+    });
+}
+
 
 // A struct allocated with `new` runs its constructor in the allocated
 // storage. An immutable field is initialized with a construct expression,

@@ -796,7 +796,7 @@ public void applyCast(
 // is `storageBytes` wide, `offset` bytes into the struct, and the field
 // takes `width` bits from bit `shift` of the unit. The unit has the width
 // of the field's declared type, so a field never reaches into the bytes of
-// a neighbour of another type. `snakebite.backends.bitfield.bitfieldAccess`
+// a neighbour of another type. `snakebite.nativelayout.bitfieldAccess`
 // builds it from a declaration; both runtime backends execute it here.
 public struct BitfieldAccess {
     public size_t offset;

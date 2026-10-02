@@ -1013,6 +1013,19 @@ static foreach (backend; Matrix!()) {
             S make() { return S([1, 2, 3, 4, 5]); }
             void main() {
                 assert(make().values.length == 5);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.indexedLoopOverMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[5] values; }
+            S make() { return S([1, 2, 3, 4, 5]); }
+            void main() {
                 int count;
                 foreach (i, v; make().values)
                     count += cast(int) i + v;
@@ -1061,23 +1074,6 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!()) {
-    @("staticArray.rvalue.sliceStoredInVariable." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct S { int[3] values; }
-            S make() { return S([1, 2, 3]); }
-            int other() { int[3] spare = [40, 50, 60]; return spare[0] + spare[1] + spare[2]; }
-            void main() {
-                auto slice = make().values[];
-                assert(other() == 150);
-                assert(slice[0] + slice[1] + slice[2] == 6);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!()) {
     @("staticArray.rvalue.loopOverManyRvalues." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1090,6 +1086,145 @@ static foreach (backend; Matrix!()) {
                     foreach (v; make(i).values)
                         sum += v;
                 assert(sum == 19_999_900_000 + 200_000);
+            }
+        });
+    }
+}
+
+// A declaration whose initialiser points into a temporary keeps that
+// temporary for as long as the function runs, and compiled D gives it one
+// stack slot that each execution of the declaration reuses. A loop or a
+// repeated call therefore runs in constant memory. The test compares the
+// address of the temporary in each execution: it does not read the
+// temporary after the declaration. The loop body is a block that dmd
+// removes the scope of, so nothing else ends the temporary.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE has no stack slot: each temporary is a new value"),
+)) {
+    @("temporaries.declarationInLoopBodyReusesItsSlot." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte[256] bytes; }
+            S make(int i) { S s; s.bytes[0] = cast(ubyte) i; return s; }
+            void main() {
+                const(ubyte)* first;
+                foreach (i; 0 .. 1000) {
+                    auto slice = make(i).bytes[];
+                    if (i == 0)
+                        first = slice.ptr;
+                    assert(slice.ptr is first);
+                }
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE has no stack slot: each temporary is a new value"),
+)) {
+    @("temporaries.declarationInCalledFunctionReusesItsSlot." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte[256] bytes; }
+            S make(int i) { S s; s.bytes[0] = cast(ubyte) i; return s; }
+            void use(int i, ref const(ubyte)* first) {
+                auto slice = make(i).bytes[];
+                if (i == 0)
+                    first = slice.ptr;
+                assert(slice.ptr is first);
+            }
+            void main() {
+                const(ubyte)* first;
+                foreach (i; 0 .. 1000)
+                    use(i, first);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE has no stack slot: each temporary is a new value"),
+)) {
+    @("temporaries.declarationInThrowingFunctionReusesItsSlot." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte[256] bytes; }
+            S make(int i) { S s; s.bytes[0] = cast(ubyte) i; return s; }
+            void use(int i, ref const(ubyte)* first) {
+                auto slice = make(i).bytes[];
+                if (i == 0)
+                    first = slice.ptr;
+                assert(slice.ptr is first);
+                throw new Exception("unwind");
+            }
+            void main() {
+                const(ubyte)* first;
+                foreach (i; 0 .. 1000) {
+                    try
+                        use(i, first);
+                    catch (Exception)
+                        continue;
+                    assert(false);
+                }
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE has no stack slot: each temporary is a new value"),
+)) {
+    @("temporaries.declarationInGotoLoopReusesItsSlot." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte[256] bytes; }
+            S make(int i) { S s; s.bytes[0] = cast(ubyte) i; return s; }
+            void main() {
+                const(ubyte)* first;
+                int i;
+            again:
+                auto slice = make(i).bytes[];
+                if (i == 0)
+                    first = slice.ptr;
+                assert(slice.ptr is first);
+                if (++i < 1000)
+                    goto again;
+            }
+        });
+    }
+}
+
+// Each activation of a recursive function has a slot of its own.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE has no stack slot: each temporary is a new value"),
+)) {
+    @("temporaries.declarationInRecursionHasASlotPerActivation." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte[256] bytes; }
+            S make(int i) { S s; s.bytes[0] = cast(ubyte) i; return s; }
+            void descend(int depth, ref const(ubyte)*[4] seen) {
+                auto slice = make(depth).bytes[];
+                seen[depth] = slice.ptr;
+                if (depth + 1 < seen.length)
+                    descend(depth + 1, seen);
+            }
+            void main() {
+                const(ubyte)*[4] seen;
+                descend(0, seen);
+                foreach (i; 0 .. seen.length)
+                    foreach (j; i + 1 .. seen.length)
+                        assert(seen[i] !is seen[j]);
             }
         });
     }

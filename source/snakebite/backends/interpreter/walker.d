@@ -134,7 +134,8 @@ private final class GuestException: Exception {
     }
 }
 
-import snakebite.nativelayout: bitfieldAccess, fieldOffset;
+import snakebite.nativelayout: bitfieldAccess;
+import snakebite.nativevalue: BitfieldAccess;
 import snakebite.backends.checkplan:
     BoundsCheck, hookOf, isUnanalysed;
 import snakebite.backends.haltprocess: isHalt;
@@ -172,7 +173,9 @@ private struct Shared {
     import snakebite.backends.runtimetypes: RuntimeTypes;
     import snakebite.backends.closureplan: ClosurePlan, Hop;
     import snakebite.ffi: PlanCache;
+    import dmd.declaration: VarDeclaration;
     import snakebite.nativelayout: NativeData, TypeFacts;
+    import snakebite.nativevalue: BitfieldAccess;
     import snakebite.sharedtable: SharedTable;
 
     // The program being run: its `isInterpreted` is the one decision for
@@ -239,6 +242,9 @@ private struct Shared {
     // such as `int` is dmd's own shared, interned instance, so the same
     // entry serves every function that mentions it.
     SharedTable!(Type, TypeFacts) typeFacts;
+    // Where each bit field lives and how it is read and written, planned
+    // once from its declaration.
+    SharedTable!(VarDeclaration, BitfieldAccess) bitfields;
     // The reverse of `callableAddress`: a real callable address any
     // evaluator handed out for a guest function, back to the declaration
     // it stands for, so a call through that same address - made by any
@@ -506,6 +512,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private CallSitePlan _lastCallSitePlan;
 
     private Cache!(Type, TypeFacts) _typeFacts;
+    private Cache!(VarDeclaration, BitfieldAccess) _bitfields;
     // Expression-scoped rvalues and temporary destructors have one owner.
     private TemporaryLifetime _temporaries;
     // The most recently asked-about `Type` and its facts: dmd interns
@@ -569,6 +576,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             Cache!(StaticChainKey, Hop[])(&shared_.staticChains);
         _catchTypes = Cache!(Catch, TypeInfo_Class)(&shared_.catchTypes);
         _typeFacts = Cache!(Type, TypeFacts)(&shared_.typeFacts);
+        _bitfields =
+            Cache!(VarDeclaration, BitfieldAccess)(&shared_.bitfields);
         _frames = FrameStack(defaultFrameCapacity);
         _interpreterStack = InterpreterStack(defaultInterpreterStackBytes);
         _temporaries = new TemporaryLifetime(&destroyTemporary);
@@ -2837,7 +2846,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 const result = loadIntegral(
                     scratch.base, valueFacts.size, !valueFacts.isUnsigned);
                 storeBitfieldAt(field, target, result);
-                storeIntegral(_place, result, _facts.size);
+                storeIntegral(_place, bitfieldValueAtPlace(field, target),
+                    _facts.size);
                 return _place;
             }
         }
@@ -3187,7 +3197,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             auto field = expression.var.isVarDeclaration;
             assert(field !is null, "a field address names a variable");
             return cast(ubyte*) evaluator.fieldBaseAddress(expression.e1)
-                + fieldOffset(field);
+                + evaluator.fieldOffsetOf(field);
         }
 
         // The generic fallback for any expression `StorageResolver.resolve`
@@ -3711,7 +3721,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     ? current + step : current - step;
                 storeIntegral(_place, current, _facts.size);
                 storeBitfieldAt(field,
-                    cast(ubyte*) base + fieldOffset(field), changed);
+                    cast(ubyte*) base + fieldOffsetOf(field), changed);
                 return;
             }
         }
@@ -4625,28 +4635,42 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // storage.
     private long bitfieldValueAt(void* base, VarDeclaration field) {
         return bitfieldValueAtPlace(field,
-            cast(ubyte*) base + fieldOffset(field));
+            cast(ubyte*) base + fieldOffsetOf(field));
     }
 
     // `place` is the address of the field's storage unit.
     private long bitfieldValueAtPlace(
         VarDeclaration field, void* place,
     ) {
-        return bitfieldAccess(field).load(place);
+        return bitfieldPlanOf(field).load(place);
     }
 
     private void storeBitfield(
         DotVarExp expression, VarDeclaration field, long value,
     ) {
         auto place = cast(ubyte*) fieldBaseAddress(expression.e1)
-            + fieldOffset(field);
+            + fieldOffsetOf(field);
         storeBitfieldAt(field, place, value);
     }
 
     private void storeBitfieldAt(
         VarDeclaration field, void* place, long value,
     ) {
-        bitfieldAccess(field).store(place, cast(ulong) value);
+        bitfieldPlanOf(field).store(place, cast(ulong) value);
+    }
+
+    extern(D) private BitfieldAccess bitfieldPlanOf(VarDeclaration field) {
+        if (auto cached = field in _bitfields)
+            return *cached;
+
+        return *_bitfields.build(field, () => bitfieldAccess(field));
+    }
+
+    // Where a field starts in its struct: a bit field starts at its
+    // storage unit.
+    extern(D) private size_t fieldOffsetOf(VarDeclaration field) {
+        return field.isBitFieldDeclaration is null
+            ? field.offset : bitfieldPlanOf(field).offset;
     }
 
     override void visit(TypeidExp expression) {
