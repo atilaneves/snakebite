@@ -16,6 +16,14 @@ private:
 // thread-local ones, runs the thread-local constructors and destructors on
 // every thread that starts or ends, and runs the destructors in reverse.
 //
+// The functions of `pragma(crt_constructor)` and `pragma(crt_destructor)` are
+// not druntime's in compiled D: the C runtime runs them from its init and
+// fini arrays, in the order of the object files. Here they are the
+// independent constructor and the destructor of one more record that comes
+// first, so druntime runs the constructors before every guest constructor and
+// the destructors after every guest destructor, also when `exit` ends the
+// program. A startup that fails runs the destructors, as the C runtime does.
+//
 // A process that runs one guest program and then ends (`bin/sb`) leaves the
 // registration to its own `rt_term`, which runs the phases in the order
 // druntime defines, and, for a program that calls `exit`, to a handler that
@@ -81,6 +89,7 @@ public struct GuestModules {
             atomicStore(run.state, Run.State.failed);
             print(throwable);
             modules._failed = true;
+            run.runCrtDestructors;
             // No caller ends a program that did not start, and what startup
             // registered is still there.
             if (ends == Ends.program) {
@@ -326,6 +335,8 @@ private struct Run {
     pthread_t owner;
     Phase*[] sharedOrder;
     Phase*[] threadOrder;
+    // The destructors of `pragma(crt_destructor)`, or null when there is none.
+    Phase* crtDestructors;
     KernelThread[] threadsAtStart;
 
     // A registration reaches a thread through the thread that starts it, so
@@ -349,6 +360,20 @@ private struct Run {
             release;
         else
             leaveToExit(&this);
+    }
+
+    // The `crt_destructor` functions of a program that failed to start, when
+    // its `crt_constructor` functions ran: no phase of druntime runs them
+    // then.
+    void runCrtDestructors() {
+        if (crtDestructors is null || sharedOrder.length == 0
+            || sharedOrder[0] !is crtDestructors)
+            return;
+
+        try
+            crtDestructors.call;
+        catch (Throwable throwable)
+            print(throwable);
     }
 
     // Removes the registration and everything it holds.
@@ -420,12 +445,7 @@ private void execute(Phase* phase) {
             break;
     }
 
-    try
-        foreach (function_; phase.functions)
-            run.backend.call(function_, null, []);
-    catch (SnakebiteException failure)
-        throw new HostFailure(failure.msg);
-
+    phase.call;
     if (phase.destructor is null || !pthread_equal(pthread_self, run.owner))
         return;
 
@@ -433,6 +453,15 @@ private void execute(Phase* phase) {
         run.sharedOrder ~= phase.destructor;
     else
         run.threadOrder ~= phase.destructor;
+}
+
+
+private void call(Phase* phase) {
+    try
+        foreach (function_; phase.functions)
+            phase.run.backend.call(function_, null, []);
+    catch (SnakebiteException failure)
+        throw new HostFailure(failure.msg);
 }
 
 
@@ -478,6 +507,8 @@ private struct ModuleSpec {
         return functions.independentConstructors.length
             || functions.sharedConstructors.length
             || functions.threadConstructors.length
+            || functions.crtConstructors.length
+            || functions.crtDestructors.length
             || hasDestructors;
     }
 
@@ -498,6 +529,7 @@ private ModuleInfo*[] recordsOf(
     import snakebite.frontend.dmd.functions: findUnittests;
 
     auto records = new ModuleInfo*[specs.length];
+    auto crtRecord = crtRecordOf(run, specs);
     auto importSlots = new ModuleInfo**[specs.length];
     const imports = importsOf(specs);
     foreach (i, spec; specs) {
@@ -540,7 +572,37 @@ private ModuleInfo*[] recordsOf(
     foreach (i, slots; importSlots)
         foreach (j, index; imports[i])
             slots[j] = records[index];
-    return records;
+    return crtRecord is null ? records : crtRecord ~ records;
+}
+
+
+// The record of the `crt_constructor` and `crt_destructor` functions of all
+// modules, in module order, or null when there are none. It is the first
+// record, as druntime runs independent constructors in record order, and
+// standalone, as druntime puts such a module first among the ones that have
+// a destructor, which makes its destructor the last.
+private ModuleInfo* crtRecordOf(Run* run, ModuleSpec[] specs) {
+    imported!"dmd.func".FuncDeclaration[] constructors;
+    imported!"dmd.func".FuncDeclaration[] destructors;
+    foreach (spec; specs) {
+        constructors ~= spec.functions.crtConstructors;
+        destructors ~= spec.functions.crtDestructors;
+    }
+
+    if (constructors.length == 0 && destructors.length == 0)
+        return null;
+
+    Fields fields;
+    fields.name = "snakebite_crt";
+    fields.standalone = true;
+    auto destructorPhase = run.phaseOf(
+        Phase.Kind.destructor, reversed(destructors));
+    run.crtDestructors = destructorPhase;
+    fields.independentConstructor = run.entryOf(run.phaseOf(
+        Phase.Kind.constructor, constructors, null, destructorPhase));
+    fields.destructor = run.entryOf(destructorPhase);
+    ModuleInfo** unused;
+    return newRecord(fields, unused);
 }
 
 
