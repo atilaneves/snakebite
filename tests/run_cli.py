@@ -1185,23 +1185,22 @@ def finalizer_shape_source(name: str, value: tuple[str | None, ...]) -> str:
     """
 
 
-@pytest.fixture(scope="module", params=FINALIZER_BACKENDS)
-def finalizer_shapes_output(
-    request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory,
-) -> tuple[str, str]:
-    backend = request.param
-    app = tmp_path_factory.mktemp(f"finalizer-{backend}") / "app"
+# Runs the named shapes in one process. A hang gives the output that the
+# process had written so far, marked as a timeout.
+def run_finalizer_shapes(
+    backend: str, names: list[str], app: Path,
+) -> tuple[str, bool]:
     write(app / "dub.sdl", dub_project_recipe("finalizer"))
-    for name, shape in FINALIZER_SHAPES.items():
+    for name in names:
         write(
             app / "source" / f"shape_{name}.d",
-            finalizer_shape_source(name, shape),
+            finalizer_shape_source(name, FINALIZER_SHAPES[name]),
         )
-    imports = "".join(f"import shape_{name};\n" for name in FINALIZER_SHAPES)
+    imports = "".join(f"import shape_{name};\n" for name in names)
     reports = "".join(
         f'fprintf(stderr, "{name} %s\\n", shape_{name}.finalizes '
         '? "ok".ptr : "failed".ptr);\n'
-        for name in FINALIZER_SHAPES
+        for name in names
     )
     write(
         app / "source" / "main.d",
@@ -1209,35 +1208,85 @@ def finalizer_shapes_output(
         + imports + "unittest {\n" + reports + "}\nint main() { return 0; }\n",
     )
 
-    if backend == "native":
-        result = subprocess.run(
-            ["dmd", "-unittest", "-of=native", *sorted(
-                str(path.relative_to(app))
-                for path in (app / "source").glob("*.d")
-            )],
-            capture_output=True, check=False, text=True, cwd=app,
-        )
-        assert result.returncode == 0, output(result)
-        result = subprocess.run(
-            [str(app / "native")], capture_output=True, check=False,
-            text=True, cwd=app, timeout=300,
-        )
-    else:
-        result = run_sb(
-            f"--backend={backend}", "--no-optimise-image", str(app),
-            cwd=app.parent, timeout_seconds=300,
+    try:
+        if backend == "native":
+            result = subprocess.run(
+                ["dmd", "-unittest", "-of=native", *sorted(
+                    str(path.relative_to(app))
+                    for path in (app / "source").glob("*.d")
+                )],
+                capture_output=True, check=False, text=True, cwd=app,
+            )
+            assert result.returncode == 0, output(result)
+            result = subprocess.run(
+                [str(app / "native")], capture_output=True, check=False,
+                text=True, cwd=app, timeout=FINALIZER_TIMEOUT_SECONDS,
+            )
+        else:
+            result = run_sb(
+                f"--backend={backend}", "--no-optimise-image", str(app),
+                cwd=app.parent, timeout_seconds=FINALIZER_TIMEOUT_SECONDS,
+            )
+    except subprocess.TimeoutExpired as timeout:
+        def decoded(data: str | bytes | None) -> str:
+            if data is None:
+                return ""
+            return data if isinstance(data, str) else data.decode(
+                errors="replace")
+
+        return (
+            decoded(timeout.stdout) + decoded(timeout.stderr)
+            + f"\ntimed out after {FINALIZER_TIMEOUT_SECONDS} s\n"
+        ), False
+    return output(result), True
+
+
+FINALIZER_TIMEOUT_SECONDS = 300
+
+
+class FinalizerShapes:
+    def __init__(self, backend: str, root: Path) -> None:
+        self.backend = backend
+        self._root = root
+        self._alone: dict[str, str] = {}
+        self.text, self.completed = run_finalizer_shapes(
+            backend, list(FINALIZER_SHAPES), root / "all" / "app",
         )
 
-    return backend, output(result)
+    # The combined run is the fast path. When it did not finish, a shape
+    # without a report runs alone, so that one defect makes one test red.
+    def verdict(self, shape: str) -> str:
+        lines = self.text.splitlines()
+        if f"{shape} ok" in lines or f"{shape} failed" in lines:
+            return self.text
+        if self.completed:
+            return self.text
+        if shape not in self._alone:
+            self._alone[shape], _ = run_finalizer_shapes(
+                self.backend, [shape], self._root / shape / "app",
+            )
+        return self._alone[shape]
+
+
+@pytest.fixture(scope="module", params=FINALIZER_BACKENDS)
+def finalizer_shapes(
+    request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory,
+) -> FinalizerShapes:
+    return FinalizerShapes(
+        request.param,
+        tmp_path_factory.mktemp(f"finalizer-{request.param}"),
+    )
 
 
 @pytest.mark.parametrize("shape", sorted(FINALIZER_SHAPES))
 def test_destructor_shape_runs_in_finalizer(
-    finalizer_shapes_output: tuple[str, str], shape: str,
+    finalizer_shapes: FinalizerShapes, shape: str,
 ) -> None:
-    backend, text = finalizer_shapes_output
+    text = finalizer_shapes.verdict(shape)
 
-    assert f"{shape} ok" in text.splitlines(), f"{backend}:\n{text[-3000:]}"
+    assert f"{shape} ok" in text.splitlines(), (
+        f"{finalizer_shapes.backend}:\n{text[-3000:]}"
+    )
 
 
 # A dub recipe whose unittest configuration is an executable: dub's own
