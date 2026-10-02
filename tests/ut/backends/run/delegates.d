@@ -1316,3 +1316,82 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A variadic function through a pointer type with no parameter. The callee
+// reads no parameter, so the missing arguments have no effect.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine does not implement C-style variadic functions"),
+)) {
+    @("callCVariadicThroughFunctionPointerWithNoParameters." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C) int three(int unused, ...) { return 3; }
+            alias NoParameters = extern(C) int function();
+            int main() {
+                auto pointer = cast(NoParameters) &three;
+                return pointer() == 3 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A function pointer cast from a `lazy` parameter to a value parameter.
+// The callee does not read the parameter.
+static foreach (backend; Matrix!()) {
+    @("callThroughFunctionPointerCastFromLazyParameter." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int three(lazy int unused) { return 3; }
+            int main() {
+                auto pointer = cast(int function(int)) &three;
+                return pointer(1) == 3 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A function pointer cast from a slice parameter to an `int` parameter.
+// The callee does not read the parameter.
+static foreach (backend; Matrix!()) {
+    @("callThroughFunctionPointerCastFromSliceParameter." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int three(int[] unused) { return 3; }
+            int main() {
+                auto pointer = cast(int function(int)) &three;
+                return pointer(1) == 3 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A guest `extern(C)` variadic function through a pointer type with fixed
+// parameters. The callee reads its extra argument as the C ABI passes it.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine does not implement C-style variadic functions"),
+)) {
+    @("callCVariadicThroughFixedFunctionPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.stdarg;
+            extern(C) int sum(int a, ...) {
+                va_list list;
+                va_start(list, a);
+                const b = va_arg!int(list);
+                va_end(list);
+                return a + b;
+            }
+            alias Fixed = extern(C) int function(int, int);
+            int main() {
+                auto pointer = cast(Fixed) &sum;
+                return pointer(4, 5) == 9 ? 0 : 1;
+            }
+        });
+    }
+}

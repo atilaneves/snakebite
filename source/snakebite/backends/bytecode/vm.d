@@ -22,6 +22,7 @@ import snakebite.backends.haltprocess: HaltAction, isHalt;
 import snakebite.backends.unwindplan:
     ExceptionCandidate, UnwindPlan, unwindPlanOf;
 import snakebite.callarguments: CallArguments;
+import snakebite.nativelayout: TypeFacts;
 import snakebite.nativevalue:
     CastKind, ComplexOperation, floatingToBool, loadFloating, loadSigned,
     loadUnsigned, shiftCount, storeFloating, storeIntegral;
@@ -151,7 +152,18 @@ public struct CallSite {
         return site;
     }
 
+    // What a call through a value of a function type tells a C-variadic
+    // callee: the facts of each parameter of the type when the type has no
+    // variadic arguments of its own, or the offset of the cursor that the
+    // call site built when it has.
+    public struct ValueArguments {
+        package bool isValueCall;
+        package const(TypeFacts)[] parameters;
+        package size_t cursor = size_t.max;
+    }
+
     package Kind kind;
+    package ValueArguments value;
     package Arg[] args;
     package Arg[] nativeArgs;
     package size_t returnWidth;
@@ -387,6 +399,10 @@ public struct Function {
     package uint closureAlignment = 1;
     package ClosureSlot[] closureSlots;
     package size_t[] parameterOffsets;
+    // Where a C-variadic function reads its cursor, and how many parameters
+    // it declares before it; `size_t.max` for any other function.
+    package size_t cursorOffset = size_t.max;
+    package size_t declaredParameters;
 }
 
 
@@ -1003,8 +1019,12 @@ private const(Instruction)* runCall(Decoded)(
                     contextAdjustment))
                 return execution.next;
         }
-        return callFunction(execution, *site, cast(const(Function)*) callee,
-            contextAdjustment);
+        auto function_ = cast(const(Function)*) callee;
+        const next = callFunction(
+            execution, *site, function_, contextAdjustment);
+        if (function_.cursorOffset != size_t.max && site.value.isValueCall)
+            bindVariadicCallee(execution, *site, function_);
+        return next;
     case native:
         auto arguments = gatherArguments(execution, site.args);
         auto values = arguments.values;
@@ -1023,6 +1043,10 @@ private const(Instruction)* runCall(Decoded)(
 }
 
 
+    // Where a C-variadic function reads its cursor, and how many parameters
+    // it declares before it; `size_t.max` for any other function.
+    package size_t cursorOffset = size_t.max;
+    package size_t declaredParameters;
 // Copies each argument's address out of the caller's frame, in the order
 // `args` names, for a call reached through a plan or a resolved entry
 // (`indirect`, `native`, `builtin` in `runCall`'s switch) rather than a
@@ -1068,8 +1092,9 @@ private const(Instruction)* callFunction(Decoded)(
     // removing a context word can also change argument alignment.
     if (site.hasContext && callee.contextOffset == size_t.max) {
         foreach (i, arg; site.args[1 .. $])
-            memcpy(activation.frame + callee.parameterOffsets[i],
-                execution.storage(arg.callerOffset), arg.width);
+            if (i < callee.parameterOffsets.length)
+                memcpy(activation.frame + callee.parameterOffsets[i],
+                    execution.storage(arg.callerOffset), arg.width);
     } else {
         foreach (arg; site.args)
             memcpy(activation.frame + arg.calleeOffset,

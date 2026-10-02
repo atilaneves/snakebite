@@ -1004,6 +1004,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _closureOffset == size_t.max ? 1 : _closureLayout.alignment,
             closureSlots,
             parameterOffsets,
+            _layout.variadicTypes == size_t.max
+                ? _layout.variadicCursor : size_t.max,
+            _layout.parameters.length,
         );
     }
 
@@ -7090,7 +7093,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `hasContext` doc).
     private void compileIndirectCall(CallExp expression, in size_t destOffset) {
         import dmd.astenums: STC, VarArg;
-        import snakebite.backends.calls: arityMismatches, isIndirectDelegateCall;
+        import snakebite.backends.calls: isIndirectDelegateCall, ValueCall;
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, delegateValueSize;
 
@@ -7132,8 +7135,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             evalInto(deref.e1, calleeOffset, size_t.sizeof);
         }
 
-        if (arityMismatches(functionType.parameterList, expression.arguments,
-                functionType.parameterList.varargs == VarArg.variadic))
+        auto valueCall = ValueCall.of(functionType, isDelegateCall);
+        if (valueCall.mismatches(expression.arguments))
             assert(0, "dmd rejects a call with the wrong number of arguments");
 
         // A `ref` return hands back its target's address in the return
@@ -7147,7 +7150,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (isVoidCallee && destOffset != discardResult)
             assert(0, "a `void` call is only ever evaluated for effect");
 
-        auto calleeLayout = FrameLayout.ofParameters(functionType, isDelegateCall);
+        const calleeLayout = valueCall.layout;
 
         Arg[] args;
         if (isDelegateCall)
@@ -7160,6 +7163,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             functionType, expression.arguments, calleeLayout, args,
             calleeOffset, isVoidCallee ? 0 : returnShape.returnFacts.size,
             isDelegateCall);
+        site.value.isValueCall = true;
+        if (valueCall.isVariadic)
+            site.value.cursor = calleeLayout.variadicCursor;
+        else
+            foreach (parameter; calleeLayout.parameters)
+                site.value.parameters ~= parameter.facts;
         const siteIndex = _callSites.length;
         _callSites ~= site;
         emit(&opCall,
