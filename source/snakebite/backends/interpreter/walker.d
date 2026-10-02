@@ -1087,6 +1087,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return FrameLayout.of(function_);
     }
 
+    // A call through a function pointer or a delegate: the type of the value
+    // gives the layout of its arguments, which `valueCallOf` makes once.
+    extern(D) private void prepareValueCall(CallExp site) {
+        import snakebite.backends.calls: isIndirectDelegateCall;
+
+        auto callee = site.e1;
+        if (isIndirectDelegateCall(callee.type))
+            valueCallOf(site, callee.type.nextOf.isTypeFunction, true);
+        else if (auto deref = callee.isPtrExp)
+            valueCallOf(site, deref.type.isTypeFunction, false);
+    }
+
     private ValueCall* valueCallOf(
         CallExp site, TypeFunction type, in bool hasContext,
     ) {
@@ -1610,6 +1622,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                         FinallyKey.Exit.gotoScope),
                     statement);
             }),
+            (site) => attempt({ prepareValueCall(site); }),
         ));
         while (pending.length) {
             auto function_ = pending[$ - 1];
