@@ -309,6 +309,7 @@ private Nullable!FaultCheck accessFaultOfVariable(
 //  - `synchronized (c)` locks the monitor of `c`, a field of the object.
 //  - `p.length = n` and `*p ~= x` change the array that `p` points to: the
 //    hook takes it by `ref` as its first argument and writes it.
+//  - An array operation reads and writes the elements of its slices.
 public const(NativeCallCheck)* nativeCallCheckOf(
     imported!"dmd.func".FuncDeclaration callee,
 ) {
@@ -328,7 +329,45 @@ public const(NativeCallCheck)* nativeCallCheckOf(
         return check;
     }
 
-    return integerPowerCheckOf(callee);
+    if (auto power = integerPowerCheckOf(callee))
+        return power;
+
+    return arrayOperationCheckOf(callee);
+}
+
+// An array operation, `core.internal.array.operations.arrayOp`, reads and
+// writes the elements of its slices in a loop. Its first template argument
+// is the type of the result, which is the first argument of the call, and
+// the operands that follow have one argument each, in the order of the
+// template arguments that are types.
+private const(NativeCallCheck)* arrayOperationCheckOf(
+    imported!"dmd.func".FuncDeclaration callee,
+) {
+    import core.stdc.string: strcmp;
+    import dmd.dtemplate: isType;
+    import dmd.typesem: toBasetype;
+
+    auto instance = callee.parent is null
+        ? null : callee.parent.isTemplateInstance;
+    if (instance is null || instance.tiargs is null
+            || instance.name.toString != "arrayOp"
+            || strcmp(instance.tempdecl.parent.toPrettyChars,
+                "core.internal.array.operations") != 0)
+        return null;
+
+    auto check = new NativeCallCheck;
+    size_t argument;
+    foreach (templateArgument; (*instance.tiargs)[]) {
+        auto type = isType(templateArgument);
+        if (type is null)
+            continue;
+
+        if (type.toBasetype.isTypeDArray !is null)
+            check.slices ~= argument;
+        ++argument;
+    }
+
+    return check.slices.length == 0 ? null : check;
 }
 
 // `pow` of `std.math` with an integer base and exponent, which is what

@@ -167,6 +167,12 @@ public struct NativeCallCheck {
         public bool exponentIsSigned;
     }
 
+    // The slices that an array operation reads or writes element by element
+    // in native code. A slice with elements and a base in the first page is
+    // a null dereference of the user's statement. Slices of different
+    // lengths are the error of the array operation itself: it comes first.
+    public size_t[] slices;
+
     // An argument that must not be null, as the monitor that `synchronized`
     // locks or the array that a hook changes by `ref`, and the failure when
     // it is.
@@ -187,6 +193,33 @@ public struct NativeCallCheck {
         if (integerPower.present && integerPower.fails(arguments)) {
             kind = GuestFault.Kind.divisionByZero;
             return true;
+        }
+
+        if (slices.length != 0 && slicesAreNull(arguments)) {
+            kind = GuestFault.Kind.nullPointer;
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool slicesAreNull(
+        scope const(void*)[] arguments,
+    ) const @trusted @nogc nothrow {
+        const length = *cast(const(size_t)*) arguments[slices[0]];
+        foreach (argument; slices) {
+            if (*cast(const(size_t)*) arguments[argument] != length)
+                return false;
+        }
+
+        if (length == 0)
+            return false;
+
+        foreach (argument; slices) {
+            const base = *cast(const(void*)*) (
+                cast(const(ubyte)*) arguments[argument] + size_t.sizeof);
+            if (GuestFault.isNullAddress(base))
+                return true;
         }
 
         return false;

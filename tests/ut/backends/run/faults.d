@@ -1090,6 +1090,81 @@ void main() {
 }
 
 
+// An array operation reads each element of its operands and writes each
+// element of its result: a slice of a null pointer is a null dereference.
+static foreach (backend; FaultBackends) {
+    @("fault.arrayOperationOnANullSliceOperand." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        GuestFault.Kind.nullPointer.shouldBeFaultOf!(backend, q{
+void main() {
+    int[] a = [8, 6];
+    int* p;
+    int[2] c;
+    c[] = a[] + p[0 .. 2];
+}
+})(6);
+    }
+}
+
+
+static foreach (backend; FaultBackends) {
+    @("fault.arrayOperationOnANullSliceOfADivisor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        GuestFault.Kind.nullPointer.shouldBeFaultOf!(backend, q{
+void main() {
+    int[] a = [8, 6];
+    int* p;
+    int[2] c;
+    c[] = a[] / p[0 .. 2];
+}
+})(6);
+    }
+}
+
+
+static foreach (backend; FaultBackends) {
+    @("fault.arrayOperationOnANullSliceResult." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        GuestFault.Kind.nullPointer.shouldBeFaultOf!(backend, q{
+void main() {
+    int[] a = [8, 6];
+    int* p;
+    p[0 .. 2][] = a[] + 1;
+}
+})(5);
+    }
+}
+
+
+// An operand of another length is the error of the array operation itself,
+// before any element is read.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot slice a null pointer"),
+)) {
+    @("fault.arrayOperationOfANullSliceOfAnotherLengthIsALengthError."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        int main() {
+            int[] a = [8, 6, 4];
+            int* p;
+            int[3] c;
+            try {
+                c[] = a[] + p[0 .. 2];
+            } catch (Error) {
+                return 0;
+            }
+            return 1;
+        }
+        });
+    }
+}
+
+
 // `x ^^ n` of integers divides by zero for a base of zero and a negative
 // exponent.
 static foreach (backend; FaultBackends) {
