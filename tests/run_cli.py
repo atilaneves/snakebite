@@ -228,6 +228,45 @@ def test_import_paths_stay_relative_to_caller(
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+# A string import is not a lexer literal, so dmd gives it no zero code unit
+# after the file's text unless the backend adds one. `native` is the compiled
+# D that the two backends must agree with.
+@pytest.mark.parametrize("backend", ["native", *FILE_BACKENDS])
+def test_string_import_is_followed_by_zero(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(tmp_path / "strings" / "payload.txt", "payload")
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        unittest {
+            immutable text = import("payload.txt");
+            assert(text.length == 7);
+            assert(text.ptr[text.length] == 0);
+        }
+        """,
+    )
+
+    if backend == "native":
+        command = [
+            "dmd", "-unittest", "-main", f"-J{tmp_path / 'strings'}", "-run",
+            str(tmp_path / "app" / "main.d"),
+        ]
+        result = subprocess.run(
+            command, capture_output=True, check=False, text=True,
+            cwd=tmp_path, timeout=120,
+        )
+    else:
+        result = run_sb(
+            f"--backend={backend}", "--no-optimise-image",
+            "--string-import-path=strings", str(tmp_path / "app"),
+            cwd=tmp_path,
+        )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_fetch_keeps_package_name(tmp_path: Path) -> None:
     fake_dub(
         tmp_path,

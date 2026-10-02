@@ -151,6 +151,8 @@ private final class GuestException: Exception {
     }
 }
 
+import snakebite.nativelayout: bitfieldAccess;
+import snakebite.nativevalue: BitfieldAccess;
 import snakebite.backends.checkplan:
     BoundsCheck, hookOf, isUnanalysed;
 import snakebite.backends.haltprocess: isHalt;
@@ -169,6 +171,7 @@ import snakebite.backends.switchplan: switchPlan, selectCase,
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
 import snakebite.cstack: CStack;
 import snakebite.backends.fullexpression: FullExpressionKind;
+import snakebite.backends.temporary: canRetainTemporaries;
 
 // The state one program's evaluators share, whichever thread they run
 // on (ADR-0006). Every table here is filled once per key - under its
@@ -193,7 +196,9 @@ private struct Shared {
     import snakebite.backends.runtimetypes: RuntimeTypes;
     import snakebite.backends.closureplan: ClosurePlan, Hop;
     import snakebite.ffi: PlanCache;
+    import dmd.declaration: VarDeclaration;
     import snakebite.nativelayout: NativeData, TypeFacts;
+    import snakebite.nativevalue: BitfieldAccess;
     import snakebite.sharedtable: SharedTable;
 
     // The program being run: its `isInterpreted` is the one decision for
@@ -260,6 +265,9 @@ private struct Shared {
     // such as `int` is dmd's own shared, interned instance, so the same
     // entry serves every function that mentions it.
     SharedTable!(Type, TypeFacts) typeFacts;
+    // Where each bit field lives and how it is read and written, planned
+    // once from its declaration.
+    SharedTable!(VarDeclaration, BitfieldAccess) bitfields;
     // The reverse of `callableAddress`: a real callable address any
     // evaluator handed out for a guest function, back to the declaration
     // it stands for, so a call through that same address - made by any
@@ -596,6 +604,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // preparation to build it before the program reaches it: a reference
     // in code that never runs must cost what it costs without preparation.
     private enum preparedBytesLimit = 64 * 1024;
+    private Cache!(VarDeclaration, BitfieldAccess) _bitfields;
+    // The plans of the bit fields most recently used, found by the
+    // address of the declaration, so that a loop over a few bit fields
+    // does not hash on each access.
+    private static struct BitfieldSlot {
+        VarDeclaration field;
+        BitfieldAccess plan;
+    }
+    private BitfieldSlot[16] _recentBitfields;
     // Expression-scoped rvalues and temporary destructors have one owner.
     private TemporaryLifetime _temporaries;
     // The most recently asked-about `Type` and its facts: dmd interns
@@ -659,6 +676,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             Cache!(StaticChainKey, Hop[])(&shared_.staticChains);
         _catchTypes = Cache!(Catch, TypeInfo_Class)(&shared_.catchTypes);
         _typeFacts = Cache!(Type, TypeFacts)(&shared_.typeFacts);
+        _bitfields =
+            Cache!(VarDeclaration, BitfieldAccess)(&shared_.bitfields);
         _frames = FrameStack(defaultFrameCapacity);
         _interpreterStack = InterpreterStack(defaultInterpreterStackBytes);
         _temporaries = TemporaryLifetime(&destroyTemporary);
@@ -920,7 +939,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 bindHostArguments(
                     declaredArguments, frame.base, layout, shape);
                 auto arguments = argumentSlots(frame.base, layout);
-                _temporaries.withNestedCall({
+                _temporaries.withNestedCall(layout.retainsTemporaries, {
                     executeRaw(
                         function_, returnPlace, frame.base, layout,
                         null, arguments.values.ptr,
@@ -1164,7 +1183,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             scope void* place,
             scope const(void*)[] arguments,
         ) {
-            _temporaries.withNestedCall({
+            _temporaries.withNestedCall(layout.retainsTemporaries, {
                 executeRaw(
                     function_, place, frameBase, layout, callSite,
                     arguments.ptr, arguments.length,
@@ -2234,6 +2253,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // destroys them. The mark is recorded before anything can reserve a
     // temporary, so a guest throw from any point of the evaluation still
     // releases whatever was reserved by then.
+    //
+    // A declaration keeps the bytes of its temporaries in a slot of the
+    // running call: the variable it initialises can point into them, and
+    // compiled D keeps a temporary's stack slot for the whole function.
     private void runFullExpression(Expression expression) {
         _temporaries.withExpression(FullExpressionKind.effect, expression, {
             runForEffect(expression);
@@ -3029,17 +3052,24 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // The raw slot for a declaration, before indirecting through a `ref`
     // variable. Declarations need this address to initialize a reference
     // slot itself; reads and writes use `slotOf` below and indirect it.
-    private ubyte* storageOf(VarDeclaration variable) {
+    private ubyte* storageOf(VarDeclaration variable, bool* retains = null) {
         auto owner = outerFunctionOf(variable);
         if (owner !is null && functionNeedsClosure(owner)) {
             auto context = contextOf(owner);
             const closure = closureLayoutOf(owner);
-            if (closure.hasSlot(variable))
+            if (closure.hasSlot(variable)) {
+                if (retains !is null)
+                    *retains = _layout.retainsTemporaries
+                        && canRetainTemporaries(variable);
                 return context + closure.slotOf(variable).offset;
+            }
         }
 
-        if (auto slot = _layout.slotOf(variable))
+        if (auto slot = _layout.slotOf(variable)) {
+            if (retains !is null)
+                *retains = slot.retainsTemporaries;
             return _frameBase + slot.offset;
+        }
 
         if (owner is null)
             assert(0, "a local variable has an enclosing function");
@@ -3160,17 +3190,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         assert(expInitializer !is null,
             "a runtime variable initializer is an expression initializer");
 
-        auto slot = storageOf(variable);
+        bool retains;
+        auto slot = storageOf(variable, &retains);
 
         if (initializerConstructsThroughSlice(expInitializer, variable)) {
-            _temporaries.initialize(variable, expression, slot, {
+            initialize(variable, expression, slot, retains, {
                 runForEffect(expInitializer.exp);
             });
             return;
         }
 
         auto value = initializerValueOf(expInitializer);
-        _temporaries.initialize(variable, expression, slot, {
+        initialize(variable, expression, slot, retains, {
             if (isRefStorage(variable)) {
                 import snakebite.nativelayout: storeIntegral;
 
@@ -3179,6 +3210,20 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             } else
                 evaluate(value, variable.type, slot);
         });
+    }
+
+    extern(D) private void initialize(
+        VarDeclaration variable,
+        DeclarationExp expression,
+        ubyte* slot,
+        in bool retains,
+        scope void delegate() evaluate,
+    ) {
+        if (retains)
+            _temporaries.initializeRetaining(
+                variable, expression, slot, evaluate);
+        else
+            _temporaries.initialize(variable, expression, slot, evaluate);
     }
 
     protected override void visitUnloweredConstruct(ConstructExp expression) {
@@ -3221,8 +3266,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     valueFacts, scratch.base);
                 const result = loadIntegral(
                     scratch.base, valueFacts.size, !valueFacts.isUnsigned);
-                storeBitfieldAt(field, target, result);
-                storeIntegral(_place, result, _facts.size);
+                auto unit = bitfieldUnitAt(field, target);
+                storeBitfieldAt(field, unit, result);
+                storeIntegral(_place, bitfieldValueAtPlace(field, unit),
+                    _facts.size);
                 return _place;
             }
         }
@@ -3910,7 +3957,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (field !is null && field.isBitFieldDeclaration !is null) {
                 const stepFacts = factsOf(expression.e2.type);
                 const step = asIntegral(expression.e2, stepFacts);
-                const fieldValue = bitfieldValueAtPlace(field, target);
+                auto unit = bitfieldUnitAt(field, target);
+                const fieldValue = bitfieldValueAtPlace(field, unit);
                 const current = signExtend
                     ? fieldValue
                     : fieldValue & (ulong.max >> (64 - 8 * targetFacts.size));
@@ -3919,8 +3967,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 else
                     const result = combine!op(
                         current, step, arithmeticFacts, stepFacts, expression);
-                storeBitfieldAt(field, target, result);
-                storeIntegral(_place, bitfieldValueAtPlace(field, target),
+                storeBitfieldAt(field, unit, result);
+                storeIntegral(_place, bitfieldValueAtPlace(field, unit),
                     _facts.size);
                 return;
             }
@@ -4089,7 +4137,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     ? current + step : current - step;
                 storeIntegral(_place, current, _facts.size);
                 storeBitfieldAt(field,
-                    cast(ubyte*) base + field.offset, changed);
+                    cast(ubyte*) base + bitfieldPlanOf(field).offset, changed);
                 return;
             }
         }
@@ -5002,44 +5050,52 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // operation to `int` while a `ubyte` field still has one byte of
     // storage.
     private long bitfieldValueAt(void* base, VarDeclaration field) {
-        return bitfieldValueAtPlace(field,
-            cast(ubyte*) base + field.offset);
+        const plan = bitfieldPlanOf(field);
+        return plan.load(cast(ubyte*) base + plan.offset);
     }
 
+    // `place` is the address of the field's storage unit.
     private long bitfieldValueAtPlace(
         VarDeclaration field, void* place,
     ) {
-        import snakebite.nativelayout: loadIntegral;
-        const bits = field.isBitFieldDeclaration;
-        const facts = factsOf(field.type);
-        const raw = loadIntegral(
-            place, facts.size, false);
-        const mask = ulong.max >> (64 - bits.fieldWidth);
-        auto value = (raw >> bits.bitOffset) & mask;
-        if (!facts.isUnsigned && bits.fieldWidth < 64
-                && (value & (1UL << (bits.fieldWidth - 1))))
-            value |= ulong.max << bits.fieldWidth;
-        return cast(long) value;
+        return bitfieldPlanOf(field).load(place);
     }
 
     private void storeBitfield(
         DotVarExp expression, VarDeclaration field, long value,
     ) {
-        const bits = field.isBitFieldDeclaration;
-        auto place = cast(ubyte*) fieldBaseAddress(expression.e1) + field.offset;
-        storeBitfieldAt(field, place, value);
+        const plan = bitfieldPlanOf(field);
+        plan.store(cast(ubyte*) fieldBaseAddress(expression.e1) + plan.offset,
+            cast(ulong) value);
     }
 
     private void storeBitfieldAt(
         VarDeclaration field, void* place, long value,
     ) {
-        import snakebite.nativelayout: loadIntegral, storeIntegral;
-        const bits = field.isBitFieldDeclaration;
-        const mask = (ulong.max >> (64 - bits.fieldWidth)) << bits.bitOffset;
-        auto storage = loadIntegral(place, factsOf(field.type).size, false);
-        storage = (storage & ~mask)
-            | ((cast(ulong) value << bits.bitOffset) & mask);
-        storeIntegral(place, storage, factsOf(field.type).size);
+        bitfieldPlanOf(field).store(place, cast(ulong) value);
+    }
+
+    extern(D) private const(BitfieldAccess)* bitfieldPlanOf(
+        VarDeclaration field,
+    ) {
+        auto recent = &_recentBitfields[(cast(size_t) cast(void*) field >> 4) & 15];
+        if (recent.field is field)
+            return &recent.plan;
+
+        auto plan = field in _bitfields;
+        if (plan is null)
+            plan = _bitfields.build(field, () => bitfieldAccess(field));
+        *recent = BitfieldSlot(field, *plan);
+        return plan;
+    }
+
+    // `address` is where the frontend places the bit field, which is not
+    // always where its storage unit starts.
+    extern(D) private ubyte* bitfieldUnitAt(
+        VarDeclaration field, void* address,
+    ) {
+        return cast(ubyte*) address - field.offset
+            + bitfieldPlanOf(field).offset;
     }
 
     override void visit(TypeidExp expression) {
@@ -5231,7 +5287,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             frame.base + layout.hiddenThis.parameter.offset,
             cast(size_t) thisPointer, size_t.sizeof,
         );
-        _temporaries.withNestedCall({
+        _temporaries.withNestedCall(layout.retainsTemporaries, {
             executeRaw(inv, null, frame.base, layout, null, null, 0);
         });
     }

@@ -2025,18 +2025,13 @@ package alias opLoadBitfield =
 private const(Instruction)* runLoadBitfield(Decoded)(
     ref Decoded execution,
 ) {
+    import snakebite.nativevalue: BitfieldAccess;
+
     auto address = *cast(void**) (execution.source);
     const metadata = execution.sourceWidth;
-    const bitOffset = metadata & 0xffff;
-    const fieldWidth = (metadata >> 16) & 0xffff;
-    const resultWidth = (metadata >> 40) & 0xff;
-    const isSigned = (metadata & (1UL << 32)) != 0;
-    const storage = loadUnsigned(address, execution.width);
-    const mask = ulong.max >> (64 - fieldWidth);
-    ulong value = (storage >> bitOffset) & mask;
-    if (isSigned && fieldWidth < 64 && (value & (1UL << (fieldWidth - 1))))
-        value |= ulong.max << fieldWidth;
-    storeWidth(execution.destination, cast(long) value, resultWidth);
+    const value = BitfieldAccess.decode(metadata).load(address);
+    storeWidth(execution.destination, value,
+        BitfieldAccess.resultWidth(metadata));
     return execution.next;
 }
 
@@ -2112,15 +2107,11 @@ package alias opStoreBitfield =
 private const(Instruction)* runStoreBitfield(Decoded)(
     ref Decoded execution,
 ) {
+    import snakebite.nativevalue: BitfieldAccess;
+
     auto address = *cast(void**) (execution.destination);
-    const metadata = execution.sourceWidth;
-    const bitOffset = metadata & 0xffff;
-    const fieldWidth = (metadata >> 16) & 0xffff;
-    auto value = loadUnsigned(execution.source, execution.width);
-    const mask = (ulong.max >> (64 - fieldWidth)) << bitOffset;
-    auto storage = loadUnsigned(address, (metadata >> 40) & 0xff);
-    storage = (storage & ~mask) | ((value << bitOffset) & mask);
-    storeWidth(address, cast(long) storage, (metadata >> 40) & 0xff);
+    BitfieldAccess.decode(execution.sourceWidth).store(
+        address, loadUnsigned(execution.source, execution.width));
     return execution.next;
 }
 

@@ -5,6 +5,7 @@ private:
 
 
 import snakebite.nativevalue:
+    BitfieldAccess,
     nativeArrayLengthOffset = arrayLengthOffset,
     nativeArrayPointerOffset = arrayPointerOffset,
     nativeArrayValueSize = arrayValueSize,
@@ -501,7 +502,8 @@ public struct NativeData {
     import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.dsymbol: Dsymbol;
-    import dmd.expression: ClassReferenceExp, Expression, StructLiteralExp;
+    import dmd.expression:
+        ClassReferenceExp, Expression, StringExp, StructLiteralExp;
     import dmd.location: Loc;
     import dmd.mtype: Type;
 
@@ -521,6 +523,13 @@ public struct NativeData {
     // struct values are keyed by their own literal, not by a reference
     // or address expression, to preserve aliases and cycles.
     private void*[StructLiteralExp] _compileTimeValues;
+    // The address of each literal's copy, found without a lock. A miss goes
+    // to `_stringTexts`, so that nodes with equal text share one address.
+    private SharedTable!(StringExp, const(void)*) _stringNodes;
+    // Under the compiler lock only. The copies are outside the GC heap, as
+    // read-only data is in compiled D, and are freed with this object.
+    private const(void)*[StringText] _stringTexts;
+    private void*[] _stringBlocks;
     // Written under the compiler lock only, like every miss below.
     private void[][] _blocks;
     private void[] _available;
@@ -625,6 +634,44 @@ public struct NativeData {
             _compileTimeValues[literal] = address;
             scope (failure) _compileTimeValues.remove(literal);
             write(literal.type, facts, literal, address);
+        });
+        return address;
+    }
+
+    ~this() {
+        import core.stdc.stdlib: free;
+
+        foreach (block; _stringBlocks)
+            free(block);
+    }
+
+    // Equal text has one address, as the object file gives in compiled D:
+    // dmd makes a new literal for each use of a manifest constant, and for
+    // each instance of a template.
+    private const(void)* stringData(StringExp literal) {
+        import core.stdc.stdlib: calloc;
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        if (auto found = literal in _stringNodes)
+            return *found;
+
+        const(void)* address;
+        withCompilerLock({
+            const text = StringText.of(literal);
+            if (auto found = text in _stringTexts) {
+                address = *found;
+            } else {
+                auto bytes = cast(ubyte*) calloc(
+                    literal.len + 1, literal.sz);
+                assert(bytes !is null);
+                _stringBlocks ~= bytes;
+                auto units = bytes[0 .. literal.len * literal.sz];
+                copyUnits(literal, units);
+                address = bytes;
+                // Keyed by the copy: the frontend can free its buffer.
+                _stringTexts[StringText(literal.sz, units)] = address;
+            }
+            _stringNodes.insert(literal, address);
         });
         return address;
     }
@@ -865,6 +912,13 @@ public struct NativeData {
                     field.type,
                     newInFrontend!getConstInitializer(field, false),
                 );
+            if (field.isBitFieldDeclaration !is null) {
+                const access = bitfieldAccess(field);
+                access.store(place + access.offset,
+                    loadIntegral(bytes.ptr, bytes.length, false));
+                continue;
+            }
+
             import core.stdc.string: memcpy;
 
             memcpy(place + field.offset, bytes.ptr, bytes.length);
@@ -981,6 +1035,47 @@ public void storeValue(
     void* place,
 ) {
     storeValue(type, facts, value, place, null);
+}
+
+// The code unit size is part of the key: the terminator has that width, so
+// text of equal bytes in two widths does not share a copy.
+private struct StringText {
+    size_t unitSize;
+    const(ubyte)[] units;
+
+    static StringText of(imported!"dmd.expression".StringExp literal) {
+        return StringText(
+            literal.sz,
+            cast(const(ubyte)[]) literal.peekData[0 .. literal.len * literal.sz],
+        );
+    }
+}
+
+private void copyUnits(
+    imported!"dmd.expression".StringExp literal,
+    ubyte[] destination,
+) {
+    import core.stdc.string: memcpy;
+
+    memcpy(destination.ptr, literal.peekData.ptr, destination.length);
+}
+
+private const(void)* stringPointer(
+    NativeData* nativeData,
+    imported!"dmd.expression".StringExp literal,
+) {
+    return nativeData is null
+        ? terminatedCopy(literal).ptr : nativeData.stringData(literal);
+}
+
+// A literal is followed by one zero code unit in memory, so that it converts
+// to a C string. The frontend does not keep one in a literal that it made by
+// folding, so the code units are copied to storage that has it.
+private ubyte[] terminatedCopy(imported!"dmd.expression".StringExp literal) {
+    // `auto`: the copy is written, so it cannot be `const`.
+    auto bytes = new ubyte[(literal.len + 1) * literal.sz];
+    copyUnits(literal, bytes[0 .. literal.len * literal.sz]);
+    return bytes;
 }
 
 private void storeValue(
@@ -1100,12 +1195,12 @@ private void storeValue(
             assert(literal.len * elementSize == facts.size);
             memcpy(place, literal.peekData.ptr, facts.size);
         } else if (type.ty == Tpointer) {
-            *cast(const(void)**) place = literal.peekData.ptr;
+            *cast(const(void)**) place = stringPointer(nativeData, literal);
         } else {
             assert(type.ty == Tarray);
             storeIntegral(bytes + arrayLengthOffset, literal.len, size_t.sizeof);
             *cast(const(void)**) (bytes + arrayPointerOffset) =
-                literal.peekData.ptr;
+                stringPointer(nativeData, literal);
         }
         return;
     }
@@ -1156,14 +1251,9 @@ private void storeValue(
                 continue;
             if (field.offset + field.type.size > writtenEnd)
                 writtenEnd = field.offset + field.type.size;
-            if (auto bitfield = field.isBitFieldDeclaration) {
-                const fieldBytes = field.type.size;
-                auto bits = loadIntegral(bytes + field.offset, fieldBytes, false);
-                const mask = ulong.max >> (64 - bitfield.fieldWidth);
-                const shift = bitfield.bitOffset;
-                bits = (bits & ~(mask << shift))
-                    | ((element.toInteger & mask) << shift);
-                storeIntegral(bytes + field.offset, bits, fieldBytes);
+            if (field.isBitFieldDeclaration !is null) {
+                const access = bitfieldAccess(field);
+                access.store(bytes + access.offset, element.toInteger);
             } else
                 storeValue(field.type, element, bytes + field.offset,
                     symbolAddress, nativeData);
@@ -1281,4 +1371,51 @@ private void storeValue(
                 value.toString, "` of type `", type.toString, "`: the ",
                 "cases above handle every constant dmd folds to"));
     }
+}
+
+// The storage unit of a bit field, which both runtime backends read and
+// write as the compiled D of dmd does: a unit as wide as the field's
+// declared type. The bits of a field start at bit `offset * 8 + bitOffset`
+// of the struct. dmd numbers `bitOffset` from `offset` across unit
+// boundaries, so a `ubyte` field after a `ushort` one can have a
+// `bitOffset` of 9: whole units of the declared type move into `offset`
+// and what is left is the shift inside the unit.
+//
+// A field that follows narrower fields can be as wide as its type and start
+// on a unit boundary of the struct, not of `offset` (`ubyte a : 8;
+// ushort b : 16; uint c : 32;` puts `c` at offset 2 and bit offset 16).
+// dmd's own glue stops there. Its layout puts the field in the unit of its
+// type that is aligned from the start of the struct, so that is the unit.
+// The layout starts a new field, at its own `offset`, for each bit field
+// that would cross such a unit, so one of the two units always holds the
+// field.
+public BitfieldAccess bitfieldAccess(imported!"dmd.declaration".VarDeclaration field) {
+    auto bitfield = field.isBitFieldDeclaration;
+    if (bitfield is null)
+        assert(0, "a bit field access needs a bit field declaration");
+
+    const facts = TypeFacts.of(field.type);
+    const unitBits = facts.size * 8;
+    const units = bitfield.bitOffset / unitBits;
+    const shift = bitfield.bitOffset - units * unitBits;
+    if (shift + bitfield.fieldWidth <= unitBits)
+        return BitfieldAccess(
+            field.offset + units * facts.size, cast(uint) facts.size,
+            cast(uint) shift, bitfield.fieldWidth, !facts.isUnsigned);
+
+    const first = field.offset * 8 + bitfield.bitOffset;
+    const alignedUnit = first / unitBits * facts.size;
+    const alignedShift = first - alignedUnit * 8;
+    if (alignedShift + bitfield.fieldWidth > unitBits)
+        assert(0, "a bit field does not fit a unit of its type");
+    return BitfieldAccess(
+        alignedUnit, cast(uint) facts.size, cast(uint) alignedShift,
+        bitfield.fieldWidth, !facts.isUnsigned);
+}
+
+// Where a field starts in its struct: a bit field starts at its storage
+// unit.
+public size_t fieldOffset(imported!"dmd.declaration".VarDeclaration field) {
+    return field.isBitFieldDeclaration is null
+        ? field.offset : bitfieldAccess(field).offset;
 }
