@@ -4,7 +4,6 @@ module snakebite.backends.interpreter.temporarylifetime;
 private:
 
 import dmd.declaration: VarDeclaration;
-import dmd.tokens: EXP;
 import dmd.expression: DeclarationExp, Expression, StructLiteralExp;
 import snakebite.backends.temporary: TemporaryPlan;
 import snakebite.backends.temporarystack: TemporaryStack;
@@ -38,32 +37,30 @@ public final class TemporaryLifetime {
         size_t mark;
         size_t stackMark;
         size_t floor;
-        // For a retaining expression: its declaration, and the slot that
-        // the bytes of its value temporaries come from.
-        Expression root;
-        size_t slot;
-        size_t used;
     }
 
     // The bytes that the temporaries of one declaration use, kept for the
-    // whole activation: a variable that the declaration initialises can
-    // point into them, and compiled D gives each such temporary one stack
-    // slot that every execution reuses. A declaration in a loop, or in a
+    // whole call: a variable that the declaration initialises can point
+    // into them, and compiled D gives each such temporary one stack slot
+    // that every execution reuses. A declaration in a loop, or in a
     // function called many times, therefore runs in constant memory.
     private struct Slot {
-        Expression declaration;
+        VarDeclaration variable;
         ubyte* base;
         size_t capacity;
     }
 
-    private enum noSlot = size_t.max;
-
-    // What a guest call gives back when it ends: the bytes of its slots,
-    // and the slot table of the call that made it.
-    public struct Activation {
-        private FrameStack.Mark storage;
-        private size_t slotBase;
+    // The declaration whose initialiser is running and whose temporaries
+    // go to a slot. `root` stays null while no such declaration runs.
+    private struct Retained {
+        const(void)* root;
+        VarDeclaration variable;
+        size_t slot;
+        size_t used;
+        size_t firstTemporary;
     }
+
+    private enum noSlot = size_t.max;
 
     private Temporary[] _temporaries;
     private TemporaryStack _stack;
@@ -76,11 +73,7 @@ public final class TemporaryLifetime {
     private Slot[] _slots;
     private size_t _slotCount;
     private size_t _slotBase;
-    // Whether the running outer expression of this call takes its
-    // temporaries from a slot. No other outer expression can begin or end
-    // while this is set, except one in a callee, which `withNestedCall`
-    // hides.
-    private bool _retaining;
+    private Retained _retained;
 
     public this(Destroy destroy) {
         _frames = FrameStack(defaultFrameCapacity);
@@ -91,43 +84,53 @@ public final class TemporaryLifetime {
         _destroy = destroy;
     }
 
-    public void withNestedCall(scope Action action) {
+    // A callee with a variable that can keep temporaries (`slots`) gets
+    // slots of its own.
+    public void withNestedCall(in bool slots, scope Action action) {
+        if (slots) {
+            const activation = enterActivation;
+            nestedCall(action);
+        } else
+            nestedCall(action);
+    }
+
+    pragma(inline, true)
+    private void nestedCall(scope Action action) {
         const state = _expressions.suspendCall;
-        const retaining = _retaining;
-        _retaining = false;
-        scope (exit) {
-            _expressions.resumeCall(state);
-            _retaining = retaining;
-        }
+        scope (exit) _expressions.resumeCall(state);
         action();
     }
 
-    // The temporaries of a declaration live in the slot of that
-    // declaration until the activation ends or the declaration runs again:
-    // a variable that it initialises can point into them. Their destructors
-    // still run at the end of the expression.
     public void withExpression(
         FullExpressionKind kind,
         Expression root,
         scope Action action,
     ) {
         _expressions.run(kind, cast(const(void)*) root,
-            { beginExpression(root); }, action, { endExpression; });
+            { beginExpression; }, action, { endExpression; });
     }
 
-    // Starts the slots of one guest call. `leaveActivation` gives back
-    // every slot made since, whichever way the call ends.
+    // The slots of one guest call: given back, with their bytes, when the
+    // call ends by any path.
+    public struct Activation {
+        private TemporaryLifetime _lifetime;
+        private FrameStack.Mark _storage;
+        private size_t _slotBase;
+
+        @disable this(this);
+
+        ~this() {
+            _lifetime._slotCount = _lifetime._slotBase;
+            _lifetime._slotBase = _slotBase;
+            if (_lifetime._frames.mark > _storage)
+                _lifetime._frames.release(_storage);
+        }
+    }
+
     public Activation enterActivation() {
-        const activation = Activation(_frames.mark, _slotBase);
+        const slotBase = _slotBase;
         _slotBase = _slotCount;
-        return activation;
-    }
-
-    public void leaveActivation(in Activation activation) {
-        _slotCount = _slotBase;
-        _slotBase = activation.slotBase;
-        if (_frames.mark > activation.storage)
-            _frames.release(activation.storage);
+        return Activation(this, _frames.mark, slotBase);
     }
 
     // Gives a nested evaluation its own temporary pairing and cleanup
@@ -150,6 +153,40 @@ public final class TemporaryLifetime {
             _temporaries ~= Temporary(null, _frames.mark, base, destructor);
             _stack.registerTemporary(base, payload);
         }, evaluate, { _stack.arm(base); });
+    }
+
+    // The initialisation of a variable that can point into the temporaries
+    // of its own initialiser: they stay in its slot until the call ends,
+    // and their destructors still run at the end of the expression.
+    public void initializeRetaining(
+        VarDeclaration variable,
+        DeclarationExp declaration,
+        ubyte* base,
+        scope Action evaluate,
+    ) {
+        if (!isOfRoot(declaration))
+            return initialize(variable, declaration, base, evaluate);
+
+        auto outer = _retained;
+        _retained = Retained(
+            _expressions.root, variable, noSlot, 0, _temporaries.length);
+        scope (exit) _retained = outer;
+        initialize(variable, declaration, base, evaluate);
+    }
+
+    // A declaration in a condition, `if (auto s = f())`, is the first
+    // operand of a comma expression that is the root; another declaration
+    // nested in an initialiser is not.
+    private bool isOfRoot(DeclarationExp declaration) {
+        static bool within(Expression expression, DeclarationExp wanted) {
+            if (expression is wanted)
+                return true;
+            auto comma = expression.isCommaExp;
+            return comma !is null
+                && (within(comma.e1, wanted) || within(comma.e2, wanted));
+        }
+
+        return within(cast(Expression) _expressions.root, declaration);
     }
 
     // Reserves a value-returning temporary. Its address remains valid until
@@ -193,7 +230,7 @@ public final class TemporaryLifetime {
         in size_t size,
         in uint alignment,
     ) {
-        if (_retaining)
+        if (_retained.root !is null && _retained.root is _expressions.root)
             return reserveRetained(node, size, alignment);
 
         const mark = _frames.mark;
@@ -219,46 +256,45 @@ public final class TemporaryLifetime {
     private ubyte* reserveRetained(
         StructLiteralExp node, in size_t size, in uint alignment,
     ) {
-        auto base = reserveInSlot(size, alignment);
-        _temporaries ~= Temporary(node, _frames.mark, base, null);
-        return base;
-    }
-
-    private ubyte* reserveInSlot(in size_t size, in uint alignment) {
-        auto state = &_expressionStates[_expressionDepth - 1];
-        if (state.slot == noSlot) {
-            state.slot = slotOf(state.root);
-            state.used = 0;
+        if (_retained.slot == noSlot) {
+            _retained.slot = slotOf(_retained.variable);
+            _retained.used = 0;
         }
 
-        auto slot = &_slots[state.slot];
-        size_t start = alignedUp(cast(size_t) slot.base + state.used, alignment);
+        auto slot = &_slots[_retained.slot];
+        size_t start =
+            alignedUp(cast(size_t) slot.base + _retained.used, alignment);
         if (slot.base is null
                 || start + size > cast(size_t) slot.base + slot.capacity) {
             import std.algorithm.comparison: max;
 
             // Everything reserved so far in this execution stays valid in
-            // the old bytes, which stay until the activation ends. The next
+            // the old bytes, which stay until the call ends. The next
             // execution fits in the new bytes.
             const capacity = max(256, 2 * slot.capacity,
-                state.used + size + alignment);
+                _retained.used + size + alignment);
             slot.base = _frames.reserve(capacity, 16);
             slot.capacity = capacity;
-            state.used = 0;
+            _retained.used = 0;
             start = alignedUp(cast(size_t) slot.base, alignment);
+            // The release at the end of the expression must not give the
+            // new bytes back.
+            foreach (ref temporary; _temporaries[_retained.firstTemporary .. $])
+                temporary.mark = _frames.mark;
         }
-        state.used = start + size - cast(size_t) slot.base;
+        _retained.used = start + size - cast(size_t) slot.base;
+        _temporaries ~= Temporary(node, _frames.mark, cast(ubyte*) start, null);
         return cast(ubyte*) start;
     }
 
-    private size_t slotOf(Expression declaration) {
+    private size_t slotOf(VarDeclaration variable) {
         foreach (i; _slotBase .. _slotCount)
-            if (_slots[i].declaration is declaration)
+            if (_slots[i].variable is variable)
                 return i;
 
         if (_slotCount == _slots.length)
             _slots.length = _slots.length ? 2 * _slots.length : 8;
-        _slots[_slotCount] = Slot(declaration, null, 0);
+        _slots[_slotCount] = Slot(variable, null, 0);
         return _slotCount++;
     }
 
@@ -267,7 +303,7 @@ public final class TemporaryLifetime {
         return (address + mask) & ~mask;
     }
 
-    private void beginExpression(Expression root) {
+    private void beginExpression() {
         if (_expressionDepth == _expressionStates.length)
             _expressionStates ~= ExpressionState.init;
 
@@ -276,34 +312,20 @@ public final class TemporaryLifetime {
         state.stackMark = _stack.mark;
         state.floor = _floor;
         _floor = _temporaries.length;
-        if (root.op == EXP.declaration) {
-            _retaining = true;
-            state.root = root;
-            state.slot = noSlot;
-        }
     }
 
     private void endExpression() {
         assert(_expressionDepth != 0);
-        // Copied out: a destructor that runs while the expression ends can
-        // begin an expression of its own and move the state array.
-        const state = &_expressionStates[--_expressionDepth];
-        const mark = state.mark;
-        const stackMark = state.stackMark;
-        const floor = state.floor;
-        const retains = _retaining;
-        _retaining = false;
-        releaseSince(mark, stackMark, retains);
-        _floor = floor;
+        const state = _expressionStates[--_expressionDepth];
+        releaseSince(state.mark, state.stackMark);
+        _floor = state.floor;
     }
 
-    private void releaseSince(
-        in size_t mark, in size_t stackMark, in bool retainStorage = false,
-    ) {
+    private void releaseSince(in size_t mark, in size_t stackMark) {
         // The storage must be released even if a DMD-provided destructor
         // expression throws while unwinding this full expression.
         scope(exit) {
-            if (_temporaries.length > mark && !retainStorage)
+            if (_temporaries.length > mark)
                 _frames.release(_temporaries[mark].mark);
             _temporaries = _temporaries[0 .. mark];
         }

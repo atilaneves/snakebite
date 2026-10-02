@@ -1203,10 +1203,7 @@ static foreach (backend; Matrix!(
 }
 
 // Each activation of a recursive function has a slot of its own.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "CTFE has no stack slot: each temporary is a new value"),
-)) {
+static foreach (backend; Matrix!()) {
     @("temporaries.declarationInRecursionHasASlotPerActivation." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1225,6 +1222,44 @@ static foreach (backend; Matrix!(
                 foreach (i; 0 .. seen.length)
                     foreach (j; i + 1 .. seen.length)
                         assert(seen[i] !is seen[j]);
+            }
+        });
+    }
+}
+
+// A variable declared in a condition can point into a temporary of its
+// initialiser, as a variable declared in a statement can.
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.sliceDeclaredInIfCondition." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[4] values; }
+            S make(int base) { S s; s.values[] = base; return s; }
+            void main() {
+                if (auto slice = make(6).values[])
+                    assert(slice[0] == 6 && slice[3] == 6);
+                else
+                    assert(false);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.sliceDeclaredInWhileCondition." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[4] values; }
+            S make(int base) { S s; s.values[] = base; return s; }
+            void main() {
+                int count;
+                while (auto slice = count < 2 ? make(7 + count).values[] : null) {
+                    assert(slice[0] == 7 + count && slice[3] == 7 + count);
+                    count++;
+                }
+                assert(count == 2);
             }
         });
     }

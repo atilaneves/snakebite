@@ -152,6 +152,7 @@ import snakebite.backends.switchplan: switchPlan, selectCase,
     gotoCaseTarget, gotoDefaultTarget;
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
 import snakebite.backends.fullexpression: FullExpressionKind;
+import snakebite.backends.temporary: canRetainTemporaries;
 
 // The state one program's evaluators share, whichever thread they run
 // on (ADR-0006). Every table here is filled once per key - under its
@@ -844,7 +845,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 bindHostArguments(
                     declaredArguments, frame.base, layout, shape);
                 auto arguments = argumentSlots(frame.base, layout);
-                _temporaries.withNestedCall({
+                _temporaries.withNestedCall(layout.retainsTemporaries, {
                     executeRaw(
                         function_, returnPlace, frame.base, layout,
                         null, arguments.values.ptr,
@@ -1088,7 +1089,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             scope void* place,
             scope const(void*)[] arguments,
         ) {
-            _temporaries.withNestedCall({
+            _temporaries.withNestedCall(layout.retainsTemporaries, {
                 executeRaw(
                     function_, place, frameBase, layout, callSite,
                     arguments.ptr, arguments.length,
@@ -1425,7 +1426,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         private ControlFlowState _controlFlow;
         private SwitchStatement _switchStatement;
         private void[][] _activationAllocations;
-        private TemporaryLifetime.Activation _activation;
 
         @disable this();
         @disable this(this);
@@ -1444,7 +1444,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _switchStatement = evaluator._switchStatement;
             _activationAllocations = evaluator._activationAllocations;
             evaluator._activationAllocations = null;
-            _activation = evaluator._temporaries.enterActivation;
         }
 
         ~this() {
@@ -1459,7 +1458,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _evaluator._controlFlow = _controlFlow;
             _evaluator._switchStatement = _switchStatement;
             _evaluator._activationAllocations = _activationAllocations;
-            _evaluator._temporaries.leaveActivation(_activation);
         }
     }
 
@@ -2662,17 +2660,24 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // The raw slot for a declaration, before indirecting through a `ref`
     // variable. Declarations need this address to initialize a reference
     // slot itself; reads and writes use `slotOf` below and indirect it.
-    private ubyte* storageOf(VarDeclaration variable) {
+    private ubyte* storageOf(VarDeclaration variable, bool* retains = null) {
         auto owner = outerFunctionOf(variable);
         if (owner !is null && functionNeedsClosure(owner)) {
             auto context = contextOf(owner);
             const closure = closureLayoutOf(owner);
-            if (closure.hasSlot(variable))
+            if (closure.hasSlot(variable)) {
+                if (retains !is null)
+                    *retains = _layout.retainsTemporaries
+                        && canRetainTemporaries(variable);
                 return context + closure.slotOf(variable).offset;
+            }
         }
 
-        if (auto slot = _layout.slotOf(variable))
+        if (auto slot = _layout.slotOf(variable)) {
+            if (retains !is null)
+                *retains = slot.retainsTemporaries;
             return _frameBase + slot.offset;
+        }
 
         if (owner is null)
             assert(0, "a local variable has an enclosing function");
@@ -2793,17 +2798,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         assert(expInitializer !is null,
             "a runtime variable initializer is an expression initializer");
 
-        auto slot = storageOf(variable);
+        bool retains;
+        auto slot = storageOf(variable, &retains);
 
         if (initializerConstructsThroughSlice(expInitializer, variable)) {
-            _temporaries.initialize(variable, expression, slot, {
+            initialize(variable, expression, slot, retains, {
                 runForEffect(expInitializer.exp);
             });
             return;
         }
 
         auto value = initializerValueOf(expInitializer);
-        _temporaries.initialize(variable, expression, slot, {
+        initialize(variable, expression, slot, retains, {
             if (isRefStorage(variable)) {
                 import snakebite.nativelayout: storeIntegral;
 
@@ -2812,6 +2818,20 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             } else
                 evaluate(value, variable.type, slot);
         });
+    }
+
+    extern(D) private void initialize(
+        VarDeclaration variable,
+        DeclarationExp expression,
+        ubyte* slot,
+        in bool retains,
+        scope void delegate() evaluate,
+    ) {
+        if (retains)
+            _temporaries.initializeRetaining(
+                variable, expression, slot, evaluate);
+        else
+            _temporaries.initialize(variable, expression, slot, evaluate);
     }
 
     protected override void visitUnloweredConstruct(ConstructExp expression) {
@@ -2854,8 +2874,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     valueFacts, scratch.base);
                 const result = loadIntegral(
                     scratch.base, valueFacts.size, !valueFacts.isUnsigned);
-                storeBitfieldAt(field, target, result);
-                storeIntegral(_place, bitfieldValueAtPlace(field, target),
+                auto unit = bitfieldUnitAt(field, target);
+                storeBitfieldAt(field, unit, result);
+                storeIntegral(_place, bitfieldValueAtPlace(field, unit),
                     _facts.size);
                 return _place;
             }
@@ -3206,7 +3227,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             auto field = expression.var.isVarDeclaration;
             assert(field !is null, "a field address names a variable");
             return cast(ubyte*) evaluator.fieldBaseAddress(expression.e1)
-                + evaluator.fieldOffsetOf(field);
+                + field.offset;
         }
 
         // The generic fallback for any expression `StorageResolver.resolve`
@@ -3551,7 +3572,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (field !is null && field.isBitFieldDeclaration !is null) {
                 const stepFacts = factsOf(expression.e2.type);
                 const step = asIntegral(expression.e2, stepFacts);
-                const fieldValue = bitfieldValueAtPlace(field, target);
+                auto unit = bitfieldUnitAt(field, target);
+                const fieldValue = bitfieldValueAtPlace(field, unit);
                 const current = signExtend
                     ? fieldValue
                     : fieldValue & (ulong.max >> (64 - 8 * targetFacts.size));
@@ -3560,8 +3582,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 else
                     const result = combine!op(
                         current, step, arithmeticFacts, stepFacts, expression);
-                storeBitfieldAt(field, target, result);
-                storeIntegral(_place, bitfieldValueAtPlace(field, target),
+                storeBitfieldAt(field, unit, result);
+                storeIntegral(_place, bitfieldValueAtPlace(field, unit),
                     _facts.size);
                 return;
             }
@@ -3730,7 +3752,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     ? current + step : current - step;
                 storeIntegral(_place, current, _facts.size);
                 storeBitfieldAt(field,
-                    cast(ubyte*) base + fieldOffsetOf(field), changed);
+                    cast(ubyte*) base + bitfieldPlanOf(field).offset, changed);
                 return;
             }
         }
@@ -4682,11 +4704,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return plan;
     }
 
-    // Where a field starts in its struct: a bit field starts at its
-    // storage unit.
-    extern(D) private size_t fieldOffsetOf(VarDeclaration field) {
-        return field.isBitFieldDeclaration is null
-            ? field.offset : bitfieldPlanOf(field).offset;
+    // `address` is where the frontend places the bit field, which is not
+    // always where its storage unit starts.
+    extern(D) private ubyte* bitfieldUnitAt(
+        VarDeclaration field, void* address,
+    ) {
+        return cast(ubyte*) address - field.offset
+            + bitfieldPlanOf(field).offset;
     }
 
     override void visit(TypeidExp expression) {
@@ -4878,7 +4902,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             frame.base + layout.hiddenThis.parameter.offset,
             cast(size_t) thisPointer, size_t.sizeof,
         );
-        _temporaries.withNestedCall({
+        _temporaries.withNestedCall(layout.retainsTemporaries, {
             executeRaw(inv, null, frame.base, layout, null, null, 0);
         });
     }
