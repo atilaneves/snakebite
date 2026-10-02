@@ -248,6 +248,11 @@ public int run(
 ) {
     import snakebite.backends.guestmodules: GuestModules;
 
+    // A C `main` starts no druntime: no module constructor or destructor
+    // of a D module runs.
+    if (program.hasCEntryPoint)
+        return runMain(backend, program, hostArguments);
+
     auto modules = GuestModules.start(
         backend, program, GuestModules.Tests.no, GuestModules.Ends.program);
     if (modules.failed)
