@@ -1433,5 +1433,47 @@ def test_check_flag_applies_to_a_dependency_template(
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+# A dependency that does not build is a failure with the compiler's message,
+# whatever dmd-only flags the root recipe has.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_dependency_that_fails_to_build_is_reported(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    dependency = tmp_path / "dependency"
+    (app / "source").mkdir(parents=True)
+    (dependency / "source").mkdir(parents=True)
+    (app / "dub.sdl").write_text(
+        'name "app"\ntargetType "library"\ndflags "-check=in=off"\n'
+        'dependency "dep" path="../dependency"\n',
+        encoding="utf-8",
+    )
+    (app / "source" / "app.d").write_text(
+        "module app;\nimport dep;\nunittest {}\n", encoding="utf-8",
+    )
+    (dependency / "dub.sdl").write_text(
+        'name "dep"\ntargetType "library"\n', encoding="utf-8",
+    )
+    (dependency / "source" / "dep.d").write_text(
+        'module dep;\nstatic assert(false, "dependency does not build");\n',
+        encoding="utf-8",
+    )
+    command = (
+        ["dub", "test", f"--compiler={native_compiler()}"]
+        if backend == "native"
+        else [sb_path(), f"--backend={backend}", "--no-optimise-image",
+              str(app)]
+    )
+
+    result = subprocess.run(
+        command, cwd=app, capture_output=True, check=False, text=True,
+        timeout=TIMEOUT,
+    )
+
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    assert "dependency does not build" in output, output
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
