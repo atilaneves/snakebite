@@ -35,7 +35,9 @@ public Nullable!FaultCheck accessFaultOf(
     import dmd.typesem: toBasetype;
 
     alias Check = Nullable!FaultCheck;
-    if (namesMemoryOf(addressOnly, expression))
+    ulong offset;
+    if (namesMemoryOf(addressOnly, expression, offset)
+            && offset < GuestFault.firstPage)
         return Check.init;
 
     const pointer = Check(FaultCheck(GuestFault.Kind.nullPointer,
@@ -68,6 +70,29 @@ public Nullable!FaultCheck accessFaultOf(
         return this_.type.toBasetype.ty == Tstruct ? pointer : Check.init;
 
     return Check.init;
+}
+
+// How many bytes the pointer `operand` of a dereference is above its base,
+// when it is pointer arithmetic with a constant offset of at least a page:
+// `*(p + 2000)`. The base is what a null dereference is checked on, and the
+// sum of a null base and such an offset is not in the first page. It is
+// zero for a smaller or a run-time offset: the sum is in the first page for
+// a null base, or the base is not known without evaluating it twice.
+public ulong baseOffsetOf(imported!"dmd.expression".Expression operand) {
+    import dmd.astenums: Tpointer;
+    import dmd.typesem: toBasetype;
+
+    // dmd has already scaled the offset of a pointer sum to bytes.
+    auto sum = operand.isAddExp;
+    if (sum is null || sum.e1.type.toBasetype.ty != Tpointer)
+        return 0;
+
+    auto offset = sum.e2.isIntegerExp;
+    if (offset is null)
+        return 0;
+
+    const bytes = offset.getInteger;
+    return bytes < GuestFault.firstPage ? 0 : bytes;
 }
 
 // A fill or a copy writes or reads every element of a slice that has any,
@@ -244,16 +269,37 @@ public FaultCheck typeidFaultOf(
 
 // Whether `target` names memory that `addressOnly` only addresses: the node
 // itself, or what a struct field or a static array element in it stands in.
+// `offset` is then how far above the start of `target` the address can be.
+// An address that is formed more than a page above a null base is not in the
+// first page: the access through it does not see the base, so the formation
+// is where the base is checked.
 private bool namesMemoryOf(
     imported!"dmd.expression".Expression addressOnly,
     imported!"dmd.expression".Expression target,
+    out ulong offset,
 ) {
     import dmd.astenums: Tsarray, Tstruct;
-    import dmd.typesem: isIntegral, toBasetype;
+    import dmd.typesem: isIntegral, size, toBasetype;
 
+    ulong distance;
     for (auto node = addressOnly; node !is null;) {
-        if (node is target)
+        if (auto field = node.isDotVarExp) {
+            auto variable = field.var.isVarDeclaration;
+            distance += variable is null ? 0 : variable.offset;
+        } else if (auto element = node.isIndexExp) {
+            const stride = element.type.size;
+            auto index = element.e2.isIntegerExp;
+            if (element.e1.type.toBasetype.ty == Tsarray)
+                distance += index is null
+                    ? element.e1.type.size : index.getInteger * stride;
+            else if (index !is null)
+                distance += index.getInteger * stride;
+        }
+
+        if (node is target) {
+            offset = distance;
             return true;
+        }
 
         if (auto field = node.isDotVarExp)
             node = field.e1.type.toBasetype.ty == Tstruct ? field.e1 : null;
@@ -265,14 +311,28 @@ private bool namesMemoryOf(
         else if (auto cast_ = node.isCastExp)
             node = isIntegral(cast_.e1.type) && isIntegral(cast_.type)
                 ? cast_.e1 : null;
-        else if (auto condition = node.isCondExp)
-            return namesMemoryOf(condition.e1, target)
-                || namesMemoryOf(condition.e2, target);
-        else
+        else if (auto condition = node.isCondExp) {
+            ulong inner;
+            if (namesMemoryOf(condition.e1, target, inner)
+                    || namesMemoryOf(condition.e2, target, inner)) {
+                offset = distance + inner;
+                return true;
+            }
+
+            return false;
+        } else
             node = null;
     }
 
     return false;
+}
+
+private bool namesMemoryOf(
+    imported!"dmd.expression".Expression addressOnly,
+    imported!"dmd.expression".Expression target,
+) {
+    ulong offset;
+    return namesMemoryOf(addressOnly, target, offset);
 }
 
 private Nullable!FaultCheck accessFaultOfVariable(

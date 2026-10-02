@@ -665,7 +665,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         pairPlanOf;
     import snakebite.backends.guestfault: GuestFault;
     import snakebite.backends.guestfaultplan:
-        FaultCheck, accessFaultOf, addressCanBeNull, callFaultOf,
+        FaultCheck, accessFaultOf, addressCanBeNull, baseOffsetOf,
+        callFaultOf,
         contextFaultOf, delegateFaultOf, divisionFaultOf, nativeCallCheckOf,
         refResultFaultOf, sliceElementsFaultOf, throwFaultOf, typeidFaultOf;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
@@ -7490,6 +7491,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         public size_t storagePointer(PtrExp expression) {
             const result = compiler.reserveTemp(compiler.pointerFacts);
             compiler.evalInto(expression.e1, result, size_t.sizeof);
+            const baseOffset = baseOffsetOf(expression.e1);
+            if (baseOffset != 0) {
+                // A pointer sum as large as the offset can have a null base.
+                const base = compiler.reserveTemp(compiler.pointerFacts);
+                const negated = compiler.reserveTemp(compiler.pointerFacts);
+                compiler.emit(&opCopy, base, result, size_t.sizeof);
+                compiler.emit(&opConstant, negated,
+                    compiler.addConstant(-cast(long) baseOffset),
+                    size_t.sizeof);
+                compiler.emit(&opAdd, base, negated, size_t.sizeof);
+                compiler.emitAccessCheck(expression, base);
+            }
             compiler.emitAccessCheck(expression, result);
             return result;
         }

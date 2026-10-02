@@ -1165,6 +1165,96 @@ static foreach (backend; Matrix!(
 }
 
 
+// A field after the first page of a null pointer is a null dereference too,
+// also through an address that is made first.
+static foreach (backend; FaultBackends) {
+    @("fault.nullBeyondTheFirstPageThroughARefArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        GuestFault.Kind.nullPointer.shouldBeFaultOf!(backend, q{
+struct S { ubyte[8000] pad; int last; int[4] tail; }
+int get(ref int value) { return value; }
+void main() {
+    S* p;
+    int x = get(p.last);
+}
+})(6);
+    }
+}
+
+
+static foreach (backend; FaultBackends) {
+    @("fault.nullBeyondTheFirstPageThroughAnAddress." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        GuestFault.Kind.nullPointer.shouldBeFaultOf!(backend, q{
+struct S { ubyte[8000] pad; int last; int[4] tail; }
+int get(ref int value) { return value; }
+void main() {
+    S* p;
+    int* q = &p.last; int x = *q;
+}
+})(6);
+    }
+}
+
+
+static foreach (backend; FaultBackends) {
+    @("fault.nullBeyondTheFirstPageThroughForeach." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        GuestFault.Kind.nullPointer.shouldBeFaultOf!(backend, q{
+struct S { ubyte[8000] pad; int last; int[4] tail; }
+int get(ref int value) { return value; }
+void main() {
+    S* p;
+    int x; foreach (e; p.tail) x += e;
+}
+})(6);
+    }
+}
+
+
+static foreach (backend; FaultBackends) {
+    @("fault.nullBeyondTheFirstPageThroughPointerArithmetic." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        GuestFault.Kind.nullPointer.shouldBeFaultOf!(backend, q{
+struct S { ubyte[8000] pad; int last; int[4] tail; }
+int get(ref int value) { return value; }
+void main() {
+    S* p;
+    int x = *(cast(int*) p + 2000);
+}
+})(6);
+    }
+}
+
+
+// The same accesses through a pointer that is not null are no fault.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot cast a pointer"),
+)) {
+    @("fault.beyondTheFirstPageOfAPointerThatIsNotNull." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        struct S { ubyte[8000] pad; int last; int[4] tail; }
+        int get(ref int value) { return value; }
+        int main() {
+            auto p = new S;
+            p.last = 3;
+            p.tail[1] = 4;
+            int* q = &p.last;
+            int x; foreach (e; p.tail) x += e;
+            return get(p.last) + *q + x + *(cast(int*) p + 2000) == 13
+                ? 0 : 1;
+        }
+        });
+    }
+}
+
+
 // `x ^^ n` of integers divides by zero for a base of zero and a negative
 // exponent.
 static foreach (backend; FaultBackends) {
