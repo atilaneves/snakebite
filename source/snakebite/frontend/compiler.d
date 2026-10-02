@@ -52,6 +52,7 @@ public imported!"dmd.dmodule".Module[] parseRootModules(
     in FrontendFlags flags,
     in string[string] sourceOverrides = null,
     in string rootDirectory = null,
+    in bool importedCFilesAreRoots = false,
 ) {
     return compiler.parseRootModules(
         filePaths,
@@ -59,6 +60,7 @@ public imported!"dmd.dmodule".Module[] parseRootModules(
         flags,
         sourceOverrides,
         rootDirectory,
+        importedCFilesAreRoots,
     );
 }
 
@@ -504,9 +506,11 @@ final class Compiler {
         import dmd.frontend: addImport, initDMD;
         import dmd.globals: global;
         import dmd.target: CPU, addDefaultVersionIdentifiers, target;
+        import snakebite.frontend.importc: preprocessCFile;
         import std.algorithm.iteration: each;
 
         initDMD;
+        global.preprocess = &preprocessCFile;
         target.cpu = CPU.baseline;
         target.setCPU;
         addDefaultVersionIdentifiers(global.params, target);
@@ -709,6 +713,7 @@ final class Compiler {
         in FrontendFlags flags,
         in string[string] sourceOverrides,
         in string rootDirectory,
+        in bool importedCFilesAreRoots,
     ) {
         return inside(() => parseRootModulesLocked(
             filePaths,
@@ -716,6 +721,7 @@ final class Compiler {
             flags,
             sourceOverrides,
             rootDirectory,
+            importedCFilesAreRoots,
         ));
     }
 
@@ -725,6 +731,7 @@ final class Compiler {
         in FrontendFlags flags,
         in string[string] sourceOverrides,
         in string rootDirectory,
+        in bool importedCFilesAreRoots,
     ) {
         import dmd.dmodule: Module;
         import dmd.frontend: addImport, dmdParseModule = parseModule;
@@ -766,19 +773,20 @@ final class Compiler {
             }
 
             const sourceOverride = filePath in sourceOverrides;
-            const source = sourceOverride is null
-                ? filePath.readText
-                : owned(*sourceOverride);
-            // DMD treats null as a request to reopen the filename, which
-            // is relative for __FILE__ and may not exist in the current directory.
-            auto result = dmdParseModule(
-                owned(dmdFileName(filePath, importPaths, rootDirectory)),
-                source is null ? "" : source,
-            );
+            auto result = sourceOverride is null && isCSourceFile(filePath)
+                ? parseCRoot(filePath)
+                : parseRootText(filePath, sourceOverride, importPaths, rootDirectory);
             if (result.diagnostics.hasErrors)
                 throw new Exception(diagnosticMessageWithLocations);
             modules ~= result.module_;
         }
+
+        // A C module the project's D code imports compiles with the project
+        // under `dmd -i`, though no source list names it. A build that
+        // lists its sources compiles only those.
+        if (importedCFilesAreRoots)
+            modules ~= discoverRootOwnedImports(
+                modules, importPathsUnder(importPaths, rootDirectory), true);
 
         // Drive the shared semantic phases over the whole root set the way dmd
         // drives `-unittest <files>`: each phase runs across all roots before
@@ -986,6 +994,26 @@ final class Compiler {
         return false;
     }
 
+    private auto parseRootText(
+        in string filePath,
+        in string* sourceOverride,
+        in string[] importPaths,
+        in string rootDirectory,
+    ) const {
+        import dmd.frontend: dmdParseModule = parseModule;
+        import std.file: readText;
+
+        const source = sourceOverride is null
+            ? filePath.readText
+            : owned(*sourceOverride);
+        // DMD treats null as a request to reopen the filename, which
+        // is relative for __FILE__ and may not exist in the current directory.
+        return dmdParseModule(
+            owned(dmdFileName(filePath, importPaths, rootDirectory)),
+            source is null ? "" : source,
+        );
+    }
+
     // The name dmd sees for a root file, and so its `__FILE__`. dub compiles
     // a package from its own directory with paths relative to it, so a file
     // under `rootDirectory` gets that same relative name.
@@ -1158,6 +1186,7 @@ public bool isUnderAnyPath(
 private imported!"dmd.dmodule".Module[] discoverRootOwnedImports(
     imported!"dmd.dmodule".Module[] modules,
     in string[] rootImportPaths,
+    in bool cModulesOnly = false,
 ) {
     import dmd.dmodule: Module;
     import dmd.frontend: dmdParseModule = parseModule;
@@ -1190,10 +1219,13 @@ private imported!"dmd.dmodule".Module[] discoverRootOwnedImports(
             // Named as dmd's own import lookup names it: the import path
             // as dmd was handed it, joined with the module's file, or with
             // the package's `package.d` when there is no such file.
-            const relativePaths = [
-                buildPath(segments) ~ ".d",
-                buildPath(segments ~ "package.d"),
-            ];
+            const relativePaths = cModulesOnly
+                ? [buildPath(segments) ~ ".c"]
+                : [
+                    buildPath(segments) ~ ".d",
+                    buildPath(segments ~ "package.d"),
+                    buildPath(segments) ~ ".c",
+                ];
             string matchedPath;
             foreach (rootPath; rootImportPaths) {
                 foreach (relativePath; relativePaths) {
@@ -1211,7 +1243,9 @@ private imported!"dmd.dmodule".Module[] discoverRootOwnedImports(
 
             auto loaded = alreadyParsedModule(segments);
             if (loaded is null) {
-                auto result = dmdParseModule(matchedPath, matchedPath.readText);
+                auto result = isCSourceFile(matchedPath)
+                    ? parseCRoot(matchedPath)
+                    : dmdParseModule(matchedPath, matchedPath.readText);
                 if (result.diagnostics.hasErrors)
                     continue; // the real `importAll` below reports this properly
                 loaded = result.module_;
@@ -1295,6 +1329,7 @@ private struct SavedFrontendFlags {
     Identifier[] versionIdentifiers;
     size_t debugIdentifierLength;
     size_t stringImportPathLength;
+    size_t preprocessorSwitchLength;
     FeatureState useDIP25;
     FeatureState useDIP1000;
     bool ehnogc;
@@ -1331,6 +1366,7 @@ private SavedFrontendFlags saveFrontendFlags() {
         global.versionids[].dup,
         global.debugids.length,
         global.filePath.length,
+        global.params.cppswitches.length,
         global.params.useDIP25,
         global.params.useDIP1000,
         global.params.ehnogc,
@@ -1369,6 +1405,8 @@ private void restoreFrontendFlags(ref const SavedFrontendFlags saved) {
         global.versionids.push(cast() identifier);
     global.debugids.setDim(saved.debugIdentifierLength);
     global.filePath.setDim(saved.stringImportPathLength);
+    global.params.cppswitches.setDim(saved.preprocessorSwitchLength);
+    preprocessorSwitches = preprocessorSwitches[0 .. saved.preprocessorSwitchLength];
     global.params.useDIP25 = saved.useDIP25;
     global.params.useDIP1000 = saved.useDIP1000;
     global.params.ehnogc = saved.ehnogc;
@@ -1441,6 +1479,8 @@ private void applyFrontendFlags(in FrontendFlags flags) {
             parsedParams.debugEnabled = true;
         else if (arg.startsWith("-debug="))
             DebugCondition.addGlobalIdent(arg["-debug=".length .. $]);
+        else if (arg.length > 2 && arg.startsWith("-P"))
+            addPreprocessorSwitch(arg["-P".length .. $]);
         else if (arg.length > 2 && arg.startsWith("-J="))
             addStringImport(arg["-J=".length .. $]);
         else if (arg.length > 2 && arg.startsWith("-J"))
@@ -1452,6 +1492,20 @@ private void applyFrontendFlags(in FrontendFlags flags) {
     global.compileEnv.previewIn = global.params.previewIn;
     global.compileEnv.transitionIn = global.params.v.vin;
     global.compileEnv.ddocOutput = global.params.ddoc.doOutput;
+}
+
+// dmd keeps the pointers of `global.params.cppswitches` for the whole run,
+// and the argument strings it was given are gone after the flags are
+// applied, so the copies live here. A leading `=` is dropped, as dmd does:
+// `-P=-DX` and `-P-DX` are the same.
+private __gshared string[] preprocessorSwitches;
+
+private void addPreprocessorSwitch(in char[] option) {
+    import dmd.globals: global;
+
+    const text = option.length != 0 && option[0] == '=' ? option[1 .. $] : option;
+    preprocessorSwitches ~= (text ~ '\0').idup;
+    global.params.cppswitches.push(preprocessorSwitches[$ - 1].ptr);
 }
 
 // What the project's compiler arguments select for run-time checks: the
@@ -1771,4 +1825,42 @@ CapturedStderr capturedStderr() @trusted nothrow @nogc {
     dup2(sinkFd, 2);
 
     return captured;
+}
+
+// Whether dmd parses `path` as C (ImportC): `.i` is C already preprocessed,
+// so only `.c` and `.h` need `Module.read`'s preprocessor run.
+private bool isCSourceFile(in string path) {
+    import std.path: extension;
+
+    const suffix = path.extension;
+    return suffix == ".c" || suffix == ".h";
+}
+
+// dmd preprocesses a C file when it reads it (`Module.read`), so the source
+// is not given here, and the file must exist under the name that dmd reads:
+// the absolute path, because the name `Compiler.dmdFileName` makes is
+// relative to a directory that is not the working directory.
+private auto parseCRoot(in string filePath) {
+    import dmd.frontend: dmdParseModule = parseModule;
+    import std.path: absolutePath, buildNormalizedPath;
+
+    return dmdParseModule(
+        owned(filePath.absolutePath.buildNormalizedPath), null);
+}
+
+private const(string)[] importPathsUnder(in string[] importPaths, in string directory) {
+    import std.algorithm.iteration: filter;
+    import std.algorithm.searching: startsWith;
+    import std.array: array;
+    import std.path: absolutePath, buildNormalizedPath, dirSeparator;
+
+    if (directory.length == 0)
+        return null;
+
+    const root = directory.absolutePath.buildNormalizedPath;
+    return importPaths.filter!((path) {
+        const normalized = path.absolutePath.buildNormalizedPath;
+        return normalized == root
+            || normalized.startsWith(root ~ dirSeparator);
+    }).array;
 }

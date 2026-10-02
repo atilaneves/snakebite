@@ -53,6 +53,31 @@ public struct CallSelection {
     // (ADR-0006); a decision is built once per function.
     private SharedTable!(FuncDeclaration, Decision) _decisions;
 
+    // Read without a lock, like `_decisions`; see `definitionOf`.
+    private SharedTable!(FuncDeclaration, FuncDeclaration) _definitions;
+
+    // Whether any declaration can have a definition to link to. Set once,
+    // from the program, before the first call.
+    public bool linksFunctions;
+
+    // The function that a call to `function_` runs. A declaration with no
+    // body is the definition that the linker finds for it (see
+    // `snakebite.frontend.dmd.linking`), and that is worked out once for
+    // each declaration, at its first call or when its call is compiled. A
+    // function with a body is its own definition, with no lookup.
+    public FuncDeclaration definitionOf(
+        FuncDeclaration function_,
+        scope FuncDeclaration delegate(FuncDeclaration) link,
+    ) {
+        if (!linksFunctions || function_.fbody !is null)
+            return function_;
+
+        if (auto cached = function_ in _definitions)
+            return *cached;
+
+        return *_definitions.insert(function_, link(function_));
+    }
+
     // `function_`'s full routing decision. The one call every hot path
     // wants: a single cache lookup carries both the route and, for
     // `builtin`, the wrapper to call - `usesGuestBody` below is the one
@@ -206,6 +231,12 @@ public struct CallSelection {
                 && (isGuest(function_) || !hasNativeSymbol))
             return Decision(Route.guest);
 
+        // The host compiler's druntime implements `va_copy` as an
+        // intrinsic, so the process has no symbol for it, but the frontend's
+        // druntime gives it a body.
+        if (isVaCopy(function_))
+            return Decision(Route.guest);
+
         // A root-owned body must run as guest even when its linker name
         // is in the host (notably _Dmain). A template instance can reuse
         // a native copy only when that copy is independent of the running
@@ -229,6 +260,14 @@ public struct CallSelection {
         const module_ = function_.getModule;
         return function_.ident.toString == "va_start"
             && function_.toParent.isTemplateInstance !is null
+            && module_ !is null && module_.md !is null
+            && module_.md.toString == "core.stdc.stdarg";
+    }
+
+    private static bool isVaCopy(FuncDeclaration function_) {
+        const module_ = function_.getModule;
+        return function_.ident.toString == "va_copy"
+            && function_.toParent.isTemplateInstance is null
             && module_ !is null && module_.md !is null
             && module_.md.toString == "core.stdc.stdarg";
     }

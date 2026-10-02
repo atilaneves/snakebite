@@ -328,6 +328,7 @@ private extern(C++) class Collector
         if (auto instance = function_.parent.isTemplateInstance) {
             if (instance.tempdecl !is null
                     && !_program.isRootOwned(instance.tempdecl)
+                    && !isImportCBuiltins(instance.tempdecl.getModule)
                     && !function_.needThis && !function_.isNested
                     && !hasFunctionLocalType(instance)) {
                 const name = instance.tempdecl.getModule.toPrettyChars.fromStringz.idup;
@@ -376,6 +377,15 @@ private extern(C++) class Collector
         expression.func.accept(this);
         super.visit(expression);
     }
+}
+
+
+// The module that dmd imports into every C file for the `__builtin_*`
+// functions. Its file is `__importc_builtins.di`, not `__builtins.d`, so no
+// `import` of it from another module finds it; its functions run from their
+// bodies.
+private bool isImportCBuiltins(imported!"dmd.dmodule".Module module_) {
+    return module_.ident.toString == "__builtins";
 }
 
 

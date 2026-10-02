@@ -468,6 +468,9 @@ public struct NativeData {
     import snakebite.tlsstorage: TlsDescriptor, TlsSlots;
 
     private bool delegate(Dsymbol) const _isRootOwned;
+    private VarDeclaration delegate(VarDeclaration) _linkedVariable;
+    // An `extern` variable's definition, found once for each variable.
+    private SharedTable!(VarDeclaration, VarDeclaration) _definitions;
     private SymbolAddress _symbolAddress;
     private ThreadLocalAddress _threadLocalAddress;
     private TypeInfo_Class delegate(ClassDeclaration) _classInfo;
@@ -498,12 +501,14 @@ public struct NativeData {
 
     public this(
         bool delegate(Dsymbol) const isRootOwned,
+        VarDeclaration delegate(VarDeclaration) linkedVariable,
         SymbolAddress symbolAddress,
         ThreadLocalAddress threadLocalAddress,
         TypeInfo_Class delegate(ClassDeclaration) classInfo,
         LoweringCall call,
     ) {
         _isRootOwned = isRootOwned;
+        _linkedVariable = linkedVariable;
         _symbolAddress = symbolAddress;
         _threadLocalAddress = threadLocalAddress;
         _classInfo = classInfo;
@@ -644,9 +649,10 @@ public struct NativeData {
     // otherwise the one copy every thread shares. Native storage when
     // the variable has it (`hasNativeStorage`); this program's own
     // otherwise.
-    public void[] storageOf(VarDeclaration variable) {
+    public void[] storageOf(VarDeclaration declaration) {
         import std.string: fromStringz;
 
+        auto variable = definitionOf(declaration);
         const facts = TypeFacts.of(variable.type);
         if (variable.isThreadlocal)
             return _tls.current.slotFor(tlsDescriptorOf(variable));
@@ -683,7 +689,8 @@ public struct NativeData {
     // into an `opTls*` instruction operand in place of a resolved
     // address (finding 1.3): a thread-local variable's address is never
     // a compile-time constant, the same way it never is in compiled D.
-    public const(TlsDescriptor)* tlsDescriptorOf(VarDeclaration variable) {
+    public const(TlsDescriptor)* tlsDescriptorOf(VarDeclaration declaration) {
+        auto variable = definitionOf(declaration);
         if (auto found = variable in _tlsDescriptors)
             return found;
 
@@ -713,6 +720,18 @@ public struct NativeData {
                 cast(const(void)*) variable, bytes.ptr, bytes.length));
         });
         return descriptor;
+    }
+
+    // The one variable that an `extern` declaration shares its storage
+    // with: its definition in a root module, when there is one.
+    private VarDeclaration definitionOf(VarDeclaration variable) {
+        if (!isExtern(variable))
+            return variable;
+
+        if (auto found = variable in _definitions)
+            return *found;
+
+        return *_definitions.insert(variable, _linkedVariable(variable));
     }
 
     // Whether `variable`'s storage is native rather than this program's
@@ -852,6 +871,33 @@ private imported!"dmd.expression".Expression initialExpression(
     return newInFrontend!defaultInitLiteral(type, loc);
 }
 
+// Whether `value`, through any casts, is the address of a symbol plus an
+// offset: the link-time constant that C allows as the initialiser of an
+// integer, `(unsigned long) &variable`.
+private bool isSymbolAddress(
+    imported!"dmd.expression".Expression value,
+    out imported!"dmd.declaration".Declaration symbol,
+    out ulong offset,
+) {
+    while (auto integerCast = value.isCastExp)
+        value = integerCast.e1;
+
+    if (auto offsetExpression = value.isSymOffExp) {
+        symbol = offsetExpression.var;
+        offset = offsetExpression.offset;
+        return true;
+    }
+
+    if (auto address = value.isAddrExp) {
+        if (auto variable = address.e1.isVarExp) {
+            symbol = variable.var;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 public void storeValue(
     imported!"dmd.mtype".Type type,
     imported!"dmd.expression".Expression value,
@@ -900,6 +946,15 @@ private void storeValue(
     }
 
     if (facts.isIntegral) {
+        imported!"dmd.declaration".Declaration symbol;
+        ulong offset;
+        if (isSymbolAddress(value, symbol, offset)) {
+            assert(symbolAddress !is null);
+            storeIntegral(place,
+                cast(ulong) symbolAddress(symbol) + offset, facts.size);
+            return;
+        }
+
         storeIntegral(place, value.toInteger, facts.size);
         return;
     }
@@ -951,6 +1006,19 @@ private void storeValue(
         return;
     }
 
+    // `&(struct S){1, 2}` at file scope: the C compound literal is a struct
+    // literal and has static storage, which dmd's static data glue (`todt`)
+    // gives a symbol of its own.
+    if (auto address = value.isAddrExp) {
+        if (auto literal = address.e1.isStructLiteralExp) {
+            auto pointee = literal.type;
+            auto storage = new void[pointee.size];
+            storeValue(pointee, literal, storage.ptr, symbolAddress, nativeData);
+            *cast(void**) place = storage.ptr;
+            return;
+        }
+    }
+
     if (auto literal = value.isFuncExp) {
         assert(symbolAddress !is null);
         if (type.ty == Tdelegate) {
@@ -998,12 +1066,18 @@ private void storeValue(
     }
 
     if (auto literal = value.isArrayLiteralExp) {
-        assert(type.ty == Tarray);
+        assert(type.ty == Tarray || type.ty == Tpointer);
         const elementSize = type.nextOf.size;
         auto data = new void[literal.elements.length * elementSize];
         foreach (i; 0 .. literal.elements.length)
             storeValue(type.nextOf, literal[i],
                 cast(ubyte*) data.ptr + i * elementSize, symbolAddress, nativeData);
+        // `int *p = (int[]){1, 2};` at file scope in C: the literal decays
+        // to a pointer to its own static storage.
+        if (type.ty == Tpointer) {
+            *cast(void**) place = data.ptr;
+            return;
+        }
         storeIntegral(bytes + arrayLengthOffset, literal.elements.length,
             size_t.sizeof);
         *cast(void**) (bytes + arrayPointerOffset) = data.ptr;

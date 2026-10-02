@@ -120,7 +120,7 @@ public ExecutionReport executeBackend(
     TestStartupReport startup;
     int status;
     // Snippet callers construct Programs without project startup metadata.
-    if (program.testStartupImage is null)
+    if (program.testStartupImage is null || program.hasCEntryPoint)
         status = run(backend, program, hostArguments);
     else {
         startup = runTestsAndMain(backend, program, hostArguments);

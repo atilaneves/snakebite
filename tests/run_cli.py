@@ -304,6 +304,260 @@ def test_fetch_failure_reports_dub_output(tmp_path: Path) -> None:
     ) in output(result)
 
 
+C_ROOT_SOURCE = """
+#include <string.h>
+struct Point { int x; int y; };
+struct Point origin = {1, 2};
+int numbers[3] = {4, 5, 6};
+int total(int x) {
+    int pair[2] = {x, 3};
+    return pair[0] + pair[1] + (int) strlen("ab");
+}
+"""
+
+
+# A C file is a root module of a dub project (`sourceFiles`): the C
+# preprocessor runs on it, and its initialisers reach the backend. The
+# native row is the same files built by dmd, whose own unittest run is the
+# expected result.
+@pytest.mark.parametrize("backend", ["native", "interpreter", "bytecode"])
+@pytest.mark.parametrize(
+    "total, expected_status", [(9, 0), (8, 1)], ids=["agrees", "disagrees"],
+)
+def test_c_root_module(
+    tmp_path: Path, backend: str, total: int, expected_status: int,
+) -> None:
+    write(
+        tmp_path / "app" / "dub.sdl",
+        dub_project_recipe("c-root") + 'sourceFiles "source/lib.c"\n',
+    )
+    write(tmp_path / "app" / "source" / "lib.c", C_ROOT_SOURCE)
+    write(
+        tmp_path / "app" / "source" / "main.d",
+        f"""
+        module main;
+        import lib;
+        unittest {{
+            assert(total(4) == {total});
+            assert(origin.y == 2);
+            assert(numbers[2] == 6);
+        }}
+        int main() {{ return 0; }}
+        """,
+    )
+
+    if backend == "native":
+        result = run_native(tmp_path / "app")
+    else:
+        result = run_sb(
+            f"--backend={backend}", "--no-optimise-image",
+            str(tmp_path / "app"), cwd=tmp_path,
+        )
+
+    assert (result.returncode != 0) == (expected_status != 0), output(result)
+
+
+def run_native(
+    directory: Path,
+    flags: list[str] | None = None,
+    sources: list[str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    program = directory / "native-program"
+    build = subprocess.run(
+        ["dmd", "-unittest", f"-of={program}", *(flags or []),
+         *(sources or ["source/main.d", "source/lib.c"])],
+        capture_output=True, check=False, text=True, cwd=directory,
+    )
+    assert build.returncode == 0, output(build)
+    return subprocess.run(
+        [str(program)], capture_output=True, check=False, text=True,
+        cwd=directory,
+    )
+
+
+def run_backend(
+    backend: str, directory: Path, cwd: Path, env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return run_sb(
+        f"--backend={backend}", "--no-optimise-image", str(directory),
+        cwd=cwd, env=env,
+    )
+
+
+# `-P` flags in `dflags` go to the C preprocessor, as `dmd -P` sends them:
+# a macro and an include directory are the usual configuration of a C
+# project.
+@pytest.mark.parametrize("backend", ["native", "interpreter", "bytecode"])
+@pytest.mark.parametrize(
+    "expected, expected_status", [(1242, 0), (1243, 1)],
+    ids=["agrees", "disagrees"],
+)
+def test_c_preprocessor_flags_from_dflags(
+    tmp_path: Path, backend: str, expected: int, expected_status: int,
+) -> None:
+    flags = ["-P-DVALUE=42", "-P-Iinc"]
+    app = tmp_path / "app"
+    write(
+        app / "dub.sdl",
+        dub_project_recipe("c-flags")
+        + 'sourceFiles "source/lib.c"\n'
+        + "".join(f'dflags "{flag}"\n' for flag in flags),
+    )
+    write(app / "source" / "local.h", "#define LOCAL 200\n")
+    write(app / "inc" / "outer.h", "#define OUTER 1000\n")
+    write(
+        app / "source" / "lib.c",
+        """
+        #include "local.h"
+        #include "outer.h"
+        #ifndef VALUE
+        #define VALUE 1
+        #endif
+        int value(void) { return VALUE + LOCAL + OUTER; }
+        """,
+    )
+    write(
+        app / "source" / "main.d",
+        f"""
+        module main;
+        import lib;
+        unittest {{ assert(value() == {expected}); }}
+        int main() {{ return 0; }}
+        """,
+    )
+
+    if backend == "native":
+        result = run_native(app, flags)
+    else:
+        result = run_backend(backend, app, tmp_path)
+
+    assert (result.returncode != 0) == (expected_status != 0), output(result)
+
+
+def write_unlisted_c_project(app: Path) -> None:
+    write(app / "dub.sdl", dub_project_recipe("c-unlisted"))
+    write(app / "source" / "lib.c", "int add(int a, int b) { return a + b; }\n")
+    write(
+        app / "source" / "main.d",
+        """
+        module main;
+        import lib;
+        unittest { assert(add(40, 2) == 42); }
+        int main() { return 0; }
+        """,
+    )
+
+
+# A dub build compiles the sources the recipe lists, and a C module that a D
+# module imports but the recipe does not list is not one of them: the link
+# fails, and a run must fail the same way, not succeed.
+@pytest.mark.parametrize("backend", ["native", "interpreter", "bytecode"])
+def test_imported_c_file_not_in_recipe_does_not_link(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    write_unlisted_c_project(app)
+
+    if backend == "native":
+        result = subprocess.run(
+            ["dub", "test", "-q", "--compiler=dmd"],
+            capture_output=True, check=False, text=True, cwd=app,
+        )
+        assert "undefined reference" in output(result)
+    else:
+        result = run_backend(backend, app, tmp_path)
+        assert "cannot resolve the symbol `add`" in output(result)
+
+    assert result.returncode != 0, output(result)
+
+
+# Without a recipe the build is `dmd -i`, which compiles the imported C
+# file with the program.
+@pytest.mark.parametrize("backend", ["native", "interpreter", "bytecode"])
+def test_imported_c_file_in_bare_directory_links(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    write(app / "lib.c", "int add(int a, int b) { return a + b; }\n")
+    write(
+        app / "main.d",
+        """
+        module main;
+        import lib;
+        unittest { assert(add(40, 2) == 42); }
+        int main() { return 0; }
+        """,
+    )
+
+    if backend == "native":
+        build = subprocess.run(
+            ["dmd", "-i", "-unittest", "-ofnative-program", "main.d"],
+            capture_output=True, check=False, text=True, cwd=app,
+        )
+        assert build.returncode == 0, output(build)
+        result = subprocess.run(
+            [str(app / "native-program")], capture_output=True, check=False,
+            text=True, cwd=app,
+        )
+    else:
+        result = run_backend(backend, app, tmp_path)
+
+    assert result.returncode == 0, output(result)
+
+
+# A `main` in a C module is the entry of the process: druntime does not
+# start, so no unittest runs, and the status is the one `main` returns.
+@pytest.mark.parametrize("backend", ["native", "interpreter", "bytecode"])
+def test_c_main_is_the_program_entry(tmp_path: Path, backend: str) -> None:
+    app = tmp_path / "app"
+    write(app / "dub.sdl", dub_project_recipe("c-main") + 'sourceFiles "source/lib.c"\n')
+    write(
+        app / "source" / "lib.c",
+        """
+        #include <stdio.h>
+        int main(int argc, char **argv) {
+            printf("c main %d\\n", argc);
+            return 3;
+        }
+        """,
+    )
+    write(
+        app / "source" / "main.d",
+        """
+        module app;
+        import core.stdc.stdio: puts;
+        unittest { puts("unittest ran"); }
+        """,
+    )
+
+    if backend == "native":
+        result = run_native(app, sources=["source/main.d", "source/lib.c"])
+    else:
+        result = run_backend(backend, app, tmp_path)
+
+    assert result.returncode == 3, output(result)
+    assert "c main 1" in result.stdout
+    assert "unittest ran" not in output(result)
+
+
+# One message says why the C file did not compile, however many times the
+# frontend reaches for it.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_missing_c_preprocessor_is_reported_once(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    write(app / "dub.sdl", dub_project_recipe("c-no-cpp") + 'sourceFiles "source/lib.c"\n')
+    write(app / "source" / "lib.c", "int add(int a, int b) { return a + b; }\n")
+    write(app / "source" / "main.d", "module main;\nimport lib;\nunittest { assert(add(1, 2) == 3); }\n")
+
+    result = run_backend(backend, app, tmp_path, {"CPPCMD": "/nonexistent/cpp"})
+
+    assert result.returncode != 0, output(result)
+    assert output(result).count("cannot run the C preprocessor") == 1
+    assert "No such file or directory" in output(result)
+
+
 # A dub recipe whose unittest configuration is an executable: dub's own
 # synthetic unittest configuration would put a generated stub with its
 # own `main` first, and a program takes the first root `main` it finds.

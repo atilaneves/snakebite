@@ -96,7 +96,9 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     public this(const Program program) {
         super(program);
         _plans = PlanCache(program.dependencyImage);
+        _callSelection.linksFunctions = program.definesLinkableFunctions;
         _nativeData = NativeData(&_program.isRootOwned,
+            (variable) => _program.linkedVariableOf(variable),
             &constantSymbolAddress,
             (name) => _plans.resolveThreadLocal(name),
             &classRuntimeInfo, &callLowering);
@@ -266,6 +268,11 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return _program.isInterpreted(function_);
     }
 
+    package FuncDeclaration definitionOf(FuncDeclaration function_) {
+        return _callSelection.definitionOf(
+            function_, (declaration) => _program.linkedFunctionOf(declaration));
+    }
+
     package Checks checks() const {
         return _program.checks;
     }
@@ -366,7 +373,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         import dmd.dsymbolsem: isAbstract;
 
         // getOverloads can leave an alias in a function-pointer constant.
-        method = method.toAliasFunc;
+        method = definitionOf(method.toAliasFunc);
         if (method.isAbstract)
             return null;
         const(void)* word;
@@ -5216,10 +5223,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     override void visit(NotExp expression) {
         requireDestination(expression);
         compileNot(expression, _destination);
+        widenBoolean;
     }
 
     override void visit(LogicalExp expression) {
         compileLogical(expression, _destination, _width);
+        widenBoolean;
+    }
+
+    // `!`, `&&`, `||` and the comparisons write one byte, the width of the
+    // `bool` they have in D. In C their type is `int`, and the bytes that
+    // the byte does not cover must not keep what the slot held before.
+    private void widenBoolean() {
+        if (_destination != discardResult && _width > 1)
+            emit(&opCastWidenUnsigned, _destination, 1, _width);
     }
 
     override void visit(CondExp expression) {
@@ -5237,11 +5254,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         requireDestination(expression);
         compileComparison(expression, plan, _destination);
+        if (plan.kind != ComparisonPlan.Kind.vector)
+            widenBoolean;
     }
 
     protected override void visitUnloweredEqual(EqualExp expression) {
         requireDestination(expression);
+        compileEquality(expression);
+        if (comparisonPlan(expression).kind != ComparisonPlan.Kind.vector)
+            widenBoolean;
+    }
 
+    private void compileEquality(EqualExp expression) {
         const plan = comparisonPlan(expression);
         with (ComparisonPlan.Kind) final switch (plan.kind) {
             case dynamicArray:
@@ -6482,6 +6506,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (callee is null)
             return compileIndirectCall(expression, destOffset);
 
+        callee = _bytecode.definitionOf(callee);
         if (isVirtualCall(expression, callee))
             return compileVirtualCall(expression, callee, destOffset);
 

@@ -153,9 +153,10 @@ private extern(C++) class InlineAsmCollector
 // tree this way. `StaticIfCondition` (`static if`, not a version) never
 // reaches `visit(VersionCondition)` below.
 private extern(C++) class InlineAsmVersionGate
-        : imported!"dmd.visitor".SemanticTimeTransitiveVisitor {
+        : imported!"snakebite.frontend.declarationcollector".ImportCSafeVisitor {
     import dmd.visitor: SemanticTimeTransitiveVisitor;
-    alias visit = SemanticTimeTransitiveVisitor.visit;
+    import snakebite.frontend.declarationcollector: ImportCSafeVisitor;
+    alias visit = ImportCSafeVisitor.visit;
 
     import dmd.cond: Include, VersionCondition;
     import dmd.declaration: AliasDeclaration;

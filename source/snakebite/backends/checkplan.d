@@ -25,12 +25,18 @@ public FailurePlan assertPlanOf(in Checks checks) @safe pure nothrow @nogc {
 }
 
 // `function_` is the function whose code holds the check:
-// `-release` checks bounds only in `@safe` code.
+// `-release` checks bounds only in `@safe` code, and code in a C module is
+// never checked, as dmd's glue layer decides (`IRState.arrayBoundsCheck`).
+// A flexible array member has length 0 and is indexed past it.
 public FailurePlan boundsPlanOf(
     in Checks checks,
     imported!"dmd.func".FuncDeclaration function_,
-) @safe nothrow @nogc {
-    import dmd.astenums: CHECKENABLE, TRUST;
+) {
+    import dmd.astenums: CHECKENABLE, FileType, TRUST;
+
+    const module_ = function_ is null ? null : function_.getModule;
+    if (module_ !is null && module_.filetype == FileType.c)
+        return planFor(CHECKENABLE.off, checks);
 
     final switch (checks.arrayBounds) with (CHECKENABLE) {
         case _default:
