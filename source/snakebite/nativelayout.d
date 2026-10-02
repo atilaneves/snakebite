@@ -5,6 +5,7 @@ private:
 
 
 import snakebite.nativevalue:
+    BitfieldAccess,
     nativeArrayLengthOffset = arrayLengthOffset,
     nativeArrayPointerOffset = arrayPointerOffset,
     nativeArrayValueSize = arrayValueSize,
@@ -1106,14 +1107,9 @@ private void storeValue(
                 continue;
             if (field.offset + field.type.size > writtenEnd)
                 writtenEnd = field.offset + field.type.size;
-            if (auto bitfield = field.isBitFieldDeclaration) {
-                const fieldBytes = field.type.size;
-                auto bits = loadIntegral(bytes + field.offset, fieldBytes, false);
-                const mask = ulong.max >> (64 - bitfield.fieldWidth);
-                const shift = bitfield.bitOffset;
-                bits = (bits & ~(mask << shift))
-                    | ((element.toInteger & mask) << shift);
-                storeIntegral(bytes + field.offset, bits, fieldBytes);
+            if (field.isBitFieldDeclaration !is null) {
+                const access = bitfieldAccess(field);
+                access.store(bytes + access.offset, element.toInteger);
             } else
                 storeValue(field.type, element, bytes + field.offset,
                     symbolAddress, nativeData);
@@ -1231,4 +1227,33 @@ private void storeValue(
                 value.toString, "` of type `", type.toString, "`: the ",
                 "cases above handle every constant dmd folds to"));
     }
+}
+
+// The storage unit of a bit field, which both runtime backends read and
+// write as the compiled D of dmd does: a unit as wide as the field's
+// declared type. dmd numbers `bitOffset` from `offset` across unit
+// boundaries, so a `ubyte` field after a `ushort` one can have a
+// `bitOffset` of 9. Whole units of the declared type move into `offset`
+// and what is left is the shift inside the unit.
+public BitfieldAccess bitfieldAccess(imported!"dmd.declaration".VarDeclaration field) {
+    auto bitfield = field.isBitFieldDeclaration;
+    if (bitfield is null)
+        assert(0, "a bit field access needs a bit field declaration");
+
+    const facts = TypeFacts.of(field.type);
+    const unitBits = facts.size * 8;
+    const units = bitfield.bitOffset / unitBits;
+    const shift = bitfield.bitOffset - units * unitBits;
+    if (shift + bitfield.fieldWidth > unitBits)
+        assert(0, "a bit field does not fit its storage unit");
+    return BitfieldAccess(
+        field.offset + units * facts.size, cast(uint) facts.size, cast(uint) shift,
+        bitfield.fieldWidth, !facts.isUnsigned);
+}
+
+// Where a field starts in its struct: a bit field starts at its storage
+// unit.
+public size_t fieldOffset(imported!"dmd.declaration".VarDeclaration field) {
+    return field.isBitFieldDeclaration is null
+        ? field.offset : bitfieldAccess(field).offset;
 }

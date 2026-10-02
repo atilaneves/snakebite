@@ -134,6 +134,7 @@ private final class GuestException: Exception {
     }
 }
 
+import snakebite.nativelayout: bitfieldAccess, fieldOffset;
 import snakebite.backends.checkplan:
     BoundsCheck, hookOf, isUnanalysed;
 import snakebite.backends.haltprocess: isHalt;
@@ -3186,7 +3187,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             auto field = expression.var.isVarDeclaration;
             assert(field !is null, "a field address names a variable");
             return cast(ubyte*) evaluator.fieldBaseAddress(expression.e1)
-                + field.offset;
+                + fieldOffset(field);
         }
 
         // The generic fallback for any expression `StorageResolver.resolve`
@@ -3710,7 +3711,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     ? current + step : current - step;
                 storeIntegral(_place, current, _facts.size);
                 storeBitfieldAt(field,
-                    cast(ubyte*) base + field.offset, changed);
+                    cast(ubyte*) base + fieldOffset(field), changed);
                 return;
             }
         }
@@ -4624,43 +4625,28 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // storage.
     private long bitfieldValueAt(void* base, VarDeclaration field) {
         return bitfieldValueAtPlace(field,
-            cast(ubyte*) base + field.offset);
+            cast(ubyte*) base + fieldOffset(field));
     }
 
+    // `place` is the address of the field's storage unit.
     private long bitfieldValueAtPlace(
         VarDeclaration field, void* place,
     ) {
-        import snakebite.nativelayout: loadIntegral;
-        const bits = field.isBitFieldDeclaration;
-        const facts = factsOf(field.type);
-        const raw = loadIntegral(
-            place, facts.size, false);
-        const mask = ulong.max >> (64 - bits.fieldWidth);
-        auto value = (raw >> bits.bitOffset) & mask;
-        if (!facts.isUnsigned && bits.fieldWidth < 64
-                && (value & (1UL << (bits.fieldWidth - 1))))
-            value |= ulong.max << bits.fieldWidth;
-        return cast(long) value;
+        return bitfieldAccess(field).load(place);
     }
 
     private void storeBitfield(
         DotVarExp expression, VarDeclaration field, long value,
     ) {
-        const bits = field.isBitFieldDeclaration;
-        auto place = cast(ubyte*) fieldBaseAddress(expression.e1) + field.offset;
+        auto place = cast(ubyte*) fieldBaseAddress(expression.e1)
+            + fieldOffset(field);
         storeBitfieldAt(field, place, value);
     }
 
     private void storeBitfieldAt(
         VarDeclaration field, void* place, long value,
     ) {
-        import snakebite.nativelayout: loadIntegral, storeIntegral;
-        const bits = field.isBitFieldDeclaration;
-        const mask = (ulong.max >> (64 - bits.fieldWidth)) << bits.bitOffset;
-        auto storage = loadIntegral(place, factsOf(field.type).size, false);
-        storage = (storage & ~mask)
-            | ((cast(ulong) value << bits.bitOffset) & mask);
-        storeIntegral(place, storage, factsOf(field.type).size);
+        bitfieldAccess(field).store(place, cast(ulong) value);
     }
 
     override void visit(TypeidExp expression) {
