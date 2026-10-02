@@ -279,3 +279,15 @@ public struct SymbolAddressResolver(Result, Adapter) {
         return _adapter.addSymbolOffset(address, expression.offset);
     }
 }
+
+// The `TypeInfo` declaration that `&declaration` names, or null. dmd leaves
+// the address of a `TypeInfo` declaration as an `AddrExp` in places such as
+// `Object.classinfo`. The symbol of such a declaration is the `TypeInfo`
+// object, so the address is the object that `typeid` of the same type
+// gives, and not the address of a variable slot.
+public imported!"dmd.declaration".TypeInfoDeclaration typeInfoAddressedBy(
+    imported!"dmd.expression".AddrExp expression,
+) {
+    auto variable = expression.e1.isVarExp;
+    return variable is null ? null : variable.var.isTypeInfoDeclaration;
+}
