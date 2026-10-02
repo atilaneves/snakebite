@@ -322,6 +322,28 @@ static foreach (backend; Matrix!(
 }
 
 
+// A process that runs a program twice runs the `crt_constructor` and
+// `crt_destructor` functions once for each run.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("crtFunctionsRunOnceForEachProgramRun." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        const code = q{
+            pragma(crt_constructor) void crtConstructor() { crtTrace("crt-ctor;"); }
+            pragma(crt_destructor) void crtDestructor() { crtTrace("crt-dtor;"); }
+            void main() { trace("main;"); }
+        };
+        programStatus!backend(sandbox, code).should == 0;
+        programStatus!backend(sandbox, code).should == 0;
+        sandbox.shouldEqualContent("trace",
+            "crt-ctor;main;crt-dtor;crt-ctor;main;crt-dtor;");
+    }
+}
+
+
 // A thread's `static ~this` runs when that thread ends, before a `join` on
 // it returns.
 static foreach (backend; Matrix!(

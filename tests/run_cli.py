@@ -1200,6 +1200,91 @@ def test_crt_destructor_runs_after_a_failed_module_constructor(
     assert guest_lines(result) == ["crt constructor", "crt destructor"]
 
 
+# A cycle between module constructors stops druntime before it runs a module
+# constructor. The crt functions are not druntime's, so they still run.
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
+def test_crt_functions_run_when_module_constructors_have_a_cycle(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        import other;
+        import core.stdc.stdio: puts;
+        pragma(crt_constructor) void crtConstructor() { puts("crt constructor"); }
+        pragma(crt_destructor) void crtDestructor() { puts("crt destructor"); }
+        shared static this() { puts("main shared constructor"); }
+        void main() { puts("main"); }
+        """,
+    )
+    write(
+        tmp_path / "app" / "other.d",
+        """
+        module other;
+        import main;
+        shared static this() {}
+        """,
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 1, output(result)
+    assert guest_lines(result) == ["crt constructor", "crt destructor"]
+
+
+# `exit` in a `crt_constructor` function ends the program before druntime
+# runs a module constructor, so no module destructor runs.
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
+def test_exit_in_a_crt_constructor_runs_no_module_destructor(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        import core.stdc.stdio: puts;
+        import core.stdc.stdlib: exit;
+        pragma(crt_constructor) void crtConstructor() { puts("crt constructor"); exit(3); }
+        pragma(crt_destructor) void crtDestructor() { puts("crt destructor"); }
+        shared static ~this() { puts("shared destructor"); }
+        static ~this() { puts("thread destructor"); }
+        void main() { puts("main"); }
+        """,
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 3, output(result)
+    assert guest_lines(result) == ["crt constructor", "crt destructor"]
+
+
+# Compiled D has no stable result here: the throw comes before druntime
+# starts, so there is no GC for the exception. Only the backends have a row.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_crt_destructors_run_when_a_later_crt_constructor_throws(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        import core.stdc.stdio: puts;
+        pragma(crt_constructor) void first() { puts("first crt constructor"); }
+        pragma(crt_constructor) void second() { throw new Exception("second failed"); }
+        pragma(crt_destructor) void crtDestructor() { puts("crt destructor"); }
+        shared static ~this() { puts("shared destructor"); }
+        void main() { puts("main"); }
+        """,
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 1, output(result)
+    assert "second failed" in result.stderr
+    assert guest_lines(result) == ["first crt constructor", "crt destructor"]
+
+
 # The functions of a template instance and of a mixin are crt functions of
 # the module that instantiates them. The instance comes after the functions
 # declared in the module.
