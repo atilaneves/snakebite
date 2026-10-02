@@ -31,7 +31,7 @@ public int run(string[] args) {
     import snakebite.gc: selectFrontendMemory;
     import std.algorithm.iteration: map;
     import std.array: array;
-    import std.file: chdir, exists, getcwd, isDir;
+    import std.file: chdir, exists, isDir;
     import std.path: absolutePath;
     import std.stdio: stderr, stdout, write;
 
@@ -48,13 +48,13 @@ public int run(string[] args) {
         if (!projectDirectory.exists || !projectDirectory.isDir)
             projectDirectory = fetchProject(projectDirectory);
         projectDirectory = projectDirectory.absolutePath;
-        const originalDirectory = getcwd;
         const importPaths = parsed.options.importPaths
             .map!(path => path.absolutePath).array;
         const stringImportPaths = parsed.options.stringImportPaths
             .map!(path => path.absolutePath).array;
+        // The process ends with the program, and the module destructors run
+        // when it does: they see the directory that `main` saw.
         chdir(projectDirectory);
-        scope (exit) chdir(originalDirectory);
         auto preparation = prepareProject(
             projectDirectory,
             importPaths,
@@ -68,13 +68,33 @@ public int run(string[] args) {
             preparation.project.program,
             [preparation.project.program.name] ~ parsed.options.programArguments,
             false,
+            true,
         );
-        printStatistics(preparation, report);
+        _statistics = Statistics(true, preparation, report);
         return report.status;
     } catch (Exception exception) {
         stderr.write("snakebite: ", exception.msg, "\n");
         return 1;
     }
+}
+
+
+// The report comes after everything the program prints. The module
+// destructors of the program run when the process ends, so the report waits
+// for the destructors of the host, which run after the program's.
+private struct Statistics {
+    bool pending;
+    imported!"snakebite.execution".PreparationReport preparation;
+    imported!"snakebite.execution".ExecutionReport report;
+}
+
+
+private __gshared Statistics _statistics;
+
+
+shared static ~this() {
+    if (_statistics.pending)
+        printStatistics(_statistics.preparation, _statistics.report);
 }
 
 

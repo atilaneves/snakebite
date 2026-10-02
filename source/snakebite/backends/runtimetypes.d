@@ -379,6 +379,18 @@ public struct RuntimeTypes {
         return info;
     }
 
+    // As the compiler's glue does: no bytes for an opaque struct, and a
+    // null pointer with the struct length when the default is all zero.
+    private byte[] structInit(StructDeclaration declaration) {
+        if (declaration.members is null)
+            return null;
+        if (declaration.zeroInit)
+            return (cast(byte*) null)[0 .. declaration.structsize];
+        return cast(byte[]) _initialValue(
+            declaration.type, declaration.loc,
+        ).dup;
+    }
+
     private TypeInfo_Struct structInfo(StructDeclaration declaration) {
         if (auto cached = declaration in _structs)
             return *cached;
@@ -387,9 +399,7 @@ public struct RuntimeTypes {
         auto info = new TypeInfo_Struct;
         _structs.insert(declaration, info);
         info.mangledName = declaration.type.deco.toDString.idup;
-        info.m_init = cast(byte[]) _initialValue(
-            declaration.type, declaration.loc,
-        ).dup;
+        info.m_init = structInit(declaration);
         info.m_align = declaration.alignsize;
         import dmd.astenums: STC;
         import dmd.semantic3: semanticTypeInfoMembers, search_toString;

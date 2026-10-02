@@ -5,6 +5,7 @@ private:
 
 
 import snakebite.nativelayout: TypeFacts;
+import snakebite.nativelayout: fieldOffset;
 import dmd.typesem: toBasetype;
 
 
@@ -366,7 +367,7 @@ private InitStep fieldStep(
     const facts = TypeFacts.of(field.type);
     if (field.isBitFieldDeclaration !is null) {
         auto step = InitStep(
-            InitStep.Kind.bitfield, field.offset, facts, field.type);
+            InitStep.Kind.bitfield, fieldOffset(field), facts, field.type);
         step.source = source;
         step.field = field;
         return step;

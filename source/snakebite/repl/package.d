@@ -34,6 +34,7 @@ public struct Repl {
     private string _pendingInput;
     private uint _cellCount = 1;
     private Module _module;
+    private imported!"snakebite.backends".Program _program;
     private Backend _backend;
 
     public this(
@@ -115,6 +116,7 @@ public struct Repl {
 
     private SubmitResult submitExpression(in string source) {
         import snakebite.backends: makeBackend;
+        import snakebite.backends.guestmodules: GuestModules;
         import snakebite.frontend.compiler: parseSnippet;
         import snakebite.frontend.dmd.functions: findFunction;
         import snakebite.repl.cell: replCellLineDirective;
@@ -149,6 +151,17 @@ public struct Repl {
             program,
         );
 
+        // One expression cell runs the accumulated module as a program does:
+        // its module constructors before the cell, its destructors after.
+        auto modules = GuestModules.start(
+            backend, program, GuestModules.Tests.no, GuestModules.Ends.program);
+        if (modules.failed) {
+            _pendingInput = null;
+            return SubmitResult(
+                SubmitResult.Kind.error, "a module constructor failed");
+        }
+
+        scope(exit) modules.finish;
         string display;
         try
             display = backend.eval(function_);
@@ -235,6 +248,7 @@ public struct Repl {
         accept(
             fullSource,
             module_,
+            program,
             makeBackend(_backendName, program),
         );
 
@@ -244,10 +258,12 @@ public struct Repl {
     private void accept(
         in string fullSource,
         Module module_,
+        imported!"snakebite.backends".Program program,
         Backend backend,
     ) {
         _accumulatedSource = fullSource;
         _module = module_;
+        _program = program;
         _backend = backend;
         ++_cellCount;
         _pendingInput = null;
@@ -257,12 +273,21 @@ public struct Repl {
     // druntime's own default runner would. All failures are reported
     // together rather than stopping at the first one.
     private SubmitResult runLoadedTests() {
+        import snakebite.backends.guestmodules: GuestModules;
         import snakebite.frontend.dmd.functions: findUnittests;
         import std.array: join;
 
         if (_module is null)
             return SubmitResult.init;
 
+        auto modules = GuestModules.start(
+            _backend, _program,
+            GuestModules.Tests.no, GuestModules.Ends.program);
+        if (modules.failed)
+            return SubmitResult(
+                SubmitResult.Kind.error, "a module constructor failed");
+
+        scope(exit) modules.finish;
         string[] failures;
         foreach (unittest_; findUnittests(_module)) {
             try

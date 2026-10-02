@@ -51,14 +51,8 @@ public PreparationReport prepareProject(
         = imported!"snakebite.dependencyimage".Optimise.yes,
 ) {
     import snakebite.frontend.compiler: Snippets, initialize;
-    import snakebite.project:
-        loadProject, projectStateDirectory, sourceSet, prepareDependencies;
+    import snakebite.project: loadProject, sourceSet, prepareDependencies;
     import std.datetime.stopwatch: AutoStart, StopWatch;
-    import snakebite.teststartup: prepareTestStartup;
-    import snakebite.dependencyimage: DependencyImage;
-    import std.algorithm.iteration: map;
-    import std.array: array;
-    import std.string: fromStringz;
 
     // Two costs a user pays before any backend runs, timed apart: finding
     // the sources is not frontend work (for a dub project it is a `dub
@@ -71,7 +65,6 @@ public PreparationReport prepareProject(
     stopWatch.reset;
     initialize(Snippets.no);
     auto project = loadProject(directory, sources);
-    const stateDirectory = projectStateDirectory(project.directory);
     const frontendDuration = stopWatch.peek;
     stopWatch.reset;
     if (nativeDependencies)
@@ -81,11 +74,7 @@ public PreparationReport prepareProject(
         );
     if (project.program.dependencyImage !is null)
         project.program.testHooks = project.program.dependencyImage.testHooks;
-    auto startupImage = new DependencyImage;
-    *startupImage = prepareTestStartup(stateDirectory,
-        project.program.rootModules.map!(module_ =>
-            module_.toPrettyChars.fromStringz.idup).array);
-    project.program.testStartupImage = startupImage;
+    project.program.startsAsProject = true;
     return PreparationReport(project, discovery, frontendDuration, stopWatch.peek);
 }
 
@@ -95,6 +84,7 @@ public ExecutionReport executeBackend(
     imported!"snakebite.backends".Program program,
     in string[] hostArguments = null,
     in bool collectGarbage = true,
+    in bool endsProcess = false,
 ) {
     import snakebite.backends: makeBackend;
     import snakebite.backends.backend: run;
@@ -119,11 +109,13 @@ public ExecutionReport executeBackend(
     scope backend = makeBackend(name, program);
     TestStartupReport startup;
     int status;
-    // Snippet callers construct Programs without project startup metadata.
-    if (program.testStartupImage is null || program.hasCEntryPoint)
+    // Snippet callers construct Programs that do not start as a project,
+    // and a program with a C `main` is not started as a project either.
+    if (!program.startsAsProject || program.hasCEntryPoint)
         status = run(backend, program, hostArguments);
     else {
-        startup = runTestsAndMain(backend, program, hostArguments);
+        startup = runTestsAndMain(
+            backend, program, hostArguments, endsProcess);
         status = startup.status;
     }
     // Native objects can hold callback entries for guest destructors. Run

@@ -285,3 +285,36 @@ unittest {
 
     (unittestBuild != debugBuild).should == true;
 }
+
+
+// Several threads describe at once, as parallel tests do. Each call gets
+// its own output and not that of a call that runs at the same time.
+@("describe.concurrentCallsKeepTheirOwnOutput")
+unittest {
+    import core.thread: Thread;
+    import snakebite.dub: describeCapturingStdout;
+    import std.conv: text;
+
+    enum threadCount = 6;
+    string[threadCount] outputs;
+    // A function of its own, so that each thread has its own `label`.
+    Thread startDescribe(in size_t index) {
+        const label = "describe-output-" ~ text(index);
+        auto thread = new Thread({
+            outputs[index] = describeCapturingStdout(
+                ["sh", "-c", "echo " ~ label ~ "; sleep 0.3; echo " ~ label], ".").output;
+        });
+        thread.start;
+        return thread;
+    }
+
+    Thread[] threads;
+    foreach (index; 0 .. threadCount)
+        threads ~= startDescribe(index);
+    foreach (thread; threads) thread.join;
+
+    foreach (index; 0 .. threadCount) {
+        const label = "describe-output-" ~ text(index);
+        outputs[index].should == label ~ "\n" ~ label ~ "\n";
+    }
+}

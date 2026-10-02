@@ -861,3 +861,406 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A static array that lives in a temporary - a member of a returned
+// struct, a returned array itself - iterates and slices like one in a
+// variable.
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.memberOfReturnedStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte[4] bytes; }
+            S make() { return S([1, 2, 3, 4]); }
+            void main() {
+                int sum;
+                foreach (v; make().bytes)
+                    sum += v;
+                assert(sum == 10);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.returnedStaticArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int[3] make() { return [4, 5, 6]; }
+            void main() {
+                int sum;
+                foreach (v; make())
+                    sum += v;
+                assert(sum == 15);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.nestedMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Inner { int[3] values; }
+            struct Outer { int tag; Inner inner; }
+            Outer make() { return Outer(9, Inner([1, 2, 3])); }
+            void main() {
+                int sum;
+                foreach (v; make().inner.values)
+                    sum += v;
+                assert(sum == 6);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.sliceOfMemberPassedToFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[3] values; }
+            S make() { return S([7, 8, 9]); }
+            int sum(int[] values) {
+                int total;
+                foreach (v; values)
+                    total += v;
+                return total;
+            }
+            void main() {
+                assert(sum(make().values[]) == 24);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.boundedSliceOfMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[4] values; }
+            S make() { return S([1, 2, 3, 4]); }
+            int sum(int[] values) {
+                int total;
+                foreach (v; values)
+                    total += v;
+                return total;
+            }
+            void main() {
+                assert(sum(make().values[1 .. 3]) == 5);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.memberOfStructLiteral." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int tag; int[3] values; }
+            void main() {
+                int sum;
+                foreach (v; S(1, [2, 3, 4]).values)
+                    sum += v;
+                assert(sum == 9);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.refOverMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[3] values; }
+            S make() { return S([1, 2, 3]); }
+            void main() {
+                int sum;
+                foreach (ref v; make().values)
+                    sum += v;
+                assert(sum == 6);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.indexOfMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[3] values; }
+            S make() { return S([5, 6, 7]); }
+            int index() { return 2; }
+            void main() {
+                assert(make().values[index()] == 7);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.lengthOfMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[5] values; }
+            S make() { return S([1, 2, 3, 4, 5]); }
+            void main() {
+                assert(make().values.length == 5);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.indexedLoopOverMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[5] values; }
+            S make() { return S([1, 2, 3, 4, 5]); }
+            void main() {
+                int count;
+                foreach (i, v; make().values)
+                    count += cast(int) i + v;
+                assert(count == 25);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.memberOfMethodChain." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S {
+                int[3] values;
+                S next() { return S([values[0] + 1, values[1] + 1, values[2] + 1]); }
+            }
+            S make() { return S([1, 2, 3]); }
+            void main() {
+                int sum;
+                foreach (v; make().next().next().values)
+                    sum += v;
+                assert(sum == 12);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.reverseOverMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[3] values; }
+            S make() { return S([1, 2, 3]); }
+            void main() {
+                int[3] seen;
+                size_t at;
+                foreach_reverse (v; make().values)
+                    seen[at++] = v;
+                assert(seen == [3, 2, 1]);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.loopOverManyRvalues." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[2] values; }
+            S make(int base) { return S([base, 1]); }
+            void main() {
+                long sum;
+                foreach (i; 0 .. 200_000)
+                    foreach (v; make(i).values)
+                        sum += v;
+                assert(sum == 19_999_900_000 + 200_000);
+            }
+        });
+    }
+}
+
+// A declaration whose initialiser points into a temporary keeps that
+// temporary for as long as the function runs, and compiled D gives it one
+// stack slot that each execution of the declaration reuses. A loop or a
+// repeated call therefore runs in constant memory. The test compares the
+// address of the temporary in each execution: it does not read the
+// temporary after the declaration. The loop body is a block that dmd
+// removes the scope of, so nothing else ends the temporary.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE has no stack slot: each temporary is a new value"),
+)) {
+    @("temporaries.declarationInLoopBodyReusesItsSlot." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte[256] bytes; }
+            S make(int i) { S s; s.bytes[0] = cast(ubyte) i; return s; }
+            void main() {
+                const(ubyte)* first;
+                foreach (i; 0 .. 1000) {
+                    auto slice = make(i).bytes[];
+                    if (i == 0)
+                        first = slice.ptr;
+                    assert(slice.ptr is first);
+                }
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE has no stack slot: each temporary is a new value"),
+)) {
+    @("temporaries.declarationInCalledFunctionReusesItsSlot." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte[256] bytes; }
+            S make(int i) { S s; s.bytes[0] = cast(ubyte) i; return s; }
+            void use(int i, ref const(ubyte)* first) {
+                auto slice = make(i).bytes[];
+                if (i == 0)
+                    first = slice.ptr;
+                assert(slice.ptr is first);
+            }
+            void main() {
+                const(ubyte)* first;
+                foreach (i; 0 .. 1000)
+                    use(i, first);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE has no stack slot: each temporary is a new value"),
+)) {
+    @("temporaries.declarationInThrowingFunctionReusesItsSlot." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte[256] bytes; }
+            S make(int i) { S s; s.bytes[0] = cast(ubyte) i; return s; }
+            void use(int i, ref const(ubyte)* first) {
+                auto slice = make(i).bytes[];
+                if (i == 0)
+                    first = slice.ptr;
+                assert(slice.ptr is first);
+                throw new Exception("unwind");
+            }
+            void main() {
+                const(ubyte)* first;
+                foreach (i; 0 .. 1000) {
+                    try
+                        use(i, first);
+                    catch (Exception)
+                        continue;
+                    assert(false);
+                }
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE has no stack slot: each temporary is a new value"),
+)) {
+    @("temporaries.declarationInGotoLoopReusesItsSlot." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte[256] bytes; }
+            S make(int i) { S s; s.bytes[0] = cast(ubyte) i; return s; }
+            void main() {
+                const(ubyte)* first;
+                int i;
+            again:
+                auto slice = make(i).bytes[];
+                if (i == 0)
+                    first = slice.ptr;
+                assert(slice.ptr is first);
+                if (++i < 1000)
+                    goto again;
+            }
+        });
+    }
+}
+
+// Each activation of a recursive function has a slot of its own.
+static foreach (backend; Matrix!()) {
+    @("temporaries.declarationInRecursionHasASlotPerActivation." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte[256] bytes; }
+            S make(int i) { S s; s.bytes[0] = cast(ubyte) i; return s; }
+            void descend(int depth, ref const(ubyte)*[4] seen) {
+                auto slice = make(depth).bytes[];
+                seen[depth] = slice.ptr;
+                if (depth + 1 < seen.length)
+                    descend(depth + 1, seen);
+            }
+            void main() {
+                const(ubyte)*[4] seen;
+                descend(0, seen);
+                foreach (i; 0 .. seen.length)
+                    foreach (j; i + 1 .. seen.length)
+                        assert(seen[i] !is seen[j]);
+            }
+        });
+    }
+}
+
+// A variable declared in a condition can point into a temporary of its
+// initialiser, as a variable declared in a statement can.
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.sliceDeclaredInIfCondition." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[4] values; }
+            S make(int base) { S s; s.values[] = base; return s; }
+            void main() {
+                if (auto slice = make(6).values[])
+                    assert(slice[0] == 6 && slice[3] == 6);
+                else
+                    assert(false);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.sliceDeclaredInWhileCondition." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[4] values; }
+            S make(int base) { S s; s.values[] = base; return s; }
+            void main() {
+                int count;
+                while (auto slice = count < 2 ? make(7 + count).values[] : null) {
+                    assert(slice[0] == 7 + count && slice[3] == 7 + count);
+                    count++;
+                }
+                assert(count == 2);
+            }
+        });
+    }
+}

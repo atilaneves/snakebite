@@ -144,8 +144,7 @@ time detect replaced files and same-size edits with restored modification times.
 If only root source metadata changed, preparation checks whether the generated
 template references changed. If they did not, it reuses the image and updates
 the root metadata. Otherwise, it uses the two-level image cache described
-above. Direct calls to `prepareImage`, including the test startup image, use
-that cache. A cache hit for a CLI run therefore costs a handful of `stat`
+above. Direct calls to `prepareImage` use that cache. A cache hit for a CLI run therefore costs a handful of `stat`
 calls and a loader reference, whichever level it hits.
 
 Builds use unique temporary directories and publish completed libraries with an
