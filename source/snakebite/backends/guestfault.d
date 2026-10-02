@@ -91,7 +91,7 @@ public struct GuestFault {
     public alias Sink = void delegate(in const(char)[]);
 
     // The text of a fault, as pieces for `sink`: the message and then one
-    // line for each frame. It allocates nothing.
+    // line for each frame. It makes no allocation of its own.
     public static void render(
         in Kind kind, in const(char)[] file, in size_t line,
         scope Stack stack, scope Sink sink,
@@ -118,15 +118,13 @@ public struct GuestFault {
     // The message and the stack on standard error, as `bin/sb` prints them
     // and the REPL does for a fault that no cell joins. It runs after a
     // fault that can have interrupted native code that holds a lock, so it
-    // uses neither the garbage collector nor `stdio`: the text is formatted
-    // into a fixed buffer and written with `write`.
+    // does not wait for one: the text is formatted into a fixed buffer and
+    // written with `write`, and the only `stdio` call is a flush of standard
+    // output that is skipped when another thread holds that stream.
     public static void print(
         in Kind kind, in const(char)[] file, in size_t line, scope Stack stack,
     ) @trusted {
-        import core.stdc.stdio: fflush;
-
-        // The output of the guest comes before the message.
-        fflush(null);
+        flushStandardOutput;
         StandardError buffer;
         render(kind, file, line, stack, &buffer.put);
         buffer.flush;
@@ -142,6 +140,21 @@ public struct GuestFault {
         print(kind, file, line, stack);
         _Exit(1);
     }
+}
+
+// The output of the guest comes before the message. `fflush(null)` would
+// lock every open stream, standard input included, and a thread that is
+// blocked in a read holds that lock for ever.
+private extern (C) int fflush_unlocked(imported!"core.stdc.stdio".FILE*) nothrow @nogc;
+
+private void flushStandardOutput() @trusted {
+    import core.stdc.stdio: FILE, stdout;
+    import core.sys.posix.stdio: ftrylockfile, funlockfile;
+
+    if (ftrylockfile(stdout) != 0)
+        return;
+    fflush_unlocked(stdout);
+    funlockfile(stdout);
 }
 
 private void renderPosition(
