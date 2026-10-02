@@ -665,6 +665,633 @@ static foreach (backend; Matrix!(
     }
 }
 
+// Bit fields of different declared types share storage as the compiled
+// layout of D gives it. A store to one field leaves every other field as
+// it was. Native code drops a compound assignment to a bit field narrower
+// than `int`, and builds a wrong struct literal when a `short` bit field
+// follows a `long` one, so those tests do not assert the lost value.
+static foreach (backend; Matrix!()) {
+    @("bitfields.storeKeepsNeighbours.UbyteThenUint." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte a : 3; uint b : 20; ubyte c : 2; }
+            void main() {
+                S s;
+                s.a = 4; s.b = 703710; s.c = 2;
+                assert(s.a == 4 && s.b == 703710 && s.c == 2);
+                s.a = 2;
+                assert(s.a == 2 && s.b == 703710 && s.c == 2);
+                s.b = 74565;
+                assert(s.a == 2 && s.b == 74565 && s.c == 2);
+                s.c = 1;
+                assert(s.a == 2 && s.b == 74565 && s.c == 1);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.compoundAssign.UbyteThenUint." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte a : 3; uint b : 20; ubyte c : 2; }
+            void main() {
+                S s;
+                s.a = 4; s.b = 703710; s.c = 2;
+                s.a ^= 1;
+                assert(s.b == 703710 && s.c == 2);
+                s.a = 5;
+                s.b ^= 1;
+                assert(s.a == 5 && s.b == 703711 && s.c == 2);
+                s.c ^= 1;
+                assert(s.a == 5 && s.b == 703711);
+                s.c = 3;
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.incrementAndDecrement.UbyteThenUint." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte a : 3; uint b : 20; ubyte c : 2; }
+            void main() {
+                S s;
+                s.a = 4; s.b = 703710; s.c = 2;
+                { const before = s.a++; assert(before == 4); }
+                assert(s.a == 5 && s.b == 703710 && s.c == 2);
+                { const before = s.b++; assert(before == 703710); }
+                assert(s.a == 5 && s.b == 703711 && s.c == 2);
+                { const before = s.c++; assert(before == 2); }
+                assert(s.a == 5 && s.b == 703711 && s.c == 3);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.structLiteral.UbyteThenUint." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte a : 3; uint b : 20; ubyte c : 2; }
+            T value(T)(T input) { return input; }
+            void main() {
+                S s = S(value!ubyte(4), value!uint(703710), value!ubyte(2));
+                assert(s.a == 4 && s.b == 703710 && s.c == 2);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.storeKeepsNeighbours.UshortThenUbyte." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ushort a : 9; ubyte b : 7; }
+            void main() {
+                S s;
+                s.a = 510; s.b = 85;
+                assert(s.a == 510 && s.b == 85);
+                s.a = 170;
+                assert(s.a == 170 && s.b == 85);
+                s.b = 42;
+                assert(s.a == 170 && s.b == 42);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.compoundAssign.UshortThenUbyte." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ushort a : 9; ubyte b : 7; }
+            void main() {
+                S s;
+                s.a = 510; s.b = 85;
+                s.a ^= 1;
+                assert(s.b == 85);
+                s.a = 511;
+                s.b ^= 1;
+                assert(s.a == 511);
+                s.b = 84;
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.incrementAndDecrement.UshortThenUbyte." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ushort a : 9; ubyte b : 7; }
+            void main() {
+                S s;
+                s.a = 510; s.b = 85;
+                { const before = s.a++; assert(before == 510); }
+                assert(s.a == 511 && s.b == 85);
+                { const before = s.b++; assert(before == 85); }
+                assert(s.a == 511 && s.b == 86);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.structLiteral.UshortThenUbyte." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ushort a : 9; ubyte b : 7; }
+            T value(T)(T input) { return input; }
+            void main() {
+                S s = S(value!ushort(510), value!ubyte(85));
+                assert(s.a == 510 && s.b == 85);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.storeKeepsNeighbours.LongAfterInt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a : 3; long b : 40; short c : 5; }
+            void main() {
+                S s;
+                s.a = -3; s.b = -300000000000; s.c = -7;
+                assert(s.a == -3 && s.b == -300000000000 && s.c == -7);
+                s.a = 2;
+                assert(s.a == 2 && s.b == -300000000000 && s.c == -7);
+                s.b = 123456789012;
+                assert(s.a == 2 && s.b == 123456789012 && s.c == -7);
+                s.c = 9;
+                assert(s.a == 2 && s.b == 123456789012 && s.c == 9);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.compoundAssign.LongAfterInt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a : 3; long b : 40; short c : 5; }
+            void main() {
+                S s;
+                s.a = -3; s.b = -300000000000; s.c = -7;
+                s.a -= 1;
+                assert(s.a == -4 && s.b == -300000000000 && s.c == -7);
+                s.b -= 1;
+                assert(s.a == -4 && s.b == -300000000001 && s.c == -7);
+                s.c -= 1;
+                assert(s.a == -4 && s.b == -300000000001);
+                s.c = -8;
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.incrementAndDecrement.LongAfterInt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a : 3; long b : 40; short c : 5; }
+            void main() {
+                S s;
+                s.a = -3; s.b = -300000000000; s.c = -7;
+                { const before = s.a--; assert(before == -3); }
+                assert(s.a == -4 && s.b == -300000000000 && s.c == -7);
+                { const before = s.b--; assert(before == -300000000000); }
+                assert(s.a == -4 && s.b == -300000000001 && s.c == -7);
+                { const before = s.c--; assert(before == -7); }
+                assert(s.a == -4 && s.b == -300000000001 && s.c == -8);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.storeKeepsNeighbours.UlongAfterUbyte." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte a : 1; ulong b : 40; ubyte c : 3; }
+            void main() {
+                S s;
+                s.a = 0; s.b = 1094624909430; s.c = 5;
+                assert(s.a == 0 && s.b == 1094624909430 && s.c == 5);
+                s.a = 1;
+                assert(s.a == 1 && s.b == 1094624909430 && s.c == 5);
+                s.b = 4886718345;
+                assert(s.a == 1 && s.b == 4886718345 && s.c == 5);
+                s.c = 2;
+                assert(s.a == 1 && s.b == 4886718345 && s.c == 2);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.compoundAssign.UlongAfterUbyte." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte a : 1; ulong b : 40; ubyte c : 3; }
+            void main() {
+                S s;
+                s.a = 0; s.b = 1094624909430; s.c = 5;
+                s.a ^= 1;
+                assert(s.b == 1094624909430 && s.c == 5);
+                s.a = 1;
+                s.b ^= 1;
+                assert(s.a == 1 && s.b == 1094624909431 && s.c == 5);
+                s.c ^= 1;
+                assert(s.a == 1 && s.b == 1094624909431);
+                s.c = 4;
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.incrementAndDecrement.UlongAfterUbyte." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte a : 1; ulong b : 40; ubyte c : 3; }
+            void main() {
+                S s;
+                s.a = 0; s.b = 1094624909430; s.c = 5;
+                { const before = s.a++; assert(before == 0); }
+                assert(s.a == 1 && s.b == 1094624909430 && s.c == 5);
+                { const before = s.b++; assert(before == 1094624909430); }
+                assert(s.a == 1 && s.b == 1094624909431 && s.c == 5);
+                { const before = s.c++; assert(before == 5); }
+                assert(s.a == 1 && s.b == 1094624909431 && s.c == 6);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.structLiteral.UlongAfterUbyte." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte a : 1; ulong b : 40; ubyte c : 3; }
+            T value(T)(T input) { return input; }
+            void main() {
+                S s = S(value!ubyte(0), value!ulong(1094624909430), value!ubyte(5));
+                assert(s.a == 0 && s.b == 1094624909430 && s.c == 5);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.storeKeepsNeighbours.SignedFields." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { byte a : 4; short b : 12; int c : 20; }
+            void main() {
+                S s;
+                s.a = -5; s.b = -1000; s.c = -100000;
+                assert(s.a == -5 && s.b == -1000 && s.c == -100000);
+                s.a = 3;
+                assert(s.a == 3 && s.b == -1000 && s.c == -100000);
+                s.b = 2000;
+                assert(s.a == 3 && s.b == 2000 && s.c == -100000);
+                s.c = 300000;
+                assert(s.a == 3 && s.b == 2000 && s.c == 300000);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.compoundAssign.SignedFields." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { byte a : 4; short b : 12; int c : 20; }
+            void main() {
+                S s;
+                s.a = -5; s.b = -1000; s.c = -100000;
+                s.a -= 1;
+                assert(s.b == -1000 && s.c == -100000);
+                s.a = -6;
+                s.b -= 1;
+                assert(s.a == -6 && s.c == -100000);
+                s.b = -1001;
+                s.c -= 1;
+                assert(s.a == -6 && s.b == -1001 && s.c == -100001);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.incrementAndDecrement.SignedFields." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { byte a : 4; short b : 12; int c : 20; }
+            void main() {
+                S s;
+                s.a = -5; s.b = -1000; s.c = -100000;
+                { const before = s.a--; assert(before == -5); }
+                assert(s.a == -6 && s.b == -1000 && s.c == -100000);
+                { const before = s.b--; assert(before == -1000); }
+                assert(s.a == -6 && s.b == -1001 && s.c == -100000);
+                { const before = s.c--; assert(before == -100000); }
+                assert(s.a == -6 && s.b == -1001 && s.c == -100001);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.structLiteral.SignedFields." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { byte a : 4; short b : 12; int c : 20; }
+            T value(T)(T input) { return input; }
+            void main() {
+                S s = S(value!byte(-5), value!short(-1000), value!int(-100000));
+                assert(s.a == -5 && s.b == -1000 && s.c == -100000);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.storeKeepsNeighbours.AfterOrdinaryMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte x; uint a : 4; ushort b : 5; }
+            void main() {
+                S s;
+                s.x = 126; s.a = 9; s.b = 17;
+                assert(s.x == 126 && s.a == 9 && s.b == 17);
+                s.x = 17;
+                assert(s.x == 17 && s.a == 9 && s.b == 17);
+                s.a = 6;
+                assert(s.x == 17 && s.a == 6 && s.b == 17);
+                s.b = 30;
+                assert(s.x == 17 && s.a == 6 && s.b == 30);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.compoundAssign.AfterOrdinaryMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte x; uint a : 4; ushort b : 5; }
+            void main() {
+                S s;
+                s.x = 126; s.a = 9; s.b = 17;
+                s.x ^= 1;
+                assert(s.a == 9 && s.b == 17);
+                s.x = 127;
+                s.a ^= 1;
+                assert(s.x == 127 && s.a == 8 && s.b == 17);
+                s.b ^= 1;
+                assert(s.x == 127 && s.a == 8);
+                s.b = 16;
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.incrementAndDecrement.AfterOrdinaryMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte x; uint a : 4; ushort b : 5; }
+            void main() {
+                S s;
+                s.x = 126; s.a = 9; s.b = 17;
+                { const before = s.x++; assert(before == 126); }
+                assert(s.x == 127 && s.a == 9 && s.b == 17);
+                { const before = s.a++; assert(before == 9); }
+                assert(s.x == 127 && s.a == 10 && s.b == 17);
+                { const before = s.b++; assert(before == 17); }
+                assert(s.x == 127 && s.a == 10 && s.b == 18);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.structLiteral.AfterOrdinaryMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte x; uint a : 4; ushort b : 5; }
+            T value(T)(T input) { return input; }
+            void main() {
+                S s = S(value!ubyte(126), value!uint(9), value!ushort(17));
+                assert(s.x == 126 && s.a == 9 && s.b == 17);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.storeKeepsNeighbours.ZeroWidthUnit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte a : 3; uint : 0; ubyte b : 3; ushort c : 4; }
+            void main() {
+                S s;
+                s.a = 5; s.b = 6; s.c = 11;
+                assert(s.a == 5 && s.b == 6 && s.c == 11);
+                s.a = 2;
+                assert(s.a == 2 && s.b == 6 && s.c == 11);
+                s.b = 1;
+                assert(s.a == 2 && s.b == 1 && s.c == 11);
+                s.c = 4;
+                assert(s.a == 2 && s.b == 1 && s.c == 4);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.compoundAssign.ZeroWidthUnit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte a : 3; uint : 0; ubyte b : 3; ushort c : 4; }
+            void main() {
+                S s;
+                s.a = 5; s.b = 6; s.c = 11;
+                s.a ^= 1;
+                assert(s.b == 6 && s.c == 11);
+                s.a = 4;
+                s.b ^= 1;
+                assert(s.a == 4 && s.c == 11);
+                s.b = 7;
+                s.c ^= 1;
+                assert(s.a == 4 && s.b == 7);
+                s.c = 10;
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.incrementAndDecrement.ZeroWidthUnit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte a : 3; uint : 0; ubyte b : 3; ushort c : 4; }
+            void main() {
+                S s;
+                s.a = 5; s.b = 6; s.c = 11;
+                { const before = s.a++; assert(before == 5); }
+                assert(s.a == 6 && s.b == 6 && s.c == 11);
+                { const before = s.b++; assert(before == 6); }
+                assert(s.a == 6 && s.b == 7 && s.c == 11);
+                { const before = s.c++; assert(before == 11); }
+                assert(s.a == 6 && s.b == 7 && s.c == 12);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.structLiteral.ZeroWidthUnit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { ubyte a : 3; uint : 0; ubyte b : 3; ushort c : 4; }
+            T value(T)(T input) { return input; }
+            void main() {
+                S s = S(value!ubyte(5), value!ubyte(6), value!ushort(11));
+                assert(s.a == 5 && s.b == 6 && s.c == 11);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.storeKeepsNeighbours.BoolFields." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { bool a : 1; ubyte b : 3; bool c : 1; uint d : 4; }
+            void main() {
+                S s;
+                s.a = true; s.b = 5; s.c = true; s.d = 9;
+                assert(s.a == true && s.b == 5 && s.c == true && s.d == 9);
+                s.a = false;
+                assert(s.a == false && s.b == 5 && s.c == true && s.d == 9);
+                s.b = 2;
+                assert(s.a == false && s.b == 2 && s.c == true && s.d == 9);
+                s.c = false;
+                assert(s.a == false && s.b == 2 && s.c == false && s.d == 9);
+                s.d = 6;
+                assert(s.a == false && s.b == 2 && s.c == false && s.d == 6);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.compoundAssign.BoolFields." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { bool a : 1; ubyte b : 3; bool c : 1; uint d : 4; }
+            void main() {
+                S s;
+                s.a = true; s.b = 5; s.c = true; s.d = 9;
+                s.a ^= true;
+                assert(s.b == 5 && s.c == true && s.d == 9);
+                s.a = false;
+                s.b ^= 1;
+                assert(s.a == false && s.c == true && s.d == 9);
+                s.b = 4;
+                s.c ^= true;
+                assert(s.a == false && s.b == 4 && s.d == 9);
+                s.c = false;
+                s.d ^= 1;
+                assert(s.a == false && s.b == 4 && s.c == false && s.d == 8);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.incrementAndDecrement.BoolFields." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { bool a : 1; ubyte b : 3; bool c : 1; uint d : 4; }
+            void main() {
+                S s;
+                s.a = true; s.b = 5; s.c = true; s.d = 9;
+                { const before = s.b++; assert(before == 5); }
+                assert(s.a == true && s.b == 6 && s.c == true && s.d == 9);
+                { const before = s.d++; assert(before == 9); }
+                assert(s.a == true && s.b == 6 && s.c == true && s.d == 10);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.structLiteral.BoolFields." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { bool a : 1; ubyte b : 3; bool c : 1; uint d : 4; }
+            T value(T)(T input) { return input; }
+            void main() {
+                S s = S(value!bool(true), value!ubyte(5), value!bool(true), value!uint(9));
+                assert(s.a == true && s.b == 5 && s.c == true && s.d == 9);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("bitfields.structLiteral.LongAfterIntOnly." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a : 3; long b : 40; }
+            T value(T)(T input) { return input; }
+            void main() {
+                S s = S(value!int(-3), value!long(-300000000000));
+                assert(s.a == -3 && s.b == -300000000000);
+            }
+        });
+    }
+}
+
+
 // A struct allocated with `new` runs its constructor in the allocated
 // storage. An immutable field is initialized with a construct expression,
 // so this also checks that constructor initialization reaches the object
