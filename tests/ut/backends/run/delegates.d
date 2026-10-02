@@ -1254,3 +1254,45 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// `&S.f` without an object is a function pointer with no context. A call
+// through it gives `f` no `this`, which is correct when `f` reads no field.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine refuses a member function call with no `this`"),
+)) {
+    @("callStructMemberThroughContextFreeFunctionPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S {
+                int f() { return 42; }
+            }
+            int main() {
+                auto pointer = &S.f;
+                return pointer() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A function pointer cast to a type with one more parameter. The callee
+// reads no parameter, so the extra argument has no effect.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine fails with an internal error on a call with"
+            ~ " more arguments than parameters"),
+)) {
+    @("callThroughFunctionPointerCastToOneMoreParameter." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int three() { return 3; }
+            int main() {
+                auto pointer = cast(int function(int)) &three;
+                return pointer(1) == 3 ? 0 : 1;
+            }
+        });
+    }
+}
