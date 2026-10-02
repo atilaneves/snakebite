@@ -6228,7 +6228,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             auto word = _frames.reserve(size_t.sizeof, size_t.alignof);
             storeIntegral(
                 word,
-                thisValueOf(cast() _function.vthis) + source.receiverAdjustment,
+                thisValueOf(null, cast() _function.vthis)
+                    + source.receiverAdjustment,
                 size_t.sizeof,
             );
             return cast(size_t) word - source.slotOffset;
