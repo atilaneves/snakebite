@@ -459,7 +459,8 @@ public struct NativeData {
     import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.dsymbol: Dsymbol;
-    import dmd.expression: ClassReferenceExp, Expression, StructLiteralExp;
+    import dmd.expression:
+        ClassReferenceExp, Expression, StringExp, StructLiteralExp;
     import dmd.location: Loc;
     import dmd.mtype: Type;
 
@@ -479,6 +480,7 @@ public struct NativeData {
     // struct values are keyed by their own literal, not by a reference
     // or address expression, to preserve aliases and cycles.
     private void*[StructLiteralExp] _compileTimeValues;
+    private const(void)*[StringExp] _stringData;
     // Written under the compiler lock only, like every miss below.
     private void[][] _blocks;
     private void[] _available;
@@ -583,6 +585,27 @@ public struct NativeData {
             _compileTimeValues[literal] = address;
             scope (failure) _compileTimeValues.remove(literal);
             write(literal.type, facts, literal, address);
+        });
+        return address;
+    }
+
+    // One copy for each literal, so that evaluating it again in a loop does
+    // not allocate again.
+    private const(void)* stringData(
+        StringExp literal,
+        scope ubyte[] delegate() make,
+    ) {
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        const(void)* address;
+        withCompilerLock({
+            if (auto found = literal in _stringData) {
+                address = *found;
+                return;
+            }
+            auto bytes = make();
+            _blocks ~= bytes;
+            address = _stringData[literal] = bytes.ptr;
         });
         return address;
     }
@@ -925,6 +948,24 @@ public void storeValue(
     storeValue(type, facts, value, place, null);
 }
 
+// A literal is followed by one zero code unit in memory, so that it converts
+// to a C string. The frontend does not keep one in a literal that it made by
+// folding, so the code units are copied to storage that has it.
+private const(void)* terminatedData(
+    imported!"dmd.expression".StringExp literal,
+    NativeData* nativeData,
+) {
+    import core.stdc.string: memcpy;
+
+    auto make = () {
+        auto bytes = new ubyte[(literal.len + 1) * literal.sz];
+        memcpy(bytes.ptr, literal.peekData.ptr, literal.len * literal.sz);
+        return bytes;
+    };
+    return nativeData is null
+        ? make().ptr : nativeData.stringData(literal, make);
+}
+
 private void storeValue(
     imported!"dmd.mtype".Type type,
     in TypeFacts facts,
@@ -1055,12 +1096,12 @@ private void storeValue(
             assert(literal.len * elementSize == facts.size);
             memcpy(place, literal.peekData.ptr, facts.size);
         } else if (type.ty == Tpointer) {
-            *cast(const(void)**) place = literal.peekData.ptr;
+            *cast(const(void)**) place = terminatedData(literal, nativeData);
         } else {
             assert(type.ty == Tarray);
             storeIntegral(bytes + arrayLengthOffset, literal.len, size_t.sizeof);
             *cast(const(void)**) (bytes + arrayPointerOffset) =
-                literal.peekData.ptr;
+                terminatedData(literal, nativeData);
         }
         return;
     }
