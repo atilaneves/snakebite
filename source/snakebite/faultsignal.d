@@ -80,6 +80,16 @@ public struct GuestRun {
 }
 
 
+// The catcher of a `HardwareFault` calls this first. Until it does, the
+// thread has a fault in flight, and a second fault of the thread (in the
+// unwinder, in a cleanup) gets the default action: throwing again would
+// loop for ever.
+public void takeFault(in HardwareFault) @trusted @nogc nothrow {
+    static if (supported)
+        _state.pending = false;
+}
+
+
 // The fault handlers for the signals that report a guest fault. It returns
 // whether they are in use: not on a target that is not supported, and not
 // when the environment variable `SNAKEBITE_NO_FAULT_HANDLER` is set, so
@@ -291,35 +301,43 @@ static if (supported) {
         stack_t;
     import core.sys.posix.ucontext: REG_RIP, REG_RSP, ucontext_t;
 
-    extern(C) void snakebite_fault_trampoline() nothrow @nogc;
-    extern(C) void snakebite_fault_trampoline_call() nothrow @nogc;
+    private extern(C) void snakebite_fault_trampoline() nothrow @nogc;
+    private extern(C) void snakebite_fault_trampoline_call() nothrow @nogc;
 
     // `SIGILL` is not here: `-checkaction=halt` ends in an illegal
     // instruction, and that must stay a signal.
-    immutable int[3] handledSignals = [SIGSEGV, SIGFPE, SIGBUS];
+    private immutable int[3] handledSignals = [SIGSEGV, SIGFPE, SIGBUS];
 
     // What each thread knows. In the executable, so that the handler
     // reaches it with one instruction that is relative to `fs`.
-    struct ThreadState {
+    private struct ThreadState {
         // How many guest runs this thread is in.
         size_t runs;
-        // A fault was recorded and the trampoline has not run yet.
+        // A fault was recorded and no catcher has taken it yet (`takeFault`).
+        // A fault of the thread in that time happens while the first one
+        // unwinds, and is a defect of the host.
         bool pending;
         FaultReport record;
+        // The thrown object lives here, not in the heap: the collector
+        // scans the thread-local memory of threads it knows, and a thread
+        // that the guest made is not one of them.
+        align(16) void[__traits(classInstanceSize, HardwareFault)] storage;
         HardwareFault prepared;
-        void* alternateStack;
-        size_t alternateStackSize;
+        // The mapping of the alternate stack that this module made, with its
+        // guard page, or null when the thread had an alternate stack.
+        void* mapping;
+        size_t mappingSize;
     }
 
-    ThreadState _state;
-    shared bool _installed;
+    private ThreadState _state;
+    private shared bool _installed;
     // What the signals did before this module: a fault of the host goes to
     // it (a sanitizer, a host that embeds snakebite).
-    __gshared sigaction_t[3] _previous;
+    private __gshared sigaction_t[3] _previous;
 
     // The trace of a thrown object is made by druntime from the stack. The
     // fault has no use for it, and making it allocates.
-    final class NoTrace: Throwable.TraceInfo {
+    private final class NoTrace: Throwable.TraceInfo {
         override int opApply(scope int delegate(ref const(char[]))) const {
             return 0;
         }
@@ -333,55 +351,77 @@ static if (supported) {
         }
     }
 
-    __gshared NoTrace _noTrace = new NoTrace;
+    private __gshared NoTrace _noTrace = new NoTrace;
 
-    void prepareThread() @trusted {
+    private enum guardSize = 4096;
+
+    private void prepareThread() @trusted {
         import core.sys.linux.sys.mman: MAP_ANONYMOUS;
+        import core.sys.posix.signal: SS_DISABLE;
         import core.sys.posix.sys.mman:
-            MAP_FAILED, MAP_PRIVATE, mmap, PROT_READ, PROT_WRITE;
+            MAP_FAILED, MAP_PRIVATE, mmap, mprotect, PROT_NONE, PROT_READ,
+            PROT_WRITE;
         import core.sys.posix.unistd: sysconf;
 
-        enum signalStackSize = 250;
+        // `_SC_SIGSTKSZ` of glibc.
+        enum sysconfSignalStackSize = 250;
         enum minimum = 64 * 1024;
 
-        const wanted = sysconf(signalStackSize);
-        const size = wanted > minimum ? cast(size_t) wanted : minimum;
-        auto stack = mmap(null, size, PROT_READ | PROT_WRITE,
-            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (stack == MAP_FAILED)
-            assert(0, "cannot map an alternate signal stack");
+        // A guest that made an alternate stack of its own keeps it.
+        stack_t current;
+        sigaltstack(null, &current);
+        if (current.ss_flags & SS_DISABLE) {
+            const wanted = sysconf(sysconfSignalStackSize);
+            const size = wanted > minimum ? cast(size_t) wanted : minimum;
+            // The guard page is the lowest: the stack grows down.
+            const total = size + guardSize;
+            auto mapping = mmap(null, total, PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (mapping == MAP_FAILED)
+                assert(0, "cannot map an alternate signal stack");
+            if (mprotect(mapping, guardSize, PROT_NONE) != 0)
+                assert(0, "cannot protect the alternate signal stack");
 
-        stack_t alternate;
-        alternate.ss_sp = stack;
-        alternate.ss_size = size;
-        if (sigaltstack(&alternate, null) != 0)
-            assert(0, "sigaltstack failed");
+            stack_t alternate;
+            alternate.ss_sp = mapping + guardSize;
+            alternate.ss_size = size;
+            if (sigaltstack(&alternate, null) != 0)
+                assert(0, "sigaltstack failed");
 
-        _state.alternateStack = stack;
-        _state.alternateStackSize = size;
-        _state.prepared = new HardwareFault;
-        _state.prepared.info = _noTrace;
+            _state.mapping = mapping;
+            _state.mappingSize = total;
+        }
+
+        _state.storage[] = typeid(HardwareFault).initializer[];
+        auto fault = cast(HardwareFault) _state.storage.ptr;
+        fault.__ctor;
+        fault.info = _noTrace;
+        _state.prepared = fault;
     }
 
-    static ~this() @trusted {
+    private static ~this() @trusted {
         import core.sys.posix.sys.mman: munmap;
         import core.sys.posix.signal: SS_DISABLE;
 
-        if (_state.alternateStack is null)
+        if (_state.mapping is null)
             return;
 
-        stack_t disabled;
-        disabled.ss_flags = SS_DISABLE;
-        sigaltstack(&disabled, null);
-        munmap(_state.alternateStack, _state.alternateStackSize);
-        _state.alternateStack = null;
+        // The guest can have replaced the stack: its own stays.
+        stack_t current;
+        sigaltstack(null, &current);
+        if (current.ss_sp is _state.mapping + guardSize) {
+            stack_t disabled;
+            disabled.ss_flags = SS_DISABLE;
+            sigaltstack(&disabled, null);
+        }
+        munmap(_state.mapping, _state.mappingSize);
+        _state.mapping = null;
     }
 
     // Runs on the thread that faulted, off signal context.
     public extern(C) void snakebite_fault_raise() {
         auto fault = _state.prepared;
         const record = _state.record;
-        _state.pending = false;
 
         fault.signal = record.signal;
         fault.address = record.address;
@@ -391,7 +431,7 @@ static if (supported) {
         throw fault;
     }
 
-    extern(C) void onFault(int signal, siginfo_t* info, void* context) nothrow @nogc {
+    private extern(C) void onFault(int signal, siginfo_t* info, void* context) nothrow @nogc {
         // A signal that a program sent (`kill`, `raise`) has no faulting
         // instruction to continue from.
         const hardware = info.si_code > 0;
@@ -423,7 +463,7 @@ static if (supported) {
         (*registers)[REG_RIP] = cast(size_t) &snakebite_fault_trampoline;
     }
 
-    Divisor divisorOfContext(ref const(ucontext_t) context) @system nothrow @nogc {
+    private Divisor divisorOfContext(ref const(ucontext_t) context) @system nothrow @nogc {
         import core.sys.posix.ucontext:
             REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15, REG_R8,
             REG_R9, REG_RAX, REG_RBP, REG_RBX, REG_RCX, REG_RDI, REG_RDX,
@@ -448,7 +488,7 @@ static if (supported) {
     // if there was one, else the default action. Returning from the
     // handler runs the faulting instruction again, and that ends the
     // process with the signal (and a core dump if the user enabled them).
-    void hostDefect(int signal, siginfo_t* info, void* context) nothrow @nogc {
+    private void hostDefect(int signal, siginfo_t* info, void* context) nothrow @nogc {
         import core.stdc.signal: raise;
         import core.sys.posix.signal: SIG_IGN;
 
@@ -473,6 +513,11 @@ static if (supported) {
             return;
         }
 
+        // A program that ignored the signal and a program that sent it get
+        // what they asked for.
+        if (info.si_code <= 0 && handler is cast(void*) SIG_IGN)
+            return;
+
         if (info.si_code > 0)
             reportHostDefect(signal, info, context);
         sigaction_t default_;
@@ -483,7 +528,7 @@ static if (supported) {
             raise(signal);
     }
 
-    void reportHostDefect(int signal, siginfo_t* info, void* context) nothrow @nogc {
+    private void reportHostDefect(int signal, siginfo_t* info, void* context) nothrow @nogc {
         import core.sys.posix.unistd: write;
 
         char[128] line = void;
@@ -503,7 +548,11 @@ static if (supported) {
             put(digits[start .. $]);
         }
 
-        put("snakebite: internal error: signal ");
+        // A thread in a guest run most likely has a fault of the guest that
+        // no handler of the guest run took: do not blame the host.
+        put(_state.runs != 0
+            ? "snakebite: fatal: fault of the guest program: signal "
+            : "snakebite: internal error: signal ");
         putNumber(signal, 10);
         put(" at address 0x");
         putNumber(cast(size_t) info.si_addr, 16);

@@ -11,7 +11,8 @@ import snakebite.faultsignal:
     FaultReport,
     GuestRun,
     HardwareFault,
-    installFaultHandlers;
+    installFaultHandlers,
+    takeFault;
 import ut;
 
 
@@ -80,32 +81,50 @@ unittest {
     // idiv rcx
     decoded([0x48, 0xf7, 0xf9], registersWith(rcx, 1UL << 32))
         .should == Divisor.nonZero;
+}
+
+@("faultsignal.divisorOf.sixtyFourBitOperandZero")
+unittest {
+    // idiv rcx
     decoded([0x48, 0xf7, 0xf9], registersWith(rcx, 0))
         .should == Divisor.zero;
 }
 
-@("faultsignal.divisorOf.extendedRegister")
+@("faultsignal.divisorOf.extendedRegisterZero")
 unittest {
     // idiv r9d: REX.B selects r9
     decoded([0x41, 0xf7, 0xf9], registersWith(r9, 0, rcx, 5))
         .should == Divisor.zero;
+}
+
+@("faultsignal.divisorOf.extendedRegisterNonZero")
+unittest {
     decoded([0x41, 0xf7, 0xf9], registersWith(r9, 3, rcx, 0))
         .should == Divisor.nonZero;
 }
 
-@("faultsignal.divisorOf.eightBitOperand")
+@("faultsignal.divisorOf.eightBitOperandZero")
 unittest {
     // idiv cl
     decoded([0xf6, 0xf9], registersWith(rcx, 0x100)).should == Divisor.zero;
+}
+
+@("faultsignal.divisorOf.eightBitOperandNonZero")
+unittest {
+    // idiv cl
     decoded([0xf6, 0xf9], registersWith(rcx, 0x101))
         .should == Divisor.nonZero;
 }
 
-@("faultsignal.divisorOf.highByteRegister")
+@("faultsignal.divisorOf.highByteRegisterZero")
 unittest {
     // idiv ah: without a REX prefix, register 4 of a byte operand is ah.
     decoded([0xf6, 0xfc], registersWith(rax, 0x0001))
         .should == Divisor.zero;
+}
+
+@("faultsignal.divisorOf.highByteRegisterNonZero")
+unittest {
     decoded([0xf6, 0xfc], registersWith(rax, 0x0100))
         .should == Divisor.nonZero;
 }
@@ -117,21 +136,30 @@ unittest {
         .should == Divisor.zero;
 }
 
-@("faultsignal.divisorOf.sixteenBitOperand")
+@("faultsignal.divisorOf.sixteenBitOperandZero")
 unittest {
     // idiv cx
     decoded([0x66, 0xf7, 0xf9], registersWith(rcx, 0x10000))
         .should == Divisor.zero;
+}
+
+@("faultsignal.divisorOf.sixteenBitOperandNonZero")
+unittest {
     decoded([0x66, 0xf7, 0xf9], registersWith(rcx, 0x10001))
         .should == Divisor.nonZero;
 }
 
-@("faultsignal.divisorOf.memoryThroughARegister")
+@("faultsignal.divisorOf.memoryThroughARegisterZero")
 unittest {
     int[2] values = [0, -1];
     // idiv dword ptr [rbx]
     decoded([0xf7, 0x3b], registersWith(rbx, cast(size_t) &values[0]))
         .should == Divisor.zero;
+}
+
+@("faultsignal.divisorOf.memoryThroughARegisterNonZero")
+unittest {
+    int[2] values = [0, -1];
     decoded([0xf7, 0x3b], registersWith(rbx, cast(size_t) &values[1]))
         .should == Divisor.nonZero;
 }
@@ -144,6 +172,14 @@ unittest {
         .should == Divisor.zero;
 }
 
+@("faultsignal.divisorOf.memoryWithNegativeEightBitDisplacement")
+unittest {
+    int[2] values = [0, -1];
+    // idiv dword ptr [rbp - 4]: the displacement is signed.
+    decoded([0xf7, 0x7d, 0xfc], registersWith(rbp, cast(size_t) &values[1]))
+        .should == Divisor.zero;
+}
+
 @("faultsignal.divisorOf.memoryWithThirtyTwoBitDisplacement")
 unittest {
     int[2] values = [-1, 0];
@@ -153,25 +189,62 @@ unittest {
         .should == Divisor.zero;
 }
 
-@("faultsignal.divisorOf.memoryWithScaledIndex")
+@("faultsignal.divisorOf.memoryWithNegativeThirtyTwoBitDisplacement")
+unittest {
+    int[2] values = [-1, 0];
+    // idiv dword ptr [rbp - 0x1000]
+    decoded([0xf7, 0xbd, 0x00, 0xf0, 0xff, 0xff],
+        registersWith(rbp, cast(size_t) &values[1] + 0x1000))
+        .should == Divisor.zero;
+}
+
+@("faultsignal.divisorOf.memoryWithScaledIndexZero")
 unittest {
     int[4] values = [-1, -1, 0, -1];
     // idiv dword ptr [rax + rbx * 4]
     decoded([0xf7, 0x3c, 0x98],
         registersWith(rax, cast(size_t) &values[0], rbx, 2))
         .should == Divisor.zero;
+}
+
+@("faultsignal.divisorOf.memoryWithScaledIndexNonZero")
+unittest {
+    int[4] values = [-1, -1, 0, -1];
     decoded([0xf7, 0x3c, 0x98],
         registersWith(rax, cast(size_t) &values[0], rbx, 3))
         .should == Divisor.nonZero;
 }
 
-@("faultsignal.divisorOf.memoryWithExtendedIndexAndBase")
+@("faultsignal.divisorOf.memoryWithIndexAndNoBaseZero")
+unittest {
+    int[2] values = [0, -1];
+    // idiv dword ptr [rbx * 4 + 0]: mod 0 and base 5 mean no base, so rbp
+    // must not be added. The address is a multiple of 4.
+    decoded([0xf7, 0x3c, 0x9d, 0x00, 0x00, 0x00, 0x00],
+        registersWith(rbx, cast(size_t) &values[0] / 4, rbp, 0x1000))
+        .should == Divisor.zero;
+}
+
+@("faultsignal.divisorOf.memoryWithIndexAndNoBaseNonZero")
+unittest {
+    int[2] values = [0, -1];
+    decoded([0xf7, 0x3c, 0x9d, 0x00, 0x00, 0x00, 0x00],
+        registersWith(rbx, cast(size_t) &values[1] / 4, rbp, 0x1000))
+        .should == Divisor.nonZero;
+}
+
+@("faultsignal.divisorOf.memoryWithExtendedIndexAndBaseZero")
 unittest {
     long[2] values = [0, 5];
     // idiv qword ptr [r9 + r12 * 8]: REX.W, REX.X, REX.B
     decoded([0x4b, 0xf7, 0x3c, 0xe1],
         registersWith(r9, cast(size_t) &values[0], r12, 0))
         .should == Divisor.zero;
+}
+
+@("faultsignal.divisorOf.memoryWithExtendedIndexAndBaseNonZero")
+unittest {
+    long[2] values = [0, 5];
     decoded([0x4b, 0xf7, 0x3c, 0xe1],
         registersWith(r9, cast(size_t) &values[0], r12, 1))
         .should == Divisor.nonZero;
@@ -186,34 +259,48 @@ unittest {
         .should == Divisor.zero;
 }
 
-@("faultsignal.divisorOf.memoryRelativeToTheInstructionPointer")
-unittest {
-    // idiv dword ptr [rip + displacement]: the displacement counts from the
-    // end of the instruction, which is 6 bytes long. The data is next to
-    // the code: a displacement has 32 bits.
+// idiv dword ptr [rip + displacement]: the displacement counts from the end
+// of the instruction, which is 6 bytes long. The data is next to the code: a
+// displacement has 32 bits.
+private Divisor decodedRelativeToTheInstructionPointer(in size_t dataIndex) @trusted {
     struct Layout {
         ubyte[6] code;
         int[2] data;
         ubyte[16] padding;
     }
 
-    foreach (index, expected; [Divisor.nonZero, Divisor.zero]) {
-        Layout layout;
-        layout.code = [0xf7, 0x3d, 0, 0, 0, 0];
-        layout.data = [1, 0];
-        const end = cast(long) &layout + 6;
-        *cast(int*) (layout.code.ptr + 2) =
-            cast(int) (cast(long) &layout.data[index] - end);
-        divisorOf(layout.code.ptr, ulong[16].init).should == expected;
-    }
+    Layout layout;
+    layout.code = [0xf7, 0x3d, 0, 0, 0, 0];
+    layout.data = [1, 0];
+    const end = cast(long) &layout + 6;
+    *cast(int*) (layout.code.ptr + 2) =
+        cast(int) (cast(long) &layout.data[dataIndex] - end);
+    return divisorOf(layout.code.ptr, ulong[16].init);
 }
 
-@("faultsignal.divisorOf.otherInstructionIsUnknown")
+@("faultsignal.divisorOf.memoryRelativeToTheInstructionPointerNonZero")
 unittest {
-    // nop
+    decodedRelativeToTheInstructionPointer(0).should == Divisor.nonZero;
+}
+
+@("faultsignal.divisorOf.memoryRelativeToTheInstructionPointerZero")
+unittest {
+    decodedRelativeToTheInstructionPointer(1).should == Divisor.zero;
+}
+
+@("faultsignal.divisorOf.nopIsUnknown")
+unittest {
     decoded([0x90]).should == Divisor.unknown;
-    // neg ecx: the same opcode as idiv, another operation
+}
+
+@("faultsignal.divisorOf.otherOperationOfTheSameOpcodeIsUnknown")
+unittest {
+    // neg ecx: the opcode of idiv, another operation
     decoded([0xf7, 0xd9]).should == Divisor.unknown;
+}
+
+@("faultsignal.divisorOf.otherOpcodeIsUnknown")
+unittest {
     // mov eax, [rax]
     decoded([0x8b, 0x00]).should == Divisor.unknown;
 }
@@ -222,6 +309,13 @@ unittest {
 unittest {
     // idiv dword ptr fs:[rbx]: the base of fs is not a register.
     decoded([0x64, 0xf7, 0x3b], registersWith(rbx, 0))
+        .should == Divisor.unknown;
+}
+
+@("faultsignal.divisorOf.overrideOfTheAddressSizeIsUnknown")
+unittest {
+    // idiv dword ptr [ebx]: the 0x67 prefix makes the address 32 bits wide.
+    decoded([0x67, 0xf7, 0x3b], registersWith(rbx, 0))
         .should == Divisor.unknown;
 }
 
@@ -238,18 +332,20 @@ private enum segvAccessError = 2;
 private enum sigKernel = 0x80;
 private enum fpeIntegerDivide = 1;
 
-@("faultsignal.classify.addressInTheFirstPageIsNull")
-unittest {
-    foreach (address; [0UL, 8, 8000, 65_535])
+static foreach (address; [0UL, 8, 8000, 65_535]) {
+    @("faultsignal.classify.addressInTheFirstPageIsNull." ~ address.stringof)
+    unittest {
         classify(report(SIGSEGV, segvMapError, address))
             .should == GuestFault.Kind.nullDereference;
+    }
 }
 
-@("faultsignal.classify.addressAfterTheFirstPageIsInvalid")
-unittest {
-    foreach (address; [65_536UL, 0x7000_0000_0000])
+static foreach (address; [65_536UL, 0x7000_0000_0000]) {
+    @("faultsignal.classify.addressAfterTheFirstPageIsInvalid." ~ address.stringof)
+    unittest {
         classify(report(SIGSEGV, segvMapError, address))
             .should == GuestFault.Kind.invalidAccess;
+    }
 }
 
 @("faultsignal.classify.protectionFaultInTheFirstPageIsNull")
@@ -336,6 +432,12 @@ private int loadThroughAFrameWithCleanup(int* pointer) {
     return load(pointer);
 }
 
+private int loadThroughAFrameThatFaultsInCleanup(int* pointer) {
+    pragma(inline, false);
+    scope(exit) load(null);
+    return load(pointer);
+}
+
 // One fault, as the hardware makes it, and the throwable that the thread
 // gets. A division trap has no address of an access.
 private enum noAddress = size_t.max;
@@ -374,8 +476,10 @@ private HardwareFault faultOf(void function() fault) {
     auto run = GuestRun.begin;
     try
         fault();
-    catch (HardwareFault caught)
+    catch (HardwareFault caught) {
+        takeFault(caught);
         return caught;
+    }
 
     assert(0, "the fault did not end the call");
 }
@@ -419,6 +523,7 @@ unittest {
         try
             load(null);
         catch (HardwareFault fault) {
+            takeFault(fault);
             fault.kind.should == GuestFault.Kind.nullDereference;
             continue;
         }
@@ -435,7 +540,8 @@ unittest {
 
     try
         loadThroughAFrameWithCleanup(null);
-    catch (HardwareFault) {
+    catch (HardwareFault fault) {
+        takeFault(fault);
     }
 
     cleanups.should == [1];
@@ -451,6 +557,40 @@ unittest {
     }
 
     faultOf(shapes[0].fault).kind.should == GuestFault.Kind.nullDereference;
+}
+
+
+@("faultsignal.guestRun.keepsTheAlternateStackOfTheGuest")
+unittest {
+    import core.sys.posix.signal: SS_DISABLE, sigaltstack, stack_t;
+    import core.thread: Thread;
+
+    installFaultHandlers.shouldBeTrue;
+    void* current;
+    void* own;
+    auto thread = new Thread({
+        auto memory = new ubyte[64 * 1024];
+        own = memory.ptr;
+        stack_t guest;
+        guest.ss_sp = memory.ptr;
+        guest.ss_size = memory.length;
+        sigaltstack(&guest, null);
+
+        {
+            auto run = GuestRun.begin;
+            stack_t after;
+            sigaltstack(null, &after);
+            current = after.ss_sp;
+        }
+
+        stack_t disabled;
+        disabled.ss_flags = SS_DISABLE;
+        sigaltstack(&disabled, null);
+    });
+    thread.start;
+    thread.join;
+
+    current.should == own;
 }
 
 
@@ -482,6 +622,7 @@ unittest {
                 try
                     shape.fault();
                 catch (HardwareFault fault) {
+                    takeFault(fault);
                     if (fault.kind != shape.kind)
                         atomicOp!"+="(wrong, 1);
                     continue;
@@ -556,6 +697,33 @@ unittest {
     runChild("sentSignalInGuestRun").status.should == killedBySegmentationFault;
 }
 
+@("faultsignal.hostDefect.faultWhileAnotherIsUnwindingKeepsItsStatus")
+unittest {
+    // The cleanup faults after the throw and before the catch.
+    runChild("faultInCleanup").status.should == killedBySegmentationFault;
+}
+
+@("faultsignal.hostDefect.faultInAGuestRunDoesNotBlameTheHost")
+unittest {
+    const child = runChild("faultInCleanup");
+
+    "fault of the guest program: signal 11".should.be in child.output;
+    "internal error".should.not.be in child.output;
+}
+
+@("faultsignal.hostDefect.signalThatTheProgramIgnoredStaysIgnored")
+unittest {
+    runChild("sentSignalWhileIgnored").status.should == survivedStatus;
+}
+
+@("faultsignal.guestRun.thrownObjectSurvivesCollectionsForAThreadOfTheGuest")
+unittest {
+    // A thread that druntime does not know: the collector does not scan
+    // its thread-local memory.
+    runChild("faultOnAThreadOfTheGuestAfterCollections").status
+        .should == survivedStatus;
+}
+
 @("faultsignal.hostDefect.goesToTheHandlerThatWasThereBefore")
 unittest {
     runChild("previousHandler").status.should == previousHandlerStatus;
@@ -581,6 +749,7 @@ unittest {
 
 
 private enum previousHandlerStatus = 43;
+private enum survivedStatus = 77;
 private enum guestHandlerStatus = 42;
 
 extern(C) private void exitWithPreviousHandlerStatus(int) nothrow @nogc {
@@ -601,17 +770,26 @@ extern(C) private void exitWithGuestHandlerStatus(int) nothrow @nogc {
 // status that tells the parent test that the fault did not kill it.
 public int runFaultChild(in string scenario) {
     import core.sys.posix.signal: raise, sigaction, sigaction_t, SIGILL;
-    import core.sys.posix.sys.resource: RLIMIT_CORE, rlimit, setrlimit;
+    import core.sys.linux.sys.prctl: PR_SET_DUMPABLE, prctl;
+    import core.sys.posix.signal: SIG_IGN;
+    import core.sys.posix.unistd: alarm;
     import core.thread: Thread;
 
-    // The processes die on purpose: no core dump for each of them.
-    rlimit noCore;
-    setrlimit(RLIMIT_CORE, &noCore);
+    // The processes die on purpose: no core dump for each of them. A
+    // limit of zero does not stop a helper that the kernel runs for a
+    // piped `core_pattern`, a process that is not dumpable does.
+    prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
+    // A scenario that does not end is a failure: it dies of SIGALRM.
+    alarm(30);
 
     sigaction_t previous;
     switch (scenario) {
         case "previousHandler":
             previous.sa_handler = &exitWithPreviousHandlerStatus;
+            sigaction(SIGSEGV, &previous, null);
+            break;
+        case "sentSignalWhileIgnored":
+            previous.sa_handler = SIG_IGN;
             sigaction(SIGSEGV, &previous, null);
             break;
         default:
@@ -646,6 +824,16 @@ public int runFaultChild(in string scenario) {
         case "previousHandler":
             load(null);
             break;
+        case "faultInCleanup":
+            auto run = GuestRun.begin;
+            loadThroughAFrameThatFaultsInCleanup(null);
+            break;
+        case "sentSignalWhileIgnored":
+            auto run = GuestRun.begin;
+            raise(SIGSEGV);
+            return survivedStatus;
+        case "faultOnAThreadOfTheGuestAfterCollections":
+            return faultOnAThreadOfTheGuest;
         case "guestFaultWithTheHandlersOff":
             auto run = GuestRun.begin;
             load(null);
@@ -668,6 +856,58 @@ public int runFaultChild(in string scenario) {
     }
 
     return 0;
+}
+
+// A thread that `pthread_create` made, as the guest does, runs guest code
+// and faults after the main thread has collected garbage and allocated
+// objects of the size of the thrown one.
+private final class Filler {
+    void*[(__traits(classInstanceSize, HardwareFault) + 7) / 8] words;
+}
+
+private shared bool guestThreadReady;
+private shared bool guestThreadGo;
+private shared bool guestThreadCaught;
+
+extern(C) private void* runGuestThread(void*) {
+    import core.atomic: atomicLoad, atomicStore;
+    import core.sys.posix.unistd: usleep;
+
+    auto run = GuestRun.begin;
+    atomicStore(guestThreadReady, true);
+    while (!atomicLoad(guestThreadGo))
+        usleep(1000);
+
+    try
+        load(null);
+    catch (HardwareFault fault) {
+        takeFault(fault);
+        atomicStore(guestThreadCaught,
+            fault.kind == GuestFault.Kind.nullDereference);
+    }
+    return null;
+}
+
+private int faultOnAThreadOfTheGuest() @trusted {
+    import core.atomic: atomicLoad, atomicStore;
+    import core.memory: GC;
+    import core.sys.posix.pthread: pthread_create, pthread_join, pthread_t;
+    import core.sys.posix.unistd: usleep;
+
+    pthread_t thread;
+    pthread_create(&thread, null, &runGuestThread, null);
+    while (!atomicLoad(guestThreadReady))
+        usleep(1000);
+
+    foreach (round; 0 .. 200) {
+        GC.collect;
+        foreach (index; 0 .. 500)
+            cast(void) new Filler;
+    }
+    atomicStore(guestThreadGo, true);
+    pthread_join(thread, null);
+
+    return atomicLoad(guestThreadCaught) ? survivedStatus : 98;
 }
 
 public enum faultChildVariable = childVariable;
