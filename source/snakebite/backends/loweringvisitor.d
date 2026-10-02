@@ -5,7 +5,7 @@ private:
 
 import dmd.expression:
     ArrayLiteralExp, AssocArrayLiteralExp, CastExp, CatAssignExp, CatExp,
-    CmpExp, EqualExp,
+    CmpExp, EqualExp, HaltExp,
     CatElemAssignExp, CatDcharAssignExp,
     ConstructExp, Expression, IdentityExp, LoweredAssignExp, NewExp, ThrowExp,
     TupleExp;
@@ -59,17 +59,25 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     protected abstract void visitThrowStatement(ThrowStatement statement);
     protected abstract void visitThrowExp(ThrowExp expression);
 
-    // DMD's semantic pass records the complete runtime append operation in
-    // `lowering`. An unlowered form belongs to backend code generation, such
-    // as `dchar` append, and follows the normal unsupported-expression path.
+    // DMD's semantic pass leaves `lowering` null in a scope that needs no
+    // code generation, and dmd's glue cannot compile such an append. A
+    // backend can still compile it: an `if (__ctfe)` block with a `case`
+    // label is dead code at run time but has statements that a jump can
+    // reach. Reaching the append halts the guest.
     final override void visit(CatAssignExp expression) {
         if (expression.lowering is null) {
-            visit(cast(Expression) expression);
+            visitHalt;
             return;
         }
 
         expression.lowering.accept(this);
     }
+
+    final override void visit(HaltExp) {
+        visitHalt;
+    }
+
+    protected abstract void visitHalt();
 
     final override void visit(EqualExp expression) {
         if (expression.lowering !is null) {

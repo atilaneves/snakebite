@@ -603,8 +603,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         GotoCaseStatement, GotoDefaultStatement, GotoStatement, IfStatement,
         ImportStatement, LabelStatement, ReturnStatement, ScopeStatement, Statement,
         SwitchErrorStatement, SwitchStatement, ThrowStatement,
-        TryCatchStatement, TryFinallyStatement, UnrolledLoopStatement,
-        WithStatement;
+        TryCatchStatement, ScopeGuardStatement, TryFinallyStatement,
+        UnrolledLoopStatement, WithStatement;
     import dmd.tokens: EXP;
     import snakebite.backends.bytecode.vm:
         Arg, AssertSite, CallSite, ClosureSlot, castSizeWithSignedness,
@@ -1242,7 +1242,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     extern(C++):
 
     override void visit(Statement statement) {
-        throw rejection(_function, statement.loc, statementText(statement));
+        import std.conv: text;
+
+        assert(0, text("Statement ", statement.stmt,
+            ": no `visit` override, and not in `UnreachableNodes`"));
     }
 
     override void visit(CompoundStatement statement) {
@@ -1400,6 +1403,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (statement._body !is null)
             compileStatement(statement._body);
+    }
+
+    // Statement semantic rewrites a scope guard in a compound or scope
+    // statement. A scope guard that is a whole `catch` handler stays, and
+    // dmd's glue generates no code for it.
+    override void visit(ScopeGuardStatement statement) {
     }
 
     override void visit(TryCatchStatement statement) {
@@ -3939,7 +3948,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     extern(C++):
 
     override void visit(Expression expression) {
-        throw rejection(_function, expression.loc, expressionText(expression));
+        import std.conv: text;
+
+        assert(0, text("Expression ", expression.op,
+            ": no `visit` override, and not in `UnreachableNodes`"));
     }
 
     override void visit(DeclarationExp expression) {
@@ -4178,10 +4190,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             } else
                 evalInto(target.receiver, context, size_t.sizeof);
         } else if (target.needsContext) {
-            if (target.contextOwner is null)
-                assert(0,
-                    "`delegateTargetOf` asks for a context only with an owner");
-
             const contextOffset = contextAddressOf(target.contextOwner);
             emit(&opCopy, _destination + delegateContextOffset,
                 contextOffset, size_t.sizeof);
@@ -5079,7 +5087,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileAssert(expression);
     }
 
-    override void visit(HaltExp) {
+    protected override void visitHalt() {
         const never = reserveTemp(pointerFacts);
         emit(&opConstant, never, addConstant(0), size_t.sizeof);
         emit(&opAssert, never, haltSite, size_t.sizeof);
@@ -7745,38 +7753,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
 }
 
-// Renders `statement` back to source text for a rejection message, on one
-// line: dmd's own renderer (`toChars`) includes the trailing newline a
-// statement carries in source.
-private string statementText(imported!"dmd.statement".Statement statement) {
-    import dmd.hdrgen: toChars;
-    import std.string: fromStringz, strip;
-    import std.conv: text;
-
-    return text("`", toChars(statement).fromStringz.strip, "`");
-}
-
-// As `statementText`, for an expression: `Expression.toString` already
-// renders on one line, unlike a statement's.
+// Renders `expression` back to source text for a diagnostic message.
 private string expressionText(imported!"dmd.expression".Expression expression) {
     import std.conv: text;
 
     return text("`", expression.toString, "`");
 }
 
-// A rejection naming where in the guest source it happened (`loc`), what
-// the compiler refused (`operation`), and which function it was compiling.
-private imported!"snakebite.exception".SnakebiteException rejection(
-    imported!"dmd.func".FuncDeclaration function_,
-    imported!"dmd.location".Loc loc,
-    string operation,
-) {
-    import snakebite.exception: SnakebiteException;
-    import std.conv: text;
-    import std.string: fromStringz;
 
-    return new SnakebiteException(text(
-        loc.toChars.fromStringz, ": bytecode compiler cannot compile ",
-        operation, " in `", function_.toString, "`",
-    ));
+
+// A function body is analysed only in the compile unit that compiles this
+// module, whereas a module-scope `static assert` runs again in every unit
+// that imports it.
+private void assertEveryNodeHandled() {
+    static assert(
+        imported!"snakebite.backends.nodecoverage".AssertEveryNodeHandled!FunctionCompiler);
 }

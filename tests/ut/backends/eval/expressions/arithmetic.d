@@ -266,3 +266,11 @@ static foreach (backend; Matrix!()) {
         ).should == "6";
     }
 }
+
+static foreach (backend; Matrix!()) {
+    @("nullStringResult." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        eval!(backend, q{cast(string) null}).should == "";
+    }
+}
