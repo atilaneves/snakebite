@@ -30,6 +30,8 @@ public struct GuestFault {
         nullCall,
         divisionByZero,
         divisionOverflow,
+        // A division trap whose cause the host could not read.
+        divisionFault,
         throwNull,
         stackOverflow,
     }
@@ -46,6 +48,8 @@ public struct GuestFault {
                 return "integer division by zero";
             case divisionOverflow:
                 return "integer overflow in division";
+            case divisionFault:
+                return "integer division fault";
             case throwNull:
                 return "throw of a null reference";
             case stackOverflow:
