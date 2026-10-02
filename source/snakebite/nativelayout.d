@@ -1063,19 +1063,6 @@ private void storeValue(
         return;
     }
 
-    // `&(struct S){1, 2}` at file scope: the C compound literal is a struct
-    // literal and has static storage, which dmd's static data glue (`todt`)
-    // gives a symbol of its own.
-    if (auto address = value.isAddrExp) {
-        if (auto literal = address.e1.isStructLiteralExp) {
-            auto pointee = literal.type;
-            auto storage = new void[pointee.size];
-            storeValue(pointee, literal, storage.ptr, symbolAddress, nativeData);
-            *cast(void**) place = storage.ptr;
-            return;
-        }
-    }
-
     if (auto literal = value.isFuncExp) {
         assert(symbolAddress !is null);
         if (type.ty == Tdelegate) {
@@ -1096,6 +1083,7 @@ private void storeValue(
         return;
     }
 
+    // Also `&(struct S){1, 2}` at file scope in C.
     if (auto address = value.isAddrExp) {
         if (isStaticStructAddress(address)) {
             assert(nativeData !is null);
