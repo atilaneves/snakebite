@@ -480,7 +480,7 @@ public struct NativeData {
     // struct values are keyed by their own literal, not by a reference
     // or address expression, to preserve aliases and cycles.
     private void*[StructLiteralExp] _compileTimeValues;
-    private const(void)*[StringExp] _stringData;
+    private SharedTable!(StringExp, ubyte[]) _stringData;
     // Written under the compiler lock only, like every miss below.
     private void[][] _blocks;
     private void[] _available;
@@ -591,23 +591,10 @@ public struct NativeData {
 
     // One copy for each literal, so that evaluating it again in a loop does
     // not allocate again.
-    private const(void)* stringData(
-        StringExp literal,
-        scope ubyte[] delegate() make,
-    ) {
-        import snakebite.frontend.compiler: withCompilerLock;
-
-        const(void)* address;
-        withCompilerLock({
-            if (auto found = literal in _stringData) {
-                address = *found;
-                return;
-            }
-            auto bytes = make();
-            _blocks ~= bytes;
-            address = _stringData[literal] = bytes.ptr;
-        });
-        return address;
+    private const(void)* stringData(StringExp literal) {
+        if (auto found = literal in _stringData)
+            return found.ptr;
+        return _stringData.insert(literal, terminatedCopy(literal)).ptr;
     }
 
     public const(void)[] initialValue(
@@ -951,19 +938,12 @@ public void storeValue(
 // A literal is followed by one zero code unit in memory, so that it converts
 // to a C string. The frontend does not keep one in a literal that it made by
 // folding, so the code units are copied to storage that has it.
-private const(void)* terminatedData(
-    imported!"dmd.expression".StringExp literal,
-    NativeData* nativeData,
-) {
+private ubyte[] terminatedCopy(imported!"dmd.expression".StringExp literal) {
     import core.stdc.string: memcpy;
 
-    auto make = () {
-        auto bytes = new ubyte[(literal.len + 1) * literal.sz];
-        memcpy(bytes.ptr, literal.peekData.ptr, literal.len * literal.sz);
-        return bytes;
-    };
-    return nativeData is null
-        ? make().ptr : nativeData.stringData(literal, make);
+    auto bytes = new ubyte[(literal.len + 1) * literal.sz];
+    memcpy(bytes.ptr, literal.peekData.ptr, literal.len * literal.sz);
+    return bytes;
 }
 
 private void storeValue(
@@ -1096,12 +1076,14 @@ private void storeValue(
             assert(literal.len * elementSize == facts.size);
             memcpy(place, literal.peekData.ptr, facts.size);
         } else if (type.ty == Tpointer) {
-            *cast(const(void)**) place = terminatedData(literal, nativeData);
+            *cast(const(void)**) place = nativeData is null
+                ? terminatedCopy(literal).ptr : nativeData.stringData(literal);
         } else {
             assert(type.ty == Tarray);
             storeIntegral(bytes + arrayLengthOffset, literal.len, size_t.sizeof);
             *cast(const(void)**) (bytes + arrayPointerOffset) =
-                terminatedData(literal, nativeData);
+                nativeData is null
+                ? terminatedCopy(literal).ptr : nativeData.stringData(literal);
         }
         return;
     }
