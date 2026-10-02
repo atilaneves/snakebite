@@ -4643,8 +4643,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // operation to `int` while a `ubyte` field still has one byte of
     // storage.
     private long bitfieldValueAt(void* base, VarDeclaration field) {
-        return bitfieldValueAtPlace(field,
-            cast(ubyte*) base + fieldOffsetOf(field));
+        const plan = bitfieldPlanOf(field);
+        return plan.load(cast(ubyte*) base + plan.offset);
     }
 
     // `place` is the address of the field's storage unit.
@@ -4657,9 +4657,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private void storeBitfield(
         DotVarExp expression, VarDeclaration field, long value,
     ) {
-        auto place = cast(ubyte*) fieldBaseAddress(expression.e1)
-            + fieldOffsetOf(field);
-        storeBitfieldAt(field, place, value);
+        const plan = bitfieldPlanOf(field);
+        plan.store(cast(ubyte*) fieldBaseAddress(expression.e1) + plan.offset,
+            cast(ulong) value);
     }
 
     private void storeBitfieldAt(
@@ -4668,16 +4668,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         bitfieldPlanOf(field).store(place, cast(ulong) value);
     }
 
-    extern(D) private BitfieldAccess bitfieldPlanOf(VarDeclaration field) {
+    extern(D) private const(BitfieldAccess)* bitfieldPlanOf(
+        VarDeclaration field,
+    ) {
         auto recent = &_recentBitfields[(cast(size_t) cast(void*) field >> 4) & 15];
         if (recent.field is field)
-            return recent.plan;
+            return &recent.plan;
 
         auto plan = field in _bitfields;
         if (plan is null)
             plan = _bitfields.build(field, () => bitfieldAccess(field));
         *recent = BitfieldSlot(field, *plan);
-        return *plan;
+        return plan;
     }
 
     // Where a field starts in its struct: a bit field starts at its
