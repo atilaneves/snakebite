@@ -658,7 +658,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // so every enclosing visitor can continue its normal statement sequence.
     private ControlFlowState _controlFlow;
     private SwitchStatement _switchStatement;
-    private void[][] _activationAllocations;
+    private CStack!(void*) _activationAllocations;
     // `extern(D)`: only `Visitor`'s `visit` overloads need the C++
     // linkage.
     extern(D) public this(Shared* shared_) {
@@ -1313,12 +1313,30 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // `alloca`'s memory is the running function's, as compiled D has it:
     // the guard of that function's activation lets go of it on return.
     private void* allocateForActivation(in size_t size) {
+        import core.memory: GC;
+        import core.stdc.stdlib: malloc;
+
         enum alignment = 16;
-        // A block with pointers: the GC scans it, as it scans a stack.
-        auto block = new void[](size + alignment);
-        _activationAllocations ~= block;
-        return cast(void*) ((cast(size_t) block.ptr + alignment - 1)
+        auto block = malloc(size + alignment);
+        if (block is null)
+            assert(0, "out of memory for alloca");
+        // A stack holds pointers to GC objects, so the GC scans this block
+        // as it scans a stack. `GC.addRange` does not allocate.
+        GC.addRange(block, size + alignment);
+        _activationAllocations.push(block);
+        return cast(void*) ((cast(size_t) block + alignment - 1)
             & ~size_t(alignment - 1));
+    }
+
+    private void releaseActivationAllocations(in size_t mark) {
+        import core.memory: GC;
+        import core.stdc.stdlib: free;
+
+        foreach (block; _activationAllocations[mark .. $]) {
+            GC.removeRange(block);
+            free(block);
+        }
+        _activationAllocations.truncate(mark);
     }
 
     private void callHost(
@@ -1534,6 +1552,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             }),
             (expression) => attempt({ structLiteralPlanOf(expression); }),
             (expression) => attempt({ _nativeData.stringData(expression); }),
+            (constructor) => attempt({
+                auto definition = _callSelection.definitionOf(
+                    constructor,
+                    (declaration) => _program.linkedFunctionOf(declaration));
+                layoutOf(constructor);
+                callShapeOf(constructor);
+                enqueue(definition);
+            }),
+            (field) => attempt({ bitfieldPlanOf(field); }),
             (statement) => attempt({ tryCatchPlanOf(statement); }),
             (statement) => attempt({
                 finallyCandidatesOf(statement);
@@ -1763,7 +1790,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         private Identifier _pendingLoopLabel;
         private ControlFlowState _controlFlow;
         private SwitchStatement _switchStatement;
-        private void[][] _activationAllocations;
+        private size_t _activationMark;
 
         @disable this();
         @disable this(this);
@@ -1780,8 +1807,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _pendingLoopLabel = evaluator._pendingLoopLabel;
             _controlFlow = evaluator._controlFlow;
             _switchStatement = evaluator._switchStatement;
-            _activationAllocations = evaluator._activationAllocations;
-            evaluator._activationAllocations = null;
+            _activationMark = evaluator._activationAllocations.length;
         }
 
         ~this() {
@@ -1795,7 +1821,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _evaluator._pendingLoopLabel = _pendingLoopLabel;
             _evaluator._controlFlow = _controlFlow;
             _evaluator._switchStatement = _switchStatement;
-            _evaluator._activationAllocations = _activationAllocations;
+            _evaluator.releaseActivationAllocations(_activationMark);
         }
     }
 
@@ -5526,7 +5552,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // `_place` was overwritten with the temporary's own address - it is
     // what `storeConstant`/`storeAddress`/`copyBytes` write into, not the
     // temporary itself.
-    private TemporaryDestination[] _temporaryDestinations;
+    private CStack!TemporaryDestination _temporaryDestinations;
 
     // Reserves a frame temporary of `facts` and substitutes it for the
     // ambient (`_place`, `_type`, `_facts`) destination `run` (and anything
@@ -5538,9 +5564,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             Type type, in TypeFacts facts, scope void delegate() run) {
         auto destination = TemporaryDestination(
             _place, _type, _facts, _frames.mark);
-        _temporaryDestinations ~= destination;
+        _temporaryDestinations.push(destination);
         scope (exit) {
-            _temporaryDestinations.length--;
+            _temporaryDestinations.pop;
             _place = destination.place;
             _type = destination.type;
             _facts = destination.facts;
@@ -5567,7 +5593,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     // Valid only inside `withTemporaryDestination`'s `run` delegate: writes
     // `value` at `byteOffset` into the surrounding destination that call
-    // saved (`_temporaryDestinations[$ - 1]`), not into the temporary.
+    // saved (`_temporaryDestinations.back`), not into the temporary.
     protected override void storeConstant(
         in size_t value, in size_t byteOffset,
     ) {
@@ -5575,7 +5601,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         assert(_temporaryDestinations.length > 0,
             "storeConstant needs an enclosing withTemporaryDestination");
-        auto destination = _temporaryDestinations[$ - 1];
+        auto destination = _temporaryDestinations.back;
         storeIntegral(cast(ubyte*) destination.place + byteOffset,
             value, size_t.sizeof);
     }
@@ -5587,7 +5613,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     protected override void storeAddress(in size_t byteOffset) {
         assert(_temporaryDestinations.length > 0,
             "storeAddress needs an enclosing withTemporaryDestination");
-        auto destination = _temporaryDestinations[$ - 1];
+        auto destination = _temporaryDestinations.back;
         *cast(void**) (cast(ubyte*) destination.place + byteOffset)
             = *cast(void**) _place;
     }
@@ -5601,7 +5627,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         assert(_temporaryDestinations.length > 0,
             "copyBytes needs an enclosing withTemporaryDestination");
-        auto destination = _temporaryDestinations[$ - 1];
+        auto destination = _temporaryDestinations.back;
         memcpy(destination.place, *cast(void**) _place, width);
     }
 
@@ -5610,19 +5636,19 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         size_t mark;
     }
 
-    private NewDestination[] _newDestinations;
+    private CStack!NewDestination _newDestinations;
 
     protected override void prepareNew(NewExp expression) {
         // Keeps pointed-to storage mutable during destination restoration.
         auto destination = NewDestination(_place, _frames.mark);
         auto place = _frames.reserve(_facts.size, _facts.alignment);
-        _newDestinations ~= destination;
+        _newDestinations.push(destination);
         _place = place;
     }
 
     protected override void restoreNew() {
-        auto destination = _newDestinations[$ - 1];
-        _newDestinations.length--;
+        auto destination = _newDestinations.back;
+        _newDestinations.pop;
         _place = destination.place;
         _frames.release(destination.mark);
     }
@@ -5651,7 +5677,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 factsOf(expression.newtype),
                 cast(void*) loadIntegral(_place, size_t.sizeof, false));
         }
-        memcpy(_newDestinations[$ - 1].place, _place, _facts.size);
+        memcpy(_newDestinations.back.place, _place, _facts.size);
     }
 
     protected override void visitUnloweredNew(

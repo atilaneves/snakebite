@@ -7,7 +7,7 @@ import dmd.dclass: ClassDeclaration;
 import dmd.declaration: Declaration, VarDeclaration;
 import dmd.expression:
     AddAssignExp, AddExp, AssignExp, CallExp, CmpExp, DeclarationExp,
-    DelegateExp, DeleteExp, EqualExp, Expression, FuncExp, IndexExp, IntegerExp,
+    DelegateExp, DeleteExp, DotVarExp, EqualExp, Expression, FuncExp, IndexExp, IntegerExp,
     MinAssignExp, MinExp, NewExp, PostExp, SliceExp, StringExp, StructLiteralExp,
     SymOffExp, ThisExp, TypeidExp, VarExp;
 import dmd.func: FuncDeclaration;
@@ -37,6 +37,8 @@ package struct Preparation {
     package void delegate(DeleteExp) deletion;
     package void delegate(StructLiteralExp) structLiteral;
     package void delegate(StringExp) stringLiteral;
+    package void delegate(FuncDeclaration) constructor;
+    package void delegate(VarDeclaration) bitfield;
     package void delegate(TryCatchStatement) tryCatch;
     package void delegate(TryFinallyStatement) tryFinally;
     package void delegate(TryFinallyStatement, Statement) gotoOutOf;
@@ -168,6 +170,13 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
         _preparation.stringLiteral(expression);
     }
 
+    // The layout of a bit field is worked out at its first access.
+    private extern(D) void handle(DotVarExp expression) {
+        auto field = expression.var.isVarDeclaration;
+        if (field !is null && field.isBitFieldDeclaration !is null)
+            _preparation.bitfield(field);
+    }
+
     private extern(D) void handle(StructLiteralExp expression) {
         _preparation.structLiteral(expression);
     }
@@ -177,6 +186,9 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
     // object of a class that a destructor makes is that one.
     private extern(D) void handle(NewExp expression) {
         import snakebite.backends.aggregateinit: NewPlan, planNew;
+
+        if (expression.member !is null)
+            _preparation.constructor(expression.member);
 
         const plan = planNew(expression);
         if (plan.destination == NewPlan.Destination.stack

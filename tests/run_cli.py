@@ -786,6 +786,10 @@ FINALIZER_SHAPES: dict[str, tuple[str | None, ...]] = {
         "struct W { int v; alias v this; }",
         "W w = W(3); int i = w; total += i;",
     ),
+    "alloca_": (
+        "import core.stdc.stdlib: alloca;",
+        "auto p = cast(int*) alloca(16); *p = 3; total += *p;",
+    ),
     "arrayops": (
         "",
         "int[4] a = [1,2,3,4]; int[4] b = [4,3,2,1]; int[4] c; c[] = "
@@ -842,6 +846,15 @@ FINALIZER_SHAPES: dict[str, tuple[str | None, ...]] = {
     "atomic": (
         "import core.atomic; shared int ctr;",
         'atomicOp!"+="(ctr, 1); total += atomicLoad(ctr);',
+    ),
+    "bitfield_class": (
+        "class H { uint a : 3; uint b : 5; } __gshared H h; "
+        "shared static this() { h = new H; }",
+        "h.b = 9; total += h.b;",
+    ),
+    "bitfield_struct": (
+        "struct F { uint a : 3; uint b : 5; } __gshared F gf;",
+        "F f; f.a = 3; f.b = 9; total += f.a + f.b; gf.a = 1; ++gf.b;",
     ),
     "boundsok": (
         "__gshared int[] data = [1,2,3];",
@@ -1050,6 +1063,10 @@ FINALIZER_SHAPES: dict[str, tuple[str | None, ...]] = {
     "opassign": (
         "struct P { int x; void opAssign(P o) { x = o.x + 1; } }",
         "P a = P(1); P b; b = a; total += b.x;",
+    ),
+    "placement": (
+        "struct P { int x; this(int v) { x = v; } }",
+        "P s = void; new (s) P(3); total += s.x;",
     ),
     "postblit": (
         "struct P { int x; this(this) { total += 1; } ~this() { total "
