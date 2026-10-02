@@ -104,6 +104,19 @@ static foreach (backend; Matrix!(
 }
 
 
+// A trace function for the functions of `pragma(crt_constructor)` and
+// `pragma(crt_destructor)`. Compiled D runs them with no druntime, so they
+// cannot call `trace`, which uses the GC.
+private enum crtTrace = q{
+    void crtTrace(string text) {
+        import core.stdc.stdio: fclose, fopen, fwrite;
+        auto file = fopen(traceFile.ptr, "a");
+        fwrite(text.ptr, 1, text.length, file);
+        fclose(file);
+    }
+};
+
+
 // Runs `code` as a whole program the way compiled D runs it, module
 // constructors and destructors included, and returns the exit status. The
 // guest finds `traceFile`, a path in `sandbox`, and writes what it observed
@@ -112,7 +125,8 @@ static foreach (backend; Matrix!(
 private int programStatus(Backend)(in Sandbox sandbox, in string code) {
     const source = "enum traceFile = `" ~ sandbox.inSandboxPath("trace")
         ~ "`;\nvoid trace(string text) {"
-        ~ " import std.file: append; traceFile.append(text); }\n" ~ code;
+        ~ " import std.file: append; traceFile.append(text); }\n"
+        ~ crtTrace ~ code;
     static if (is(Backend == Native)) {
         sandbox.writeFile("guest.d", source);
         const executable = sandbox.inSandboxPath("guest");
@@ -220,6 +234,90 @@ static foreach (backend; Matrix!(
             void main() { trace("main;"); }
         }).should == 1;
         sandbox.shouldEqualContent("trace", "ctor1;");
+    }
+}
+
+
+// `pragma(crt_constructor)` functions run before every module constructor,
+// and `pragma(crt_destructor)` functions run after every module destructor.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("crtFunctionsSurroundTheModulePhases." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            pragma(crt_destructor) void crtDestructor() { crtTrace("crt-dtor;"); }
+            shared static ~this() { trace("dtor;"); }
+            shared static this() { trace("ctor;"); }
+            pragma(crt_constructor) void crtConstructor() { crtTrace("crt-ctor;"); }
+            void main() { trace("main;"); }
+        }).should == 0;
+        sandbox.shouldEqualContent(
+            "trace", "crt-ctor;ctor;main;dtor;crt-dtor;");
+    }
+}
+
+
+// The `crt_constructor` functions run in declaration order and the
+// `crt_destructor` functions in the reverse order.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("crtFunctionsRunInDeclarationOrder." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            pragma(crt_constructor) void first() { crtTrace("c1;"); }
+            pragma(crt_destructor) void third() { crtTrace("d1;"); }
+            pragma(crt_constructor) void second() { crtTrace("c2;"); }
+            pragma(crt_destructor) void fourth() { crtTrace("d2;"); }
+            void main() { trace("main;"); }
+        }).should == 0;
+        sandbox.shouldEqualContent("trace", "c1;c2;main;d2;d1;");
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("crtDestructorRunsAfterMainThrows." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            pragma(crt_destructor) void crtDestructor() { crtTrace("crt-dtor;"); }
+            shared static ~this() { trace("dtor;"); }
+            void main() {
+                trace("main;");
+                throw new Exception("main failed");
+            }
+        }).should == 1;
+        sandbox.shouldEqualContent("trace", "main;dtor;crt-dtor;");
+    }
+}
+
+
+// A failed module constructor skips the module destructors but not the
+// `crt_destructor` functions.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("crtDestructorRunsAfterFailedConstructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            pragma(crt_constructor) void crtConstructor() { crtTrace("crt-ctor;"); }
+            pragma(crt_destructor) void crtDestructor() { crtTrace("crt-dtor;"); }
+            shared static this() { throw new Exception("ctor failed"); }
+            shared static ~this() { trace("dtor;"); }
+            void main() { trace("main;"); }
+        }).should == 1;
+        sandbox.shouldEqualContent("trace", "crt-ctor;crt-dtor;");
     }
 }
 
