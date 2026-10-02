@@ -72,3 +72,22 @@ _Avoid_: per-thread evaluator, thread context
 **Execution state**:
 The evaluator or VM state for guest calls on one native stack. Each Fiber
 has its own execution state, separate from the thread's main stack.
+
+**Halt**:
+The end of a run with no more guest code. No `catch`, `finally`,
+`scope` guard or destructor sees it, and druntime code that handles every
+`Exception` lets it pass. The `Program` owns the action, and the host that
+makes the program chooses it. `bin/sb` ends the process. A REPL cell or an
+in-process test fails and the session goes on. A failed check under
+`-checkaction=halt` and a guest fault are halts.
+A `synchronized` block that a halt leaves does not unlock its mutex.
+_Avoid_: abort, crash
+
+**Guest fault**:
+A halt for guest code that compiled D would kill with a signal: a load or
+store through a null address (an address in the first page), an integer
+division the hardware traps. The backend reports it to the `Program`, and
+the action of the `Program` prints the message and the guest call stack.
+A fault no flag turns off, `-release` included. A crash inside native
+code that the guest calls is not a guest fault.
+_Avoid_: crash, trap

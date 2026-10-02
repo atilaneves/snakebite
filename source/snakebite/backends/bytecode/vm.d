@@ -18,9 +18,10 @@ extern(C) bool executeIndirectCallPlan(
 );
 
 import snakebite.backends.builtins: BuiltinCall;
-import snakebite.backends.haltprocess: HaltAction, isHalt;
+import snakebite.backends.haltprocess: HostActions, isHalt;
 import snakebite.backends.unwindplan:
     ExceptionCandidate, UnwindPlan, unwindPlanOf;
+import snakebite.backends.guestfault: GuestFault, NativeCallCheck;
 import snakebite.callarguments: CallArguments;
 import snakebite.nativevalue:
     CastKind, ComplexOperation, floatingToBool, loadFloating, loadSigned,
@@ -166,6 +167,10 @@ public struct CallSite {
     package size_t cleanupEndIndex = size_t.max;
     package const(void)* cleanupStart;
     package const(void)* cleanupEnd;
+    // What a `native` call needs before it runs, and the `assertSites` entry
+    // that reports its fault.
+    package const(NativeCallCheck)* check;
+    package size_t faultSite;
 
     public static CallSite temporary() {
         CallSite site;
@@ -227,6 +232,7 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind) {
     public const(AssertSite)[] assertSites;
     public FrameStack* frames;
     private DispatchState* _dispatch;
+    private Activation* _activation;
 
     private const(Instruction)* _pc;
     private ubyte* _frame;
@@ -235,6 +241,7 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind) {
         const(Instruction)* pc, Activation* activation, DispatchState* state,
     ) pure nothrow @nogc {
         _pc = pc;
+        _activation = activation;
         _frame = activation.frame;
         this.returnPlace = activation.returnPlace;
         this.constants = activation.constants;
@@ -258,6 +265,16 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind) {
         return _pc.sourceWidth;
     }
 
+    // The `assertSites` index of a divide or modulo opcode. These opcodes
+    // read no source width, so their `sourceWidth` field holds it.
+    public size_t faultSite() const @safe pure nothrow @nogc {
+        return _pc.sourceWidth;
+    }
+
+    private Activation* activation() pure nothrow @nogc {
+        return _activation;
+    }
+
     private auto decode(OperandKind kind)(in size_t operand)
         pure nothrow @nogc
     {
@@ -270,11 +287,17 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind) {
     }
 
     public ubyte* storage(in size_t operand) pure nothrow @nogc {
-        if ((operand & (1UL << 63)) == 0)
-            return _frame + operand;
-        const addressSlot = (operand >> 32) & 0x7fff_ffffUL;
-        return *cast(ubyte**) (_frame + addressSlot) + cast(uint) operand;
+        return storageAt(_frame, operand);
     }
+}
+
+private ubyte* storageAt(ubyte* frame, in size_t operand)
+    pure nothrow @nogc
+{
+    if ((operand & (1UL << 63)) == 0)
+        return frame + operand;
+    const addressSlot = (operand >> 32) & 0x7fff_ffffUL;
+    return *cast(ubyte**) (frame + addressSlot) + cast(uint) operand;
 }
 
 private const(Instruction)* execute(
@@ -321,6 +344,9 @@ public struct Instruction {
     //    `opCopy`/`opCall` result out of a slot it does not itself own.
     //  - a constant index, for `opConstant`'s `source`.
     //  - a call-site index, for `opCall`'s `source`.
+    //  - an `assertSites` index: `opAssert`'s `source`, and the
+    //    `sourceWidth` of the divide and modulo opcodes, which name the
+    //    place that reports their fault.
     //  - a source width, for `opCastWidenSigned`/`opCastWidenUnsigned`'s
     //    `source`: the one thing a widening cast needs besides its own
     //    `destination`/`width` (the destination width) that neither
@@ -349,11 +375,43 @@ public struct Instruction {
 // VM never has to reach into dmd's own `Loc`. Assertions use all fields;
 // range checks only need the source location.
 package struct AssertSite {
+    // What a failed check does. `fault` knows its kind when it is compiled;
+    // `lateFault` is a division, or a check of a native call, that decides
+    // it when it fails.
+    package enum Outcome : ubyte {
+        assertError,
+        halt,
+        fault,
+        lateFault,
+    }
+
     package string message;
     package string file;
     package size_t line;
-    // Not null for a check that halts rather than throws.
-    package HaltAction halt;
+    package Outcome outcome;
+    // Read for `Outcome.fault` only.
+    package GuestFault.Kind kind;
+    // The program's, for the outcomes that end the run.
+    package HostActions actions;
+
+    package static AssertSite halt(in HostActions actions) {
+        return AssertSite("", "", 0, Outcome.halt, GuestFault.Kind.init,
+            actions);
+    }
+
+    package static AssertSite fault(
+        in GuestFault.Kind kind, string file, in size_t line,
+        in HostActions actions,
+    ) {
+        return AssertSite(null, file, line, Outcome.fault, kind, actions);
+    }
+
+    package static AssertSite lateFault(
+        string file, in size_t line, in HostActions actions,
+    ) {
+        return AssertSite(null, file, line, Outcome.lateFault,
+            GuestFault.Kind.init, actions);
+    }
 }
 
 
@@ -387,6 +445,10 @@ public struct Function {
     package uint closureAlignment = 1;
     package ClosureSlot[] closureSlots;
     package size_t[] parameterOffsets;
+    // Names this function in the call stack of a guest fault.
+    package string name;
+    package string file;
+    package size_t line;
 }
 
 
@@ -446,7 +508,7 @@ public struct Vm {
         dispatch(
             pc, frame.base, returnPlace, function_.constants,
             function_.callSites, function_.assertSites,
-            function_.exceptionHandlers, &_frames,
+            function_.exceptionHandlers, &_frames, null, &function_,
         );
     }
 }
@@ -499,6 +561,10 @@ private struct Activation {
     size_t cleanupMark;
     FrameStack.Mark frameMark;
     Activation* parent;
+    // The activation that was running when native code called the guest
+    // that this root activation starts. The call stack follows it.
+    Activation* outer;
+    const(Function)* function_;
 
     void cleanup(FrameStack* frames) {
         cleanupSince(cleanupMark, frame, constants, callSites, assertSites,
@@ -527,8 +593,10 @@ private void dispatch(
     scope const ExceptionHandler[] exceptionHandlers,
     FrameStack* frames,
     const(Instruction)* end = null,
+    const(Function)* function_ = null,
 ) {
     Activation root;
+    root.function_ = function_;
     root.pc = root.start = pc;
     root.end = end;
     root.frame = frame;
@@ -540,6 +608,10 @@ private void dispatch(
     root.cleanupMark = frames.cleanupMark;
     auto state = DispatchState(frames);
     auto active = &root;
+    root.outer = cast(Activation*) frames.innermostActivation;
+    frames.innermostActivation = active;
+    scope (exit)
+        frames.innermostActivation = root.outer;
 
     while (true) {
         try {
@@ -548,6 +620,7 @@ private void dispatch(
                 if (active.parent is null)
                     return;
                 active = popActivation(active, frames);
+                frames.innermostActivation = active;
                 pc = active.resume;
                 continue;
             }
@@ -560,6 +633,7 @@ private void dispatch(
                 const next = handler(instruction, active, &state);
                 if (state.pending !is null) {
                     active = state.pending;
+                    frames.innermostActivation = active;
                     state.pending = null;
                     pc = active.pc;
                 } else
@@ -569,6 +643,7 @@ private void dispatch(
         } catch (Throwable throwable) {
             active.pc = pc;
             active = handleException(active, frames, throwable);
+            frames.innermostActivation = active;
             pc = active.pc;
         }
     }
@@ -925,21 +1000,64 @@ private const(Instruction)* runTlsAddress(Decoded)(
 // type standing in for it. Each `opCall` this throw unwinds through pops
 // its own callee `Frame` via that struct's destructor (see
 // `snakebite.framestack`), so no explicit cleanup is needed here.
-package alias opAssert =
-    execute!(runAssert, OperandKind.storage, OperandKind.immediate);
-
-private const(Instruction)* runAssert(Decoded)(
-    ref Decoded execution,
+// The handler is not an `execute` instance: building the `Execution` of
+// every check costs more than the check, and a null check runs at every
+// dereference.
+package const(Instruction)* opAssert(
+    const(Instruction)* pc, Activation* activation, DispatchState* state,
 ) {
-    if (loadUnsigned(execution.destination, execution.width) != 0)
-        return execution.next;
+    const place = storageAt(activation.frame, pc.destination);
+    if (pc.width == size_t.sizeof
+            ? *cast(const(size_t)*) place != 0
+            : loadUnsigned(place, pc.width) != 0)
+        return pc + 1;
 
+    return assertFailed(pc, activation);
+}
+
+// `opAssert` for the address of a load or a store, in a plain frame slot:
+// the address must be outside the first page, as `GuestFault.isNullAddress`
+// says. It needs no operand decoding and no width dispatch, and a null check
+// runs at every dereference.
+package const(Instruction)* opAssertWord(
+    const(Instruction)* pc, Activation* activation, DispatchState* state,
+) {
+    if (*cast(const(size_t)*) (activation.frame + pc.destination)
+            >= GuestFault.firstPage)
+        return pc + 1;
+
+    return assertFailed(pc, activation);
+}
+
+pragma(inline, false)
+private noreturn assertFailed(const(Instruction)* pc, Activation* activation) {
     import core.exception: AssertError;
 
-    const site = execution.assertSites[execution.source];
-    if (site.halt !is null)
-        site.halt();
-    throw new AssertError(site.message, site.file, site.line);
+    const site = activation.assertSites[pc.source];
+    final switch (site.outcome) with (AssertSite.Outcome) {
+        case assertError:
+            throw new AssertError(site.message, site.file, site.line);
+        case halt:
+            site.actions.halt();
+        case fault:
+            reportFault(site.kind, site, activation);
+        case lateFault:
+            assert(0, "a late fault site is reported by its own opcode");
+    }
+}
+
+pragma(inline, false)
+private noreturn reportFault(
+    in GuestFault.Kind kind, in AssertSite site, Activation* innermost,
+) {
+    site.actions.fault(kind, site.file, site.line, (scope sink) {
+        for (auto activation = innermost; activation !is null;
+                activation = activation.parent !is null
+                    ? activation.parent : activation.outer)
+            if (auto function_ = activation.function_)
+                sink(GuestFault.Frame(
+                    function_.name, function_.file, function_.line));
+    });
 }
 
 
@@ -972,6 +1090,10 @@ private const(Instruction)* runCall(Decoded)(
     const site = &execution.callSites[execution.source];
     final switch (site.kind) with (CallSite.Kind) {
     case guest:
+        if (site.check !is null) {
+            auto arguments = gatherArguments(execution, site.args);
+            checkNativeCall(execution.activation, *site, arguments.values);
+        }
         return callFunction(execution, *site,
             site.callee !is null ? site.callee : site.prepareGuest());
     case indirect:
@@ -991,6 +1113,8 @@ private const(Instruction)* runCall(Decoded)(
     case native:
         auto arguments = gatherArguments(execution, site.args);
         auto values = arguments.values;
+        if (site.check !is null)
+            checkNativeCall(execution.activation, *site, values);
         auto result = execution.destination;
         executeCallPlan(
             site.nativePlan !is null ? site.nativePlan : site.prepareNativePlan(),
@@ -1003,6 +1127,17 @@ private const(Instruction)* runCall(Decoded)(
         site.builtinEntry(execution.destination, values.ptr, values.length);
         return execution.next;
     }
+}
+
+
+pragma(inline, false)
+private void checkNativeCall(
+    Activation* activation, scope const ref CallSite site,
+    scope const(void*)[] arguments,
+) {
+    GuestFault.Kind kind;
+    if (site.check.failure(arguments, kind))
+        reportFault(kind, activation.assertSites[site.faultSite], activation);
 }
 
 
@@ -1074,6 +1209,7 @@ private const(Instruction)* callFunction(Decoded)(
     activation.assertSites = callee.assertSites;
     activation.exceptionHandlers = callee.exceptionHandlers;
     activation.cleanupMark = execution.frames.cleanupMark;
+    activation.function_ = callee;
     activation.parent = execution._dispatch.current;
     activation.parent.resume = execution.next;
     execution._dispatch.pending = activation;
@@ -1386,12 +1522,15 @@ private const(Instruction)* runShiftRightArithmetic(Decoded)(
 package alias opDivideSigned =
     execute!(runDivideSigned, OperandKind.storage, OperandKind.storage);
 
+pragma(inline, true)
 private const(Instruction)* runDivideSigned(Decoded)(
     ref Decoded execution,
 ) {
     auto place = execution.destination;
     const a = loadSigned(place, execution.width);
     const b = loadSigned(execution.source, execution.width);
+    if (cast(ulong) (b + 1) <= 1)
+        checkSignedDivision(execution, a, b);
     storeWidth(place, a / b, execution.width);
     return execution.next;
 }
@@ -1399,12 +1538,15 @@ private const(Instruction)* runDivideSigned(Decoded)(
 package alias opModuloSigned =
     execute!(runModuloSigned, OperandKind.storage, OperandKind.storage);
 
+pragma(inline, true)
 private const(Instruction)* runModuloSigned(Decoded)(
     ref Decoded execution,
 ) {
     auto place = execution.destination;
     const a = loadSigned(place, execution.width);
     const b = loadSigned(execution.source, execution.width);
+    if (cast(ulong) (b + 1) <= 1)
+        checkSignedDivision(execution, a, b);
     storeWidth(place, a % b, execution.width);
     return execution.next;
 }
@@ -1412,12 +1554,16 @@ private const(Instruction)* runModuloSigned(Decoded)(
 package alias opDivideUnsigned =
     execute!(runDivideUnsigned, OperandKind.storage, OperandKind.storage);
 
+pragma(inline, true)
 private const(Instruction)* runDivideUnsigned(Decoded)(
     ref Decoded execution,
 ) {
     auto place = execution.destination;
     const a = loadUnsigned(place, execution.width);
     const b = loadUnsigned(execution.source, execution.width);
+    if (b == 0)
+        divisionFault(execution.activation, execution.faultSite,
+            GuestFault.Kind.divisionByZero);
     storeWidth(place, cast(long) (a / b), execution.width);
     return execution.next;
 }
@@ -1425,16 +1571,40 @@ private const(Instruction)* runDivideUnsigned(Decoded)(
 package alias opModuloUnsigned =
     execute!(runModuloUnsigned, OperandKind.storage, OperandKind.storage);
 
+pragma(inline, true)
 private const(Instruction)* runModuloUnsigned(Decoded)(
     ref Decoded execution,
 ) {
     auto place = execution.destination;
     const a = loadUnsigned(place, execution.width);
     const b = loadUnsigned(execution.source, execution.width);
+    if (b == 0)
+        divisionFault(execution.activation, execution.faultSite,
+            GuestFault.Kind.divisionByZero);
     storeWidth(place, cast(long) (a % b), execution.width);
     return execution.next;
 }
 
+// The handlers call this for the two divisors that can trap, `0` and `-1`,
+// so the other divisions run one comparison. It returns only when the
+// division does not fault, and then no value of the handler is live across a
+// call: the report is a call that does not return.
+pragma(inline, true)
+private void checkSignedDivision(Decoded)(
+    ref Decoded execution, in long dividend, in long divisor,
+) {
+    GuestFault.Kind kind;
+    if (GuestFault.divisionFault(
+            dividend, divisor, execution.width, false, kind))
+        divisionFault(execution.activation, execution.faultSite, kind);
+}
+
+pragma(inline, false)
+private noreturn divisionFault(
+    Activation* activation, in size_t site, in GuestFault.Kind kind,
+) {
+    reportFault(kind, activation.assertSites[site], activation);
+}
 
 // The eight relational-comparison opcodes: `destination` holds the left
 // operand and `source` the right one on entry, both read at `execution.width`

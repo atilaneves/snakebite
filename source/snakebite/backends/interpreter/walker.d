@@ -150,6 +150,13 @@ import snakebite.backends.switchplan: switchPlan, selectCase,
     gotoCaseTarget, gotoDefaultTarget;
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
 import snakebite.backends.fullexpression: FullExpressionKind;
+import snakebite.backends.guestfault: GuestFault, NativeCallCheck;
+import snakebite.backends.guestfaultplan:
+    FaultCheck, accessFaultOf, callFaultOf, contextFaultOf, delegateFaultOf,
+    divisionFaultOf,
+    nativeCallCheckOf, refResultFaultOf, throwFaultOf,
+    typeidFaultOf, sliceElementsFaultOf;
+import std.typecons: Nullable;
 
 // The state one program's evaluators share, whichever thread they run
 // on (ADR-0006). Every table here is filled once per key - under its
@@ -482,6 +489,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private Dollar _dollar;
+    // The expression whose address is being formed and not used: it makes
+    // no memory access (`snakebite.backends.guestfaultplan.accessFaultOf`).
+    private Expression _addressOnly;
+    private CallStateGuard* _innermostGuard;
+    private const(NativeCallCheck)*[FuncDeclaration] _nativeCallChecks;
     // The program being run: its `isInterpreted` is the one decision for
     // whether a callee is walked here or called natively, made on every
     // call this evaluator makes.
@@ -1146,6 +1158,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             const plan = callSite is null
                 ? _plans.of(function_)
                 : callPlanOf(callSite, function_);
+            if (callSite !is null)
+                faultIfNativeCallFails(
+                    function_, callSite.loc, arguments[0 .. argumentCount]);
             callHost(
                 function_, plan, returnPlace, arguments, argumentCount,
             );
@@ -1170,10 +1185,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 *cast(const(size_t)*) arguments[0]);
             return;
         case guest:
+            if (callSite !is null && !_program.isInterpreted(function_))
+                faultIfNativeCallFails(
+                    function_, callSite.loc, arguments[0 .. argumentCount]);
             break;
         }
 
-        const guard = CallStateGuard(this);
+        auto guard = CallStateGuard(this);
+        guard.enter;
 
         _closureBase = null;
         if (closurePlanOf(function_).needsClosure)
@@ -1407,6 +1426,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         private ControlFlowState _controlFlow;
         private SwitchStatement _switchStatement;
         private void[][] _activationAllocations;
+        private CallStateGuard* _previous;
 
         @disable this();
         @disable this(this);
@@ -1439,6 +1459,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _evaluator._controlFlow = _controlFlow;
             _evaluator._switchStatement = _switchStatement;
             _evaluator._activationAllocations = _activationAllocations;
+            _evaluator._innermostGuard = _previous;
+        }
+
+        // Links the guard once it has its final address.
+        private void enter() {
+            _previous = _evaluator._innermostGuard;
+            _evaluator._innermostGuard = &this;
         }
     }
 
@@ -1802,7 +1829,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         _temporaries.withExpression(FullExpressionKind.value, statement.exp, {
             void* referenceAddress() {
-                return addressOf(statement.exp);
+                return addressOfOnly(statement.exp);
             }
 
             void evaluateValue() {
@@ -2269,6 +2296,69 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return *cast(void**) buffer.ptr;
     }
 
+    private void* dereferencedPointer(
+        Expression dereference, Expression operand,
+    ) {
+        auto pointer = asPointer(operand);
+        faultIfNull(pointer, dereference);
+        return pointer;
+    }
+
+    // `reference` is the address that the load or the store of `access`
+    // goes through.
+    extern(D) private void faultIfNull(
+        in void* reference, Expression access,
+    ) {
+        if (GuestFault.isNullAddress(reference))
+            faultIf(accessFaultOf(access, _addressOnly));
+    }
+
+    // The check that the shared plan names for a call into native code.
+    extern(D) private void faultIfNativeCallFails(
+        FuncDeclaration callee, in Loc loc, scope const(void*)[] arguments,
+    ) {
+        auto cached = callee in _nativeCallChecks;
+        const check = cached !is null
+            ? *cached : (_nativeCallChecks[callee] = nativeCallCheckOf(callee));
+        GuestFault.Kind kind;
+        if (check !is null && check.failure(arguments, kind))
+            fault(FaultCheck(kind, loc));
+    }
+
+    extern(D) private void faultIf(in Nullable!FaultCheck check) {
+        if (!check.isNull)
+            fault(check.get);
+    }
+
+    // A fault is a halt: `_shared.halted` tells the cleanup that runs on
+    // the way up to run no guest code.
+    extern(D) private noreturn fault(in FaultCheck check) {
+        import std.string: fromStringz;
+
+        _shared.halted = true;
+        _program.fault(check.kind, check.loc.filename.fromStringz,
+            check.loc.linnum, &guestStack);
+    }
+
+    // The guest functions that run now, innermost first. Each call guard
+    // holds the function of the caller that made the call.
+    extern(D) private void guestStack(scope GuestFault.FrameSink sink) {
+        import std.string: fromStringz;
+
+        void add(FuncDeclaration function_) {
+            if (function_ !is null)
+                sink(GuestFault.Frame(
+                    function_.toPrettyChars.fromStringz,
+                    function_.loc.filename.fromStringz,
+                    function_.loc.linnum));
+        }
+
+        add(_function);
+        for (auto guard = _innermostGuard; guard !is null;
+                guard = guard._previous)
+            add(guard._function);
+    }
+
     private void* asReference(Expression expression, in TypeFacts facts) {
         align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
         assert(facts.size <= buffer.sizeof && facts.alignment <= buffer.alignof,
@@ -2374,7 +2464,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
-        storeDelegateValue(delegateTargetOf(literal, _type), _place);
+        storeDelegateValue(
+            delegateTargetOf(literal, _type), expression, _place);
     }
 
     // `&nested` is lowered by dmd to a DelegateExp whose expression is the
@@ -2386,13 +2477,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         storeDelegateValue(
             delegateTargetOf(expression.func, _type, expression.e1,
                 expression.vthis2),
-            _place);
+            expression, _place);
     }
 
     // A delegate keeps its native context word so compiled code can pass
     // that context back through the callback entry without conversion.
     private void storeDelegateValue(
         DelegateTarget target,
+        Expression expression,
         void* place,
     ) {
         import snakebite.nativelayout:
@@ -2405,7 +2497,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         auto context = cast(size_t) 0;
         if (target.receiver !is null) {
             if (target.receiverIsAddress)
-                context = cast(size_t) addressOf(target.receiver);
+                context = cast(size_t) addressOfOnly(target.receiver);
             else
                 evaluate(target.receiver, target.receiver.type,
                     factsOf(target.receiver.type), &context);
@@ -2423,9 +2515,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         storeIntegral(
             bytes + delegateContextOffset, context, size_t.sizeof);
         void* address;
-        if (target.virtualDispatch)
+        if (target.virtualDispatch) {
+            if (context == 0)
+                faultIf(delegateFaultOf(target, expression.loc));
             address = _virtualAddress(target.function_, cast(void*) context);
-        else
+        } else
             address = callableAddress(target.function_, 0);
         storeIntegral(bytes + delegateFunctionOffset,
             cast(size_t) address, size_t.sizeof);
@@ -2528,16 +2622,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // address of a struct.
     private size_t thisValueOf(ThisExp expression) {
         return thisValueOf(
+            expression,
             expression.var is null
                 ? cast() _layout.hiddenThis.variable : expression.var);
     }
 
     // As above for `variable`, the hidden `this` of some function on the
-    // static chain.
-    private size_t thisValueOf(VarDeclaration variable) {
+    // static chain. `original` is the expression the read is for, `null`
+    // for none.
+    private size_t thisValueOf(Expression original, VarDeclaration variable) {
         import snakebite.nativelayout: loadIntegral;
 
-        auto slot = slotOf(variable);
+        auto slot = slotOf(original, variable);
         auto owner = outerFunctionOf(variable);
         const hops = owner is null ? null : ClosurePlan.receiverHops(owner);
         if (hops.length == 0)
@@ -2549,6 +2645,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         foreach (hop; hops)
             value = cast(size_t) loadIntegral(
                 cast(ubyte*) value + hop.offset, size_t.sizeof, false);
+        if (original !is null)
+            faultIfNull(cast(void*) value, original);
         return value;
     }
 
@@ -2558,7 +2656,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import snakebite.nativelayout: loadIntegral;
 
         const pair = cast(size_t) loadIntegral(
-            slotOf(variable), size_t.sizeof, false);
+            slotOf(null, variable), size_t.sizeof, false);
         return cast(size_t) loadIntegral(
             cast(ubyte*) pair + offset, size_t.sizeof, false);
     }
@@ -2568,26 +2666,42 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // up from there - one context hop per level of nesting. A context is
     // either a frame or a heap closure, as dmd decides for that owner.
     private ubyte* contextOf(FuncDeclaration owner) {
-        auto base = tryContextOf(owner);
-        if (base is null)
-            assert(0, "a variable's owner is an enclosing function of its "
-                ~ "user");
+        if (owner is _function)
+            return functionNeedsClosure(_function) ? _closureBase : _frameBase;
 
-        return base;
+        const path = staticChainOf(owner);
+        if (path is null)
+            assert(0, "the owner of a context is on the static chain");
+
+        return contextAlong(path);
+    }
+
+    // The context that `access` reads or writes through. A context that is
+    // null is a nested function that was called through a delegate with no
+    // context: the access faults, a call that only passes it on does not.
+    private ubyte* accessedContextOf(
+        FuncDeclaration owner, Expression access,
+    ) {
+        auto context = contextOf(owner);
+        if (GuestFault.isNullAddress(context))
+            faultIf(contextFaultOf(access, _addressOnly));
+
+        return context;
     }
 
     // As `contextOf`, but `null` when `owner`'s context is not reachable
     // from here, which a non-capturing delegate allows: its context is
     // never read.
     private ubyte* tryContextOf(FuncDeclaration owner) {
-        import snakebite.nativelayout: loadIntegral;
-
         if (owner is _function)
             return functionNeedsClosure(_function) ? _closureBase : _frameBase;
 
         const path = staticChainOf(owner);
-        if (path is null)
-            return null;
+        return path is null ? null : contextAlong(path);
+    }
+
+    extern(D) private ubyte* contextAlong(in Hop[] path) {
+        import snakebite.nativelayout: loadIntegral;
 
         auto base = _frameBase;
         foreach (const hop; path) {
@@ -2631,7 +2745,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // differ in what they do with the slot, not in how they find it, so
     // both come here.
     private ubyte* slotOf(VarExp expression) {
-        return slotOf(expression.var);
+        return slotOf(expression, expression.var);
     }
 
     // The raw slot for a declaration, before indirecting through a `ref`
@@ -2673,8 +2787,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // rather than a `VarExp` naming it - `SymOffExp`/`AddrExp` reach a
     // variable's storage the same way a read does, just to take its
     // address instead of copying its bytes, so this is the one place both
-    // paths resolve a name to a slot.
-    private ubyte* slotOf(Declaration declaration) {
+    // paths resolve a name to a slot. `original` is the expression that a
+    // fault of the access names, `null` for a read that no guest node names.
+    private ubyte* slotOf(Expression original, Declaration declaration) {
         import snakebite.nativelayout: loadIntegral;
 
         auto variable = declaration.isVarDeclaration;
@@ -2695,14 +2810,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // the frame or context chain below.
         auto owner = outerFunctionOf(variable);
         if (owner !is null && functionNeedsClosure(owner)) {
-            auto context = contextOf(owner);
+            auto context = accessedContextOf(owner, original);
             const closure = closureLayoutOf(owner);
             if (closure.hasSlot(variable)) {
                 const slot = closure.slotOf(variable);
                 auto result = context + slot.offset;
                 if (slot.isRef)
-                    return cast(ubyte*) loadIntegral(
-                        result, size_t.sizeof, false);
+                    return referenceTarget(original, result);
                 return result;
             }
         }
@@ -2714,7 +2828,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (owner is null)
                 assert(0, "a local variable has an enclosing function");
 
-            base = contextOf(owner);
+            base = accessedContextOf(owner, original);
             layout = layoutOf(owner);
             slot = layout.slotOf(variable);
         }
@@ -2729,10 +2843,20 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // the one place every read, write and address-of a variable resolves
         // its slot, makes a reach of the variable reach its target instead.
         if (slot.isRef)
-            return cast(ubyte*) loadIntegral(
-                address, size_t.sizeof, false);
+            return referenceTarget(original, address);
 
         return address;
+    }
+
+    // The address that the `ref` slot holds. A null one faults at the load
+    // or the store that goes through it, not where the reference is made.
+    private ubyte* referenceTarget(Expression original, in ubyte* slot) {
+        import snakebite.nativelayout: loadIntegral;
+
+        auto target = cast(ubyte*) loadIntegral(slot, size_t.sizeof, false);
+        if (original !is null)
+            faultIfNull(target, original);
+        return target;
     }
 
     extern(D) private ubyte* staticSlotOf(VarDeclaration variable) {
@@ -2782,7 +2906,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (isRefStorage(variable)) {
                 import snakebite.nativelayout: storeIntegral;
 
-                storeIntegral(slot, cast(size_t) addressOf(value),
+                storeIntegral(slot, cast(size_t) addressOfOnly(value),
                     size_t.sizeof);
             } else
                 evaluate(value, variable.type, slot);
@@ -2878,6 +3002,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             destination.base + arrayLengthOffset, size_t.sizeof, false);
         auto element = *cast(ubyte**) (
             destination.base + arrayPointerOffset);
+        if (length != 0 && GuestFault.isNullAddress(element))
+            fault(sliceElementsFaultOf(expression.loc));
+
         foreach (_; 0 .. length) {
             memcpy(element, value.base, elementFacts.size);
             element += elementFacts.size;
@@ -2910,6 +3037,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (plan.kind != FailurePlan.Kind.ignore
                 && !slicesConform(to, from, elementSize))
             failArrayBounds(BoundsCheck.sliceCopy, expression.loc, null);
+
+        if (to.length != 0 && (GuestFault.isNullAddress(to.ptr)
+                || GuestFault.isNullAddress(from.ptr)))
+            fault(sliceElementsFaultOf(expression.loc));
 
         copyUnchecked(to, from, elementSize);
 
@@ -2953,13 +3084,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             // assignment. Keep the declaration's own slot, rather than
             // resolving it through the reference it does not hold yet.
             auto target = evaluator.storageOf(declaration);
-            auto source = evaluator.addressOf(expression.e2);
+            auto source = evaluator.addressOfOnly(expression.e2);
             storeIntegral(target, cast(size_t) source, size_t.sizeof);
             return source;
         }
 
         public void* storagePointer(PtrExp expression) {
-            return evaluator.asPointer(expression.e1);
+            return evaluator.dereferencedPointer(expression, expression.e1);
         }
 
         public void storageEffect(Expression expression) {
@@ -3145,6 +3276,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 size_t.sizeof,
                 false,
             );
+            evaluator.faultIfNull(elements, expression);
             return elements + value * stride;
         }
 
@@ -3168,18 +3300,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 evaluator.factsOf(expression.e1.type.toBasetype.nextOf).size;
             const value = loadIntegral(index, size_t.sizeof, false);
             auto elements = cast(ubyte*) pointer;
-            if (elements is null)
-                throw new SnakebiteException(
-                    text("interpreter cannot index through a null pointer in `",
-                        expression.toString, "` at ", value),
-                );
+            evaluator.faultIfNull(elements, expression);
             return elements + value * stride;
         }
 
         public void* storageField(DotVarExp expression) {
             auto field = expression.var.isVarDeclaration;
             assert(field !is null, "a field address names a variable");
-            return cast(ubyte*) evaluator.fieldBaseAddress(expression.e1)
+            return cast(ubyte*) evaluator.fieldBaseAddress(expression)
                 + field.offset;
         }
 
@@ -3226,7 +3354,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             auto variable = expression.var.isVarDeclaration;
             assert(variable !is null,
                 "a non-special symbol address names a variable");
-            return evaluator.slotOf(variable);
+            return evaluator.slotOf(expression, variable);
         }
 
         public void* addSymbolOffset(
@@ -3235,6 +3363,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         ) {
             return cast(void*) (cast(ubyte*) address + offset);
         }
+    }
+
+    private void* addressOfOnly(Expression target) {
+        auto outer = _addressOnly;
+        _addressOnly = target;
+        scope(exit) _addressOnly = outer;
+        return addressOf(target);
     }
 
     private void* addressOf(Expression target) {
@@ -3492,6 +3627,25 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         convertComplex(_place, _facts.size / 2, target, targetFacts.size / 2);
     }
 
+    // `combine`, after the report of a division that the hardware traps on.
+    private extern(D) ulong combined(string op)(
+        in long a,
+        in long b,
+        in TypeFacts aFacts,
+        in TypeFacts bFacts,
+        Expression expression,
+    ) {
+        static if (op == "/" || op == "%") {
+            GuestFault.Kind kind;
+            if (GuestFault.divisionFault(a, b, aFacts.size,
+                    sharedSignedness(aFacts, bFacts), kind))
+                fault(FaultCheck(
+                    kind, divisionFaultOf(expression.isBinExp).get));
+        }
+
+        return combine!op(a, b, aFacts, bFacts);
+    }
+
     private extern(D) void storeIntegralAssign(string op)(
         BinAssignExp expression, void* resolvedTarget,
     ) {
@@ -3532,7 +3686,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 static if (isShift)
                     const result = shifted(current, step, shift);
                 else
-                    const result = combine!op(
+                    const result = combined!op(
                         current, step, arithmeticFacts, stepFacts, expression);
                 storeBitfieldAt(field, target, result);
                 storeIntegral(_place, bitfieldValueAtPlace(field, target),
@@ -3547,7 +3701,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         static if (isShift)
             const result = shifted(current, step, shift);
         else
-            const result = combine!op(
+            const result = combined!op(
                 current, step, arithmeticFacts, stepFacts, expression);
 
         storeIntegral(target, result, targetFacts.size);
@@ -3670,7 +3824,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     const signed = !plan.laneFacts.isUnsigned;
                     const x = loadIntegral(a, laneSize, signed);
                     const y = loadIntegral(b, laneSize, signed);
-                    storeIntegral(lane, combine!op(x, y, plan.laneFacts,
+                    storeIntegral(lane, combined!op(x, y, plan.laneFacts,
                         plan.laneFacts, expression), laneSize);
                     break;
                 }
@@ -3697,7 +3851,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (auto dot = expression.e1.isDotVarExp) {
             auto field = dot.var.isVarDeclaration;
             if (field !is null && field.isBitFieldDeclaration !is null) {
-                auto base = fieldBaseAddress(dot.e1);
+                auto base = fieldBaseAddress(dot);
                 const current = bitfieldValueAt(base, field);
                 const step = asIntegral(expression.e2);
                 const changed = expression.op == EXP.plusPlus
@@ -4094,7 +4248,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 static if (op == "<<" || op == ">>" || op == ">>>")
                     const result = shifted(a, b, shiftPlan(expression));
                 else
-                    const result = combine!op(a, b, aFacts, bFacts, expression);
+                    const result = combined!op(
+                        a, b, aFacts, bFacts, expression);
                 storeIntegral(_place, result, _facts.size);
                 return;
             }
@@ -4405,7 +4560,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         case sarrayToPointer: {
             align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
             storeIntegral(
-                buffer.ptr, cast(size_t) addressOf(expression.e1),
+                buffer.ptr, cast(size_t) addressOfOnly(expression.e1),
                 size_t.sizeof,
             );
             applyCast(layoutOf(plan), buffer.ptr, _place);
@@ -4556,7 +4711,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return _nativeData.write(_type, _facts, expression, _place);
 
         storeIntegral(
-            _place, cast(size_t) addressOf(expression.e1), _facts.size);
+            _place, cast(size_t) addressOfOnly(expression.e1), _facts.size);
     }
 
     // `*p`: the address `p` evaluates to is not this expression's own
@@ -4567,7 +4722,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     override void visit(PtrExp expression) {
         import core.stdc.string: memcpy;
 
-        memcpy(_place, asPointer(expression.e1), _facts.size);
+        memcpy(_place, dereferencedPointer(expression, expression.e1),
+            _facts.size);
     }
 
     // `info.base`: an aggregate field read. The field's own byte offset is
@@ -4587,7 +4743,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
-        auto base = cast(ubyte*) fieldBaseAddress(expression.e1);
+        auto base = cast(ubyte*) fieldBaseAddress(expression);
         memcpy(_place, base + field.offset, _facts.size);
     }
 
@@ -4595,7 +4751,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // object, a struct value is the object. dmd leaves a pointer receiver
     // in the `DotVarExp` that selects the context field of a dual-context
     // function.
-    private void* fieldBaseAddress(Expression aggregate) {
+    private void* fieldBaseAddress(DotVarExp field) {
+        auto aggregate = field.e1;
         const type = aggregate.type.toBasetype.ty;
         if (type != Tclass && type != Tpointer)
             return addressOf(aggregate);
@@ -4605,11 +4762,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             "a class reference or a pointer is not one word on this target");
         void* object;
         evaluate(aggregate, aggregate.type, facts, &object);
+        faultIfNull(object, field);
         return object;
     }
 
     private long bitfieldValue(DotVarExp expression, VarDeclaration field) {
-        return bitfieldValueAt(fieldBaseAddress(expression.e1), field);
+        return bitfieldValueAt(fieldBaseAddress(expression), field);
     }
 
     // The storage is read at the field's own width, not at the width of
@@ -4641,7 +4799,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         DotVarExp expression, VarDeclaration field, long value,
     ) {
         const bits = field.isBitFieldDeclaration;
-        auto place = cast(ubyte*) fieldBaseAddress(expression.e1) + field.offset;
+        auto place = cast(ubyte*) fieldBaseAddress(expression) + field.offset;
         storeBitfieldAt(field, place, value);
     }
 
@@ -4664,6 +4822,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         if (auto value = isExpression(expression.obj)) {
             auto address = classReferenceOf(value);
+            if (address is null)
+                fault(typeidFaultOf(expression));
             const indirections = 2
                 + (value.type.toBasetype.isTypeClass.sym
                     .isInterfaceDeclaration !is null);
@@ -4870,10 +5030,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             value.ptr, facts.size, false,
         );
         if (guest is null)
-            throw new SnakebiteException(
-                text("interpreter cannot throw `", expression.toString,
-                    "`: it is null"),
-            );
+            fault(throwFaultOf(expression.loc));
 
         throw new GuestException(guest);
     }
@@ -4945,7 +5102,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             // and the length is part of the type itself rather than
             // something to read back from a run-time value.
             case Tsarray: {
-                base = cast(ubyte*) addressOf(array);
+                base = cast(ubyte*) addressOfOnly(array);
                 const elementSize = factsOf(sourceType.nextOf).size;
                 sourceLength = factsOf(sourceType).size / elementSize;
                 knownLength = true;
@@ -5386,11 +5543,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             const parameter = layout.parameters[i];
             auto slot = frameBase + parameter.offset; // Evaluation writes the slot.
 
-            void* address;
-
             void* argumentAddress() {
-                address = addressOf(argument);
-                return address;
+                if (argument.type.ty == Tpointer
+                        && argument.type.nextOf.equals(value.parameterType))
+                    return asPointer(argument);
+                return addressOfOnly(argument);
             }
 
             void evaluateArgument(void* place) {
@@ -5405,14 +5562,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 &argumentAddress,
                 &evaluateArgument,
             );
-
-            if (value.isOut)
-                initializeDefault(
-                    value.parameterType,
-                    factsOf(value.parameterType),
-                    cast(ubyte*) address,
-                    loc,
-                );
         });
     }
 
@@ -5628,7 +5777,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // value into `_place` for this ordinary expression path; `addressOf`
     // uses `refCallAddress` when the expression itself is an lvalue.
     override void visit(CallExp expression) {
-        _executeCallExpression(expression, _place);
+        const result = _executeCallExpression(expression, _place);
+        if (_place !is null && result.isNullReference)
+            faultIf(refResultFaultOf(expression, _addressOnly));
     }
 
     private CallResult _executeCallExpression(
@@ -5668,17 +5819,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             auto dot = expression.e1.isDotVarExp;
             auto receiver = dot is null ? expression.e1 : dot.e1;
             classReceiver = classReferenceOf(receiver);
-            if (classReceiver is null)
-                throw new SnakebiteException(
-                    text("interpreter cannot call `", expression.toString,
-                        "`: its class receiver is null"),
-                );
 
             // `super.f()` is statically bound. Every other virtual class
             // call uses the declaration of the object held by the receiver,
             // not the declaration dmd selected from its static type.
             if (!expression.directcall && receiver.isSuperExp is null
                     && function_.isVirtualMethod) {
+                if (classReceiver is null)
+                    faultIf(callFaultOf(expression));
                 const address = _virtualAddress(function_, classReceiver);
                 const target = _plans.guestTarget(address);
                 if (target.word is null)
@@ -5907,10 +6055,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
             auto function_ = cast(FuncDeclaration) asPointer(deref.e1);
             if (function_ is null)
-                throw new SnakebiteException(
-                    text("interpreter cannot call `", expression.toString,
-                        "`: the function pointer is null"),
-                );
+                faultIf(callFaultOf(expression));
 
             if (auto declaration =
                     cast(void*) function_ in _shared.callableDeclarations)
@@ -5935,10 +6080,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         auto function_ = cast(FuncDeclaration) cast(void*) loadIntegral(
             value.ptr + delegateFunctionOffset, size_t.sizeof, false);
         if (function_ is null)
-            throw new SnakebiteException(
-                text("interpreter cannot call `", expression.toString,
-                    "`: the delegate is null"),
-            );
+            faultIf(callFaultOf(expression));
 
         if (auto declaration =
                 cast(void*) function_ in _shared.callableDeclarations)
@@ -5951,7 +6093,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     private void* classReferenceOf(Expression expression) {
         import snakebite.nativelayout: loadIntegral;
-        import std.conv: text;
 
         assert(expression.type.toBasetype.ty == Tclass,
             "dmd gives a member call a receiver expression of class type");
@@ -6045,7 +6186,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     text("interpreter cannot call `", function_.toString,
                         "`: its `this` receiver is not a struct lvalue"),
                 );
-            return cast(size_t) addressOf(dot.e1);
+            return cast(size_t) addressOfOnly(dot.e1);
         }
 
         // A nested callee's `vthis` is its enclosing context. A
@@ -6055,11 +6196,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return callContextOf(calleeContextSourceOf(_function, function_));
     }
 
-    // The context a direct call hands over, which is always reachable from
-    // the caller.
+    // The context a direct call hands over. A frame is always reachable from
+    // the caller. A receiver can be null, and the access that reads it in the
+    // callee faults.
     private size_t callContextOf(in ContextSource source) {
         const context = contextValueOf(source);
-        assert(context != 0 || source.kind == ContextSource.Kind.none,
+        assert(context != 0 || source.kind != ContextSource.Kind.frame,
             "a direct call's enclosing function is on the static chain");
         return context;
     }
@@ -6075,7 +6217,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         case receiver:
             auto value = source.throughPair
                 ? hiddenValueOf(cast() source.function_.vthis, source.pairOffset)
-                : thisValueOf(cast() source.function_.vthis);
+                : thisValueOf(null, cast() source.function_.vthis);
             foreach (offset; source.fields)
                 value = cast(size_t) loadIntegral(
                     cast(ubyte*) value + offset, size_t.sizeof, false);
@@ -6086,7 +6228,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             auto word = _frames.reserve(size_t.sizeof, size_t.alignof);
             storeIntegral(
                 word,
-                thisValueOf(cast() _function.vthis) + source.receiverAdjustment,
+                thisValueOf(null, cast() _function.vthis)
+                    + source.receiverAdjustment,
                 size_t.sizeof,
             );
             return cast(size_t) word - source.slotOffset;
@@ -6110,7 +6253,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // bound to another call's `ref` result. The FFI call adapter validates
     // that the result is a reference.
     private void* refCallAddress(CallExp expression) {
-        return _executeCallExpression(expression, null).address;
+        const result = _executeCallExpression(expression, null);
+        if (result.isNullReference)
+            faultIf(refResultFaultOf(expression, _addressOnly));
+
+        return result.address;
     }
 
     // The address of a call's own return value, for `addressOf` when the
@@ -6260,14 +6407,13 @@ private ulong combine(string op)(
     in long b,
     in imported!"snakebite.nativelayout".TypeFacts aFacts,
     in imported!"snakebite.nativelayout".TypeFacts bFacts,
-    imported!"dmd.expression".Expression expression,
 ) {
     static if (op == "<<" || op == ">>" || op == ">>>")
         // dmd rejects a vector shift and a shift has its own `ShiftPlan`.
         assert(0);
     else static if (op == "/" || op == "%")
         return divided!op(
-            a, b, sharedSignedness(aFacts, bFacts), aFacts.size, expression);
+            a, b, sharedSignedness(aFacts, bFacts), aFacts.size);
     else
         // `+`, `-`, `*`, `&`, `|` and `^` leave the same low bits
         // whichever way the operands were widened, so no signedness
@@ -6289,26 +6435,14 @@ private bool sharedSignedness(
     return a.isUnsigned;
 }
 
-// D leaves a division by zero undefined, and the host's own divide
-// instruction raises SIGFPE on it, which would take the host process
-// down on guest input. The guest asked for something with no answer, so
-// this reports that to the host the same way a failed guest assertion
-// is reported: an exception the host survives, naming the expression.
+// The answer of a division that does not trap: `Evaluator.combined` has
+// reported the fault of one that does.
 private ulong divided(string op)(
     in long a,
     in long b,
     in bool unsigned,
     in size_t width,
-    imported!"dmd.expression".Expression expression,
 ) {
-    import std.conv: text;
-
-    if (b == 0)
-        throw new SnakebiteException(
-            text("interpreter: division by zero in `",
-                expression.toString, "`"),
-        );
-
     // A signed operand arrives sign-extended to 64 bits, which is not its
     // value as an operand of the operation's own unsigned type.
     if (unsigned) {
@@ -6316,17 +6450,6 @@ private ulong divided(string op)(
             ? (1UL << (8 * width)) - 1 : ulong.max;
         return mixin("(cast(ulong) a & mask) " ~ op
             ~ " (cast(ulong) b & mask)");
-    }
-
-    // The other input the host's divide instruction traps on:
-    // `long.min / -1` has no representable quotient. Negation and a
-    // zero remainder are the answers the instruction gives for every
-    // other dividend, and the two's complement wrap `long.min` needs.
-    if (b == -1) {
-        static if (op == "/")
-            return -cast(ulong) a;
-        else
-            return 0;
     }
 
     return cast(ulong) mixin("a " ~ op ~ " b");

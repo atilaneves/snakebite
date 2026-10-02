@@ -277,9 +277,9 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return _program.checks;
     }
 
-    package imported!"snakebite.backends.haltprocess".HaltAction
-    haltAction() const {
-        return _program.haltAction;
+    package imported!"snakebite.backends.haltprocess".HostActions
+    actions() const {
+        return _program.actions;
     }
 
     // Records that `compiled` is the word this backend stores for
@@ -618,8 +618,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         discardResult, indirectStorage,
         ExceptionHandler, Function,
         Instruction,
-        opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
-        opBranchTrue, opCall,
+        opAdd, opAssert, opAssertWord, opBitAnd, opBitOr, opBitXor,
+        opBranchFalse, opBranchTrue, opCall,
         opCastAs, opCastFixedAs,
         opCastToBool, opCastWidenSigned, opCastWidenUnsigned, opComplement,
         opAlloca, opArrayEqual, opComplex, opComplexNegate, opConstant, opCopy,
@@ -663,6 +663,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.backends.dualcontext:
         ContextSource, PairPlan, calleeContextSourceOf, contextSourceOf,
         pairPlanOf;
+    import snakebite.backends.guestfault: GuestFault;
+    import snakebite.backends.guestfaultplan:
+        FaultCheck, accessFaultOf, addressCanBeNull, callFaultOf,
+        contextFaultOf, delegateFaultOf, divisionFaultOf, nativeCallCheckOf,
+        refResultFaultOf, sliceElementsFaultOf, throwFaultOf, typeidFaultOf;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.backends.temporary: TemporaryPlan, constructTemporary;
     import snakebite.exception: SnakebiteException;
@@ -670,6 +675,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         alignUp, initializerConstructsThroughSlice, initializerValueOf,
         isIntegralSize, TypeFacts;
     import snakebite.nativevalue: CastKind;
+    import std.typecons: Nullable;
 
     alias visit = LoweringVisitor.visit;
 
@@ -694,6 +700,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private CallSite[] _callSites;
     private AssertSite[] _assertSites;
     private size_t _haltSite = size_t.max;
+    // The expression whose address is being formed and not used: it makes
+    // no memory access (`snakebite.backends.guestfaultplan.accessFaultOf`).
+    private Expression _addressOnly;
+    // The file name of the last site, as the string the VM keeps. A function
+    // has one file in nearly all cases, so it is converted once.
+    private const(char)* _siteFilename;
+    private string _siteFile;
     private PendingExceptionHandler[] _exceptionHandlers;
     private size_t _tempSize;
     private uint _tempAlignment;
@@ -972,6 +985,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 );
             }
 
+        import std.string: fromStringz;
+
         const contextOffset = _layout.hiddenThis.variable is null
             ? size_t.max : _layout.hiddenThis.parameter.offset;
         size_t[] parameterOffsets;
@@ -990,6 +1005,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _closureOffset == size_t.max ? 1 : _closureLayout.alignment,
             closureSlots,
             parameterOffsets,
+            _function.toPrettyChars.fromStringz.idup,
+            siteFileOf(_function.loc),
+            _function.loc.linnum,
         );
     }
 
@@ -1007,6 +1025,81 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _function.loc.linnum,
         );
         emit(&opAssert, zero, _assertSites.length - 1, size_t.sizeof);
+    }
+
+    private size_t faultSite(in FaultCheck check) {
+        return faultSite(check.kind, check.loc);
+    }
+
+    private size_t faultSite(in GuestFault.Kind kind, in Loc loc) {
+        _assertSites ~= AssertSite.fault(
+            kind, siteFileOf(loc), loc.linnum, _bytecode.actions);
+        return _assertSites.length - 1;
+    }
+
+    // A site whose fault kind is decided when it happens: a division by
+    // zero or a quotient that does not fit, a check of a native call.
+    private size_t lateFaultSite(in Loc loc) {
+        _assertSites ~= AssertSite.lateFault(
+            siteFileOf(loc), loc.linnum, _bytecode.actions);
+        return _assertSites.length - 1;
+    }
+
+    private string siteFileOf(in Loc loc) {
+        import std.string: fromStringz;
+
+        if (_siteFilename is null || _siteFilename !is loc.filename) {
+            _siteFilename = loc.filename;
+            _siteFile = loc.filename.fromStringz.idup;
+        }
+
+        return _siteFile;
+    }
+
+    // Reports a fault unless the address in the pointer-sized slot at
+    // `offset` is outside the first page. A slot that holds an address of
+    // the storage (a `ref` parameter) is copied out first.
+    private void emitNullCheck(in size_t offset, in FaultCheck check) {
+        size_t slot = offset;
+        if (offset >= (1UL << 63)) {
+            slot = reserveTemp(pointerFacts);
+            emit(&opCopy, slot, offset, size_t.sizeof);
+        }
+
+        emit(&opAssertWord, slot, faultSite(check), size_t.sizeof);
+    }
+
+    // The check of a fill or a copy of the elements of the slice at
+    // `sliceOffset`, which a slice with no element does not make.
+    private void emitSliceElementsCheck(in size_t sliceOffset, in Loc loc) {
+        import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
+
+        const branchIndex = _instructions.length;
+        emit(&opBranchFalse, sliceOffset + arrayLengthOffset, 0,
+            size_t.sizeof);
+        emitNullCheck(sliceOffset + arrayPointerOffset,
+            sliceElementsFaultOf(loc));
+        *branchTargetField(_instructions[branchIndex]) = _instructions.length;
+    }
+
+    private void emitFaultCheck(
+        in Nullable!FaultCheck check, in size_t offset,
+    ) {
+        if (!check.isNull)
+            emitNullCheck(offset, check.get);
+    }
+
+    // The check of the access through `expression`, whose address is in
+    // the pointer-sized slot at `offset`.
+    private void emitAccessCheck(Expression expression, in size_t offset) {
+        emitFaultCheck(accessFaultOf(expression, _addressOnly), offset);
+    }
+
+    private size_t compileAddressOnly(Expression expression) {
+        auto outer = _addressOnly;
+        _addressOnly = expression;
+        scope(exit) _addressOnly = outer;
+        return compileAddress(expression);
     }
 
     private const(Instruction)* instructionAt(in size_t index) const {
@@ -1531,6 +1624,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const facts = TypeFacts.of(expression.type);
         const offset = reserveTemp(facts);
         evalInto(expression, offset, facts.size);
+        emitNullCheck(offset, throwFaultOf(loc));
         emit(&opThrow, offset, 0, 0);
         _finished = true;
     }
@@ -1769,7 +1863,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         if (_isRefReturn) {
-            const addressOffset = compileAddress(statement.exp);
+            const addressOffset = compileAddressOnly(statement.exp);
             runPendingFinallyBodies(unwindPlanOf(activeScopePath));
             if (_finished)
                 return;
@@ -2017,7 +2111,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // nothing.
     private size_t haltSite() {
         if (_haltSite == size_t.max) {
-            _assertSites ~= AssertSite("", "", 0, _bytecode.haltAction);
+            _assertSites ~= AssertSite.halt(_bytecode.actions);
             _haltSite = _assertSites.length - 1;
         }
 
@@ -2685,7 +2779,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const slot = _closureLayout.slotOf(variable);
             const target = closureSlotAddress(slot.offset);
             if (slot.isRef) {
-                const addressOffset = compileAddress(initializerValueOf(
+                const addressOffset = compileAddressOnly(initializerValueOf(
                     expInitializer));
                 emit(&opStoreIndirect, target, addressOffset,
                     size_t.sizeof);
@@ -2710,7 +2804,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // sets `isRef` only for `STC.ref_`, and `wthis` is `STC.temp`, so
         // it falls through to the plain `evalInto` path below instead.
         if (_layout.isRef(variable)) {
-            const addressOffset = compileAddress(initializerValueOf(expInitializer));
+            const addressOffset =
+                compileAddressOnly(initializerValueOf(expInitializer));
             emit(&opCopy, offset, addressOffset, size_t.sizeof);
             return;
         }
@@ -2828,7 +2923,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // that frame's own hidden `this` slot is already addressable by offset
     // at compile time - every later hop indirects through a pointer value
     // already sitting in `result`.
-    private size_t contextAddressOf(FuncDeclaration owner) {
+    //
+    // `check` is the failure when a context is null, before the next hop or
+    // the access uses it. It is null for a context that is only passed on.
+    private size_t contextAddressOf(
+        FuncDeclaration owner, in Nullable!FaultCheck check = Nullable!FaultCheck.init,
+    ) {
         if (owner is _function) {
             if (_closureOffset != size_t.max)
                 return _closureOffset;
@@ -2845,10 +2945,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto result = reserveTemp(pointerFacts);
         emit(&opCopy, result, path[0].offset, size_t.sizeof);
+        emitFaultCheck(check, result);
 
         foreach (const hop; path[1 .. $]) {
             result = addPointerOffset(result, hop.offset);
             emit(&opLoadIndirect, result, result, size_t.sizeof);
+            emitFaultCheck(check, result);
         }
 
         return result;
@@ -2865,7 +2967,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // The address of a variable's storage as a pointer value in a frame
     // slot. A ref variable is indirected here, so all callers see the
     // storage it refers to rather than its pointer slot.
-    private size_t addressOfVariable(VarDeclaration variable) {
+    private size_t addressOfVariable(
+        VarDeclaration variable,
+        in Nullable!FaultCheck contextCheck = Nullable!FaultCheck.init,
+    ) {
         if (isClosureVariable(variable)) {
             const slot = _closureLayout.slotOf(variable);
             auto result = closureSlotAddress(slot.offset);
@@ -2889,7 +2994,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             assert(0,
                 "a local variable belongs to a function");
 
-        auto context = contextAddressOf(owner);
+        auto context = contextAddressOf(owner, contextCheck);
         const closurePlan = closurePlanOf(owner);
         if (closurePlan.needsClosure) {
             const closure = closurePlan.layout;
@@ -2911,6 +3016,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (layout.isRef(variable))
             emit(&opLoadIndirect, context, context, size_t.sizeof);
         return context;
+    }
+
+    // The address of the variable that `expression` names, for a load or a
+    // store: a `ref` variable can hold a null address.
+    private size_t addressOfAccessedVariable(
+        VarExp expression, VarDeclaration variable,
+    ) {
+        const address = addressOfVariable(
+            variable, contextFaultOf(expression, _addressOnly));
+        emitAccessCheck(expression, address);
+        return address;
     }
 
     // The raw slot for a reference declaration. Unlike addressOfVariable,
@@ -3048,8 +3164,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return value;
     }
 
-    private size_t compileThisFieldAddress(VarDeclaration field) {
+    // `access` is the expression that reads or writes `field`, null for a
+    // caller that only forms the address.
+    private size_t compileThisFieldAddress(
+        VarDeclaration field, Expression access = null,
+    ) {
         const addressOffset = hiddenThisOffset;
+        if (access !is null)
+            emitAccessCheck(access, addressOffset);
         if (field.offset == 0)
             return addressOffset;
 
@@ -3153,6 +3275,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (aggregateType.ty == Tclass || aggregateType.ty == Tpointer) {
             addressOffset = reserveTemp(pointerFacts);
             evalInto(expression.e1, addressOffset, size_t.sizeof);
+            emitAccessCheck(expression, addressOffset);
         } else {
             assert(aggregateType.isTypeStruct !is null,
                 "a struct field has a struct or class receiver");
@@ -3254,6 +3377,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ? compileAddress(target.e1)
             : loadSlicePointer(resolvedTarget, TypeFacts.of(target.type));
 
+        if (dim != 0 && addressCanBeNull(target.e1))
+            emitNullCheck(baseOffset, sliceElementsFaultOf(expression.loc));
+
         const rightTy = expression.e2.type.toBasetype.ty;
         import snakebite.nativelayout: isStoredLiteral;
 
@@ -3280,6 +3406,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             size_t sourceSliceOffset;
             if (rightTy == Tsarray) {
                 const sourceOffset = compileAddress(expression.e2);
+                if (dim != 0 && addressCanBeNull(expression.e2))
+                    emitNullCheck(sourceOffset,
+                        sliceElementsFaultOf(expression.loc));
                 sourceSliceOffset = reserveTemp(sliceFacts);
                 emit(&opConstant, sourceSliceOffset + arrayLengthOffset,
                     addConstant(cast(long) dim), size_t.sizeof);
@@ -3397,6 +3526,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             compileBoundsHook(conforms, BoundsCheck.sliceCopy, null, loc);
         }
 
+        emitSliceElementsCheck(to, loc);
+        emitSliceElementsCheck(from, loc);
         emit(&opSliceCopy, to, from, elementSize);
     }
 
@@ -3410,6 +3541,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             loadSliceDescriptor(resolvedTarget, TypeFacts.of(target.type));
         const valueOffset = reserveTemp(elementFacts);
         evalInto(expression.e2, valueOffset, elementFacts.size);
+        emitSliceElementsCheck(destSliceOffset, expression.loc);
         emit(&opSliceFill, destSliceOffset, valueOffset, elementFacts.size);
     }
 
@@ -3516,7 +3648,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
         if (!conversion.readsTargetFirst)
             valueOffset = readScalar(storage, valueFacts);
-        emit(handler, valueOffset, rightOffset, operationWidth, operands);
+        const division = divisionFaultOf(expression);
+        emit(handler, valueOffset, rightOffset, operationWidth,
+            division.isNull ? operands : lateFaultSite(division.get));
         valueOffset = writeScalar(storage, valueOffset, valueFacts.size);
 
         if (destOffset == discardResult)
@@ -3642,7 +3776,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 );
             return ScalarStorage(
                 ScalarStorage.Kind.indirect, facts,
-                addressOfVariable(variable), null,
+                addressOfAccessedVariable(var, variable), null,
                 arithmetic,
             );
         }
@@ -4092,7 +4226,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         if (isThisField(variable)) {
-            const addressOffset = compileThisFieldAddress(variable);
+            const addressOffset = compileThisFieldAddress(variable, expression);
             emit(&opLoadIndirect, _destination, addressOffset, _width);
             return;
         }
@@ -4108,7 +4242,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         if (!_layout.hasSlot(variable) || isClosureVariable(variable)) {
-            const address = addressOfVariable(variable);
+            const address = addressOfAccessedVariable(expression, variable);
             emit(&opLoadIndirect, _destination, address, _width);
             return;
         }
@@ -4120,6 +4254,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // through that address instead of the slot's own bytes, the one
         // place every plain variable read resolves this.
         if (_layout.isRef(variable)) {
+            emitAccessCheck(expression, source);
             emit(&opLoadIndirect, _destination, source, _width);
             return;
         }
@@ -4192,7 +4327,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const context = _destination + delegateContextOffset;
         if (target.receiver !is null) {
             if (target.receiverIsAddress) {
-                const address = compileAddress(target.receiver);
+                const address = compileAddressOnly(target.receiver);
                 emit(&opCopy, context, address, size_t.sizeof);
             } else
                 evalInto(target.receiver, context, size_t.sizeof);
@@ -4212,6 +4347,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 size_t.sizeof);
 
         if (target.virtualDispatch) {
+            emitFaultCheck(delegateFaultOf(target, expression.loc), context);
             const method = compileClassVtableSlot(
                 expression, context, target.function_);
             emit(&opCopy, _destination + delegateFunctionOffset,
@@ -4291,6 +4427,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
+        emitAccessCheck(expression, offset);
         emit(&opLoadIndirect, _destination, offset, _width);
     }
 
@@ -4311,7 +4448,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         requireDestination(expression);
 
-        const addressOffset = compileAddress(expression.e1);
+        const addressOffset = compileAddressOnly(expression.e1);
         if (addressOffset != _destination)
             emit(&opCopy, _destination, addressOffset, size_t.sizeof);
     }
@@ -4356,6 +4493,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const facts = TypeFacts.of(field.type);
             const objectOffset = reserveTemp(pointerFacts);
             evalInto(expression.e1, objectOffset, size_t.sizeof);
+            emitAccessCheck(expression, objectOffset);
             const fieldOffset = reserveTemp(pointerFacts);
             emit(&opConstant, fieldOffset,
                 addConstant(cast(long) field.offset), size_t.sizeof);
@@ -4660,7 +4798,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const sourceLengthOffset = reserveTemp(pointerFacts);
             emit(&opConstant, sourceLengthOffset,
                 addConstant(cast(long) dim), size_t.sizeof);
-            const addressOffset = compileAddress(expression.e1);
+            const addressOffset = compileAddressOnly(expression.e1);
             compileBoundedSlice(
                 expression, sourceLengthOffset, addressOffset);
             return;
@@ -4673,7 +4811,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // of itself - and no separate storage to point into: the result's
         // pointer word is `xs`'s own address, its length word `xs`'s own
         // dimension, known at compile time.
-        const addressOffset = compileAddress(expression.e1);
+        const addressOffset = compileAddressOnly(expression.e1);
         emit(&opConstant, _destination + arrayLengthOffset,
             addConstant(cast(long) dim), size_t.sizeof);
         emit(&opCopy, _destination + arrayPointerOffset,
@@ -5037,6 +5175,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (auto value = isExpression(expression.obj)) {
             evalInto(value, _destination, size_t.sizeof);
+            emitNullCheck(_destination, typeidFaultOf(expression));
             const indirections = 2
                 + (value.type.toBasetype.isTypeClass.sym
                     .isInterfaceDeclaration !is null);
@@ -5413,7 +5552,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 evalOperandInto(expression.e1, leftOffset, width);
                 const rightOffset = reserveTemp(plan.facts);
                 evalOperandInto(expression.e2, rightOffset, width);
-                emit(handler, leftOffset, rightOffset, width);
+                const division = divisionFaultOf(expression);
+                emit(handler, leftOffset, rightOffset, width,
+                    division.isNull ? 0 : lateFaultSite(division.get));
                 return copyResult(destOffset, leftOffset, width);
             }
 
@@ -6293,14 +6434,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // value in, just with that address as its "value" - so
         // `applyCastAs` reads it back the same way for both.
         case sarrayToSlice: {
-            const addressOffset = compileAddress(expression.e1);
+            const addressOffset = compileAddressOnly(expression.e1);
             emit(&opCastAs!(CastKind.sarrayToSlice), destOffset,
                 addressOffset, plan.staticLength);
             return;
         }
 
         case sarrayToPointer: {
-            const addressOffset = compileAddress(expression.e1);
+            const addressOffset = compileAddressOnly(expression.e1);
             emit(&opCastAs!(CastKind.sarrayToPointer), destOffset,
                 addressOffset, plan.destFacts.size);
             return;
@@ -6433,6 +6574,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const objectOffset = reserveTemp(pointerFacts);
         evalInto(dot.e1, objectOffset, size_t.sizeof);
+        emitFaultCheck(callFaultOf(expression), objectOffset);
 
         const calleeSlotOffset =
             compileClassVtableSlot(expression, objectOffset, callee);
@@ -6627,7 +6769,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (dot !is null || receiver.isThisExp !is null
                 || receiver.isSuperExp !is null)
-            return compileAddress(receiver);
+            return compileAddressOnly(receiver);
 
         // An ordinary method called with no explicit receiver at all
         // (`foo()` from inside another member of the same class) - sugar
@@ -6769,10 +6911,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // The delegate outlives this compiler, so it captures the backend
         // and not `this`.
         auto bytecode = _bytecode;
-        _callSites ~= CallSite.guest(
+        auto site = CallSite.guest(
             deferred(() => bytecode.compileFunction(callee)), args,
             returnShape.returnFacts.size,
         );
+        // A hook of druntime that no machine code stands for runs as guest
+        // code: its failure is still the one of the call.
+        if (!_bytecode.isGuestFunction(callee)) {
+            site.check = nativeCallCheckOf(callee);
+            if (site.check !is null)
+                site.faultSite = lateFaultSite(loc);
+        }
+        _callSites ~= site;
         emit(&opCall, destOffset, siteIndex, 0);
     }
 
@@ -6818,7 +6968,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         preparation.eachDeclared((i, value) {
             const parameter = layout.parameters[i];
             if (value.isReference) {
-                const argumentOffset = compileAddress(value.expression);
+                const argumentOffset = compileAddressOnly(value.expression);
                 args ~= Arg(argumentOffset, parameter.offset, size_t.sizeof);
                 return;
             }
@@ -6891,6 +7041,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import snakebite.ffi.call: CallAdapter;
 
+        CallSite withCheck(CallSite site) {
+            site.check = nativeCallCheckOf(callee);
+            if (site.check !is null)
+                site.faultSite = lateFaultSite(loc);
+            return site;
+        }
+
         compileBarrierCall(type, arguments, loc, exprText, initialArgs,
             destOffset, /* allowExtraArguments */ true,
             (args, returnWidth) {
@@ -6909,17 +7066,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 // call fails whenever it executes.
                 if (hasNativeSymbol) {
                     const plan = preparation.prepare(_bytecode._plans, callee);
-                    return CallSite.native(
-                        cast(const(void)*) plan, args, returnWidth);
+                    return withCheck(CallSite.native(
+                        cast(const(void)*) plan, args, returnWidth));
                 }
                 // The returned delegate outlives this compiler, so it
                 // captures the backend and not `this`; `PlanCache` is a
                 // struct.
                 auto bytecode = _bytecode;
-                return CallSite.native(
+                return withCheck(CallSite.native(
                     deferred(() => cast(const(void)*)
                         preparation.prepare(bytecode._plans, callee)),
-                    args, returnWidth);
+                    args, returnWidth));
             });
     }
 
@@ -7027,7 +7184,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private Arg compileBarrierArgument(CallAdapter.Arguments.Value value) {
         if (value.isReference)
-            return Arg(compileAddress(value.expression), 0, size_t.sizeof);
+            return Arg(
+                compileAddressOnly(value.expression), 0, size_t.sizeof);
 
         const offset = reserveTemp(value.facts);
         evalInto(value.expression, offset, value.facts.size);
@@ -7103,6 +7261,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             evalInto(expression.e1, delegateOffset, delegateValueSize);
             contextOffset = delegateOffset + delegateContextOffset;
             calleeOffset = delegateOffset + delegateFunctionOffset;
+            emitFaultCheck(callFaultOf(expression), calleeOffset);
         } else {
             functionType = deref is null ? null : deref.type.isTypeFunction;
             if (functionType is null)
@@ -7111,6 +7270,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             calleeOffset = reserveTemp(pointerFacts);
             evalInto(deref.e1, calleeOffset, size_t.sizeof);
+            emitFaultCheck(callFaultOf(expression), calleeOffset);
         }
 
         if (arityMismatches(functionType.parameterList, expression.arguments,
@@ -7289,7 +7449,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         FunctionCompiler compiler;
 
         public size_t storageThis(ThisExp expression) {
-            return compiler.hiddenThisOffset(expression.var);
+            const offset = compiler.hiddenThisOffset(expression.var);
+            compiler.emitAccessCheck(expression, offset);
+            return offset;
         }
 
         public size_t storageSuper(SuperExp expression) {
@@ -7303,8 +7465,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             if (variable.isDataseg)
                 return compiler.compileStaticAddress(variable);
             if (compiler.isThisField(variable))
-                return compiler.compileThisFieldAddress(variable);
-            return compiler.addressOfVariable(variable);
+                return compiler.compileThisFieldAddress(variable, expression);
+            return compiler.addressOfAccessedVariable(expression, variable);
         }
 
         public size_t storageReferenceInit(AssignExp expression) {
@@ -7316,7 +7478,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             const target = compiler.referenceSlotAddress(
                 declaration);
-            const source = compiler.compileAddress(expression.e2);
+            const source = compiler.compileAddressOnly(expression.e2);
             compiler.emit(&opCopy, target, source, size_t.sizeof);
             return source;
         }
@@ -7324,6 +7486,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         public size_t storagePointer(PtrExp expression) {
             const result = compiler.reserveTemp(compiler.pointerFacts);
             compiler.evalInto(expression.e1, result, size_t.sizeof);
+            compiler.emitAccessCheck(expression, result);
             return result;
         }
 
@@ -7402,6 +7565,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         public size_t storageReferenceCall(CallExp expression) {
             const result = compiler.reserveTemp(compiler.pointerFacts);
             compiler.compileCall(expression, result);
+            compiler.emitFaultCheck(
+                refResultFaultOf(expression, compiler._addressOnly), result);
             return result;
         }
 
@@ -7516,6 +7681,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const address = compiler.reserveTemp(compiler.pointerFacts);
             compiler.emit(&opCopy, address,
                 array + arrayPointerOffset, size_t.sizeof);
+            compiler.emitAccessCheck(expression, address);
             compiler.emit(&opAdd, address, index, size_t.sizeof);
             return address;
         }
@@ -7543,6 +7709,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         ) {
             import dmd.typesem: toBasetype;
 
+            compiler.emitAccessCheck(expression, pointer);
             const stride =
                 TypeFacts.of(expression.e1.type.toBasetype.nextOf).size;
             const strideOffset = compiler.reserveTemp(compiler.pointerFacts);

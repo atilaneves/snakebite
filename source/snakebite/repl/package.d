@@ -71,6 +71,7 @@ public struct Repl {
         catch (Exception exception)
             throw new Exception("cannot read " ~ filePath ~ ": " ~ exception.msg);
 
+        const cell = RunsCell(true);
         const result = submitDeclaration(source);
         if (result.kind == SubmitResult.Kind.error)
             throw new Exception(result.text);
@@ -78,6 +79,8 @@ public struct Repl {
 
     public SubmitResult submit(in string input) {
         import std.string: strip;
+
+        const cell = RunsCell(true);
 
         if (_pendingInput.length == 0 && input.strip.length == 0)
             return SubmitResult.init;
@@ -126,11 +129,11 @@ public struct Repl {
             : stripped;
 
         const evalName = syntheticEvalFunctionName(_cellCount);
+        // The expression starts on line 1 of the cell, so a diagnostic
+        // names the line the user typed it on.
         const cellSource = replCellLineDirective(_cellCount)
-            ~ "string " ~ evalName ~ "() {\n"
-            ~ "    import std.conv: text;\n"
-            ~ "    return text(" ~ expression ~ ");\n"
-            ~ "}\n";
+            ~ "string " ~ evalName ~ "() { import std.conv: text; "
+            ~ "return text(" ~ expression ~ "); }\n";
         const fullSource = _accumulatedSource ~ cellSource;
 
         Module module_;
@@ -176,12 +179,13 @@ public struct Repl {
     // process that holds the user's work.
     private imported!"snakebite.backends".Program programOf(Module module_) {
         import snakebite.backends: Program;
+        import snakebite.backends.haltprocess: HostActions;
 
         return Program(
             interpretedModules(module_, _importPaths),
             "",
             checksOf(_flags),
-            &endCell,
+            HostActions(&endCell, &endCellOnFault),
         );
     }
 
@@ -291,6 +295,39 @@ private noreturn endCell() {
     import snakebite.backends.haltprocess: Halted;
 
     throw new Halted;
+}
+
+// Whether this thread runs a cell. The thread of a cell gets the fault as
+// the failure of the cell, and prints nothing here. A thread that the guest
+// started has nobody to get it unless the guest joins the thread, so the
+// fault is printed as it happens.
+private bool _runsCell;
+
+private struct RunsCell {
+    private bool _previous;
+
+    this(in bool value) {
+        _previous = _runsCell;
+        _runsCell = value;
+    }
+
+    ~this() {
+        _runsCell = _previous;
+    }
+}
+
+private noreturn endCellOnFault(
+    in imported!"snakebite.backends.guestfault".GuestFault.Kind kind,
+    in const(char)[] file,
+    in size_t line,
+    scope imported!"snakebite.backends.guestfault".GuestFault.Stack stack,
+) {
+    import snakebite.backends.guestfault: GuestFault;
+
+    if (!_runsCell)
+        GuestFault.print(kind, file, line, stack);
+
+    GuestFault.throwFault(kind, file, line, stack);
 }
 
 

@@ -497,6 +497,80 @@ def test_piped_mode_continues_after_error() -> None:
     )
 
 
+# A guest fault (a null dereference, an integer division by zero) ends the
+# cell that ran it with a message. The session stays alive: the next cell
+# runs.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+@pytest.mark.parametrize(
+    "cells, message",
+    [
+        ("int zero() { return 0; }\n5 / zero()\n", "integer division by zero"),
+        ("int* nothing;\n*nothing\n", "null pointer dereference"),
+    ],
+)
+def test_guest_fault_ends_the_cell_not_the_session(
+    backend: str, cells: str, message: str,
+) -> None:
+    result = run_sb("-b", backend, input=cells + "1 + 2\n")
+
+    assert message in result.stdout + result.stderr
+    assert result.stdout.endswith("3\n")
+    assert result.returncode == 0
+
+
+# The location of a fault is a line of the cell, as the user typed it.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_guest_fault_names_the_line_of_the_cell(backend: str) -> None:
+    result = run_sb(
+        "-b", backend,
+        input="int zero() { return 0; }\n5 / zero()\n",
+    )
+
+    assert (
+        "Error: <repl cell 2>(1): fatal: integer division by zero\n"
+        in result.stdout
+    )
+
+
+# A fault ends the run: no guest code runs after it, and the destructor of
+# a temporary is guest code.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_guest_fault_runs_no_guest_destructor(backend: str) -> None:
+    result = run_sb(
+        "-b", backend,
+        input=(
+            "import core.stdc.stdio: fflush, puts, stdout;\n"
+            'struct R { ~this() { puts("destructor ran"); fflush(stdout); }'
+            " int one() { return 1; } }\n"
+            "int zero() { return 0; }\n"
+            "R().one() / zero()\n"
+        ),
+    )
+
+    assert "fatal: integer division by zero" in result.stdout
+    assert "destructor ran" not in result.stdout
+
+
+# A fault on a second thread that the cell does not join is reported too.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_guest_fault_on_a_second_thread_is_reported(backend: str) -> None:
+    result = run_sb(
+        "-b", backend,
+        input=(
+            "import core.thread;\n"
+            "void work() { int* p; *p = 1; }\n"
+            "int run() { auto t = new Thread(&work); t.start();"
+            " Thread.sleep(200.msecs); return 1; }\n"
+            "run()\n"
+            "1 + 2\n"
+        ),
+    )
+
+    assert "fatal: null pointer dereference" in result.stdout + result.stderr
+    assert result.stdout.endswith("3\n")
+    assert result.returncode == 0
+
+
 def test_piped_pragma_msg_writes_once_to_stderr() -> None:
     result = run_sb(input='pragma(msg, "hello");\n42\n')
 
