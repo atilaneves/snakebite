@@ -3083,3 +3083,21 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// `Object.classinfo` as the operand of `typeid` is the address of the
+// static `TypeInfo_Class` object of `Object`, and that object is itself an
+// instance of `TypeInfo_Class`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot read runtime TypeInfo"),
+)) {
+    @("class.typeidOfAClassinfoOfAType." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        int main() {
+            auto info = typeid(Object.classinfo);
+            return info is typeid(TypeInfo_Class) ? 0 : 1;
+        }
+        });
+    }
+}

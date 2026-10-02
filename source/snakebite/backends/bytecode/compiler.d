@@ -4441,12 +4441,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // through `ref` binding, so this is nothing more than that answer
     // copied to `_destination`.
     override void visit(AddrExp expression) {
+        import snakebite.frontend.storage: typeInfoAddressedBy;
         import snakebite.nativelayout: isStaticStructAddress;
 
         if (isStaticStructAddress(expression))
             return compileConstant(expression);
 
         requireDestination(expression);
+
+        if (auto typeInfo = expression.typeInfoAddressedBy) {
+            emitRuntimeTypeInfoConstant(typeInfo.tinfo);
+            return;
+        }
 
         const addressOffset = compileAddressOnly(expression.e1);
         if (addressOffset != _destination)
