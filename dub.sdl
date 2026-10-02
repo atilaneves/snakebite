@@ -18,13 +18,15 @@ subPackage {
 
 // A plain `dub build`/`dub test` fails to link: every configuration
 // below needs the FFI call stub's assembled object
-// (`snakebite_ffi_call_sysv_amd64`) and the interpreter's native-stack-
-// switch object (`snakebite_interpreter_call_on_stack`), which only
+// (`snakebite_ffi_call_sysv_amd64`), the interpreter's native-stack-
+// switch object (`snakebite_interpreter_call_on_stack`) and the fault
+// trampoline's (`snakebite_fault_trampoline`), which only
 // `build/reggae.sh`'s ninja build produces, from
-// `source/snakebite/ffi/sysv_amd64.S` and
-// `source/snakebite/backends/interpreter/interpreter_stack_amd64.S` -
-// build through reggae (`build/*.sh`), not dub directly. A system C
-// compiler (`cc`) is required to assemble those files.
+// `source/snakebite/ffi/sysv_amd64.S`,
+// `source/snakebite/backends/interpreter/interpreter_stack_amd64.S` and
+// `source/snakebite/fault_trampoline_amd64.S` - build through reggae
+// (`build/*.sh`), not dub directly. A system C compiler (`cc`) is
+// required to assemble those files.
 configuration "unittest" {
     targetType "executable"
     targetName "ut"
