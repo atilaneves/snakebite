@@ -1569,12 +1569,15 @@ private void expandArguments(
 }
 
 private void applyChecks(in imported!"snakebite.frontend.checks".Checks checks) {
+    import dmd.cond: VersionCondition;
     import dmd.globals: global;
 
     checks.applyTo(global.params);
     for (size_t index = global.versionids.length; index-- > 0; )
         if (!checks.defines(global.versionids[index].toString))
             global.versionids.remove(index);
+    foreach (identifier; checks.definitions)
+        VersionCondition.addPredefinedGlobalIdent(identifier);
 }
 
 private bool applyFeature(alias features)(
