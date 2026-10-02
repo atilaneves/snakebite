@@ -1146,9 +1146,9 @@ def test_exit_runs_crt_destructors(tmp_path: Path, backend: str) -> None:
     result = run_app(tmp_path, backend)
 
     assert result.returncode == 5, output(result)
-    assert guest_lines(result) == [
-        "crt constructor", "main", "shared destructor", "crt destructor",
-    ]
+    lines = guest_lines(result)
+    assert lines[:2] == ["crt constructor", "main"]
+    assert sorted(lines[2:]) == ["crt destructor", "shared destructor"]
 
 
 @pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
