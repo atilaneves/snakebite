@@ -8,7 +8,7 @@ import dmd.declaration: Declaration, VarDeclaration;
 import dmd.expression:
     AddAssignExp, AddExp, AssignExp, CallExp, CmpExp, DeclarationExp,
     DelegateExp, DeleteExp, EqualExp, Expression, FuncExp, IndexExp, IntegerExp,
-    MinAssignExp, MinExp, NewExp, PostExp, SliceExp, StructLiteralExp,
+    MinAssignExp, MinExp, NewExp, PostExp, SliceExp, StringExp, StructLiteralExp,
     SymOffExp, ThisExp, TypeidExp, VarExp;
 import dmd.func: FuncDeclaration;
 import dmd.mtype: Type;
@@ -36,6 +36,7 @@ package struct Preparation {
     package void delegate(ClassDeclaration) stackClass;
     package void delegate(DeleteExp) deletion;
     package void delegate(StructLiteralExp) structLiteral;
+    package void delegate(StringExp) stringLiteral;
     package void delegate(TryCatchStatement) tryCatch;
     package void delegate(TryFinallyStatement) tryFinally;
     package void delegate(TryFinallyStatement, Statement) gotoOutOf;
@@ -160,6 +161,11 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
             ? unresolvedCalleeOf(expression) : expression.f;
         if (callee !is null)
             _preparation.call(expression, callee);
+    }
+
+    // The one address of a literal's text is made at its first use.
+    private extern(D) void handle(StringExp expression) {
+        _preparation.stringLiteral(expression);
     }
 
     private extern(D) void handle(StructLiteralExp expression) {

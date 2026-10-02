@@ -1533,6 +1533,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 planOf(*_plans, planDelete(expression).hook);
             }),
             (expression) => attempt({ structLiteralPlanOf(expression); }),
+            (expression) => attempt({ _nativeData.stringData(expression); }),
             (statement) => attempt({ tryCatchPlanOf(statement); }),
             (statement) => attempt({
                 finallyCandidatesOf(statement);

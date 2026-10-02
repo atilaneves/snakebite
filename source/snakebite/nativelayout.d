@@ -648,7 +648,7 @@ public struct NativeData {
     // Equal text has one address, as the object file gives in compiled D:
     // dmd makes a new literal for each use of a manifest constant, and for
     // each instance of a template.
-    private const(void)* stringData(StringExp literal) {
+    public const(void)* stringData(StringExp literal) {
         import core.stdc.stdlib: calloc;
         import snakebite.frontend.compiler: withCompilerLock;
 

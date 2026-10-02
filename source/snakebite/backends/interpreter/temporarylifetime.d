@@ -111,7 +111,7 @@ public struct TemporaryLifetime {
     // The slots of one guest call: given back, with their bytes, when the
     // call ends by any path.
     public struct Activation {
-        private TemporaryLifetime _lifetime;
+        private TemporaryLifetime* _lifetime;
         private FrameStack.Mark _storage;
         private size_t _slotBase;
 
@@ -128,7 +128,7 @@ public struct TemporaryLifetime {
     public Activation enterActivation() {
         const slotBase = _slotBase;
         _slotBase = _slots.length;
-        return Activation(this, _frames.mark, slotBase);
+        return Activation(&this, _frames.mark, slotBase);
     }
 
     // Gives a nested evaluation its own temporary pairing and cleanup
