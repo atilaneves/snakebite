@@ -111,6 +111,15 @@ pragma(inline, true) public void integralToFloating(
     storeFloating(destination, value, destinationSize);
 }
 
+// What native x86 code gives, which D leaves undefined outside the range of
+// the destination: a value that does not fit makes the hardware convert to
+// its "integer indefinite" value, the smallest signed integer of that width.
+// A destination of 1 to 4 bytes converts through a 32-bit register, except
+// `uint`, which converts through a 64-bit one; a `real` source for those
+// first rounds to `double`. A `ulong` converts a value below 2^63 as a
+// signed integer, wrapping a negative one, and a larger value after
+// subtracting 2^63. A `float` or `double` converts as a `double`, which is
+// cheaper than `real` and gives the same integer.
 pragma(inline, true) public void floatingToIntegral(
     void* destination,
     in void* source,
@@ -118,11 +127,57 @@ pragma(inline, true) public void floatingToIntegral(
     in size_t sourceSize,
     in bool unsignedDestination,
 ) @nogc nothrow {
-    const value = loadFloating(source, sourceSize);
-    const converted = unsignedDestination
-        ? cast(long) cast(ulong) value
-        : cast(long) value;
-    storeIntegral(destination, cast(ulong) converted, destinationSize);
+    ulong converted;
+    if (sourceSize == double.sizeof)
+        converted = truncated(
+            *cast(const(double)*) source, destinationSize,
+            unsignedDestination);
+    else if (sourceSize == float.sizeof)
+        converted = truncated(
+            cast(double) *cast(const(float)*) source, destinationSize,
+            unsignedDestination);
+    else {
+        assert(sourceSize == real.sizeof,
+            "no native layout for this floating width");
+        const value = *cast(const(real)*) source;
+        converted = destinationSize < ulong.sizeof
+            ? truncated(cast(double) value, destinationSize,
+                unsignedDestination)
+            : truncated(value, destinationSize, unsignedDestination);
+    }
+    storeIntegral(destination, converted, destinationSize);
+}
+
+pragma(inline, true) private ulong truncated(T)(
+    in T value, in size_t destinationSize, in bool unsignedDestination,
+) @nogc nothrow pure @safe {
+    switch (destinationSize) {
+        case ulong.sizeof:
+            if (!unsignedDestination || value < 0x1p63)
+                return cast(ulong) signed64(value);
+            return cast(ulong) signed64(value - 0x1p63) + (1UL << 63);
+        case int.sizeof:
+            return unsignedDestination
+                ? cast(ulong) signed64(value) : cast(ulong) signed32(value);
+        default:
+            return cast(ulong) signed32(value);
+    }
+}
+
+// The smallest value of the width is also what the hardware gives for the
+// value just below it, so one magnitude test covers both ends.
+pragma(inline, true) private long signed64(T)(in T value)
+        @nogc nothrow pure @safe {
+    import core.math: fabs;
+
+    return fabs(value) < 0x1p63 ? cast(long) value : long.min;
+}
+
+pragma(inline, true) private int signed32(T)(in T value)
+        @nogc nothrow pure @safe {
+    import core.math: fabs;
+
+    return fabs(value) < 2147483648.0 ? cast(int) value : int.min;
 }
 
 pragma(inline, true) public void floatingToBool(

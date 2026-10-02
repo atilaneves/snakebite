@@ -1265,3 +1265,455 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+static foreach (backend; Matrix!()) {
+    @("compoundAssignFieldsOfDifferentTypesInMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Owner {
+                byte pad = 9;
+                double d = 1.5;
+                long l = 20;
+                double run() {
+                    d += 0.5;
+                    l <<= 1;
+                    return d + l;
+                }
+            }
+            int main() {
+                Owner owner;
+                return owner.run == 42.0 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("shiftLongLocalByInt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                long value = 20;
+                value <<= 1;
+                return value == 40 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("shiftLongFieldThroughThisByInt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Owner {
+                long value = 20;
+                void run() { value <<= 1; }
+            }
+            int main() {
+                Owner owner;
+                owner.run;
+                return owner.value == 40 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("powAssignLongByInt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                long value = 3;
+                int exponent = 3;
+                value ^^= exponent;
+                return value == 27 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("addAssignIntByDouble." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int value = 20;
+                double step = 2.5;
+                value += step;
+                return value == 22 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE converts a floating step to the integral target before the "
+        ~ "operation: pinned by the `.Ctfe.diverges` test of the same name"),
+)) {
+    @("subAssignLongByDouble." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                long value = 20;
+                double step = 2.5;
+                value -= step;
+                return value == 17 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+@("subAssignLongByDouble.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    0.shouldBeStatusOf!(Ctfe, q{
+        int main() {
+            long value = 20;
+            double step = 2.5;
+            value -= step;
+            return value == 18 ? 0 : 1;
+        }
+    });
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE converts a floating step to the integral target before the "
+        ~ "operation: pinned by the `.Ctfe.diverges` test of the same name"),
+)) {
+    @("mulAssignUintByReal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                uint value = 20;
+                real factor = 2.5;
+                value *= factor;
+                return value == 50 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+@("mulAssignUintByReal.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    0.shouldBeStatusOf!(Ctfe, q{
+        int main() {
+            uint value = 20;
+            real factor = 2.5;
+            value *= factor;
+            return value == 40 ? 0 : 1;
+        }
+    });
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("addAssignIntFieldThroughThisByDouble." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Owner {
+                byte pad = 9;
+                int value = 20;
+                void run(double step) { value += step; }
+            }
+            int main() {
+                Owner owner;
+                owner.run(2.5);
+                return owner.value == 22 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE converts a floating step to the integral target before the "
+        ~ "operation: pinned by the `.Ctfe.diverges` test of the same name"),
+)) {
+    @("mulAssignIntArrayElementByDouble." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int[2] values = [1, 21];
+                double factor = 2.5;
+                values[1] *= factor;
+                return values[0] == 1 && values[1] == 52 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+@("mulAssignIntArrayElementByDouble.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    0.shouldBeStatusOf!(Ctfe, q{
+        int main() {
+            int[2] values = [1, 21];
+            double factor = 2.5;
+            values[1] *= factor;
+            return values[0] == 1 && values[1] == 42 ? 0 : 1;
+        }
+    });
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a mutable static variable"),
+)) {
+    @("addAssignIntStaticByDouble." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int value = 20;
+            int main() {
+                double step = 2.5;
+                value += step;
+                return value == 22 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("addAssignIntGivesTheStoredValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int value = 20;
+                double step = 2.5;
+                const result = (value += step);
+                return result == 22 && value == 22 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "dmd's CTFE converts the step to the integral target and reads the " ~
+        "target after the step: pinned by " ~
+        "`addAssignIntReadsTheTargetBeforeTheStep.Ctfe.diverges`"),
+)) {
+    @("addAssignIntReadsTheTargetBeforeTheStep." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            double step(ref int value) { value = 5; return 2.5; }
+            int main() {
+                int value = 20;
+                value += step(value);
+                return value == 22 ? 0 : 1;
+            }
+        });
+    }
+}
+
+@("addAssignIntReadsTheTargetBeforeTheStep.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    0.shouldBeStatusOf!(Ctfe, q{
+        double step(ref int value) { value = 5; return 2.5; }
+        int main() {
+            int value = 20;
+            value += step(value);
+            return value == 7 ? 0 : 1;
+        }
+    });
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "dmd's CTFE divides in 64 bits: pinned by `divAssignIntByUintDividesUnsigned.Ctfe.diverges`"),
+)) {
+    @("divAssignIntByUintDividesUnsigned." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int value = -5;
+                uint divisor = 7;
+                value /= divisor;
+                return value == 613_566_755 ? 0 : 1;
+            }
+        });
+    }
+}
+
+@("divAssignIntByUintDividesUnsigned.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    0.shouldBeStatusOf!(Ctfe, q{
+            int main() {
+                int value = -5;
+                uint divisor = 7;
+                value /= divisor;
+                return value == -1_840_700_271 ? 0 : 1;
+            }
+    });
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "dmd's CTFE divides in 64 bits: pinned by `modAssignIntByUintGivesTheUnsignedRemainder.Ctfe.diverges`"),
+)) {
+    @("modAssignIntByUintGivesTheUnsignedRemainder." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int value = -5;
+                uint divisor = 7;
+                value %= divisor;
+                return value == 6 ? 0 : 1;
+            }
+        });
+    }
+}
+
+@("modAssignIntByUintGivesTheUnsignedRemainder.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    0.shouldBeStatusOf!(Ctfe, q{
+            int main() {
+                int value = -5;
+                uint divisor = 7;
+                value %= divisor;
+                return value == 4 ? 0 : 1;
+            }
+    });
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "dmd's CTFE divides in 64 bits: pinned by `divAssignByteByUintDividesUnsigned.Ctfe.diverges`"),
+)) {
+    @("divAssignByteByUintDividesUnsigned." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                byte value = -5;
+                uint divisor = 7;
+                value /= divisor;
+                return value == 35 ? 0 : 1;
+            }
+        });
+    }
+}
+
+@("divAssignByteByUintDividesUnsigned.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    0.shouldBeStatusOf!(Ctfe, q{
+            int main() {
+                byte value = -5;
+                uint divisor = 7;
+                value /= divisor;
+                return value == -111 ? 0 : 1;
+            }
+    });
+}
+
+static foreach (backend; Matrix!()) {
+    @("divIntByUintDividesUnsigned." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int value = -5;
+                uint divisor = 7;
+                return value / divisor == 613_566_755 ? 0 : 1;
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("modIntByUintGivesTheUnsignedRemainder." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int value = -5;
+                uint divisor = 7;
+                return value % divisor == 6 ? 0 : 1;
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("modAssignUintByNegativeIntUsesTheUnsignedDivisor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                uint value = 5;
+                int divisor = -7;
+                value %= divisor;
+                return value == 5 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("addAssignBitFieldGivesTheStoredValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Bits { uint low : 5; }
+            int main() {
+                Bits bits;
+                bits.low = 10;
+                const result = (bits.low += 30);
+                return result == 8 && bits.low == 8 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("addAssignSignedBitFieldGivesTheStoredValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Bits { int low : 5; }
+            int main() {
+                Bits bits;
+                bits.low = 10;
+                const result = (bits.low += 10);
+                return result == -12 && bits.low == -12 ? 0 : 1;
+            }
+        });
+    }
+}

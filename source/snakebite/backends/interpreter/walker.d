@@ -3371,6 +3371,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private extern(D) void storeFloatingAssign(string op)(
         BinAssignExp expression, void* resolvedTarget,
     ) {
+        import snakebite.backends.arithmetic: ArithmeticPlan;
+        import snakebite.backends.compoundassign: readsTargetFirst;
         import snakebite.frontend.storage: compoundTarget;
         import snakebite.nativevalue: loadFloating, storeFloating;
 
@@ -3380,13 +3382,19 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             target = addressOf(target_);
 
         const targetFacts = factsOf(target_.type);
+        // Only an integral target crosses kind under a floating operation.
+        if (targetFacts.isIntegral)
+            return storeConvertedFloatingAssign!op(
+                expression, target_, target);
+
         const operationFacts = factsOf(expression.e1.type);
-        const mixedPromotion = targetFacts.size != operationFacts.size;
+        const targetFirst = readsTargetFirst(ArithmeticPlan.Kind.floating,
+            false, targetFacts.size, operationFacts.size);
         real current;
-        if (mixedPromotion)
+        if (targetFirst)
             current = loadFloating(target, targetFacts.size);
         const step = asFloating(expression.e2);
-        if (!mixedPromotion)
+        if (!targetFirst)
             current = loadFloating(target, targetFacts.size);
         const result = floatingResult!op(current, step, operationFacts.size);
 
@@ -3395,12 +3403,72 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _facts.size);
     }
 
+    // An integral target under a floating operation: the target is read
+    // converted to the type the operation runs in, and the result is
+    // converted back.
+    private extern(D) void storeConvertedFloatingAssign(string op)(
+        BinAssignExp expression, Expression target_, void* target,
+    ) {
+        import snakebite.backends.casts: layoutOf;
+        import snakebite.backends.compoundassign: compoundConversion;
+        import snakebite.nativelayout: loadIntegral, storeIntegral;
+        import snakebite.nativevalue: applyCast, loadFloating, storeFloating;
+
+        const conversion = compoundConversion(expression);
+        const targetFacts = factsOf(target_.type);
+        const precision = conversion.load.destFacts.size;
+        auto field = target_.isDotVarExp is null
+            ? null : target_.isDotVarExp.var.isVarDeclaration;
+        auto bitfield = field is null || field.isBitFieldDeclaration is null
+            ? null : field;
+
+        align(size_t.alignof) ubyte[size_t.sizeof] stored = void;
+        align(real.alignof) ubyte[real.sizeof] operation = void;
+        void loadTarget() {
+            if (bitfield is null)
+                stored[0 .. targetFacts.size] =
+                    (cast(ubyte*) target)[0 .. targetFacts.size];
+            else
+                storeIntegral(stored.ptr,
+                    bitfieldValueAtPlace(bitfield, target),
+                    targetFacts.size);
+            applyCast(layoutOf(conversion.load), stored.ptr, operation.ptr);
+        }
+
+        if (conversion.readsTargetFirst)
+            loadTarget;
+        const step = asFloating(expression.e2);
+        if (!conversion.readsTargetFirst)
+            loadTarget;
+        storeFloating(operation.ptr,
+            floatingResult!op(
+                loadFloating(operation.ptr, precision), step, precision),
+            precision);
+        applyCast(layoutOf(conversion.store), operation.ptr, stored.ptr);
+
+        if (bitfield is null) {
+            (cast(ubyte*) target)[0 .. targetFacts.size] =
+                stored[0 .. targetFacts.size];
+            storeIntegral(_place,
+                loadIntegral(
+                    stored.ptr, targetFacts.size, !targetFacts.isUnsigned),
+                _facts.size);
+        } else {
+            storeBitfieldAt(bitfield, target,
+                loadIntegral(
+                    stored.ptr, targetFacts.size, !targetFacts.isUnsigned));
+            storeIntegral(_place, bitfieldValueAtPlace(bitfield, target),
+                _facts.size);
+        }
+    }
+
     // As `storeFloatingAssign`, for both halves of a complex target.
     private extern(D) void storeComplexAssign(string op)(
         BinAssignExp expression,
         in imported!"snakebite.backends.arithmetic".ArithmeticPlan plan,
         void* resolvedTarget,
     ) {
+        import snakebite.backends.compoundassign: readsTargetFirst;
         import snakebite.frontend.storage: compoundTarget;
         import snakebite.nativevalue: applyComplex;
 
@@ -3411,7 +3479,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const partSize = plan.facts.size / 2;
         align(real.alignof) ubyte[2 * real.sizeof] current = void;
         align(real.alignof) ubyte[2 * real.sizeof] step = void;
-        const mixedPromotion = targetFacts.size != plan.facts.size;
+        const mixedPromotion = readsTargetFirst(
+            plan.kind, false, targetFacts.size, plan.facts.size);
         if (mixedPromotion)
             convertComplex(current.ptr, partSize, target, targetFacts.size / 2);
         evaluate(expression.e2, expression.e2.type,
@@ -3434,15 +3503,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         auto target_ = compoundTarget(expression);
         const targetFacts = factsOf(target_.type);
-        // dmd's own integral promotion always widens a narrow target to a
-        // signed `int` for the operation itself; a bitwise-width-preserving
-        // combination of the target's own storage width and that
-        // operation's signedness is what a division needs -
-        // `targetFacts.isUnsigned` alone would compare an unsigned narrow
-        // target's own signedness against its always-signed promoted right
-        // operand and refuse a division that dmd allows.
+        // The operation has the width and signedness of the common type dmd
+        // gave `e1`, which is wider than a narrow target and unsigned for an
+        // `int /= uint`.
         const operationFacts = factsOf(expression.e1.type);
-        auto arithmeticFacts = TypeFacts(targetFacts.size,
+        auto arithmeticFacts = TypeFacts(operationFacts.size,
             targetFacts.alignment, true, operationFacts.isUnsigned);
         bool signExtend = !targetFacts.isUnsigned;
         enum isShift = op == "<<" || op == ">>" || op == ">>>";
@@ -3472,7 +3537,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     const result = combine!op(
                         current, step, arithmeticFacts, stepFacts, expression);
                 storeBitfieldAt(field, target, result);
-                storeIntegral(_place, result, _facts.size);
+                storeIntegral(_place, bitfieldValueAtPlace(field, target),
+                    _facts.size);
                 return;
             }
         }
@@ -6194,7 +6260,7 @@ private ulong combine(string op)(
         assert(0);
     else static if (op == "/" || op == "%")
         return divided!op(
-            a, b, sharedSignedness(aFacts, bFacts), expression);
+            a, b, sharedSignedness(aFacts, bFacts), aFacts.size, expression);
     else
         // `+`, `-`, `*`, `&`, `|` and `^` leave the same low bits
         // whichever way the operands were widened, so no signedness
@@ -6225,6 +6291,7 @@ private ulong divided(string op)(
     in long a,
     in long b,
     in bool unsigned,
+    in size_t width,
     imported!"dmd.expression".Expression expression,
 ) {
     import std.conv: text;
@@ -6235,8 +6302,14 @@ private ulong divided(string op)(
                 expression.toString, "`"),
         );
 
-    if (unsigned)
-        return mixin("cast(ulong) a " ~ op ~ " cast(ulong) b");
+    // A signed operand arrives sign-extended to 64 bits, which is not its
+    // value as an operand of the operation's own unsigned type.
+    if (unsigned) {
+        const mask = width < ulong.sizeof
+            ? (1UL << (8 * width)) - 1 : ulong.max;
+        return mixin("(cast(ulong) a & mask) " ~ op
+            ~ " (cast(ulong) b & mask)");
+    }
 
     // The other input the host's divide instruction traps on:
     // `long.min / -1` has no representable quotient. Negation and a

@@ -16,16 +16,25 @@ public imported!"dmd.expression".Expression compoundTarget(
     imported!"dmd.expression".BinAssignExp expression,
 ) {
     const type = expression.type.toBasetype;
-    if (expression.e1.type.toBasetype.equals(type))
+    if (sameScalar(expression.e1.type.toBasetype, type))
         return expression.e1;
 
     // A shift by a wider count promotes the target twice, e.g.
     // `cast(long)cast(int)b` for a `byte`.
     for (auto promotion = expression.e1.isCastExp; promotion !is null;
             promotion = promotion.e1.isCastExp)
-        if (promotion.e1.type.toBasetype.equals(type))
+        if (sameScalar(promotion.e1.type.toBasetype, type))
             return promotion.e1;
     return expression.e1;
+}
+
+// The assignment's own type is `const` when it initialises a `const`
+// variable, while the target it promotes is not. The ordinary case is the
+// first comparison alone.
+private bool sameScalar(
+    imported!"dmd.mtype".Type a, in imported!"dmd.mtype".Type b,
+) {
+    return a.equals(b) || (a.ty == b.ty && a.isTypeBasic !is null);
 }
 
 // Resolves the storage named by an expression. `Result` is deliberately a

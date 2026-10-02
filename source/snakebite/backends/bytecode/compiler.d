@@ -649,7 +649,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.backends.aggregateinit: InitStep, NewPlan;
     import snakebite.backends.builtins: BuiltinCall;
     import snakebite.backends.calls: CallSelection;
+    import snakebite.backends.casts: CastPlan;
     import snakebite.backends.closureplan: ClosurePlan;
+    import snakebite.backends.compoundassign:
+        CompoundConversion, compoundConversion;
     import snakebite.backends.dualcontext:
         ContextSource, PairPlan, contextSourceOf, pairPlanOf;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
@@ -3425,8 +3428,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         size_t operationWidth = operationFacts.size;
         size_t operands;
         bool shiftSignExtend = !targetFacts.isUnsigned;
+        // A literal shift count keeps its own promoted type, which can
+        // differ in width from the operation type.
+        bool stepAtOperationWidth;
+        CompoundConversion conversion;
         with (ArithmeticPlan.Kind) final switch (plan.kind) {
             case integral, pointerOffset:
+                stepAtOperationWidth = true;
                 if (expression.isShlAssignExp || expression.isShrAssignExp
                         || expression.isUshrAssignExp) {
                     const shift = shiftPlan(expression);
@@ -3440,8 +3448,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             case floating:
                 handler = compoundHandler(
                     expression, operationFacts.isUnsigned, true);
+                conversion = compoundConversion(expression);
+                if (conversion.crossesKind)
+                    operationWidth = conversion.load.destFacts.size;
                 break;
             case complex:
+                conversion = compoundConversion(expression);
                 handler = complexHandler(expression);
                 rightFacts = TypeFacts.of(expression.e2.type);
                 operationWidth = operationFacts.size / 2;
@@ -3466,20 +3478,37 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             arithmeticKind(target.type),
         );
         storage.facts.isUnsigned = !shiftSignExtend;
-        const promotedFirst = storage.promotesBeforeOperand
-            && operationFacts.size != storage.facts.size;
+        storage.conversion = conversion;
+        // Where the operation reads and writes its value: the type it runs
+        // in, which the plan changes for a target that crosses kind.
+        const valueFacts = conversion.crossesKind
+            ? conversion.load.destFacts : operationFacts;
         size_t valueOffset;
-        if (promotedFirst)
-            valueOffset = readScalar(storage, operationFacts);
+        if (conversion.readsTargetFirst)
+            valueOffset = readScalar(storage, valueFacts);
 
-        const rightOffset = reserveTemp(rightFacts);
-        evalInto(expression.e2, rightOffset, rightFacts.size);
-        if (!promotedFirst)
-            valueOffset = readScalar(storage, operationFacts);
+        auto rightOffset = reserveTemp(rightFacts);
+        if (stepAtOperationWidth && expression.e2.isIntegerExp)
+            evalOperandInto(expression.e2, rightOffset, operationWidth);
+        else
+            evalInto(expression.e2, rightOffset, rightFacts.size);
+        if (conversion.crossesKind && conversion.step.kind != CastKind.copy) {
+            const widened = reserveTemp(conversion.step.destFacts);
+            emitPackedCast(conversion.step, widened, rightOffset);
+            rightOffset = widened;
+        }
+        if (!conversion.readsTargetFirst)
+            valueOffset = readScalar(storage, valueFacts);
         emit(handler, valueOffset, rightOffset, operationWidth, operands);
-        valueOffset = writeScalar(storage, valueOffset, operationFacts.size);
+        valueOffset = writeScalar(storage, valueOffset, valueFacts.size);
 
-        if (destOffset != discardResult)
+        if (destOffset == discardResult)
+            return;
+        // The value of the expression is what the field holds, which is
+        // narrower than the value the operation gave.
+        if (storage.kind == ScalarStorage.Kind.bitfield)
+            loadScalar(storage, destOffset, storage.facts.size);
+        else
             emit(&opCopy, destOffset, valueOffset, storage.facts.size);
     }
 
@@ -3535,6 +3564,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         VarDeclaration variable;
         imported!"snakebite.backends.arithmetic".ArithmeticPlan.Kind
             arithmetic;
+        // Only a compound assignment sets it.
+        CompoundConversion conversion;
 
         // DMD reads a promoted floating or complex target before its right
         // side; integral targets keep the ordinary right-side-first order.
@@ -3609,6 +3640,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t readScalar(
         ScalarStorage storage, in TypeFacts resultFacts,
     ) {
+        if (storage.conversion.crossesKind) {
+            const loaded = reserveTemp(storage.facts);
+            loadScalar(storage, loaded, storage.facts.size);
+            const converted = reserveTemp(resultFacts);
+            emitPackedCast(storage.conversion.load, converted, loaded);
+            return converted;
+        }
+
         if (storage.kind == ScalarStorage.Kind.frame
                 && storage.facts.size == resultFacts.size)
             return storage.offset;
@@ -3683,7 +3722,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t valueWidth,
     ) {
         size_t storedOffset = valueOffset;
-        if (valueWidth != storage.facts.size
+        size_t storedWidth = valueWidth;
+        if (storage.conversion.crossesKind) {
+            storedOffset = reserveTemp(storage.facts);
+            emitPackedCast(storage.conversion.store, storedOffset,
+                valueOffset);
+            storedWidth = storage.facts.size;
+        } else if (valueWidth != storage.facts.size
                 && storage.promotesBeforeOperand) {
             storedOffset = reserveTemp(storage.facts);
             emitWidthChange(storage.arithmetic, storage.facts, storedOffset,
@@ -3705,10 +3750,48 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             break;
         case bitfield:
             emitBitfieldStore(storage.variable, storage.offset, storedOffset,
-                valueWidth);
+                storedWidth);
             break;
         }
         return storedOffset;
+    }
+
+    // Emits a cast whose operand already sits at `source`. The two sizes an
+    // instruction carries are the cast's own, and `castSizeWithSignedness`
+    // folds in the one signedness a kind reads: the source's for a kind that
+    // reads an integral value, the destination's for one that writes it.
+    private void emitPackedCast(
+        in CastPlan plan, in size_t destination, in size_t source,
+    ) {
+        with (CastKind) final switch (plan.kind) {
+            case complexToBool, complexToReal, complexToImaginary,
+                    complexWidth, realToComplex, imaginaryToComplex,
+                    floatToPointer, pointerToFloat, floatWidth:
+                emit(castOp(plan.kind), destination, source,
+                    plan.destFacts.size, plan.sourceFacts.size);
+                return;
+            case complexToIntegral, floatToIntegral:
+                emit(castOp(plan.kind), destination, source,
+                    castSizeWithSignedness(
+                        plan.destFacts.size, plan.destFacts.isUnsigned),
+                    plan.sourceFacts.size);
+                return;
+            case integralToComplex, integralToFloat:
+                emit(castOp(plan.kind), destination, source,
+                    plan.destFacts.size,
+                    castSizeWithSignedness(
+                        plan.sourceFacts.size, plan.sourceFacts.isUnsigned));
+                return;
+            case floatToBool:
+                emit(&opCastAs!floatToBool, destination, source, 0,
+                    plan.sourceFacts.size);
+                return;
+            case copy, classReference, zero, sarrayToSlice,
+                    sarrayToPointer, sliceToPointer, pointerToArray,
+                    pointerToIntegral, delegateToPointer, reinterpretSlice,
+                    narrow, widenSigned, widenUnsigned, toBool:
+                assert(0, "this kind does not take a packed operand pair");
+        }
     }
 
     private void emitStaticLoad(
@@ -5453,6 +5536,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
+        if (operandFacts.size < width && operand.isIntegerExp) {
+            // A literal needs no run-time conversion: store it at `width`.
+            Type literalType = operandFacts.isUnsigned
+                ? (width == 8 ? Type.tuns64 : Type.tuns32)
+                : (width == 8 ? Type.tint64 : Type.tint32);
+            if (TypeFacts.of(literalType).size == width) {
+                evalInto(operand, destOffset, width, literalType);
+                return;
+            }
+        }
+
         if (operandFacts.size < width) {
             evalInto(operand, destOffset, operandFacts.size);
             emit(
@@ -6102,50 +6196,25 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opZero, destOffset, 0, width);
             return;
 
-        // Each of these kinds reads its whole evaluated operand out of
-        // one temporary and writes `destFacts.size` bytes: no
-        // signedness bit to pack in, so `width`/`sourceWidth` alone
-        // carry the two sizes `castOp(plan.kind)`'s instance of
-        // `applyCastAs` needs.
+        // Each of these kinds reads its whole evaluated operand out of one
+        // temporary; `emitPackedCast` knows which two sizes, and which one
+        // signedness, the instruction carries for each.
         case complexToBool:
         case complexToReal:
         case complexToImaginary:
+        case complexToIntegral:
         case complexWidth:
         case realToComplex:
-        case imaginaryToComplex: {
-            const sourceOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(castOp(plan.kind), destOffset, sourceOffset,
-                plan.destFacts.size, plan.sourceFacts.size);
-            return;
-        }
-
-        // These two are the destination-signedness half of the four
-        // kinds `castSizeWithSignedness` exists for: the value they
-        // produce is integral, so it is `destFacts`'s own signedness
-        // that decides how `applyCastAs` fills it in.
-        case complexToIntegral:
-        case floatToIntegral: {
-            const sourceOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(castOp(plan.kind), destOffset, sourceOffset,
-                castSizeWithSignedness(
-                    plan.destFacts.size, plan.destFacts.isUnsigned),
-                plan.sourceFacts.size);
-            return;
-        }
-
-        // The other half: the value they consume is integral, so it
-        // is `sourceFacts`'s own signedness `applyCastAs` needs
-        // instead.
+        case imaginaryToComplex:
         case integralToComplex:
-        case integralToFloat: {
+        case floatToIntegral:
+        case integralToFloat:
+        case floatToPointer:
+        case pointerToFloat:
+        case floatToBool: {
             const sourceOffset = reserveTemp(plan.sourceFacts);
             evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(castOp(plan.kind), destOffset, sourceOffset,
-                plan.destFacts.size,
-                castSizeWithSignedness(
-                    plan.sourceFacts.size, plan.sourceFacts.isUnsigned));
+            emitPackedCast(plan, destOffset, sourceOffset);
             return;
         }
 
@@ -6153,25 +6222,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const sourceOffset = plan.sourceFacts.size > plan.destFacts.size
                 ? reserveTemp(plan.sourceFacts) : destOffset;
             evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(&opCastAs!(CastKind.floatWidth), destOffset, sourceOffset,
-                plan.destFacts.size, plan.sourceFacts.size);
-            return;
-        }
-
-        case floatToPointer:
-        case pointerToFloat: {
-            const sourceOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(castOp(plan.kind), destOffset, sourceOffset,
-                plan.destFacts.size, plan.sourceFacts.size);
-            return;
-        }
-
-        case floatToBool: {
-            const sourceOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(&opCastAs!(CastKind.floatToBool), destOffset, sourceOffset,
-                0, plan.sourceFacts.size);
+            emitPackedCast(plan, destOffset, sourceOffset);
             return;
         }
 
