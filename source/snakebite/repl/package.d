@@ -189,12 +189,16 @@ public struct Repl {
     // process that holds the user's work.
     private imported!"snakebite.backends".Program programOf(Module module_) {
         import snakebite.backends: Program;
+        import snakebite.backends.haltprocess: HostActions;
 
+        // A fault ends the cell like a halt does: the default action throws.
+        HostActions actions;
+        actions.halt = &endCell;
         return Program(
             interpretedModules(module_, _importPaths),
             "",
             checksOf(_flags),
-            &endCell,
+            actions,
         );
     }
 
