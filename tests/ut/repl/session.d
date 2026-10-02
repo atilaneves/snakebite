@@ -245,6 +245,38 @@ static foreach (backend; EnumMembers!ReplBackendName) {
 }
 
 
+// The host function that the guest calls here throws a guest fault by hand,
+// so that the cell sees a fault that comes from native code, as the one a
+// signal handler makes will.
+private extern(C) void snakebite_ut_repl_fault() {
+    import snakebite.backends.guestfault: GuestFault, GuestFaultException;
+
+    throw new GuestFaultException(
+        GuestFault.Kind.nullDereference, "cell.d", 1, []);
+}
+
+// A guest fault ends the cell with its message, and the session goes on.
+static foreach (backend; EnumMembers!ReplBackendName) {
+    @("submit.faultEndsTheCellAndTheSessionContinues." ~ backend.stringof)
+    unittest {
+        auto repl = Repl(backend);
+        repl.submit("int before = 40;").kind.should == SubmitResult.Kind.none;
+        repl.submit("extern(C) void snakebite_ut_repl_fault();")
+            .kind.should == SubmitResult.Kind.none;
+        repl.submit("int trip() { snakebite_ut_repl_fault(); return 1; }")
+            .kind.should == SubmitResult.Kind.none;
+
+        const result = repl.submit("trip()");
+
+        result.kind.should == SubmitResult.Kind.error;
+        result.text.should == "cell.d(1): fatal: null pointer dereference";
+        repl.submit("before + 2").text.should == "42";
+        repl.submit("trip()").kind.should == SubmitResult.Kind.error;
+        repl.submit("before + 3").text.should == "43";
+    }
+}
+
+
 // A `foreach` over a string with a `dchar` variable calls druntime's
 // compiled `_aApplycd1` with the loop body as a delegate, so the halt
 // goes through a native frame before it reaches the `catch`. A halt is
