@@ -245,7 +245,7 @@ public void buildDubDependencies(
 // The full description provides dependency sources that the root's flat
 // import-files list does not contain. Root source contents are excluded:
 // editing a guest module must not cause another native build.
-private string dependencyFingerprint(in string directory, in DubDescription description) {
+public string dependencyFingerprint(in string directory, in DubDescription description) {
     import std.conv: text;
     import std.digest.sha: sha256Of;
     import std.digest: toHexString;
@@ -255,7 +255,7 @@ private string dependencyFingerprint(in string directory, in DubDescription desc
 
     return text("snakebite-dub-v1", defaultCompiler, __VERSION__,
         environment.get("DFLAGS", ""), environment.get("LFLAGS", ""),
-        description.value.toString,
+        description.value.toString, description.buildArguments,
         fileFingerprint(dubInputs(directory, description))).sha256Of.toHexString.idup;
 }
 

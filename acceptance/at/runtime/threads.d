@@ -43,8 +43,10 @@ import std.uuid: randomUUID;
 // the race reliably (a handful of guest threads over a trivial
 // dependency almost never overlaps the loader's own teardown window;
 // tried and abandoned). A content-keyed copy lives in the user's cache,
-// so DUB and dependency-image build outputs survive between runs. One
-// advisory lock protects the shared package while any backend uses it:
+// so DUB and dependency-image build outputs survive between runs. The copy
+// is per checkout, so checkouts that run in parallel neither share
+// project state nor wait for each other's lock. One
+// advisory lock protects the copy while any backend uses it:
 // unit-threaded deletes `tmp/unit-threaded` relative to its working
 // directory, and DUB also writes build outputs beside the package.
 static foreach (backend; Matrix!(
@@ -55,7 +57,8 @@ static foreach (backend; Matrix!(
     unittest {
         const packagePath = unitThreadedPackagePath;
         const cacheRoot = buildPath(tempDir,
-            text("snakebite-runtime-threads-", getuid), "v1");
+            text("snakebite-runtime-threads-", getuid), "v1",
+            getcwd.sha256Of.toHexString[0 .. 16].idup);
         cacheRoot.mkdirRecurse;
         const key = unitThreadedPackageKey(packagePath);
         buildPath(cacheRoot, key).mkdirRecurse;

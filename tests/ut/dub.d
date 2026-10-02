@@ -1,9 +1,10 @@
 module ut.dub;
 
 
-import snakebite.dub: parseDescribeLists, dubDescribeProject;
+import snakebite.dub: DubDescription, dependencyFingerprint, parseDescribeLists,
+    dubDescribeProject;
 import snakebite.dubcache: cachedDubDescription;
-import snakebite.dependencyimage: defaultCompiler;
+import snakebite.dependencyimage: defaultCompiler, generatorKey;
 import snakebite.project: projectStateDirectory, sourceSet;
 import std.json: JSONValue, parseJSON;
 import std.file: write, remove, rename, readText;
@@ -60,7 +61,8 @@ configuration "unittest" {
     calls.should == 5;
     load;
     calls.should == 6;
-    write(buildPath(projectStateDirectory(directory), "dub-description.bin"), "truncated");
+    write(buildPath(projectStateDirectory(directory),
+        "dub-description-" ~ generatorKey ~ ".bin"), "truncated");
     load;
     calls.should == 7;
     load;
@@ -227,4 +229,59 @@ unittest {
     parseDescribeLists("a.d\n\nb.d", 2).shouldThrowWithMessage(
         "dub describe output does not end in a newline:\na.d\n\nb.d",
     );
+}
+
+// The description holds the build arguments that snakebite itself derives,
+// so a record is only as good as the snakebite build that made it. Two
+// builds that take turns on one project each keep their record.
+@("cache.keepsGeneratorsApart")
+@Serial
+unittest {
+    const sandbox = Sandbox();
+    sandbox.writeFile("library/dub.sdl", `name "cached-library"
+targetType "library"
+`);
+    sandbox.writeFile("library/source/library.d", "module library;\n");
+    sandbox.writeFile("generator-a", "generator a");
+    sandbox.writeFile("generator-b", "generator b, a different build");
+    const directory = sandbox.inSandboxPath("library");
+    size_t calls;
+    JSONValue describe() {
+        ++calls;
+        const output = execute([
+            "dub", "describe", "--compiler=" ~ defaultCompiler,
+        ], null, Config.none, size_t.max, directory);
+        output.status.should == 0;
+        return JSONValue(["value": parseJSON(output.output),
+            "arguments": JSONValue(["--build=debug"])]);
+    }
+    void load(in string generator) {
+        cachedDubDescription(directory, defaultCompiler, null, &describe,
+            sandbox.inSandboxPath(generator));
+    }
+
+    load("generator-a");
+    calls.should == 1;
+    load("generator-b");
+    calls.should == 2;
+    load("generator-a");
+    load("generator-b");
+    calls.should == 2;
+}
+
+
+// `dub build` runs with the derived build arguments, so a change in them
+// must rebuild the dependencies even when the description is equal.
+@("dependencyFingerprint.dependsOnBuildArguments")
+unittest {
+    const sandbox = Sandbox();
+    const directory = sandbox.inSandboxPath("app");
+    const value = parseJSON(`{"rootPackage": "app", "targets": [], "packages": []}`);
+
+    const unittestBuild = dependencyFingerprint(directory,
+        DubDescription(value, ["--config=unittest", "--build=unittest"]));
+    const debugBuild = dependencyFingerprint(directory,
+        DubDescription(value, ["--build=debug"]));
+
+    (unittestBuild != debugBuild).should == true;
 }
