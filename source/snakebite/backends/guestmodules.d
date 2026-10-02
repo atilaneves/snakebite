@@ -226,24 +226,6 @@ private extern(C) void endAtExit() {
 }
 
 
-// A process that ends with `main` removes the registrations that stayed here,
-// when the runtime still has the images of the process: druntime aborts the
-// process when it unregisters the last image of the main thread while another
-// image is still registered, and the handler of `exit` runs after that.
-shared static ~this() {
-    for (auto record = cast(ExitRecord*) atomicLoad(_ending); record !is null;
-            record = record.next) {
-        if (!record.left || *record.slot is null)
-            continue;
-
-        try
-            Image.unregister(record.slot);
-        catch (Throwable throwable)
-            print(throwable);
-    }
-}
-
-
 private shared(ExitRecord*) _ending;
 private ptrdiff_t _registrations;
 private ptrdiff_t _images;
@@ -271,23 +253,43 @@ private final class HostFailure: Exception {
 }
 
 
-// The ids of the threads of the process that are alive, sorted, or null when
-// the process cannot say.
-private int[] kernelThreads() {
-    import std.algorithm.sorting: sort;
-    import std.conv: to;
-    import std.file: dirEntries, SpanMode;
-    import std.path: baseName;
+// A thread of the process. The kernel gives the id of an ended thread to a
+// new thread, so the start time tells the two apart.
+private struct KernelThread {
+    int id;
+    ulong startTime;
+}
 
-    int[] ids;
+
+// The threads of the process that are alive, or null when the process cannot
+// say.
+private KernelThread[] kernelThreads() {
+    import std.array: split;
+    import std.conv: to;
+    import std.file: dirEntries, readText, SpanMode;
+    import std.path: baseName;
+    import std.string: lastIndexOf;
+
+    KernelThread[] threads;
     try
-        foreach (entry; dirEntries("/proc/self/task", SpanMode.shallow))
-            ids ~= entry.name.baseName.to!int;
+        foreach (entry; dirEntries("/proc/self/task", SpanMode.shallow)) {
+            string stat;
+            // A thread that ended after the directory listed it.
+            try
+                stat = readText(entry.name ~ "/stat");
+            catch (Exception)
+                continue;
+
+            // The name of the thread can contain spaces and parentheses; the
+            // start time is field 22, and the state after the name is field 3.
+            const fields = stat[stat.lastIndexOf(')') + 2 .. $].split;
+            threads ~= KernelThread(
+                entry.name.baseName.to!int, fields[19].to!ulong);
+        }
     catch (Exception)
         return null;
 
-    ids.sort;
-    return ids;
+    return threads;
 }
 
 
@@ -324,7 +326,7 @@ private struct Run {
     pthread_t owner;
     Phase*[] sharedOrder;
     Phase*[] threadOrder;
-    int[] threadsAtStart;
+    KernelThread[] threadsAtStart;
 
     // A registration reaches a thread through the thread that starts it, so
     // a thread that the program started holds it, and such a thread was not
@@ -337,7 +339,7 @@ private struct Run {
         const now = kernelThreads;
         return threadsAtStart.length != 0
             && now.length != 0
-            && now.all!(id => threadsAtStart.canFind(id));
+            && now.all!(thread => threadsAtStart.canFind(thread));
     }
 
     // Gives the registration back, or leaves it to the end of the process when

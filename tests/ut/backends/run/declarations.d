@@ -921,8 +921,8 @@ static foreach (backend; Matrix!(
 // mappings of the process also change with every other test that runs at the
 // same time. A thread that another test starts during one run can hold the
 // registration of that run, so the registration stays for that run and the end
-// of the process removes it. Thus most of the runs, not every one, give their
-// registration back.
+// of the process removes it. Run it in a process with one thread, so that every
+// run gives its registration back.
 private size_t runsThatGiveBack(Backend)(
     in Sandbox sandbox,
     in string code,
@@ -947,11 +947,15 @@ private size_t runsThatGiveBack(Backend)(
 
 // A process that runs many programs must not grow with each program that
 // has module constructors and destructors: when it ended, with no thread left
-// alive, what its registration took is given back.
+// alive, what its registration took is given back. So does a program whose
+// startup failed, which is not run. A thread that starts while a program runs
+// keeps the registration of that program, so each test below runs in a process
+// of its own that has one thread: there every run gives its registration back.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot run module destructors"),
 )) {
-    @("registrationOfEndedProgramIsGivenBack." ~ backend.stringof)
+    @HiddenTest
+    @("registrationOfEndedProgramIsGivenBack.child." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         enum runs = 20;
@@ -959,17 +963,12 @@ static foreach (backend; Matrix!(
             shared static this() {}
             shared static ~this() {}
             void main() {}
-        }, 0, runs).shouldBeGreaterThan(runs / 2);
+        }, 0, runs).should == runs;
     }
-}
 
-
-// A program whose startup failed is not run, and its registration is given
-// back all the same.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible, "CTFE cannot run module destructors"),
-)) {
-    @("registrationOfProgramThatFailedToStartIsGivenBack." ~ backend.stringof)
+    @HiddenTest
+    @("registrationOfProgramThatFailedToStartIsGivenBack.child."
+        ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         enum runs = 20;
@@ -977,7 +976,34 @@ static foreach (backend; Matrix!(
             shared static this() { throw new Exception("ctor failed"); }
             shared static ~this() {}
             void main() {}
-        }, 1, runs).shouldBeGreaterThan(runs / 2);
+        }, 1, runs).should == runs;
+    }
+
+    static foreach (name; [
+        "registrationOfEndedProgramIsGivenBack",
+        "registrationOfProgramThatFailedToStartIsGivenBack",
+    ]) {
+        @(name ~ "." ~ backend.stringof)
+        @Tags(backend.stringof)
+        unittest {
+            import std.file: thisExePath;
+            import std.process: Config;
+
+            // The sandbox tree is cleared when a test process starts, so the
+            // child gets a directory of its own. The collector must not
+            // start its marking threads while a program runs.
+            const sandbox = Sandbox();
+            const child = execute(
+                [
+                    thisExePath,
+                    "--DRT-gcopt=parallel:0",
+                    "--single",
+                    "ut.backends.run.declarations." ~ name ~ ".child."
+                        ~ backend.stringof,
+                ],
+                null, Config.none, size_t.max, sandbox.sandboxPath);
+            child.status.shouldEqual(0, child.output);
+        }
     }
 }
 
