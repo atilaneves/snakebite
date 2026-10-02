@@ -165,16 +165,25 @@ static foreach (backend; Matrix!(
     unittest {
         import core.memory: GC;
         import std.array: replace;
+        import std.conv: text;
         import std.file: exists, readText, remove, write;
+        import std.process: thisProcessID;
 
-        enum marker = "/tmp/snakebite-gc-finalizer-after-main-"
-            ~ __FILE_FULL_PATH__.replace("/", "_") ~ "-" ~ backend.stringof;
-        enum code = "enum marker = \"" ~ marker ~ "\\0\";" ~ q{
+        enum prefix = "/tmp/snakebite-gc-finalizer-after-main-"
+            ~ __FILE_FULL_PATH__.replace("/", "_") ~ "-" ~ backend.stringof
+            ~ "-";
+        const marker = prefix ~ thisProcessID.text;
+        enum code = "enum prefix = \"" ~ prefix ~ "\\0\";" ~ q{
             class B {
                 ~this() {
-                    import core.stdc.stdio: fclose, fopen, fputs;
+                    import core.stdc.stdio:
+                        fclose, fopen, fputs, snprintf;
+                    import core.sys.posix.unistd: getpid;
 
-                    auto file = fopen(marker.ptr, "r+");
+                    char[512] path;
+                    snprintf(path.ptr, path.length, "%s%d", prefix.ptr,
+                        cast(int) getpid);
+                    auto file = fopen(path.ptr, "r+");
                     if (file is null)
                         return;
                     fputs("finalized", file);
@@ -3275,6 +3284,80 @@ static foreach (backend; Matrix!(
                 collector.start;
                 collector.join;
                 assert(dead > 1000);
+            }
+        });
+    }
+}
+
+
+// A branch that the program never takes cannot stop it. The branch appends a
+// pointer to an opaque struct to an array, and the append of druntime names
+// the type information of the element: an opaque struct has no size and no
+// default value.
+static foreach (backend; Matrix!()) {
+    @("virtualMethodNeverAppendsPointerToOpaqueStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Opaque;
+            class C {
+                Opaque*[] handles;
+                int f(Opaque* handle, bool keep) {
+                    if (keep)
+                        handles ~= handle;
+                    return 1;
+                }
+            }
+            void main() {
+                auto c = new C;
+                assert(c.f(null, false) == 1);
+            }
+        });
+    }
+}
+
+
+// The same for `typeid` of a pointer to an opaque struct.
+static foreach (backend; Matrix!()) {
+    @("virtualMethodNeverNamesTypeInfoOfPointerToOpaqueStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Opaque;
+            class C {
+                int f(bool ask) {
+                    if (ask)
+                        return cast(int) typeid(Opaque*).tsize;
+                    return 1;
+                }
+            }
+            void main() {
+                auto c = new C;
+                assert(c.f(false) == 1);
+            }
+        });
+    }
+}
+
+
+// Compiled D has type information for a pointer to an opaque struct: a
+// program can keep handles of a C library in an array.
+static foreach (backend; Matrix!()) {
+    @("virtualMethodAppendsPointerToOpaqueStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Opaque;
+            class C {
+                Opaque*[] handles;
+                int f(Opaque* handle) {
+                    handles ~= handle;
+                    return cast(int) handles.length;
+                }
+            }
+            void main() {
+                auto c = new C;
+                assert(c.f(null) == 1);
             }
         });
     }
