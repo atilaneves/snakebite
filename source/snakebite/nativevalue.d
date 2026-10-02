@@ -791,3 +791,57 @@ public void applyCast(
         return applyCastAs!widenUnsigned(layout, source, destination);
     }
 }
+
+// Where a bit field lives and how to read and write it: the storage unit
+// is `storageBytes` wide, `offset` bytes into the struct, and the field
+// takes `width` bits from bit `shift` of the unit. The unit has the width
+// of the field's declared type, so a field never reaches into the bytes of
+// a neighbour of another type. `snakebite.nativelayout.bitfieldAccess`
+// builds it from a declaration; both runtime backends execute it here.
+public struct BitfieldAccess {
+    public size_t offset;
+    public uint storageBytes;
+    public uint shift;
+    public uint width;
+    public bool isSigned;
+
+    // `unit` is the address of the storage unit, `offset` bytes into the
+    // struct.
+    public long load(in void* unit) const @nogc nothrow {
+        ulong value = (loadUnsigned(unit, storageBytes) >> shift) & mask;
+        if (isSigned && width < 64 && value & (1UL << (width - 1)))
+            value |= ulong.max << width;
+        return cast(long) value;
+    }
+
+    // Writes the low `width` bits of `value` and keeps every other bit of
+    // the unit.
+    public void store(void* unit, in ulong value) const @nogc nothrow {
+        const bits = mask << shift;
+        const unitValue = (loadUnsigned(unit, storageBytes) & ~bits)
+            | ((value << shift) & bits);
+        storeIntegral(unit, unitValue, storageBytes);
+    }
+
+    // The access in one word for a bytecode instruction operand, with the
+    // width the loaded value takes in its destination slot.
+    public size_t encode(in size_t resultWidth) const @nogc nothrow {
+        return shift | (cast(size_t) width << 16)
+            | (isSigned ? 1UL << 32 : 0)
+            | (resultWidth << 40) | (cast(size_t) storageBytes << 48);
+    }
+
+    public static BitfieldAccess decode(in size_t word) @nogc nothrow {
+        return BitfieldAccess(
+            0, (word >> 48) & 0xff, word & 0xffff, (word >> 16) & 0xffff,
+            (word & (1UL << 32)) != 0);
+    }
+
+    public static size_t resultWidth(in size_t word) @nogc nothrow {
+        return (word >> 40) & 0xff;
+    }
+
+    private ulong mask() const @nogc nothrow {
+        return ulong.max >> (64 - width);
+    }
+}

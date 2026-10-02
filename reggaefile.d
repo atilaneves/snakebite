@@ -60,6 +60,26 @@ Target assembledObject(in string source) {
     );
 }
 
+// The registry image of `source/snakebite/backends/guestmodules.d`: a shared
+// object that the system C compiler makes from a tiny C file, and the object
+// that embeds its bytes. Linked into every target like the `.S` files above,
+// so no compiler is needed at run time to make it.
+enum registrySlotSource = "source/snakebite/backends/registry_slot.c";
+enum registryImageSource = "source/snakebite/backends/registry_image_amd64.S";
+
+Target registryImageObject() {
+    return Target(
+        assembledObjectPath(registryImageSource),
+        "cc -c $in -o $out -I$project",
+        Target(registryImageSource),
+        [Target(
+            "$project/registry_slot.so",
+            "cc -shared -fPIC -nostdlib -o $out $in",
+            Target(registrySlotSource),
+        )],
+    );
+}
+
 Target dubTarget(string compiler, string config, string objectSet,
                  string output, CompilerFlags flags = CompilerFlags()) {
     auto buildOptions = options.dup;
@@ -109,7 +129,8 @@ Target dubTarget(string compiler, string config, string objectSet,
     // Links each hand-written `.S` object into this target - see
     // `assembledSources`. Reggae sweeps a dub package's own `.o` files
     // into the same link line as the D-compiled ones.
-    info.packages[0].files ~= assembledSources.map!assembledObjectPath.array;
+    info.packages[0].files ~= assembledSources.map!assembledObjectPath.array
+        ~ assembledObjectPath(registryImageSource);
 
     auto target = dubBuild(buildOptions, info, CompilationMode.options, flags);
     target.rawOutputs[0] = "bin/" ~ output;
@@ -118,6 +139,7 @@ Target dubTarget(string compiler, string config, string objectSet,
 
 Build reggaeBuild() {
     Target[] targets = assembledSources.map!assembledObject.array ~ [
+        registryImageObject,
         dubTarget("dmd", "unittest", "unittest", "ut"),
         dubTarget("ldc2", "acceptance-test", "release", "at", CompilerFlags("-release", "-O", "-flto=thin")),
         dubTarget("ldc2", "sb", "release", "sb", CompilerFlags("-release", "-O", "-flto=thin")),

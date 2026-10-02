@@ -117,6 +117,83 @@ static foreach (backend; Matrix!(
 }
 
 
+private struct FiveBytes {
+    ubyte[5] bytes;
+}
+
+
+public extern(C) FiveBytes snakebite_ut_aggregates_five_bytes(ubyte seed) {
+    FiveBytes result;
+    foreach (i, ref value; result.bytes)
+        value = cast(ubyte) (seed + i);
+    return result;
+}
+
+
+public extern(C) int snakebite_ut_aggregates_five_bytes_callback(
+    FiveBytes function(ubyte) callback, ubyte seed,
+) {
+    int sum;
+    foreach (value; callback(seed).bytes)
+        sum += value;
+    return sum;
+}
+
+
+// An aggregate of five bytes comes back in one register, and only its five
+// low bytes belong to the result.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call an external function without source"),
+)) {
+    @("registerResult.fiveBytesFromNative." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        25.shouldBeRetOf!(backend, q{
+            struct FiveBytes {
+                ubyte[5] bytes;
+            }
+            pragma(mangle, "snakebite_ut_aggregates_five_bytes")
+            extern(C) FiveBytes nativeFiveBytes(ubyte);
+            int answer() {
+                int sum;
+                const result = nativeFiveBytes(3);
+                foreach (value; result.bytes)
+                    sum += value;
+                return sum;
+            }
+        }, "answer");
+    }
+}
+
+
+// Native code reads the five bytes that a guest function returns.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("registerResult.fiveBytesFromGuestCallback." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        25.shouldBeRetOf!(backend, q{
+            struct FiveBytes {
+                ubyte[5] bytes;
+            }
+            alias Callback = extern(C) FiveBytes function(ubyte);
+            pragma(mangle, "snakebite_ut_aggregates_five_bytes_callback")
+            extern(C) int nativeSum(Callback, ubyte);
+            extern(C) FiveBytes make(ubyte seed) {
+                FiveBytes result;
+                foreach (i, ref value; result.bytes)
+                    value = cast(ubyte) (seed + i);
+                return result;
+            }
+            int answer() {
+                return nativeSum(&make, 3);
+            }
+        }, "answer");
+    }
+}
+
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot open native files"),
 )) {
@@ -133,5 +210,128 @@ static foreach (backend; Matrix!(
                 assert(first.fileno == second.fileno);
             }
         });
+    }
+}
+
+
+// Each register class and each size of a small aggregate result of the
+// System V x86-64 ABI, in the two directions.
+private struct SmallType {
+    string name;
+    string kind;
+    string fields;
+    size_t bytes;
+}
+
+private enum SmallType[] smallTypes = [
+    SmallType("I1", "struct", "ubyte[1] a;", 1),
+    SmallType("I2", "struct", "ubyte[2] a;", 2),
+    SmallType("I3", "struct", "ubyte[3] a;", 3),
+    SmallType("I4", "struct", "ubyte[4] a;", 4),
+    SmallType("I5", "struct", "ubyte[5] a;", 5),
+    SmallType("I6", "struct", "ubyte[6] a;", 6),
+    SmallType("I7", "struct", "ubyte[7] a;", 7),
+    SmallType("I8", "struct", "ubyte[8] a;", 8),
+    SmallType("I9", "struct", "ubyte[9] a;", 9),
+    SmallType("I10", "struct", "ubyte[10] a;", 10),
+    SmallType("I11", "struct", "ubyte[11] a;", 11),
+    SmallType("I12", "struct", "ubyte[12] a;", 12),
+    SmallType("I13", "struct", "ubyte[13] a;", 13),
+    SmallType("I14", "struct", "ubyte[14] a;", 14),
+    SmallType("I15", "struct", "ubyte[15] a;", 15),
+    SmallType("I16", "struct", "ubyte[16] a;", 16),
+    SmallType("S1", "struct", "ubyte a;", 1),
+    SmallType("S2", "struct", "ushort a;", 2),
+    SmallType("S4", "struct", "uint a;", 4),
+    SmallType("S8", "struct", "ulong a;", 8),
+    SmallType("S16", "struct", "ulong a; ulong b;", 16),
+    SmallType("W6", "struct", "ushort[3] a;", 6),
+    SmallType("W10", "struct", "ushort[5] a;", 10),
+    SmallType("W14", "struct", "ushort[7] a;", 14),
+    SmallType("L12", "struct", "uint[3] a;", 12),
+    SmallType("LI12", "struct", "ulong a; uint b;", 12),
+    SmallType("F4", "struct", "float a;", 4),
+    SmallType("F8", "struct", "float a; float b;", 8),
+    SmallType("F12", "struct", "float a; float b; float c;", 12),
+    SmallType("F16", "struct", "float a; float b; float c; float d;", 16),
+    SmallType("FA12", "struct", "float[3] a;", 12),
+    SmallType("D8", "struct", "double a;", 8),
+    SmallType("D16", "struct", "double a; double b;", 16),
+    SmallType("DA16", "struct", "double[2] a;", 16),
+    SmallType("DF12", "struct", "double a; float b;", 12),
+    SmallType("ID16", "struct", "long a; double b;", 16),
+    SmallType("DI12", "struct", "double a; int b;", 12),
+    SmallType("DL16", "struct", "double a; long b;", 16),
+    SmallType("FI8", "struct", "float a; int b;", 8),
+    SmallType("FB5", "struct", "float a; ubyte b;", 5),
+    SmallType("FFB9", "struct", "float a; float b; ubyte c;", 9),
+    SmallType("DB11", "struct", "double a; ubyte[3] b;", 11),
+    SmallType("BD16", "struct", "ubyte[3] a; double b;", 16),
+    SmallType("P3", "struct", "align(1): ushort a; ubyte b;", 3),
+    SmallType("P5", "struct", "align(1): float a; ubyte b;", 5),
+    SmallType("P5I", "struct", "align(1): uint a; ubyte b;", 5),
+    SmallType("P6", "struct", "align(1): uint a; ushort b;", 6),
+    SmallType("P7", "struct", "align(1): uint a; ushort b; ubyte c;", 7),
+    SmallType("P9", "struct", "align(1): double a; ubyte b;", 9),
+    SmallType("P13", "struct", "align(1): double a; float b; ubyte c;", 13),
+    SmallType("P6U", "struct", "align(1): ushort a; uint b;", 6),
+    SmallType("P11U", "struct", "align(1): ubyte a; double b; ushort c;", 11),
+    SmallType("U5", "union", "ubyte[5] a; ubyte b;", 5),
+    SmallType("U7", "union", "ubyte[7] a; ushort b;", 7),
+    SmallType("UF8", "union", "ubyte[5] a; float b;", 5),
+    SmallType("UD16", "union", "ubyte[13] a; double b;", 13),
+];
+
+private int smallExpected(in size_t bytes) {
+    int sum;
+    foreach (i; 0 .. bytes)
+        sum += cast(ubyte) (3 + i) * cast(int) (i + 1);
+    return sum;
+}
+
+private string smallBytes(in size_t bytes) {
+    import std.conv: text;
+    return text(bytes);
+}
+
+static foreach (type; smallTypes) {
+    mixin("private " ~ type.kind ~ " Small" ~ type.name ~ " { " ~ type.fields ~ " }");
+    mixin("public extern(C) Small" ~ type.name ~ " snakebite_ut_small_make_" ~ type.name
+        ~ "(ubyte seed) { Small" ~ type.name ~ " r; foreach (i; 0 .. " ~ smallBytes(type.bytes)
+        ~ ") (cast(ubyte*) &r)[i] = cast(ubyte) (seed + i); return r; }");
+    mixin("public extern(C) int snakebite_ut_small_sum_" ~ type.name
+        ~ "(Small" ~ type.name ~ " function(ubyte) callback, ubyte seed) { auto r = callback(seed);"
+        ~ " int sum; foreach (i; 0 .. " ~ smallBytes(type.bytes)
+        ~ ") sum += (cast(ubyte*) &r)[i] * cast(int) (i + 1); return sum; }");
+
+    static foreach (backend; Matrix!(
+        Omit!(Ctfe, Because.inexpressible, "CTFE cannot call an external function without source"),
+    )) {
+        @("smallResult.fromNative." ~ type.name ~ "." ~ backend.stringof)
+        @Tags(backend.stringof)
+        unittest {
+            smallExpected(type.bytes).shouldBeRetOf!(backend,
+                type.kind ~ " T { " ~ type.fields ~ " }\n"
+                ~ "pragma(mangle, \"snakebite_ut_small_make_" ~ type.name ~ "\")\n"
+                ~ "extern(C) T nativeMake(ubyte);\n"
+                ~ "int answer() { auto r = nativeMake(3); int sum; foreach (i; 0 .. "
+                ~ smallBytes(type.bytes) ~ ") sum += (cast(ubyte*) &r)[i] * cast(int) (i + 1);"
+                ~ " return sum; }\n",
+                "answer");
+        }
+
+        @("smallResult.fromGuestCallback." ~ type.name ~ "." ~ backend.stringof)
+        @Tags(backend.stringof)
+        unittest {
+            smallExpected(type.bytes).shouldBeRetOf!(backend,
+                type.kind ~ " T { " ~ type.fields ~ " }\n"
+                ~ "alias Callback = extern(C) T function(ubyte);\n"
+                ~ "pragma(mangle, \"snakebite_ut_small_sum_" ~ type.name ~ "\")\n"
+                ~ "extern(C) int nativeSum(Callback, ubyte);\n"
+                ~ "extern(C) T make(ubyte seed) { T r; foreach (i; 0 .. "
+                ~ smallBytes(type.bytes) ~ ") (cast(ubyte*) &r)[i] = cast(ubyte) (seed + i); return r; }\n"
+                ~ "int answer() { return nativeSum(&make, 3); }\n",
+                "answer");
+        }
     }
 }

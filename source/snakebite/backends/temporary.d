@@ -22,6 +22,61 @@ private bool ownsTemporaryDestructor(
 }
 
 
+// Whether a variable can point into the temporaries of its own
+// initialiser: it can hold a pointer, and the initialiser builds an
+// aggregate value that no variable owns. A backend that keeps those
+// temporaries for the rest of the call decides from this alone, so a
+// function without such a variable pays nothing.
+public bool canRetainTemporaries(
+    imported!"dmd.declaration".VarDeclaration variable,
+) {
+    import dmd.typesem: hasPointers;
+
+    if (variable._init is null)
+        return false;
+    auto initializer = variable._init.isExpInitializer;
+    if (initializer is null)
+        return false;
+
+    return ((variable.storage_class & STC.ref_) != 0
+            || variable.type.hasPointers)
+        && buildsAggregateValue(initializer.exp);
+}
+
+private bool buildsAggregateValue(
+    imported!"dmd.expression".Expression initializer,
+) {
+    import dmd.astenums: Tsarray, Tstruct;
+    import dmd.expression: Expression;
+    import dmd.expressionsem: isLvalue;
+    import dmd.typesem: toBasetype;
+    import dmd.visitor: StoppableVisitor;
+    import dmd.visitor.postorder: walkPostorder;
+
+    extern(C++) static final class Finder: StoppableVisitor {
+        alias visit = StoppableVisitor.visit;
+
+        override void visit(Expression expression) {
+            if (expression.type is null)
+                return;
+            const ty = expression.type.toBasetype.ty;
+            if ((ty == Tstruct || ty == Tsarray) && !expression.isLvalue)
+                stop = true;
+        }
+    }
+
+    // The right side is the value; the left side of a construction is
+    // the variable.
+    if (auto construct = initializer.isConstructExp)
+        initializer = construct.e2;
+    else if (auto blit = initializer.isBlitExp)
+        initializer = blit.e2;
+
+    scope finder = new Finder;
+    return walkPostorder(initializer, finder);
+}
+
+
 public struct TemporaryPlan {
     import dmd.declaration: VarDeclaration;
     import dmd.expression: DeclarationExp, Expression;

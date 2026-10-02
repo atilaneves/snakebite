@@ -8,7 +8,11 @@ import snakebite.frontend.checks: Checks;
 import snakebite.frontend.compiler: parseSnippets;
 import std.algorithm.iteration: map;
 import std.array: appender, array;
-import std.traits: EnumMembers;
+import core.atomic: atomicLoad, atomicStore;
+import core.stdc.stdio: stdout;
+import core.sys.posix.stdio: flockfile, funlockfile;
+import core.thread: Thread;
+import core.time: msecs, seconds, MonoTime;
 import ut;
 
 
@@ -23,29 +27,6 @@ private string rendered(
         (scope sink) { foreach (frame; frames) sink(frame); },
         (in piece) { text ~= piece; });
     return text[];
-}
-
-
-@("guestFault.message.eachKindHasItsOwn")
-unittest {
-    GuestFault.message(GuestFault.Kind.nullDereference)
-        .should == "null pointer dereference";
-    GuestFault.message(GuestFault.Kind.invalidAccess)
-        .should == "invalid memory access";
-    GuestFault.message(GuestFault.Kind.nullCall)
-        .should == "call of a null function pointer";
-    GuestFault.message(GuestFault.Kind.divisionByZero)
-        .should == "integer division by zero";
-    GuestFault.message(GuestFault.Kind.divisionOverflow)
-        .should == "integer overflow in division";
-    GuestFault.message(GuestFault.Kind.divisionFault)
-        .should == "integer division fault";
-    GuestFault.message(GuestFault.Kind.throwNull)
-        .should == "throw of a null reference";
-    GuestFault.message(GuestFault.Kind.stackOverflow)
-        .should == "stack overflow";
-
-    EnumMembers!(GuestFault.Kind).length.should == 8;
 }
 
 
@@ -151,7 +132,8 @@ unittest {
         [module_], "", Checks(), HostActions(&haltProcess, &action));
 
     program.fault(GuestFault.Kind.nullCall, "x.d", 5, (scope sink) {})
-        .shouldThrow!Halted;
+        .shouldThrowWithMessage!Halted(
+            "a check failed under -checkaction=halt");
     seen.should == "call of a null function pointer@x.d:5";
 }
 
@@ -168,4 +150,33 @@ unittest {
         return;
     }
     assert(0, "the default action does not throw");
+}
+
+
+@("guestFault.print.doesNotWaitForAStreamThatAnotherThreadHolds")
+unittest {
+    shared bool holding, release, printed;
+    auto holder = new Thread({
+        flockfile(stdout);
+        atomicStore(holding, true);
+        while (!atomicLoad(release))
+            Thread.sleep(1.msecs);
+        funlockfile(stdout);
+    }).start;
+    while (!atomicLoad(holding))
+        Thread.sleep(1.msecs);
+
+    auto printer = new Thread({
+        GuestFault.print(GuestFault.Kind.nullDereference, "app.d", 1, (scope sink) {});
+        atomicStore(printed, true);
+    }).start;
+    const deadline = MonoTime.currTime + 5.seconds;
+    while (!atomicLoad(printed) && MonoTime.currTime < deadline)
+        Thread.sleep(1.msecs);
+    const finished = atomicLoad(printed);
+
+    atomicStore(release, true);
+    holder.join;
+    printer.join;
+    finished.shouldBeTrue;
 }

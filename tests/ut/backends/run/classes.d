@@ -113,6 +113,103 @@ static foreach (backend; Matrix!(
 }
 
 
+// A callback is prepared before native code can call it, and the preparation
+// follows the functions that its body calls. A function that only the guest
+// calls needs no entry, whatever its return type.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call the native `qsort` with a guest callback"),
+)) {
+    @("callbackBodyCallsFunctionReturningFiveBytes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.stdlib: qsort;
+            struct Odd {
+                ubyte[5] bytes;
+            }
+            Odd make() {
+                Odd odd;
+                odd.bytes[0] = 7;
+                return odd;
+            }
+            extern(C) int compare(const void* a, const void* b) {
+                return make.bytes[0] == 7 ? 0 : 1;
+            }
+            void main() {
+                int[2] values = [2, 1];
+                qsort(values.ptr, 2, int.sizeof, &compare);
+            }
+        });
+    }
+}
+
+
+// A destructor runs when the collection at the end of the program finalizes
+// its object, after `main` returned. The collection here stands for the one
+// that the process makes when it ends. Compiled D leaves no trace of a
+// destructor that the guest can read after `main`, so the destructor
+// writes a file, with C functions that do not allocate, and the test reads
+// it. The path is in the text of the program, and belongs to this checkout
+// and backend, and the test creates the file before the program runs and
+// removes it at the end: a destructor that another test's collection runs
+// later finds no file to open, and makes none. 2000 dead objects are the
+// deterministic form that a conservative GC allows: a stale stack word keeps
+// at most a few alive.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerRunsGuestDestructorAfterMain." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        import core.memory: GC;
+        import std.array: replace;
+        import std.conv: text;
+        import std.file: exists, readText, remove, write;
+        import std.process: thisProcessID;
+
+        enum prefix = "/tmp/snakebite-gc-finalizer-after-main-"
+            ~ __FILE_FULL_PATH__.replace("/", "_") ~ "-" ~ backend.stringof
+            ~ "-";
+        const marker = prefix ~ thisProcessID.text;
+        enum code = "enum prefix = \"" ~ prefix ~ "\\0\";" ~ q{
+            class B {
+                ~this() {
+                    import core.stdc.stdio:
+                        fclose, fopen, fputs, snprintf;
+                    import core.sys.posix.unistd: getpid;
+
+                    char[512] path;
+                    snprintf(path.ptr, path.length, "%s%d", prefix.ptr,
+                        cast(int) getpid);
+                    auto file = fopen(path.ptr, "r+");
+                    if (file is null)
+                        return;
+                    fputs("finalized", file);
+                    fclose(file);
+                }
+            }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new B;
+            }
+            void main() {
+                make;
+            }
+        };
+        marker.write("armed");
+        scope(exit) if (exists(marker))
+            remove(marker);
+
+        0.shouldBeStatusOf!(backend, code);
+        GC.collect;
+
+        marker.readText.should == "finalized";
+    }
+}
+
+
 // Compiled D compiles a call that it never makes, so a branch that does
 // not execute must not reject the program because of the callee's
 // signature either. The extern(C) function returns an aggregate that holds
@@ -3079,6 +3176,188 @@ static foreach (backend; Matrix!()) {
             void main() {
                 Base b = new Derived;
                 assert(b.f(4) == 12);
+            }
+        });
+    }
+}
+
+
+// A class gets its vtable when the program first makes an object, and compiled
+// D gives each virtual method its code then. A method that only passes a
+// pointer to an opaque struct needs no size for the struct.
+static foreach (backend; Matrix!()) {
+    @("virtualMethodTakesPointerToOpaqueStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Opaque;
+            class C {
+                int f(Opaque* handle) { return handle is null ? 1 : 2; }
+            }
+            void main() {
+                auto c = new C;
+                assert(c.f(null) == 1);
+            }
+        });
+    }
+}
+
+
+// `void[4]` has a size and no default value: a virtual method can pass a
+// pointer to one.
+static foreach (backend; Matrix!()) {
+    @("virtualMethodTakesPointerToStaticArrayOfVoid." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C {
+                int f(const(void)[4]* bytes) { return bytes is null ? 1 : 2; }
+            }
+            void main() {
+                auto c = new C;
+                assert(c.f(null) == 1);
+            }
+        });
+    }
+}
+
+
+// A branch that the program never takes cannot stop it. The branch takes the
+// address of a function that returns five bytes.
+static foreach (backend; Matrix!()) {
+    @("virtualMethodNeverTakesAddressOfFunctionReturningFiveBytes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Odd {
+                ubyte[5] bytes;
+            }
+            Odd make() {
+                Odd odd;
+                odd.bytes[0] = 7;
+                return odd;
+            }
+            class C {
+                int f(bool take) {
+                    if (take) {
+                        auto pointer = &make;
+                        return pointer().bytes[0];
+                    }
+                    return 1;
+                }
+            }
+            void main() {
+                auto c = new C;
+                assert(c.f(false) == 1);
+            }
+        });
+    }
+}
+
+
+// The thread that collects never ran code of the program: its function is a
+// function of druntime. Compiled D ran the thread-local module constructor
+// when the thread started, so the finalizer on that thread allocates nothing.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerRunsDestructorOnThreadThatRanNoProgramCode." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared int dead;
+            int threadLocal;
+            static this() { ++threadLocal; }
+            class B {
+                ~this() { ++dead; }
+            }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new B;
+            }
+            void main() {
+                import core.memory: GC;
+                import core.thread: Thread;
+                make;
+                auto collector = new Thread(cast(void function()) &GC.collect);
+                collector.start;
+                collector.join;
+                assert(dead > 1000);
+            }
+        });
+    }
+}
+
+
+// A branch that the program never takes cannot stop it. The branch appends a
+// pointer to an opaque struct to an array, and the append of druntime names
+// the type information of the element: an opaque struct has no size and no
+// default value.
+static foreach (backend; Matrix!()) {
+    @("virtualMethodNeverAppendsPointerToOpaqueStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Opaque;
+            class C {
+                Opaque*[] handles;
+                int f(Opaque* handle, bool keep) {
+                    if (keep)
+                        handles ~= handle;
+                    return 1;
+                }
+            }
+            void main() {
+                auto c = new C;
+                assert(c.f(null, false) == 1);
+            }
+        });
+    }
+}
+
+
+// The same for `typeid` of a pointer to an opaque struct.
+static foreach (backend; Matrix!()) {
+    @("virtualMethodNeverNamesTypeInfoOfPointerToOpaqueStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Opaque;
+            class C {
+                int f(bool ask) {
+                    if (ask)
+                        return cast(int) typeid(Opaque*).tsize;
+                    return 1;
+                }
+            }
+            void main() {
+                auto c = new C;
+                assert(c.f(false) == 1);
+            }
+        });
+    }
+}
+
+
+// Compiled D has type information for a pointer to an opaque struct: a
+// program can keep handles of a C library in an array.
+static foreach (backend; Matrix!()) {
+    @("virtualMethodAppendsPointerToOpaqueStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Opaque;
+            class C {
+                Opaque*[] handles;
+                int f(Opaque* handle) {
+                    handles ~= handle;
+                    return cast(int) handles.length;
+                }
+            }
+            void main() {
+                auto c = new C;
+                assert(c.f(null) == 1);
             }
         });
     }
