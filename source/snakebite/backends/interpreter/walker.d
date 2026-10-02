@@ -184,9 +184,6 @@ private struct Shared {
     // The program being run: its `isInterpreted` is the one decision for
     // whether a callee is walked or called natively.
     const Program program;
-    // Set when a halt starts to unwind: the run is over, so no guest code
-    // runs on the way up.
-    bool halted;
     NativeData nativeData;
     RuntimeTypes runtimeTypes;
     // How to reach each already-compiled function this guest calls,
@@ -563,6 +560,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private ControlFlowState _controlFlow;
     private SwitchStatement _switchStatement;
     private void[][] _activationAllocations;
+    // Set when a halt starts to unwind this thread: no guest code runs on
+    // the way up. A halt ends the thread that halts, so another thread of
+    // the program keeps its cleanups.
+    private bool _halted;
     // `extern(D)`: only `Visitor`'s `visit` overloads need the C++
     // linkage.
     extern(D) public this(Shared* shared_) {
@@ -1321,11 +1322,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     // What `-checkaction=halt` does. A halt unwinds to the program's halt
-    // action's owner as a `Halted`, and `_shared.halted` tells the cleanup
+    // action's owner as a `Halted`, and `_halted` tells the cleanup
     // that runs on the way up, which holds no `catch` to tell it by, to
     // run no guest code.
     private noreturn haltRun() {
-        _shared.halted = true;
+        _halted = true;
         _program.halt;
     }
 
@@ -1365,7 +1366,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private void destroyTemporary(Expression expression) {
-        if (_shared.halted)
+        if (_halted)
             return;
 
         runForEffect(expression);
@@ -1672,7 +1673,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             scopeActive = false;
             if (pendingException is null)
                 runFinalizer = runsFinally(statement);
-            if (runFinalizer && !_shared.halted)
+            if (runFinalizer && !_halted)
                 _controlFlow.withCleanup({
                     runFinallyBody(statement.finalbody, pendingException);
                 });
@@ -2331,12 +2332,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             fault(check.get);
     }
 
-    // A fault is a halt: `_shared.halted` tells the cleanup that runs on
+    // A fault is a halt: `_halted` tells the cleanup that runs on
     // the way up to run no guest code.
     extern(D) private noreturn fault(in FaultCheck check) {
         import std.string: fromStringz;
 
-        _shared.halted = true;
+        _halted = true;
         _program.fault(check.kind, check.loc.filename.fromStringz,
             check.loc.linnum, &guestStack);
     }
