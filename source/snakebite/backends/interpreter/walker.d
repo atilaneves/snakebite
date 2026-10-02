@@ -5929,45 +5929,101 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     // The arguments of a call through a function pointer or a delegate, as
     // the type of the value gives them (`ValueCall`), in a frame that the
-    // callee reads.
+    // callee reads. When the callee has another signature than the type of
+    // the value, each parameter of the callee takes the argument that is in
+    // its register (`ArgumentFlow`).
     private void bindValueArguments(
         ValueCall* call, Expressions* arguments, in Loc loc,
         ubyte* frameBase, const(FrameLayout)* callee,
     ) {
-        import snakebite.backends.variadic: VariadicLayout;
-        import snakebite.nativelayout: storeIntegral, TypeFacts;
-        import core.stdc.string: memcpy, memmove;
-
         const slots = call.layoutFor(callee.hiddenThis.variable !is null);
         _bindArguments(call.type, arguments, loc, frameBase, slots,
             call.isVariadic);
         if (call.isVariadic)
             bindVariadicArguments(arguments, frameBase, slots);
+        if (call.signature is callee.signature)
+            return;
+
+        redirectValueArguments(call, arguments, frameBase, slots, callee);
+    }
+
+    // Moves each argument that `bindValueArguments` packed by the layout of
+    // the value's type to the parameter of the callee that reads it.
+    private void redirectValueArguments(
+        ValueCall* call, Expressions* arguments, ubyte* frameBase,
+        const(FrameLayout)* slots, const(FrameLayout)* callee,
+    ) {
+        import snakebite.backends.argumentflow: Shape;
+        import snakebite.backends.layout: shapeOf;
+        import snakebite.backends.variadic: VariadicLayout;
+        import snakebite.nativelayout: loadIntegral, storeIntegral;
+        import core.stdc.string: memcpy, memset;
+        import std.algorithm: min;
+
+        const declared = call.signature.parameters.length;
+        const hasTypes = slots.variadicTypes != size_t.max;
+        TypeFacts[] surplusFacts;
+        Shape[] surplusShapes;
+        if (call.isVariadic)
+            foreach (argument; (*arguments)[hasTypes + declared .. $]) {
+                surplusFacts ~= factsOf(argument.type);
+                surplusShapes ~= shapeOf(argument.type, surplusFacts[$ - 1]);
+            }
+        const calleeHasContext = callee.hiddenThis.variable !is null;
+        const flow = call.flowTo(
+            *callee.signature, surplusShapes, calleeHasContext);
+
+        // The callee writes to the same frame that holds the arguments.
+        auto packed = _frames.reserve(slots.size, slots.alignment);
+        memcpy(packed, frameBase, slots.size);
+        // A function pointer has no context: its callee gets a null one.
+        const context = call.hasContext && calleeHasContext
+            ? loadIntegral(packed + slots.hiddenThis.parameter.offset,
+                size_t.sizeof, false)
+            : 0;
+        const surplusPlan = VariadicLayout.of(surplusFacts);
+        const surplusStorage = call.isVariadic
+            ? cast(ubyte*) loadIntegral(
+                packed + slots.variadicCursor, size_t.sizeof, false)
+            : null;
+        const(ubyte)* addressOf(in size_t argument) {
+            return argument < declared
+                ? packed + slots.parameters[argument].offset
+                : surplusStorage + surplusPlan.offsets[argument - declared];
+        }
+
+        foreach (i, parameter; callee.parameters) {
+            auto place = frameBase + parameter.offset;
+            memset(place, 0, parameter.facts.size);
+            const source = flow.sourceOf(i);
+            if (source != size_t.max)
+                memcpy(place, addressOf(source),
+                    min(parameter.facts.size, flow.argumentAt(source).size));
+        }
+        if (calleeHasContext)
+            storeIntegral(frameBase + callee.hiddenThis.parameter.offset,
+                context, size_t.sizeof);
 
         if (callee.variadicCursor == size_t.max)
             return;
 
-        if (call.isVariadic) {
-            memmove(frameBase + callee.variadicCursor,
-                frameBase + slots.variadicCursor, size_t.sizeof);
-            if (callee.variadicTypes != size_t.max
-                    && slots.variadicTypes != size_t.max)
-                memmove(frameBase + callee.variadicTypes,
-                    frameBase + slots.variadicTypes, size_t.sizeof);
+        if (callee.variadicTypes != size_t.max && hasTypes) {
+            memcpy(frameBase + callee.variadicTypes,
+                packed + slots.variadicTypes, size_t.sizeof);
+            memcpy(frameBase + callee.variadicCursor,
+                packed + slots.variadicCursor, size_t.sizeof);
             return;
         }
 
-        const surplus =
-            ValueCall.variadicSurplus(*slots, callee.parameters.length);
+        const unread = flow.unread;
         TypeFacts[] facts;
-        foreach (parameter; surplus)
-            facts ~= parameter.facts;
+        foreach (argument; unread)
+            facts ~= flow.argumentAt(argument).facts;
         const plan = VariadicLayout.of(facts);
         auto storage = _frames.reserve(plan.size, plan.alignment);
         plan.initialize(storage);
         foreach (i, offset; plan.offsets)
-            memcpy(storage + offset, frameBase + surplus[i].offset,
-                facts[i].size);
+            memcpy(storage + offset, addressOf(unread[i]), facts[i].size);
         storeIntegral(frameBase + callee.variadicCursor, cast(size_t) storage,
             size_t.sizeof);
     }
