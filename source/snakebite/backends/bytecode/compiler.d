@@ -654,7 +654,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.backends.compoundassign:
         CompoundConversion, compoundConversion;
     import snakebite.backends.dualcontext:
-        ContextSource, PairPlan, contextSourceOf, pairPlanOf;
+        ContextSource, PairPlan, calleeContextSourceOf, contextSourceOf,
+        pairPlanOf;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.backends.temporary: TemporaryPlan, constructTemporary;
     import snakebite.exception: SnakebiteException;
@@ -6540,6 +6541,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             foreach (const offset; source.fields)
                 value = loadWordAt(value, offset);
             return value;
+        case overrider:
+            const word = reserveTemp(pointerFacts);
+            emit(&opCopy, word, hiddenThisOffset, size_t.sizeof);
+            if (source.receiverAdjustment != 0) {
+                const adjustment = reserveTemp(pointerFacts);
+                emit(&opConstant, adjustment,
+                    addConstant(cast(long) source.receiverAdjustment),
+                    size_t.sizeof);
+                emit(&opAdd, word, adjustment, size_t.sizeof);
+            }
+            const address = reserveTemp(pointerFacts);
+            emit(&opFrameAddress, address, word, size_t.sizeof);
+            return addPointerOffset(address, -cast(long) source.slotOffset);
         }
     }
 
@@ -6554,15 +6568,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t firstContextOffsetOf(
         CallExp expression, FuncDeclaration callee, in size_t destOffset,
     ) {
-        import snakebite.frontend.dmd.delegates: nestedContextOwnerOf;
-
         // A lambda or nested function reading `this` implicitly names an
         // outer member function's own hidden `this`, reached through the
         // static chain rather than through `expression.e1` - the same
         // reach `contextAddressOf` gives any other captured variable.
         if (callee.isThis is null)
-            return contextOffsetOf(
-                contextSourceOf(_function, nestedContextOwnerOf(callee)));
+            return contextOffsetOf(calleeContextSourceOf(_function, callee));
 
         // An ordinary bound method call wraps its receiver in a
         // `DotVarExp` (`expression.e1.isDotVarExp.e1`); `super(args)`/
