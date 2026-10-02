@@ -1454,7 +1454,8 @@ unittest {
 }
 
 // dmd builds a wrong struct literal when a `short` bit field follows a
-// `long` one; the `Native` test next to the first pins what dmd gives.
+// `long` one, and the field holds another value each time; the `Native`
+// test next to the first pins that it is not the value stored.
 static foreach (backend; Matrix!(
     Omit!(Native, Because.diverges,
         "dmd builds a wrong literal when a short bit field follows a long one"),
@@ -1481,7 +1482,7 @@ unittest {
         T value(T)(T input) { return input; }
         void main() {
             S s = S(value!int(-3), value!long(-300000000000), value!short(-7));
-            assert(s.a == -3 && s.b == -300000000000 && s.c == 15);
+            assert(s.a == -3 && s.b == -300000000000 && s.c != -7);
         }
     });
 }
