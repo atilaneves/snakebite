@@ -5,6 +5,7 @@ private:
 
 import dmd.mtype: Type;
 import object: TypeInfo_Class;
+import snakebite.backends.argumentflow: Shape;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
 import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
@@ -1011,6 +1012,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _layout.variadicTypes == size_t.max
                 ? _layout.variadicCursor : size_t.max,
             _layout.parameters.length,
+            _layout.signature,
         );
     }
 
@@ -7158,12 +7160,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private struct VariadicArguments {
         Arg[] guest;
         Arg[] values;
+        Shape[] shapes;
     }
 
     private VariadicArguments compileVariadicArguments(
         Expressions* arguments,
         in FrameLayout layout,
     ) {
+        import snakebite.backends.layout: shapeOf;
         import snakebite.backends.variadic: FirstState, VariadicLayout;
 
         const hasTypes = layout.variadicTypes != size_t.max;
@@ -7187,6 +7191,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             evalInto((*arguments)[firstExtra + i], storage + offset,
                 facts[i].size);
             result.values ~= Arg(storage + offset, 0, facts[i].size);
+            result.shapes ~=
+                shapeOf((*arguments)[firstExtra + i].type, facts[i]);
         }
         emit(&opCopy, storage + FirstState.offset, storage, FirstState.size);
         const cursor = reserveTemp(pointerFacts);
@@ -7240,12 +7246,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `FuncDeclaration` to read a `FrameLayout` from, since more than one
     // could reach this call site at run time. `FrameLayout.ofParameters`
     // packs from the signature alone, the same packing every callee's own
-    // `FrameLayout.of` uses for its declared parameters, so argument `i`
-    // lands where whichever callee this call reaches at run time reads it
-    // from - and, for a delegate call, so does the context word, packed
-    // first the same way `FrameLayout.of` packs any callee's own hidden
-    // `this` before its declared parameters (see `ofParameters`'s own
-    // `hasContext` doc).
+    // `FrameLayout.of` uses, so a callee with the signature of the value
+    // reads argument `i` where the site puts it - and, for a delegate call,
+    // so does the context word. A callee with another signature reads each
+    // parameter from the argument in the same register (`ValueCall`).
     private void compileIndirectCall(CallExp expression, in size_t destOffset) {
         import dmd.astenums: STC, VarArg;
         import snakebite.backends.calls: isIndirectDelegateCall, ValueCall;
@@ -7320,12 +7324,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             functionType, expression.arguments, calleeLayout, args,
             calleeOffset, isVoidCallee ? 0 : returnShape.returnFacts.size,
             isDelegateCall);
-        site.value.isValueCall = true;
-        if (valueCall.isVariadic)
-            site.value.cursor = calleeLayout.variadicCursor;
-        else
-            foreach (parameter; calleeLayout.parameters)
-                site.value.parameters ~= parameter.facts;
+        site.kind = CallSite.Kind.value;
+        site.value.signature = valueCall.signature;
         const siteIndex = _callSites.length;
         _callSites ~= site;
         emit(&opCall,
@@ -7358,10 +7358,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto declared = args[initialCount .. $];
         auto guestArgs = args;
         auto nativeArgs = args;
+        VariadicArguments variadic;
         const isVariadic = functionType.parameterList.varargs
             == VarArg.variadic;
         if (isVariadic) {
-            auto variadic = compileVariadicArguments(arguments, calleeLayout);
+            variadic = compileVariadicArguments(arguments, calleeLayout);
             guestArgs = args ~ variadic.guest;
             const hidden = functionType.isDstyleVariadic
                 ? compileEvaluatedArgument(
@@ -7375,9 +7376,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ? cast(const(void)*) preparation.prepareAtAddress(
                 _bytecode._plans, null, hasContext)
             : _bytecode._plans.signatureOf(functionType, hasContext);
-        return CallSite.indirect(
+        auto site = CallSite.indirect(
             calleeOffset, guestArgs, nativeArgs, returnWidth, nativePlan,
             hasContext);
+        site.value.surplus = variadic.values;
+        site.value.surplusShapes = variadic.shapes;
+        return site;
     }
 
     private TypeFacts pointerFacts() {

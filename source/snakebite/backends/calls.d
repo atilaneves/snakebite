@@ -388,20 +388,22 @@ public bool arityMismatches(
 // The caller side of a call through a function pointer or a delegate
 // value. A cast can give the value a type that is not the type of the
 // function that it holds, so the type of the value decides what the
-// arguments are, how each converts and where each is packed. The callee
-// reads its own parameters from where the ABI puts them, as native code
-// does. For the C convention that gives native code's result. For `extern(D)`
-// dmd passes the arguments in reverse register order, so an extra argument of
-// a mismatched call is not in the register that native code reads it from;
-// only the C convention is matched.
+// arguments are and how each converts, and the callee reads its parameters
+// from where the C calling convention puts them, as native code does
+// (`ArgumentFlow`): a parameter reads the argument that is in the same
+// register, and not the argument at the same position. That is true for the
+// `extern(D)` convention too when the types agree, which is the one that
+// `signature` decides; for a mismatch of the `extern(D)` convention dmd
+// passes the arguments in reverse register order, so only the C convention
+// is matched.
 //
-// The callee takes the parameters at the offsets of `layout`. A callee that
-// has no context slot, such as a function literal that a delegate type holds,
-// takes them at the offsets of `withoutContext`. A C-variadic callee that
-// declares fewer parameters than the value's type has reads the others as its
-// variadic arguments (`variadicSurplus`).
+// When the signature of the value is the signature of the callee the frames
+// agree and the arguments go where the value's layout puts them. A callee
+// that has no context, such as a function literal that a delegate type holds,
+// has the parameters of `withoutContext`.
 public struct ValueCall {
     import dmd.mtype: TypeFunction;
+    import snakebite.backends.argumentflow: ArgumentFlow, Shape, Signature;
     import snakebite.backends.layout: FrameLayout;
 
     public TypeFunction type;
@@ -418,7 +420,7 @@ public struct ValueCall {
         );
     }
 
-    public bool isVariadic() {
+    public bool isVariadic() const {
         import dmd.astenums: VarArg;
 
         return type.parameterList.varargs == VarArg.variadic;
@@ -427,21 +429,29 @@ public struct ValueCall {
     public bool mismatches(
         imported!"dmd.arraytypes".Expressions* arguments,
     ) {
+        // dmd's `ParameterList` has no `const` methods.
         return arityMismatches(type.parameterList, arguments, isVariadic);
     }
 
-    // The layout that the callee reads its arguments by.
-    public const(FrameLayout)* layoutFor(in bool calleeHasContext) {
+    // The layout that the callee reads its arguments by when the signatures
+    // are equal.
+    public const(FrameLayout)* layoutFor(in bool calleeHasContext) const {
         return hasContext && !calleeHasContext ? &withoutContext : &layout;
     }
 
-    // The parameters of the value's type that a C-variadic callee with
-    // `declared` parameters of its own reads as variadic arguments.
-    public static const(FrameLayout.Parameter)[] variadicSurplus(
-        in FrameLayout slots, in size_t declared,
-    ) {
-        const count = slots.parameters.length;
-        return declared < count ? slots.parameters[declared .. $] : null;
+    public const(Signature)* signature() const {
+        return layout.signature;
+    }
+
+    // Where each argument of a call goes for a callee with `callee` as its
+    // signature, given the shapes of the variadic arguments of the call.
+    public ArgumentFlow flowTo(
+        in Signature callee, in Shape[] surplus, in bool calleeHasContext,
+    ) const {
+        return ArgumentFlow(
+            signature.parameters, surplus, callee.parameters,
+            hasContext && calleeHasContext,
+        );
     }
 }
 

@@ -17,6 +17,7 @@ extern(C) bool executeIndirectCallPlan(
     out ptrdiff_t contextAdjustment,
 );
 
+import snakebite.backends.argumentflow: ArgumentFlow, Shape, Signature;
 import snakebite.backends.builtins: BuiltinCall;
 import snakebite.backends.haltprocess: HostActions, isHalt;
 import snakebite.backends.unwindplan:
@@ -70,6 +71,10 @@ public struct CallSite {
         // value. Native addresses, including vtable entries, use the
         // call site's prepared native plan.
         indirect,
+        // An `indirect` call through a function pointer or a delegate value:
+        // `value.signature` is the signature of the value's type, and a callee
+        // with another signature reads its parameters by register.
+        value,
         // `builtinEntry` is a `snakebite.backends.builtins.BuiltinCall`,
         // resolved once by `CallSelection` (`snakebite.backends.calls`)
         // and never re-resolved: a compiler intrinsic dmd itself
@@ -153,14 +158,15 @@ public struct CallSite {
         return site;
     }
 
-    // What a call through a value of a function type tells a C-variadic
-    // callee: the facts of each parameter of the type when the type has no
-    // variadic arguments of its own, or the offset of the cursor that the
-    // call site built when it has.
+    // What a call through a value of a function type adds: the signature of
+    // the type, and the variadic arguments of the call with their shapes. A
+    // callee with another signature reads its parameters from the arguments
+    // that are in the same registers (`ArgumentFlow`). `signature` is null
+    // for every other call.
     public struct ValueArguments {
-        package bool isValueCall;
-        package const(TypeFacts)[] parameters;
-        package size_t cursor = size_t.max;
+        package const(Signature)* signature;
+        package Arg[] surplus;
+        package const(Shape)[] surplusShapes;
     }
 
     package Kind kind;
@@ -465,6 +471,7 @@ public struct Function {
     // it declares before it; `size_t.max` for any other function.
     package size_t cursorOffset = size_t.max;
     package size_t declaredParameters;
+    package const(Signature)* signature;
 }
 
 
@@ -1113,23 +1120,9 @@ private const(Instruction)* runCall(Decoded)(
         return callFunction(execution, *site,
             site.callee !is null ? site.callee : site.prepareGuest());
     case indirect:
-        auto callee =
-            *cast(const(void)**) (execution.storage(site.calleeSlotOffset));
-        ptrdiff_t contextAdjustment;
-        if (site.nativePlan !is null) {
-            auto arguments = gatherArguments(execution, site.nativeArgs);
-            auto values = arguments.values;
-            if (executeIndirectCallPlan(site.nativePlan, callee,
-                    execution.destination, values.ptr, values.length,
-                    contextAdjustment))
-                return execution.next;
-        }
-        auto function_ = cast(const(Function)*) callee;
-        const next = callFunction(
-            execution, *site, function_, contextAdjustment);
-        if (function_.cursorOffset != size_t.max && site.value.isValueCall)
-            bindVariadicCallee(execution, *site, function_);
-        return next;
+        return runIndirect!false(execution, site);
+    case value:
+        return runIndirect!true(execution, site);
     case native:
         auto arguments = gatherArguments(execution, site.args);
         auto values = arguments.values;
@@ -1150,37 +1143,98 @@ private const(Instruction)* runCall(Decoded)(
 }
 
 
-// A C-variadic callee reads the arguments after its own parameters from a
-// cursor. A call through a value gives it one that holds the parameters of the
-// value's type that the callee does not declare, or, if that type is variadic
-// too, the cursor that the call site built.
-pragma(inline, false)
-private void bindVariadicCallee(Decoded)(
-    ref Decoded execution, scope const ref CallSite site,
-    const(Function)* callee,
+pragma(inline, true)
+private const(Instruction)* runIndirect(bool isValue, Decoded)(
+    ref Decoded execution, const(CallSite)* site,
 ) {
-    import core.stdc.string: memcpy, memmove;
-    import snakebite.backends.variadic: VariadicLayout;
+    auto callee =
+        *cast(const(void)**) (execution.storage(site.calleeSlotOffset));
+    ptrdiff_t contextAdjustment;
+    if (site.nativePlan !is null) {
+        auto arguments = gatherArguments(execution, site.nativeArgs);
+        auto values = arguments.values;
+        if (executeIndirectCallPlan(site.nativePlan, callee,
+                execution.destination, values.ptr, values.length,
+                contextAdjustment))
+            return execution.next;
+    }
+    auto function_ = cast(const(Function)*) callee;
+    static if (isValue)
+        if (site.value.signature !is function_.signature)
+            return callFunction!true(
+                execution, *site, function_, contextAdjustment);
+    return callFunction(execution, *site, function_, contextAdjustment);
+}
 
-    auto frame = execution._dispatch.pending.frame;
-    auto cursor = frame + callee.cursorOffset;
-    if (site.value.cursor != size_t.max) {
-        memmove(cursor, frame + site.value.cursor, size_t.sizeof);
+
+// A call through a value whose type has another signature than the callee.
+// The context goes to the context of the callee, and each parameter takes the
+// argument that is in its register. A C-variadic callee gets a cursor over
+// the arguments that no named parameter reads.
+pragma(inline, false)
+private void redirectArguments(Decoded)(
+    ref Decoded execution, scope const ref CallSite site,
+    const(Function)* callee, ubyte* frame,
+) {
+    import core.stdc.string: memcpy, memset;
+    import snakebite.backends.variadic: VariadicLayout;
+    import std.algorithm: min;
+
+    const value = &site.value;
+    const parameters = callee.signature.parameters;
+    const declared = value.signature.parameters.length;
+    const first = site.hasContext ? 1 : 0;
+    const calleeHasContext = callee.contextOffset != size_t.max;
+    const flow = ArgumentFlow(
+        value.signature.parameters, value.surplusShapes, parameters,
+        site.hasContext && calleeHasContext);
+    const(ubyte)* addressOf(in size_t argument) {
+        return execution.storage(argument < declared
+            ? site.args[first + argument].callerOffset
+            : value.surplus[argument - declared].callerOffset);
+    }
+
+    if (calleeHasContext) {
+        // A function pointer has no context: its callee gets a null one.
+        auto context = frame + callee.contextOffset;
+        if (site.hasContext)
+            memcpy(context, execution.storage(site.args[0].callerOffset),
+                size_t.sizeof);
+        else
+            memset(context, 0, size_t.sizeof);
+    }
+    foreach (i, shape; parameters) {
+        auto place = frame + callee.parameterOffsets[i];
+        memset(place, 0, shape.size);
+        const source = flow.sourceOf(i);
+        if (source != size_t.max)
+            memcpy(place, addressOf(source),
+                min(shape.size, flow.argumentAt(source).size));
+    }
+
+    if (callee.cursorOffset != size_t.max) {
+        const unread = flow.unread;
+        TypeFacts[] facts;
+        foreach (argument; unread)
+            facts ~= flow.argumentAt(argument).facts;
+        const plan = VariadicLayout.of(facts);
+        auto storage = execution.frames.reserve(plan.size, plan.alignment);
+        plan.initialize(storage);
+        foreach (i, offset; plan.offsets)
+            memcpy(storage + offset, addressOf(unread[i]), facts[i].size);
+        *cast(ubyte**) (frame + callee.cursorOffset) = storage;
         return;
     }
 
-    const first = site.hasContext ? 1 : 0;
-    const declared = callee.declaredParameters;
-    const facts = declared < site.value.parameters.length
-        ? site.value.parameters[declared .. $] : null;
-    const plan = VariadicLayout.of(facts);
-    auto storage = execution.frames.reserve(plan.size, plan.alignment);
-    plan.initialize(storage);
-    foreach (i, offset; plan.offsets)
-        memcpy(storage + offset,
-            execution.storage(site.args[first + declared + i].callerOffset),
-            facts[i].size);
-    *cast(ubyte**) cursor = storage;
+    // `types` and `cursor` are the last two arguments of the site and the two
+    // parameters of the callee after the declared ones.
+    if (callee.signature.variadic == Signature.Variadic.d
+            && value.signature.variadic == Signature.Variadic.d)
+        foreach (i; 0 .. 2) {
+            const argument = site.args[$ - 2 + i];
+            memcpy(frame + callee.parameterOffsets[parameters.length + i],
+                execution.storage(argument.callerOffset), argument.width);
+        }
 }
 
 
@@ -1214,7 +1268,7 @@ private CallArguments gatherArguments(Decoded)(
 // The dispatcher starts the callee after this opcode returns. The saved
 // caller pc remains the call site until the callee returns, so exceptions
 // can find the caller's handler while unwinding guest activations.
-private const(Instruction)* callFunction(Decoded)(
+private const(Instruction)* callFunction(bool redirected = false, Decoded)(
     ref Decoded execution,
     scope const ref CallSite site,
     const(Function)* callee,
@@ -1238,11 +1292,16 @@ private const(Instruction)* callFunction(Decoded)(
     // An inferred function literal can convert to a delegate without
     // gaining a context parameter. Use its declared parameter layout;
     // removing a context word can also change argument alignment.
-    if (site.hasContext && callee.contextOffset == size_t.max) {
-        foreach (i, arg; site.args[1 .. $])
-            if (i < callee.parameterOffsets.length)
-                memcpy(activation.frame + callee.parameterOffsets[i],
-                    execution.storage(arg.callerOffset), arg.width);
+    static if (redirected)
+        redirectArguments(execution, site, callee, activation.frame);
+    else if (site.hasContext && callee.contextOffset == size_t.max) {
+        foreach (i, arg; site.args[1 .. $]) {
+            if (i >= callee.parameterOffsets.length)
+                assert(0, "a callee with the signature of the value has a "
+                    ~ "parameter for each argument");
+            memcpy(activation.frame + callee.parameterOffsets[i],
+                execution.storage(arg.callerOffset), arg.width);
+        }
     } else {
         foreach (arg; site.args)
             memcpy(activation.frame + arg.calleeOffset,
@@ -1250,8 +1309,13 @@ private const(Instruction)* callFunction(Decoded)(
     }
 
     if (contextAdjustment != 0) {
-        auto context = cast(ubyte**) (activation.frame + site.args[0].calleeOffset);
-        *context += contextAdjustment;
+        static if (redirected)
+            const contextOffset = callee.contextOffset;
+        else
+            const contextOffset = site.args[0].calleeOffset;
+        if (contextOffset != size_t.max)
+            *cast(ubyte**) (activation.frame + contextOffset) +=
+                contextAdjustment;
     }
     initializeClosure(callee, activation.frame, execution.frames);
 
