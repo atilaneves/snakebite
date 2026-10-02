@@ -6922,6 +6922,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             if (site.check !is null)
                 site.faultSite = lateFaultSite(loc);
         }
+        if (decision.reportsAtCall) {
+            site.reportsAtCall = true;
+            site.faultSite = lateFaultSite(loc);
+        }
         _callSites ~= site;
         emit(&opCall, destOffset, siteIndex, 0);
     }

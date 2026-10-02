@@ -1025,6 +1025,71 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// The divisor can be the result of any operation of the statement.
+static foreach (backend; FaultBackends) {
+    @("fault.arrayOperationDivisorMadeByAnd." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        GuestFault.Kind.divisionByZero.shouldBeFaultOf!(backend, q{
+void main() {
+    int[] a = [8, 6, 4];
+    int[] b = [2, 1, 0];
+    int[3] c;
+    c[] = a[] / (b[] & 1);
+}
+})(6);
+    }
+}
+
+
+static foreach (backend; FaultBackends) {
+    @("fault.arrayOperationDivisorMadeByXor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        GuestFault.Kind.divisionByZero.shouldBeFaultOf!(backend, q{
+void main() {
+    int[] a = [8, 6, 4];
+    int[] b = [2, 1, 0];
+    int[3] c;
+    c[] = a[] / (b[] ^ 2);
+}
+})(6);
+    }
+}
+
+
+static foreach (backend; FaultBackends) {
+    @("fault.arrayOperationDivisorMadeByOr." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        GuestFault.Kind.divisionByZero.shouldBeFaultOf!(backend, q{
+void main() {
+    int[] a = [8, 6, 4];
+    int[] b = [2, 1, 0];
+    int[3] c;
+    c[] = a[] % (b[] | 0);
+}
+})(6);
+    }
+}
+
+
+static foreach (backend; FaultBackends) {
+    @("fault.arrayOperationDivisorMadeByPower." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        GuestFault.Kind.divisionByZero.shouldBeFaultOf!(backend, q{
+void main() {
+    int[] a = [8, 6, 4];
+    int[] b = [2, 1, 0];
+    int[3] c;
+    c[] = a[] / (b[] ^^ 2);
+}
+})(6);
+    }
+}
+
+
 // `x ^^ n` of integers divides by zero for a base of zero and a negative
 // exponent.
 static foreach (backend; FaultBackends) {

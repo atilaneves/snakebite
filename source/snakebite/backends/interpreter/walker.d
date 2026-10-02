@@ -493,6 +493,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // no memory access (`snakebite.backends.guestfaultplan.accessFaultOf`).
     private Expression _addressOnly;
     private CallStateGuard* _innermostGuard;
+    // The call that a fault in its callee is reported at, or null.
+    private Expression _reportCall;
     private const(NativeCallCheck)*[FuncDeclaration] _nativeCallChecks;
     // The program being run: its `isInterpreted` is the one decision for
     // whether a callee is walked here or called natively, made on every
@@ -1193,6 +1195,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         auto guard = CallStateGuard(this);
         guard.enter;
+        // The outermost call that reports for its callee decides the line.
+        if (decision.reportsAtCall && _reportCall is null)
+            _reportCall = callSite;
 
         _closureBase = null;
         if (closurePlanOf(function_).needsClosure)
@@ -1427,6 +1432,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         private SwitchStatement _switchStatement;
         private void[][] _activationAllocations;
         private CallStateGuard* _previous;
+        private Expression _reportCall;
 
         @disable this();
         @disable this(this);
@@ -1445,6 +1451,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _switchStatement = evaluator._switchStatement;
             _activationAllocations = evaluator._activationAllocations;
             evaluator._activationAllocations = null;
+            _reportCall = evaluator._reportCall;
         }
 
         ~this() {
@@ -1460,6 +1467,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _evaluator._switchStatement = _switchStatement;
             _evaluator._activationAllocations = _activationAllocations;
             _evaluator._innermostGuard = _previous;
+            _evaluator._reportCall = _reportCall;
         }
 
         // Links the guard once it has its final address.
@@ -2335,9 +2343,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     extern(D) private noreturn fault(in FaultCheck check) {
         import std.string: fromStringz;
 
+        const loc = _reportCall is null ? check.loc : _reportCall.loc;
         _shared.halted = true;
-        _program.fault(check.kind, check.loc.filename.fromStringz,
-            check.loc.linnum, &guestStack);
+        _program.fault(check.kind, loc.filename.fromStringz,
+            loc.linnum, &guestStack);
     }
 
     // The guest functions that run now, innermost first. Each call guard

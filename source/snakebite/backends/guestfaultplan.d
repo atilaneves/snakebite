@@ -309,10 +309,6 @@ private Nullable!FaultCheck accessFaultOfVariable(
 //  - `synchronized (c)` locks the monitor of `c`, a field of the object.
 //  - `p.length = n` and `*p ~= x` change the array that `p` points to: the
 //    hook takes it by `ref` as its first argument and writes it.
-//  - An array operation divides the elements of its operands one by one,
-//    in the loop of `core.internal.array.operations.arrayOp`, which is
-//    native code whatever the module that instantiates it. The operands and
-//    the operations are template arguments in Reverse Polish Notation.
 public const(NativeCallCheck)* nativeCallCheckOf(
     imported!"dmd.func".FuncDeclaration callee,
 ) {
@@ -332,10 +328,7 @@ public const(NativeCallCheck)* nativeCallCheckOf(
         return check;
     }
 
-    if (auto power = integerPowerCheckOf(callee))
-        return power;
-
-    return arrayOperationCheckOf(callee);
+    return integerPowerCheckOf(callee);
 }
 
 // `pow` of `std.math` with an integer base and exponent, which is what
@@ -387,92 +380,4 @@ private bool growsArrayInPlace(imported!"dmd.func".FuncDeclaration callee) {
     enum package_ = "core.internal.array.";
     return strncmp(instance.tempdecl.parent.toPrettyChars, package_.ptr,
         package_.length) == 0;
-}
-
-private const(NativeCallCheck)* arrayOperationCheckOf(
-    imported!"dmd.func".FuncDeclaration callee,
-) {
-    import core.stdc.string: strcmp;
-    import dmd.dtemplate: isExpression, isType;
-    import dmd.mtype: Type;
-    import dmd.typesem: isIntegral, isUnsigned, size, toBasetype;
-
-    auto instance = callee.parent is null
-        ? null : callee.parent.isTemplateInstance;
-    if (instance is null || instance.tiargs is null
-            || instance.name.toString != "arrayOp"
-            || strcmp(instance.tempdecl.parent.toPrettyChars,
-                "core.internal.array.operations") != 0)
-        return null;
-
-    alias Step = NativeCallCheck.ArrayOperation.Step;
-    alias Operand = NativeCallCheck.ArrayOperation.Operand;
-
-    // `arrayOp(T : T[], Args...)(T[] res, ...)`: the first template
-    // argument is for `res`, argument 0 of the call. The operands are the
-    // arguments 1 and up, in the order of the types in `Args`.
-    Operand operandOf(Type type, in size_t argument, in bool isSlice) {
-        auto element = isSlice ? type.toBasetype.isTypeDArray.next : type;
-        return Operand(argument, isSlice, element.size,
-            element.toBasetype.isIntegral, element.toBasetype.isUnsigned);
-    }
-
-    auto resultType = (*instance.tiargs)[][0].isType;
-    auto check = new NativeCallCheck;
-    size_t nextArgument = 1;
-    bool divides;
-    foreach (argument; (*instance.tiargs)[][1 .. $]) {
-        Step step;
-        if (auto type = isType(argument)) {
-            step.kind = Step.Kind.operand;
-            step.operand = operandOf(
-                type, nextArgument++, type.toBasetype.isTypeDArray !is null);
-            check.arrayOperation.steps ~= step;
-            continue;
-        }
-
-        const operation = isExpression(argument).isStringExp.peekString;
-        if (operation[0] == 'u') {
-            step.kind = operation == "u-"
-                ? Step.Kind.negate
-                : operation == "u~" ? Step.Kind.complement
-                    : Step.Kind.unknownUnary;
-        } else if (operation == "=") {
-            step.kind = Step.Kind.assign;
-        } else {
-            const compound = operation.length > 1 && operation[$ - 1] == '=';
-            const binary = compound ? operation[0 .. $ - 1] : operation;
-            step.kind = binaryKindOf(binary);
-            if (compound) {
-                step.assignsToResult = true;
-                step.operand = operandOf(resultType, 0, true);
-            }
-            divides = divides || step.kind == Step.Kind.divide
-                || step.kind == Step.Kind.modulo;
-        }
-
-        check.arrayOperation.steps ~= step;
-    }
-
-    return divides ? check : null;
-}
-
-private imported!"snakebite.backends.guestfault".NativeCallCheck
-    .ArrayOperation.Step.Kind binaryKindOf(in const(char)[] operation) {
-    alias Kind = NativeCallCheck.ArrayOperation.Step.Kind;
-
-    switch (operation) {
-        case "+":
-            return Kind.add;
-        case "-":
-            return Kind.subtract;
-        case "*":
-            return Kind.multiply;
-        case "/":
-            return Kind.divide;
-        case "%":
-            return Kind.modulo;
-        default:
-            return Kind.unknownBinary;
-    }
 }

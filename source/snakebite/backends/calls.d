@@ -47,6 +47,9 @@ public struct CallSelection {
     public struct Decision {
         public Route route;
         public BuiltinCall builtinEntry;
+        // A guest call that a fault inside it, or inside what it calls, is
+        // reported at: the lowered call is not code the user wrote.
+        public bool reportsAtCall;
     }
 
     // Read without a lock by every thread that runs guest code
@@ -223,6 +226,12 @@ public struct CallSelection {
         if (outerFunctionOf(function_) !is null)
             return Decision(Route.guest);
 
+        // The loop of an array operation that divides integers runs as
+        // guest code: native code that divides by zero dies of a signal,
+        // and the guest division reports it as a fault.
+        if (dividesIntegers(function_))
+            return Decision(Route.guest, null, true);
+
         // A function literal in an imported aggregate has a body but no
         // native symbol of its own. Keep it guest when it is root-owned or
         // when the linker cannot resolve that symbol.
@@ -251,6 +260,41 @@ public struct CallSelection {
         const prefers = function_.isInstantiated() !is null
             ? !hasIndependentNativeSymbol : isGuest(function_);
         return Decision(prefers ? Route.guest : Route.native);
+    }
+
+    // Whether `function_` is an instance of `core.internal.array.operations.
+    // arrayOp` with an integer division or remainder among its operations.
+    // dmd gives the operations as template arguments: the strings `"/"`,
+    // `"%"`, `"/="` and `"%="` are the ones that divide.
+    private static bool dividesIntegers(FuncDeclaration function_) {
+        import core.stdc.string: strcmp;
+        import dmd.dtemplate: isExpression, isType;
+        import dmd.typesem: isIntegral, toBasetype;
+
+        auto instance = function_.parent is null
+            ? null : function_.parent.isTemplateInstance;
+        if (instance is null || instance.tiargs is null
+                || instance.tiargs.length == 0
+                || instance.name.toString != "arrayOp"
+                || strcmp(instance.tempdecl.parent.toPrettyChars,
+                    "core.internal.array.operations") != 0)
+            return false;
+
+        // The first template argument is the type of the result array.
+        auto result = (*instance.tiargs)[0].isType;
+        auto array = result is null ? null : result.toBasetype.isTypeDArray;
+        if (array is null || !array.next.toBasetype.isIntegral)
+            return false;
+
+        foreach (argument; (*instance.tiargs)[][1 .. $]) {
+            auto operation = isExpression(argument);
+            auto text = operation is null || operation.isStringExp is null
+                ? null : operation.isStringExp.peekString;
+            if (text == "/" || text == "%" || text == "/=" || text == "%=")
+                return true;
+        }
+
+        return false;
     }
 
     // The test dmd's own glue applies (`dmd.glue.toir.intrinsic_op`) to

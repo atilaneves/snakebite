@@ -171,6 +171,9 @@ public struct CallSite {
     // that reports its fault.
     package const(NativeCallCheck)* check;
     package size_t faultSite;
+    // A fault in the callee, or in what it calls, is reported at the line
+    // that `faultSite` names, as if the call itself failed.
+    package bool reportsAtCall;
 
     public static CallSite temporary() {
         CallSite site;
@@ -1050,7 +1053,22 @@ pragma(inline, false)
 private noreturn reportFault(
     in GuestFault.Kind kind, in AssertSite site, Activation* innermost,
 ) {
-    site.actions.fault(kind, site.file, site.line, (scope sink) {
+    // The outermost call that reports for its callee decides the line.
+    const(AssertSite)* call;
+    for (auto activation = innermost; activation !is null;) {
+        // Only a guest caller is stopped at an `opCall`: native code can
+        // call the guest from other instructions.
+        if (auto caller = activation.parent) {
+            const callSite = &caller.callSites[caller.pc.source];
+            if (callSite.reportsAtCall)
+                call = &caller.assertSites[callSite.faultSite];
+        }
+        activation = activation.parent !is null
+            ? activation.parent : activation.outer;
+    }
+
+    const place = call is null ? &site : call;
+    site.actions.fault(kind, place.file, place.line, (scope sink) {
         for (auto activation = innermost; activation !is null;
                 activation = activation.parent !is null
                     ? activation.parent : activation.outer)
