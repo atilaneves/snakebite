@@ -571,6 +571,55 @@ def test_guest_fault_on_a_second_thread_is_reported(backend: str) -> None:
     assert result.returncode == 0
 
 
+# A fault ends the thread that faults. A cell thread that goes on still
+# runs its destructors and its `finally` blocks.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_guest_fault_on_a_second_thread_does_not_end_the_cell(
+    backend: str,
+) -> None:
+    result = run_sb(
+        "-b", backend,
+        input=(
+            "import core.thread;\n"
+            "import core.stdc.stdio: fflush, puts, stdout;\n"
+            "void work() { int* p; *p = 1; }\n"
+            'struct Guard { ~this() { puts("destructor ran"); fflush(stdout); } }\n'
+            "int run() { auto t = new Thread(&work); t.start();"
+            " Thread.sleep(200.msecs);"
+            " { Guard guard; }"
+            ' try { } finally { puts("finally ran"); fflush(stdout); }'
+            " return 1; }\n"
+            "run()\n"
+        ),
+    )
+
+    assert "fatal: null pointer dereference" in result.stderr
+    assert result.stdout == "destructor ran\nfinally ran\n1\n"
+
+
+# One fault is reported one time, also when the cell joins the thread that
+# faults.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_guest_fault_on_a_joined_thread_is_reported_one_time(
+    backend: str,
+) -> None:
+    result = run_sb(
+        "-b", backend,
+        input=(
+            "import core.thread;\n"
+            "void work() { int* p; *p = 1; }\n"
+            "int run() { auto t = new Thread(&work); t.start(); t.join();"
+            " return 1; }\n"
+            "run()\n"
+            "1 + 2\n"
+        ),
+    )
+
+    report = result.stdout + result.stderr
+    assert report.count("fatal: null pointer dereference") == 1
+    assert result.stdout.endswith("3\n")
+
+
 def test_piped_pragma_msg_writes_once_to_stderr() -> None:
     result = run_sb(input='pragma(msg, "hello");\n42\n')
 
