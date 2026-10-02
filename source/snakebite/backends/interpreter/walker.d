@@ -14,7 +14,7 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     import dmd.func: FuncDeclaration;
     import snakebite.backends.backend: Program;
     import snakebite.ffi: CallbackBridge, CallbackCall;
-    import snakebite.hostthreads: PerThread;
+    import snakebite.hostthreads: heapNew, PerThread;
 
     // What every thread that runs this program shares: the caches that
     // are filled once per key, and the plan cache with its callback
@@ -34,7 +34,11 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
                 cast(void*) this,
                 &prepareCallback,
             ));
-        _evaluators = PerThread!(Evaluator, true)(() => new Evaluator(_shared));
+        _evaluators = PerThread!(Evaluator, true)(
+            () => heapNew!Evaluator(_shared));
+        _shared.prepare = (function_) {
+            evaluator.prepareCallback(function_);
+        };
     }
 
     public override void call(
@@ -117,8 +121,18 @@ import snakebite.exception: SnakebiteException;
 // guest construct. The runner catches this wrapper, while interpreter
 // failures travel as `SnakebiteException` and continue through the host
 // unchanged.
+//
+// It lives on the C heap, because a destructor that the GC finalizer runs can
+// throw, and the GC forbids an allocation there. `take` releases it: the
+// unwinder holds no reference to a caught exception.
 private final class GuestException: Exception {
     private Throwable _guest;
+
+    public static GuestException make(Throwable guest) {
+        import snakebite.hostthreads: heapNew;
+
+        return heapNew!GuestException(guest);
+    }
 
     public this(Throwable guest) {
         super(guest.msg);
@@ -133,8 +147,11 @@ private final class GuestException: Exception {
     }
 
     private Throwable take() {
+        import snakebite.hostthreads: heapDelete;
+
         auto guest = _guest;
         _guest = null;
+        heapDelete(this);
         return guest;
     }
 }
@@ -150,12 +167,14 @@ import snakebite.backends.identity: IdentityPlan;
 import snakebite.backends.comparison: ComparisonPlan;
 import snakebite.backends.controlflow: ControlFlowState,
     ScopeFrame, scopePath;
-import snakebite.backends.exceptionplan: catchPlanOf;
+import snakebite.backends.exceptionplan: CatchPlan, catchPlanOf;
+import snakebite.backends.aggregateinit: AggregateInitPlan;
 import snakebite.backends.unwindplan:
     ExceptionCandidate, ExceptionUnwindPlan = UnwindPlan;
 import snakebite.backends.switchplan: switchPlan, selectCase,
     gotoCaseTarget, gotoDefaultTarget;
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
+import snakebite.cstack: CStack;
 import snakebite.backends.fullexpression: FullExpressionKind;
 import snakebite.backends.temporary: canRetainTemporaries;
 
@@ -171,7 +190,10 @@ private struct Shared {
     import dmd.declaration: Declaration;
     import dmd.func: FuncDeclaration;
     import dmd.mtype: Type;
-    import dmd.statement: Catch;
+    import dmd.expression: StructLiteralExp;
+    import dmd.statement: Catch, TryCatchStatement, TryFinallyStatement;
+    import snakebite.ffi: CallPlan;
+    import snakebite.backends.unwindplan: ExceptionCandidate;
     import snakebite.backends.backend: Program;
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.classinfo: ClassRuntimeCache;
@@ -257,6 +279,20 @@ private struct Shared {
     // evaluator, not only the one that first resolved it - is interpreted
     // directly instead of crossing the FFI barrier to call itself.
     SharedTable!(const(void)*, FuncDeclaration) callableDeclarations;
+    // What an AST node's plan is, which depends on nothing but the node.
+    // Each one is built once per node, by the first evaluator that reaches
+    // it or by the preparation of a callback, and read without a lock
+    // after that: a destructor that the GC finalizer runs cannot allocate.
+    SharedTable!(StructLiteralExp, AggregateInitPlan) structLiteralPlans;
+    SharedTable!(TryCatchStatement, TryCatchPlan) tryCatchPlans;
+    SharedTable!(TryFinallyStatement, ExceptionCandidate[]) finallyCandidates;
+    SharedTable!(FinallyKey, bool) finallyRuns;
+    SharedTable!(CallSiteKey, const(CallPlan)*) callSitePlans;
+    SharedTable!(const(void)*, VariadicCallPlan) variadicCallPlans;
+    // The guest functions whose preparation is complete, and how to
+    // prepare one more.
+    SharedTable!(FuncDeclaration, bool) prepared;
+    void delegate(FuncDeclaration) prepare;
 
     // Runs a guest function from host code with native-layout arguments.
     private void delegate(FuncDeclaration, void*, void*[]) callGuest;
@@ -311,11 +347,18 @@ private struct Shared {
     // also reads directly, so every slot stays a real callable address,
     // never a `FuncDeclaration` only an evaluator knows how to walk.
     TypeInfo_Class classRuntimeInfo(ClassDeclaration declaration) {
-        import snakebite.backends.classinfo:
-            classRuntimeInfo_ = classRuntimeInfo, Hooks;
-
         if (auto found = classRuntime.find(declaration))
             return *found;
+
+        return buildClassRuntimeInfo(declaration);
+    }
+
+    // Apart from `classRuntimeInfo`: the delegates below capture `this`, so
+    // a function that holds them allocates a closure when it starts, and
+    // the lookup of a class that exists must not allocate.
+    private TypeInfo_Class buildClassRuntimeInfo(ClassDeclaration declaration) {
+        import snakebite.backends.classinfo:
+            classRuntimeInfo_ = classRuntimeInfo, Hooks;
 
         return classRuntime.build(() => classRuntimeInfo_(
             declaration,
@@ -361,6 +404,8 @@ private struct Shared {
                 plans.hasIndependentNativeSymbol(method))) {
             plans.registerGuestFunction(cast(void*) method, method);
             word = cast(void*) method;
+            if (prepare !is null && method !in prepared)
+                prepare(method);
             if (callSelection.storesGuestWord(
                     method, hasNativeSymbol, adjustment))
                 return cast(void*) word;
@@ -374,6 +419,35 @@ private struct Shared {
             callableDeclarations.insert(address, method);
         return address;
     }
+}
+
+private struct TryCatchPlan {
+    ExceptionCandidate[] candidates;
+    CatchPlan catches;
+}
+
+// Whether a `finally` body runs depends on the statement, how control
+// leaves it, and where it goes: `destination` is the scope that a `goto`
+// targets, and null for every other way out.
+private struct FinallyKey {
+    enum Exit { gotoScope, fallThrough, transfer }
+
+    const(void)* statement;
+    const(void)* destination;
+    Exit exit;
+}
+
+private struct VariadicCallPlan {
+    import snakebite.backends.variadic: VariadicLayout;
+    import snakebite.nativelayout: TypeFacts;
+
+    TypeFacts[] facts;
+    VariadicLayout layout;
+}
+
+private struct CallSiteKey {
+    const(void)* callSite;
+    const(void)* function_;
 }
 
 // `CallAdapter` paired with one `CallAdapter.Argument` per declared
@@ -401,12 +475,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import snakebite.backends.aggregateinit: InitStep, NewPlan;
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.backend: Program;
-    import snakebite.frontend.dmd.delegates: DelegateTarget, outerFunctionOf;
+    import snakebite.frontend.dmd.delegates:
+        DelegateTarget, isCtfeVariable, outerFunctionOf;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.backends.closureplan: ClosurePlan, Hop;
     import snakebite.backends.dualcontext:
         ContextSource, PairPlan, calleeContextSourceOf, contextSourceOf,
         pairPlanOf;
+    import snakebite.backends.interpreter.scout: BodyScout, Preparation;
     import snakebite.backends.classinfo;
     import dmd.dclass: ClassDeclaration;
     import dmd.dstruct: StructDeclaration;
@@ -426,8 +502,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         TypeInfo_Tuple;
     import dmd.root.string: toDString;
     import dmd.astenums:
-        Tarray, Taarray, Tbool, Tchar, Tclass, Tdelegate, Tnoreturn, Tint64,
-        Tpointer, Tsarray, Ttuple, Tuns32, Tuns8, Tvoid, Twchar, TY, VarArg;
+        Tarray, Taarray, Tbool, Tchar, Tclass, Tdelegate, Terror, Tfunction,
+        Tnoreturn, Tint64, Tpointer, Tsarray, Tstruct, Ttuple, Tuns32, Tuns8, Tvoid,
+        Twchar, TY, STC, VarArg;
     import dmd.arraytypes: Expressions;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
@@ -481,7 +558,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private struct ActiveExceptionScope {
         private ExceptionCandidate[] _candidates;
     }
-    private ActiveExceptionScope[] _activeExceptionScopes;
+
+    // The scopes a throw can reach, innermost last. They live on the C
+    // heap: entering one inside a destructor that the GC finalizer runs
+    // cannot allocate from the GC. A candidate array belongs to the shared
+    // plan of its statement, so nothing here needs the GC to keep it.
+    private CStack!ActiveExceptionScope _activeExceptionScopes;
+    private CStack!ExceptionCandidate _candidateScratch;
     private RuntimeTypes* _runtimeTypes;
     // dmd gives every `arr[... $ ...]` a `lengthVar` declaration for its
     // `$`, which no statement declares and which therefore has no frame
@@ -514,10 +597,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         private const(CallPlan)* _plan;
     }
 
-    private CallSitePlan[] _callPlans;
     private CallSitePlan _lastCallSitePlan;
 
     private Cache!(Type, TypeFacts) _typeFacts;
+    // The function whose body the preparation walks.
+    private FuncDeclaration _preparing;
+    // The functions that this thread prepares and has not finished: the
+    // preparation of one function reaches the entry of another.
+    private bool[FuncDeclaration] _started;
+    // What a variable's storage or a struct's default value may weigh for
+    // preparation to build it before the program reaches it: a reference
+    // in code that never runs must cost what it costs without preparation.
+    private enum preparedBytesLimit = 64 * 1024;
     private Cache!(VarDeclaration, BitfieldAccess) _bitfields;
     // The plans of the bit fields most recently used, found by the
     // address of the declaration, so that a loop over a few bit fields
@@ -572,7 +663,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // so every enclosing visitor can continue its normal statement sequence.
     private ControlFlowState _controlFlow;
     private SwitchStatement _switchStatement;
-    private void[][] _activationAllocations;
+    private CStack!(void*) _activationAllocations;
     // `extern(D)`: only `Visitor`'s `visit` overloads need the C++
     // linkage.
     extern(D) public this(Shared* shared_) {
@@ -594,7 +685,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             Cache!(VarDeclaration, BitfieldAccess)(&shared_.bitfields);
         _frames = FrameStack(defaultFrameCapacity);
         _interpreterStack = InterpreterStack(defaultInterpreterStackBytes);
-        _temporaries = new TemporaryLifetime(&destroyTemporary);
+        _temporaries = TemporaryLifetime(&destroyTemporary);
+        // The first touch of this thread's thread-local table allocates,
+        // and a destructor that the GC finalizer runs cannot.
+        _nativeData.tlsSlots;
     }
 
     // Runs `function_` against a fresh top-level frame, mirroring the
@@ -1224,12 +1318,30 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // `alloca`'s memory is the running function's, as compiled D has it:
     // the guard of that function's activation lets go of it on return.
     private void* allocateForActivation(in size_t size) {
+        import core.memory: GC;
+        import core.stdc.stdlib: malloc;
+
         enum alignment = 16;
-        // A block with pointers: the GC scans it, as it scans a stack.
-        auto block = new void[](size + alignment);
-        _activationAllocations ~= block;
-        return cast(void*) ((cast(size_t) block.ptr + alignment - 1)
+        auto block = malloc(size + alignment);
+        if (block is null)
+            assert(0, "out of memory for alloca");
+        // A stack holds pointers to GC objects, so the GC scans this block
+        // as it scans a stack. `GC.addRange` does not allocate.
+        GC.addRange(block, size + alignment);
+        _activationAllocations.push(block);
+        return cast(void*) ((cast(size_t) block + alignment - 1)
             & ~size_t(alignment - 1));
+    }
+
+    private void releaseActivationAllocations(in size_t mark) {
+        import core.memory: GC;
+        import core.stdc.stdlib: free;
+
+        foreach (block; _activationAllocations[mark .. $]) {
+            GC.removeRange(block);
+            free(block);
+        }
+        _activationAllocations.truncate(mark);
     }
 
     private void callHost(
@@ -1275,7 +1387,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (isHalt(thrown))
                 throw thrown;
 
-            throw new GuestException(thrown);
+            throw GuestException.make(thrown);
         }
     }
 
@@ -1361,11 +1473,267 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             call.variadicCursor, call.variadicTypes);
     }
 
+    // Fills everything that executing `function_`, or a function it calls
+    // by name, would otherwise fill on first use, while the GC can still
+    // allocate: the GC finalizer can run the callback, and there neither
+    // an allocation nor a wait for a lock that another thread holds
+    // while it waits for the GC is possible. Execution decides what runs,
+    // so this asks only what a node of a body would ask, and a node that
+    // this cannot prepare, or that makes dmd report an error, stays as it
+    // was: a call that never executes must not fail, and one that does fails
+    // the way it always did.
     extern(D) final void prepareCallback(FuncDeclaration function_) {
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        // A function that refers to itself reaches this again through its
+        // own entry, and another thread's preparation of the same function
+        // may still be running: only a finished one is in `prepared`.
+        if (function_ in _shared.prepared || function_ in _started)
+            return;
+
+        const outermost = _started.length == 0;
+        _started[function_] = true;
+        scope(failure) _started = null;
+        withCompilerLock({ prepareReachable(function_); });
+        if (outermost) {
+            foreach (started, _; _started)
+                _shared.prepared.insert(started, true);
+            _started = null;
+        }
+    }
+
+    extern(D) private void prepareReachable(FuncDeclaration root) {
+        import snakebite.frontend.compiler: gagged;
+
+        FuncDeclaration[] pending = [root];
+        void enqueue(FuncDeclaration function_) {
+            if (function_ !in _started && function_ !in _shared.prepared) {
+                _started[function_] = true;
+                pending ~= function_;
+            }
+        }
+        // Whatever dmd reports while an action runs is dropped and not kept
+        // on a declaration: a node that dmd cannot analyse stays for the
+        // execution that reaches it.
+        void attempt(scope void delegate() action) {
+            try
+                gagged(action);
+            catch (Exception) {
+            }
+        }
+        scope scout = new BodyScout(Preparation(
+            (site, named) => attempt({
+                // Execution plans the definition that the linker finds for
+                // a declaration, and asks for it at each call, a virtual
+                // one included: it asks about the declaration that dmd
+                // selected before it finds the one that runs.
+                auto callee = _callSelection.definitionOf(
+                    named,
+                    (declaration) => _program.linkedFunctionOf(declaration));
+                if (named.isThis !is null && named.isVirtualMethod
+                        && !site.directcall)
+                    return;
+
+                enqueue(callee);
+                prepareCall(site, callee);
+            }),
+            (function_) => attempt({
+                if (!_plans.canPlan(function_))
+                    return;
+
+                _shared.callableAddress(function_, 0);
+                enqueue(function_);
+            }),
+            (variable) => attempt({ prepareVariable(variable); }),
+            (type) => attempt({ prepareType(type); }),
+            (type) => attempt({ prepareZeroInitialized(type); }),
+            (type) => attempt({ _runtimeTypes.get(type); }),
+            (declaration) => attempt({ classRuntimeInfo(declaration); }),
+            (expression) => attempt({
+                import snakebite.backends.deleteplan: planDelete;
+                import snakebite.backends.druntimehooks: planOf;
+
+                planOf(*_plans, planDelete(expression).hook);
+            }),
+            (expression) => attempt({ structLiteralPlanOf(expression); }),
+            (expression) => attempt({ _nativeData.stringData(expression); }),
+            (constructor) => attempt({
+                auto definition = _callSelection.definitionOf(
+                    constructor,
+                    (declaration) => _program.linkedFunctionOf(declaration));
+                layoutOf(constructor);
+                callShapeOf(constructor);
+                enqueue(definition);
+            }),
+            (field) => attempt({ bitfieldPlanOf(field); }),
+            (statement) => attempt({ tryCatchPlanOf(statement); }),
+            (statement) => attempt({
+                finallyCandidatesOf(statement);
+                foreach (exit; [FinallyKey.Exit.fallThrough,
+                        FinallyKey.Exit.transfer])
+                    runsFinally(
+                        FinallyKey(cast(const(void)*) statement, null, exit),
+                        statement);
+            }),
+            (statement, destination) => attempt({
+                runsFinally(
+                    FinallyKey(cast(const(void)*) statement,
+                        cast(const(void)*) destination,
+                        FinallyKey.Exit.gotoScope),
+                    statement);
+            }),
+        ));
+        while (pending.length) {
+            auto function_ = pending[$ - 1];
+            pending.length -= 1;
+            attempt({ prepareFunction(function_, scout); });
+        }
+    }
+
+    extern(D) private void prepareFunction(
+        FuncDeclaration function_,
+        BodyScout scout,
+    ) {
+        const decision = _callSelection.decisionOf(
+            function_,
+            (callee) => _program.isInterpreted(callee),
+            hasNativeSymbol(function_),
+            hasIndependentNativeSymbol(function_),
+        );
+        if (decision.route != CallSelection.Route.guest)
+            return;
+
+        auto outer = _preparing;
+        _preparing = function_;
+        scope(exit) _preparing = outer;
+
         layoutOf(function_);
         callShapeOf(function_);
-        functionNeedsClosure(function_);
-        factsOf(function_.type.nextOf);
+        closurePlanOf(function_);
+        prepareFacts(function_.type.nextOf);
+        if (function_.fbody !is null)
+            function_.fbody.accept(scout);
+    }
+
+    extern(D) private void prepareCall(
+        CallExp site,
+        FuncDeclaration callee,
+    ) {
+        layoutOf(callee);
+        callShapeOf(callee);
+        prepareContext(outerFunctionOf(callee));
+        auto calleeType = typeFunctionOf(callee);
+        foreach (i; 0 .. calleeType.parameterList.length)
+            if ((calleeType.parameterList[i].storageClass & STC.out_) != 0)
+                prepareDefault(calleeType.parameterList[i].type);
+        const decision = _callSelection.decisionOf(
+            callee,
+            (function_) => _program.isInterpreted(function_),
+            hasNativeSymbol(callee),
+            hasIndependentNativeSymbol(callee),
+        );
+
+        if (decision.route == CallSelection.Route.guest
+                && typeFunctionOf(callee).parameterList.varargs
+                    == VarArg.variadic) {
+            const layout = layoutOf(callee);
+            const hasTypes = layout.variadicTypes != size_t.max;
+            variadicCallPlanOf(site.arguments,
+                hasTypes + layout.parameters.length);
+        }
+        if (decision.route != CallSelection.Route.native
+                || !_plans.canPlan(callee))
+            return;
+
+        // The answer to whether a variadic callee has a native symbol is
+        // asked by execution of any call to it, and `decision` may not ask.
+        if (isNativeVariadic(callee)) {
+            auto adapter = CallAdapter.Arguments.of(
+                typeFunctionOf(callee), site.arguments);
+            cachedCallPlan(site, callee,
+                () => adapter.prepare(*_plans, callee));
+        } else
+            callPlanOf(site, callee);
+    }
+
+    // The facts that execution asks for about the type of a node, its base
+    // type's, and nothing below them: a pointer is as large as any other
+    // pointer, whatever it points to.
+    extern(D) private void prepareType(Type type) {
+        import dmd.typesem: toBasetype;
+
+        if (!hasValueFacts(type))
+            return;
+
+        prepareFacts(type);
+        auto base = type.toBasetype;
+        if (base !is type && hasValueFacts(base))
+            prepareFacts(base);
+    }
+
+    private static bool hasValueFacts(Type type) {
+        return type !is null && type.ty != Tfunction && type.ty != Ttuple
+            && type.ty != Terror;
+    }
+
+    extern(D) private void prepareFacts(Type type) {
+        if (!hasValueFacts(type) || type in _typeFacts)
+            return;
+
+        TypeFacts facts;
+        if (TypeFacts.tryOf(type, facts))
+            _typeFacts.build(type, () => facts);
+    }
+
+    // The bytes of a struct whose default value is all zero, or of the
+    // struct that a static array repeats: `storeValue` reads them when it
+    // stores that encoding. A struct that is larger than
+    // `preparedBytesLimit` stays for execution, which is the one that knows
+    // whether the value is needed.
+    extern(D) private void prepareZeroInitialized(Type type) {
+        import dmd.typesem: baseElemOf, toBasetype;
+
+        auto element = type.baseElemOf.toBasetype;
+        if (element.isTypeStruct !is null)
+            prepareDefault(element);
+    }
+
+    extern(D) private void prepareDefault(Type type) {
+        TypeFacts facts;
+        if (TypeFacts.tryOf(type, facts) && facts.size <= preparedBytesLimit)
+            _nativeData.initialValue(type, Loc.initial);
+    }
+
+    extern(D) private void prepareVariable(VarDeclaration variable) {
+        // `__ctfe` has no parent, and asking dmd where it lives reports
+        // that as an error. Execution folds a read of it to `false`.
+        if (isCtfeVariable(variable) || variable.parent is null)
+            return;
+
+        if (variable.isThreadlocal || variable.isDataseg) {
+            TypeFacts facts;
+            if (!TypeFacts.tryOf(variable.type, facts)
+                    || facts.size > preparedBytesLimit)
+                return;
+
+            if (variable.isThreadlocal)
+                _nativeData.tlsDescriptorOf(variable);
+            else
+                _nativeData.storageOf(variable);
+        } else
+            prepareContext(outerFunctionOf(variable));
+    }
+
+    // The way from the function that is being prepared to the context of
+    // an enclosing function that it reaches into.
+    extern(D) private void prepareContext(FuncDeclaration owner) {
+        if (owner is null || owner is _preparing)
+            return;
+
+        if (functionNeedsClosure(owner))
+            closureLayoutOf(owner);
+        layoutOf(owner);
+        staticChainBetween(_preparing, owner);
     }
 
     private void destroyTemporary(Expression expression) {
@@ -1397,19 +1765,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 && _lastCallSitePlan._function is function_)
             return _lastCallSitePlan._plan;
 
-        foreach (i; 0 .. _callPlans.length) {
-            CallSitePlan* cached = &_callPlans[i];
-            if (cached._callSite is callSite
-                && cached._function is function_) {
-                _lastCallSitePlan = *cached;
-                return _lastCallSitePlan._plan;
-            }
+        const key = CallSiteKey(
+            cast(const(void)*) callSite, cast(const(void)*) function_);
+        if (auto cached = key in _shared.callSitePlans) {
+            _lastCallSitePlan = CallSitePlan(callSite, function_, *cached);
+            return *cached;
         }
 
         countForeignNameLookup;
-        const plan = build();
-        _callPlans ~= CallSitePlan(callSite, function_, plan);
-        _lastCallSitePlan = _callPlans[$ - 1];
+        const plan = *_shared.callSitePlans.insert(key, build());
+        _lastCallSitePlan = CallSitePlan(callSite, function_, plan);
         return plan;
     }
 
@@ -1430,7 +1795,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         private Identifier _pendingLoopLabel;
         private ControlFlowState _controlFlow;
         private SwitchStatement _switchStatement;
-        private void[][] _activationAllocations;
+        private size_t _activationMark;
 
         @disable this();
         @disable this(this);
@@ -1447,8 +1812,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _pendingLoopLabel = evaluator._pendingLoopLabel;
             _controlFlow = evaluator._controlFlow;
             _switchStatement = evaluator._switchStatement;
-            _activationAllocations = evaluator._activationAllocations;
-            evaluator._activationAllocations = null;
+            _activationMark = evaluator._activationAllocations.length;
         }
 
         ~this() {
@@ -1462,7 +1826,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _evaluator._pendingLoopLabel = _pendingLoopLabel;
             _evaluator._controlFlow = _controlFlow;
             _evaluator._switchStatement = _switchStatement;
-            _evaluator._activationAllocations = _activationAllocations;
+            _evaluator.releaseActivationAllocations(_activationMark);
         }
     }
 
@@ -1505,24 +1869,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     override void visit(TryCatchStatement statement) {
-        // Candidate construction needs dmd's mutable TypeInfo_Class values.
-        auto catches = catchPlanOf(
-            statement, catch_ => catchRuntimeInfo(catch_),
-        );
-        ExceptionCandidate[] candidates;
-        foreach (clause; catches.clauses)
-            candidates ~= ExceptionCandidate(
-                cast(const(void)*) statement,
-                ExceptionCandidate.Kind.catch_,
-                clause.type,
-                cast(const(void)*) clause.syntax,
-            );
-
-        _activeExceptionScopes ~= ActiveExceptionScope(candidates);
+        _activeExceptionScopes.push(ActiveExceptionScope(
+            tryCatchPlanOf(statement).candidates));
         auto scopeActive = true; // Cleared after the scope is removed explicitly.
         scope (exit)
             if (scopeActive)
-                _activeExceptionScopes.length -= 1;
+                _activeExceptionScopes.pop;
 
         if (_controlFlow.seeking) {
             try {
@@ -1532,7 +1884,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 const plan = exceptionPlan(exception._guest.classinfo);
                 // Binding and visiting the handler mutate dmd's Catch node.
                 auto catch_ = selectedCatch(plan, statement);
-                _activeExceptionScopes.length -= 1;
+                _activeExceptionScopes.pop;
                 scopeActive = false;
                 if (catch_ !is null) {
                     bindCatchVariable(catch_, exception.take);
@@ -1543,7 +1895,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
                 throw exception;
             }
-            _activeExceptionScopes.length -= 1;
+            _activeExceptionScopes.pop;
             scopeActive = false;
             if (_controlFlow.seeking)
                 foreach (catch_; *statement.catches)
@@ -1558,7 +1910,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             const plan = exceptionPlan(exception._guest.classinfo);
             // Binding and visiting the handler mutate dmd's Catch node.
             auto catch_ = selectedCatch(plan, statement);
-            _activeExceptionScopes.length -= 1;
+            _activeExceptionScopes.pop;
             scopeActive = false;
             if (catch_ !is null) {
                 bindCatchVariable(catch_, exception.take);
@@ -1571,11 +1923,51 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
     }
 
-    extern(D) private ExceptionCandidate[] activeExceptionCandidates() {
-        ExceptionCandidate[] candidates;
-        foreach_reverse (scope_; _activeExceptionScopes)
-            candidates ~= scope_._candidates;
-        return candidates;
+    extern(D) private TryCatchPlan* tryCatchPlanOf(
+        TryCatchStatement statement,
+    ) {
+        if (auto cached = statement in _shared.tryCatchPlans)
+            return cached;
+
+        // Candidate construction needs dmd's mutable TypeInfo_Class values.
+        TryCatchPlan plan;
+        plan.catches = catchPlanOf(
+            statement, catch_ => catchRuntimeInfo(catch_),
+        );
+        foreach (clause; plan.catches.clauses)
+            plan.candidates ~= ExceptionCandidate(
+                cast(const(void)*) statement,
+                ExceptionCandidate.Kind.catch_,
+                clause.type,
+                cast(const(void)*) clause.syntax,
+            );
+        return _shared.tryCatchPlans.insert(statement, plan);
+    }
+
+    extern(D) private ExceptionCandidate[] finallyCandidatesOf(
+        TryFinallyStatement statement,
+    ) {
+        if (auto cached = statement in _shared.finallyCandidates)
+            return *cached;
+
+        return *_shared.finallyCandidates.insert(statement, [
+            ExceptionCandidate(
+                cast(const(void)*) statement,
+                ExceptionCandidate.Kind.finally_,
+                null,
+                cast(const(void)*) statement.finalbody,
+            ),
+        ]);
+    }
+
+    // The result lasts until the next call: it lives on the C heap, because
+    // a throw in a destructor that the GC finalizer runs cannot allocate.
+    extern(D) private const(ExceptionCandidate)[] activeExceptionCandidates() {
+        _candidateScratch.truncate(0);
+        foreach_reverse (scope_; _activeExceptionScopes[])
+            foreach (candidate; scope_._candidates)
+                _candidateScratch.push(candidate);
+        return _candidateScratch[];
     }
 
     extern(D) private ExceptionUnwindPlan exceptionPlan(
@@ -1602,17 +1994,48 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private bool runsFinally(TryFinallyStatement statement) {
+        auto key = FinallyKey(cast(const(void)*) statement);
+        if (_controlFlow.hasGoto) {
+            key.exit = FinallyKey.Exit.gotoScope;
+            key.destination = _controlFlow.destinationScope;
+        } else
+            key.exit = _controlFlow.hasTransfer
+                ? FinallyKey.Exit.transfer : FinallyKey.Exit.fallThrough;
+
+        return runsFinally(key, statement);
+    }
+
+    private bool runsFinally(
+        in FinallyKey key,
+        TryFinallyStatement statement,
+    ) {
+        if (auto cached = key in _shared.finallyRuns)
+            return *cached;
+
+        return *_shared.finallyRuns.insert(
+            key, computeRunsFinally(key, statement));
+    }
+
+    private bool computeRunsFinally(
+        in FinallyKey key,
+        TryFinallyStatement statement,
+    ) {
         import snakebite.backends.exceptionplan: unwindPlanOf;
 
         // The unwind planner takes mutable ScopeFrame arrays from dmd.
         auto source = scopePath(statement);
         ScopeFrame[] destination;
-        if (_controlFlow.hasGoto)
-            destination = scopePath(
-                cast(Statement) _controlFlow.destinationScope,
-            );
-        else if (!_controlFlow.hasTransfer && source.length > 0)
-            destination = source[1 .. $];
+        final switch (key.exit) with (FinallyKey.Exit) {
+            case gotoScope:
+                destination = scopePath(cast(Statement) key.destination);
+                break;
+            case fallThrough:
+                if (source.length > 0)
+                    destination = source[1 .. $];
+                break;
+            case transfer:
+                break;
+        }
 
         const plan = unwindPlanOf(source, destination);
         foreach (finalizer; plan.finalizers)
@@ -1622,18 +2045,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     override void visit(TryFinallyStatement statement) {
-        _activeExceptionScopes ~= ActiveExceptionScope([
-            ExceptionCandidate(
-                cast(const(void)*) statement,
-                ExceptionCandidate.Kind.finally_,
-                null,
-                cast(const(void)*) statement.finalbody,
-            ),
-        ]);
+        _activeExceptionScopes.push(
+            ActiveExceptionScope(finallyCandidatesOf(statement)));
         auto scopeActive = true; // Cleared after the scope is removed explicitly.
         scope (exit)
             if (scopeActive)
-                _activeExceptionScopes.length -= 1;
+                _activeExceptionScopes.pop;
 
         bool bodyRan;
         Throwable pendingException;
@@ -1664,7 +2081,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             assert(plan.finalizers[0].owner == cast(const(void)*) statement);
             runFinalizer = true;
         } finally {
-            _activeExceptionScopes.length -= 1;
+            _activeExceptionScopes.pop;
             scopeActive = false;
             if (pendingException is null)
                 runFinalizer = runsFinally(statement);
@@ -1697,7 +2114,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (isHalt(exception))
                 throw exception;
 
-            throw new GuestException(exception);
+            throw GuestException.make(exception);
         }
     }
 
@@ -2635,20 +3052,22 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // force semantic3 themselves, guarded, wherever they are called from
     // - so nothing extra is forced here.
     extern(D) private const(Hop)[] staticChainOf(FuncDeclaration owner) {
+        return staticChainBetween(_function, owner);
+    }
+
+    extern(D) private const(Hop)[] staticChainBetween(
+        FuncDeclaration from,
+        FuncDeclaration owner,
+    ) {
         const key = StaticChainKey(
-            cast(const(void)*) _function, cast(const(void)*) owner);
+            cast(const(void)*) from, cast(const(void)*) owner);
         if (auto cached = key in _staticChains)
             return *cached;
 
         return *_staticChains.build(key,
-            () => ClosurePlan.staticChainPath(_function, owner));
+            () => ClosurePlan.staticChainPath(from, owner));
     }
 
-    // The answer shared with the bytecode compiler
-    // (`snakebite.frontend.dmd.delegates.functionNeedsClosure`), kept: dmd
-    // works it out by walking every captured variable's references each
-    // time it is asked, and this evaluator asks on every reach of a
-    // variable.
     private bool functionNeedsClosure(FuncDeclaration function_) {
         return closurePlanOf(function_).needsClosure;
     }
@@ -2887,19 +3306,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             }
         }
 
-        void* delegate(size_t, size_t) reserve =
-            (size_t size, size_t alignment) {
-            return _temporaries.reserveValue(
-                size, cast(uint) alignment);
-        };
-        void delegate(void*) evaluateRhs = (void* value) {
-            evaluate(expression.e2, _type, _facts, value);
-        };
-        void delegate(void*) publish = (void* value) {
-            memcpy(target, value, _facts.size);
-        };
-        executeAssignment!(void*, reserve, evaluateRhs, publish)(
-            isConstruct, target, _facts.size, _facts.alignment);
+        executeAssignment!(void*)(isConstruct, target, _facts.size,
+            _facts.alignment,
+            (size, alignment) => cast(void*) _temporaries.reserveValue(
+                size, cast(uint) alignment),
+            (value) { evaluate(expression.e2, _type, _facts, value); },
+            (value) { memcpy(target, value, _facts.size); });
         if (_place !is null)
             memcpy(_place, target, _facts.size);
         return target;
@@ -4850,7 +5262,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const message = failure.messageExpression is null
             ? failure.message
             : evaluateMessage(failure.messageExpression);
-        throw new GuestException(
+        throw GuestException.make(
             new AssertError(message, failure.file, failure.line));
     }
 
@@ -4936,7 +5348,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "`: it is null"),
             );
 
-        throw new GuestException(guest);
+        throw GuestException.make(guest);
     }
 
     override void visit(ArrayLengthExp expression) {
@@ -5145,7 +5557,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // `_place` was overwritten with the temporary's own address - it is
     // what `storeConstant`/`storeAddress`/`copyBytes` write into, not the
     // temporary itself.
-    private TemporaryDestination[] _temporaryDestinations;
+    private CStack!TemporaryDestination _temporaryDestinations;
 
     // Reserves a frame temporary of `facts` and substitutes it for the
     // ambient (`_place`, `_type`, `_facts`) destination `run` (and anything
@@ -5157,9 +5569,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             Type type, in TypeFacts facts, scope void delegate() run) {
         auto destination = TemporaryDestination(
             _place, _type, _facts, _frames.mark);
-        _temporaryDestinations ~= destination;
+        _temporaryDestinations.push(destination);
         scope (exit) {
-            _temporaryDestinations.length--;
+            _temporaryDestinations.pop;
             _place = destination.place;
             _type = destination.type;
             _facts = destination.facts;
@@ -5186,7 +5598,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     // Valid only inside `withTemporaryDestination`'s `run` delegate: writes
     // `value` at `byteOffset` into the surrounding destination that call
-    // saved (`_temporaryDestinations[$ - 1]`), not into the temporary.
+    // saved (`_temporaryDestinations.back`), not into the temporary.
     protected override void storeConstant(
         in size_t value, in size_t byteOffset,
     ) {
@@ -5194,7 +5606,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         assert(_temporaryDestinations.length > 0,
             "storeConstant needs an enclosing withTemporaryDestination");
-        auto destination = _temporaryDestinations[$ - 1];
+        auto destination = _temporaryDestinations.back;
         storeIntegral(cast(ubyte*) destination.place + byteOffset,
             value, size_t.sizeof);
     }
@@ -5206,7 +5618,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     protected override void storeAddress(in size_t byteOffset) {
         assert(_temporaryDestinations.length > 0,
             "storeAddress needs an enclosing withTemporaryDestination");
-        auto destination = _temporaryDestinations[$ - 1];
+        auto destination = _temporaryDestinations.back;
         *cast(void**) (cast(ubyte*) destination.place + byteOffset)
             = *cast(void**) _place;
     }
@@ -5220,7 +5632,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         assert(_temporaryDestinations.length > 0,
             "copyBytes needs an enclosing withTemporaryDestination");
-        auto destination = _temporaryDestinations[$ - 1];
+        auto destination = _temporaryDestinations.back;
         memcpy(destination.place, *cast(void**) _place, width);
     }
 
@@ -5229,19 +5641,19 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         size_t mark;
     }
 
-    private NewDestination[] _newDestinations;
+    private CStack!NewDestination _newDestinations;
 
     protected override void prepareNew(NewExp expression) {
         // Keeps pointed-to storage mutable during destination restoration.
         auto destination = NewDestination(_place, _frames.mark);
         auto place = _frames.reserve(_facts.size, _facts.alignment);
-        _newDestinations ~= destination;
+        _newDestinations.push(destination);
         _place = place;
     }
 
     protected override void restoreNew() {
-        auto destination = _newDestinations[$ - 1];
-        _newDestinations.length--;
+        auto destination = _newDestinations.back;
+        _newDestinations.pop;
         _place = destination.place;
         _frames.release(destination.mark);
     }
@@ -5270,7 +5682,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 factsOf(expression.newtype),
                 cast(void*) loadIntegral(_place, size_t.sizeof, false));
         }
-        memcpy(_newDestinations[$ - 1].place, _place, _facts.size);
+        memcpy(_newDestinations.back.place, _place, _facts.size);
     }
 
     protected override void visitUnloweredNew(
@@ -5582,15 +5994,27 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         assert(structType !is null && structType.sym == expression.sd,
             "a struct literal destination has the same struct type");
 
-        import snakebite.backends.aggregateinit: applyStep, planStructLiteral;
+        import snakebite.backends.aggregateinit: applyStep;
 
-        auto plan = planStructLiteral(expression);
+        auto plan = structLiteralPlanOf(expression);
         if (plan.zeroFill)
             memset(_place, 0, _facts.size);
 
         auto hooks = AggregateInitHooks(this, cast(ubyte*) _place);
         foreach (step; plan.steps)
             applyStep(hooks, step);
+    }
+
+    private AggregateInitPlan* structLiteralPlanOf(
+        StructLiteralExp expression,
+    ) {
+        import snakebite.backends.aggregateinit: planStructLiteral;
+
+        if (auto cached = expression in _shared.structLiteralPlans)
+            return cached;
+
+        return _shared.structLiteralPlans.insert(
+            expression, planStructLiteral(expression));
     }
 
     protected override void visitUnloweredCat(CatExp expression) {
@@ -5777,23 +6201,39 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         );
     }
 
+    // Where the extra arguments of one call site go, which depends on
+    // their types alone: built once for the site, by the first evaluator
+    // that reaches it or by the preparation of a callback.
+    private const(VariadicCallPlan)* variadicCallPlanOf(
+        Expressions* arguments, in size_t firstExtra,
+    ) {
+        import snakebite.backends.variadic: VariadicLayout;
+
+        const key = cast(const(void)*) arguments;
+        if (auto found = key in _shared.variadicCallPlans)
+            return found;
+
+        TypeFacts[] facts;
+        foreach (argument; (*arguments)[firstExtra .. $])
+            facts ~= factsOf(argument.type);
+        return _shared.variadicCallPlans.insert(
+            key, VariadicCallPlan(facts, VariadicLayout.of(facts)));
+    }
+
     private void bindVariadicArguments(
         Expressions* arguments, ubyte* frame, const(FrameLayout)* layout,
     ) {
-        import snakebite.backends.variadic: VariadicLayout;
         import snakebite.nativelayout: storeIntegral;
 
         const hasTypes = layout.variadicTypes != size_t.max;
         const firstExtra = hasTypes + layout.parameters.length;
-        TypeFacts[] facts;
-        foreach (argument; (*arguments)[firstExtra .. $])
-            facts ~= factsOf(argument.type);
-        const plan = VariadicLayout.of(facts);
-        auto storage = _frames.reserve(plan.size, plan.alignment);
-        plan.initialize(storage);
-        foreach (i, offset; plan.offsets) {
+        const call = variadicCallPlanOf(arguments, firstExtra);
+        auto storage = _frames.reserve(
+            call.layout.size, call.layout.alignment);
+        call.layout.initialize(storage);
+        foreach (i, offset; call.layout.offsets) {
             auto argument = (*arguments)[firstExtra + i];
-            evaluate(argument, argument.type, facts[i], storage + offset);
+            evaluate(argument, argument.type, call.facts[i], storage + offset);
         }
         storeIntegral(frame + layout.variadicCursor, cast(size_t) storage,
             size_t.sizeof);
