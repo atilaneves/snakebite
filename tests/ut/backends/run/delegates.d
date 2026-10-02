@@ -1296,3 +1296,23 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A function pointer cast to a type with one fewer parameter. The callee
+// reads no parameter, so the missing argument has no effect.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine fails with an internal error on a call with"
+            ~ " fewer arguments than parameters"),
+)) {
+    @("callThroughFunctionPointerCastToOneFewerParameter." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int three(int unused) { return 3; }
+            int main() {
+                auto pointer = cast(int function()) &three;
+                return pointer() == 3 ? 0 : 1;
+            }
+        });
+    }
+}

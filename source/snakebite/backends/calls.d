@@ -374,11 +374,20 @@ public struct CallSelection {
 // typesafe call's trailing arguments into one array-typed argument by
 // the time this ever runs, so `>=` never actually admits more arguments
 // than `parameterList.length` for that kind.
+//
+// A call through a function pointer has the arity of the pointer's type,
+// which a cast can make different from the arity of the function that the
+// pointer holds (`throughValue`).
+
 public bool arityMismatches(
     imported!"dmd.mtype".ParameterList parameterList,
     imported!"dmd.arraytypes".Expressions* arguments,
     in bool allowExtra = false,
+    in bool throughValue = false,
 ) {
+    if (throughValue)
+        return false;
+
     const count = arguments is null ? 0 : arguments.length;
     return allowExtra
         ? count < parameterList.length

@@ -1179,6 +1179,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const(FrameLayout)* layout,
         Expression callSite = null,
         Expressions* callArguments = null,
+        in bool throughValue = false,
     ) {
         auto arguments = argumentSlots(frameBase, layout);
         auto adapter = callShapeOf(function_).adapter;
@@ -1217,7 +1218,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 bindVariadicArguments(callArguments, frameBase, layout);
             } else if (callSite !is null)
                 bindArguments(function_, callArguments, callSite.loc,
-                    frameBase, layout);
+                    frameBase, layout, false, throughValue);
             result = adapter.invoke(
                 returnPlace, arguments.values, &executeCallee);
         }, { _temporaries.armConstructor(receiver); });
@@ -5835,19 +5836,22 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         ubyte* frameBase,
         const(FrameLayout)* layout,
         in bool allowExtra = false,
+        in bool throughValue = false,
     ) {
         _bindArguments(typeFunctionOf(function_), arguments, loc,
-            frameBase, layout, allowExtra);
+            frameBase, layout, allowExtra, throughValue);
     }
 
     private void _bindArguments(
         TypeFunction type, Expressions* arguments, in Loc loc,
         ubyte* frameBase, const(FrameLayout)* layout,
         in bool allowExtra = false,
+        in bool throughValue = false,
     ) {
         import snakebite.backends.calls: arityMismatches;
 
-        if (arityMismatches(type.parameterList, arguments, allowExtra))
+        if (arityMismatches(
+                type.parameterList, arguments, allowExtra, throughValue))
             assert(0, "dmd checks a call's arity; a variadic call allows "
                 ~ "extra arguments");
 
@@ -5887,6 +5891,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     loc,
                 );
         });
+
+        // A function pointer cast to a type with more parameters than the
+        // callee passes arguments that the callee never reads. Each still
+        // runs, in order, as in compiled code.
+        if (type.parameterList.varargs != VarArg.variadic
+                && arguments !is null
+                && arguments.length > type.parameterList.length)
+            foreach (extra; (*arguments)[type.parameterList.length .. $])
+                runForEffect(extra);
     }
 
     private void initializeDefault(
@@ -6185,6 +6198,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         const isVariadic = funcType.parameterList.varargs == VarArg.variadic;
+        const contextFromValue = resolved is null;
         auto frame = bindFrame(
             expression,
             function_,
@@ -6192,12 +6206,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             isVariadic,
             classReceiver,
             callee.context,
-            callee.fromDelegate,
+            contextFromValue,
         );
 
         return executeCall(
             function_, returnPlace, frame.base, layout, expression,
-            expression.arguments,
+            expression.arguments, contextFromValue,
         );
     }
 
@@ -6473,7 +6487,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         in bool allowExtra = false,
         void* classReceiver = null,
         void* delegateContext = null,
-        bool fromDelegate = false,
+        bool contextFromValue = false,
     ) {
         import snakebite.nativelayout: storeIntegral;
         import snakebite.backends.calls: arityMismatches;
@@ -6486,12 +6500,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // only a body has.
         auto parameterList = typeFunctionOf(function_).parameterList;
         auto arguments = expression.arguments;
-        if (arityMismatches(parameterList, arguments, allowExtra))
-            throw new SnakebiteException(
-                text("interpreter: `", function_.toString, "` expects ",
-                    parameterList.length, " argument(s), got ",
-                    arguments is null ? 0 : arguments.length),
-            );
+        if (arityMismatches(
+                parameterList, arguments, allowExtra, contextFromValue))
+            assert(0, "dmd checks a call's arity; a variadic call allows "
+                ~ "extra arguments");
 
         auto frame = _frames.push(layout.size, layout.alignment);
 
@@ -6501,7 +6513,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // The shared layout excludes unused lambda contexts even when
         // dmd retains their `vthis` declarations.
         if (layout.hiddenThis.variable !is null) {
-            const hidden = fromDelegate
+            const hidden = contextFromValue
                 ? cast(size_t) delegateContext
                 : hiddenArgumentOf(expression, function_, classReceiver);
             storeIntegral(
@@ -6542,10 +6554,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (classDeclaration !is null)
                 return cast(size_t) classReceiver;
             if (dot is null)
-                throw new SnakebiteException(
-                    text("interpreter cannot call `", function_.toString,
-                        "`: its `this` receiver is not a struct lvalue"),
-                );
+                assert(0, "a struct member reached with no receiver "
+                    ~ "expression is called through a value");
             return cast(size_t) addressOf(dot.e1);
         }
 
