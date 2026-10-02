@@ -513,6 +513,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     private Cache!(Type, TypeFacts) _typeFacts;
     private Cache!(VarDeclaration, BitfieldAccess) _bitfields;
+    // The plans of the bit fields most recently used, found by the
+    // address of the declaration, so that a loop over a few bit fields
+    // does not hash on each access.
+    private static struct BitfieldSlot {
+        VarDeclaration field;
+        BitfieldAccess plan;
+    }
+    private BitfieldSlot[16] _recentBitfields;
     // Expression-scoped rvalues and temporary destructors have one owner.
     private TemporaryLifetime _temporaries;
     // The most recently asked-about `Type` and its facts: dmd interns
@@ -1417,6 +1425,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         private ControlFlowState _controlFlow;
         private SwitchStatement _switchStatement;
         private void[][] _activationAllocations;
+        private TemporaryLifetime.Activation _activation;
 
         @disable this();
         @disable this(this);
@@ -1435,6 +1444,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _switchStatement = evaluator._switchStatement;
             _activationAllocations = evaluator._activationAllocations;
             evaluator._activationAllocations = null;
+            _activation = evaluator._temporaries.enterActivation;
         }
 
         ~this() {
@@ -1449,6 +1459,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _evaluator._controlFlow = _controlFlow;
             _evaluator._switchStatement = _switchStatement;
             _evaluator._activationAllocations = _activationAllocations;
+            _evaluator._temporaries.leaveActivation(_activation);
         }
     }
 
@@ -1758,8 +1769,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (statement.statement is null)
             return;
 
-        const storage = _temporaries.storageMark;
-        scope (exit) _temporaries.releaseStorage(storage);
         statement.statement.accept(this);
     }
 
@@ -1857,13 +1866,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // temporary, so a guest throw from any point of the evaluation still
     // releases whatever was reserved by then.
     //
-    // A declaration keeps the bytes of its temporaries until its scope
-    // ends: the variable it initialises can point into them, and compiled
-    // D keeps a temporary's stack slot for the whole function.
+    // A declaration keeps the bytes of its temporaries in a slot of the
+    // running call: the variable it initialises can point into them, and
+    // compiled D keeps a temporary's stack slot for the whole function.
     private void runFullExpression(Expression expression) {
         _temporaries.withExpression(FullExpressionKind.effect, expression, {
             runForEffect(expression);
-        }, expression.isDeclarationExp !is null);
+        });
     }
 
     // A condition is a full expression of its own on each evaluation - a
@@ -4660,10 +4669,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     extern(D) private BitfieldAccess bitfieldPlanOf(VarDeclaration field) {
-        if (auto cached = field in _bitfields)
-            return *cached;
+        auto recent = &_recentBitfields[(cast(size_t) cast(void*) field >> 4) & 15];
+        if (recent.field is field)
+            return recent.plan;
 
-        return *_bitfields.build(field, () => bitfieldAccess(field));
+        auto plan = field in _bitfields;
+        if (plan is null)
+            plan = _bitfields.build(field, () => bitfieldAccess(field));
+        *recent = BitfieldSlot(field, *plan);
+        return *plan;
     }
 
     // Where a field starts in its struct: a bit field starts at its
