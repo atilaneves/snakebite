@@ -62,24 +62,29 @@ public struct Program {
         in Checks checks,
         HaltAction haltAction = &haltProcess,
     ) {
+        import snakebite.frontend.compiler: withCompilerLock;
         import snakebite.frontend.dmd.functions: findFunction;
 
         this.rootModules = rootModules;
-        _links = LinkMap(rootModules);
         this.name = name;
         _checks = checks;
         _haltAction = haltAction;
-        foreach (module_; rootModules) {
-            _rootModuleSet[module_] = true;
-        }
-
-        foreach (module_; rootModules) {
-            auto found = findFunction(module_, "main");
-            if (found !is null) {
-                main = Main(found);
-                break;
+        // The walks read the frontend's global state, which a thread that
+        // evaluates a literal changes under the lock at the same time.
+        withCompilerLock({
+            _links = LinkMap(rootModules);
+            foreach (module_; rootModules) {
+                _rootModuleSet[module_] = true;
             }
-        }
+
+            foreach (module_; rootModules) {
+                auto found = findFunction(module_, "main");
+                if (found !is null) {
+                    main = Main(found);
+                    break;
+                }
+            }
+        });
     }
 
     public Checks checks() const {
