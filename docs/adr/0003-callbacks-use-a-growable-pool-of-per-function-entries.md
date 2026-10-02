@@ -29,8 +29,11 @@ We decide as follows.
    own address and its chunk's trailer address relative to the
    program counter, and embeds no absolute address of any table.
 2. A slot is keyed by guest function, never by call, and is never
-   released. A guest function pointer maps to its slot for the life
-   of the program, within the backend instance that owns the function.
+   released, except that a bridge whose entries no host code can reach
+   any more gives all of its slots back (`CallbackBridge.release`): the
+   module phases of a guest program that ended. A guest function pointer
+   maps to its slot for the life of the program, within the backend
+   instance that owns the function.
    A guest delegate uses the same per-function slot as its function
    pointer, and keeps its own context word untouched, because the
    host passes that context back on every call.

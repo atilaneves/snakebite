@@ -387,6 +387,18 @@ public imported!"dmd.expression".Expression initializerValueOf(
     return value;
 }
 
+// Whether `variable` has one copy for each thread. dmd's glue layer gives a
+// compiler-made `static` (`STC.temp`, such as the gate of a template
+// instance's module destructor) one copy for the whole process, though
+// `isThreadlocal` is true for it: `glue/tocsym.d` makes that exception.
+public bool isThreadLocalStorage(
+    imported!"dmd.declaration".VarDeclaration variable,
+) {
+    import dmd.astenums: STC;
+
+    return variable.isThreadlocal && !(variable.storage_class & STC.temp);
+}
+
 // `T[n] v = source;` (a static array constructed from a slice or a
 // scalar, never an array literal) is not a plain value initializer: dmd
 // rewrites the construction to `v[] = source` (expressionsem.d, around
@@ -701,7 +713,7 @@ public struct NativeData {
 
         auto variable = definitionOf(declaration);
         const facts = TypeFacts.of(variable.type);
-        if (variable.isThreadlocal)
+        if (variable.isThreadLocalStorage)
             return _tls.current.slotFor(tlsDescriptorOf(variable));
 
         if (hasNativeStorage(variable)) {
@@ -844,7 +856,7 @@ public struct NativeData {
         import std.conv: text;
 
         if (auto variable = symbol.isVarDeclaration) {
-            if (variable.isThreadlocal)
+            if (variable.isThreadLocalStorage)
                 throw new Exception(text(
                     "cannot bake the address of thread-local variable `",
                     variable.toChars, "` into a constant initializer"));
