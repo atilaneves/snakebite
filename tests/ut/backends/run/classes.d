@@ -3088,7 +3088,8 @@ static foreach (backend; Matrix!()) {
 // static `TypeInfo_Class` object of `Object`, and that object is itself an
 // instance of `TypeInfo_Class`.
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible, "CTFE cannot read runtime TypeInfo"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE internal error: determining classinfo"),
 )) {
     @("class.typeidOfAClassinfoOfAType." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -3097,6 +3098,41 @@ static foreach (backend; Matrix!(
         int main() {
             auto info = typeid(Object.classinfo);
             return info is typeid(TypeInfo_Class) ? 0 : 1;
+        }
+        });
+    }
+}
+
+// `I.classinfo` of an interface is the `TypeInfo_Class` object of the
+// interface, not the `TypeInfo_Interface` object that `typeid(I)` gives.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine fails with an internal error on the classinfo"),
+)) {
+    @("class.typeidOfAClassinfoOfAnInterface." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        interface I {}
+        int main() {
+            return typeid(I.classinfo) is typeid(TypeInfo_Class) ? 0 : 1;
+        }
+        });
+    }
+}
+
+// `I.classinfo` is the same object as the `info` of `typeid(I)`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine cannot compare `typeid(I)` at compile time"),
+)) {
+    @("class.classinfoOfAnInterfaceIsTheInfoOfItsTypeid." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        interface I {}
+        int main() {
+            return I.classinfo is typeid(I).info ? 0 : 1;
         }
         });
     }

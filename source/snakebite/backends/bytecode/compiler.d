@@ -4449,8 +4449,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         requireDestination(expression);
 
-        if (auto typeInfo = expression.typeInfoAddressedBy) {
-            emitRuntimeTypeInfoConstant(typeInfo.tinfo);
+        if (auto typeInfo =
+                expression.typeInfoAddressedBy(_bytecode._runtimeTypes)) {
+            emitTypeInfoConstant(typeInfo);
             return;
         }
 
@@ -5202,7 +5203,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t destination = size_t.max,
         in size_t width = size_t.max,
     ) {
-        auto address = cast(void*) _bytecode._runtimeTypes.get(type);
+        emitTypeInfoConstant(
+            _bytecode._runtimeTypes.get(type), destination, width);
+    }
+
+    private void emitTypeInfoConstant(
+        TypeInfo info,
+        in size_t destination = size_t.max,
+        in size_t width = size_t.max,
+    ) {
+        auto address = cast(void*) info;
 
         emit(&opConstant,
             destination == size_t.max ? _destination : destination,
@@ -7758,6 +7768,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         FunctionCompiler compiler;
 
         public size_t symbolAddress(SymOffExp expression) {
+            import snakebite.frontend.storage: typeInfoObjectOf;
+
             if (auto function_ = expression.var.isFuncDeclaration) {
                 const result = compiler.reserveTemp(compiler.pointerFacts);
                 const address = compiler._bytecode.callableAddress(function_, 0);
@@ -7769,8 +7781,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             if (auto typeInfo = expression.var.isTypeInfoDeclaration) {
                 const result = compiler.reserveTemp(compiler.pointerFacts);
-                compiler.emitRuntimeTypeInfoConstant(
-                    typeInfo.tinfo, result, size_t.sizeof,
+                compiler.emitTypeInfoConstant(
+                    typeInfoObjectOf(
+                        typeInfo, compiler._bytecode._runtimeTypes),
+                    result, size_t.sizeof,
                 );
                 return result;
             }

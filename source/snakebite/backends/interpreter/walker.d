@@ -3347,11 +3347,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         Evaluator evaluator;
 
         public void* symbolAddress(SymOffExp expression) {
+            import snakebite.frontend.storage: typeInfoObjectOf;
+
             if (auto function_ = expression.var.isFuncDeclaration)
                 return evaluator.callableAddress(function_, 0);
 
             if (auto typeInfo = expression.var.isTypeInfoDeclaration)
-                return cast(void*) evaluator._runtimeTypes.get(typeInfo.tinfo);
+                return cast(void*) typeInfoObjectOf(
+                    typeInfo, *evaluator._runtimeTypes);
 
             auto variable = expression.var.isVarDeclaration;
             assert(variable !is null,
@@ -4713,9 +4716,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (isStaticStructAddress(expression))
             return _nativeData.write(_type, _facts, expression, _place);
 
-        if (auto typeInfo = expression.typeInfoAddressedBy) {
-            storeIntegral(_place,
-                cast(size_t) cast(void*) _runtimeTypes.get(typeInfo.tinfo),
+        if (auto typeInfo = expression.typeInfoAddressedBy(*_runtimeTypes)) {
+            storeIntegral(_place, cast(size_t) cast(void*) typeInfo,
                 _facts.size);
             return;
         }
