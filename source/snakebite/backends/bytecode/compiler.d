@@ -659,6 +659,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.frontend.dmd.delegates:
         DelegateTarget, delegateTargetOf, outerFunctionOf;
     import snakebite.backends.aggregateinit: InitStep, NewPlan;
+    import snakebite.nativelayout: bitfieldAccess, fieldOffset;
     import snakebite.backends.builtins: BuiltinCall;
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.casts: CastPlan;
@@ -2765,7 +2766,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                         && field.isBitFieldDeclaration !is null) {
                     const facts = TypeFacts.of(field.type);
                     emit(&opLoadBitfield, destOffset, target, facts.size,
-                        bitfieldMetadata(field, facts.size));
+                        bitfieldAccess(field).encode(facts.size));
                     return;
                 }
             }
@@ -3054,15 +3055,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private size_t compileThisFieldAddress(VarDeclaration field) {
-        const addressOffset = hiddenThisOffset;
-        if (field.offset == 0)
-            return addressOffset;
-
-        const fieldOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, fieldOffset,
-            addConstant(cast(long) field.offset), size_t.sizeof);
-        emit(&opAdd, fieldOffset, addressOffset, size_t.sizeof);
-        return fieldOffset;
+        return addFieldOffset(hiddenThisOffset, field);
     }
 
     // `*p = value` in every guise this compiler reaches it through: a `ref`
@@ -3164,24 +3157,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             addressOffset = compileAddress(expression.e1);
         }
 
-        if (field.offset == 0)
-            return addressOffset;
-
-        const fieldOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, fieldOffset,
-            addConstant(cast(long) field.offset), size_t.sizeof);
-        emit(&opAdd, fieldOffset, addressOffset, size_t.sizeof);
-        return fieldOffset;
+        return addFieldOffset(addressOffset, field);
     }
 
-    private size_t bitfieldMetadata(VarDeclaration field, in size_t resultWidth) {
-        auto bitfield = field.isBitFieldDeclaration;
-        const signedBit = TypeFacts.of(field.type).isUnsigned
-            ? 0UL : (1UL << 32);
-        return cast(size_t) bitfield.bitOffset
-            | (cast(size_t) bitfield.fieldWidth << 16)
-            | signedBit
-            | (resultWidth << 40);
+    // The address of `field` in the aggregate at `addressOffset`; for a bit
+    // field, the address of its storage unit.
+    private size_t addFieldOffset(
+        in size_t addressOffset, VarDeclaration field,
+    ) {
+        const offset = fieldOffset(field);
+        if (offset == 0)
+            return addressOffset;
+
+        const result = reserveTemp(pointerFacts);
+        emit(&opConstant, result,
+            addConstant(cast(long) offset), size_t.sizeof);
+        emit(&opAdd, result, addressOffset, size_t.sizeof);
+        return result;
     }
 
     private void emitBitfieldStore(
@@ -3201,8 +3193,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         VarDeclaration field, in size_t addressOffset, in size_t valueOffset,
         in size_t valueWidth,
     ) {
-        const metadata = bitfieldMetadata(
-            field, TypeFacts.of(field.type).size);
+        const metadata = bitfieldAccess(field).encode(
+            TypeFacts.of(field.type).size);
         emit(&opStoreBitfield, addressOffset, valueOffset, valueWidth,
             metadata);
     }
@@ -3734,7 +3726,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         case bitfield:
             emit(&opLoadBitfield, destination, storage.offset,
                 storage.facts.size,
-                bitfieldMetadata(storage.variable, width));
+                bitfieldAccess(storage.variable).encode(width));
             break;
         }
     }
@@ -4351,7 +4343,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const facts = TypeFacts.of(field.type);
             const addressOffset = compileFieldAddress(expression);
             emit(&opLoadBitfield, _destination, addressOffset, facts.size,
-                bitfieldMetadata(field, facts.size));
+                bitfieldAccess(field).encode(facts.size));
             return;
         }
 

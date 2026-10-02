@@ -28,6 +28,11 @@ package struct FrameLayout {
     package size_t size;
     package uint alignment = 1;
 
+    // Whether a local of the function can point into the temporaries of its
+    // initialiser: decided once here, so a call of any other function does
+    // no work for it.
+    package bool retainsTemporaries;
+
     // One parameter's slot: its offset into the frame, the facts needed
     // to place a value there, and whether it is `ref` - decided together,
     // from the same `TypeFacts.of` call, since a parameter's type never
@@ -74,6 +79,9 @@ package struct FrameLayout {
     package struct VariableSlot {
         package size_t offset;
         package bool isRef;
+        // Whether the variable can point into the temporaries of its own
+        // initialiser.
+        package bool retainsTemporaries;
     }
     private VariableSlot[VarDeclaration] _slotOf;
 
@@ -625,7 +633,11 @@ extern(C++) private final class LocalsCollector:
             return;
 
         import dmd.astenums: STC;
+        import snakebite.backends.temporary: canRetainTemporaries;
         import snakebite.nativelayout: TypeFacts;
+
+        const retains = canRetainTemporaries(variable);
+        _layout.retainsTemporaries |= retains;
 
         const isRef = (variable.storage_class & STC.ref_) != 0;
         const slot = isRef
@@ -633,7 +645,7 @@ extern(C++) private final class LocalsCollector:
                 TypeFacts.pointer)
             : _layout.reserveSlot(variable.type);
         _layout._slotOf[variable] =
-            FrameLayout.VariableSlot(slot.offset, isRef);
+            FrameLayout.VariableSlot(slot.offset, isRef, retains);
 
         if (variable._init is null)
             return;
