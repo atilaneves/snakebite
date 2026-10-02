@@ -1481,15 +1481,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
         scope scout = new BodyScout(Preparation(
             (site, named) => attempt({
+                // Execution plans the definition that the linker finds for
+                // a declaration, and asks for it at each call, a virtual
+                // one included: it asks about the declaration that dmd
+                // selected before it finds the one that runs.
+                auto callee = _callSelection.definitionOf(
+                    named,
+                    (declaration) => _program.linkedFunctionOf(declaration));
                 if (named.isThis !is null && named.isVirtualMethod
                         && !site.directcall)
                     return;
 
-                // Execution plans the definition that the linker finds for
-                // a declaration, and asks for it at each call.
-                auto callee = _callSelection.definitionOf(
-                    named,
-                    (declaration) => _program.linkedFunctionOf(declaration));
                 enqueue(callee);
                 prepareCall(site, callee);
             }),
