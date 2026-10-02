@@ -189,14 +189,22 @@ unittest {
 @("faultsignal.divisorOf.memoryRelativeToTheInstructionPointer")
 unittest {
     // idiv dword ptr [rip + displacement]: the displacement counts from the
-    // end of the instruction, which is 6 bytes long.
-    static int[4] values = [1, 0, 2, 3];
-    ubyte[6] instruction = [0xf7, 0x3d, 0, 0, 0, 0];
-    const end = cast(long) instruction.ptr + instruction.length;
+    // end of the instruction, which is 6 bytes long. The data is next to
+    // the code: a displacement has 32 bits.
+    struct Layout {
+        ubyte[6] code;
+        int[2] data;
+        ubyte[16] padding;
+    }
+
     foreach (index, expected; [Divisor.nonZero, Divisor.zero]) {
-        *cast(int*) (instruction.ptr + 2) =
-            cast(int) (cast(long) &values[index] - end);
-        decoded(instruction[]).should == expected;
+        Layout layout;
+        layout.code = [0xf7, 0x3d, 0, 0, 0, 0];
+        layout.data = [1, 0];
+        const end = cast(long) &layout + 6;
+        *cast(int*) (layout.code.ptr + 2) =
+            cast(int) (cast(long) &layout.data[index] - end);
+        divisorOf(layout.code.ptr, ulong[16].init).should == expected;
     }
 }
 
@@ -329,7 +337,9 @@ private int loadThroughAFrameWithCleanup(int* pointer) {
 }
 
 // One fault, as the hardware makes it, and the throwable that the thread
-// gets.
+// gets. A division trap has no address of an access.
+private enum noAddress = size_t.max;
+
 private struct Shape {
     string name;
     void function() fault;
@@ -351,13 +361,13 @@ private immutable Shape[] shapes = [
     Shape("unmappedCall", () { call(cast(void function()) 0x7000_0000_0000); },
         GuestFault.Kind.invalidAccess, 0x7000_0000_0000),
     Shape("divisionByZero", () { divide(5, int.max - int.max); },
-        GuestFault.Kind.divisionByZero, 0),
+        GuestFault.Kind.divisionByZero, noAddress),
     Shape("divisionOverflow", () { divide(int.min, int.max - int.max - 1); },
-        GuestFault.Kind.divisionOverflow, 0),
+        GuestFault.Kind.divisionOverflow, noAddress),
     Shape("moduloByZero", () { divideLong(5, long.max - long.max); },
-        GuestFault.Kind.divisionByZero, 0),
+        GuestFault.Kind.divisionByZero, noAddress),
     Shape("moduloOverflow", () { divideLong(long.min, long.max - long.max - 1); },
-        GuestFault.Kind.divisionOverflow, 0),
+        GuestFault.Kind.divisionOverflow, noAddress),
 ];
 
 private HardwareFault faultOf(void function() fault) {
@@ -379,7 +389,8 @@ static foreach (shape; shapes) {
             const fault = faultOf(shape.fault);
 
             fault.kind.should == shape.kind;
-            fault.address.should == shape.address;
+            if (shape.address != noAddress)
+                fault.address.should == shape.address;
             fault.msg.should == GuestFault.message(shape.kind);
         }
     }
