@@ -63,13 +63,30 @@ public final class TemporaryLifetime {
         action();
     }
 
+    // `retainStorage` ends the expression's destructors at its end but
+    // keeps the bytes of its value temporaries until `releaseStorage`: a
+    // variable initialised by the expression can point into them, as a
+    // slice of a static array member of a returned struct does.
     public void withExpression(
         FullExpressionKind kind,
         Expression root,
         scope Action action,
+        in bool retainStorage = false,
     ) {
         _expressions.run(kind, cast(const(void)*) root,
-            { beginExpression; }, action, { endExpression; });
+            { beginExpression; }, action,
+            { endExpression(retainStorage); });
+    }
+
+    public FrameStack.Mark storageMark() const {
+        return _frames.mark;
+    }
+
+    // Gives back the bytes kept by `withExpression`'s `retainStorage` since
+    // `mark`, the mark taken when the retaining scope began.
+    public void releaseStorage(in FrameStack.Mark mark) {
+        if (_frames.mark > mark)
+            _frames.release(mark);
     }
 
     // Gives a nested evaluation its own temporary pairing and cleanup
@@ -147,9 +164,11 @@ public final class TemporaryLifetime {
     ) {
         const previousFloor = _floor;
         const stackMark = _stack.mark;
+        const storage = _frames.mark;
         _floor = mark;
         scope(exit) {
             releaseSince(mark, stackMark);
+            releaseStorage(storage);
             _floor = previousFloor;
         }
         action();
@@ -166,18 +185,20 @@ public final class TemporaryLifetime {
         _floor = _temporaries.length;
     }
 
-    private void endExpression() {
+    private void endExpression(in bool retainStorage) {
         assert(_expressionDepth != 0);
         const state = _expressionStates[--_expressionDepth];
-        releaseSince(state.mark, state.stackMark);
+        releaseSince(state.mark, state.stackMark, retainStorage);
         _floor = state.floor;
     }
 
-    private void releaseSince(in size_t mark, in size_t stackMark) {
+    private void releaseSince(
+        in size_t mark, in size_t stackMark, in bool retainStorage = false,
+    ) {
         // The storage must be released even if a DMD-provided destructor
         // expression throws while unwinding this full expression.
         scope(exit) {
-            if (_temporaries.length > mark)
+            if (_temporaries.length > mark && !retainStorage)
                 _frames.release(_temporaries[mark].mark);
             _temporaries = _temporaries[0 .. mark];
         }

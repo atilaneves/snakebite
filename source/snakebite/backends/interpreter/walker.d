@@ -1748,6 +1748,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (statement.statement is null)
             return;
 
+        const storage = _temporaries.storageMark;
+        scope (exit) _temporaries.releaseStorage(storage);
         statement.statement.accept(this);
     }
 
@@ -1844,10 +1846,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // destroys them. The mark is recorded before anything can reserve a
     // temporary, so a guest throw from any point of the evaluation still
     // releases whatever was reserved by then.
+    //
+    // A declaration keeps the bytes of its temporaries until its scope
+    // ends: the variable it initialises can point into them, and compiled
+    // D keeps a temporary's stack slot for the whole function.
     private void runFullExpression(Expression expression) {
         _temporaries.withExpression(FullExpressionKind.effect, expression, {
             runForEffect(expression);
-        });
+        }, expression.isDeclarationExp !is null);
     }
 
     // A condition is a full expression of its own on each evaluation - a
