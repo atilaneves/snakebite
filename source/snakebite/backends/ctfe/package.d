@@ -8,6 +8,7 @@ private:
 public final class Ctfe: imported!"snakebite.backends.backend".Backend {
     import dmd.func: FuncDeclaration;
     import snakebite.backends.backend: Program;
+    import snakebite.exception: SnakebiteException;
 
     public this(const Program program) {
         super(program);
@@ -26,9 +27,15 @@ public final class Ctfe: imported!"snakebite.backends.backend".Backend {
         // `const` would qualify the dmd AST reference inside the result.
         auto result = interpret(function_);
         if (result.error !is null)
-            throw new Exception(result.error);
+            throw new SnakebiteException(result.error);
 
         writeResult(function_, result.value, returnPlace);
+    }
+
+    public override void[] staticStorage(
+        imported!"dmd.declaration".VarDeclaration,
+    ) {
+        return null;
     }
 
     public override string eval(FuncDeclaration function_) {

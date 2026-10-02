@@ -49,10 +49,15 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         evaluator.call(function_, returnPlace, args);
     }
 
+    public override void[] staticStorage(
+        imported!"dmd.declaration".VarDeclaration variable,
+    ) {
+        return _shared.nativeData.storageOf(variable);
+    }
+
     // The evaluator of the calling thread: made on its first entry, and
     // kept until it ends.
     private Evaluator evaluator() {
-        initializeThread;
         return _evaluators.current;
     }
 

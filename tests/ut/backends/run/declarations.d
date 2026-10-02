@@ -104,6 +104,235 @@ static foreach (backend; Matrix!(
 }
 
 
+// Runs `code` as a whole program the way compiled D runs it, module
+// constructors and destructors included, and returns the exit status. The
+// guest finds `traceFile`, a path in `sandbox`, and writes what it observed
+// there. The native oracle builds an executable: `Guest.main` called from a
+// struct would never run the module's constructors or destructors.
+private int programStatus(Backend)(in Sandbox sandbox, in string code) {
+    const source = "enum traceFile = `" ~ sandbox.inSandboxPath("trace")
+        ~ "`;\nvoid trace(string text) {"
+        ~ " import std.file: append; traceFile.append(text); }\n" ~ code;
+    static if (is(Backend == Native)) {
+        sandbox.writeFile("guest.d", source);
+        const executable = sandbox.inSandboxPath("guest");
+        const built = execute([defaultCompiler,
+            sandbox.inSandboxPath("guest.d"), "-of=" ~ executable]);
+        built.status.shouldEqual(0, built.output);
+        return execute([executable]).status;
+    } else {
+        auto program = Program([parseSnippet(source)]);
+        return run(new Backend(program), program);
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("moduleDestructorRunsAfterMain." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            shared static ~this() { trace("dtor;"); }
+            void main() { trace("main;"); }
+        }).should == 0;
+        sandbox.shouldEqualContent("trace", "main;dtor;");
+    }
+}
+
+
+// Destructors run in the reverse of declaration order. The main thread's
+// `static ~this` run before every `shared static ~this`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("moduleDestructorsRunInReverseOrder." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            shared static ~this() { trace("s1;"); }
+            static ~this() { trace("t1;"); }
+            shared static ~this() { trace("s2;"); }
+            static ~this() { trace("t2;"); }
+            void main() { trace("main;"); }
+        }).should == 0;
+        sandbox.shouldEqualContent("trace", "main;t2;t1;s2;s1;");
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("moduleDestructorRunsAfterMainThrows." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            shared static ~this() { trace("dtor;"); }
+            void main() {
+                trace("main;");
+                throw new Exception("main failed");
+            }
+        }).should == 1;
+        sandbox.shouldEqualContent("trace", "main;dtor;");
+    }
+}
+
+
+// An exception from a destructor ends the destructor phase: the destructors
+// that would run after it do not, and a program that succeeded now fails.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("moduleDestructorThatThrowsFailsTheProgram." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            shared static ~this() { trace("first declared;"); }
+            shared static ~this() {
+                trace("last declared;");
+                throw new Exception("dtor failed");
+            }
+            void main() { trace("main;"); }
+        }).should == 1;
+        sandbox.shouldEqualContent("trace", "main;last declared;");
+    }
+}
+
+
+// A program whose startup failed never ran its module destructors.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("moduleDestructorDoesNotRunAfterFailedConstructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            shared static this() { trace("ctor1;"); }
+            shared static this() { throw new Exception("ctor failed"); }
+            shared static ~this() { trace("dtor;"); }
+            void main() { trace("main;"); }
+        }).should == 1;
+        sandbox.shouldEqualContent("trace", "ctor1;");
+    }
+}
+
+
+// A thread's `static ~this` runs when that thread ends, before a `join` on
+// it returns.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("threadDestructorRunsWhenThreadEnds." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            import core.thread: Thread;
+
+            static ~this() { trace("dtor;"); }
+
+            void main() {
+                auto thread = new Thread({ trace("worker;"); });
+                thread.start;
+                thread.join;
+                trace("main;");
+            }
+        }).should == 0;
+        sandbox.shouldEqualContent("trace", "worker;dtor;main;dtor;");
+    }
+}
+
+
+// dmd guards a module destructor of a template instance with a gate: more
+// than one module can emit the same instance. The module's constructor phase
+// increments the gate (dmd glue, `callFuncsAndGates`), and the destructor
+// runs its body only when it decrements the gate to zero.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("moduleDestructorOfTemplateInstanceRuns." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            struct Holder(T) {
+                shared static ~this() { trace("shared;"); }
+                static ~this() { trace("thread;"); }
+            }
+
+            void main() {
+                Holder!int holder;
+                trace("main;");
+            }
+        }).should == 0;
+        sandbox.shouldEqualContent("trace", "main;thread;shared;");
+    }
+}
+
+
+// dmd emits the gate of a thread-local destructor as one variable for the
+// process, not one for each thread. Thus the destructor body runs only on
+// the last thread that ends.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("threadDestructorOfTemplateInstanceRunsWhenThreadEnds." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            import core.thread: Thread;
+
+            struct Holder(T) {
+                static ~this() { trace("dtor;"); }
+            }
+
+            void main() {
+                Holder!int holder;
+                auto thread = new Thread({ trace("worker;"); });
+                thread.start;
+                thread.join;
+                trace("main;");
+            }
+        }).should == 0;
+        sandbox.shouldEqualContent("trace", "worker;main;dtor;");
+    }
+}
+
+
+// druntime runs the thread-local constructors and destructors on every thread
+// it starts, also on one that calls no function of the program.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("threadConstructorRunsOnThreadThatCallsNoProgramCode." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            import std.parallelism: TaskPool;
+
+            static this() { trace("ctor;"); }
+            static ~this() { trace("dtor;"); }
+
+            void main() {
+                auto pool = new TaskPool(1);
+                pool.finish(true);
+                trace("main;");
+            }
+        }).should == 0;
+        sandbox.shouldEqualContent("trace", "ctor;ctor;dtor;main;dtor;");
+    }
+}
+
+
 static foreach (backend; Matrix!()) {
     @("tupleLocalsInitializeEveryMember." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -651,5 +880,157 @@ static foreach (backend; Matrix!(
                 assert((pageSize & (pageSize - 1)) == 0);
             }
         });
+    }
+}
+
+
+// A thread that a module destructor starts can stay alive after its program
+// ends. When it ends later, it must not run the thread-local destructors of
+// a different program that runs at that time.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
+)) {
+    @("threadOfEndedProgramDoesNotRunDestructorsOfLaterProgram."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        programStatus!backend(sandbox, q{
+            import core.thread: Thread;
+            import core.time: msecs;
+            static ~this() {}
+            shared static ~this() {
+                new Thread({ Thread.sleep(100.msecs); }).start;
+            }
+            void main() {}
+        }).should == 0;
+        programStatus!backend(sandbox, q{
+            import core.thread: Thread;
+            import core.time: msecs;
+            static ~this() { trace("second program;"); }
+            void main() { Thread.sleep(300.msecs); }
+        }).should == 0;
+        sandbox.shouldEqualContent("trace", "second program;");
+    }
+}
+
+
+// How many of `runs` runs of `code` leave nothing registered with druntime,
+// no registry image and no callback entry that the calling thread took. The
+// test counts what the calling thread took and did not give back, because the
+// mappings of the process also change with every other test that runs at the
+// same time. A thread that another test starts during one run can hold the
+// registration of that run, so the registration stays for that run and the end
+// of the process removes it. Run it in a process with one thread, so that every
+// run gives its registration back.
+private size_t runsThatGiveBack(Backend)(
+    in Sandbox sandbox,
+    in string code,
+    in int status,
+    in size_t runs,
+) {
+    import snakebite.backends.guestmodules: GuestModules;
+    import snakebite.ffi.callback: callbackEntriesInUse;
+
+    size_t givenBack;
+    foreach (_; 0 .. runs) {
+        const held = GuestModules.held;
+        const entries = callbackEntriesInUse;
+        programStatus!Backend(sandbox, code).should == status;
+        if (GuestModules.held == held && callbackEntriesInUse == entries)
+            ++givenBack;
+    }
+
+    return givenBack;
+}
+
+
+// A process that runs many programs must not grow with each program that
+// has module constructors and destructors: when it ended, with no thread left
+// alive, what its registration took is given back. So does a program whose
+// startup failed, which is not run. A thread that starts while a program runs
+// keeps the registration of that program, so each test below runs in a process
+// of its own that has one thread: there every run gives its registration back.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot run module destructors"),
+)) {
+    @HiddenTest
+    @("registrationOfEndedProgramIsGivenBack.child." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        enum runs = 20;
+        runsThatGiveBack!backend(Sandbox(), q{
+            shared static this() {}
+            shared static ~this() {}
+            void main() {}
+        }, 0, runs).should == runs;
+    }
+
+    @HiddenTest
+    @("registrationOfProgramThatFailedToStartIsGivenBack.child."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        enum runs = 20;
+        runsThatGiveBack!backend(Sandbox(), q{
+            shared static this() { throw new Exception("ctor failed"); }
+            shared static ~this() {}
+            void main() {}
+        }, 1, runs).should == runs;
+    }
+
+    static foreach (name; [
+        "registrationOfEndedProgramIsGivenBack",
+        "registrationOfProgramThatFailedToStartIsGivenBack",
+    ]) {
+        @(name ~ "." ~ backend.stringof)
+        @Tags(backend.stringof)
+        unittest {
+            import std.file: thisExePath;
+            import std.process: Config;
+
+            // The sandbox tree is cleared when a test process starts, so the
+            // child gets a directory of its own. The collector must not
+            // start its marking threads while a program runs.
+            const sandbox = Sandbox();
+            const child = execute(
+                [
+                    thisExePath,
+                    "--DRT-gcopt=parallel:0",
+                    "--single",
+                    "ut.backends.run.declarations." ~ name ~ ".child."
+                        ~ backend.stringof,
+                ],
+                null, Config.none, size_t.max, sandbox.sandboxPath);
+            child.status.shouldEqual(0, child.output);
+        }
+    }
+}
+
+
+// A registration that stays because a thread of its program is alive is not
+// lost: the end of the process removes it.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot run module destructors"),
+)) {
+    @("registrationHeldByThreadIsLeftToTheEndOfTheProcess." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        import snakebite.backends.guestmodules: GuestModules;
+
+        const sandbox = Sandbox();
+        const before = GuestModules.held.leftToExit;
+        programStatus!backend(sandbox, q{
+            import core.thread: Thread;
+            import core.time: msecs;
+            shared static ~this() {
+                new Thread({ Thread.sleep(50.msecs); }).start;
+            }
+            void main() {}
+        }).should == 0;
+
+        // A native program runs in a process of its own.
+        const expected = is(backend == Native) ? before : before + 1;
+        GuestModules.held.leftToExit.should == expected;
     }
 }
