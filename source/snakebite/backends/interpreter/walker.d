@@ -160,6 +160,7 @@ import snakebite.nativelayout: bitfieldAccess;
 import snakebite.nativevalue: BitfieldAccess;
 import snakebite.backends.checkplan:
     BoundsCheck, hookOf, isUnanalysed;
+import snakebite.backends.calls: ValueCall;
 import snakebite.backends.haltprocess: isHalt;
 import snakebite.backends.exceptions: CAssertCall;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
@@ -209,9 +210,6 @@ private struct Shared {
     // The program being run: its `isInterpreted` is the one decision for
     // whether a callee is walked or called natively.
     const Program program;
-    // Set when a halt starts to unwind: the run is over, so no guest code
-    // runs on the way up.
-    bool halted;
     NativeData nativeData;
     RuntimeTypes runtimeTypes;
     // How to reach each already-compiled function this guest calls,
@@ -250,6 +248,9 @@ private struct Shared {
     // `FuncDeclaration`'s call adapter at all, only an evaluator does,
     // on every call.
     SharedTable!(FuncDeclaration, CallShape) calls;
+    // How each call through a value passes its arguments. The type of the
+    // value never changes at a call site.
+    SharedTable!(imported!"dmd.expression".CallExp, ValueCall) valueCalls;
     // Storage for locals that dmd moves out of an activation frame when
     // it decides that the frame must survive its call.
     SharedTable!(FuncDeclaration, ClosurePlan) closurePlans;
@@ -544,6 +545,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // This thread's reads of the shared tables, counted.
     private Cache!(FuncDeclaration, FrameLayout) _layouts;
     private Cache!(FuncDeclaration, CallShape) _calls;
+    private Cache!(CallExp, ValueCall) _valueCalls;
+    private CallExp _lastValueCallSite;
+    private ValueCall* _lastValueCall;
     // The backing bytes of a closure are kept in `_allocations`, so a
     // delegate can retain this context after the frame stack has popped
     // the call.
@@ -664,6 +668,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private ControlFlowState _controlFlow;
     private SwitchStatement _switchStatement;
     private CStack!(void*) _activationAllocations;
+    // Set when a halt starts to unwind this thread: no guest code runs on
+    // the way up. A halt ends the thread that halts, so another thread of
+    // the program keeps its cleanups.
+    private bool _halted;
     // `extern(D)`: only `Visitor`'s `visit` overloads need the C++
     // linkage.
     extern(D) public this(Shared* shared_) {
@@ -675,6 +683,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _callSelection = &shared_.callSelection;
         _layouts = Cache!(FuncDeclaration, FrameLayout)(&shared_.layouts);
         _calls = Cache!(FuncDeclaration, CallShape)(&shared_.calls);
+        _valueCalls = Cache!(CallExp, ValueCall)(&shared_.valueCalls);
         _closurePlans =
             Cache!(FuncDeclaration, ClosurePlan)(&shared_.closurePlans);
         _staticChains =
@@ -1078,6 +1087,33 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return FrameLayout.of(function_);
     }
 
+    // A call through a function pointer or a delegate: the type of the value
+    // gives the layout of its arguments, which `valueCallOf` makes once.
+    extern(D) private void prepareValueCall(CallExp site) {
+        import snakebite.backends.calls: isIndirectDelegateCall;
+
+        auto callee = site.e1;
+        if (isIndirectDelegateCall(callee.type))
+            valueCallOf(site, callee.type.nextOf.isTypeFunction, true);
+        else if (auto deref = callee.isPtrExp)
+            valueCallOf(site, deref.type.isTypeFunction, false);
+    }
+
+    private ValueCall* valueCallOf(
+        CallExp site, TypeFunction type, in bool hasContext,
+    ) {
+        if (_lastValueCallSite is site)
+            return _lastValueCall;
+
+        auto call = site in _valueCalls;
+        if (call is null)
+            call = _valueCalls.build(
+                site, () => ValueCall.of(type, hasContext));
+        _lastValueCallSite = site;
+        _lastValueCall = call;
+        return call;
+    }
+
     private const(CallShape)* callShapeOf(FuncDeclaration function_) {
         if (auto cached = function_ in _calls)
             return cached;
@@ -1179,6 +1215,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const(FrameLayout)* layout,
         Expression callSite = null,
         Expressions* callArguments = null,
+        ValueCall* valueCall = null,
     ) {
         auto arguments = argumentSlots(frameBase, layout);
         auto adapter = callShapeOf(function_).adapter;
@@ -1210,8 +1247,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 size_t.sizeof, false);
             _temporaries.suspendConstructor(receiver);
         }, {
-            if (callSite !is null && typeFunctionOf(function_).parameterList
-                    .varargs == VarArg.variadic) {
+            if (callSite !is null && valueCall !is null)
+                bindValueArguments(valueCall, callArguments, callSite.loc,
+                    frameBase, layout);
+            else if (callSite !is null && typeFunctionOf(function_)
+                    .parameterList.varargs == VarArg.variadic) {
                 bindArguments(function_, callArguments, callSite.loc,
                     frameBase, layout, true);
                 bindVariadicArguments(callArguments, frameBase, layout);
@@ -1437,11 +1477,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     // What `-checkaction=halt` does. A halt unwinds to the program's halt
-    // action's owner as a `Halted`, and `_shared.halted` tells the cleanup
+    // action's owner as a `Halted`, and `_halted` tells the cleanup
     // that runs on the way up, which holds no `catch` to tell it by, to
     // run no guest code.
     private noreturn haltRun() {
-        _shared.halted = true;
+        _halted = true;
         _program.halt;
     }
 
@@ -1582,6 +1622,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                         FinallyKey.Exit.gotoScope),
                     statement);
             }),
+            (site) => attempt({ prepareValueCall(site); }),
         ));
         while (pending.length) {
             auto function_ = pending[$ - 1];
@@ -1737,7 +1778,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private void destroyTemporary(Expression expression) {
-        if (_shared.halted)
+        if (_halted)
             return;
 
         runForEffect(expression);
@@ -2085,7 +2126,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             scopeActive = false;
             if (pendingException is null)
                 runFinalizer = runsFinally(statement);
-            if (runFinalizer && !_shared.halted)
+            if (runFinalizer && !_halted)
                 _controlFlow.withCleanup({
                     runFinallyBody(statement.finalbody, pendingException);
                 });
@@ -3681,11 +3722,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         Evaluator evaluator;
 
         public void* symbolAddress(SymOffExp expression) {
+            import snakebite.frontend.storage: typeInfoObjectOf;
+
             if (auto function_ = expression.var.isFuncDeclaration)
                 return evaluator.callableAddress(function_, 0);
 
             if (auto typeInfo = expression.var.isTypeInfoDeclaration)
-                return cast(void*) evaluator._runtimeTypes.get(typeInfo.tinfo);
+                return cast(void*) typeInfoObjectOf(
+                    typeInfo, *evaluator._runtimeTypes);
 
             auto variable = expression.var.isVarDeclaration;
             assert(variable !is null,
@@ -5015,10 +5059,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // index - this just stores whichever one it finds as a `size_t`, the
     // way any other pointer value is stored.
     override void visit(AddrExp expression) {
+        import snakebite.frontend.storage: typeInfoAddressedBy;
         import snakebite.nativelayout: isStaticStructAddress, storeIntegral;
 
         if (isStaticStructAddress(expression))
             return _nativeData.write(_type, _facts, expression, _place);
+
+        if (auto typeInfo = expression.typeInfoAddressedBy(*_runtimeTypes)) {
+            storeIntegral(_place, cast(size_t) cast(void*) typeInfo,
+                _facts.size);
+            return;
+        }
 
         storeIntegral(
             _place, cast(size_t) addressOf(expression.e1), _facts.size);
@@ -5889,6 +5940,107 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         });
     }
 
+    // The arguments of a call through a function pointer or a delegate, as
+    // the type of the value gives them (`ValueCall`), in a frame that the
+    // callee reads. When the callee has another signature than the type of
+    // the value, each parameter of the callee takes the argument that is in
+    // its register (`ArgumentFlow`).
+    private void bindValueArguments(
+        ValueCall* call, Expressions* arguments, in Loc loc,
+        ubyte* frameBase, const(FrameLayout)* callee,
+    ) {
+        const slots = call.layoutFor(callee.hiddenThis.variable !is null);
+        _bindArguments(call.type, arguments, loc, frameBase, slots,
+            call.isVariadic);
+        if (call.isVariadic)
+            bindVariadicArguments(arguments, frameBase, slots);
+        if (call.signature is callee.signature)
+            return;
+
+        redirectValueArguments(call, arguments, frameBase, slots, callee);
+    }
+
+    // Moves each argument that `bindValueArguments` packed by the layout of
+    // the value's type to the parameter of the callee that reads it.
+    private void redirectValueArguments(
+        ValueCall* call, Expressions* arguments, ubyte* frameBase,
+        const(FrameLayout)* slots, const(FrameLayout)* callee,
+    ) {
+        import snakebite.backends.argumentflow: Shape;
+        import snakebite.backends.layout: shapeOf;
+        import snakebite.backends.variadic: VariadicLayout;
+        import snakebite.nativelayout: loadIntegral, storeIntegral;
+        import core.stdc.string: memcpy, memset;
+        import std.algorithm: min;
+
+        const declared = call.signature.parameters.length;
+        const hasTypes = slots.variadicTypes != size_t.max;
+        TypeFacts[] surplusFacts;
+        Shape[] surplusShapes;
+        if (call.isVariadic)
+            foreach (argument; (*arguments)[hasTypes + declared .. $]) {
+                surplusFacts ~= factsOf(argument.type);
+                surplusShapes ~= shapeOf(argument.type, surplusFacts[$ - 1]);
+            }
+        const calleeHasContext = callee.hiddenThis.variable !is null;
+        const flow = call.flowTo(
+            *callee.signature, surplusShapes, calleeHasContext);
+
+        // The callee writes to the same frame that holds the arguments.
+        auto packed = _frames.reserve(slots.size, slots.alignment);
+        memcpy(packed, frameBase, slots.size);
+        // A function pointer has no context: its callee gets a null one.
+        const context = call.hasContext && calleeHasContext
+            ? loadIntegral(packed + slots.hiddenThis.parameter.offset,
+                size_t.sizeof, false)
+            : 0;
+        const surplusPlan = VariadicLayout.of(surplusFacts);
+        const surplusStorage = call.isVariadic
+            ? cast(ubyte*) loadIntegral(
+                packed + slots.variadicCursor, size_t.sizeof, false)
+            : null;
+        const(ubyte)* addressOf(in size_t argument) {
+            return argument < declared
+                ? packed + slots.parameters[argument].offset
+                : surplusStorage + surplusPlan.offsets[argument - declared];
+        }
+
+        foreach (i, parameter; callee.parameters) {
+            auto place = frameBase + parameter.offset;
+            memset(place, 0, parameter.facts.size);
+            const source = flow.sourceOf(i);
+            if (source != size_t.max)
+                memcpy(place, addressOf(source),
+                    min(parameter.facts.size, flow.argumentAt(source).size));
+        }
+        if (calleeHasContext)
+            storeIntegral(frameBase + callee.hiddenThis.parameter.offset,
+                context, size_t.sizeof);
+
+        if (callee.variadicCursor == size_t.max)
+            return;
+
+        if (callee.variadicTypes != size_t.max && hasTypes) {
+            memcpy(frameBase + callee.variadicTypes,
+                packed + slots.variadicTypes, size_t.sizeof);
+            memcpy(frameBase + callee.variadicCursor,
+                packed + slots.variadicCursor, size_t.sizeof);
+            return;
+        }
+
+        const unread = flow.unread;
+        TypeFacts[] facts;
+        foreach (argument; unread)
+            facts ~= flow.argumentAt(argument).facts;
+        const plan = VariadicLayout.of(facts);
+        auto storage = _frames.reserve(plan.size, plan.alignment);
+        plan.initialize(storage);
+        foreach (i, offset; plan.offsets)
+            memcpy(storage + offset, addressOf(unread[i]), facts[i].size);
+        storeIntegral(frameBase + callee.variadicCursor, cast(size_t) storage,
+            size_t.sizeof);
+    }
+
     private void initializeDefault(
         Type type,
         in TypeFacts facts,
@@ -6185,6 +6337,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         const isVariadic = funcType.parameterList.varargs == VarArg.variadic;
+        auto valueCall = resolved is null
+            ? valueCallOf(expression, callee.type, callee.fromDelegate)
+            : null;
         auto frame = bindFrame(
             expression,
             function_,
@@ -6192,12 +6347,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             isVariadic,
             classReceiver,
             callee.context,
-            callee.fromDelegate,
+            valueCall,
         );
 
         return executeCall(
             function_, returnPlace, frame.base, layout, expression,
-            expression.arguments,
+            expression.arguments, valueCall,
         );
     }
 
@@ -6413,13 +6568,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                         "`: the function pointer is null"),
                 );
 
+            auto type = deref.type.isTypeFunction;
             if (auto declaration =
                     cast(void*) function_ in _shared.callableDeclarations)
-                return Callee(*declaration, null, false);
+                return Callee(*declaration, null, false, null, type);
             if (!_plans.isGuestWord(cast(void*) function_))
-                return Callee(null, null, false, cast(void*) function_,
-                    deref.type.isTypeFunction);
-            return Callee(function_, null, false);
+                return Callee(null, null, false, cast(void*) function_, type);
+            return Callee(function_, null, false, null, type);
         }
 
         const facts = factsOf(callee.type);
@@ -6441,13 +6596,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "`: the delegate is null"),
             );
 
+        auto type = callee.type.nextOf.isTypeFunction;
         if (auto declaration =
                 cast(void*) function_ in _shared.callableDeclarations)
-            return Callee(*declaration, cast(void*) context, true);
+            return Callee(*declaration, cast(void*) context, true, null, type);
         if (!_plans.isGuestWord(cast(void*) function_))
             return Callee(null, cast(void*) context, true,
-                cast(void*) function_, callee.type.nextOf.isTypeFunction);
-        return Callee(function_, cast(void*) context, true);
+                cast(void*) function_, type);
+        return Callee(function_, cast(void*) context, true, null, type);
     }
 
     private void* classReferenceOf(Expression expression) {
@@ -6473,12 +6629,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         in bool allowExtra = false,
         void* classReceiver = null,
         void* delegateContext = null,
-        bool fromDelegate = false,
+        ValueCall* valueCall = null,
     ) {
+        import std.algorithm: max;
         import snakebite.nativelayout: storeIntegral;
         import snakebite.backends.calls: arityMismatches;
         import snakebite.frontend.dmd.delegates: outerFunctionOf;
-        import std.conv: text;
         import dmd.astenums: STC;
 
         // The callee's parameter types, which a body-less declaration has
@@ -6486,14 +6642,20 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // only a body has.
         auto parameterList = typeFunctionOf(function_).parameterList;
         auto arguments = expression.arguments;
-        if (arityMismatches(parameterList, arguments, allowExtra))
-            throw new SnakebiteException(
-                text("interpreter: `", function_.toString, "` expects ",
-                    parameterList.length, " argument(s), got ",
-                    arguments is null ? 0 : arguments.length),
-            );
+        const mismatch = valueCall is null
+            ? arityMismatches(parameterList, arguments, allowExtra)
+            : valueCall.mismatches(arguments);
+        if (mismatch)
+            assert(0, "dmd checks a call's arity; a variadic call allows "
+                ~ "extra arguments");
 
-        auto frame = _frames.push(layout.size, layout.alignment);
+        // The arguments of a call through a value sit in a frame that is as
+        // large as the one of the value's type, which can need more room than
+        // the callee's own.
+        const slots = valueCall is null
+            ? layout : valueCall.layoutFor(layout.hiddenThis.variable !is null);
+        auto frame = _frames.push(
+            max(layout.size, slots.size), max(layout.alignment, slots.alignment));
 
         // `vthis` is dmd's one declaration for both hidden context
         // kinds: a method's `this`, and a nested function's static
@@ -6501,7 +6663,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // The shared layout excludes unused lambda contexts even when
         // dmd retains their `vthis` declarations.
         if (layout.hiddenThis.variable !is null) {
-            const hidden = fromDelegate
+            const hidden = valueCall !is null
                 ? cast(size_t) delegateContext
                 : hiddenArgumentOf(expression, function_, classReceiver);
             storeIntegral(
@@ -6533,8 +6695,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         FuncDeclaration function_,
         void* classReceiver,
     ) {
-        import std.conv: text;
-
         if (function_.isThis !is null) {
             auto dot = expression.e1.isDotVarExp;
             const classDeclaration =
@@ -6542,10 +6702,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (classDeclaration !is null)
                 return cast(size_t) classReceiver;
             if (dot is null)
-                throw new SnakebiteException(
-                    text("interpreter cannot call `", function_.toString,
-                        "`: its `this` receiver is not a struct lvalue"),
-                );
+                assert(0, "a struct member reached with no receiver "
+                    ~ "expression is called through a value");
             return cast(size_t) addressOf(dot.e1);
         }
 

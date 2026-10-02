@@ -279,3 +279,40 @@ public struct SymbolAddressResolver(Result, Adapter) {
         return _adapter.addSymbolOffset(address, expression.offset);
     }
 }
+
+// The runtime object that the address of a `TypeInfo` declaration is, or
+// null when `expression` is not that. dmd leaves `&declaration` as an
+// `AddrExp` in places such as `Object.classinfo`. The symbol of a
+// declaration is a `TypeInfo` object, so the address is that object and not
+// the address of a variable slot.
+public TypeInfo typeInfoAddressedBy(Types)(
+    imported!"dmd.expression".AddrExp expression, ref Types types,
+) {
+    auto variable = expression.e1.isVarExp;
+    auto declaration =
+        variable is null ? null : variable.var.isTypeInfoDeclaration;
+    return declaration is null ? null : typeInfoObjectOf(declaration, types);
+}
+
+// The object that the symbol of `declaration` is. `typeid(I)` of an
+// interface is a `TypeInfo_Interface`, but `I.classinfo` is the symbol of
+// the `TypeInfo_Class` that this one holds.
+public TypeInfo typeInfoObjectOf(Types)(
+    imported!"dmd.declaration".TypeInfoDeclaration declaration,
+    ref Types types,
+) {
+    import dmd.declaration: TypeInfoClassDeclaration;
+
+    auto info = types.get(declaration.tinfo);
+    if (cast(TypeInfoClassDeclaration) declaration is null)
+        return info;
+
+    auto classType = declaration.tinfo.isTypeClass;
+    if (classType is null || classType.sym.isInterfaceDeclaration is null)
+        return info;
+
+    auto interfaceInfo = cast(TypeInfo_Interface) info;
+    if (interfaceInfo is null)
+        assert(0, "the runtime type of an interface is a `TypeInfo_Interface`");
+    return interfaceInfo.info;
+}
