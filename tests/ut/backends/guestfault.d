@@ -38,12 +38,14 @@ unittest {
         .should == "integer division by zero";
     GuestFault.message(GuestFault.Kind.divisionOverflow)
         .should == "integer overflow in division";
+    GuestFault.message(GuestFault.Kind.divisionFault)
+        .should == "integer division fault";
     GuestFault.message(GuestFault.Kind.throwNull)
         .should == "throw of a null reference";
     GuestFault.message(GuestFault.Kind.stackOverflow)
         .should == "stack overflow";
 
-    EnumMembers!(GuestFault.Kind).length.should == 7;
+    EnumMembers!(GuestFault.Kind).length.should == 8;
 }
 
 
