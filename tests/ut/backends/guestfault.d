@@ -3,7 +3,7 @@ module ut.backends.guestfault;
 
 import snakebite.backends.backend: Program;
 import snakebite.backends.guestfault: GuestFault, GuestFaultException;
-import snakebite.backends.haltprocess: Halted, HostActions, isHalt;
+import snakebite.backends.haltprocess: Halted, haltProcess, HostActions, isHalt;
 import snakebite.frontend.checks: Checks;
 import snakebite.frontend.compiler: parseSnippets;
 import std.algorithm.iteration: map;
@@ -140,13 +140,13 @@ unittest {
         in GuestFault.Kind kind, in const(char)[] file, in size_t line,
         scope GuestFault.Stack stack,
     ) {
-        seen = GuestFault.message(kind) ~ "@" ~ file ~ ":" ~ cast(char)('0' + line);
+        seen = (GuestFault.message(kind) ~ "@" ~ file ~ ":" ~ cast(char) ('0' + line)).idup;
         throw new Halted;
     }
 
     auto module_ = parseSnippets(["module programFaultAction;"])[0];
     const program = Program(
-        [module_], "", Checks(), HostActions(&action));
+        [module_], "", Checks(), HostActions(&haltProcess, &action));
 
     program.fault(GuestFault.Kind.nullCall, "x.d", 5, (scope sink) {})
         .shouldThrow!Halted;

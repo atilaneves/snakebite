@@ -13,7 +13,8 @@ public struct Program {
     import dmd.dmodule: Module;
     import dmd.func: FuncDeclaration;
     import dmd.dsymbol: Dsymbol;
-    import snakebite.backends.haltprocess: HaltAction, haltProcess;
+    import snakebite.backends.guestfault: GuestFault;
+    import snakebite.backends.haltprocess: HaltAction, HostActions;
     import snakebite.frontend.checks: Checks;
     import snakebite.frontend.dmd.linking: LinkMap;
 
@@ -33,7 +34,7 @@ public struct Program {
     Main main;
     string name;
     private Checks _checks;
-    private HaltAction _haltAction = &haltProcess;
+    private HostActions _actions;
     // Prepared for this project's execution before any guest code runs.
     const(DependencyImage)* dependencyImage;
     const(DependencyImage)* testStartupImage;
@@ -53,13 +54,13 @@ public struct Program {
     }
 
     // `checks` are the ones the frontend analysed `rootModules` under, and
-    // `haltAction` is what `-checkaction=halt` does here: the default ends
-    // the process, as compiled code does.
+    // `actions` are what `-checkaction=halt` and a guest fault do here: the
+    // default halt ends the process, as compiled code does.
     this(
         Module[] rootModules,
         in string name,
         in Checks checks,
-        HaltAction haltAction = &haltProcess,
+        in HostActions actions = HostActions(),
     ) {
         import snakebite.frontend.dmd.functions:
             findFunction,
@@ -69,7 +70,7 @@ public struct Program {
         _links = LinkMap(rootModules);
         this.name = name;
         _checks = checks;
-        _haltAction = haltAction;
+        _actions = actions;
         foreach (module_; rootModules) {
             _rootModuleSet[module_] = true;
             moduleConstructors ~= findModuleConstructors(module_);
@@ -90,11 +91,20 @@ public struct Program {
 
     // What a backend that can hold a function pointer stores.
     public HaltAction haltAction() const {
-        return _haltAction;
+        return _actions.halt;
     }
 
     public noreturn halt() const {
-        _haltAction();
+        _actions.halt();
+    }
+
+    public noreturn fault(
+        in GuestFault.Kind kind,
+        in const(char)[] file,
+        in size_t line,
+        scope GuestFault.Stack stack,
+    ) const {
+        _actions.fault(kind, file, line, stack);
     }
 
     // The root definition that the linker makes of the declaration

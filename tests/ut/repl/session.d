@@ -256,7 +256,8 @@ private extern(C) void snakebite_ut_repl_fault() {
 }
 
 // A guest fault ends the cell with its message, and the session goes on.
-static foreach (backend; EnumMembers!ReplBackendName) {
+// The CTFE backend cannot call a host function.
+static foreach (backend; [BackendName.interpreter, BackendName.bytecode]) {
     @("submit.faultEndsTheCellAndTheSessionContinues." ~ backend.stringof)
     unittest {
         auto repl = Repl(backend);
