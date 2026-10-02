@@ -1059,3 +1059,38 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.sliceStoredInVariable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[3] values; }
+            S make() { return S([1, 2, 3]); }
+            int other() { int[3] spare = [40, 50, 60]; return spare[0] + spare[1] + spare[2]; }
+            void main() {
+                auto slice = make().values[];
+                assert(other() == 150);
+                assert(slice[0] + slice[1] + slice[2] == 6);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.rvalue.loopOverManyRvalues." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[2] values; }
+            S make(int base) { return S([base, 1]); }
+            void main() {
+                long sum;
+                foreach (i; 0 .. 200_000)
+                    foreach (v; make(i).values)
+                        sum += v;
+                assert(sum == 19_999_900_000 + 200_000);
+            }
+        });
+    }
+}
