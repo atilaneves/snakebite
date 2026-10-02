@@ -671,6 +671,51 @@ def test_destructor_that_throws_existing_exception_gives_finalize_error(
     assert "FinalizeError" in output(result)
 
 
+# An opaque class has no size. Taking its type information must not crash.
+# A native build does not link this program.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_type_information_of_opaque_class(
+    tmp_path: Path, backend: str,
+) -> None:
+    source = """
+        module main;
+        import core.stdc.stdio: printf;
+        import core.stdc.stdlib: qsort;
+        __gshared int never;
+        extern(C++) class Opaque;
+        __gshared Opaque opaque;
+        int work(int x) {
+            if (x == never + 12345) {
+                Opaque[] all;
+                all ~= opaque;
+                x += cast(int) all.length;
+            }
+            return x + 1;
+        }
+        class C { int f(int x) { return work(x); } }
+        extern(C) int cmp(const void* a, const void* b) {
+            return work(*cast(int*) a) - work(*cast(int*) b);
+        }
+        unittest {
+            auto c = new C;
+            int[4] v = [4, 2, 3, 1];
+            qsort(v.ptr, 4, 4, &cmp);
+            printf("ok %d %d%d%d%d\\n", c.f(1), v[0], v[1], v[2], v[3]);
+        }
+        int main() { return 0; }
+    """
+    write(tmp_path / "app" / "dub.sdl", dub_project_recipe("opaque-class"))
+    write(tmp_path / "app" / "source" / "main.d", source)
+
+    result = run_sb(
+        f"--backend={backend}", "--no-optimise-image",
+        str(tmp_path / "app"), cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, output(result)
+    assert "ok 2 1234" in output(result)
+
+
 # What the GC finalizer needs from a destructor that compiled D allows: no
 # allocation and no lock. Each shape is one construct in the destructor of a
 # class. All the shapes of one backend run in one small process, where a

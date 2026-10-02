@@ -226,10 +226,14 @@ public TypeInfo_Class classRuntimeInfo(
             if (method !is null)
                 info.vtbl[i] = hooks.methodAddress(method, 0);
         }
-        if (info.base !is null)
-            info.m_init[0 .. info.base.m_init.length] = info.base.m_init[];
-        *cast(void**) info.m_init.ptr = info.vtbl.ptr;
-        hooks.fillFieldInits(declaration, cast(ubyte*) info.m_init.ptr);
+        // An opaque class has no size, so its initialiser has no slots.
+        if (info.m_init.length != 0) {
+            if (info.base !is null)
+                info.m_init[0 .. info.base.m_init.length] =
+                    info.base.m_init[];
+            *cast(void**) info.m_init.ptr = info.vtbl.ptr;
+            hooks.fillFieldInits(declaration, cast(ubyte*) info.m_init.ptr);
+        }
     }
 
     info.interfaces = new Interface[declaration.vtblInterfaces.length];
