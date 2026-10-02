@@ -157,7 +157,7 @@ public struct Repl {
             display = backend.eval(function_);
         catch (Throwable throwable) {
             _pendingInput = null;
-            return SubmitResult(SubmitResult.Kind.error, throwable.msg.idup);
+            return SubmitResult(SubmitResult.Kind.error, throwable.failureText);
         }
 
         // An expression cell declares nothing later cells need to see -
@@ -268,7 +268,7 @@ public struct Repl {
             try
                 _backend.call(unittest_, null, []);
             catch (Throwable throwable)
-                failures ~= testFailureDiagnostic(unittest_, throwable.msg.idup);
+                failures ~= testFailureDiagnostic(unittest_, throwable.failureText);
         }
 
         return failures.length == 0
@@ -324,10 +324,24 @@ private noreturn endCellOnFault(
 ) {
     import snakebite.backends.guestfault: GuestFault;
 
-    if (!_runsCell)
+    auto fault = GuestFault.exceptionOf(kind, file, line, stack);
+    if (!_runsCell) {
         GuestFault.print(kind, file, line, stack);
+        fault.reported = true;
+    }
 
-    GuestFault.throwFault(kind, file, line, stack);
+    throw fault;
+}
+
+// What a cell reports for the throwable that ended it. A fault that the host
+// already printed gets a short text, so that one fault is one report.
+private string failureText(in Throwable throwable) {
+    import snakebite.backends.guestfault: GuestFaultException;
+
+    const fault = cast(const(GuestFaultException)) throwable;
+    return fault !is null && fault.reported
+        ? "a thread that the cell joined ended with the fault reported above"
+        : throwable.msg.idup;
 }
 
 

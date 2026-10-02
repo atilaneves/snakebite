@@ -108,12 +108,18 @@ public struct GuestFault {
     public static noreturn throwFault(
         in Kind kind, in const(char)[] file, in size_t line, scope Stack stack,
     ) {
+        throw exceptionOf(kind, file, line, stack);
+    }
+
+    public static GuestFaultException exceptionOf(
+        in Kind kind, in const(char)[] file, in size_t line, scope Stack stack,
+    ) {
         const(Frame)[] frames;
         stack((in frame) {
             frames ~= Frame(
                 frame.function_.idup, frame.file.idup, frame.line);
         });
-        throw new GuestFaultException(kind, file.idup, line, frames);
+        return new GuestFaultException(kind, file.idup, line, frames);
     }
 
     // The message and the stack, as `bin/sb` prints them and the REPL does
@@ -444,6 +450,11 @@ public final class GuestFaultException: Halted {
 
     public const GuestFault.Kind kind;
     public const(GuestFault.Frame)[] stack;
+
+    // Whether the host already printed the fault, so that whoever gets the
+    // exception later, such as a thread that joins the faulting thread, does
+    // not report it a second time.
+    public bool reported;
 
     public this(
         in GuestFault.Kind kind,
