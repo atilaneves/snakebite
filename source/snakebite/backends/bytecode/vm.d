@@ -1019,14 +1019,14 @@ package const(Instruction)* opAssert(
 }
 
 // `opAssert` for the address of a load or a store, in a plain frame slot:
-// the address must be outside the first page, as `GuestFault.isNullAddress`
+// the address must be outside the null guard, as `GuestFault.isNullAddress`
 // says. It needs no operand decoding and no width dispatch, and a null check
 // runs at every dereference.
 package const(Instruction)* opAssertWord(
     const(Instruction)* pc, Activation* activation, DispatchState* state,
 ) {
     if (*cast(const(size_t)*) (activation.frame + pc.destination)
-            >= GuestFault.firstPage)
+            >= GuestFault.nullGuard)
         return pc + 1;
 
     return assertFailed(pc, activation);

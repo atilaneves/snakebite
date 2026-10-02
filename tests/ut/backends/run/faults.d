@@ -1178,7 +1178,7 @@ void main() {
     S* p;
     int x = get(p.last);
 }
-})(6);
+})(3);
     }
 }
 
@@ -1232,10 +1232,8 @@ void main() {
 
 
 // The same accesses through a pointer that is not null are no fault.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible, "CTFE cannot cast a pointer"),
-)) {
-    @("fault.beyondTheFirstPageOfAPointerThatIsNotNull." ~ backend.stringof)
+static foreach (backend; Matrix!()) {
+    @("fault.refArgumentBeyondTheFirstPageOfAPointerThatIsNotNull." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
@@ -1244,13 +1242,224 @@ static foreach (backend; Matrix!(
         int main() {
             auto p = new S;
             p.last = 3;
-            p.tail[1] = 4;
-            int* q = &p.last;
-            int x; foreach (e; p.tail) x += e;
-            return get(p.last) + *q + x + *(cast(int*) p + 2000) == 13
-                ? 0 : 1;
+            return get(p.last) == 3 ? 0 : 1;
         }
         });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("fault.addressBeyondTheFirstPageOfAPointerThatIsNotNull." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        struct S { ubyte[8000] pad; int last; int[4] tail; }
+        int main() {
+            auto p = new S;
+            p.last = 3;
+            int* q = &p.last;
+            return *q == 3 ? 0 : 1;
+        }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("fault.foreachBeyondTheFirstPageOfAPointerThatIsNotNull." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        struct S { ubyte[8000] pad; int last; int[4] tail; }
+        int main() {
+            auto p = new S;
+            p.tail[1] = 4;
+            int x;
+            foreach (e; p.tail)
+                x += e;
+            return x == 4 ? 0 : 1;
+        }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot cast a pointer"),
+)) {
+    @("fault.pointerArithmeticBeyondTheFirstPageOfAPointerThatIsNotNull." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        struct S { ubyte[8000] pad; int last; int[4] tail; }
+        int main() {
+            auto p = new S;
+            p.last = 3;
+            return *(cast(int*) p + 2000) == 3 ? 0 : 1;
+        }
+        });
+    }
+}
+
+
+// The address of a field more than a page behind a null pointer is a
+// number, as the address of a near field is: the C `offsetof` idiom reads
+// no memory.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE rejects the address of a field behind a null pointer as a " ~
+        "dereference of a null pointer"),
+)) {
+    @("fault.addressOfFarStructFieldThroughNullIsNotAFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        struct S { ubyte[8000] pad; int last; }
+
+        int main() {
+            return cast(size_t) &(cast(S*) null).last == 8000 ? 0 : 1;
+        }
+        });
+    }
+}
+
+
+// A function that gets the address of a far element behind a null pointer
+// and does not read through it reads no memory.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE rejects the address of a field behind a null pointer as a " ~
+        "dereference of a null pointer"),
+)) {
+    @("fault.addressOfFarElementThroughNullAsAnArgumentIsNotAFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        struct S { ubyte[8000] pad; ubyte[9000] big; }
+
+        bool isNull(const(ubyte)* address) { return address is null; }
+
+        int main() {
+            S* p;
+            return isNull(&p.big[5000]) ? 1 : 0;
+        }
+        });
+    }
+}
+
+
+// A comparison of two addresses reads neither.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE rejects the address of a field behind a null pointer as a " ~
+        "dereference of a null pointer"),
+)) {
+    @("fault.comparisonOfFarAddressesThroughNullIsNotAFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        struct S { ubyte[8000] pad; int last; int end; }
+
+        int main() {
+            S* p;
+            return &p.last < &p.end ? 0 : 1;
+        }
+        });
+    }
+}
+
+
+// An address that is kept and never read through is no access.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE rejects the address of a field behind a null pointer as a " ~
+        "dereference of a null pointer"),
+)) {
+    @("fault.farAddressThroughNullThatIsNotReadIsNotAFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        struct S { ubyte[8000] pad; int last; }
+
+        int main() {
+            S* p;
+            int* sentinel = &p.last;
+            return sentinel is null ? 1 : 0;
+        }
+        });
+    }
+}
+
+
+// The address of an element a constant index away from a null pointer
+// reads no memory.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE rejects a dereference of a null pointer"),
+)) {
+    @("fault.addressOfFarPointerElementThroughNullIsNotAFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        int main() {
+            int* p;
+            int* q = &p[2000];
+            return cast(size_t) q == 8000 ? 0 : 1;
+        }
+        });
+    }
+}
+
+
+// A null dereference more than a page above the base, with an offset that
+// is known only when the program runs, is a null dereference too.
+static foreach (backend; FaultBackends) {
+    @("fault.nullBeyondTheFirstPageThroughARunTimeOffset." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        GuestFault.Kind.nullPointer.shouldBeFaultOf!(backend, q{
+size_t offset() { return 2000; }
+
+void main() {
+    int* p;
+    int x = *(p + offset());
+}
+})(6);
+    }
+}
+
+
+// `a[] ^^ b[]` of integers divides by zero for a base of zero and a
+// negative exponent, as the scalar `x ^^ n` does.
+static foreach (backend; FaultBackends) {
+    @("fault.arrayOperationPowerOfZeroToANegativeExponent." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        GuestFault.Kind.divisionByZero.shouldBeFaultOf!(backend, q{
+void main() {
+    int[] a = [2, 0];
+    int[] b = [3, -1];
+    int[2] c;
+    c[] = a[] ^^ b[];
+}
+})(6);
+    }
+}
+
+
+static foreach (backend; FaultBackends) {
+    @("fault.arrayOperationPowerAssignOfZeroToANegativeExponent."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        GuestFault.Kind.divisionByZero.shouldBeFaultOf!(backend, q{
+void main() {
+    int[] a = [2, 0];
+    int exponent = -1;
+    a[] ^^= exponent;
+}
+})(5);
     }
 }
 

@@ -265,19 +265,15 @@ public struct CallSelection {
     // Whether `function_` is an instance of `core.internal.array.operations.
     // arrayOp` with an integer division or remainder among its operations.
     // dmd gives the operations as template arguments: the strings `"/"`,
-    // `"%"`, `"/="` and `"%="` are the ones that divide.
+    // `"%"`, `"^^"` and their compound assignments are the ones that can
+    // divide by zero (`pow` does, for `0 ^^ -1`).
     private static bool dividesIntegers(FuncDeclaration function_) {
-        import core.stdc.string: strcmp;
         import dmd.dtemplate: isExpression, isType;
         import dmd.typesem: isIntegral, toBasetype;
+        import snakebite.backends.guestfaultplan: arrayOperationOf;
 
-        auto instance = function_.parent is null
-            ? null : function_.parent.isTemplateInstance;
-        if (instance is null || instance.tiargs is null
-                || instance.tiargs.length == 0
-                || instance.name.toString != "arrayOp"
-                || strcmp(instance.tempdecl.parent.toPrettyChars,
-                    "core.internal.array.operations") != 0)
+        auto instance = arrayOperationOf(function_);
+        if (instance is null || instance.tiargs.length == 0)
             return false;
 
         // The first template argument is the type of the result array.
@@ -290,7 +286,8 @@ public struct CallSelection {
             auto operation = isExpression(argument);
             auto text = operation is null || operation.isStringExp is null
                 ? null : operation.isStringExp.peekString;
-            if (text == "/" || text == "%" || text == "/=" || text == "%=")
+            if (text == "/" || text == "%" || text == "^^" || text == "/="
+                    || text == "%=" || text == "^^=")
                 return true;
         }
 

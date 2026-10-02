@@ -152,8 +152,8 @@ import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
 import snakebite.backends.fullexpression: FullExpressionKind;
 import snakebite.backends.guestfault: GuestFault, NativeCallCheck;
 import snakebite.backends.guestfaultplan:
-    FaultCheck, accessFaultOf, baseOffsetOf, callFaultOf, contextFaultOf,
-    delegateFaultOf, divisionFaultOf,
+    FaultCheck, accessFaultOf, callFaultOf, contextFaultOf, delegateFaultOf,
+    divisionFaultOf,
     nativeCallCheckOf, refResultFaultOf, throwFaultOf,
     typeidFaultOf, sliceElementsFaultOf;
 import std.typecons: Nullable;
@@ -2308,9 +2308,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         Expression dereference, Expression operand,
     ) {
         auto pointer = asPointer(operand);
-        // A pointer sum that is as large as the offset can have a null base.
-        if (operand.op == EXP.add && baseOffsetOf(operand) != 0)
-            faultIfNull(pointer - baseOffsetOf(operand), dereference);
         faultIfNull(pointer, dereference);
         return pointer;
     }

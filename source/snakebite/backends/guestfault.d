@@ -53,14 +53,17 @@ public struct GuestFault {
         }
     }
 
-    // The first page of the address space is never mapped. A load or a store
-    // through an address in it faults, as a null pointer does: pointer
-    // arithmetic on null (`*(p + 1)`) and the address of a field behind null
-    // (`&p.field`) land in it.
-    public enum firstPage = 4096;
+    // The first 64 KiB of the address space is never mapped: an unprivileged
+    // Linux process cannot map below `vm.mmap_min_addr`, which is 65536 by
+    // default, and Windows and macOS reserve at least as much. A load or a
+    // store through an address below it faults, as a null pointer does:
+    // pointer arithmetic on null (`*(p + 1)`) and the address of a field
+    // behind null (`&p.field`) land in it. An access more than this above a
+    // null base is not seen, and it is a crash of the host.
+    public enum nullGuard = 65536;
 
     public static bool isNullAddress(in void* address) @trusted @nogc nothrow pure {
-        return cast(size_t) address < firstPage;
+        return cast(size_t) address < nullGuard;
     }
 
     // Whether the hardware traps on this division, and why: on a zero
