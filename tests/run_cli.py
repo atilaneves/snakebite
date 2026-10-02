@@ -1001,6 +1001,91 @@ def test_zero_to_a_negative_power_is_a_fault(
     )
 
 
+# The divisor of an array operation can be the result of any operation of
+# the same statement, a bitwise one and a power included.
+@pytest.mark.parametrize("backend", FAULT_BACKENDS)
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "c[] = a[] / (b[] & 1);",
+        "c[] = a[] / (b[] ^ 2);",
+        "c[] = a[] % (b[] | 0);",
+        "c[] = a[] / (b[] ^^ 2);",
+    ],
+)
+def test_array_operation_division_by_a_bitwise_result_is_a_fault(
+    tmp_path: Path, backend: str, statement: str,
+) -> None:
+    result = run_program(
+        tmp_path, backend,
+        "void main() {\n"
+        "    int[] a = [8, 6, 4];\n"
+        "    int[] b = [2, 1, 0];\n"
+        "    int[3] c;\n"
+        f"    {statement}\n"
+        "}\n",
+    )
+
+    assert result.returncode == 1, output(result)
+    assert (
+        "app.d(5): fatal: integer division by zero"
+        in result.stderr.splitlines()
+    )
+
+
+# A null pointer to a large struct: an access to a field after the first
+# page is a null dereference too, also through an address that is made
+# first.
+@pytest.mark.parametrize("backend", FAULT_BACKENDS)
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "int x = get(p.last);",
+        "int* q = &p.last; int x = *q;",
+        "int x; foreach (e; p.tail) x += e;",
+        "int x = *(cast(int*) p + 2000);",
+    ],
+)
+def test_null_access_beyond_the_first_page_is_a_fault(
+    tmp_path: Path, backend: str, statement: str,
+) -> None:
+    result = run_program(
+        tmp_path, backend,
+        "struct S { ubyte[8000] pad; int last; int[4] tail; }\n"
+        "int get(ref int value) { return value; }\n"
+        "void main() {\n"
+        "    S* p;\n"
+        f"    {statement}\n"
+        "}\n",
+    )
+
+    assert result.returncode == 1, output(result)
+    assert "fatal: null pointer dereference" in result.stderr
+
+
+# An array operation reads each element of its operands: a slice of a
+# null pointer is a null dereference.
+@pytest.mark.parametrize("backend", FAULT_BACKENDS)
+def test_array_operation_on_a_null_slice_is_a_fault(
+    tmp_path: Path, backend: str,
+) -> None:
+    result = run_program(
+        tmp_path, backend,
+        "void main() {\n"
+        "    int[] a = [8, 6];\n"
+        "    int* p;\n"
+        "    int[2] c;\n"
+        "    c[] = a[] + p[0 .. 2];\n"
+        "}\n",
+    )
+
+    assert result.returncode == 1, output(result)
+    assert (
+        "app.d(5): fatal: null pointer dereference"
+        in result.stderr.splitlines()
+    )
+
+
 def dub_project_recipe(name: str) -> str:
     return (
         f'name "{name}"\ntargetType "library"\n'
