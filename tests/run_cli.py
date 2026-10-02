@@ -1706,6 +1706,57 @@ def dub_project_recipe(name: str) -> str:
     )
 
 
+
+
+# A throw from a `crt_destructor` function makes the program fail. Compiled D
+# aborts there, so only the backends have a row.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_throw_from_a_crt_destructor_fails_the_program(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        import core.stdc.stdio: puts;
+        pragma(crt_destructor) void crtDestructor() { throw new Exception("destructor failed"); }
+        void main() { puts("main"); }
+        """,
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert "destructor failed" in result.stderr
+    assert result.returncode == 1, output(result)
+
+
+# `exit` in a module destructor ends druntime's destructor phase. The
+# `crt_destructor` functions are not druntime's, so they still run.
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
+def test_crt_destructor_runs_after_exit_in_a_module_destructor(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        import core.stdc.stdio: puts;
+        import core.stdc.stdlib: exit;
+        pragma(crt_constructor) void crtConstructor() { puts("crt constructor"); }
+        pragma(crt_destructor) void crtDestructor() { puts("crt destructor"); }
+        shared static ~this() { puts("shared destructor"); exit(5); }
+        void main() { puts("main"); }
+        """,
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 5, output(result)
+    assert guest_lines(result) == [
+        "crt constructor", "main", "shared destructor", "crt destructor",
+    ]
+
+
 def write(path: Path, text: str = "") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")

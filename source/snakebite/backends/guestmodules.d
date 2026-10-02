@@ -23,9 +23,10 @@ private:
 // refuses the modules too, and the destructors run once after druntime's
 // destructor phase: from the last destructor of one more record, from the
 // handler of `exit`, from `finish`, or at once when the start fails. They run
-// when at least one constructor ran. With a dependency image, a guest
-// constructor runs after druntime start-up and after the `shared static this`
-// of the dependency, where compiled D runs it before them.
+// when at least one constructor ran, or when the program has none. With a
+// dependency image, a guest constructor runs after druntime start-up and after
+// the `shared static this` of the dependency, where compiled D runs it before
+// them.
 //
 // A process that runs one guest program and then ends (`bin/sb`) leaves the
 // registration to its own `rt_term`, which runs the phases in the order
@@ -93,11 +94,16 @@ public struct GuestModules {
             atomicStore(run.state, Run.State.failed);
             print(throwable);
             modules._failed = true;
-            run.runCrtDestructors;
+            try
+                run.runCrtDestructors;
+            catch (Throwable destructorThrowable)
+                print(destructorThrowable);
             // The process ends with `main` and `rt_term` frees the GC heap
             // before `endAtExit` runs, which then must not read the run.
-            if (run.exit !is null)
+            if (run.exit !is null) {
                 atomicStore(run.exit.returned, true);
+                atomicStore(run.exit.crtPending, false);
+            }
 
             // No caller ends a program that did not start, and what startup
             // registered is still there.
@@ -133,8 +139,9 @@ public struct GuestModules {
     // destructors and `exit` no longer has to. Otherwise this does what
     // `rt_term` does for the thread that ran the program: that thread's
     // thread-local destructors, then the shared ones, each module in the
-    // reverse of the order in which druntime ran its constructor. Returns 1
-    // when a destructor threw, as `rt_term` then makes the program fail.
+    // reverse of the order in which druntime ran its constructor, and then the
+    // `crt_destructor` functions. Returns 1 when a destructor threw, as
+    // `rt_term` then makes the program fail.
     //
     // The registration goes with the program when no thread that the
     // program started is alive: a thread inherits the registrations of the
@@ -189,6 +196,10 @@ private struct ExitRecord {
     // Whether the program ended and its registration stayed, so that the
     // end of the process removes it.
     bool left;
+    // Whether `rt_term` still can run the `crt_destructor` functions: when it
+    // is true and `returned` too, `rt_term` is in a destructor phase, so the
+    // `Run` is alive.
+    shared bool crtPending;
     void** slot;
     Run* run;
     ExitRecord* next;
@@ -201,6 +212,7 @@ private ExitRecord* newExitRecord(Run* run, void** slot) {
     auto record = cast(ExitRecord*) malloc(ExitRecord.sizeof);
     record.returned = false;
     record.left = false;
+    record.crtPending = run !is null && run.crtDestructors !is null;
     record.slot = slot;
     record.run = run;
     registerEndHandler;
@@ -239,8 +251,14 @@ private void registerEndHandler() {
 private extern(C) void endAtExit() {
     for (auto record = cast(ExitRecord*) atomicLoad(_ending); record !is null;
             record = record.next) {
-        if (atomicLoad(record.returned))
+        if (atomicLoad(record.returned)) {
+            if (atomicLoad(record.crtPending))
+                try
+                    record.run.runCrtDestructors;
+                catch (Throwable throwable)
+                    print(throwable);
             continue;
+        }
 
         if (*record.slot !is null)
             try
@@ -251,7 +269,10 @@ private extern(C) void endAtExit() {
         // A registration that stayed after its program ended has no run: the
         // end of that program ran the destructors.
         if (record.run !is null)
-            record.run.runCrtDestructors;
+            try
+                record.run.runCrtDestructors;
+            catch (Throwable throwable)
+                print(throwable);
     }
 }
 
@@ -397,17 +418,19 @@ private struct Run {
         crtConstructors.call;
     }
 
+    // Throws what a function throws: the caller ends the program. The
+    // functions after the one that threw do not run.
     void runCrtDestructors() {
         import core.atomic: cas;
+
+        if (exit !is null)
+            atomicStore(exit.crtPending, false);
 
         if (crtDestructors is null || !atomicLoad(crtConstructed)
             || !cas(&crtDestructed, false, true))
             return;
 
-        try
-            crtDestructors.call;
-        catch (Throwable throwable)
-            print(throwable);
+        crtDestructors.call;
     }
 
     // Removes the registration and everything it holds.
@@ -484,7 +507,15 @@ private void execute(Phase* phase) {
             break;
     }
 
-    phase.call;
+    // druntime skips the rest of its phase and ends the program.
+    try
+        phase.call;
+    catch (Throwable throwable) {
+        if (run.exit !is null)
+            atomicStore(run.exit.crtPending, false);
+        throw throwable;
+    }
+
     if (phase.destructor is null || !pthread_equal(pthread_self, run.owner))
         return;
 
@@ -617,9 +648,10 @@ private ModuleInfo*[] recordsOf(
 
 // Sets up the `crt_constructor` functions of all modules in `run`, and
 // returns the record of their `crt_destructor` functions, or null when there
-// are none. Without a constructor, the destructors have nothing to wait for. The record is first and standalone, as druntime puts such a
-// module first among the ones that have a destructor, which makes its
-// destructor the last.
+// are none. Without a constructor, the destructors have nothing to wait for.
+//
+// The record is first and standalone, as druntime puts such a module first
+// among the ones that have a destructor, which makes its destructor the last.
 private ModuleInfo* crtRecordOf(Run* run, ModuleSpec[] specs) {
     imported!"dmd.func".FuncDeclaration[] constructors;
     imported!"dmd.func".FuncDeclaration[] destructors;
