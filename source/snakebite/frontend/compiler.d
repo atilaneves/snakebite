@@ -105,6 +105,24 @@ public void withCompilerLock(
     compiler.withLock(action, flags);
 }
 
+// Runs `action` with dmd's diagnostics gagged, for a caller that holds the
+// frontend lock: a question that the frontend cannot answer prints nothing,
+// and dmd does not keep the error it found on the declaration
+// (`AggregateDeclaration.determineSize` marks a struct invalid only outside
+// a gag). Returns whether dmd found an error, in which case what `action`
+// learned is not an answer.
+public bool gagged(scope void delegate() action) {
+    import dmd.globals: global;
+
+    bool found;
+    const outer = global.startGagging;
+    {
+        scope(exit) found = global.endGagging(outer);
+        action();
+    }
+    return found;
+}
+
 // Run `action`, then put the frontend back in the state `initialize` left
 // it in: every module `action` parsed is gone, and so is what the frontend
 // printed while it ran, unless `action` throws. For an analysis whose only

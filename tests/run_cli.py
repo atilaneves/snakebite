@@ -12,6 +12,7 @@ import shutil
 import stat
 import subprocess
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -1733,6 +1734,798 @@ def test_missing_c_preprocessor_is_reported_once(
     assert result.returncode != 0, output(result)
     assert output(result).count("cannot run the C preprocessor") == 1
     assert "No such file or directory" in output(result)
+
+
+# The GC forbids an allocation while it runs a finalizer, so a guest
+# destructor that allocates fails the way compiled D does. Each case runs in
+# a process of its own: the error leaves the process that collected unsafe
+# for the next test. CTFE cannot run `GC.collect`.
+FINALIZER_BACKENDS = ["native", "interpreter", "bytecode"]
+
+
+@pytest.mark.parametrize("backend", FINALIZER_BACKENDS)
+@pytest.mark.parametrize(
+    "destructor",
+    [
+        "auto p = new int; *p = 1;",
+        "int[] a; a ~= 1; total += a.length;",
+        "int x = dead; total += call(() => x);",
+        'throw new Exception("boom");',
+    ],
+    ids=["new", "append", "closure", "throw-new"],
+)
+def test_destructor_that_allocates_fails_in_finalizer(
+    tmp_path: Path, backend: str, destructor: str,
+) -> None:
+    source = f"""
+        module main;
+        __gshared int dead;
+        __gshared long total;
+        int call(int delegate() d) {{ return d(); }}
+        class B {{ ~this() {{ {destructor} ++dead; }} }}
+        pragma(inline, false) void make() {{
+            foreach (n; 0 .. 2000)
+                new B;
+        }}
+        unittest {{
+            import core.memory: GC;
+            make;
+            GC.collect;
+            GC.collect;
+        }}
+        int main() {{ return 0; }}
+    """
+    write(tmp_path / "app" / "dub.sdl", dub_project_recipe("finalizer"))
+    write(tmp_path / "app" / "source" / "main.d", source)
+
+    if backend == "native":
+        result = subprocess.run(
+            ["dmd", "-unittest", "-of=native", "source/main.d"],
+            capture_output=True, check=False, text=True,
+            cwd=tmp_path / "app",
+        )
+        assert result.returncode == 0, output(result)
+        result = subprocess.run(
+            [str(tmp_path / "app" / "native")],
+            capture_output=True, check=False, text=True,
+            cwd=tmp_path / "app",
+        )
+    else:
+        result = run_sb(
+            f"--backend={backend}", "--no-optimise-image",
+            str(tmp_path / "app"), cwd=tmp_path,
+        )
+
+    assert result.returncode != 0, output(result)
+    assert "InvalidMemoryOperationError" in output(result)
+
+
+# A destructor that throws an exception which exists already allocates
+# nothing, and druntime reports the exception as a `FinalizeError`.
+@pytest.mark.parametrize("backend", FINALIZER_BACKENDS)
+def test_destructor_that_throws_existing_exception_gives_finalize_error(
+    tmp_path: Path, backend: str,
+) -> None:
+    source = """
+        module main;
+        __gshared Exception existing;
+        class B { ~this() { throw existing; } }
+        pragma(inline, false) void make() {
+            foreach (n; 0 .. 2000)
+                new B;
+        }
+        unittest {
+            import core.memory: GC;
+            existing = new Exception("existing");
+            make;
+            GC.collect;
+            GC.collect;
+        }
+        int main() { return 0; }
+    """
+    write(tmp_path / "app" / "dub.sdl", dub_project_recipe("finalizer"))
+    write(tmp_path / "app" / "source" / "main.d", source)
+
+    if backend == "native":
+        result = subprocess.run(
+            ["dmd", "-unittest", "-of=native", "source/main.d"],
+            capture_output=True, check=False, text=True,
+            cwd=tmp_path / "app",
+        )
+        assert result.returncode == 0, output(result)
+        result = subprocess.run(
+            [str(tmp_path / "app" / "native")],
+            capture_output=True, check=False, text=True,
+            cwd=tmp_path / "app",
+        )
+    else:
+        result = run_sb(
+            f"--backend={backend}", "--no-optimise-image",
+            str(tmp_path / "app"), cwd=tmp_path,
+        )
+
+    assert result.returncode != 0, output(result)
+    assert "FinalizeError" in output(result)
+
+
+# An opaque class has no size. Taking its type information must not crash.
+# A native build does not link this program.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_type_information_of_opaque_class(
+    tmp_path: Path, backend: str,
+) -> None:
+    source = """
+        module main;
+        import core.stdc.stdio: printf;
+        import core.stdc.stdlib: qsort;
+        __gshared int never;
+        extern(C++) class Opaque;
+        __gshared Opaque opaque;
+        int work(int x) {
+            if (x == never + 12345) {
+                Opaque[] all;
+                all ~= opaque;
+                x += cast(int) all.length;
+            }
+            return x + 1;
+        }
+        class C { int f(int x) { return work(x); } }
+        extern(C) int cmp(const void* a, const void* b) {
+            return work(*cast(int*) a) - work(*cast(int*) b);
+        }
+        unittest {
+            auto c = new C;
+            int[4] v = [4, 2, 3, 1];
+            qsort(v.ptr, 4, 4, &cmp);
+            printf("ok %d %d%d%d%d\\n", c.f(1), v[0], v[1], v[2], v[3]);
+        }
+        int main() { return 0; }
+    """
+    write(tmp_path / "app" / "dub.sdl", dub_project_recipe("opaque-class"))
+    write(tmp_path / "app" / "source" / "main.d", source)
+
+    result = run_sb(
+        f"--backend={backend}", "--no-optimise-image",
+        str(tmp_path / "app"), cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, output(result)
+    assert "ok 2 1234" in output(result)
+
+
+# What the GC finalizer needs from a destructor that compiled D allows: no
+# allocation and no lock. Each shape is one construct in the destructor of a
+# class. All the shapes of one backend run in one small process, where a
+# collection is cheap, and the process of a defect that hangs ends at the
+# timeout of `run_sb`. A shape is `(declarations, destructor body, statement
+# that makes garbage, statement that collects)`; the last two have a default,
+# and a body of `None` means that the declarations define the class `B`.
+# 2000 dead objects are the deterministic form that a conservative GC allows:
+# a stale stack word keeps at most a few alive.
+class FinalizerShape(NamedTuple):
+    declarations: str
+    body: str | None = ""
+    make: str = "new B;"
+    collect: str = "GC.collect; GC.collect;"
+
+
+FINALIZER_SHAPES: dict[str, tuple[str | None, ...]] = {
+    "aaindex": (
+        "__gshared int[int] aa; shared static this() { aa = [1: 1, 2: "
+        "2]; }",
+        "total += aa[2];",
+    ),
+    "aalookup": (
+        '__gshared int[string] aa; shared static this() { aa = ["one": '
+        '1, "two": 2]; }',
+        'if (auto p = "two" in aa) total += *p; total += aa.length;',
+    ),
+    "aliasthis": (
+        "struct W { int v; alias v this; }",
+        "W w = W(3); int i = w; total += i;",
+    ),
+    "alloca_": (
+        "import core.stdc.stdlib: alloca;",
+        "auto p = cast(int*) alloca(16); *p = 3; total += *p;",
+    ),
+    "arrayops": (
+        "",
+        "int[4] a = [1,2,3,4]; int[4] b = [4,3,2,1]; int[4] c; c[] = "
+        "a[] + b[]; total += c[0];",
+    ),
+    "arreq": (
+        "__gshared int[] a1 = [1,2,3]; __gshared int[] a2 = [1,2,3];",
+        "if (a1 == a2) total += 1; if (a1 < [9]) total += 0;",
+    ),
+    "arreq2": (
+        "__gshared int[] a1 = [1,2,3]; __gshared int[] a2 = [1,2,3];",
+        "if (a1 == a2) total += 1;",
+    ),
+    "asg_dbl": (
+        "",
+        "double d; d = 2.5; total += cast(long) d;",
+    ),
+    "asg_field": (
+        "",
+        "id = dead; total += 1;",
+    ),
+    "asg_gshared": (
+        "__gshared int g;",
+        "g = dead; total += 1;",
+    ),
+    "asg_index": (
+        "__gshared int[4] g;",
+        "g[1] = 2; total += g[1];",
+    ),
+    "asg_local": (
+        "",
+        "int a; a = dead; total += a + 1;",
+    ),
+    "asg_ptr": (
+        "__gshared int g;",
+        "int* p = &g; *p = 3; total += 1;",
+    ),
+    "asg_ref": (
+        "",
+        "Object o; o = this; total += o !is null;",
+    ),
+    "asg_str": (
+        '__gshared string gs = "ab";',
+        "string s; s = gs; total += s.length;",
+    ),
+    "asg_struct": (
+        "struct P { int x, y; }",
+        "P a = P(1, 2); P b; b = a; total += b.y;",
+    ),
+    "assertok": (
+        "",
+        'assert(dead >= 0, "neg"); total += 1;',
+    ),
+    "atomic": (
+        "import core.atomic; shared int ctr;",
+        'atomicOp!"+="(ctr, 1); total += atomicLoad(ctr);',
+    ),
+    "bitfield_class": (
+        "class H { uint a : 3; uint b : 5; } __gshared H h; "
+        "shared static this() { h = new H; }",
+        "h.b = 9; total += h.b;",
+    ),
+    "bitfield_struct": (
+        "struct F { uint a : 3; uint b : 5; } __gshared F gf;",
+        "F f; f.a = 3; f.b = 9; total += f.a + f.b; gf.a = 1; ++gf.b;",
+    ),
+    "boundsok": (
+        "__gshared int[] data = [1,2,3];",
+        "total += data[dead % 3];",
+    ),
+    "breakfinally": (
+        "",
+        "foreach (i; 0 .. 3) { scope(exit) total += 1; if (i == 1) "
+        "break; }",
+    ),
+    "callchain_loop": (
+        "int inner(int n) { return n + 1; }\nint outer(int n) { return "
+        "inner(n) + inner(n + 1); }",
+        "int sum; foreach (i; 0 .. 10) sum += outer(i); total += sum;",
+    ),
+    "classinfo": (
+        "",
+        "total += this.classinfo.name.length;",
+    ),
+    "compare_strings": (
+        '__gshared string name = "abc";',
+        'if (name == "abc") ++total;',
+    ),
+    "contract": (
+        "int f(int x) in (x >= 0) out (r; r > 0) { return x + 1; }",
+        "total += f(dead);",
+    ),
+    "copyctor": (
+        "struct P { int x; this(int v) { x = v; } this(ref return "
+        "scope P o) { x = o.x + 1; } }",
+        "P a = P(1); P b = a; total += b.x;",
+    ),
+    "cstring": (
+        "import core.stdc.string: strlen, memcmp;",
+        'total += strlen("hello") + (memcmp("ab".ptr, "ab".ptr, 2) == '
+        "0);",
+    ),
+    "ctfeguard": (
+        "int f(int x) { if (__ctfe) return x; return x + 1; }",
+        "total += f(1);",
+    ),
+    "cvar": (
+        "import core.stdc.stdarg; int sumv(int n, ...) { va_list ap; "
+        "va_start(ap, n); int s; foreach (i; 0 .. n) s += "
+        "va_arg!int(ap); va_end(ap); return s; }",
+        "total += sumv(3, 1, 2, 3);",
+    ),
+    "delegfield": (
+        "struct Cb { int delegate(int) d; } __gshared Cb cb; class Tgt "
+        "{ int k = 2; int m(int x) { return x * k; } } shared static "
+        "this() { cb.d = &(new Tgt).m; }",
+        "total += cb.d(3);",
+    ),
+    "dgcall": (
+        "class T { int m(int x) { return x + 1; } } __gshared int "
+        "delegate(int) dg; shared static this() { dg = &(new T).m; }",
+        "total += dg(1);",
+    ),
+    "dowhile": (
+        "",
+        "int i; do { ++i; } while (i < 4); while (i > 0) { --i; total "
+        "+= 1; }",
+    ),
+    "dstring": (
+        "",
+        'wstring w = "ab"w; dstring d = "abc"d; total += w.length + '
+        'd.length; foreach (dchar c; "hé") total += 1;',
+    ),
+    "dyncast": (
+        "class X {} class Y : X { int v = 4; } __gshared X gx; shared "
+        "static this() { gx = new Y; }",
+        "if (auto y = cast(Y) gx) total += y.v;",
+    ),
+    "enumval": (
+        "enum Color : ubyte { r = 1, g, b } enum table = [1, 2, 3];",
+        "Color c = Color.g; total += c;",
+    ),
+    "finalswitch": (
+        "enum E { a, b, c } int pick(E e) { final switch (e) with (E) "
+        "{ case a: return 1; case b: return 2; case c: return 3; } }",
+        "total += pick(cast(E)(dead % 3));",
+    ),
+    "floatm": (
+        "import core.stdc.math: sqrt;",
+        "double d = sqrt(16.0) * 1.5; total += cast(long) d;",
+    ),
+    "fnptr2": (
+        "int f1(int x) { return x + 1; } __gshared int function(int) "
+        "fp = &f1;",
+        "total += fp(1); auto q = &f1; total += q(2);",
+    ),
+    "fnptrcall": (
+        "int f1(int x) { return x + 1; } __gshared int function(int) "
+        "fp; shared static this() { fp = &f1; }",
+        "total += fp(1);",
+    ),
+    "forloop": (
+        "",
+        "for (int i = 0; i < 3; i++) total += i + 1;",
+    ),
+    "gcquery": (
+        "import core.memory: GC;",
+        "total += 1; auto p = cast(void*) this; total += (p !is null);",
+    ),
+    "gotocase": (
+        "",
+        "switch (dead & 1) { case 0: total += 1; goto case 1; case 1: "
+        "total += 1; break; default: }",
+    ),
+    "gotofinally": (
+        "",
+        "foreach (i; 0 .. 2) { try { if (i == 1) goto done; } finally "
+        "{ total += 1; } } done:",
+    ),
+    "gotolbl": (
+        "",
+        "int i; again: ++i; if (i < 3) goto again; outer: foreach (a; "
+        "0 .. 3) foreach (b; 0 .. 3) { if (b == 1) continue outer; if "
+        "(a == 2) break outer; total += 1; } total += i;",
+    ),
+    "guest_callback_to_native": (
+        "import core.stdc.stdlib: qsort;\nextern(C) int compare(const "
+        "void* a, const void* b) { return *cast(int*) a - *cast(int*) "
+        "b; }",
+        "int[3] values = [3, 1, 2]; qsort(values.ptr, 3, int.sizeof, "
+        "&compare); total += values[0];",
+    ),
+    "idcompare": (
+        "",
+        "Object o = this; if (o is this) total += 1; if (o !is null) "
+        "total += 1;",
+    ),
+    "iface": (
+        "interface I { int f(); } final class K : I { int f() { return "
+        "3; } } __gshared I gi; shared static this() { gi = new K; }",
+        "total += gi.f;",
+    ),
+    "immtable": (
+        "static immutable int[5] table = [10, 20, 30, 40, 50]; static "
+        'immutable string[3] names = ["a", "bb", "ccc"];',
+        "total += table[dead % 5] + names[dead % 3].length;",
+    ),
+    "incfield": (
+        "",
+        "++id; id += 2; total += id;",
+    ),
+    "init_only": (
+        "",
+        "int a = dead; Object o = this; total += a + 1;",
+    ),
+    "interface_call": (
+        "interface I { int value(); }\nclass Impl : I { int value() { "
+        "return 2; } }\n__gshared Impl impl;\nshared static this() { "
+        "impl = new Impl; }",
+        "I i = impl; total += i.value;",
+    ),
+    "invariant_": (
+        "class Inv { int v = 1; invariant { assert(v == 1); } int "
+        "get() { return v; } } __gshared Inv gi; shared static this() "
+        "{ gi = new Inv; }",
+        "total += gi.get;",
+    ),
+    "lazyp": (
+        "int pick(bool b, lazy int v) { return b ? v : 0; }",
+        "total += pick(true, dead + 1);",
+    ),
+    "memberdtor": (
+        "struct M { int v = 3; ~this() { total += v; } } class H { M "
+        "m; ~this() { total += 1; } } __gshared int made; void mk() { "
+        "foreach (i; 0 .. 10) new H; }",
+        "total += 1;",
+    ),
+    "memfnptr": (
+        "struct S { int v; int get() { return v; } }",
+        "S s = S(7); auto d = &s.get; total += d();",
+    ),
+    "memset_": (
+        "import core.stdc.string: memset;",
+        "ubyte[16] b = void; memset(b.ptr, 1, 16); total += b[3];",
+    ),
+    "nested_function": (
+        "",
+        "int n = 2; int inner() { return n + 1; } total += inner();",
+    ),
+    "nestedclass": (
+        "class Outer { int v = 2; class Inner { int get() { return v; "
+        "} } Inner mk() { return new Inner; } } __gshared Outer.Inner "
+        "gin; shared static this() { gin = (new Outer).mk; }",
+        "total += gin.get;",
+    ),
+    "nesteddg": (
+        "int apply(scope int delegate(int) d) { return d(2); }",
+        "int base = 5; int add(int x) { return x + base; } total += "
+        "apply(&add);",
+    ),
+    "neststruct": (
+        "struct In { int v; ~this() { total += v; } } struct Out { In "
+        "a; In b; ~this() { total += 1; } }",
+        "{ auto o = Out(In(1), In(2)); }",
+    ),
+    "opapply": (
+        "struct C { int opApply(scope int delegate(int) d) { foreach "
+        "(i; 0 .. 3) if (auto r = d(i + 1)) return r; return 0; } }",
+        "C c; foreach (x; c) total += x;",
+    ),
+    "opassign": (
+        "struct P { int x; void opAssign(P o) { x = o.x + 1; } }",
+        "P a = P(1); P b; b = a; total += b.x;",
+    ),
+    "placement": (
+        "struct P { int x; this(int v) { x = v; } }",
+        "P s = void; new (s) P(3); total += s.x;",
+    ),
+    "postblit": (
+        "struct P { int x; this(this) { total += 1; } ~this() { total "
+        "+= 1; } } P same(P p) { return p; }",
+        "P a = P(1); P b = a; P c = same(b); total += c.x;",
+    ),
+    "ptrarith": (
+        "__gshared int[4] g = [1,2,3,4];",
+        "auto p = g.ptr; p += 2; total += *p + p[-1];",
+    ),
+    "ptrfield": (
+        "struct N { int v; } __gshared N gn;",
+        "auto p = &gn; p.v = 4; total += p.v;",
+    ),
+    "ptrmember": (
+        "struct N { int v; N* next; } __gshared N* head; shared static "
+        "this() { head = new N(1, new N(2, null)); }",
+        "for (auto n = head; n; n = n.next) total += n.v;",
+    ),
+    "rangefe": (
+        "struct R { int i, n; bool empty() const { return i >= n; } "
+        "int front() const { return i; } void popFront() { ++i; } }",
+        "foreach (x; R(1, 5)) total += x;",
+    ),
+    "refout": (
+        "ref int pick(return ref int a) { return a; } void setit(out "
+        "int o) { o = 4; }",
+        "int a = 1; pick(a) += 2; int o; setit(o); total += a + o;",
+    ),
+    "retfinally": (
+        "int g(int i) { try { if (i) return 1; } finally { total += 1; "
+        "} return 0; }",
+        "total += g(1);",
+    ),
+    "retstruct": (
+        "struct P { int x, y; } P mk(int a) { P p; p.x = a; p.y = a; "
+        "return p; }",
+        "total += mk(2).y;",
+    ),
+    "sarr": (
+        "",
+        "int[8] a = [1,2,3,4,5,6,7,8]; int[8] b = a; b[] += 2; foreach "
+        "(x; b) total += x;",
+    ),
+    "scopeclass": (
+        "class Q { int v = 2; ~this() { total += 1; } }",
+        "scope q = new Q; total += q.v;",
+    ),
+    "scopeguards": (
+        "",
+        "scope(exit) total += 1; scope(success) total += 1; { "
+        "scope(failure) total += 100; total += 1; }",
+    ),
+    "slices": (
+        "__gshared int[] data = [1,2,3,4,5,6];",
+        "auto s = data[1 .. 4]; foreach (x; s) total += x; total += "
+        "s.length;",
+    ),
+    "snprintf": (
+        "import core.stdc.stdio: snprintf;",
+        'char[32] buf; total += snprintf(buf.ptr, buf.length, "%d-%s", '
+        'dead, "x".ptr);',
+    ),
+    "staticctor": (
+        "__gshared int gs; int tl; static this() { tl = 5; }",
+        "total += 1;",
+    ),
+    "staticlocal": (
+        "int next() { static int n; return ++n; } int nextg() { "
+        "__gshared int n; return ++n; }",
+        "total += next + nextg;",
+    ),
+    "stdalgo": (
+        "import std.algorithm.comparison: max, min;",
+        "total += max(1, min(5, dead + 2));",
+    ),
+    "strswitch": (
+        '__gshared string key = "beta"; int sw(string s) { switch (s) '
+        '{ case "alpha": return 1; case "beta": return 2; default: '
+        "return 0; } }",
+        "total += sw(key);",
+    ),
+    "base_class": (
+        "class Base { ~this() { ++total; } } "
+        "class B : Base { ~this() { ++dead; } }",
+        None,
+    ),
+    "collecting_thread": (
+        "",
+        "++total;",
+        "new B;",
+        "import core.thread: Thread; auto collector = new Thread({ "
+        "GC.collect; GC.collect; }); collector.start; collector.join;",
+    ),
+    "heap_struct": (
+        "struct S { int value; ~this() { ++total; ++dead; } }",
+        None,
+        "auto s = new S(1); assert(s.value == 1);",
+    ),
+    "struct_field": (
+        "struct Part { ~this() { ++total; } } "
+        "class B { Part part; ~this() { ++dead; } }",
+        None,
+    ),
+    "thread_local_first_touch": (
+        "int threadLocalDead;",
+        "++threadLocalDead; ++total;",
+    ),
+    "struct_array": (
+        "struct S { int value; ~this() { ++total; ++dead; } }",
+        None,
+        "auto array = new S[4]; assert(array.length == 4);",
+    ),
+    "struct_locals_with_destructors": (
+        "struct S { int value; ~this() { ++total; } }",
+        "S[3] locals; total += locals[0].value;",
+    ),
+    "structeq": (
+        "struct P { int x; string s; }",
+        'auto a = P(1, "q"); auto b = P(1, "q"); if (a == b) total += '
+        "1;",
+    ),
+    "structmethodtmpl": (
+        'struct V { int x; V opBinary(string op : "+")(V o) { return '
+        "V(x + o.x); } int opIndex(size_t i) { return x + cast(int) i; "
+        "} int opCall(int k) { return x * k; } }",
+        "auto v = V(1) + V(2); total += v[1] + v(2);",
+    ),
+    "superdtor": (
+        "class Base { ~this() { total += 1; } } class D2 : Base { "
+        "~this() { total += 2; } } void more() { foreach (i; 0 .. 4) "
+        "new D2; } shared static this() { more; }",
+        "total += 1;",
+    ),
+    "ternary": (
+        "",
+        "total += dead > 5 ? 1 : 2;",
+    ),
+    "ternstr": (
+        '__gshared string s1 = "a", s2 = "bc";',
+        "auto s = dead % 2 ? s1 : s2; total += s.length; if (s is s1) "
+        'total += 1; if (s == "bc") total += 1;',
+    ),
+    "tlsstruct": (
+        "struct T { int a; long b; } T tl;",
+        "++tl.a; total += tl.a;",
+    ),
+    "tlsvar": (
+        "int tl; static this() { tl = 0; }",
+        "++tl; total += tl;",
+    ),
+    "tmplfirst": (
+        "T twice(T)(T x) { return x + x; } T pick(T)(T a, T b) { "
+        "return a > b ? a : b; }",
+        "total += twice(3L) + pick!short(1, 2);",
+    ),
+    "tohash": (
+        "",
+        "total += (hashOf(dead) & 1) + 1;",
+    ),
+    "trycatch_scopeexit": (
+        "",
+        "scope(exit) ++total; try { if (total < 0) throw new "
+        'Exception("never"); } catch (Exception) { }',
+    ),
+    "typeidname": (
+        "",
+        "total += typeid(this).name.length;",
+    ),
+    "typesafevar": (
+        "int sum(int[] xs...) { int s; foreach (x; xs) s += x; return "
+        "s; }",
+        "total += sum(1, 2, 3);",
+    ),
+    "union_": (
+        "union U { int i; float f; ubyte[4] b; }",
+        "U u; u.f = 1.0f; total += u.b[3];",
+    ),
+    "whileasg": (
+        "",
+        "int i = 3; while (i) { i = i - 1; total += 1; }",
+    ),
+    "withstmt": (
+        "struct P { int x, y; }",
+        "P p = P(1, 2); with (p) total += x + y;",
+    ),
+    "write_gshared": (
+        "",
+        "total += 1;",
+    ),
+}
+
+
+def finalizer_shape_source(name: str, value: tuple[str | None, ...]) -> str:
+    shape = FinalizerShape(*value)
+    destructor = "" if shape.body is None else f"""
+        class B {{
+            int id;
+            ~this() {{ {shape.body} ++dead; }}
+        }}"""
+    return f"""
+        module shape_{name};
+        __gshared int dead;
+        __gshared long total;
+        {shape.declarations}{destructor}
+        pragma(inline, false) void make() {{
+            foreach (n; 0 .. 2000) {{
+                {shape.make}
+            }}
+        }}
+        public bool finalizes() {{
+            import core.memory: GC;
+            make;
+            {shape.collect}
+            return dead > 1000 && total > 0;
+        }}
+    """
+
+
+# Runs the named shapes in one process. A hang gives the output that the
+# process had written so far, marked as a timeout.
+def run_finalizer_shapes(
+    backend: str, names: list[str], app: Path,
+) -> tuple[str, bool]:
+    write(app / "dub.sdl", dub_project_recipe("finalizer"))
+    for name in names:
+        write(
+            app / "source" / f"shape_{name}.d",
+            finalizer_shape_source(name, FINALIZER_SHAPES[name]),
+        )
+    imports = "".join(f"import shape_{name};\n" for name in names)
+    reports = "".join(
+        f'fprintf(stderr, "{name} %s\\n", shape_{name}.finalizes '
+        '? "ok".ptr : "failed".ptr);\n'
+        for name in names
+    )
+    write(
+        app / "source" / "main.d",
+        "module main;\nimport core.stdc.stdio: fprintf, stderr;\n"
+        + imports + "unittest {\n" + reports + "}\nint main() { return 0; }\n",
+    )
+
+    try:
+        if backend == "native":
+            result = subprocess.run(
+                ["dmd", "-unittest", "-of=native", *sorted(
+                    str(path.relative_to(app))
+                    for path in (app / "source").glob("*.d")
+                )],
+                capture_output=True, check=False, text=True, cwd=app,
+            )
+            assert result.returncode == 0, output(result)
+            result = subprocess.run(
+                [str(app / "native")], capture_output=True, check=False,
+                text=True, cwd=app, timeout=FINALIZER_TIMEOUT_SECONDS,
+            )
+        else:
+            result = run_sb(
+                f"--backend={backend}", "--no-optimise-image", str(app),
+                cwd=app.parent, timeout_seconds=FINALIZER_TIMEOUT_SECONDS,
+            )
+    except subprocess.TimeoutExpired as timeout:
+        def decoded(data: str | bytes | None) -> str:
+            if data is None:
+                return ""
+            return data if isinstance(data, str) else data.decode(
+                errors="replace")
+
+        return (
+            decoded(timeout.stdout) + decoded(timeout.stderr)
+            + f"\ntimed out after {FINALIZER_TIMEOUT_SECONDS} s\n"
+        ), False
+    return output(result), True
+
+
+FINALIZER_TIMEOUT_SECONDS = 300
+
+
+class FinalizerShapes:
+    def __init__(self, backend: str, root: Path) -> None:
+        self.backend = backend
+        self._root = root
+        self._alone: dict[str, str] = {}
+        self.text, self.completed = run_finalizer_shapes(
+            backend, list(FINALIZER_SHAPES), root / "all" / "app",
+        )
+
+    # The combined run is the fast path. When it did not finish, a shape
+    # without a report runs alone, so that one defect makes one test red.
+    def verdict(self, shape: str) -> str:
+        lines = self.text.splitlines()
+        if f"{shape} ok" in lines or f"{shape} failed" in lines:
+            return self.text
+        if self.completed:
+            return self.text
+        if shape not in self._alone:
+            self._alone[shape], _ = run_finalizer_shapes(
+                self.backend, [shape], self._root / shape / "app",
+            )
+        return self._alone[shape]
+
+
+@pytest.fixture(scope="module", params=FINALIZER_BACKENDS)
+def finalizer_shapes(
+    request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory,
+) -> FinalizerShapes:
+    return FinalizerShapes(
+        request.param,
+        tmp_path_factory.mktemp(f"finalizer-{request.param}"),
+    )
+
+
+@pytest.mark.parametrize("shape", sorted(FINALIZER_SHAPES))
+def test_destructor_shape_runs_in_finalizer(
+    finalizer_shapes: FinalizerShapes, shape: str,
+) -> None:
+    text = finalizer_shapes.verdict(shape)
+
+    assert f"{shape} ok" in text.splitlines(), (
+        f"{finalizer_shapes.backend}:\n{text[-3000:]}"
+    )
 
 
 # A dub recipe whose unittest configuration is an executable: dub's own

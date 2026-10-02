@@ -48,7 +48,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import snakebite.sharedtable: SharedTable;
     import snakebite.exception: SnakebiteException;
     import snakebite.framestack: defaultFrameCapacity;
-    import snakebite.hostthreads: PerThread;
+    import snakebite.hostthreads: heapNew, PerThread;
     import snakebite.nativelayout: NativeData, nativeSymbolName;
     import snakebite.backends.runtimetypes: RuntimeTypes;
 
@@ -68,6 +68,11 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // once and never relocates, unlike an associative array's own
     // storage, which can rehash as more entries go in.
     private Function*[FuncDeclaration] _compiled;
+    // The functions in `_compiled` whose body is complete, read without a
+    // lock: the first guest call of a thread can be the one that a GC
+    // finalizer makes, and it cannot wait for a lock that another thread
+    // holds while it waits for the GC.
+    private SharedTable!(FuncDeclaration, const(Function)*) _complete;
     private const(Function)*[] _callbackRoots;
     private bool _preparingCallbacks;
     // The prepared FFI plan for druntime's own allocator, built once and
@@ -107,7 +112,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             &classRuntimeInfo,
             (type, loc) => _nativeData.initialValue(type, loc));
         _vms = PerThread!(Vm*, true)(
-            () => new Vm(defaultFrameCapacity, _nativeData.tlsSlots));
+            () => heapNew!Vm(defaultFrameCapacity, _nativeData.tlsSlots));
         _plans.useCallbacks(
             new CallbackBridge(&invokeCallback, cast(void*) this));
     }
@@ -152,7 +157,9 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         // `compileFunction`'s own doc for why a second, backend-local
         // lock cannot give class-runtime building and function
         // compilation one consistent order.
-        const(Function)* compiled = compileFunction(function_);
+        auto complete = function_ in _complete;
+        const(Function)* compiled = complete is null
+            ? compileFunction(function_) : *complete;
         runHostToGuest(compiled, function_, returnPlace, args);
     }
 
@@ -582,6 +589,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                 this, function_, layout, returnFacts, isVoidReturn,
                 isRefReturn);
             *placeholder = compiler.build(body_);
+            _complete.insert(function_, placeholder);
             if (outermost)
                 prepareCallbackBodies;
 
@@ -3092,19 +3100,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const facts = TypeFacts.of(expression.e1.type);
         import snakebite.backends.assignment: executeAssignment;
 
-        size_t delegate(size_t, size_t) reserve =
-            (size_t size, size_t alignment) {
-                return reserveTemp(facts);
-            };
-        void delegate(size_t value) evaluate = (size_t value) {
-            evalInto(expression.e2, value, facts.size, expression.e1.type);
-        };
-        void delegate(size_t value) publish = (size_t value) {
-            emit(&opStoreIndirect, addressOffset, value, facts.size);
-        };
-        const valueOffset = executeAssignment!(size_t, reserve, evaluate,
-            publish)(expression.isConstructExp !is null,
-                indirectStorage(addressOffset), facts.size, facts.alignment);
+        const valueOffset = executeAssignment!size_t(
+            expression.isConstructExp !is null,
+            indirectStorage(addressOffset), facts.size, facts.alignment,
+            (size, alignment) => reserveTemp(facts),
+            (value) {
+                evalInto(expression.e2, value, facts.size,
+                    expression.e1.type);
+            },
+            (value) {
+                emit(&opStoreIndirect, addressOffset, value, facts.size);
+            });
 
         if (destOffset != discardResult)
             emit(&opCopy, destOffset, valueOffset, facts.size);

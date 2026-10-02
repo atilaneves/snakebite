@@ -144,6 +144,11 @@ public struct SharedTable(Key, Value) {
     // Stores `value` for `key` unless the key already has one, and
     // returns the value the table holds after this call.
     public Value* insert(Key key, Value value) {
+        // A key that is already stored needs no lock: a finalizer cannot
+        // wait for one that another thread holds.
+        if (auto found = find(key))
+            return found;
+
         auto tableLock = lockOf();
         tableLock.lock;
         scope(exit) tableLock.unlock;

@@ -2,6 +2,8 @@ module snakebite.backends.temporarystack;
 
 private:
 
+import snakebite.cstack: CStack;
+
 
 // Backend neutral state for expression-scoped destructors. The payload is
 // owned by the caller: the interpreter uses a metadata index and bytecode
@@ -13,7 +15,7 @@ public struct TemporaryStack {
         public bool armed;
     }
 
-    private Entry[] _entries;
+    private CStack!Entry _entries;
 
     public size_t mark() const {
         return _entries.length;
@@ -24,11 +26,11 @@ public struct TemporaryStack {
         size_t payload,
         bool armed = false,
     ) {
-        _entries ~= Entry(address, payload, armed);
+        _entries.push(Entry(address, payload, armed));
     }
 
     public void arm(void* address) {
-        foreach_reverse (ref entry; _entries)
+        foreach_reverse (ref entry; _entries[])
             if (entry.address is address) {
                 entry.armed = true;
                 return;
@@ -36,7 +38,7 @@ public struct TemporaryStack {
     }
 
     public void suspend(void* address) {
-        foreach_reverse (ref entry; _entries)
+        foreach_reverse (ref entry; _entries[])
             if (entry.address is address) {
                 entry.armed = false;
                 return;
@@ -48,8 +50,8 @@ public struct TemporaryStack {
         scope void delegate(in Entry) destroy,
     ) {
         while (_entries.length > mark_) {
-            const entry = _entries[$ - 1];
-            _entries = _entries[0 .. $ - 1];
+            const entry = _entries.back;
+            _entries.pop;
             if (!entry.armed)
                 continue;
             // A throwing destructor must not strand older completed values.
