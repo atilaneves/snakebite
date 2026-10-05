@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# dependencies = ["pytest==8.4.1"]
+# dependencies = ["pytest==8.4.1", "pytest-xdist==3.8.0"]
 # ///
 
 # Compiler flags change what a whole program means, and a halt ends the
