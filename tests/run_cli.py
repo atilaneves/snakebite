@@ -309,6 +309,41 @@ def test_state_directory_stays_in_caller_directory(
     assert not (tmp_path / "app" / ".snakebite").exists()
 
 
+# The `dub describe` record of a project that nothing changed since the
+# first start holds on the second start. The state directory lies in the
+# project directory here, which the record watches: creating it must not
+# change what the record saw.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_second_start_does_not_describe_again(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    write(app / "dub.sdl", dub_project_recipe("describe-once"))
+    write(
+        app / "source" / "main.d",
+        """
+        module main;
+        int main() { return 0; }
+        """,
+    )
+    real_dub = shutil.which("dub")
+    assert real_dub is not None
+    log = tmp_path / "dub.log"
+    fake_dub(tmp_path, f'echo "$*" >> "{log}"\nexec "{real_dub}" "$@"\n')
+
+    for _ in range(2):
+        result = run_with_fake_dub_in(
+            tmp_path, app, f"--backend={backend}", "--no-optimise-image", ".",
+        )
+        assert result.returncode == 0, output(result)
+
+    describes = [
+        line for line in log.read_text().splitlines()
+        if line.split()[0] == "describe"
+    ]
+    assert len(describes) == 1, describes
+
+
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
 def test_dependency_constructor_uses_project_directory(
     tmp_path: Path, backend: str,
@@ -2608,6 +2643,13 @@ def run_with_fake_dub(
     outside.mkdir(exist_ok=True)
     path = f"{directory / 'bin'}:{os.environ.get('PATH', '')}"
     return run_sb(*args, cwd=outside, env={"PATH": path})
+
+
+def run_with_fake_dub_in(
+    directory: Path, cwd: Path, *args: str,
+) -> subprocess.CompletedProcess[str]:
+    path = f"{directory / 'bin'}:{os.environ.get('PATH', '')}"
+    return run_sb(*args, cwd=cwd, env={"PATH": path})
 
 
 def output(result: subprocess.CompletedProcess[str]) -> str:

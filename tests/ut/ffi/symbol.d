@@ -261,21 +261,26 @@ unittest {
     dirEntries(directory, SpanMode.shallow).array.length.should == 0;
 }
 
+// The image is built with the flags of the host's compiler family. A
+// compiler of the other family does not accept them, and nothing is left in
+// the cache directory.
 @("image.compilerFamily")
 @Serial
 unittest {
     const sandbox = Sandbox();
     const directory = sandbox.sandboxPath;
-    version (DigitalMars) {
+    version (DigitalMars)
         const otherCompiler = "ldc2";
-        const message = "Image compiler must be DMD";
-    } else {
+    else
         const otherCompiler = "dmd";
-        const message = "Image compiler must be LDC";
-    }
     (() {
-        auto image = prepareImage(atomicSource, directory, otherCompiler, optimise: Optimise.no);
-    })().shouldThrowWithMessage!SnakebiteException(message);
+        try {
+            auto image = prepareImage(atomicSource, directory, otherCompiler, optimise: Optimise.no);
+        } catch (SnakebiteException error) {
+            "Dependency image compilation failed".shouldBeIn(error.msg);
+            throw error;
+        }
+    })().shouldThrow!SnakebiteException;
     dirEntries(directory, SpanMode.shallow).array.length.should == 0;
 }
 
