@@ -41,6 +41,11 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         };
     }
 
+    protected override void release() {
+        _evaluators.release;
+        _shared.nativeData.release;
+    }
+
     public override void call(
         FuncDeclaration function_,
         void* returnPlace,

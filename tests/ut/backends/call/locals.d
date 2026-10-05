@@ -239,7 +239,7 @@ unittest {
         }
     });
     auto function_ = findFunction(module_, "next");
-    auto backend = new Bytecode(Program([module_]));
+    auto backend = Owned!Bytecode(Program([module_]));
 
     int first;
     backend.call(function_, &first, []);

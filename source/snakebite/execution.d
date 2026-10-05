@@ -106,7 +106,7 @@ public ExecutionReport executeBackend(
     }
 
     auto stopWatch = StopWatch(AutoStart.yes);
-    scope backend = makeBackend(name, program);
+    auto backend = makeBackend(name, program);
     TestStartupReport startup;
     int status;
     // Snippet callers construct Programs that do not start as a project,

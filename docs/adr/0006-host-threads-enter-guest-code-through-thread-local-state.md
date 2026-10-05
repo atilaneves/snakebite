@@ -45,7 +45,18 @@ is not how compiled D behaves.
 
 `synchronized` is not used, per project rule. Locks use `core.sync`
 primitives, and only on slow paths. Each backend must release a
-thread's state when the thread ends.
+thread's state when the thread ends. The owner of a backend also
+releases the state that it made on its own thread when the owner ends.
+A guest finalizer that enters a backend after that makes a new state, which
+stays until its thread ends. In a full `bin/ut` run about 14 states stay this
+way. Nothing limits them in `sb-repl`: after 3000 cells that each leave an
+object with a guest destructor, 967 frame stacks stay with the bytecode backend
+(409 MiB resident, against 262 MiB without the destructor) and 2550 with the
+interpreter (1435 MiB, against 257 MiB). The numbers are from one run each. A
+rule that releases such a state needs a flag that the owner ended and a count of
+entries on the thread, so it is a design change of its own. Guest thread-local
+variables are not released with the owner, because live guest objects can point
+into them. The owner releases only the table of a thread that holds no variable.
 
 Automatic attach inherits druntime's own attach race (issue #40
 review, finding 3): `thread_attachThis` allocates a `Thread` object

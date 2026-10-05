@@ -362,7 +362,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             });
             auto program = Program([module_]);
             program.dependencyImage = &image;
-            scope instance = new backend(program);
+            auto instance = Owned!backend(program);
 
             int a = 3, b = 4;
             int intResult;
@@ -460,7 +460,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             });
             auto program = Program([module_]);
             program.dependencyImage = &image;
-            scope instance = new backend(program);
+            auto instance = Owned!backend(program);
 
             int result;
             instance.call(
@@ -537,7 +537,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             });
             auto program = Program([module_]);
             program.dependencyImage = &image;
-            scope instance = new backend(program);
+            auto instance = Owned!backend(program);
 
             static struct Reading { size_t a; size_t b; size_t c; }
             Reading result;
@@ -576,7 +576,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             });
             auto program = Program([module_]);
             program.dependencyImage = &image;
-            scope instance = new backend(program);
+            auto instance = Owned!backend(program);
 
             int result;
             instance.call(
@@ -646,7 +646,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             });
             auto program = Program([module_]);
             program.dependencyImage = &image;
-            scope instance = new backend(program);
+            auto instance = Owned!backend(program);
 
             int v = 17;
             int result;
@@ -693,7 +693,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             });
             auto program = Program([module_]);
             program.dependencyImage = &image;
-            scope instance = new backend(program);
+            auto instance = Owned!backend(program);
 
             int v = 9;
             int result;
@@ -723,7 +723,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             });
             auto program = Program([module_]);
             program.dependencyImage = &image;
-            scope instance = new backend(program);
+            auto instance = Owned!backend(program);
 
             int result;
             try {
@@ -798,7 +798,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             });
             auto program = Program([module_]);
             program.dependencyImage = &image;
-            scope instance = new backend(program);
+            auto instance = Owned!backend(program);
 
             int result;
             instance.call(findFunction(module_, "callFirst"), &result, []);

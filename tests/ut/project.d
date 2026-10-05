@@ -390,7 +390,7 @@ private void dubProjectMainShouldSucceed(backend)(in string directory) {
     import snakebite.execution: prepareProject;
 
     auto project = prepareProject(directory).project;
-    scope instance = new backend(project.program);
+    auto instance = Owned!backend(project.program);
     run(instance, project.program).should == 0;
 }
 

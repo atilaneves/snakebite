@@ -3492,7 +3492,7 @@ unittest {
     auto function_ = findFunction(module_, "answer");
     assert(function_ !is null, "No `answer` in the guest program");
 
-    auto interpreter_ = new Interpreter(Program([module_]));
+    auto interpreter_ = Owned!Interpreter(Program([module_]));
     size_t result;
     // Warms the plan cache (`PlanCache.of`) and the type cache
     // (`RuntimeTypes.get`) alike - only the steady state after this is
@@ -3526,7 +3526,7 @@ unittest {
     auto function_ = findFunction(module_, "answer");
     assert(function_ !is null, "No `answer` in the guest program");
 
-    auto bytecode = new Bytecode(Program([module_]));
+    auto bytecode = Owned!Bytecode(Program([module_]));
     size_t result;
     bytecode.call(function_, &result, []);
 
