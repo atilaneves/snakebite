@@ -21,7 +21,7 @@ import snakebite.frontend.dmd.functions: findFunction;
 // the library never instantiates.
 
 
-// The D side's own `extern(C++)` declarations for `cppSource`, shared
+// The D side's own `extern(C++)` declarations for the C++ library, shared
 // by every guest snippet below.
 private enum cppBindings = q{
     extern(C++) struct Point { int x; int y; }
@@ -92,7 +92,7 @@ private enum cppBindings = q{
 // below takes a function's mangled name from a real declaration here
 // (`.mangleof`), resolves it out of the same image the other rows
 // call through the barrier, and calls it directly - what compiled D
-// itself would do (issue #336 review, finding 8). Never called
+// itself would do. Never called
 // directly itself, only named, so it needs nothing to link against -
 // except a virtual method: dmd builds a real reference to one even
 // with no call anywhere, the same as compiled D calling into an
@@ -100,7 +100,7 @@ private enum cppBindings = q{
 // with one non-final, body-less method fails to link on its own,
 // with no call to it anywhere). So `Base` and `Derived` stay bare
 // here, and every method reaches this file only through its own
-// free-function wrapper from `cppSource` above.
+// free-function wrapper from the C++ library.
 private enum nativeBindings = q{
     extern(C++) struct Point { int x; int y; }
     extern(C++) struct Big { size_t a; size_t b; size_t c; }
@@ -115,10 +115,10 @@ private enum nativeBindings = q{
     // linked call to it wherever this file's own compiled code (the
     // `Native` row below) holds a `NonPod` by value - including inside
     // `resolveNative`'s own callers - and this file never links the
-    // compiled C++ object into `bin/ut` itself, only into the image
-    // the image loads at run time. See the comment on the
+    // compiled C++ object into `bin/ut` itself, only into the shared object
+    // that the tests load at run time. See the comment on the
     // `Native` row of `cpp.nonPod.passedAndReturnedByValue` for what
-    // this means for that one row (issue #336 review, finding 5).
+    // this means for that one row.
     extern(C++) struct NonPod {
         int value;
         this(ref const(NonPod) other);

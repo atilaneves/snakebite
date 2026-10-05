@@ -20,7 +20,7 @@ import std.path: buildPath;
 // A shared object that the build of `bin/ut` made (tests/fixtures/native):
 // no test here starts a compiler. The tests of what a built image holds are
 // in tests/run_cli.py, which runs the real `bin/sb`.
-private enum atomicSource = "module image;\n";
+private enum emptyImageSource = "module image;\n";
 
 private string symbolsLibrary() {
     return nativeFixture("symbols.so");
@@ -383,7 +383,7 @@ unittest {
     cache.prepare(*image,
         () {
             ++sources;
-            return atomicSource;
+            return emptyImageSource;
         },
         () {
             ++builds;
@@ -417,7 +417,7 @@ unittest {
     sandbox.writeFile("root.d", "changed root");
     next.prepare(hit, () {
             ++sources;
-            return atomicSource;
+            return emptyImageSource;
         },
         () {
             throw new Exception("A root edit with the same source skips build");
@@ -428,7 +428,7 @@ unittest {
     sources.should == 2;
     inputReads.should == 1;
     auto changedSettings = ProjectImageCache(record, "other settings", [root]);
-    changedSettings.prepare(hit, () => atomicSource, () {
+    changedSettings.prepare(hit, () => emptyImageSource, () {
             ++builds;
         }, &makeImage, true,
         &dependencyInputs).should == true;
@@ -439,7 +439,7 @@ unittest {
     const stamp = timeLastModified(dependency);
     sandbox.writeFile("dependency.d", "after!");
     setTimes(dependency, stamp, stamp);
-    changedSettings.prepare(hit, () => atomicSource, () {
+    changedSettings.prepare(hit, () => emptyImageSource, () {
             ++builds;
         }, &makeImage, true,
         &dependencyInputs).should == true;
@@ -449,7 +449,7 @@ unittest {
     sandbox.writeFile("root.d", "changed root again");
     changedSettings.prepare(hit, () {
             ++sources;
-            return atomicSource ~ "\nenum changedSource = 1;\n";
+            return emptyImageSource ~ "\nenum changedSource = 1;\n";
         },
         () {
             ++builds;
@@ -523,7 +523,7 @@ unittest {
     // A root edit that now calls one.
     sandbox.writeFile("root.d", "root that calls a dependency template");
     ProjectImageCache(record, "settings", [root])
-        .prepare(image, () => countedSource(atomicSource), () {}, &makeImage,
+        .prepare(image, () => countedSource(emptyImageSource), () {}, &makeImage,
             false, &dependencyInputs)
         .should == true;
     sources.should == 3;
@@ -540,7 +540,7 @@ unittest {
     // A dependency edit asks again, even with the roots unchanged.
     sandbox.writeFile("dependency.d", "after");
     ProjectImageCache(record, "settings", [root])
-        .prepare(image, () => countedSource(atomicSource), () {}, &makeImage,
+        .prepare(image, () => countedSource(emptyImageSource), () {}, &makeImage,
             false, &dependencyInputs)
         .should == true;
     sources.should == 5;
@@ -579,7 +579,7 @@ unittest {
 
     auto cache = ProjectImageCache(record, "settings", [root], defaultCompiler, generator);
     auto image = new DependencyImage;
-    cache.prepare(*image, () => atomicSource, () {}, &makeImage, true,
+    cache.prepare(*image, () => emptyImageSource, () {}, &makeImage, true,
         &noInputs).should == true;
 
     // Same generator, unchanged: the recorded image is restored.
@@ -588,7 +588,7 @@ unittest {
     size_t sourceCalls;
     unchanged.prepare(hit, () {
             ++sourceCalls;
-            return atomicSource;
+            return emptyImageSource;
         },
         () {
             throw new Exception("An unchanged generator must skip preparation");
@@ -607,7 +607,7 @@ unittest {
     size_t builds;
     rebuilt.prepare(regenerated, () {
             ++regeneratedSourceCalls;
-            return atomicSource;
+            return emptyImageSource;
         },
         () { ++builds; },
         &makeImage, true, &noInputs).should == true;
@@ -641,7 +641,7 @@ unittest {
         auto cache = ProjectImageCache(record, "settings", [root],
             defaultCompiler, generator);
         DependencyImage image;
-        cache.prepare(image, () => atomicSource, () { ++builds; },
+        cache.prepare(image, () => emptyImageSource, () { ++builds; },
             &makeImage, true, &noInputs).should == true;
     }
 

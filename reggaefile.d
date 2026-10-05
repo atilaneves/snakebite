@@ -76,14 +76,24 @@ Target registryImageObject() {
             "$project/registry_slot.so",
             "cc -shared -fPIC -nostdlib -o $out $in",
             Target(registrySlotSource),
-        )] ~ testFixtureLibraries,
+        )],
     );
 }
 
 // The native libraries that `bin/ut` loads, built here so that no test
 // starts a compiler for them. They lie in `bin/fixtures`, next to the test
-// executable. They are implicit inputs of the registry image object because
-// `ninja bin/ut` must make them, and every target links that object.
+// executable. They are implicit inputs of an empty object that only
+// `bin/ut` links, so that `ninja bin/ut` makes them and no other target
+// needs a C or C++ compiler for them.
+Target testFixtureObject() {
+    return Target(
+        "$project/test_fixtures.o",
+        "cc -x c -c /dev/null -o $out",
+        Target[].init,
+        testFixtureLibraries,
+    );
+}
+
 Target[] testFixtureLibraries() {
     return [
         Target(
@@ -150,6 +160,8 @@ Target dubTarget(string compiler, string config, string objectSet,
     // into the same link line as the D-compiled ones.
     info.packages[0].files ~= assembledSources.map!assembledObjectPath.array
         ~ assembledObjectPath(registryImageSource);
+    if (config == "unittest")
+        info.packages[0].files ~= "$project/test_fixtures.o";
 
     auto target = dubBuild(buildOptions, info, CompilationMode.options, flags);
     target.rawOutputs[0] = "bin/" ~ output;
@@ -159,6 +171,7 @@ Target dubTarget(string compiler, string config, string objectSet,
 Build reggaeBuild() {
     Target[] targets = assembledSources.map!assembledObject.array ~ [
         registryImageObject,
+        testFixtureObject,
         dubTarget("dmd", "unittest", "unittest", "ut"),
         dubTarget("ldc2", "acceptance-test", "release", "at", CompilerFlags("-release", "-O", "-flto=thin")),
         dubTarget("ldc2", "sb", "release", "sb", CompilerFlags("-release", "-O", "-flto=thin")),

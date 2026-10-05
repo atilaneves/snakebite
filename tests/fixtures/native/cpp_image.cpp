@@ -12,7 +12,7 @@ int sum_point(Point p) { return p.x + p.y; }
 // pointer (`abi.needsHiddenReturnPointer`) - and for `extern(C++)`,
 // unlike `extern(D)`, `this` follows that pointer instead of coming
 // before it (`abi.contextPrecedesHiddenReturnPointer`). That order is
-// the one ABI fact this branch changes (issue #336 review, finding 4).
+// the one ABI fact that `extern(C++)` changes.
 struct Big {
     unsigned long a;
     unsigned long b;
@@ -21,12 +21,12 @@ struct Big {
 
 // Every method reads a field through `this`. A non-virtual call with
 // a wrong or null `this` then returns the wrong answer, not the same
-// constant every call used to return (issue #336 review, finding 3).
+// constant every call.
 // `first` and `second` are both virtual, so a vtable slot swap - not
 // only a crash - shows up as a wrong value on one of them. `bigVirtual`
 // is a third virtual slot that also returns through the hidden
-// pointer, so a virtual call pins finding 4's ABI fact too, not only
-// a non-virtual one. `tag_value` and `big` stay non-virtual, so
+// pointer, so a virtual call pins that ABI fact too, not only a
+// non-virtual one. `tag_value` and `big` stay non-virtual, so
 // `Derived` overriding only `first` still leaves a vtable with one
 // overridden slot next to two inherited ones.
 //
@@ -81,8 +81,7 @@ Base* get_derived_as_base() { return &derivedInstance; }
 // One resolved symbol reaches a class method - `ut.ffi.symbol`'s own
 // pattern for a free function. These wrappers let the `Native` row
 // below call the very same compiled method the other rows reach
-// through the barrier, instead of only asserting a constant (issue
-// #336 review, finding 8).
+// through the barrier, instead of only asserting a constant.
 int call_tag_value(Base* b) { return b->tag_value(); }
 int call_first(Base* b) { return b->first(); }
 int call_second(Base* b) { return b->second(); }
@@ -91,8 +90,7 @@ Big call_big_virtual(Base* b) { return b->bigVirtual(); }
 
 // A struct, not a class, with its own method: `this` is the address
 // of a value type's storage, not a class reference
-// (`FrameLayout.of`'s own `isRefThis` case for a struct - issue #336
-// review, finding 13).
+// (`FrameLayout.of`'s own `isRefThis` case for a struct).
 struct Vector2 {
     int x;
     int y;
@@ -120,8 +118,7 @@ int destroyed_count() { return destroyedCount; }
 
 // A callback that itself takes a non-trivially-copyable value by
 // hidden reference: the reverse plan (`prepareCallback`) must unpack
-// that reference the same way a forward call does (issue #336 review,
-// finding 13).
+// that reference the same way a forward call does.
 typedef int (*NonPodCallback)(NonPod);
 int call_non_pod_callback(NonPodCallback callback, int v) {
     return callback(NonPod(v));
