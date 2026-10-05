@@ -606,9 +606,7 @@ static if (supported) {
         int signal, siginfo_t* info, void* context, size_t frame) nothrow @nogc {
         import core.atomic: atomicLoad, cas;
         import core.stdc.signal: raise;
-        import core.sys.posix.signal:
-            SA_NODEFER, SA_RESETHAND, SIG_IGN, SIG_SETMASK, SIG_UNBLOCK,
-            sigaddset, sigemptyset, sigismember, sigprocmask, sigset_t;
+        import core.sys.posix.signal: SA_RESETHAND, SIG_IGN;
 
         size_t index;
         foreach (candidate, handled; handledSignals)
@@ -624,46 +622,11 @@ static if (supported) {
             && handler !is cast(void*) SIG_IGN;
         if (callable && (!(previous.sa_flags & SA_RESETHAND)
             || cas(&_previousReset[index], false, true))) {
-            alias WithInformation = extern(C) void function(
-                int, siginfo_t*, void*) nothrow @nogc;
-            alias WithoutInformation = extern(C) void function(int) nothrow @nogc;
-
             // The one-shot claim must precede any change of mask. On the
             // normal stack the collector can suspend this thread safely.
             // On an alternate stack it must stay blocked, as at signal entry.
-            const interrupted = cast(ucontext_t*) context;
-            sigset_t savedMask;
-            const location = cast(size_t) &savedMask;
-            const alternate = cast(size_t) interrupted.uc_stack.ss_sp;
-            const onAlternate = location >= alternate
-                && location - alternate < interrupted.uc_stack.ss_size;
-            const sp = cast(size_t) interrupted.uc_mcontext.gregs[REG_RSP];
-            const wasOnAlternate = sp >= alternate
-                && sp - alternate < interrupted.uc_stack.ss_size;
-            if (onAlternate && !wasOnAlternate && !(previous.sa_flags & SA_ONSTACK))
-                return forwardOnNormalStack(signal, info, interrupted, frame, handler,
-                    previous.sa_mask, (previous.sa_flags & SA_NODEFER) != 0);
-            const unmask = (previous.sa_flags & SA_NODEFER)
-                && !sigismember(&previous.sa_mask, signal)
-                && !sigismember(&interrupted.uc_sigmask, signal);
-            bool changed;
-            if (!onAlternate) {
-                const allowed = previousHandlerMask(previous.sa_mask,
-                    interrupted.uc_sigmask, signal, (previous.sa_flags & SA_NODEFER) != 0);
-                changed = sigprocmask(SIG_SETMASK, &allowed, &savedMask) == 0;
-            } else if (unmask) {
-                sigset_t allowed;
-                sigemptyset(&allowed);
-                sigaddset(&allowed, signal);
-                changed = sigprocmask(SIG_UNBLOCK, &allowed, &savedMask) == 0;
-            }
-            if (previous.sa_flags & SA_SIGINFO)
-                (cast(WithInformation) handler)(signal, info, context);
-            else
-                (cast(WithoutInformation) handler)(signal);
-            if (changed)
-                sigprocmask(SIG_SETMASK, &savedMask, null);
-            return null;
+            return forwardPreviousAction(signal, info, cast(ucontext_t*) context,
+                frame, handler, previous);
         }
 
         // A program that ignored the signal and a program that sent it get
@@ -682,46 +645,86 @@ static if (supported) {
         return null;
     }
 
+    pragma(inline, true) private Forward* forwardPreviousAction(int signal,
+        imported!"core.sys.posix.signal".siginfo_t* info,
+        imported!"core.sys.posix.ucontext".ucontext_t* context,
+        size_t frame, const(void)* handler,
+        const(imported!"core.sys.posix.signal".sigaction_t)* previous) nothrow @nogc {
+        import core.sys.posix.signal: SA_NODEFER, sigdelset, sigismember;
+
+        const location = cast(size_t) &frame;
+        const alternate = cast(size_t) context.uc_stack.ss_sp;
+        const onAlternate = location >= alternate
+            && location - alternate < context.uc_stack.ss_size;
+        const sp = cast(size_t) context.uc_mcontext.gregs[REG_RSP];
+        const wasOnAlternate = sp >= alternate
+            && sp - alternate < context.uc_stack.ss_size;
+        const relocate = onAlternate && !wasOnAlternate
+            && !(previous.sa_flags & SA_ONSTACK);
+        const nodefer = (previous.sa_flags & SA_NODEFER) != 0;
+        if (relocate) {
+            placeNormalSignalFrame(info, context, frame);
+        } else {
+            _forward.stack = cast(void*) frame;
+            _forward.length = 0;
+        }
+        _forward.handler = cast(void*) handler;
+        _forward.setMask = !onAlternate || relocate;
+        if (_forward.setMask) {
+            previousHandlerMask(_forward.mask, previous.sa_mask,
+                context.uc_sigmask, signal, nodefer);
+        } else if (nodefer && !sigismember(&previous.sa_mask, signal)
+            && !sigismember(&context.uc_sigmask, signal)) {
+            // Retain the entry's collector block on the alternate stack.
+            sigfillset(&_forward.mask);
+            sigdelset(&_forward.mask, signal);
+            _forward.setMask = true;
+        }
+        return &_forward;
+    }
+
     private struct Forward {
         void* stack;
         void* handler;
         siginfo_t* info;
         ucontext_t* context;
-        int signal;
+        bool setMask;
         sigset_t mask;
         const(void)* source;
         size_t length;
         void* floatingPoint;
     }
-    // The assembly reads every field before unblocking signals. Nested
+    // The assembly reads the packet before unblocking signals. Nested
     // delivery can then reuse this thread's packet, not the moved frame.
     private Forward _forward;
+    static assert(Forward.stack.offsetof == 0);
+    static assert(Forward.handler.offsetof == 8);
+    static assert(Forward.info.offsetof == 16);
+    static assert(Forward.context.offsetof == 24);
     static assert(Forward.mask.offsetof == 40);
     static assert(Forward.source.offsetof == 168);
     static assert(Forward.length.offsetof == 176);
     static assert(Forward.floatingPoint.offsetof == 184);
+    static assert(Forward.setMask.offsetof == 32);
+    static assert(Forward.sizeof == 192);
     static assert(ucontext_t.uc_mcontext.offsetof == 40);
     static assert(imported!"core.sys.posix.ucontext".mcontext_t.gregs.offsetof == 0);
     static assert(imported!"core.sys.posix.ucontext".mcontext_t.fpregs.offsetof == 184);
 
-    private imported!"core.sys.posix.signal".sigset_t previousHandlerMask(
+    pragma(inline, true) private void previousHandlerMask(
+        ref imported!"core.sys.posix.signal".sigset_t allowed,
         ref const(imported!"core.sys.posix.signal".sigset_t) saved,
         ref const(imported!"core.sys.posix.signal".sigset_t) interrupted,
-        int signal, bool nodefer) nothrow @nogc {
-        import core.sys.posix.signal: sigaddset;
-
-        sigset_t allowed = saved;
+        int signal, bool nodefer) @safe pure nothrow @nogc {
         // Linux x86-64 has 64 signals; the other words are libc padding.
-        allowed.__val[0] |= interrupted.__val[0];
-        if (!nodefer)
-            sigaddset(&allowed, signal);
-        return allowed;
+        const self = nodefer ? 0UL : 1UL << (signal - 1);
+        allowed.__val[0] = saved.__val[0] | interrupted.__val[0] | self;
     }
 
-    private Forward* forwardOnNormalStack(int signal, siginfo_t* info,
-        const(ucontext_t)* context, size_t frame, const(void)* handler,
-        ref const(imported!"core.sys.posix.signal".sigset_t) savedMask,
-        bool nodefer) nothrow @nogc {
+    pragma(inline, true) private void placeNormalSignalFrame(
+        imported!"core.sys.posix.signal".siginfo_t* info,
+        const(imported!"core.sys.posix.ucontext".ucontext_t)* context,
+        size_t frame) nothrow @nogc {
         // Linux x86-64 rt_sigreturn receives the context just after the
         // restorer slot. Relocate the kernel's actual frame, including its
         // variable-length XSAVE image, rather than construct a new frame.
@@ -761,16 +764,12 @@ static if (supported) {
         // Ordinary page faults can then grow a valid MAP_GROWSDOWN mapping;
         // remote memory access cannot establish native stack accessibility.
         _forward.stack = cast(void*) target;
-        _forward.handler = cast(void*) handler;
         _forward.info = cast(siginfo_t*) (target + cast(size_t) info - source);
         _forward.context = cast(ucontext_t*) (target + size_t.sizeof);
-        _forward.signal = signal;
-        _forward.mask = previousHandlerMask(savedMask, context.uc_sigmask, signal, nodefer);
         _forward.source = cast(const(void)*) source;
         _forward.length = length;
         _forward.floatingPoint = context.uc_mcontext.fpregs is null ? null
             : cast(void*) (target + cast(size_t) context.uc_mcontext.fpregs - source);
-        return &_forward;
     }
 
     private void brokenSignalFrame() nothrow @nogc {

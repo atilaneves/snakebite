@@ -245,6 +245,8 @@ def build_host(request, tmp_path_factory, source, bridge=None):
             directory)
     checked(["cc", "-c", str(ROOT / "source/snakebite/fault_trampoline_amd64.S"),
              "-o", "trampoline.o"], directory)
+    checked(["cc", "-c", str(ROOT / "source/snakebite/fault_signal_abi.c"),
+             "-o", "signal_abi.o"], directory)
     sources = [ROOT / "source/snakebite" / name for name in (
         "faultsignal.d", "backends/guestfault.d", "backends/haltprocess.d",
     )]
@@ -435,8 +437,9 @@ static void previous(int sig, siginfo_t *info, void *opaque) {
     volatile uint64_t marker = 0x123456789abcdef0UL;
     ++calls;
     if (sig != target || (info && info->si_signo != target)) ++failures;
-    if ((uintptr_t)&marker >= (uintptr_t)alternate &&
-        (uintptr_t)&marker < (uintptr_t)alternate + stack_size) ++failures;
+    int on_alternate = (uintptr_t)&marker >= (uintptr_t)alternate &&
+        (uintptr_t)&marker < (uintptr_t)alternate + stack_size;
+    if (on_alternate != (mode == 9)) ++failures;
     if (mode == 0) {
         stack_t stack;
         if (sigaltstack(0, &stack)) _exit(90);
@@ -444,7 +447,7 @@ static void previous(int sig, siginfo_t *info, void *opaque) {
         int disarmed = !!(stack_flags & 0x80000000);
         if (stack.ss_flags != (disarmed ? SS_DISABLE : 0) ||
             stack.ss_sp != (disarmed ? 0 : alternate)) ++failures;
-    } else if (mode == 1) {
+    } else if (mode == 1 || mode == 9) {
         sigaddset(&context->uc_sigmask, SIGUSR2);
         context->uc_mcontext.fpregs->mxcsr =
             (context->uc_mcontext.fpregs->mxcsr & ~0x6000u) | 0x4000u;
@@ -531,8 +534,10 @@ int main(int argc, char **argv) {
     if (information) action.sa_sigaction=previous;
     else action.sa_handler=simple;
     action.sa_flags=(information ? SA_SIGINFO : 0) |
-                    (mode == 2 ? SA_NODEFER : 0);
+                    (mode == 2 ? SA_NODEFER : 0) |
+                    (mode == 9 ? SA_ONSTACK : 0);
     sigemptyset(&action.sa_mask);
+    if (mode == 9) sigfillset(&action.sa_mask);
     if (sigaction(target, &action, 0)) return 94;
     if (atoi(argv[4]) && !install_saved_action()) return 93;
     if (mode == 7) start_collector();
@@ -568,7 +573,7 @@ int main(int argc, char **argv) {
     }
     else raise(target);
     if (mode == 7) while (!atomic_load(&collected)) sched_yield();
-    if (mode == 1) {
+    if (mode == 1 || mode == 9) {
         sigset_t mask;
         unsigned mxcsr;
         sigprocmask(SIG_SETMASK, 0, &mask);
@@ -652,6 +657,18 @@ def test_callback_context_edits_restore_callee_saved_registers(normal_host, sig)
     for installed in (False, True):
         result = subprocess.run(
             [str(normal_host), str(sig.value), "8", "1", str(int(installed))],
+            capture_output=True, timeout=5,
+        )
+        assert result.returncode == 0, result
+
+
+@pytest.mark.parametrize("sig", [signal.SIGSEGV, signal.SIGFPE, signal.SIGBUS])
+@pytest.mark.parametrize("autodisarm", [False, True])
+def test_onstack_callback_context_and_mask_edits(normal_host, sig, autodisarm):
+    for installed in (False, True):
+        result = subprocess.run(
+            [str(normal_host), str(sig.value), "9", "1", str(int(installed)),
+             str(0x80000000 if autodisarm else 0)],
             capture_output=True, timeout=5,
         )
         assert result.returncode == 0, result

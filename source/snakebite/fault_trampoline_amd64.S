@@ -24,6 +24,10 @@
 
 #if defined(__x86_64__) && defined(__linux__)
 
+#define __ASSEMBLY__ 1
+#include <asm/signal.h>
+#include <asm/unistd.h>
+
     .text
 
     /* The compiler must not infer nounwind from the guest body, even with
@@ -75,10 +79,10 @@ snakebite_fault_trampoline_call:
     .cfi_endproc
     .size   snakebite_fault_trampoline_call, . - snakebite_fault_trampoline_call
 
-    /* A saved action without SA_ONSTACK uses the interrupted normal stack.
-     * The D dispatcher moves the complete kernel frame. Tail entry keeps the
+    /* Every saved callback uses this tail entry. Only a stack change needs
+     * placement of the kernel frame. Tail entry keeps the
      * kernel restorer as the callback's return address; rt_sigreturn consumes
-     * that moved frame only once, including any callback context edits.
+     * frame only once, including any callback context edits.
      */
     .globl snakebite_fault_signal_entry
     .type snakebite_fault_signal_entry,@function
@@ -90,6 +94,9 @@ snakebite_fault_signal_entry:
     .cfi_offset %rbp,-16
     mov %rsp,%rbp
     .cfi_def_cfa_register %rbp
+    mov %rsi,%r13
+    mov %rdx,%r14
+    mov %edi,%r15d
     cld
     call snakebite_fault_dispatch@PLT
     leave
@@ -100,12 +107,13 @@ snakebite_fault_signal_entry:
     mov %rax,%rbx
     mov 0(%rax),%r10
     mov 8(%rax),%r12
-    mov 16(%rax),%r13
-    mov 24(%rax),%r14
-    mov 32(%rax),%r15d
-    mov 168(%rax),%rsi
     mov 176(%rax),%rcx
     mov %r10,%rsp
+    test %rcx,%rcx
+    jz .Lsignal_unmoved
+    mov 16(%rax),%r13
+    mov 24(%rax),%r14
+    mov 168(%rax),%rsi
     mov %r10,%rdi
     /* Use the normal stack before the first write. A legitimate growing
      * stack gets ordinary user page faults, without a remote-write syscall
@@ -134,25 +142,32 @@ snakebite_fault_signal_entry:
     mov %rax,224(%r14)
     /* Do not write this slot before the copy: it can overlap the source. */
     mov %r12,-8(%rsp)
+.Lsignal_unmask:
     lea 40(%rbx),%rsi
-    mov $2,%edi
+    mov $SIG_SETMASK,%edi
     xor %edx,%edx
     mov $8,%r10d
-    mov $14,%eax
+    mov $__NR_rt_sigprocmask,%eax
     syscall
     test %rax,%rax
     jnz .Lsignal_failure
+.Lsignal_callback:
     mov %r15d,%edi
     mov %r13,%rsi
     mov %r14,%rdx
     xor %eax,%eax
     jmp *-8(%rsp)
+.Lsignal_unmoved:
+    mov %r12,-8(%rsp)
+    cmpb $0,32(%rbx)
+    je .Lsignal_callback
+    jmp .Lsignal_unmask
 .Lsignal_return:
     ret
 .Lsignal_failure:
     /* Unmasking failed: do not run the callback under the wrong mask. */
-    mov $139,%edi
-    mov $231,%eax
+    mov $(128 + SIGSEGV),%edi
+    mov $__NR_exit_group,%eax
     syscall
     ud2
     .cfi_endproc
