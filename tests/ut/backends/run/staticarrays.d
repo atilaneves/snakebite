@@ -1264,3 +1264,30 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// `const ubyte[2] bytes = range[0 .. 2];` constructs a static array from a
+// slice of a template-typed range: the same `bytes[] = range[0 .. 2]`
+// rewrite as above, with a slice that has a lower bound, and the bytes must
+// be copied as bytes.
+static foreach (backend; Matrix!()) {
+    @("staticArray.constructedFromTemplateSliceKeepsBytes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            ushort conv(size_t n)(ubyte[n] val) {
+                ushort r;
+                static foreach (i; 0 .. 2)
+                    r |= (cast(ushort) val[i]) << (2 - i - 1) * 8;
+                return r;
+            }
+            ushort pk(R)(R range) {
+                const ubyte[2] bytes = range[0 .. 2];
+                return conv(bytes);
+            }
+            void main() {
+                ubyte[] b = [0x12, 0x34, 0, 1];
+                assert(pk(b) == 0x1234);
+            }
+        });
+    }
+}

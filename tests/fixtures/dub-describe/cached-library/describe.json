@@ -1,0 +1,135 @@
+{
+	"rootPackage": "cached-library",
+	"configuration": "library",
+	"buildType": "debug",
+	"compiler": "dmd",
+	"architecture": [
+		"x86_64"
+	],
+	"platform": [
+		"linux",
+		"posix"
+	],
+	"packages": [
+		{
+			"path": "@ROOT@/app/",
+			"name": "cached-library",
+			"version": "~master",
+			"description": "",
+			"homepage": "",
+			"authors": [],
+			"copyright": "",
+			"license": "",
+			"dependencies": [],
+			"active": true,
+			"configuration": "library",
+			"targetType": "library",
+			"targetPath": "",
+			"targetName": "cached-library",
+			"targetFileName": "libcached-library.a",
+			"workingDirectory": "",
+			"mainSourceFile": "",
+			"dflags": [],
+			"lflags": [],
+			"libs": [],
+			"frameworks": [],
+			"injectSourceFiles": [],
+			"copyFiles": [],
+			"extraDependencyFiles": [],
+			"versions": [],
+			"debugVersions": [],
+			"importPaths": [
+				"source/"
+			],
+			"cImportPaths": [],
+			"stringImportPaths": [],
+			"preGenerateCommands": [],
+			"postGenerateCommands": [],
+			"preBuildCommands": [],
+			"postBuildCommands": [],
+			"preRunCommands": [],
+			"postRunCommands": [],
+			"environments": {},
+			"buildEnvironments": {},
+			"runEnvironments": {},
+			"preGenerateEnvironments": {},
+			"postGenerateEnvironments": {},
+			"preBuildEnvironments": {},
+			"postBuildEnvironments": {},
+			"preRunEnvironments": {},
+			"postRunEnvironments": {},
+			"buildRequirements": [],
+			"options": [],
+			"files": [
+				{
+					"role": "source",
+					"path": "source/library.d"
+				}
+			]
+		}
+	],
+	"targets": [
+		{
+			"rootPackage": "cached-library",
+			"packages": [
+				"cached-library"
+			],
+			"rootConfiguration": "library",
+			"buildSettings": {
+				"targetType": 6,
+				"targetPath": "@ROOT@/app/",
+				"targetName": "cached-library",
+				"workingDirectory": "",
+				"mainSourceFile": "",
+				"dflags": [],
+				"lflags": [],
+				"libs": [],
+				"frameworks": [],
+				"linkerFiles": [],
+				"sourceFiles": [
+					"@ROOT@/app/source/library.d"
+				],
+				"injectSourceFiles": [],
+				"copyFiles": [],
+				"extraDependencyFiles": [],
+				"versions": [
+					"Have_cached_library"
+				],
+				"debugVersions": [],
+				"versionFilters": [],
+				"debugVersionFilters": [],
+				"importPaths": [
+					"@ROOT@/app/source/"
+				],
+				"cImportPaths": [],
+				"stringImportPaths": [],
+				"importFiles": [],
+				"stringImportFiles": [],
+				"preGenerateCommands": [],
+				"postGenerateCommands": [],
+				"preBuildCommands": [],
+				"postBuildCommands": [],
+				"preRunCommands": [],
+				"postRunCommands": [],
+				"environments": {},
+				"buildEnvironments": {},
+				"runEnvironments": {},
+				"preGenerateEnvironments": {},
+				"postGenerateEnvironments": {},
+				"preBuildEnvironments": {},
+				"postBuildEnvironments": {},
+				"preRunEnvironments": {},
+				"postRunEnvironments": {},
+				"requirements": [],
+				"options": [
+					"debugMode",
+					"debugInfo",
+					"warningsAsErrors"
+				]
+			},
+			"cacheArtifactPath": "<machine specific>",
+			"dependencies": [],
+			"linkDependencies": []
+		}
+	]
+}

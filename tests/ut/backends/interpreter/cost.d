@@ -9,6 +9,236 @@ import snakebite.frontend.dmd.functions: findFunction;
 import dmd.dmodule: Module;
 import dmd.func: FuncDeclaration;
 import std.conv: text;
+import core.exception: AssertError;
+import core.thread: Fiber, Thread;
+import snakebite.sharedtable: PreparedExecution, SharedTable;
+import ut.backends: Matrix, Omit, Because, Ctfe, shouldBeStatusOf;
+
+
+@("preparedExecutionRejectsNewCacheEntries")
+unittest {
+    SharedTable!(int, int) table;
+    table.insert(1, 7);
+    {
+        auto execution = PreparedExecution(true);
+        table.insert(1, 9)[0].should == 7;
+        {
+            auto nested = PreparedExecution(false);
+            table.insert(2, 8)
+                .shouldThrowWithMessage!AssertError(
+                    "unprepared lazy cache insertion: int -> int");
+        }
+        table.insert(3, 9)
+            .shouldThrowWithMessage!AssertError(
+                "unprepared lazy cache insertion: int -> int");
+    }
+    table.insert(2, 8)[0].should == 8;
+    table.length.should == 2;
+}
+
+@("preparedExecutionFollowsFiber")
+@Serial
+unittest {
+    SharedTable!(int, int) table;
+    auto paused = new Fiber({
+        auto execution = PreparedExecution(true);
+        Fiber.yield;
+        table.insert(2, 8).shouldThrowWithMessage!AssertError(
+            "unprepared lazy cache insertion: int -> int");
+    });
+    paused.call;
+    table.insert(1, 7)[0].should == 7;
+    paused.call;
+    table.insert(2, 8)[0].should == 8;
+    table.length.should == 2;
+}
+
+@("preparedExecutionFollowsThread")
+@Serial
+unittest {
+    SharedTable!(int, int) table;
+    {
+        auto execution = PreparedExecution(true);
+        auto independent = new Thread({ table.insert(1, 7); });
+        independent.start;
+        independent.join;
+        table.find(1)[0].should == 7;
+        table.insert(2, 8).shouldThrowWithMessage!AssertError(
+            "unprepared lazy cache insertion: int -> int");
+    }
+    table.insert(2, 8)[0].should == 8;
+    table.length.should == 2;
+}
+
+private SharedTable!(int, int)* _finalizerCache;
+
+extern(C) int fillFinalizerTestCache() {
+    return *_finalizerCache.insert(1, 7);
+}
+
+extern(C) void callFinalizerTestCallback(void* address, Object object) {
+    (cast(void function(Object)) address)(object);
+}
+
+extern(C) int callPreparedTestCallback(int function() callback) {
+    return callback();
+}
+
+// A destructor can call host code that calls an ordinary guest function.
+// The finalizer cache contract must also apply across this nested entry.
+private enum ordinaryCallbackGuest = q{
+    import core.memory: GC;
+    pragma(mangle, "fillFinalizerTestCache")
+    extern(C) int fillFinalizerTestCache();
+    pragma(mangle, "callPreparedTestCallback")
+    extern(C) int callPreparedTestCallback(int function());
+    pragma(mangle, "callFinalizerTestCallback")
+    extern(C) void callFinalizerTestCallback(void*, Object);
+    extern(C) int callback() { return fillFinalizerTestCache(); }
+    class Resource {
+        int* result;
+        this(int* result) { this.result = result; }
+        ~this() { *result = callPreparedTestCallback(&callback); }
+    }
+    void main() {
+        int result;
+        auto resource = new Resource(&result);
+        GC.clrAttr(cast(void*) resource, GC.BlkAttr.FINALIZE);
+        callFinalizerTestCallback(typeid(Resource).destructor, resource);
+        assert(result == 7);
+    }
+};
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot cast the finalizer fixture to void*"),
+)) {
+    @("preparedFunctionCallbackCacheFill." ~ backend.stringof)
+    @Tags(backend.stringof)
+    @Serial
+    unittest {
+        _finalizerCache = new SharedTable!(int, int);
+        static if (is(backend == Interpreter)) {
+            auto module_ = parseSnippet(ordinaryCallbackGuest);
+            auto interpreter = new Interpreter(Program([module_]));
+            interpreter.call(module_.findFunction("main"), null, [])
+                .shouldThrowWithMessage!AssertError(
+                    "unprepared lazy cache insertion: int -> int");
+            _finalizerCache.length.should == 0;
+            fillFinalizerTestCache.should == 7;
+        } else {
+            0.shouldBeStatusOf!(backend, ordinaryCallbackGuest);
+            _finalizerCache.length.should == 1;
+        }
+    }
+}
+
+// A TypeInfo callback uses the same destructor entry as GC finalization, but
+// lets the test observe a cache failure without allocating inside the GC.
+private enum finalizerGuest(string shape) = q{
+    import core.memory: GC;
+    pragma(mangle, "fillFinalizerTestCache")
+    extern(C) int fillFinalizerTestCache();
+    pragma(mangle, "callFinalizerTestCallback")
+    extern(C) void callFinalizerTestCallback(void*, Object);
+} ~ (shape == "direct" ? "class Base {}" : "class Base { ~this() {} }") ~ q{
+    class Resource: Base {
+        int* result;
+        this(int* result) { this.result = result; }
+        ~this() { *result = fillFinalizerTestCache(); }
+    }
+    void main() {
+        int result;
+        auto resource = new Resource(&result);
+        GC.clrAttr(cast(void*) resource, GC.BlkAttr.FINALIZE);
+        callFinalizerTestCallback(typeid(Resource).destructor, resource);
+        assert(result == 7);
+    }
+};
+
+static foreach (shape; ["direct", "inherited"]) {
+    static foreach (backend; Matrix!(
+        Omit!(Ctfe, Because.inexpressible,
+            "CTFE cannot call a runtime TypeInfo destructor"),
+    )) {
+        @("firstDestructorCallbackCacheFill." ~ shape ~ "." ~ backend.stringof)
+        @Tags(backend.stringof)
+        @Serial
+        unittest {
+            _finalizerCache = new SharedTable!(int, int);
+            static if (is(backend == Interpreter)) {
+                auto module_ = parseSnippet(finalizerGuest!shape);
+                auto interpreter = new Interpreter(Program([module_]));
+                interpreter.call(module_.findFunction("main"), null, [])
+                    .shouldThrowWithMessage!AssertError(
+                        "unprepared lazy cache insertion: int -> int");
+                _finalizerCache.length.should == 0;
+                // Failure must restore the calling thread's cache policy.
+                fillFinalizerTestCache.should == 7;
+            } else {
+                0.shouldBeStatusOf!(backend, finalizerGuest!shape);
+                _finalizerCache.length.should == 1;
+            }
+        }
+
+        @("firstDestructorCallbackUsesPreparedCache."
+            ~ shape ~ "." ~ backend.stringof)
+        @Tags(backend.stringof)
+        @Serial
+        unittest {
+            _finalizerCache = new SharedTable!(int, int);
+            fillFinalizerTestCache.should == 7;
+            0.shouldBeStatusOf!(backend, finalizerGuest!shape);
+            _finalizerCache.length.should == 1;
+        }
+    }
+}
+
+
+private enum constantGuest(string aggregate, bool warm) = q{
+    import core.memory: GC;
+    pragma(mangle, "callFinalizerTestCallback")
+    extern(C) void callFinalizerTestCallback(void*, Object);
+} ~ aggregate ~ q{ Constant {
+        int value;
+        this(int value) { this.value = value; }
+        int get() const { return value; }
+    }
+    static const constant = new Constant(7);
+    int read() { return constant.get(); }
+    class Resource {
+        int* result;
+        this(int* result) { this.result = result; }
+        ~this() { *result = read(); }
+    }
+} ~ "enum warm = " ~ (warm ? "true;" : "false;") ~ q{
+    void main() {
+        assert(typeid(Constant).name.length > 0);
+        if (warm) assert(read() == 7);
+        int result;
+        auto resource = new Resource(&result);
+        GC.clrAttr(cast(void*) resource, GC.BlkAttr.FINALIZE);
+        callFinalizerTestCallback(typeid(Resource).destructor, resource);
+        assert(result == 7);
+    }
+};
+
+static foreach (aggregate; ["class", "struct"]) {
+    static foreach (warm; [false, true]) {
+        static foreach (backend; Matrix!(
+            Omit!(Ctfe, Because.inexpressible,
+                "CTFE cannot read runtime TypeInfo or call a destructor through it"),
+        )) {
+            @("firstDestructorCallbackConstant." ~ aggregate ~ "."
+                ~ (warm ? "warm." : "cold.") ~ backend.stringof)
+            @Tags(backend.stringof)
+            @Serial
+            unittest {
+                0.shouldBeStatusOf!(backend, constantGuest!(aggregate, warm));
+            }
+        }
+    }
+}
 
 
 // How many trips round the loop each of the two guest functions

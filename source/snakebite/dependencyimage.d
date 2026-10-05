@@ -114,15 +114,6 @@ public struct DependencyImage {
 // the cache. The compiler installation is assumed immutable at a given
 // path and version. No shell interprets source paths or compiler arguments.
 //
-// `cppSource`, when not empty, is one C++ translation unit compiled by
-// `cxxCompiler` (the system C++ compiler - `c++` by default, or `$CXX`
-// - `defaultCxxCompiler` reads it) into the same shared object as
-// `source`: one build, one cache entry, one loader. This is how a test
-// C++ library reaches the image (issue #336): the D side declares its
-// functions and classes `extern(C++)` and calls them like any other
-// resolved symbol. The C++ compiler's own identity and flags join the
-// cache key, next to the D compiler's, so a different C++ toolchain or
-// flag set never reuses another one's image.
 public DependencyImage prepareImage(
     in string source,
     in string cacheDirectory,
@@ -133,9 +124,6 @@ public DependencyImage prepareImage(
     in string[] compilerArguments = null,
     in string[] linkerFiles = null,
     in string[] linkerArguments = null,
-    in string cppSource = null,
-    in string cxxCompiler = defaultCxxCompiler,
-    in string[] cxxCompilerArguments = null,
     in Optimise optimise = Optimise.yes,
 ) {
     import std.conv: text;
@@ -166,7 +154,8 @@ public DependencyImage prepareImage(
             return expandedCompilerArguments(compilerArguments);
         }
     }
-    const importFlags = imageArguments.map!imageArgument.array
+    const arguments = imageArguments;
+    const importFlags = arguments.map!imageArgument.array
         ~ importPaths.map!(path => "-I" ~ path).array
         ~ stringImportPaths.map!(path => "-J" ~ path).array;
     const executable = compilerPath(compiler);
@@ -175,29 +164,32 @@ public DependencyImage prepareImage(
     // `-O`: `-allinst`/`-linkonce-templates` below are for correctness
     // (a guest object supplies no template bodies of its own), not speed.
     const optimiseFlags = optimise ? ["-O"] : null;
+    import snakebite.frontend.checks: Checks;
+
+    Checks checks;
+    foreach (argument; arguments)
+        checks.accept(argument);
+
+    // A BetterC object has no ModuleInfo section for the DSO startup object.
+    // Keep the same runtime choice for compilation and linking.
+    const runtimeFlags = checks.betterC ? ["-betterC"] : null;
 
     // The image must emit transitive template bodies too, including runtime
     // helpers introduced by assertion lowering. No guest object supplies them.
     version (DigitalMars) {
         const compileFlags = ["-c", "-fPIC", "-allinst"] ~ optimiseFlags;
         const linkFlags = ["-shared", "-defaultlib=libphobos2.so",
-            "-L--no-undefined"];
+            "-L--no-undefined"] ~ runtimeFlags;
     } else version (LDC) {
         // -allinst also analyzes unused template members, which can fail
         // under the project's compiler options. Emit referenced bodies instead.
         const compileFlags = ["-c", "-relocation-model=pic",
             "-linkonce-templates"] ~ optimiseFlags;
         const linkFlags = ["-shared", "-link-defaultlib-shared",
-            "-L--no-undefined"];
+            "-L--no-undefined"] ~ runtimeFlags;
     } else {
         static assert(false, "Dependency images require DMD or LDC");
     }
-    // Fixed C++ compile flags: same for every build, so this is not a
-    // caller parameter the way `cxxCompilerArguments` is - but it still
-    // joins the fingerprint (issue #336 review, finding 6), so changing
-    // one of these constants later cannot reuse a stale image built with
-    // the old flags.
-    const cxxCompileFlags = ["-c", "-fPIC", "-O2", "-std=c++17"];
     // A linker response file stops DMD from moving archives
     // outside the whole-archive pair. Guest calls do not create undefined
     // symbols in image.o, so ordinary archive extraction loses their code.
@@ -215,18 +207,6 @@ public DependencyImage prepareImage(
         else
             dependencyFlags ~= path;
     }
-    // The C++ compiler is only ever asked for when a caller actually
-    // wants C++ code in the image - a build with no `cppSource` probes
-    // no C++ toolchain and its fingerprint is byte-for-byte what it was
-    // before this parameter existed.
-    const hasCppSource = cppSource.length != 0;
-    string[] cxxCommand;
-    string cxxExecutable;
-    if (hasCppSource) {
-        cxxCommand = resolveCxxCommand(cxxCompiler);
-        cxxExecutable = cxxCommand[0];
-    }
-
     // Everything the content fingerprint below depends on, minus file
     // contents, keys a stamp record. An unchanged compiler, input set and
     // source hits there without a compiler probe or a content hash: the
@@ -239,9 +219,7 @@ public DependencyImage prepareImage(
         __VERSION__, "\n", compileFlags, "\n", linkFlags, "\n", importFlags,
         "\n", dependencyFlags, "\n", linkerArguments, "\n",
         inputs.map!(input => input.absolutePath).array, "\n",
-        source.length, ":", source, "\ncxx:", cxxCommand, "\n",
-        cxxCompileFlags, "\n", cxxCompilerArguments, "\n",
-        cppSource.length, ":", cppSource);
+        source.length, ":", source);
     auto stamps = ProjectImageCache(
         directory.buildPath(sourceDigest(settings) ~ ".json"), settings, null,
         executable);
@@ -259,24 +237,6 @@ public DependencyImage prepareImage(
         fingerprint ~= text("\n", input.absolutePath.length, ":",
             input.absolutePath, ":", fileDigest(input));
 
-    string cxxRuntimeLibrary;
-    if (hasCppSource) {
-        // The C++ runtime library this pulls in is what gives the image
-        // `operator new`/`delete`, RTTI and the exception personality
-        // routine a thrown C++ exception (issue #336 step 5) needs. Which
-        // one a given `$CXX` links is not decided by the compiler's name:
-        // on Linux, clang defaults to `libstdc++` unless it was itself
-        // built with `CLANG_DEFAULT_CXX_STDLIB=libc++`, so guessing from
-        // "clang" in `--version` breaks a plain `CXX=clang++` on such a
-        // system. Asking the driver instead - see `probeCxxRuntimeLibrary`
-        // - is right for any compiler and configuration.
-        cxxRuntimeLibrary = probeCxxRuntimeLibrary(cxxCommand);
-        fingerprint ~= text("\ncxx:", cxxCommand, "\n",
-            fileDigest(cxxExecutable),
-            "\n", cxxCompileFlags, "\n", cxxCompilerArguments,
-            "\n", cxxRuntimeLibrary, "\n", cppSource.length, ":", cppSource);
-    }
-
     directory.mkdirRecurse;
     const destination = directory.buildPath(fingerprint.sha256Of.toHexString ~ ".so");
     if (!destination.exists) {
@@ -290,22 +250,6 @@ public DependencyImage prepareImage(
             __VERSION__, ", \"Image compiler must match the host compiler version\");\n"));
         runCompiler("compilation", [executable] ~ compileFlags ~ importFlags
             ~ [sourcePath, "-of=" ~ objectPath]);
-
-        string[] objectPaths = [objectPath];
-        string[] extraLinkFlags;
-        if (hasCppSource) {
-            const cppSourcePath = staging.buildPath("image.cpp");
-            const cppObjectPath = staging.buildPath("image_cpp.o");
-            cppSourcePath.write(cppSource);
-            runCompiler("C++ compilation", cxxCommand ~ cxxCompileFlags
-                ~ cxxCompilerArguments ~ [cppSourcePath, "-o", cppObjectPath]);
-            objectPaths ~= cppObjectPath;
-            // A library flag must trail every object file that needs
-            // symbols from it, or a traditional linker's one-pass symbol
-            // search misses them - so this joins the response file's own
-            // dependency archives, not `linkFlags`, which comes first.
-            extraLinkFlags ~= "-L-l" ~ cxxRuntimeLibrary;
-        }
 
         import std.array: join;
         import std.string: replace;
@@ -324,20 +268,21 @@ public DependencyImage prepareImage(
         runCompiler("linking", [executable] ~ linkFlags
             ~ otherArguments
             ~ ["-Xcc=-Wl,@linker.rsp"]
-            ~ objectPaths ~ libraryArguments ~ extraLinkFlags
+            ~ [objectPath] ~ libraryArguments
             ~ ["-of=" ~ imagePath], staging);
         // Readers must never observe a partially linked image. Concurrent
         // builders publish equivalent complete files with atomic rename.
         rename(imagePath, destination);
     }
     auto image = loadImage(destination); // Returned as mutable: its handle is.
-    stamps.save(destination, source,
-        inputs ~ linkerFiles ~ (hasCppSource ? [cxxExecutable] : null));
+    stamps.save(destination, source, inputs ~ linkerFiles);
     return image;
 }
 
 
-private DependencyImage loadImage(in string path) {
+// Loads an image that is already built, instead of having `prepareImage` make
+// one.
+public DependencyImage loadImage(in string path) {
     import core.sys.posix.dlfcn:
         dlerror, dlopen, RTLD_LAZY, RTLD_NODELETE;
     import std.string: fromStringz, toStringz;
@@ -403,15 +348,6 @@ else version (LDC)
     public enum defaultCompiler = "ldc2";
 
 
-// The system C++ compiler: `$CXX` when set, `c++` otherwise - the same
-// rule a Makefile uses.
-public string defaultCxxCompiler() {
-    import std.process: environment;
-
-    return environment.get("CXX", "c++");
-}
-
-
 private void runCompiler(
     in string phase, in string[] command, in string directory = null,
 ) {
@@ -428,68 +364,7 @@ private void runCompiler(
 }
 
 
-// Which runtime library `cxxCommand` links a C++ shared object against -
-// `stdc++` or `c++` - read from the driver itself instead of guessed from
-// the compiler's name (issue #336 review, finding 1). `-###` asks the
-// driver to print, not run, the subprocess commands it would use to link
-// a trivial C++ shared library: the same commands, whichever runtime it
-// defaults to, for gcc, for clang built either way
-// (`CLANG_DEFAULT_CXX_STDLIB`), and for any wrapper ahead of either. One
-// of the printed, quoted linker arguments is always `"-lstdc++"` or
-// `"-lc++"` (verified on this machine: gcc 16 and a clang 22 built to
-// clang's own upstream default both print `"-lstdc++"`, matching finding
-// 1's report that Linux clang defaults to libstdc++ unless reconfigured).
-private string probeCxxRuntimeLibrary(in string[] cxxCommand) {
-    import std.algorithm: canFind;
-    import std.conv: text;
-    import std.file: exists, remove, tempDir, write;
-    import std.path: buildPath;
-    import std.process: execute;
-    import std.uuid: randomUUID;
-
-    const probeSource = buildPath(
-        tempDir(), text("snakebite-cxx-probe-", randomUUID, ".cpp"));
-    probeSource.write("int snakebite_cxx_runtime_probe() { return 0; }\n");
-    scope(exit) if (probeSource.exists) probeSource.remove();
-    // `-###` never runs the commands it prints, so this path is never
-    // written - naming it is only what tells the driver what a real
-    // link's output path would be.
-    const probeOutput = buildPath(
-        tempDir(), text("snakebite-cxx-probe-", randomUUID, ".so"));
-
-    const probe = execute(cxxCommand ~ ["-###", "-shared", "-fPIC",
-        probeSource, "-o", probeOutput]);
-    string library;
-    if (probe.output.canFind(`"-lc++"`))
-        library = "c++";
-    else if (probe.output.canFind(`"-lstdc++"`))
-        library = "stdc++";
-    else
-        require(false, text("Cannot tell which C++ runtime library `",
-            cxxCommand, "` links: ", probe.output));
-    return library;
-}
-
-
-// `compiler` may be a bare executable, or, like a Makefile's `$CXX`, a
-// command line - a wrapper such as `ccache` ahead of the real compiler,
-// space-separated (issue #336 review, finding 7). Only the first word is
-// looked up on `PATH`; the rest travel as leading arguments ahead of
-// every other argument this module ever passes.
-private string[] resolveCxxCommand(in string compiler) {
-    import std.algorithm: filter;
-    import std.array: array;
-    import std.string: split, strip;
-
-    const words = compiler.strip.split.filter!(w => w.length != 0).array;
-    require(words.length != 0, "C++ compiler must not be empty");
-    return [compilerPath(words[0], "C++ compiler")] ~ words[1 .. $];
-}
-
-
-private string compilerPath(
-    in string compiler, in string label = "Image compiler",
-) {
+private string compilerPath(in string compiler) {
     import std.file: exists;
     import std.path: absolutePath, buildPath;
     import std.process: environment;
@@ -497,7 +372,7 @@ private string compilerPath(
     import std.algorithm: canFind;
 
     if (compiler.canFind('/')) {
-        require(compiler.exists, label ~ " does not exist: " ~ compiler);
+        require(compiler.exists, "Image compiler does not exist: " ~ compiler);
         return compiler.absolutePath;
     }
     foreach (directory; environment.get("PATH", "").split(":")) {
@@ -505,7 +380,7 @@ private string compilerPath(
         if (candidate.exists)
             return candidate.absolutePath;
     }
-    require(false, label ~ " not found on PATH: " ~ compiler);
+    require(false, "Image compiler not found on PATH: " ~ compiler);
     assert(0);
 }
 

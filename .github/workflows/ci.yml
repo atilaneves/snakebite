@@ -43,10 +43,11 @@ jobs:
           version: "0.11.32"
 
       # The REPL links GNU readline for interactive line editing.
-      - name: Install libreadline
+      # build/ut-without-build-tools.sh runs bin/ut under strace.
+      - name: Install libreadline and strace
         run: |
           sudo apt-get update
-          sudo apt-get install -y libreadline-dev
+          sudo apt-get install -y libreadline-dev strace
 
       - name: Run CI
         run: build/ci.sh

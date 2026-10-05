@@ -599,6 +599,7 @@ public struct NativeData {
     private void* classValue(ClassReferenceExp value) {
         import core.stdc.string: memcpy;
         import snakebite.frontend.compiler: withCompilerLock;
+        version(unittest) import snakebite.sharedtable: assertCacheFillAllowed;
 
         void* address;
         withCompilerLock({
@@ -606,6 +607,7 @@ public struct NativeData {
                 address = *found;
                 return;
             }
+            version(unittest) assertCacheFillAllowed!"class constants";
             const info = _classInfo(value.originalClass);
             auto bytes = new void[info.m_init.length]; // Must remain writable.
             memcpy(bytes.ptr, info.m_init.ptr, bytes.length);
@@ -632,6 +634,7 @@ public struct NativeData {
     // The one static struct value for a compile-time `&literal`.
     private void* structValue(StructLiteralExp literal) {
         import snakebite.frontend.compiler: withCompilerLock;
+        version(unittest) import snakebite.sharedtable: assertCacheFillAllowed;
 
         void* address;
         withCompilerLock({
@@ -639,6 +642,7 @@ public struct NativeData {
                 address = *found;
                 return;
             }
+            version(unittest) assertCacheFillAllowed!"struct constants";
             const facts = TypeFacts.of(literal.type);
             auto bytes = reserve(facts);
             address = bytes.ptr;
