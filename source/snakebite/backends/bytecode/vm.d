@@ -17,11 +17,13 @@ extern(C) bool executeIndirectCallPlan(
     out ptrdiff_t contextAdjustment,
 );
 
+import snakebite.backends.argumentflow: ArgumentFlow, Shape, Signature;
 import snakebite.backends.builtins: BuiltinCall;
 import snakebite.backends.haltprocess: HaltAction, isHalt;
 import snakebite.backends.unwindplan:
     ExceptionCandidate, UnwindPlan, unwindPlanOf;
 import snakebite.callarguments: CallArguments;
+import snakebite.nativelayout: TypeFacts;
 import snakebite.nativevalue:
     CastKind, ComplexOperation, floatingToBool, loadFloating, loadSigned,
     loadUnsigned, shiftCount, storeFloating, storeIntegral;
@@ -68,6 +70,10 @@ public struct CallSite {
         // value. Native addresses, including vtable entries, use the
         // call site's prepared native plan.
         indirect,
+        // An `indirect` call through a function pointer or a delegate value:
+        // `value.signature` is the signature of the value's type, and a callee
+        // with another signature reads its parameters by register.
+        value,
         // `builtinEntry` is a `snakebite.backends.builtins.BuiltinCall`,
         // resolved once by `CallSelection` (`snakebite.backends.calls`)
         // and never re-resolved: a compiler intrinsic dmd itself
@@ -151,7 +157,19 @@ public struct CallSite {
         return site;
     }
 
+    // What a call through a value of a function type adds: the signature of
+    // the type, and the variadic arguments of the call with their shapes. A
+    // callee with another signature reads its parameters from the arguments
+    // that are in the same registers (`ArgumentFlow`). `signature` is null
+    // for every other call.
+    public struct ValueArguments {
+        package const(Signature)* signature;
+        package Arg[] surplus;
+        package const(Shape)[] surplusShapes;
+    }
+
     package Kind kind;
+    package ValueArguments value;
     package Arg[] args;
     package Arg[] nativeArgs;
     package size_t returnWidth;
@@ -387,6 +405,11 @@ public struct Function {
     package uint closureAlignment = 1;
     package ClosureSlot[] closureSlots;
     package size_t[] parameterOffsets;
+    // Where a C-variadic function reads its cursor, and how many parameters
+    // it declares before it; `size_t.max` for any other function.
+    package size_t cursorOffset = size_t.max;
+    package size_t declaredParameters;
+    package const(Signature)* signature;
 }
 
 
@@ -596,11 +619,12 @@ private Activation* handleException(
         } catch (Throwable chained) {
             throwable = chained;
         }
+        ExceptionCandidate[handlerBufferLength] handlerBuffer;
         const plan = isHalt(throwable)
             ? UnwindPlan.init
             : exceptionPlanOf(
                 active.exceptionHandlers[firstHandler .. $], active.pc,
-                throwable.classinfo);
+                throwable.classinfo, handlerBuffer);
         const step = plan.finalizers.length != 0
             ? plan.finalizers[0]
             : plan.handler;
@@ -743,17 +767,24 @@ private const(Instruction)* runTemporaryEnd(Decoded)(
 }
 
 
+// The candidates of a throw fit `buffer` unless more than
+// `handlerBufferLength` handlers protect `pc`: a throw in a destructor that
+// the GC finalizer runs cannot allocate, and nesting that deep is rare.
+private enum handlerBufferLength = 16;
+
 private UnwindPlan exceptionPlanOf(
     const(ExceptionHandler)[] handlers,
     const(Instruction)* pc,
     TypeInfo_Class actual,
+    return scope ref ExceptionCandidate[handlerBufferLength] buffer,
 ) {
-    ExceptionCandidate[] candidates;
+    size_t count;
+    ExceptionCandidate[] overflow;
 
     foreach (ref handler; handlers) {
         if (pc < handler.bodyStart || pc >= handler.bodyEnd)
             continue;
-        candidates ~= ExceptionCandidate(
+        auto candidate = ExceptionCandidate(
             null,
             handler.cleanupEnd is null
                 ? ExceptionCandidate.Kind.catch_
@@ -761,9 +792,18 @@ private UnwindPlan exceptionPlanOf(
             cast(TypeInfo_Class) handler.type,
             cast(const(void)*) &handler,
         );
+        if (overflow !is null)
+            overflow ~= candidate;
+        else if (count < buffer.length)
+            buffer[count++] = candidate;
+        else {
+            overflow = buffer[0 .. count].dup;
+            overflow ~= candidate;
+        }
     }
 
-    return unwindPlanOf(candidates, actual);
+    return unwindPlanOf(overflow !is null ? overflow : buffer[0 .. count],
+        actual);
 }
 
 
@@ -975,19 +1015,9 @@ private const(Instruction)* runCall(Decoded)(
         return callFunction(execution, *site,
             site.callee !is null ? site.callee : site.prepareGuest());
     case indirect:
-        auto callee =
-            *cast(const(void)**) (execution.storage(site.calleeSlotOffset));
-        ptrdiff_t contextAdjustment;
-        if (site.nativePlan !is null) {
-            auto arguments = gatherArguments(execution, site.nativeArgs);
-            auto values = arguments.values;
-            if (executeIndirectCallPlan(site.nativePlan, callee,
-                    execution.destination, values.ptr, values.length,
-                    contextAdjustment))
-                return execution.next;
-        }
-        return callFunction(execution, *site, cast(const(Function)*) callee,
-            contextAdjustment);
+        return runIndirect!false(execution, site);
+    case value:
+        return runIndirect!true(execution, site);
     case native:
         auto arguments = gatherArguments(execution, site.args);
         auto values = arguments.values;
@@ -1003,6 +1033,101 @@ private const(Instruction)* runCall(Decoded)(
         site.builtinEntry(execution.destination, values.ptr, values.length);
         return execution.next;
     }
+}
+
+
+pragma(inline, true)
+private const(Instruction)* runIndirect(bool isValue, Decoded)(
+    ref Decoded execution, const(CallSite)* site,
+) {
+    auto callee =
+        *cast(const(void)**) (execution.storage(site.calleeSlotOffset));
+    ptrdiff_t contextAdjustment;
+    if (site.nativePlan !is null) {
+        auto arguments = gatherArguments(execution, site.nativeArgs);
+        auto values = arguments.values;
+        if (executeIndirectCallPlan(site.nativePlan, callee,
+                execution.destination, values.ptr, values.length,
+                contextAdjustment))
+            return execution.next;
+    }
+    auto function_ = cast(const(Function)*) callee;
+    static if (isValue)
+        if (site.value.signature !is function_.signature)
+            return callFunction!true(
+                execution, *site, function_, contextAdjustment);
+    return callFunction(execution, *site, function_, contextAdjustment);
+}
+
+
+// A call through a value whose type has another signature than the callee.
+// The context goes to the context of the callee, and each parameter takes the
+// argument that is in its register. A C-variadic callee gets a cursor over
+// the arguments that no named parameter reads.
+pragma(inline, false)
+private void redirectArguments(Decoded)(
+    ref Decoded execution, scope const ref CallSite site,
+    const(Function)* callee, ubyte* frame,
+) {
+    import core.stdc.string: memcpy, memset;
+    import snakebite.backends.variadic: VariadicLayout;
+    import std.algorithm: min;
+
+    const value = &site.value;
+    const parameters = callee.signature.parameters;
+    const declared = value.signature.parameters.length;
+    const first = site.hasContext ? 1 : 0;
+    const calleeHasContext = callee.contextOffset != size_t.max;
+    const flow = ArgumentFlow(
+        value.signature.parameters, value.surplusShapes, parameters,
+        site.hasContext && calleeHasContext);
+    const(ubyte)* addressOf(in size_t argument) {
+        return execution.storage(argument < declared
+            ? site.args[first + argument].callerOffset
+            : value.surplus[argument - declared].callerOffset);
+    }
+
+    if (calleeHasContext) {
+        // A function pointer has no context: its callee gets a null one.
+        auto context = frame + callee.contextOffset;
+        if (site.hasContext)
+            memcpy(context, execution.storage(site.args[0].callerOffset),
+                size_t.sizeof);
+        else
+            memset(context, 0, size_t.sizeof);
+    }
+    foreach (i, shape; parameters) {
+        auto place = frame + callee.parameterOffsets[i];
+        memset(place, 0, shape.size);
+        const source = flow.sourceOf(i);
+        if (source != size_t.max)
+            memcpy(place, addressOf(source),
+                min(shape.size, flow.argumentAt(source).size));
+    }
+
+    if (callee.cursorOffset != size_t.max) {
+        const unread = flow.unread;
+        TypeFacts[] facts;
+        foreach (argument; unread)
+            facts ~= flow.argumentAt(argument).facts;
+        const plan = VariadicLayout.of(facts);
+        auto storage = execution.frames.reserve(plan.size, plan.alignment);
+        plan.initialize(storage);
+        foreach (i, offset; plan.offsets)
+            memcpy(storage + offset, addressOf(unread[i]), facts[i].size);
+        *cast(ubyte**) (frame + callee.cursorOffset) = storage;
+        return;
+    }
+
+    // `types` and `cursor` are the last two arguments of the site and the two
+    // parameters of the callee after the declared ones.
+    if (callee.signature.variadic == Signature.Variadic.d
+            && value.signature.variadic == Signature.Variadic.d)
+        foreach (i; 0 .. 2) {
+            const argument = site.args[$ - 2 + i];
+            memcpy(frame + callee.parameterOffsets[parameters.length + i],
+                execution.storage(argument.callerOffset), argument.width);
+        }
 }
 
 
@@ -1025,7 +1150,7 @@ private CallArguments gatherArguments(Decoded)(
 // The dispatcher starts the callee after this opcode returns. The saved
 // caller pc remains the call site until the callee returns, so exceptions
 // can find the caller's handler while unwinding guest activations.
-private const(Instruction)* callFunction(Decoded)(
+private const(Instruction)* callFunction(bool redirected = false, Decoded)(
     ref Decoded execution,
     scope const ref CallSite site,
     const(Function)* callee,
@@ -1049,10 +1174,16 @@ private const(Instruction)* callFunction(Decoded)(
     // An inferred function literal can convert to a delegate without
     // gaining a context parameter. Use its declared parameter layout;
     // removing a context word can also change argument alignment.
-    if (site.hasContext && callee.contextOffset == size_t.max) {
-        foreach (i, arg; site.args[1 .. $])
+    static if (redirected)
+        redirectArguments(execution, site, callee, activation.frame);
+    else if (site.hasContext && callee.contextOffset == size_t.max) {
+        foreach (i, arg; site.args[1 .. $]) {
+            if (i >= callee.parameterOffsets.length)
+                assert(0, "a callee with the signature of the value has a "
+                    ~ "parameter for each argument");
             memcpy(activation.frame + callee.parameterOffsets[i],
                 execution.storage(arg.callerOffset), arg.width);
+        }
     } else {
         foreach (arg; site.args)
             memcpy(activation.frame + arg.calleeOffset,
@@ -1060,8 +1191,13 @@ private const(Instruction)* callFunction(Decoded)(
     }
 
     if (contextAdjustment != 0) {
-        auto context = cast(ubyte**) (activation.frame + site.args[0].calleeOffset);
-        *context += contextAdjustment;
+        static if (redirected)
+            const contextOffset = callee.contextOffset;
+        else
+            const contextOffset = site.args[0].calleeOffset;
+        if (contextOffset != size_t.max)
+            *cast(ubyte**) (activation.frame + contextOffset) +=
+                contextAdjustment;
     }
     initializeClosure(callee, activation.frame, execution.frames);
 
@@ -2008,18 +2144,13 @@ package alias opLoadBitfield =
 private const(Instruction)* runLoadBitfield(Decoded)(
     ref Decoded execution,
 ) {
+    import snakebite.nativevalue: BitfieldAccess;
+
     auto address = *cast(void**) (execution.source);
     const metadata = execution.sourceWidth;
-    const bitOffset = metadata & 0xffff;
-    const fieldWidth = (metadata >> 16) & 0xffff;
-    const resultWidth = (metadata >> 40) & 0xff;
-    const isSigned = (metadata & (1UL << 32)) != 0;
-    const storage = loadUnsigned(address, execution.width);
-    const mask = ulong.max >> (64 - fieldWidth);
-    ulong value = (storage >> bitOffset) & mask;
-    if (isSigned && fieldWidth < 64 && (value & (1UL << (fieldWidth - 1))))
-        value |= ulong.max << fieldWidth;
-    storeWidth(execution.destination, cast(long) value, resultWidth);
+    const value = BitfieldAccess.decode(metadata).load(address);
+    storeWidth(execution.destination, value,
+        BitfieldAccess.resultWidth(metadata));
     return execution.next;
 }
 
@@ -2095,15 +2226,11 @@ package alias opStoreBitfield =
 private const(Instruction)* runStoreBitfield(Decoded)(
     ref Decoded execution,
 ) {
+    import snakebite.nativevalue: BitfieldAccess;
+
     auto address = *cast(void**) (execution.destination);
-    const metadata = execution.sourceWidth;
-    const bitOffset = metadata & 0xffff;
-    const fieldWidth = (metadata >> 16) & 0xffff;
-    auto value = loadUnsigned(execution.source, execution.width);
-    const mask = (ulong.max >> (64 - fieldWidth)) << bitOffset;
-    auto storage = loadUnsigned(address, (metadata >> 40) & 0xff);
-    storage = (storage & ~mask) | ((value << bitOffset) & mask);
-    storeWidth(address, cast(long) storage, (metadata >> 40) & 0xff);
+    BitfieldAccess.decode(execution.sourceWidth).store(
+        address, loadUnsigned(execution.source, execution.width));
     return execution.next;
 }
 

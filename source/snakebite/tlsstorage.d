@@ -41,28 +41,110 @@ public struct TlsDescriptor {
 // touched, grown on demand. A `TlsSlots` belongs to exactly one thread -
 // Fibers on that thread share it (ADR-0006), so `slotFor` takes no lock:
 // nothing here is ever visible to another thread.
+//
+// The copies and the table that finds them live on the C heap and the GC
+// scans each copy through `addRange`. The first touch of a variable can
+// happen in a destructor that the GC finalizer runs, on a thread that never
+// ran guest code, and a GC allocation is forbidden there; `addRange` takes
+// no GC lock.
 public struct TlsSlots {
-    private void[][const(void)*] _slots;
+    private struct Entry {
+        const(void)* key;
+        void* bytes;
+        size_t size;
+        bool owned;
+    }
+
+    private Entry[] _table;
+    private size_t _count;
+
+    @disable this(this);
+
+    ~this() {
+        import core.memory: GC;
+        import core.stdc.stdlib: free;
+
+        foreach (ref entry; _table) {
+            if (entry.key is null || !entry.owned)
+                continue;
+            if (entry.size)
+                GC.removeRange(entry.bytes);
+            free(entry.bytes);
+        }
+        free(_table.ptr);
+        _table = null;
+        _count = 0;
+    }
 
     public void[] slotFor(const(TlsDescriptor)* descriptor) {
-        if (auto found = descriptor.key in _slots)
-            return *found;
+        if (auto found = find(descriptor.key))
+            return found.bytes[0 .. found.size];
 
-        void[] bytes;
+        Entry entry = Entry(descriptor.key);
         if (descriptor.nativeName.length) {
             // Resolved on this thread: a thread-local symbol's address
             // is the calling thread's own, so another thread's answer
             // would be that thread's copy.
-            auto address = descriptor.nativeAddress(descriptor.nativeName);
-            assert(address !is null, descriptor.nativeName);
-            bytes = address[0 .. descriptor.size];
+            entry.bytes = descriptor.nativeAddress(descriptor.nativeName);
+            assert(entry.bytes !is null, descriptor.nativeName);
         } else {
+            import core.memory: GC;
+            import core.stdc.stdlib: calloc;
             import core.stdc.string: memcpy;
 
-            bytes = new void[descriptor.size];
-            memcpy(bytes.ptr, descriptor.templateBytes, descriptor.size);
+            entry.bytes = calloc(1, descriptor.size ? descriptor.size : 1);
+            if (entry.bytes is null)
+                assert(0, "out of memory for a thread-local variable");
+            memcpy(entry.bytes, descriptor.templateBytes, descriptor.size);
+            if (descriptor.size)
+                GC.addRange(entry.bytes, descriptor.size);
+            entry.owned = true;
         }
-        _slots[descriptor.key] = bytes;
-        return bytes;
+        entry.size = descriptor.size;
+        insert(entry);
+        return entry.bytes[0 .. entry.size];
+    }
+
+    private Entry* find(const(void)* key) {
+        if (_table.length == 0)
+            return null;
+        const mask = _table.length - 1;
+        for (auto at = hashOf(key) & mask; ; at = (at + 1) & mask) {
+            if (_table[at].key is key)
+                return &_table[at];
+            if (_table[at].key is null)
+                return null;
+        }
+    }
+
+    private void insert(Entry entry) {
+        // Keep the table at most half full so a probe always finds a gap.
+        if ((_count + 1) * 2 > _table.length)
+            grow;
+        place(_table, entry);
+        ++_count;
+    }
+
+    private void grow() {
+        import core.stdc.stdlib: calloc, free;
+
+        const length = _table.length ? _table.length * 2 : 8;
+        auto memory = cast(Entry*) calloc(length, Entry.sizeof);
+        if (memory is null)
+            assert(0, "out of memory for a thread-local table");
+        auto bigger = memory[0 .. length];
+        foreach (entry; _table)
+            if (entry.key !is null)
+                place(bigger, entry);
+        free(_table.ptr);
+        _table = bigger;
+    }
+
+    private static void place(Entry[] table, Entry entry) {
+        const mask = table.length - 1;
+        auto at = hashOf(entry.key) & mask;
+        while (table[at].key !is null)
+            at = (at + 1) & mask;
+        table[at] = entry;
     }
 }

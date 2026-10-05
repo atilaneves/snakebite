@@ -13,7 +13,8 @@ public struct Program {
     import dmd.dmodule: Module;
     import dmd.func: FuncDeclaration;
     import dmd.dsymbol: Dsymbol;
-    import snakebite.backends.haltprocess: HaltAction, haltProcess;
+    import snakebite.backends.guestfault: GuestFault;
+    import snakebite.backends.haltprocess: HaltAction, HostActions;
     import snakebite.frontend.checks: Checks;
     import snakebite.frontend.dmd.linking: LinkMap;
 
@@ -27,16 +28,17 @@ public struct Program {
     // Built once from `rootModules`, for `isRootOwned`'s `O(1)` lookup; see
     // `snakebite.frontend.dmd.functions.isRootOwned`.
     private bool[Module] _rootModuleSet;
-    FuncDeclaration[] moduleConstructors;
     // Built once from `rootModules`; see `linkedFunctionOf`.
     private LinkMap _links;
     Main main;
     string name;
     private Checks _checks;
-    private HaltAction _haltAction = &haltProcess;
+    private HostActions _actions;
     // Prepared for this project's execution before any guest code runs.
     const(DependencyImage)* dependencyImage;
-    const(DependencyImage)* testStartupImage;
+    // Whether the program starts as a project does: its unit tests run
+    // before `main`, under the runner that the project's own images name.
+    bool startsAsProject;
     TestHooks testHooks;
 
     // The entry point is found the way a compiled build finds it: the first
@@ -53,35 +55,37 @@ public struct Program {
     }
 
     // `checks` are the ones the frontend analysed `rootModules` under, and
-    // `haltAction` is what `-checkaction=halt` does here: the default ends
-    // the process, as compiled code does.
+    // `actions` are what `-checkaction=halt` and a guest fault do here: the
+    // default halt ends the process, as compiled code does.
     this(
         Module[] rootModules,
         in string name,
         in Checks checks,
-        HaltAction haltAction = &haltProcess,
+        in HostActions actions = HostActions(),
     ) {
-        import snakebite.frontend.dmd.functions:
-            findFunction,
-            findModuleConstructors;
+        import snakebite.frontend.compiler: withCompilerLock;
+        import snakebite.frontend.dmd.functions: findFunction;
 
         this.rootModules = rootModules;
-        _links = LinkMap(rootModules);
         this.name = name;
         _checks = checks;
-        _haltAction = haltAction;
-        foreach (module_; rootModules) {
-            _rootModuleSet[module_] = true;
-            moduleConstructors ~= findModuleConstructors(module_);
-        }
-
-        foreach (module_; rootModules) {
-            auto found = findFunction(module_, "main");
-            if (found !is null) {
-                main = Main(found);
-                break;
+        _actions = actions;
+        // The walks read the frontend's global state, which a thread that
+        // evaluates a literal changes under the lock at the same time.
+        withCompilerLock({
+            _links = LinkMap(rootModules);
+            foreach (module_; rootModules) {
+                _rootModuleSet[module_] = true;
             }
-        }
+
+            foreach (module_; rootModules) {
+                auto found = findFunction(module_, "main");
+                if (found !is null) {
+                    main = Main(found);
+                    break;
+                }
+            }
+        });
     }
 
     public Checks checks() const {
@@ -90,11 +94,20 @@ public struct Program {
 
     // What a backend that can hold a function pointer stores.
     public HaltAction haltAction() const {
-        return _haltAction;
+        return _actions.halt;
     }
 
     public noreturn halt() const {
-        _haltAction();
+        _actions.halt();
+    }
+
+    public noreturn fault(
+        in GuestFault.Kind kind,
+        in const(char)[] file,
+        in size_t line,
+        scope GuestFault.Stack stack,
+    ) const {
+        _actions.fault(kind, file, line, stack);
     }
 
     // The root definition that the linker makes of the declaration
@@ -168,38 +181,14 @@ public struct CompilationStatistics {
 public abstract class Backend {
     import dmd.dmodule: Module;
     import dmd.func: FuncDeclaration;
-    import snakebite.hostthreads: PerThread;
 
     // The program this backend runs. Whether a callee is interpreted or
     // called natively is the program's one decision (`isInterpreted`),
     // so every backend is constructed knowing which program it runs.
     protected const Program _program;
-    private PerThread!(bool*) _threadInitialized;
-    private FuncDeclaration[] _threadConstructors;
 
     protected this(const Program program) {
         _program = program;
-        _threadInitialized = PerThread!(bool*)(() => new bool);
-        foreach (constructor; program.moduleConstructors)
-            if (constructor.isStaticCtorDeclaration !is null
-                && constructor.isSharedStaticCtorDeclaration is null)
-                // DMD declarations retain mutable semantic caches.
-                _threadConstructors ~= cast(FuncDeclaration) constructor;
-    }
-
-    protected void initializeThread() {
-        if (_threadConstructors.length == 0)
-            return;
-        auto initialized = _threadInitialized.current;
-        if (*initialized)
-            return;
-
-        // Publish before calling guest code: constructors can call back
-        // into this backend on the same thread.
-        *initialized = true;
-        scope(failure) *initialized = false;
-        foreach (constructor; _threadConstructors)
-            call(constructor, null, []);
     }
 
     // Read-only cumulative statistics. Backends without a compilation phase
@@ -238,6 +227,15 @@ public abstract class Backend {
         FuncDeclaration function_, void* returnPlace, void*[] args,
     );
 
+    // The bytes of the process-wide `static` or `__gshared` variable
+    // `variable`, in native layout, or empty when this backend keeps no
+    // static storage between calls (CTFE evaluates each call in isolation).
+    // Module phases use it to do what dmd's glue layer does with the gate
+    // of a module destructor.
+    public abstract void[] staticStorage(
+        imported!"dmd.declaration".VarDeclaration variable,
+    );
+
     // Execute one synthesised `string`-returning function and return its
     // result. The guest renders the value itself (`std.conv.text`), so the
     // returned string is a natively laid out value like any other; nothing
@@ -254,53 +252,30 @@ public abstract class Backend {
 
 // "Run on this project": do what a compiled build of it does, implemented
 // once on top of `call`, and return the exit status. A `Throwable` that
-// escapes is handled as druntime would handle it: printed, exit status 1.
+// escapes `main` is handled as druntime would handle it: printed, exit
+// status 1. The module constructors and destructors belong to druntime
+// (`GuestModules`): it orders them, runs them on each thread, and prints
+// what a destructor throws.
 public int run(
     Backend backend,
     Program program,
     in string[] hostArguments = null,
 ) {
-    if (runModuleConstructors(backend,
-            program.hasCEntryPoint ? null : program.moduleConstructors))
+    import snakebite.backends.guestmodules: GuestModules;
+
+    // A C `main` starts no druntime: no module constructor or destructor
+    // of a D module runs.
+    if (program.hasCEntryPoint)
+        return runMain(backend, program, hostArguments);
+
+    auto modules = GuestModules.start(
+        backend, program, GuestModules.Tests.no, GuestModules.Ends.program);
+    if (modules.failed)
         return 1;
 
-    return runMain(backend, program, hostArguments);
-}
-
-// A constructor that cannot run is a failed program startup. Report it
-// loudly so the caller cannot mistake a partial run for success.
-package(snakebite) int runModuleConstructors(
-    Backend backend,
-    imported!"dmd.func".FuncDeclaration[] constructors,
-) {
-    import snakebite.exception: SnakebiteException;
-    import std.stdio: stderr;
-
-    *backend._threadInitialized.current = true;
-    foreach (constructor; constructors) {
-        try
-            backend.call(constructor, null, []);
-        catch (SnakebiteException exception) {
-            stderr.writeln(
-                "snakebite: skipping module constructor `",
-                constructor.toString,
-                "`: ",
-                exception.msg,
-            );
-            return 1;
-        }
-        catch (Throwable throwable) {
-            stderr.writeln(
-                "snakebite: module constructor `",
-                constructor.toString,
-                "` failed: ",
-                throwable.msg,
-            );
-            return 1;
-        }
-    }
-
-    return 0;
+    const status = runMain(backend, program, hostArguments);
+    const destructorStatus = modules.finish;
+    return status != 0 ? status : destructorStatus;
 }
 
 // The program's own `main`. `void main` maps to exit status 0, and no `main`

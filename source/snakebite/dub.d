@@ -142,25 +142,24 @@ private auto describe(
 // forward them to our console. They must also stay out of the captured stdout:
 // merged in, a warning line parses as a bogus data value - forwarded as an
 // lflag/linker-file it fails the dependency-image link with `cannot open <text>`.
-private auto describeCapturingStdout(in string[] command, in string pkgDir) {
-    import std.conv: text;
-    import std.file: readText, tempDir;
-    import std.path: buildPath;
-    import std.process: Config, spawnProcess, thisProcessID, wait;
+public auto describeCapturingStdout(in string[] command, in string pkgDir) {
+    import std.process: Config, spawnProcess, wait;
+    import std.algorithm.iteration: joiner;
+    import std.array: array;
     import std.stdio: File, stdin;
     import std.typecons: tuple;
 
-    // Capture stdout via a temp file rather than a pipe so a large describe list
-    // cannot deadlock on a full pipe buffer. describe calls run sequentially, so
-    // one per-process path reused across calls is enough.
-    const stdoutPath =
-        buildPath(tempDir, "snakebite-dub-describe-" ~ text(thisProcessID) ~ ".out");
-    auto stdoutFile = File(stdoutPath, "w");
+    // Capture stdout via an anonymous temp file rather than a pipe so a large
+    // describe list cannot deadlock on a full pipe buffer. Each call has its
+    // own file: callers on several threads describe at the same time. The file
+    // stays open in this process after the spawn, to read it back.
+    auto stdoutFile = File.tmpfile;
     auto devNull = File("/dev/null", "w");
-    auto pid = spawnProcess(command, stdin, stdoutFile, devNull, null, Config.none, pkgDir);
+    auto pid = spawnProcess(command, stdin, stdoutFile, devNull, null, Config.retainStdout, pkgDir);
     const status = wait(pid);
-    stdoutFile.close();
-    return tuple!("status", "output")(status, readText(stdoutPath));
+    stdoutFile.rewind;
+    const output = cast(string) stdoutFile.byChunk(64 * 1024).joiner.array.idup;
+    return tuple!("status", "output")(status, output);
 }
 
 // Split the `--data-list` output for several data kinds into one list per
