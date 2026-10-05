@@ -4,6 +4,7 @@ module snakebite.backends.layout;
 private:
 
 
+import snakebite.backends.argumentflow: Shape, Signature;
 import snakebite.exception: SnakebiteException;
 
 // One guest function's declared-storage layout: each parameter's byte
@@ -44,6 +45,7 @@ package struct FrameLayout {
         package size_t offset;
         package TypeFacts facts;
         package bool isRef;
+        package Shape.Class class_ = Shape.Class.other;
     }
 
     // Parallel to the function's parameter list, indexed positionally.
@@ -52,6 +54,11 @@ package struct FrameLayout {
     package Parameter[] parameters;
     package size_t variadicTypes = size_t.max;
     package size_t variadicCursor = size_t.max;
+
+    // The parameters of the function type, shared by every layout of equal
+    // parameters: a call through a value compares it with the one of the
+    // value's type to know that the two frames agree.
+    package const(Signature)* signature;
 
     // A struct method's hidden `this`, together in one place: the slot
     // and the declaration that owns it always exist - or not - as a
@@ -170,6 +177,7 @@ package struct FrameLayout {
 
         layout.reserveVariadic(typeFunctionOf(function_));
         layout.reserveNativeCursor(typeFunctionOf(function_));
+        layout.signature = layout.signatureOf(typeFunctionOf(function_));
         if (function_.v_arguments !is null)
             layout._slotOf[function_.v_arguments] =
                 VariableSlot(layout.variadicTypes, false);
@@ -234,7 +242,23 @@ package struct FrameLayout {
 
         layout.reserveVariadic(type);
         layout.reserveNativeCursor(type);
+        layout.signature = layout.signatureOf(type);
         return layout;
+    }
+
+    private const(Signature)* signatureOf(TypeFunction type) const {
+        import dmd.astenums: VarArg;
+
+        Shape[] shapes;
+        foreach (parameter; parameters)
+            shapes ~= Shape(
+                parameter.facts.size, parameter.facts.alignment,
+                parameter.class_);
+        const variadic = type.parameterList.varargs != VarArg.variadic
+            ? Signature.Variadic.none
+            : type.isDstyleVariadic
+                ? Signature.Variadic.d : Signature.Variadic.c;
+        return Signature.intern(shapes, variadic);
     }
 
     private void reserveVariadic(TypeFunction type) {
@@ -301,7 +325,11 @@ package struct FrameLayout {
                 ? reserveSlot(TypeFacts.lazyArgument)
             : reserveSlot(parameter.type);
 
-        return Parameter(slot.offset, slot.facts, isRefParameter);
+        const class_ = isRefParameter
+            ? Shape.Class.integer
+            : parameter.storageClass & STC.lazy_
+                ? Shape.Class.other : classOf(parameter.type);
+        return Parameter(slot.offset, slot.facts, isRefParameter, class_);
     }
 
     // Whether `variable` has a slot in this layout at all - checked before
@@ -674,4 +702,33 @@ extern(C++) private final class LocalsCollector:
         if (expression !is null)
             expression.accept(this);
     }
+}
+
+
+// The register class of an argument of `type`, once its facts are known.
+package Shape.Class classOf(imported!"dmd.mtype".Type type) {
+    import dmd.astenums:
+        Tbool, Tchar, Tclass, Tdchar, Tfloat32, Tfloat64, Timaginary32,
+        Timaginary64, Tint16, Tint32, Tint64, Tint8, Tnull, Tpointer, Taarray,
+        Twchar, Tuns16, Tuns32, Tuns64, Tuns8;
+    import dmd.typesem: toBasetype;
+
+    switch (type.toBasetype.ty) {
+        case Tint8, Tuns8, Tint16, Tuns16, Tint32, Tuns32, Tint64, Tuns64,
+                Tbool, Tchar, Twchar, Tdchar, Tpointer, Tclass, Taarray,
+                Tnull:
+            return Shape.Class.integer;
+        case Tfloat32, Tfloat64, Timaginary32, Timaginary64:
+            return Shape.Class.sse;
+        default:
+            return Shape.Class.other;
+    }
+}
+
+// The shape of an argument of `type` with `facts`, as a variadic argument
+// that no parameter declares.
+package Shape shapeOf(
+    imported!"dmd.mtype".Type type, in imported!"snakebite.nativelayout".TypeFacts facts,
+) {
+    return Shape(facts.size, facts.alignment, classOf(type));
 }

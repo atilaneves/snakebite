@@ -3290,6 +3290,45 @@ static foreach (backend; Matrix!(
 }
 
 
+// A destructor that a collection runs on a thread that ran no program code
+// calls a function pointer and a delegate: the call through a value needs no
+// first-use allocation there.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerCallsFunctionPointerAndDelegate." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared int dead;
+            void bump() { ++dead; }
+            class B {
+                ~this() {
+                    void function() pointer = &bump;
+                    pointer();
+                    void delegate() delegate_ = () { ++dead; };
+                    delegate_();
+                }
+            }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new B;
+            }
+            void main() {
+                import core.memory: GC;
+                import core.thread: Thread;
+                make;
+                auto collector = new Thread(cast(void function()) &GC.collect);
+                collector.start;
+                collector.join;
+                assert(dead > 2000);
+            }
+        });
+    }
+}
+
+
 // A branch that the program never takes cannot stop it. The branch appends a
 // pointer to an opaque struct to an array, and the append of druntime names
 // the type information of the element: an opaque struct has no size and no
@@ -3359,6 +3398,61 @@ static foreach (backend; Matrix!()) {
                 auto c = new C;
                 assert(c.f(null) == 1);
             }
+        });
+    }
+}
+
+
+// `Object.classinfo` as the operand of `typeid` is the address of the
+// static `TypeInfo_Class` object of `Object`, and that object is itself an
+// instance of `TypeInfo_Class`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE internal error: determining classinfo"),
+)) {
+    @("class.typeidOfAClassinfoOfAType." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        int main() {
+            auto info = typeid(Object.classinfo);
+            return info is typeid(TypeInfo_Class) ? 0 : 1;
+        }
+        });
+    }
+}
+
+// `I.classinfo` of an interface is the `TypeInfo_Class` object of the
+// interface, not the `TypeInfo_Interface` object that `typeid(I)` gives.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine fails with an internal error on the classinfo"),
+)) {
+    @("class.typeidOfAClassinfoOfAnInterface." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        interface I {}
+        int main() {
+            return typeid(I.classinfo) is typeid(TypeInfo_Class) ? 0 : 1;
+        }
+        });
+    }
+}
+
+// `I.classinfo` is the same object as the `info` of `typeid(I)`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine cannot compare `typeid(I)` at compile time"),
+)) {
+    @("class.classinfoOfAnInterfaceIsTheInfoOfItsTypeid." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        interface I {}
+        int main() {
+            return I.classinfo is typeid(I).info ? 0 : 1;
+        }
         });
     }
 }
