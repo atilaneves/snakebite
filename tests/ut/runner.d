@@ -58,6 +58,7 @@ static import ut.backends.run.main,
     ut.backends.layout,
     ut.backends.program,
     ut.backends.guestfault,
+    ut.faultsignal,
     ut.ffi.call,
     ut.ffi.callback,
     ut.ffi.aggregates,
@@ -77,7 +78,8 @@ static import ut.backends.run.main,
     ut.repl.cell,
     ut.repl.session,
     ut.process,
-    ut.frontend.memory;
+    ut.frontend.memory,
+    ut.frontend.checks;
 
 // `bin/ut`: prepare the frontend for the selected tests, then run them.
 int run(string[] args) {
@@ -163,6 +165,7 @@ int run(string[] args) {
         "ut.backends.layout",
         "ut.backends.program",
         "ut.backends.guestfault",
+        "ut.faultsignal",
         "ut.ffi.call",
         "ut.ffi.callback",
         "ut.ffi.aggregates",
@@ -183,6 +186,7 @@ int run(string[] args) {
         "ut.repl.session",
         "ut.process",
         "ut.frontend.memory",
+        "ut.frontend.checks",
     );
     return checkArena ? status | arenaStatus : status;
 }

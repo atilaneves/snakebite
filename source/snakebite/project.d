@@ -263,13 +263,15 @@ private SourceSet dubSourceSet(
         .filter!(flag => flag.length > 0)
         .array;
 
+    import snakebite.frontend.checks: expandedCompilerArguments;
+
     return SourceSet(
         files.dup,
         importPaths.dup,
         stringImportPaths.dup,
         lflags.map!(flag => "-L" ~ flag).array
             ~ values("libs").map!(library => "-L-l" ~ library).array,
-        FrontendFlags(compilerArguments),
+        FrontendFlags(expandedCompilerArguments(compilerArguments)),
         null,
         linkerFiles.dup,
         description,

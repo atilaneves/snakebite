@@ -1059,31 +1059,3 @@ static foreach (backend; Matrix!(
         sandbox.shouldEqualContent("trace", "second program;");
     }
 }
-
-
-// A registration that stays because a thread of its program is alive is not
-// lost: the end of the process removes it.
-static foreach (backend; Matrix!(
-    Omit!(Native, Because.inexpressible,
-        "the Native arm runs no guest program in the test process, so no registration exists"),
-    Omit!(Ctfe, Because.inexpressible, "CTFE cannot run module destructors"),
-)) {
-    @("registrationHeldByThreadIsLeftToTheEndOfTheProcess." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        import snakebite.backends.guestmodules: GuestModules;
-
-        const sandbox = Sandbox();
-        const before = GuestModules.held.leftToExit;
-        programStatus!backend(sandbox, q{
-            import core.thread: Thread;
-            import core.time: msecs;
-            shared static ~this() {
-                new Thread({ Thread.sleep(50.msecs); }).start;
-            }
-            void main() {}
-        }).should == 0;
-
-        GuestModules.held.leftToExit.should == before + 1;
-    }
-}

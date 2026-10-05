@@ -1649,6 +1649,86 @@ def test_c_preprocessor_flags_from_dflags(
     assert (result.returncode != 0) == (expected_status != 0), output(result)
 
 
+NULL_DEREFERENCE_MAIN = """
+    module main;
+    int load(int* pointer) { return *pointer; }
+    int main() { int* pointer; return load(pointer); }
+"""
+
+DIVISION_BY_ZERO_MAIN = """
+    module main;
+    int divide(int dividend, int divisor) { return dividend / divisor; }
+    int main() { int zero; return divide(1, zero); }
+"""
+
+
+def write_faulting_project(app: Path, main: str) -> None:
+    write(app / "dub.sdl", dub_project_recipe("faulting"))
+    write(app / "source" / "main.d", main)
+
+
+# A guest that dereferences null or divides by zero dies of the signal, as
+# compiled D does: the fault handlers must not change the exit status.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_guest_null_dereference_dies_of_sigsegv(
+    tmp_path: Path, backend: str,
+) -> None:
+    write_faulting_project(tmp_path / "app", NULL_DEREFERENCE_MAIN)
+
+    result = run_sb(
+        f"--backend={backend}", "--no-optimise-image", str(tmp_path / "app"),
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == -signal.SIGSEGV, output(result)
+
+
+# The interpreter checks the divisor in its walker, so for now it ends with a
+# message of its own and not with the signal.
+@pytest.mark.parametrize("backend", ["bytecode"])
+def test_guest_division_by_zero_dies_of_sigfpe(
+    tmp_path: Path, backend: str,
+) -> None:
+    write_faulting_project(tmp_path / "app", DIVISION_BY_ZERO_MAIN)
+
+    result = run_sb(
+        f"--backend={backend}", "--no-optimise-image", str(tmp_path / "app"),
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == -signal.SIGFPE, output(result)
+
+
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_fault_handlers_do_not_blame_the_host_for_an_unclassified_guest_fault(
+    tmp_path: Path, backend: str,
+) -> None:
+    write_faulting_project(tmp_path / "app", NULL_DEREFERENCE_MAIN)
+
+    result = run_sb(
+        f"--backend={backend}", "--no-optimise-image", str(tmp_path / "app"),
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == -signal.SIGSEGV, output(result)
+    assert "snakebite:" not in result.stderr
+
+
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_fault_handlers_off_switch_keeps_the_plain_crash(
+    tmp_path: Path, backend: str,
+) -> None:
+    write_faulting_project(tmp_path / "app", NULL_DEREFERENCE_MAIN)
+
+    result = run_sb(
+        f"--backend={backend}", "--no-optimise-image", str(tmp_path / "app"),
+        cwd=tmp_path, env={"SNAKEBITE_NO_FAULT_HANDLER": "1"},
+    )
+
+    assert result.returncode == -signal.SIGSEGV, output(result)
+    assert "snakebite:" not in result.stderr
+
+
 def write_unlisted_c_project(app: Path) -> None:
     write(app / "dub.sdl", dub_project_recipe("c-unlisted"))
     write(app / "source" / "lib.c", "int add(int a, int b) { return a + b; }\n")

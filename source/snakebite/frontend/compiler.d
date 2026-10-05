@@ -1549,14 +1549,16 @@ private imported!"snakebite.frontend.checks".Checks checksOfArguments(
     ref imported!"dmd.arraytypes".Strings arguments,
 ) {
     import dmd.root.string: toDString;
-    import snakebite.frontend.checks: Checks;
+    import snakebite.frontend.checks: Checks, joinedCheckArguments;
+    import std.algorithm.iteration: map;
+    import std.array: array;
     import std.conv: text;
 
     Checks checks;
-    foreach (argument; arguments[])
-        if (!checks.accept(argument.toDString))
+    foreach (argument; joinedCheckArguments(arguments[].map!toDString.array))
+        if (!checks.accept(argument))
             throw new Exception(text(
-                "switch `", argument.toDString, "` is invalid"));
+                "switch `", argument, "` is invalid"));
     checks.resolve;
 
     return checks;
@@ -1569,30 +1571,26 @@ private void expandArguments(
     ref imported!"dmd.arraytypes".Strings arguments,
 ) {
     import dmd.arraytypes: Strings;
-    import dmd.root.response: responseExpand;
-    import dmd.root.string: toDString;
-    import std.conv: text;
+    import snakebite.frontend.checks: expandedCompilerArguments;
     import std.string: toStringz;
 
-    auto argumentText = ["dmd"] ~ owned(flags.compilerArguments);
+    auto argumentText = ["dmd"] ~ expandedCompilerArguments(owned(flags.compilerArguments));
     arguments = Strings(argumentText.length);
     foreach (i, argument; argumentText)
         arguments[i] = argument.toStringz;
 
-    if (const missing = responseExpand(arguments))
-        throw new Exception(text(
-            "failed to expand dub compiler response file ",
-            missing.toDString,
-        ));
 }
 
 private void applyChecks(in imported!"snakebite.frontend.checks".Checks checks) {
+    import dmd.cond: VersionCondition;
     import dmd.globals: global;
 
     checks.applyTo(global.params);
     for (size_t index = global.versionids.length; index-- > 0; )
         if (!checks.defines(global.versionids[index].toString))
             global.versionids.remove(index);
+    foreach (identifier; checks.definitions)
+        VersionCondition.addPredefinedGlobalIdent(identifier);
 }
 
 private bool applyFeature(alias features)(

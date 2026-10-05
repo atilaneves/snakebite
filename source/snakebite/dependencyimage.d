@@ -157,7 +157,16 @@ public DependencyImage prepareImage(
         }
         return argument;
     }
-    const importFlags = compilerArguments.map!imageArgument.array
+    string[] imageArguments() {
+        version (LDC) {
+            import snakebite.frontend.checks: ldcArguments;
+            return ldcArguments(compilerArguments);
+        } else {
+            import snakebite.frontend.checks: expandedCompilerArguments;
+            return expandedCompilerArguments(compilerArguments);
+        }
+    }
+    const importFlags = imageArguments.map!imageArgument.array
         ~ importPaths.map!(path => "-I" ~ path).array
         ~ stringImportPaths.map!(path => "-J" ~ path).array;
     const executable = compilerPath(compiler);
