@@ -339,6 +339,10 @@ static if (supported) {
     // What the signals did before this module: a fault of the host goes to
     // it (a sanitizer, a host that embeds snakebite).
     private __gshared sigaction_t[3] _previous;
+    // The saved action stays unchanged while handlers on other threads read
+    // it. A one-shot action is consumed before its call, not after it returns.
+    // Resetting the installed action here would also disable guest recovery.
+    private shared bool[3] _previousReset;
 
     // The trace of a thrown object is made by druntime from the stack. The
     // fault has no use for it, and making it allocates.
@@ -535,8 +539,11 @@ static if (supported) {
     // handler runs the faulting instruction again, and that ends the
     // process with the signal (and a core dump if the user enabled them).
     private void hostDefect(int signal, siginfo_t* info, void* context) nothrow @nogc {
+        import core.atomic: cas;
         import core.stdc.signal: raise;
-        import core.sys.posix.signal: SIG_IGN;
+        import core.sys.posix.signal:
+            SA_NODEFER, SA_RESETHAND, SIG_IGN, SIG_SETMASK, SIG_UNBLOCK,
+            sigaddset, sigemptyset, sigismember, sigprocmask, sigset_t;
 
         size_t index;
         foreach (candidate, handled; handledSignals)
@@ -547,15 +554,48 @@ static if (supported) {
         const handler = previous.sa_flags & SA_SIGINFO
             ? cast(void*) previous.sa_sigaction
             : cast(void*) previous.sa_handler;
-        if (handler !is cast(void*) SIG_DFL && handler !is cast(void*) SIG_IGN) {
+        const callable = handler !is cast(void*) SIG_DFL
+            && handler !is cast(void*) SIG_IGN;
+        if (callable && (!(previous.sa_flags & SA_RESETHAND)
+            || cas(&_previousReset[index], false, true))) {
             alias WithInformation = extern(C) void function(
                 int, siginfo_t*, void*) nothrow @nogc;
             alias WithoutInformation = extern(C) void function(int) nothrow @nogc;
 
+            // The one-shot claim must precede any change of mask. On the
+            // normal stack the collector can suspend this thread safely.
+            // On an alternate stack it must stay blocked, as in onFault.
+            const interrupted = cast(ucontext_t*) context;
+            sigset_t savedMask;
+            const location = cast(size_t) &savedMask;
+            const alternate = cast(size_t) interrupted.uc_stack.ss_sp;
+            const onAlternate = location >= alternate
+                && location - alternate < interrupted.uc_stack.ss_size;
+            const unmask = (previous.sa_flags & SA_NODEFER)
+                && !sigismember(&previous.sa_mask, signal)
+                && !sigismember(&interrupted.uc_sigmask, signal);
+            bool changed;
+            if (!onAlternate) {
+                // `auto` retains the const of the saved action's mask.
+                sigset_t allowed = previous.sa_mask;
+                // Linux x86-64 has 64 signals; only the first word is used by
+                // the kernel. The remaining words are libc padding.
+                allowed.__val[0] |= interrupted.uc_sigmask.__val[0];
+                if (!(previous.sa_flags & SA_NODEFER))
+                    sigaddset(&allowed, signal);
+                changed = sigprocmask(SIG_SETMASK, &allowed, &savedMask) == 0;
+            } else if (unmask) {
+                sigset_t allowed;
+                sigemptyset(&allowed);
+                sigaddset(&allowed, signal);
+                changed = sigprocmask(SIG_UNBLOCK, &allowed, &savedMask) == 0;
+            }
             if (previous.sa_flags & SA_SIGINFO)
                 (cast(WithInformation) handler)(signal, info, context);
             else
                 (cast(WithoutInformation) handler)(signal);
+            if (changed)
+                sigprocmask(SIG_SETMASK, &savedMask, null);
             return;
         }
 
