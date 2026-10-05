@@ -165,14 +165,19 @@ must be writable and owned by the caller. Cache eviction is left to the caller.
 
 ## Verification
 
-`ut.ffi.symbol` runs in the DMD unit runner and the LDC acceptance runner. It
-covers direct native calls and calls through the interpreter and bytecode
-backends, cache reuse, source and input changes, compiler and linker failure,
-and D module construction. The atomic tests call
+`ut.ffi.symbol` runs in the DMD unit runner. It covers direct native calls and
+calls through the interpreter and bytecode backends, cache reuse, source and
+input changes, compiler and linker failure, compiler family failure, and D
+module construction. The atomic tests call
 druntime's real `atomicLoad!int` and `atomicFetchAdd!int`. They also check
 automatic project preparation, image lifetime, and cache reuse. CTFE cannot
 execute loaded native code. The dub fixture checks the full backend matrix,
 transitive archive members, paths with spaces, missing archives, changed
 dependency sources, and reuse after a root source edit.
-The LDC acceptance runner also checks that an image accepts a dependency with
-an unused template member that fails under `-preview=dip1000`.
+The LDC acceptance runner checks the parts that depend on the host compiler:
+the `extern(D)` parameter order and the hidden return pointer of a method,
+the spelling of version and debug flags for the image compiler, that an
+image accepts a dependency with an unused template member that fails under
+`-preview=dip1000`, that an image with an undefined symbol fails to build, and
+that an image build with a DMD compiler fails. Other LDC acceptance tests also
+use these host choices, for example the `extern(D)` variadic arguments.
