@@ -789,7 +789,8 @@ def test_unknown_checkaction_value_is_an_error(
     assert "switch `-checkaction=bogus` is invalid" in output
 
 
-# Every test is one or a few child processes with its own temporary
-# directory, so the tests run in parallel.
+# The tests can run in parallel (see build/pytest-workers.sh) because the
+# state that they share, the `.snakebite` directory and the dub package store,
+# is keyed by project path and published with an atomic rename.
 if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-v", "-n", "4"]))
+    raise SystemExit(pytest.main([__file__, "-v"]))
