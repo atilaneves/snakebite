@@ -18,14 +18,30 @@ trace="$work/execve.log"
 status=0
 strace -f -qq -e trace=execve,execveat -o "$trace" bin/ut "$@" || status=$?
 
-# A line of a successful start is `PID execve("PATH", [...], ...) = 0`. A
-# start that failed (`= -1 ENOENT`) is a lookup along PATH, not a start. The
-# first start is bin/ut itself.
-unexpected=$(grep -E '\) += 0$' "$trace" \
-    | sed -E 's/^[^"]*"([^"]*)".*/\1/' \
-    | tail -n +2 \
-    | awk -v allowed="$allowed" '{ name = $0; sub(".*/", "", name) }
-        name !~ allowed { print }' || true)
+# A line of a successful start is `PID execve("PATH", [...], ...) = 0`. strace
+# splits it into an `<unfinished ...>` line and a `<... execve resumed>` line
+# when other processes write between them. A start that failed (`= -1 ENOENT`)
+# is a lookup along PATH, not a start. The first start is bin/ut itself.
+unexpected=$(awk -v allowed="$allowed" '
+    /execve(at)?\("/ {
+        path = $0
+        sub(/^[^"]*"/, "", path)
+        sub(/".*/, "", path)
+        if ($0 ~ /<unfinished/) { pending[$1] = path; next }
+        if ($0 ~ /\) += 0$/) started[++count] = path
+        next
+    }
+    /<\.\.\. execve(at)? resumed>/ {
+        if ($0 ~ /\) += 0$/ && ($1 in pending)) started[++count] = pending[$1]
+        delete pending[$1]
+    }
+    END {
+        for (i = 2; i <= count; i++) {
+            name = started[i]
+            sub(".*/", "", name)
+            if (name !~ allowed) print started[i]
+        }
+    }' "$trace")
 
 if [[ -n "$unexpected" ]]; then
     echo "bin/ut started a program that is not a test helper:" >&2

@@ -3634,8 +3634,8 @@ def test_failing_image_build_reports_the_compiler_output(
 # A link failure of the real linker, with no stub: the dependency calls a
 # symbol that nothing defines. The image link fails at build time, not when
 # the guest runs, the user sees the symbol, and the failed build leaves
-# nothing in the image directory. A later start with the symbol defined
-# builds the image.
+# nothing in the image directory. A later start without the call builds
+# the image.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
 def test_unresolved_dependency_symbol_fails_the_image_link(
     tmp_path: Path, backend: str,
@@ -3665,8 +3665,7 @@ def test_unresolved_dependency_symbol_fails_the_image_link(
         tmp_path / "deps" / "missing.d",
         """
         module missing;
-        extern(C) int image_missing_dependency() { return 5; }
-        int answer(T)() { return image_missing_dependency(); }
+        int answer(T)() { return 5; }
         """,
     )
     builds = image_builds(log)

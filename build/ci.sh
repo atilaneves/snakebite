@@ -4,7 +4,7 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
 build/reggae.sh
 ninja
-# Local full-suite measurements favour one worker (@TIMES@).
+# One worker keeps the full-suite time stable under strace.
 build/ut-without-build-tools.sh -j 1
 # The tests tagged `@Tags("alone")` need a process in which no other
 # test runs: they gate on measured times, or they count what the process
