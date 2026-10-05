@@ -9,7 +9,7 @@ import dmd.expression:
     CatElemAssignExp, CatDcharAssignExp,
     ConstructExp, Expression, IdentityExp, LoweredAssignExp, NewExp, ThrowExp,
     TupleExp;
-import dmd.statement: ThrowStatement;
+import dmd.statement: ReturnStatement, ThrowStatement;
 import snakebite.backends.identity: IdentityPlan, identityPlan;
 import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
 import snakebite.backends.aggregateinit: NewPlan, planNew;
@@ -55,6 +55,18 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     final override void visit(ThrowExp expression) {
         visitThrowExp(expression);
     }
+
+    // The operand of `return` is evaluated before the function starts to
+    // return: a throw from the operand leaves with an exception, and no
+    // handler or cleanup that runs then may see a pending return. Which
+    // cleanups the transfer runs is the shared unwind plan's decision.
+    final override void visit(ReturnStatement statement) {
+        visitReturnOperand(statement);
+        visitReturnTransfer(statement);
+    }
+
+    protected abstract void visitReturnOperand(ReturnStatement statement);
+    protected abstract void visitReturnTransfer(ReturnStatement statement);
 
     protected abstract void visitThrowStatement(ThrowStatement statement);
     protected abstract void visitThrowExp(ThrowExp expression);
