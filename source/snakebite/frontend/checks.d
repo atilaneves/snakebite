@@ -48,17 +48,57 @@ public struct Checks {
     public bool accept(in const(char)[] argument) @safe pure nothrow @nogc {
         import std.algorithm.searching: startsWith;
 
-        if (argument == "-release")
+        if (argument == "-release" || argument == "--release")
             _release = true;
         else if (argument == "-noboundscheck")
             _boundscheck = CHECKENABLE.off;
+        else if (argument.startsWith("--boundscheck"))
+            return acceptBoundscheck(argument["--boundscheck".length .. $]);
         else if (argument.startsWith("-boundscheck"))
             return acceptBoundscheck(argument["-boundscheck".length .. $]);
+        else if (isLdcCheckFlag(argument))
+            return acceptLdcCheck(argument);
+        else if (argument.startsWith("--checkaction="))
+            return acceptAction(argument["--checkaction=".length .. $]);
         else if (argument.startsWith("-checkaction="))
             return acceptAction(argument["-checkaction=".length .. $]);
         else if (argument.startsWith("-check"))
             return acceptCheck(argument["-check".length .. $]);
 
+        return true;
+    }
+
+    private bool acceptLdcCheck(in const(char)[] argument) @safe pure nothrow @nogc {
+        import std.algorithm.searching: findSplit, startsWith;
+
+        const option = argument[argument.startsWith("--") ? 2 : 1 .. $];
+        const enabled = option.startsWith("enable-");
+        const split = option[enabled ? "enable-".length : "disable-".length .. $]
+            .findSplit("=");
+        bool value;
+        // LDC's FlagParser accepts these spellings, not arbitrary case.
+        switch (split[2]) {
+            case "": case "true": case "True": case "TRUE": case "1":
+                value = enabled;
+                break;
+            case "false": case "False": case "FALSE": case "0":
+                value = !enabled;
+                break;
+            default: return false;
+        }
+        const request = value ? CHECKENABLE.on : CHECKENABLE.off;
+        switch (split[0]) {
+            case "asserts": _requested[Category.assertion] = request; break;
+            case "preconditions": _requested[Category.preconditions] = request; break;
+            case "postconditions": _requested[Category.postconditions] = request; break;
+            case "invariants": _requested[Category.invariants] = request; break;
+            case "switch-errors": _requested[Category.switchError] = request; break;
+            case "contracts":
+                _requested[Category.preconditions] = request;
+                _requested[Category.postconditions] = request;
+                break;
+            default: return false;
+        }
         return true;
     }
 
@@ -182,11 +222,9 @@ public struct Checks {
         return arrayBounds == CHECKENABLE.off ? noBounds : null;
     }
 
-    // The `ldc2` flags for the checks that a flag named: `ldc2` reads none
-    // of the flags that `accept` reads, and it keeps the last of two flags
-    // for one check where dmd lets `-check=bounds` win over
-    // `-boundscheck=`, so these come from the resolved checks. A check that
-    // no flag named keeps the default of `ldc2`. `ldc2` has no null check.
+    // DMD lets `-check=bounds` win over `-boundscheck=` in either order.
+    // Resolve before translation so the guest and image use the same flags.
+    // A check that no flag named keeps LDC's default. LDC has no null check.
     public string[] ldcFlags() const @safe pure nothrow {
         import std.traits: EnumMembers;
 
@@ -235,23 +273,58 @@ public struct Checks {
     }
 }
 
-// `arguments` for `ldc2`: the flags that `Checks` reads and `ldc2` does not
-// understand give way to the `ldc2` flags of the checks they select.
+private bool isLdcCheckFlag(in const(char)[] argument) @safe pure nothrow @nogc {
+    import std.algorithm.searching: startsWith;
+
+    const option = argument.startsWith("--") ? argument[1 .. $] : argument;
+    static foreach (name; ["asserts", "preconditions", "postconditions",
+            "invariants", "switch-errors", "contracts"])
+        if (option.startsWith("-enable-" ~ name)
+                || option.startsWith("-disable-" ~ name))
+            return true;
+
+    return false;
+}
+
+// Normalize both compiler dialects so a later native flag cannot override
+// the resolved DMD precedence in the image alone.
 public string[] ldcArguments(in string[] arguments) @safe pure nothrow {
     import std.algorithm.searching: startsWith;
 
-    Checks checks;
-    string[] kept;
-    foreach (argument; arguments) {
-        const isCheckFlag = argument == "-noboundscheck"
+    bool isCheckFlag(in string argument) @safe pure nothrow @nogc {
+        return argument == "-noboundscheck"
             || argument.startsWith("-boundscheck")
+            || argument.startsWith("--boundscheck")
+            || isLdcCheckFlag(argument)
             || (argument.startsWith("-check")
                 && !argument.startsWith("-checkaction="));
+    }
+
+    Checks checks;
+    string[] kept;
+    foreach (argument; joinedCheckArguments(arguments)) {
         // The compiler reports a flag that is not valid.
-        if (!checks.accept(argument) || !isCheckFlag)
+        if (!checks.accept(argument) || !isCheckFlag(argument))
             kept ~= argument;
     }
     checks.resolve;
 
     return kept ~ checks.ldcFlags;
+}
+
+// LDC also accepts a separate value for enum options. Use one argument
+// form for both the guest parser and the image translation.
+public string[] joinedCheckArguments(in string[] arguments) @safe pure nothrow {
+    string[] joined;
+    for (size_t index; index < arguments.length; ++index) {
+        const argument = arguments[index];
+        const separate = argument == "-boundscheck" || argument == "--boundscheck"
+            || argument == "-checkaction" || argument == "--checkaction";
+        if (separate && index + 1 < arguments.length)
+            joined ~= argument ~ "=" ~ arguments[++index];
+        else
+            joined ~= argument;
+    }
+
+    return joined;
 }

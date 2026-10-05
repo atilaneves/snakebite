@@ -1549,14 +1549,16 @@ private imported!"snakebite.frontend.checks".Checks checksOfArguments(
     ref imported!"dmd.arraytypes".Strings arguments,
 ) {
     import dmd.root.string: toDString;
-    import snakebite.frontend.checks: Checks;
+    import snakebite.frontend.checks: Checks, joinedCheckArguments;
+    import std.algorithm.iteration: map;
+    import std.array: array;
     import std.conv: text;
 
     Checks checks;
-    foreach (argument; arguments[])
-        if (!checks.accept(argument.toDString))
+    foreach (argument; joinedCheckArguments(arguments[].map!toDString.array))
+        if (!checks.accept(argument))
             throw new Exception(text(
-                "switch `", argument.toDString, "` is invalid"));
+                "switch `", argument, "` is invalid"));
     checks.resolve;
 
     return checks;

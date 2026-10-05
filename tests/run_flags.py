@@ -8,6 +8,7 @@
 # compiled with the same flags by dmd, the reference compiler, and the other
 # backends are `bin/sb` on a dub project whose recipe names the flags.
 
+import json
 import os
 import shutil
 import signal
@@ -75,9 +76,15 @@ def run_unittests(
 
 
 def run_native(directory: Path, flags: list[str], code: str) -> Outcome:
+    return run_compiled(directory, native_compiler(), flags, code)
+
+
+def run_compiled(
+    directory: Path, compiler: str, flags: list[str], code: str,
+) -> Outcome:
     (directory / "app.d").write_text(code, encoding="utf-8")
     compiled = subprocess.run(
-        [native_compiler(), "-unittest", "-main",
+        [compiler, "-unittest", "-main",
          f"-of={directory / 'app'}", *flags, str(directory / "app.d")],
         capture_output=True,
         check=False,
@@ -1431,6 +1438,130 @@ def test_check_flag_applies_to_a_dependency_template(
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("backend", [*BACKENDS, "native-ldc"])
+@pytest.mark.parametrize("ldc_flags,enabled", [
+    (["--enable-preconditions=false"], False),
+    (["-enable-preconditions=0"], False),
+    (["--enable-preconditions=False"], False),
+    (["--enable-preconditions=FALSE"], False),
+    (["--disable-preconditions"], False),
+    (["-disable-preconditions="], False),
+    (["--disable-preconditions=1"], False),
+    (["--disable-contracts"], False),
+    (["--enable-preconditions=false", "-enable-preconditions"], True),
+    (["-enable-preconditions", "--enable-preconditions=false"], False),
+    (["--disable-contracts", "--enable-preconditions=True"], True),
+    (["--enable-preconditions=TRUE", "--disable-contracts"], False),
+    (["--disable-preconditions=false"], True),
+    (["--release", "--enable-preconditions=true"], True),
+    (["--enable-preconditions=true", "--release"], True),
+])
+def test_compiler_specific_precondition_flags_apply_to_guest_tests(
+    tmp_path: Path, backend: str, ldc_flags: list[str], enabled: bool,
+) -> None:
+    app_source = PRELUDE + """\
+int positive(int value)
+in { assert(value > 0, "precondition checked"); }
+body { return value; }
+"""
+    test_body = """\
+unittest {
+    log("start\\n");
+    assert(positive(-1) == -1);
+    log("after\\n");
+}
+"""
+    test_source = (
+        "module app_test;\nimport app: log, positive;\n\n" + test_body
+    )
+    dmd_flags = [f"-check=in={'on' if enabled else 'off'}"]
+    if backend in ["native", "native-ldc"]:
+        compiler = native_compiler() if backend == "native" else shutil.which("ldc2")
+        if compiler is None:
+            pytest.skip("ldc2 is not on PATH")
+        outcome = run_compiled(
+            tmp_path, compiler,
+            dmd_flags if backend == "native" else ldc_flags,
+            app_source + test_body,
+        )
+    else:
+        outcome = run_compiler_specific_project(
+            tmp_path, backend, dmd_flags, ldc_flags, app_source, test_source,
+        )
+
+    if enabled:
+        assert_raises_after_start(backend, outcome, "precondition checked")
+    else:
+        assert_passes_after_start(backend, outcome)
+
+
+def run_compiler_specific_project(
+    tmp_path: Path, backend: str, dmd_flags: list[str], ldc_flags: list[str],
+    app_source: str, test_source: str,
+) -> Outcome:
+    project = tmp_path / "project"
+    (project / "source").mkdir(parents=True)
+    (project / "dub.json").write_text(
+        json.dumps({
+            "name": "app", "targetType": "library",
+            "dflags-dmd": dmd_flags, "dflags-ldc": ldc_flags,
+        }),
+        encoding="utf-8",
+    )
+    (project / "source" / "app.d").write_text(app_source, encoding="utf-8")
+    (project / "source" / "app_test.d").write_text(
+        test_source, encoding="utf-8",
+    )
+
+    return outcome_of(subprocess.run(
+        [sb_path(), f"--backend={backend}", "--no-optimise-image",
+         str(project)],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=TIMEOUT,
+    ))
+
+
+@pytest.mark.parametrize("backend", [*BACKENDS, "native-ldc"])
+@pytest.mark.parametrize("ldc_flags,unchecked", [
+    (["--boundscheck=off"], True),
+    (["--boundscheck=off", "--boundscheck=on"], False),
+    (["--boundscheck=on", "--boundscheck=off"], True),
+    (["--boundscheck", "off"], True),
+    (["-boundscheck", "safeonly"], False),
+    (["--boundscheck=off", "--boundscheck", "on"], False),
+])
+def test_compiler_specific_bounds_flags_define_d_noboundschecks(
+    tmp_path: Path, backend: str, ldc_flags: list[str], unchecked: bool,
+) -> None:
+    test_body = f"""\
+unittest {{
+    log("start\\n");
+    version (D_NoBoundsChecks) enum unchecked = true;
+    else enum unchecked = false;
+    assert(unchecked == {str(unchecked).lower()});
+    log("after\\n");
+}}
+"""
+    dmd_flags = [f"-boundscheck={'off' if unchecked else 'on'}"]
+    if backend in ["native", "native-ldc"]:
+        compiler = native_compiler() if backend == "native" else shutil.which("ldc2")
+        if compiler is None:
+            pytest.skip("ldc2 is not on PATH")
+        outcome = run_compiled(
+            tmp_path, compiler,
+            dmd_flags if backend == "native" else ldc_flags,
+            PRELUDE + test_body,
+        )
+    else:
+        outcome = run_compiler_specific_project(
+            tmp_path, backend, dmd_flags, ldc_flags, PRELUDE,
+            "module app_test;\nimport app: log;\n" + test_body,
+        )
+    assert_passes_after_start(backend, outcome)
 
 
 # A dependency that does not build is a failure with the compiler's message,

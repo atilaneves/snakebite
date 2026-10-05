@@ -139,11 +139,126 @@ unittest {
 }
 
 
+@("checks.ldc.nativePreconditions")
+unittest {
+    with (CHECKENABLE)
+        resolved(["--enable-preconditions=false"]).preconditions.should == off;
+}
+
+
+@("checks.ldc.nativeChecks")
+unittest {
+    with (CHECKENABLE) {
+        const checks = resolved([
+            "--enable-asserts=false",
+            "--enable-preconditions=false",
+            "--enable-postconditions=false",
+            "--enable-invariants=false",
+            "--enable-switch-errors=false",
+            "--boundscheck=safeonly",
+        ]);
+        checks.assertion.should == off;
+        checks.preconditions.should == off;
+        checks.postconditions.should == off;
+        checks.invariants.should == off;
+        checks.switchError.should == off;
+        checks.arrayBounds.should == safeonly;
+    }
+}
+
+
+@("checks.ldc.booleanForms")
+unittest {
+    foreach (dash; ["-", "--"])
+        foreach (name; ["asserts", "preconditions", "postconditions",
+                "invariants", "switch-errors", "contracts"]) {
+            foreach (value; ["", "=", "=true", "=True", "=TRUE", "=1"]) {
+                ldcArguments([dash ~ "enable-" ~ name ~ value]).should ==
+                    (name == "contracts"
+                        ? ["--enable-preconditions=true", "--enable-postconditions=true"]
+                        : ["--enable-" ~ name ~ "=true"]);
+                ldcArguments([dash ~ "disable-" ~ name ~ value]).should ==
+                    (name == "contracts"
+                        ? ["--enable-preconditions=false", "--enable-postconditions=false"]
+                        : ["--enable-" ~ name ~ "=false"]);
+            }
+            foreach (value; ["=false", "=False", "=FALSE", "=0"]) {
+                ldcArguments([dash ~ "enable-" ~ name ~ value]).should ==
+                    (name == "contracts"
+                        ? ["--enable-preconditions=false", "--enable-postconditions=false"]
+                        : ["--enable-" ~ name ~ "=false"]);
+                ldcArguments([dash ~ "disable-" ~ name ~ value]).should ==
+                    (name == "contracts"
+                        ? ["--enable-preconditions=true", "--enable-postconditions=true"]
+                        : ["--enable-" ~ name ~ "=true"]);
+            }
+            foreach (value; ["=yes", "=TrUe", "=FaLsE", "=2"]) {
+                Checks checks;
+                checks.accept(dash ~ "enable-" ~ name ~ value).should == false;
+                ldcArguments([dash ~ "enable-" ~ name ~ value])
+                    .should == [dash ~ "enable-" ~ name ~ value];
+            }
+        }
+}
+
+
+@("checks.ldc.contractPrecedence")
+unittest {
+    with (CHECKENABLE) {
+        resolved(["--disable-contracts", "-enable-preconditions"])
+            .preconditions.should == on;
+        resolved(["-enable-preconditions", "--disable-contracts"])
+            .preconditions.should == off;
+        resolved(["--disable-contracts", "-enable-preconditions"])
+            .postconditions.should == off;
+        resolved(["--release", "-enable-preconditions"])
+            .preconditions.should == on;
+        resolved(["--release"]).postconditions.should == off;
+        resolved(["--checkaction=halt"]).action.should == CHECKACTION.halt;
+    }
+}
+
+
+@("checks.ldc.nativeBoundsPrecedence")
+unittest {
+    with (CHECKENABLE) {
+        resolved(["--boundscheck=off", "-check=bounds=on"])
+            .arrayBounds.should == on;
+        resolved(["-check=bounds=on", "--boundscheck=off"])
+            .arrayBounds.should == on;
+    }
+}
+
+
+@("checks.ldc.normalizesNativeFlags")
+unittest {
+    ldcArguments([
+        "--enable-preconditions=false",
+        "--enable-preconditions=true",
+    ]).should == ["--enable-preconditions=true"];
+    ldcArguments(["--boundscheck=off", "-check=bounds=on"])
+        .should == ["--boundscheck=on"];
+    ldcArguments(["-check=bounds=on", "--boundscheck=off"])
+        .should == ["--boundscheck=on"];
+}
+
+
 @("checks.ldc.boundscheckForms")
 unittest {
     ldcArguments(["-boundscheck=safeonly"]).should == ["--boundscheck=safeonly"];
     ldcArguments(["-noboundscheck"]).should == ["--boundscheck=off"];
     ldcArguments(["-g", "-boundscheck=off"]).should == ["-g", "--boundscheck=off"];
+}
+
+
+@("checks.ldc.separateBoundsValue")
+unittest {
+    ldcArguments(["--boundscheck", "off"])
+        .should == ["--boundscheck=off"];
+    ldcArguments(["-boundscheck", "safeonly", "--boundscheck=on"])
+        .should == ["--boundscheck=on"];
+    ldcArguments(["--boundscheck", "off", "-check=bounds=on"])
+        .should == ["--boundscheck=on"];
 }
 
 
