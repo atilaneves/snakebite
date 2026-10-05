@@ -654,6 +654,102 @@ extern(C) int main() {{
     assert_passes_after_start(backend, outcome_of(result))
 
 
+@pytest.mark.parametrize("backend", [*BACKENDS, "native-ldc"])
+@pytest.mark.parametrize("entry", ["c", "d", "betterc", "explicit"])
+def test_dependency_entry_startup(
+    tmp_path: Path, backend: str, entry: str,
+) -> None:
+    dependency = tmp_path / "dependency"
+    (dependency / "source").mkdir(parents=True)
+    (dependency / "dub.sdl").write_text(
+        'name "dep"\ntargetType "library"\n', encoding="utf-8",
+    )
+    (dependency / "source" / "dep.d").write_text("""\
+module dep;
+import core.stdc.stdio;
+shared static this() { fputs("DEP_CTOR\\n", stderr); }
+static this() { fputs("DEP_TLS_CTOR\\n", stderr); }
+int ordinary() {
+    version (D_BetterC) return 1;
+    else return 2;
+}
+extern(C) int callback(int function() next) { return next(); }
+""", encoding="utf-8")
+    root = tmp_path / "root"
+    (root / "source").mkdir(parents=True)
+    (root / "dub.json").write_text(json.dumps({
+        "name": "app", "targetType": "executable",
+        "dependencies": {"dep": {"path": "../dependency"}},
+        "dflags": ["-betterC"] if entry == "betterc" else [],
+        "libs-dmd": ["phobos2"],
+        "mainSourceFile": "source/app.d",
+        "configurations": [{
+            "name": "unittest", "targetType": "executable",
+            "mainSourceFile": "source/app.d",
+        }],
+    }), encoding="utf-8")
+    linkage = "" if entry == "d" else "extern(C) "
+    startup = "" if entry == "betterc" else """\
+shared static this() { fputs("ROOT_CTOR\\n", stderr); }
+static this() { fputs("ROOT_TLS_CTOR\\n", stderr); }
+unittest {
+    fputs("UNITTEST\\n", stderr);
+    assert(ordinary() == 2);
+    assert(callback(&next) == 7);
+}
+"""
+    initialize = "" if entry != "explicit" else """\
+    fputs("INIT\\n", stderr);
+    if (!rt_init()) return 3;
+"""
+    (root / "source" / "app.d").write_text(f"""\
+module app;
+import dep;
+import core.stdc.stdio;
+extern(C) int rt_init();
+{startup}
+extern(C) int next() {{ return 7; }}
+{linkage}int main() {{
+{initialize}    fputs("MAIN\\n", stderr);
+    return ordinary() == 2 && callback(&next) == 7 ? 0 : 1;
+}}
+""", encoding="utf-8")
+    if backend in ["native", "native-ldc"]:
+        compiler = native_compiler() if backend == "native" else shutil.which("ldc2")
+        if compiler is None:
+            pytest.skip("ldc2 is not on PATH")
+        command = ["dub", "test", f"--compiler={compiler}"]
+    else:
+        command = [sb_path(), f"--backend={backend}", "--no-optimise-image", str(root)]
+    result = subprocess.run(
+        command, cwd=root, capture_output=True, check=False, text=True,
+        timeout=TIMEOUT,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    markers = [line for line in output.splitlines() if line in {
+        "DEP_CTOR", "DEP_TLS_CTOR", "ROOT_CTOR", "ROOT_TLS_CTOR",
+        "UNITTEST", "INIT", "MAIN",
+    }]
+    if entry in ["c", "betterc"]:
+        assert markers == ["MAIN"], output
+    else:
+        assert markers.count("DEP_CTOR") == 1, output
+        assert markers.count("DEP_TLS_CTOR") == 1, output
+        assert markers.count("ROOT_CTOR") == 1, output
+        assert markers.count("ROOT_TLS_CTOR") == 1, output
+        assert markers.index("DEP_CTOR") < markers.index("DEP_TLS_CTOR"), output
+        assert markers.index("ROOT_CTOR") < markers.index("ROOT_TLS_CTOR"), output
+        assert markers.index("DEP_CTOR") < markers.index("ROOT_CTOR"), output
+        assert markers.index("DEP_TLS_CTOR") < markers.index("ROOT_TLS_CTOR"), output
+        if entry == "d":
+            assert markers.count("UNITTEST") == 1, output
+            assert "MAIN" not in markers, output
+        else:
+            assert markers[0] == "INIT", output
+            assert markers[-1] == "MAIN", output
+
+
 # The tests can run in parallel (see build/pytest-workers.sh) because the
 # state that they share, the `.snakebite` directory and the dub package store,
 # is keyed by project path and published with an atomic rename.
