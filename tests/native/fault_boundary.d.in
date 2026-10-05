@@ -64,11 +64,83 @@ private void allocateCollected() {
     cast(void) new Collected;
 }
 
+private struct FaultOrder {
+    int marked;
+    int released;
+    bool bad;
+    HardwareFault fault;
+}
+
+private void markFault(void* context, HardwareFault fault) nothrow @nogc {
+    auto order = cast(FaultOrder*) context;
+    ++order.marked;
+    order.fault = fault;
+}
+
+private extern(C) void nativeCleanup(void* context) {
+    auto order = cast(FaultOrder*) context;
+    scope(exit) {
+        order.bad = order.marked != 1;
+        ++order.released;
+    }
+    snakebite_fault_invoke(null, &directBody);
+}
+
+private struct FaultOwners {
+    FaultOrder outer;
+    FaultOrder inner;
+}
+
+private extern(C) void nestedCleanup(void* context) {
+    auto owners = cast(FaultOwners*) context;
+    scope(exit) {
+        owners.outer.bad = owners.outer.marked != 1;
+        ++owners.outer.released;
+    }
+    runGuest(&owners.inner, &nativeCleanup, &owners.inner, &markFault);
+}
+
 int main(string[] args) {
     prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
     if (args.length != 2)
         return 64;
     switch (args[1]) {
+        case "nested-before-unwind":
+            foreach (_; 0 .. 1000) {
+                FaultOwners owners;
+                bool caught;
+                try {
+                    runGuest(&owners, &nestedCleanup, &owners.outer, &markFault);
+                } catch (HardwareFault fault) {
+                    takeFault(fault);
+                    caught = fault is owners.inner.fault
+                        && fault is owners.outer.fault;
+                }
+                if (!caught || owners.inner.bad || owners.outer.bad
+                        || owners.inner.released != 1
+                        || owners.outer.released != 1)
+                    return 31;
+            }
+            return 0;
+        case "before-unwind":
+        case "after-before-unwind":
+            foreach (_; 0 .. 1000) {
+                FaultOrder order;
+                bool caught;
+                try {
+                    runGuest(&order, &nativeCleanup, &order, &markFault);
+                } catch (HardwareFault fault) {
+                    takeFault(fault);
+                    caught = fault is order.fault;
+                }
+                if (!caught || order.bad || order.marked != 1
+                        || order.released != 1)
+                    return 29;
+            }
+            if (args[1] == "before-unwind")
+                return 0;
+            outsideFault;
+            return 30;
         case "recover-finalizer":
         case "after-finalizer":
             foreach (_; 0 .. 32) {

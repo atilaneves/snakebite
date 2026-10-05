@@ -69,14 +69,26 @@ public void runGuest(scope void delegate() body) @system {
 
 
 public alias GuestBody = extern(C) void function(void*);
+public alias BeforeFault = void function(void*, HardwareFault) nothrow @nogc;
 
 // A backend already has an entry record. Calling its entry directly avoids
 // a second delegate entry and keeps the same protected cleanup owner.
 public void runGuest(void* context, GuestBody body) @system {
+    runGuest(context, body, null, null);
+}
+
+// Runs outside signal context, before throwing starts native unwinding.
+// The hook only marks owned host state. It must not run guest code: native
+// cleanup can call back before the backend's first catch receives the fault.
+public void runGuest(
+    void* context, GuestBody body, void* faultContext, BeforeFault beforeFault,
+) @system {
     static if (supported) {
         if (_state.prepared is null)
             prepareThread;
         RunOwner owner;
+        owner.faultContext = faultContext;
+        owner.beforeFault = beforeFault;
         owner.enter;
         scope(exit) owner.leave;
         snakebite_fault_invoke(context, body);
@@ -97,6 +109,8 @@ static if (supported) {
 
         Fiber fiber;
         RunOwner* next;
+        void* faultContext;
+        BeforeFault beforeFault;
 
         void enter() nothrow @nogc {
             // Resolve druntime's TLS accessor before a signal can use it.
@@ -580,6 +594,15 @@ static if (supported) {
         fault.hostPc = record.pc;
         fault.kind = classify(record);
         fault.msg = GuestFault.message(fault.kind);
+        import core.thread.fiber: Fiber;
+
+        const fiber = Fiber.getThis;
+        auto owner = _state.runs;
+        while (owner !is null) {
+            if (owner.fiber is fiber && owner.beforeFault !is null)
+                owner.beforeFault(owner.faultContext, fault);
+            owner = owner.next;
+        }
         throw fault;
     }
 
