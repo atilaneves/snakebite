@@ -704,8 +704,10 @@ static if (supported) {
     static assert(imported!"core.sys.posix.ucontext".mcontext_t.gregs.offsetof == 0);
     static assert(imported!"core.sys.posix.ucontext".mcontext_t.fpregs.offsetof == 184);
 
-    private sigset_t previousHandlerMask(ref const(sigset_t) saved,
-        ref const(sigset_t) interrupted, int signal, bool nodefer) nothrow @nogc {
+    private imported!"core.sys.posix.signal".sigset_t previousHandlerMask(
+        ref const(imported!"core.sys.posix.signal".sigset_t) saved,
+        ref const(imported!"core.sys.posix.signal".sigset_t) interrupted,
+        int signal, bool nodefer) nothrow @nogc {
         import core.sys.posix.signal: sigaddset;
 
         sigset_t allowed = saved;

@@ -411,7 +411,7 @@ void wait_for_handler(void) {
 }
 void finish_gc(void) { atomic_store(&collected, 1); }
 static uint64_t first[4] = {1,2,3,4}, last[4] = {11,12,13,14};
-static uint64_t entry[6];
+static uint64_t restored[6];
 extern void register_signal(long, long, long);
 __asm__(".text\n"
         ".globl register_signal\n"
@@ -421,12 +421,12 @@ __asm__(".text\n"
         "mov $137,%rbx\n mov $439,%rbp\n mov $523,%r12\n"
         "mov $527,%r13\n mov $530,%r14\n mov $531,%r15\n"
         "mov $234,%eax\n syscall\n"
-        "mov %rbx,entry(%rip)\n"
-        "mov %rbp,entry+8(%rip)\n"
-        "mov %r12,entry+16(%rip)\n"
-        "mov %r13,entry+24(%rip)\n"
-        "mov %r14,entry+32(%rip)\n"
-        "mov %r15,entry+40(%rip)\n"
+        "mov %rbx,restored(%rip)\n"
+        "mov %rbp,restored+8(%rip)\n"
+        "mov %r12,restored+16(%rip)\n"
+        "mov %r13,restored+24(%rip)\n"
+        "mov %r14,restored+32(%rip)\n"
+        "mov %r15,restored+40(%rip)\n"
         "pop %r15\n pop %r14\n pop %r13\n pop %r12\n"
         "pop %rbp\n pop %rbx\n ret\n");
 void native_fault(void) { *(volatile int *)0 = 42; }
@@ -564,7 +564,7 @@ int main(int argc, char **argv) {
     else if (mode == 8) {
         register_signal(getpid(), syscall(SYS_gettid), target);
         const uint64_t expected[6] = {138,440,524,528,531,532};
-        for (int i=0; i<6; ++i) if (entry[i] != expected[i]) ++failures;
+        for (int i=0; i<6; ++i) if (restored[i] != expected[i]) ++failures;
     }
     else raise(target);
     if (mode == 7) while (!atomic_load(&collected)) sched_yield();
