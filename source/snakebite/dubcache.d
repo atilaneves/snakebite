@@ -100,6 +100,10 @@ public imported!"std.json".JSONValue cachedDubDescription(
 
     auto result = describe(); // The cache record stores mutable JSON values.
     try {
+        // Creating the state directory makes `.snakebite` in the start
+        // directory, which the watches below can include: create it first
+        // or the first record is stale on the next start.
+        cache.dirName.mkdirRecurse;
         bool cacheable = true;
         auto watched = collectWatches(directory, compiler, result["value"], cacheable); // JSON stores mutable values.
         // Do not publish an input snapshot taken across a concurrent edit.
@@ -114,7 +118,6 @@ public imported!"std.json".JSONValue cachedDubDescription(
                 "context": JSONValue(context), "watches": watched, "result": result,
             ]);
             const bytes = encode(record);
-            cache.dirName.mkdirRecurse;
             const temporary = text(cache, ".", randomUUID);
             scope(exit) if (temporary.exists) remove(temporary);
             write(temporary, bytes);

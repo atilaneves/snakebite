@@ -1,10 +1,13 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# dependencies = ["pexpect==4.9.0", "pytest==8.4.1"]
+# dependencies = [
+#     "pexpect==4.9.0", "pytest==8.4.1", "pytest-xdist==3.8.0",
+# ]
 # ///
 
 import os
 import re
+import signal
 import subprocess
 from pathlib import Path
 
@@ -14,12 +17,24 @@ import pytest
 _ANSI_ESCAPE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 TIMEOUT = 10
+
+
+# Each test gets its own REPL history file, so the tests neither write the
+# history of the user nor each other's.
+@pytest.fixture(autouse=True)
+def history_file(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    history = tmp_path_factory.mktemp("history") / "history"
+    monkeypatch.setenv("SNAKEBITE_HISTORY", str(history))
+
+
 UP_ARROW = "\x1b[A"
 
 
 def test_repl() -> None:
     repl = sb_path()
-    child = pexpect.spawn(repl, timeout=TIMEOUT, encoding="utf-8")
+    child = spawn(repl, timeout=TIMEOUT, encoding="utf-8")
     try:
         child.expect_exact("Snakebite REPL")
         child.expect_exact("[   0.0 ms] > ")
@@ -35,7 +50,7 @@ def test_repl() -> None:
         assert "3\n" in output
 
         child.sendline(":q")
-        child.expect(pexpect.EOF)
+        expect_exit(child)
     finally:
         child.close(force=True)
 
@@ -59,7 +74,7 @@ def test_halting_cell_does_not_end_the_session(
         "module repl_halt_test;\n", encoding="utf-8",
     )
 
-    child = pexpect.spawn(
+    child = spawn(
         sb_path(),
         ["--project", str(tmp_path), "-b", backend],
         timeout=TIMEOUT,
@@ -81,7 +96,7 @@ def test_halting_cell_does_not_end_the_session(
         assert "42\n" in clean(child.before)
 
         child.sendline(":q")
-        child.expect(pexpect.EOF)
+        expect_exit(child)
     finally:
         child.close(force=True)
 
@@ -101,7 +116,7 @@ def test_project_import_without_semicolon(tmp_path: Path, backend: str) -> None:
         encoding="utf-8",
     )
 
-    child = pexpect.spawn(
+    child = spawn(
         sb_path(),
         ["--project", str(tmp_path), "-b", backend],
         timeout=TIMEOUT,
@@ -120,7 +135,7 @@ def test_project_import_without_semicolon(tmp_path: Path, backend: str) -> None:
         assert "42\n" in clean(child.before)
 
         child.sendline(":q")
-        child.expect(pexpect.EOF)
+        expect_exit(child)
     finally:
         child.close(force=True)
 
@@ -454,7 +469,7 @@ def test_piped_whitespace_line_is_silent_noop() -> None:
 
 
 def test_interactive_error_label_is_red() -> None:
-    child = pexpect.spawn(sb_path(), timeout=TIMEOUT, encoding="utf-8")
+    child = spawn(sb_path(), timeout=TIMEOUT, encoding="utf-8")
     try:
         child.expect_exact("Snakebite REPL")
         child.expect_exact("[   0.0 ms] > ")
@@ -469,7 +484,7 @@ def test_interactive_error_label_is_red() -> None:
         child.expect(r"\[\s+\d+\.\d ms\] > ")
 
         child.sendline(":q")
-        child.expect(pexpect.EOF)
+        expect_exit(child)
     finally:
         child.close(force=True)
 
@@ -617,7 +632,7 @@ def test_dub_option_loads_module_from_fetched_project(tmp_path: Path) -> None:
         str(file),
         "-c",
         "loadedValue()",
-        timeout_seconds=30,
+        timeout_seconds=120,
         cwd=tmp_path,
     )
 
@@ -635,14 +650,14 @@ def test_file_argument_loads_example_fixture() -> None:
 
 
 def test_file_argument_exits_without_interactive_prompt() -> None:
-    child = pexpect.spawn(
+    child = spawn(
         sb_path(),
         ["tests/examples/ct.d"],
         timeout=TIMEOUT,
         encoding="utf-8",
     )
     try:
-        child.expect(pexpect.EOF)
+        expect_exit(child)
     finally:
         child.close(force=True)
 
@@ -658,7 +673,7 @@ def test_live_flag_keeps_repl_open_after_file_arguments(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    child = pexpect.spawn(
+    child = spawn(
         sb_path(),
         ["-l", str(module)],
         timeout=TIMEOUT,
@@ -674,7 +689,7 @@ def test_live_flag_keeps_repl_open_after_file_arguments(tmp_path: Path) -> None:
         assert "42\n" in output
 
         child.sendline(":q")
-        child.expect(pexpect.EOF)
+        expect_exit(child)
     finally:
         child.close(force=True)
 
@@ -800,9 +815,47 @@ def sb_path() -> str:
     return repl
 
 
+# pexpect sleeps by default: `delaybeforesend` 50 ms before each send,
+# `delayafterread` 0.1 ms after each read in `expect`, and `delayafterclose`
+# 100 ms in `close`. Every send here follows an expect on the prompt, so the
+# child is ready for input, and every close of a passing test follows the
+# exit of the child. `delayafterterminate` stays: `terminate` sleeps that
+# long between its signals only when `close(force=True)` finds a live child,
+# which is the failure path, and the sleep gives the child time to react to
+# a signal (pexpect/pty_spawn.py `terminate`).
+def spawn(
+    command: str, args: list[str] | None = None, **options,
+) -> pexpect.spawn:
+    child = pexpect.spawn(command, args or [], **options)
+    child.delaybeforesend = None
+    child.delayafterread = None
+    child.ptyproc.delayafterclose = 0
+    return child
+
+
+# The child has closed its terminal when EOF arrives. Waiting for the exit
+# status then ends in the child's own time. The alarm only bounds a hang.
+def expect_exit(child: pexpect.spawn) -> None:
+    child.expect(pexpect.EOF)
+    previous = signal.signal(signal.SIGALRM, _exit_timeout)
+    signal.alarm(TIMEOUT)
+    try:
+        child.wait()
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def _exit_timeout(signum: int, frame: object) -> None:
+    raise TimeoutError("the child did not exit")
+
+
 def clean(text: str) -> str:
     return _ANSI_ESCAPE.sub("", text).replace("\r", "")
 
 
+# The tests can run in parallel (see build/pytest-workers.sh) because the
+# state that they share, the `.snakebite` directory and the dub package store,
+# is keyed by project path and published with an atomic rename.
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

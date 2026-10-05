@@ -30,7 +30,7 @@ import unit_threaded;
 @("runTime.isConsistentAcrossRunCounts")
 @Flaky(3)
 @Serial
-@Tags("timing")
+@Tags("alone")
 unittest {
     string source = "module benchmarkTimingConsistency; int main() { ";
     source ~= "int sum; for (int i; i < 10_000; ++i) sum += i; ";
@@ -79,7 +79,7 @@ unittest {
 @("dub.cycle.matchesTouchedTestCycle")
 @Flaky(5)
 @Serial
-@Tags("timing")
+@Tags("alone")
 unittest {
     const directory = buildPath(getcwd, "examples", "ct-full");
     const objectFile = buildPath(directory, "ct-full-test-application.o");
