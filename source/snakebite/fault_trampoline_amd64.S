@@ -5,12 +5,18 @@
  * stack and outside signal context, where it can throw. This is the
  * technique of druntime's `etc.linux.memoryerror`.
  *
+ * A fault can interrupt code with a stack alignment that a normal D
+ * function entry does not accept. Assembly lets us align the stack and
+ * describe the interrupted frame with explicit call frame information.
+ * Inline assembly cannot supply these unwind directives (ADR-0004).
+ *
  * `snakebite_fault_trampoline` is entered with the address of the faulting
  * instruction pushed as its return address. That address is the exact
  * instruction, not the one after a call, so the frame is marked as a
- * signal frame: the unwinder does not subtract 1 from it, and druntime's
- * personality routine reads the call site table at the faulting
- * instruction. `snakebite_fault_trampoline_call` is for a call through a
+ * signal frame: the unwinder does not subtract 1 from it. This preserves
+ * the faulting PC for any call-site table the compiler kept; it cannot
+ * create catch or cleanup entries for loads, stores or divisions.
+ * `snakebite_fault_trampoline_call` is for a call through a
  * bad function pointer: the `call` pushed a normal return address.
  *
  * Neither returns: `snakebite_fault_raise` throws.
