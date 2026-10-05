@@ -6,7 +6,7 @@ build/reggae.sh
 ninja
 # Local full-suite measurements favour one worker (52s with the default
 # worker count, 43s with one worker).
-bin/ut -j 1
+build/ut-without-build-tools.sh -j 1
 # The tests tagged `@Tags("alone")` need a process in which no other
 # test runs: they gate on measured times, or they count what the process
 # holds while no other thread starts. Run them on their own,
