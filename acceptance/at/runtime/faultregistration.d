@@ -18,7 +18,9 @@ static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot run module destructors"),
 )) {
     @("registrationHeldByThreadIsLeftToTheEndOfTheProcess." ~ backend.stringof)
-    @Tags(backend.stringof, "timing")
+    // `alone` selects the serial group after the master test migration.
+    // Keep `timing` until that CI selection is present on this branch too.
+    @Tags(backend.stringof, "timing", "alone")
     unittest {
         GC.collect;
         const sandbox = Sandbox();
