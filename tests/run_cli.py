@@ -9,6 +9,7 @@
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 from pathlib import Path
@@ -2627,6 +2628,69 @@ def test_throw_from_a_crt_destructor_fails_the_program(
 
     assert "destructor failed" in result.stderr
     assert result.returncode == 1, output(result)
+
+
+# A C++ exception that unwinds past every frame of the program ends the
+# process as it ends compiled D: nothing catches or translates it, and a D
+# `catch (Throwable)` never matches a foreign exception. Compiled D dies of
+# `SIGABRT` here, and only a process shows that. The dependency compiles its
+# own C++ source into an object file that the image links.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_cpp_exception_terminates_the_process_uncaught(
+    tmp_path: Path, backend: str,
+) -> None:
+    if shutil.which("c++") is None:
+        pytest.skip("no C++ compiler is on PATH")
+
+    write(
+        tmp_path / "app" / "dub.sdl",
+        dub_project_recipe("cpp-exception")
+        + 'dependency "cpp-exception-dep" path="../dependency"\n',
+    )
+    write(
+        tmp_path / "app" / "source" / "main.d",
+        """
+        module main;
+        import core.stdc.stdio: fflush, printf, stdout;
+        import dep: throwsFromCpp;
+        int main() {
+            printf("about to throw\\n");
+            fflush(stdout);
+            try {
+                throwsFromCpp;
+            } catch (Throwable) {
+                printf("caught\\n");
+                return 3;
+            }
+            return 0;
+        }
+        """,
+    )
+    write(
+        tmp_path / "dependency" / "dub.sdl",
+        'name "cpp-exception-dep"\ntargetType "staticLibrary"\n'
+        'preBuildCommands "c++ -c -fPIC $PACKAGE_DIR/throws.cpp'
+        ' -o $PACKAGE_DIR/throws.o"\n'
+        'sourceFiles "throws.o"\nlibs "stdc++"\n',
+    )
+    write(
+        tmp_path / "dependency" / "throws.cpp",
+        """
+        #include <stdexcept>
+        void throwsFromCpp() { throw std::runtime_error("boom"); }
+        """,
+    )
+    write(
+        tmp_path / "dependency" / "source" / "dep.d",
+        "module dep;\nextern(C++) void throwsFromCpp();\n",
+    )
+
+    result = run_app(tmp_path, backend)
+
+    assert "about to throw" in result.stdout, output(result)
+    assert "caught" not in result.stdout, output(result)
+    assert "std::runtime_error" in result.stderr, output(result)
+    assert result.returncode == -signal.SIGABRT, output(result)
 
 
 # `exit` in a module destructor ends druntime's destructor phase. The
