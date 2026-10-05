@@ -655,12 +655,28 @@ private struct Child {
 private Child runChild(
     in string scenario, string[string] environment = null,
 ) {
-    import std.process: execute;
+    import std.process: Config, execute;
     import std.file: thisExePath;
 
     environment[childVariable] = scenario;
-    const result = execute([thisExePath], environment);
+    // unit-threaded removes its relative sandbox path in a shared static
+    // constructor, before main can dispatch to runFaultChild. Give the child
+    // a private working directory so it cannot remove the parent's sandbox.
+    const childSandbox = Sandbox();
+    const result = execute(
+        [thisExePath], environment, Config.none, size_t.max,
+        childSandbox.sandboxPath);
     return Child(result.status, result.output);
+}
+
+@("faultsignal.hostDefect.childDoesNotRemoveParentSandbox")
+unittest {
+    const sandbox = Sandbox();
+    sandbox.writeFile("parent-fixture", "must survive child startup");
+
+    runChild("faultInCleanup");
+
+    sandbox.shouldExist("parent-fixture");
 }
 
 private enum killedBySegmentationFault = -SIGSEGV;
