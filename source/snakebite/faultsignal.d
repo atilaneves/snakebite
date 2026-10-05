@@ -629,7 +629,7 @@ static if (supported) {
 
             // The one-shot claim must precede any change of mask. On the
             // normal stack the collector can suspend this thread safely.
-            // On an alternate stack it must stay blocked, as in onFault.
+            // On an alternate stack it must stay blocked, as at signal entry.
             const interrupted = cast(ucontext_t*) context;
             sigset_t savedMask;
             const location = cast(size_t) &savedMask;
@@ -699,6 +699,9 @@ static if (supported) {
     private Forward _forward;
     static assert(Forward.mask.offsetof == 40);
     static assert(ucontext_t.uc_mcontext.offsetof == 40);
+    static assert(imported!"core.sys.posix.ucontext".mcontext_t.gregs.offsetof == 0);
+    static assert(imported!"core.sys.posix.ucontext".REG_RBP == 10);
+    static assert(imported!"core.sys.posix.ucontext".REG_RBX == 11);
 
     private Forward* forwardOnNormalStack(int signal, siginfo_t* info,
         const(ucontext_t)* context, size_t frame, const(void)* handler,

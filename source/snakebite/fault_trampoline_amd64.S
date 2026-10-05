@@ -125,8 +125,8 @@ snakebite_fault_signal_entry:
     mov 80(%rdx),%r13
     mov 88(%rdx),%r14
     mov 96(%rdx),%r15
-    mov 120(%rdx),%rbx
-    mov 128(%rdx),%rbp
+    mov 128(%rdx),%rbx
+    mov 120(%rdx),%rbp
     xor %eax,%eax
     jmp *-8(%rsp)
 .Lsignal_return:
