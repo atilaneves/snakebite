@@ -103,7 +103,7 @@ unittest {
                 while (!atomicLoad(go)) {}
 
                 try {
-                    auto backend = new Bytecode(program);
+                    auto backend = Owned!Bytecode(program);
                     foreach (which; 0 .. 2) {
                         const index =
                             (threadIndex * 2 + which) % functionCount;
@@ -199,7 +199,7 @@ unittest {
     foreach (round; 0 .. sharedRounds) {
         auto guestModule = parseSnippet(sharedGuestSource(round));
         auto program = Program([guestModule]);
-        auto backend = new Bytecode(program);
+        auto backend = Owned!Bytecode(program);
 
         shared size_t ready = 0;
         shared bool go = false;

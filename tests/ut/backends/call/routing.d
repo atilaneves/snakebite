@@ -72,7 +72,7 @@ static foreach (backend; Matrix!()) {
                 importedLiteralModule,
             ]);
             auto function_ = findFunction(modules[0], "answer");
-            auto backend_ = new backend(Program([modules[0]]));
+            auto backend_ = Owned!backend(Program([modules[0]]));
 
             int result;
             backend_.call(function_, &result, []);
@@ -105,7 +105,8 @@ unittest {
     auto function_ = findFunction(modules[0], "answer");
 
     int result;
-    const thrown = (new Interpreter(program))
+    auto interpreter_ = Owned!Interpreter(program);
+    const thrown = interpreter_
         .call(function_, &result, [])
         .shouldThrow;
 

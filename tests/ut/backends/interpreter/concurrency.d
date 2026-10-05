@@ -103,7 +103,7 @@ unittest {
                 while (!atomicLoad(go)) {}
 
                 try {
-                    auto backend = new Interpreter(program);
+                    auto backend = Owned!Interpreter(program);
                     foreach (which; 0 .. 2) {
                         const index =
                             (threadIndex * 2 + which) % functionCount;

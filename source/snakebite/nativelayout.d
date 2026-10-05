@@ -740,6 +740,14 @@ public struct NativeData {
         return bytes;
     }
 
+    // Gives back this thread's table of thread-local variables, unless it
+    // holds a variable: a guest object that outlives the owner can still
+    // point into the storage of one, and compiled D keeps it until the
+    // thread ends too.
+    public void release() {
+        _tls.release((slots) => slots.empty);
+    }
+
     public TlsSlots* tlsSlots() {
         return _tls.current;
     }

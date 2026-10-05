@@ -817,6 +817,6 @@ private void cProjectStatus(
     const directory = sandbox.inSandboxPath("app");
 
     auto project = loadProject(directory, sourceSet(directory, null, null));
-    scope instance = new backend(project.program);
+    auto instance = Owned!backend(project.program);
     run(instance, project.program).should == expected;
 }

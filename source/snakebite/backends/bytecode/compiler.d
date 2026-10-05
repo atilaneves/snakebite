@@ -118,6 +118,11 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             new CallbackBridge(&invokeCallback, cast(void*) this));
     }
 
+    protected override void release() {
+        _vms.release;
+        _nativeData.release;
+    }
+
     private void* constantSymbolAddress(
         Declaration symbol,
     ) {

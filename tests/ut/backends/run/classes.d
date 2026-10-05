@@ -521,7 +521,7 @@ static foreach (BackendType; Matrix!()) {
                 linkedClassesModule,
             ]);
             auto function_ = findFunction(modules[0], "answer");
-            auto backend_ = new BackendType(Program([modules[0]]));
+            auto backend_ = Owned!BackendType(Program([modules[0]]));
             backend_.call(function_, &result, []);
         }
         result.should == 1;
@@ -544,7 +544,7 @@ unittest {
         linkedClassesModule,
     ]);
     auto function_ = findFunction(modules[0], "answer");
-    auto backend = new Interpreter(Program([modules[0]]));
+    auto backend = Owned!Interpreter(Program([modules[0]]));
 
     size_t result;
     backend.call(function_, &result, []);

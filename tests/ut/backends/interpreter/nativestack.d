@@ -93,7 +93,7 @@ unittest {
     assert(
         function_ !is null,
         "No function `forceCollection` in the guest program");
-    auto backend = new Interpreter(Program([guestModule]));
+    auto backend = Owned!Interpreter(Program([guestModule]));
 
     static class Box {
         int value;

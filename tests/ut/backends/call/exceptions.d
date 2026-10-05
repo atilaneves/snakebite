@@ -159,7 +159,7 @@ static foreach (backend; Matrix!(
 
             auto module_ = parseSnippet(code);
             auto function_ = findFunction(module_, "result");
-            auto instance = new backend(Program([module_]));
+            auto instance = Owned!backend(Program([module_]));
 
             try
                 instance.call(function_, &value, []);
@@ -231,7 +231,7 @@ static foreach (backend; Matrix!(
             auto module_ = parseSnippet(code);
             auto outermost = findFunction(module_, "outermost");
             auto tripleFour = findFunction(module_, "tripleFour");
-            auto instance = new backend(Program([module_]));
+            auto instance = Owned!backend(Program([module_]));
 
             try
                 instance.call(outermost, &discarded, []);
@@ -557,7 +557,7 @@ static foreach (backend; AliasSeq!(Interpreter, Bytecode)) {
                 return a + b;
             }
         });
-        auto instance = new backend(Program([module_]));
+        auto instance = Owned!backend(Program([module_]));
         int result;
         int argument;
 
@@ -587,7 +587,7 @@ static foreach (backend; AliasSeq!(Interpreter, Bytecode)) {
                 }
             }
         });
-        auto instance = new backend(Program([module_]));
+        auto instance = Owned!backend(Program([module_]));
         int result;
 
         instance.call(
