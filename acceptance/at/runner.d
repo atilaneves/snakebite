@@ -15,7 +15,8 @@ int run(string[] args) {
         "at.bench.timing",
         "at.runtime.arraycopy", "at.runtime.messaging",
         "at.cli", "at.runtime.startup", "at.dub",
-        "at.runtime.threads", "at.backends.interpreter.nativestack",
+        "at.runtime.threads", "at.runtime.registration",
+        "at.backends.interpreter.nativestack",
         "ut.process", "at.process",
     );
 }

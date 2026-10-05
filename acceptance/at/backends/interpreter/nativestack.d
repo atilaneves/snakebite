@@ -37,7 +37,7 @@ import snakebite.frontend.dmd.functions: findFunction;
 @("nativeStack.perFiberEntryDoesNotGrowCollectionCost")
 @Flaky(3)
 @Serial
-@Tags("timing")
+@Tags("alone")
 unittest {
     import core.thread.fiber: Fiber;
     import core.memory: GC;
