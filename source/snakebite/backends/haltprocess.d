@@ -27,7 +27,19 @@ public noreturn haltProcess() nothrow @nogc @trusted {
     assert(0);
 }
 
-// What a halt action that ends only a cell throws. A halt is not an error
+// What a program does when it ends the run: a failed check under
+// `-checkaction=halt`, and a guest fault. The process that owns the program
+// decides, so the program carries the actions and no backend keeps a global
+// one.
+public struct HostActions {
+    import snakebite.backends.guestfault: GuestFault;
+
+    public HaltAction halt = &haltProcess;
+    public GuestFault.Action fault = &GuestFault.throwFault;
+}
+
+// What an action that ends only a cell throws, for a halt and for a guest
+// fault alike (`GuestFaultException` is a subclass). A halt is not an error
 // that guest code handles, so it is neither an `Exception` nor an `Error`:
 // druntime code that handles every `Exception` (`rt_finalize2` makes a
 // `FinalizeError` of one) lets it pass. Each backend checks `isHalt` before
@@ -36,12 +48,20 @@ public noreturn haltProcess() nothrow @nogc @trusted {
 // `Throwable` is the one thing that still can: that is a limit of using an
 // exception to leave native frames, which the host cannot unwind in any
 // other way.
-public final class Halted: Throwable {
+public class Halted: Throwable {
     public this(
         string file = __FILE__,
         size_t line = __LINE__,
     ) @safe @nogc nothrow pure scope {
-        super("a check failed under -checkaction=halt", file, line);
+        this("a check failed under -checkaction=halt", file, line);
+    }
+
+    protected this(
+        string message,
+        string file,
+        size_t line,
+    ) @safe @nogc nothrow pure scope {
+        super(message, file, line);
     }
 }
 

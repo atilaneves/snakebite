@@ -38,6 +38,8 @@ public struct Project {
 // the second alone; see `snakebite.execution.prepareProject`.
 public Project loadProject(in string directory, SourceSet sources) {
     import snakebite.backends: Program;
+    import snakebite.backends.guestfault: GuestFault;
+    import snakebite.backends.haltprocess: haltProcess, HostActions;
     import snakebite.frontend.compiler:
         checksOf, FrontendFlags, parseRootModules;
     import std.algorithm.iteration: map;
@@ -62,7 +64,10 @@ public Project loadProject(in string directory, SourceSet sources) {
         project.directory,
         project.sources.importedCFilesAreRoots,
     );
-    project.program = Program(parsed, project.name, checksOf(flags));
+    project.program = Program(
+        parsed, project.name, checksOf(flags),
+        HostActions(&haltProcess, &GuestFault.endProcess),
+    );
 
     return project;
 }
