@@ -353,6 +353,7 @@ static if (supported) {
         sigaction_t,
         sigaltstack,
         sigfillset,
+        sigset_t,
         stack_t;
     import core.sys.posix.ucontext: REG_RIP, REG_RSP, ucontext_t;
 
@@ -647,13 +648,8 @@ static if (supported) {
                 && !sigismember(&interrupted.uc_sigmask, signal);
             bool changed;
             if (!onAlternate) {
-                // `auto` retains the const of the saved action's mask.
-                sigset_t allowed = previous.sa_mask;
-                // Linux x86-64 has 64 signals; only the first word is used by
-                // the kernel. The remaining words are libc padding.
-                allowed.__val[0] |= interrupted.uc_sigmask.__val[0];
-                if (!(previous.sa_flags & SA_NODEFER))
-                    sigaddset(&allowed, signal);
+                const allowed = previousHandlerMask(previous.sa_mask,
+                    interrupted.uc_sigmask, signal, (previous.sa_flags & SA_NODEFER) != 0);
                 changed = sigprocmask(SIG_SETMASK, &allowed, &savedMask) == 0;
             } else if (unmask) {
                 sigset_t allowed;
@@ -692,7 +688,7 @@ static if (supported) {
         siginfo_t* info;
         ucontext_t* context;
         int signal;
-        imported!"core.sys.posix.signal".sigset_t mask;
+        sigset_t mask;
         const(void)* source;
         size_t length;
         void* floatingPoint;
@@ -707,15 +703,23 @@ static if (supported) {
     static assert(ucontext_t.uc_mcontext.offsetof == 40);
     static assert(imported!"core.sys.posix.ucontext".mcontext_t.gregs.offsetof == 0);
     static assert(imported!"core.sys.posix.ucontext".mcontext_t.fpregs.offsetof == 184);
-    static assert(imported!"core.sys.posix.ucontext".REG_RBP == 10);
-    static assert(imported!"core.sys.posix.ucontext".REG_RBX == 11);
+
+    private sigset_t previousHandlerMask(ref const(sigset_t) saved,
+        ref const(sigset_t) interrupted, int signal, bool nodefer) nothrow @nogc {
+        import core.sys.posix.signal: sigaddset;
+
+        sigset_t allowed = saved;
+        // Linux x86-64 has 64 signals; the other words are libc padding.
+        allowed.__val[0] |= interrupted.__val[0];
+        if (!nodefer)
+            sigaddset(&allowed, signal);
+        return allowed;
+    }
 
     private Forward* forwardOnNormalStack(int signal, siginfo_t* info,
         const(ucontext_t)* context, size_t frame, const(void)* handler,
         ref const(imported!"core.sys.posix.signal".sigset_t) savedMask,
         bool nodefer) nothrow @nogc {
-        import core.sys.posix.signal: sigaddset;
-
         // Linux x86-64 rt_sigreturn receives the context just after the
         // restorer slot. Relocate the kernel's actual frame, including its
         // variable-length XSAVE image, rather than construct a new frame.
@@ -759,10 +763,7 @@ static if (supported) {
         _forward.info = cast(siginfo_t*) (target + cast(size_t) info - source);
         _forward.context = cast(ucontext_t*) (target + size_t.sizeof);
         _forward.signal = signal;
-        _forward.mask = savedMask;
-        _forward.mask.__val[0] |= context.uc_sigmask.__val[0];
-        if (!nodefer)
-            sigaddset(&_forward.mask, signal);
+        _forward.mask = previousHandlerMask(savedMask, context.uc_sigmask, signal, nodefer);
         _forward.source = cast(const(void)*) source;
         _forward.length = length;
         _forward.floatingPoint = context.uc_mcontext.fpregs is null ? null

@@ -412,18 +412,8 @@ void wait_for_handler(void) {
 void finish_gc(void) { atomic_store(&collected, 1); }
 static uint64_t first[4] = {1,2,3,4}, last[4] = {11,12,13,14};
 static uint64_t entry[6];
-extern void capture_previous(int, siginfo_t *, void *);
 extern void register_signal(long, long, long);
 __asm__(".text\n"
-        ".globl capture_previous\n"
-        "capture_previous:\n"
-        "mov %rbx,entry(%rip)\n"
-        "mov %rbp,entry+8(%rip)\n"
-        "mov %r12,entry+16(%rip)\n"
-        "mov %r13,entry+24(%rip)\n"
-        "mov %r14,entry+32(%rip)\n"
-        "mov %r15,entry+40(%rip)\n"
-        "jmp previous\n"
         ".globl register_signal\n"
         "register_signal:\n"
         "push %rbx\n push %rbp\n push %r12\n push %r13\n"
@@ -431,6 +421,12 @@ __asm__(".text\n"
         "mov $137,%rbx\n mov $439,%rbp\n mov $523,%r12\n"
         "mov $527,%r13\n mov $530,%r14\n mov $531,%r15\n"
         "mov $234,%eax\n syscall\n"
+        "mov %rbx,entry(%rip)\n"
+        "mov %rbp,entry+8(%rip)\n"
+        "mov %r12,entry+16(%rip)\n"
+        "mov %r13,entry+24(%rip)\n"
+        "mov %r14,entry+32(%rip)\n"
+        "mov %r15,entry+40(%rip)\n"
         "pop %r15\n pop %r14\n pop %r13\n pop %r12\n"
         "pop %rbp\n pop %rbx\n ret\n");
 void native_fault(void) { *(volatile int *)0 = 42; }
@@ -488,7 +484,11 @@ static void previous(int sig, siginfo_t *info, void *opaque) {
         if (!atomic_load(&collected)) ++failures;
     } else if (mode == 8) {
         const uint64_t expected[6] = {137,439,523,527,530,531};
-        for (int i=0; i<6; ++i) if (entry[i] != expected[i]) ++failures;
+        const int registers[6] = {REG_RBX,REG_RBP,REG_R12,REG_R13,REG_R14,REG_R15};
+        for (int i=0; i<6; ++i) {
+            if (context->uc_mcontext.gregs[registers[i]] != expected[i]) ++failures;
+            context->uc_mcontext.gregs[registers[i]] = expected[i] + 1;
+        }
     }
     if (marker != 0x123456789abcdef0UL) ++failures;
 }
@@ -528,7 +528,7 @@ int main(int argc, char **argv) {
     if (sigaltstack(&stack, 0)) return 95;
     struct sigaction action = {0};
     int information=atoi(argv[3]);
-    if (information) action.sa_sigaction=mode == 8 ? capture_previous : previous;
+    if (information) action.sa_sigaction=previous;
     else action.sa_handler=simple;
     action.sa_flags=(information ? SA_SIGINFO : 0) |
                     (mode == 2 ? SA_NODEFER : 0);
@@ -561,7 +561,11 @@ int main(int argc, char **argv) {
                          : "rcx", "r11", "r12", "memory");
         return 90;
     } else if (mode == 5) failures += vector_signal();
-    else if (mode == 8) register_signal(getpid(), syscall(SYS_gettid), target);
+    else if (mode == 8) {
+        register_signal(getpid(), syscall(SYS_gettid), target);
+        const uint64_t expected[6] = {138,440,524,528,531,532};
+        for (int i=0; i<6; ++i) if (entry[i] != expected[i]) ++failures;
+    }
     else raise(target);
     if (mode == 7) while (!atomic_load(&collected)) sched_yield();
     if (mode == 1) {
@@ -644,7 +648,7 @@ def test_collection_can_finish_inside_the_normal_stack_callback(normal_host):
 
 
 @pytest.mark.parametrize("sig", [signal.SIGSEGV, signal.SIGFPE, signal.SIGBUS])
-def test_native_callee_saved_registers_at_callback_entry(normal_host, sig):
+def test_callback_context_edits_restore_callee_saved_registers(normal_host, sig):
     for installed in (False, True):
         result = subprocess.run(
             [str(normal_host), str(sig.value), "8", "1", str(int(installed))],

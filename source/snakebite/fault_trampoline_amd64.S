@@ -75,8 +75,6 @@ snakebite_fault_trampoline_call:
     .cfi_endproc
     .size   snakebite_fault_trampoline_call, . - snakebite_fault_trampoline_call
 
-#endif
-
     /* A saved action without SA_ONSTACK uses the interrupted normal stack.
      * The D dispatcher moves the complete kernel frame. Tail entry keeps the
      * kernel restorer as the callback's return address; rt_sigreturn consumes
@@ -147,15 +145,6 @@ snakebite_fault_signal_entry:
     mov %r15d,%edi
     mov %r13,%rsi
     mov %r14,%rdx
-    /* All original registers remain in the moved frame, which the collector
-     * can scan. Also retain native callee-saved register values on entry.
-     */
-    mov 72(%rdx),%r12
-    mov 80(%rdx),%r13
-    mov 88(%rdx),%r14
-    mov 96(%rdx),%r15
-    mov 128(%rdx),%rbx
-    mov 120(%rdx),%rbp
     xor %eax,%eax
     jmp *-8(%rsp)
 .Lsignal_return:
@@ -170,3 +159,5 @@ snakebite_fault_signal_entry:
     .size snakebite_fault_signal_entry,.-snakebite_fault_signal_entry
 
     .section .note.GNU-stack,"",@progbits
+
+#endif
