@@ -4596,12 +4596,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // The address of the elements a slice names, as a word in a temporary.
     private size_t compileSlicePointer(SliceExp expression) {
-        import snakebite.nativelayout:
-            arrayLengthOffset, arrayPointerOffset, arrayValueSize;
+        import snakebite.nativelayout: arrayPointerOffset, arrayValueSize;
 
         const sliceFacts = TypeFacts(
             arrayValueSize, size_t.alignof, false, false, true,
-            TypeFacts.of(expression.e1.type.nextOf).size,
+            TypeFacts.of(expression.e1.type.toBasetype.nextOf).size,
         );
         const header = reserveTemp(sliceFacts);
 

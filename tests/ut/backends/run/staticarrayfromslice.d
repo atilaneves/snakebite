@@ -137,101 +137,6 @@ static foreach (backend; Matrix!()) {
 }
 
 
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.assign.ushort." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            ushort mk(size_t i) { return cast(ushort) (i * 4099 + 3); }
-            void main() {
-                ushort[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                ushort[] d = store[];
-                ushort[4] a;
-                a = d[1 .. 5];
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.assign.int." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int mk(size_t i) { return cast(int) (i * 100003 - 7); }
-            void main() {
-                int[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                int[] d = store[];
-                int[4] a;
-                a = d[1 .. 5];
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.assign.long." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            long mk(size_t i) { return cast(long) i * 4_000_000_007L - 5; }
-            void main() {
-                long[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                long[] d = store[];
-                long[4] a;
-                a = d[1 .. 5];
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.assign.struct." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct Pair { int a; short b; }
-            Pair mk(size_t i) { return Pair(cast(int) i + 1, cast(short) (i * 3)); }
-            void main() {
-                Pair[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                Pair[] d = store[];
-                Pair[4] a;
-                a = d[1 .. 5];
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.assign.pointer." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int* mk(size_t i) { return new int(cast(int) (i * 5 + 2)); }
-            void main() {
-                int*[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                int*[] d = store[];
-                int*[4] a;
-                a = d[1 .. 5];
-                foreach (i; 0 .. 4) assert(*a[i] == *mk(i + 1));
-            }
-        });
-    }
-}
-
 // A slice with constant bounds converts implicitly to a `T[N]` parameter:
 // the callee gets the `N` elements, not the slice's length and pointer.
 
@@ -248,46 +153,6 @@ static foreach (backend; Matrix!()) {
                 ubyte[7] store;
                 foreach (i; 0 .. store.length) store[i] = mk(i);
                 ubyte[] d = store[];
-                take(d[1 .. 5]);
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.argument.ushort." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            ushort mk(size_t i) { return cast(ushort) (i * 4099 + 3); }
-            void take(ushort[4] a) {
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-            void main() {
-                ushort[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                ushort[] d = store[];
-                take(d[1 .. 5]);
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.argument.int." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int mk(size_t i) { return cast(int) (i * 100003 - 7); }
-            void take(int[4] a) {
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-            void main() {
-                int[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                int[] d = store[];
                 take(d[1 .. 5]);
             }
         });
@@ -315,46 +180,6 @@ static foreach (backend; Matrix!()) {
 }
 
 
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.argument.struct." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct Pair { int a; short b; }
-            Pair mk(size_t i) { return Pair(cast(int) i + 1, cast(short) (i * 3)); }
-            void take(Pair[4] a) {
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-            void main() {
-                Pair[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                Pair[] d = store[];
-                take(d[1 .. 5]);
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.argument.pointer." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int* mk(size_t i) { return new int(cast(int) (i * 5 + 2)); }
-            void take(int*[4] a) {
-                foreach (i; 0 .. 4) assert(*a[i] == *mk(i + 1));
-            }
-            void main() {
-                int*[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                int*[] d = store[];
-                take(d[1 .. 5]);
-            }
-        });
-    }
-}
-
 // Returning a slice with constant bounds from a function that returns
 // `T[N]` returns the `N` elements.
 
@@ -369,44 +194,6 @@ static foreach (backend; Matrix!()) {
                 ubyte[7] store;
                 foreach (i; 0 .. store.length) store[i] = mk(i);
                 ubyte[] d = store[];
-                auto a = make(d);
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.return.ushort." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            ushort mk(size_t i) { return cast(ushort) (i * 4099 + 3); }
-            ushort[4] make(ushort[] d) { return d[1 .. 5]; }
-            void main() {
-                ushort[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                ushort[] d = store[];
-                auto a = make(d);
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.return.int." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int mk(size_t i) { return cast(int) (i * 100003 - 7); }
-            int[4] make(int[] d) { return d[1 .. 5]; }
-            void main() {
-                int[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                int[] d = store[];
                 auto a = make(d);
                 foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
             }
@@ -434,44 +221,6 @@ static foreach (backend; Matrix!()) {
 }
 
 
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.return.struct." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct Pair { int a; short b; }
-            Pair mk(size_t i) { return Pair(cast(int) i + 1, cast(short) (i * 3)); }
-            Pair[4] make(Pair[] d) { return d[1 .. 5]; }
-            void main() {
-                Pair[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                Pair[] d = store[];
-                auto a = make(d);
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.return.pointer." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int* mk(size_t i) { return new int(cast(int) (i * 5 + 2)); }
-            int*[4] make(int*[] d) { return d[1 .. 5]; }
-            void main() {
-                int*[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                int*[] d = store[];
-                auto a = make(d);
-                foreach (i; 0 .. 4) assert(*a[i] == *mk(i + 1));
-            }
-        });
-    }
-}
-
 // A constructor that assigns a constant-bounds slice to a `T[N]` field
 // stores the elements in the field.
 
@@ -493,101 +242,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.fieldInit.ushort." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            ushort mk(size_t i) { return cast(ushort) (i * 4099 + 3); }
-            struct Holder { ushort[4] a; this(ushort[] d) { a = d[1 .. 5]; } }
-            void main() {
-                ushort[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                ushort[] d = store[];
-                auto h = Holder(d);
-                foreach (i; 0 .. 4) assert(h.a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.fieldInit.int." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int mk(size_t i) { return cast(int) (i * 100003 - 7); }
-            struct Holder { int[4] a; this(int[] d) { a = d[1 .. 5]; } }
-            void main() {
-                int[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                int[] d = store[];
-                auto h = Holder(d);
-                foreach (i; 0 .. 4) assert(h.a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.fieldInit.long." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            long mk(size_t i) { return cast(long) i * 4_000_000_007L - 5; }
-            struct Holder { long[4] a; this(long[] d) { a = d[1 .. 5]; } }
-            void main() {
-                long[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                long[] d = store[];
-                auto h = Holder(d);
-                foreach (i; 0 .. 4) assert(h.a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.fieldInit.struct." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct Pair { int a; short b; }
-            Pair mk(size_t i) { return Pair(cast(int) i + 1, cast(short) (i * 3)); }
-            struct Holder { Pair[4] a; this(Pair[] d) { a = d[1 .. 5]; } }
-            void main() {
-                Pair[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                Pair[] d = store[];
-                auto h = Holder(d);
-                foreach (i; 0 .. 4) assert(h.a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.fieldInit.pointer." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int* mk(size_t i) { return new int(cast(int) (i * 5 + 2)); }
-            struct Holder { int*[4] a; this(int*[] d) { a = d[1 .. 5]; } }
-            void main() {
-                int*[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                int*[] d = store[];
-                auto h = Holder(d);
-                foreach (i; 0 .. 4) assert(*h.a[i] == *mk(i + 1));
-            }
-        });
-    }
-}
 
 // A struct literal takes the elements of a constant-bounds slice for a
 // `T[N]` field.
@@ -612,106 +266,6 @@ static foreach (backend; Matrix!()) {
 }
 
 
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.literal.ushort." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            ushort mk(size_t i) { return cast(ushort) (i * 4099 + 3); }
-            struct Holder { ushort[4] a; int tail; }
-            void main() {
-                ushort[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                ushort[] d = store[];
-                auto h = Holder(d[1 .. 5], 99);
-                foreach (i; 0 .. 4) assert(h.a[i] == mk(i + 1));
-                assert(h.tail == 99);
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.literal.int." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int mk(size_t i) { return cast(int) (i * 100003 - 7); }
-            struct Holder { int[4] a; int tail; }
-            void main() {
-                int[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                int[] d = store[];
-                auto h = Holder(d[1 .. 5], 99);
-                foreach (i; 0 .. 4) assert(h.a[i] == mk(i + 1));
-                assert(h.tail == 99);
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.literal.long." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            long mk(size_t i) { return cast(long) i * 4_000_000_007L - 5; }
-            struct Holder { long[4] a; int tail; }
-            void main() {
-                long[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                long[] d = store[];
-                auto h = Holder(d[1 .. 5], 99);
-                foreach (i; 0 .. 4) assert(h.a[i] == mk(i + 1));
-                assert(h.tail == 99);
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.literal.struct." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct Pair { int a; short b; }
-            Pair mk(size_t i) { return Pair(cast(int) i + 1, cast(short) (i * 3)); }
-            struct Holder { Pair[4] a; int tail; }
-            void main() {
-                Pair[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                Pair[] d = store[];
-                auto h = Holder(d[1 .. 5], 99);
-                foreach (i; 0 .. 4) assert(h.a[i] == mk(i + 1));
-                assert(h.tail == 99);
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.literal.pointer." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int* mk(size_t i) { return new int(cast(int) (i * 5 + 2)); }
-            struct Holder { int*[4] a; int tail; }
-            void main() {
-                int*[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                int*[] d = store[];
-                auto h = Holder(d[1 .. 5], 99);
-                foreach (i; 0 .. 4) assert(*h.a[i] == *mk(i + 1));
-                assert(h.tail == 99);
-            }
-        });
-    }
-}
-
 // `cast(T[N]) d[lo .. hi]` is the same static-array-typed slice that an
 // implicit conversion gives.
 
@@ -732,96 +286,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.cast.ushort." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            ushort mk(size_t i) { return cast(ushort) (i * 4099 + 3); }
-            void main() {
-                ushort[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                ushort[] d = store[];
-                auto a = cast(ushort[4]) d[1 .. 5];
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.cast.int." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int mk(size_t i) { return cast(int) (i * 100003 - 7); }
-            void main() {
-                int[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                int[] d = store[];
-                auto a = cast(int[4]) d[1 .. 5];
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.cast.long." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            long mk(size_t i) { return cast(long) i * 4_000_000_007L - 5; }
-            void main() {
-                long[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                long[] d = store[];
-                auto a = cast(long[4]) d[1 .. 5];
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.cast.struct." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct Pair { int a; short b; }
-            Pair mk(size_t i) { return Pair(cast(int) i + 1, cast(short) (i * 3)); }
-            void main() {
-                Pair[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                Pair[] d = store[];
-                auto a = cast(Pair[4]) d[1 .. 5];
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.cast.pointer." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int* mk(size_t i) { return new int(cast(int) (i * 5 + 2)); }
-            void main() {
-                int*[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                int*[] d = store[];
-                auto a = cast(int*[4]) d[1 .. 5];
-                foreach (i; 0 .. 4) assert(*a[i] == *mk(i + 1));
-            }
-        });
-    }
-}
 
 // An assignment from `cast(T[N]) d[lo .. hi]` copies the elements.
 
@@ -844,101 +308,6 @@ static foreach (backend; Matrix!()) {
 }
 
 
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.castAssign.ushort." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            ushort mk(size_t i) { return cast(ushort) (i * 4099 + 3); }
-            void main() {
-                ushort[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                ushort[] d = store[];
-                ushort[4] a;
-                a = cast(ushort[4]) d[1 .. 5];
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.castAssign.int." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int mk(size_t i) { return cast(int) (i * 100003 - 7); }
-            void main() {
-                int[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                int[] d = store[];
-                int[4] a;
-                a = cast(int[4]) d[1 .. 5];
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.castAssign.long." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            long mk(size_t i) { return cast(long) i * 4_000_000_007L - 5; }
-            void main() {
-                long[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                long[] d = store[];
-                long[4] a;
-                a = cast(long[4]) d[1 .. 5];
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.castAssign.struct." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct Pair { int a; short b; }
-            Pair mk(size_t i) { return Pair(cast(int) i + 1, cast(short) (i * 3)); }
-            void main() {
-                Pair[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                Pair[] d = store[];
-                Pair[4] a;
-                a = cast(Pair[4]) d[1 .. 5];
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.castAssign.pointer." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int* mk(size_t i) { return new int(cast(int) (i * 5 + 2)); }
-            void main() {
-                int*[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                int*[] d = store[];
-                int*[4] a;
-                a = cast(int*[4]) d[1 .. 5];
-                foreach (i; 0 .. 4) assert(*a[i] == *mk(i + 1));
-            }
-        });
-    }
-}
-
 // Every dimension, including one and the non-power-of-two three, takes the
 // elements of the slice.
 
@@ -954,24 +323,6 @@ static foreach (backend; Matrix!()) {
                 int[] d = store[];
                 int[1] a = d[1 .. 2];
                 foreach (i; 0 .. 1) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.length.2." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int mk(size_t i) { return cast(int) (i * 100003 - 7); }
-            void main() {
-                int[5] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                int[] d = store[];
-                int[2] a = d[1 .. 3];
-                foreach (i; 0 .. 2) assert(a[i] == mk(i + 1));
             }
         });
     }
@@ -997,42 +348,6 @@ static foreach (backend; Matrix!()) {
 
 
 static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.length.4." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int mk(size_t i) { return cast(int) (i * 100003 - 7); }
-            void main() {
-                int[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                int[] d = store[];
-                int[4] a = d[1 .. 5];
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.length.8." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int mk(size_t i) { return cast(int) (i * 100003 - 7); }
-            void main() {
-                int[11] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                int[] d = store[];
-                int[8] a = d[1 .. 9];
-                foreach (i; 0 .. 8) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
     @("staticArray.fromSlice.length.16." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1049,8 +364,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// The slice may be of a static array, a dynamic array or a pointer, with a
-// non-zero start.
+// The slice may be of a static array or a pointer, with a non-zero start.
 
 static foreach (backend; Matrix!()) {
     @("staticArray.fromSlice.source.static." ~ backend.stringof)
@@ -1061,24 +375,6 @@ static foreach (backend; Matrix!()) {
             void main() {
                 int[7] d;
                 foreach (i; 0 .. d.length) d[i] = mk(i);
-                int[4] a = d[1 .. 5];
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.source.dynamic." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int mk(size_t i) { return cast(int) (i * 100003 - 7); }
-            void main() {
-                int[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                int[] d = store[];
                 int[4] a = d[1 .. 5];
                 foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
             }
@@ -1180,112 +476,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.source.pointer.ubyte." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            ubyte mk(size_t i) { return cast(ubyte) (i * 7 + 1); }
-            void main() {
-                ubyte[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                ubyte* d = store.ptr;
-                ubyte[4] a = d[1 .. 5];
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.source.static.ubyte." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            ubyte mk(size_t i) { return cast(ubyte) (i * 7 + 1); }
-            void main() {
-                ubyte[7] d;
-                foreach (i; 0 .. d.length) d[i] = mk(i);
-                ubyte[4] a = d[1 .. 5];
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.source.pointer.long." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            long mk(size_t i) { return cast(long) i * 4_000_000_007L - 5; }
-            void main() {
-                long[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                long* d = store.ptr;
-                long[4] a = d[1 .. 5];
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.source.static.long." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            long mk(size_t i) { return cast(long) i * 4_000_000_007L - 5; }
-            void main() {
-                long[7] d;
-                foreach (i; 0 .. d.length) d[i] = mk(i);
-                long[4] a = d[1 .. 5];
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.source.pointer.struct." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct Pair { int a; short b; }
-            Pair mk(size_t i) { return Pair(cast(int) i + 1, cast(short) (i * 3)); }
-            void main() {
-                Pair[7] store;
-                foreach (i; 0 .. store.length) store[i] = mk(i);
-                Pair* d = store.ptr;
-                Pair[4] a = d[1 .. 5];
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("staticArray.fromSlice.source.static.struct." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct Pair { int a; short b; }
-            Pair mk(size_t i) { return Pair(cast(int) i + 1, cast(short) (i * 3)); }
-            void main() {
-                Pair[7] d;
-                foreach (i; 0 .. d.length) d[i] = mk(i);
-                Pair[4] a = d[1 .. 5];
-                foreach (i; 0 .. 4) assert(a[i] == mk(i + 1));
-            }
-        });
-    }
-}
 
 // A `T[N]` that a slice with a run-time length initialises is a copy of
 // `N` elements: a slice of another length fails the length check, and
@@ -1510,6 +700,435 @@ static foreach (backend; Matrix!()) {
                 assert(b.read!ushort == 0x1234);
                 assert(b.length == 2);
                 assert(b.read!ushort == 1);
+            }
+        });
+    }
+}
+
+// A slice with no bounds of a static array has the type of its array, and a
+// cast to a static array of the same size is the elements, not a header.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd CTFE makes the cast of a slice of a static array alias the array instead of copying it"),
+)) {
+    @("staticArray.fromSlice.cast.whole." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[4] sa = [1, 2, 3, 4];
+                auto b = cast(int[4]) sa[];
+                assert(b == [1, 2, 3, 4]);
+                b[0] = 9;
+                assert(sa[0] == 1);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd CTFE does not reinterpret the bytes of a slice cast"),
+)) {
+    @("staticArray.fromSlice.cast.wholeReinterpret." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                ubyte[8] sa = [1, 0, 2, 0, 3, 0, 4, 0];
+                auto w = cast(ushort[4]) sa[];
+                assert(w == [1, 2, 3, 4]);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.fromSlice.zeroLength." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] d = [1, 2, 3];
+                int[0] a = d[2 .. 2];
+                int after = 5;
+                assert(a.length == 0);
+                assert(after == 5);
+                assert(d == [1, 2, 3]);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.fromSlice.nestedElements." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[2][] dd = [[1, 2], [3, 4], [5, 6], [7, 8]];
+                int[2][2] m = dd[1 .. 3];
+                assert(m[0] == [3, 4] && m[1] == [5, 6]);
+            }
+        });
+    }
+}
+
+// A `$` in the bounds of a slice of a static array is a constant, so the
+// slice is typed `T[N]`.
+static foreach (backend; Matrix!()) {
+    @("staticArray.fromSlice.dollar.staticSource." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[7] s = [10, 11, 12, 13, 14, 15, 16];
+                int[2] a = s[$ - 2 .. $];
+                assert(a == [15, 16]);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.fromSlice.dollar.dynamicSource." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] d = [10, 11, 12, 13, 14, 15, 16];
+                int[2] a = d[$ - 2 .. $];
+                assert(a == [15, 16]);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.fromSlice.nestedSlice." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                ubyte[] d = [1, 2, 3, 4, 5, 6, 7];
+                ubyte[2] a = d[1 .. 6][1 .. 3];
+                assert(a == [3, 4]);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.fromSlice.ofArrayLiteral." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                ubyte[2] a = [1, 2, 3, 4][1 .. 3];
+                assert(a == [2, 3]);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.fromSlice.ofStringLiteral." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                char[2] a = "hello"[1 .. 3];
+                assert(a == "el");
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.fromSlice.outArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void fill(out ubyte[2] a) { a[0] = 7; a[1] = 8; }
+            void main() {
+                ubyte[] d = [1, 2, 3, 4];
+                fill(cast(ubyte[2]) d[1 .. 3]);
+                assert(d == [1, 7, 8, 4]);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.fromSlice.inArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int sum(in ubyte[2] a) { return a[0] + a[1]; }
+            void main() {
+                ubyte[] d = [1, 2, 3, 4];
+                assert(sum(d[1 .. 3]) == 5);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.fromSlice.refArgumentImplicit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void bump(ref ubyte[2] a) { a[0] += 10; a[1] += 20; }
+            void main() {
+                ubyte[] d = [1, 2, 3, 4];
+                bump(d[1 .. 3]);
+                assert(d == [1, 12, 23, 4]);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.fromSlice.returnRef." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            ref ubyte[2] mid(return ref ubyte[4] s) { return s[1 .. 3]; }
+            void main() {
+                ubyte[4] s = [10, 20, 30, 40];
+                mid(s)[0] = 99;
+                assert(s == [10, 99, 30, 40]);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.fromSlice.returnRefDynamic." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            ref ubyte[2] mid(ubyte[] s) { return s[1 .. 3]; }
+            void main() {
+                ubyte[] d = [10, 20, 30, 40];
+                mid(d)[1] = 88;
+                assert(d == [10, 20, 88, 40]);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.fromSlice.foreachRef." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                ubyte[] d = [1, 2, 3, 4];
+                foreach (ref x; cast(ubyte[2]) d[1 .. 3]) x += 100;
+                assert(d == [1, 102, 103, 4]);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.fromSlice.addressOf." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                ubyte[] d = [1, 2, 3, 4];
+                auto p = &(cast(ubyte[2]) d[1 .. 3]);
+                (*p)[0] = 42;
+                assert(d == [1, 42, 3, 4]);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.fromSlice.equality." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                ubyte[] d = [1, 2, 3, 2, 3];
+                ubyte[2] w = [2, 3];
+                assert(cast(ubyte[2]) d[1 .. 3] == w);
+                assert(cast(ubyte[2]) d[1 .. 3] == cast(ubyte[2]) d[3 .. 5]);
+                assert(!(cast(ubyte[2]) d[0 .. 2] == w));
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.fromSlice.arrayOpAssignOnLeft." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                ubyte[] d = [1, 2, 3, 4, 5];
+                (cast(ubyte[2]) d[1 .. 3])[] += 5;
+                assert(d == [1, 7, 8, 4, 5]);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.fromSlice.arrayOpOnLeft." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] d = [1, 2, 3, 4, 5];
+                (cast(int[2]) d[0 .. 2])[] = d[3 .. 5][] * 2;
+                assert(d == [8, 10, 3, 4, 5]);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.fromSlice.scalarFillOfCast." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                ubyte[] d = [1, 2, 3, 4];
+                cast(ubyte[2]) d[1 .. 3] = 6;
+                assert(d == [1, 6, 6, 4]);
+            }
+        });
+    }
+}
+
+// The bounds are constants, so the slice is typed `T[N]`; the source array is
+// shorter at run time and the slice fails its check before it reads memory.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd CTFE reports a slice that is out of bounds as a compile-time error that a guest cannot catch"),
+)) {
+    @("staticArray.fromSlice.constantBoundsPastEnd.decl." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: ArraySliceError;
+            void take(ubyte[2] a) {}
+            void main() {
+                ubyte[] d = [1];
+                bool thrown;
+                try {
+                    ubyte[2] a = d[0 .. 2];
+                } catch (ArraySliceError e) {
+                    thrown = true;
+                    assert(e.msg == "slice [0 .. 2] extends past source array of length 1");
+                }
+                assert(thrown);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd CTFE reports a slice that is out of bounds as a compile-time error that a guest cannot catch"),
+)) {
+    @("staticArray.fromSlice.constantBoundsPastEnd.assign." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: ArraySliceError;
+            void take(ubyte[2] a) {}
+            void main() {
+                ubyte[] d = [1];
+                bool thrown;
+                try {
+                    ubyte[2] a;
+                    a = d[0 .. 2];
+                } catch (ArraySliceError e) {
+                    thrown = true;
+                    assert(e.msg == "slice [0 .. 2] extends past source array of length 1");
+                }
+                assert(thrown);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd CTFE reports a slice that is out of bounds as a compile-time error that a guest cannot catch"),
+)) {
+    @("staticArray.fromSlice.constantBoundsPastEnd.argument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: ArraySliceError;
+            void take(ubyte[2] a) {}
+            void main() {
+                ubyte[] d = [1];
+                bool thrown;
+                try {
+                    take(d[0 .. 2]);
+                } catch (ArraySliceError e) {
+                    thrown = true;
+                    assert(e.msg == "slice [0 .. 2] extends past source array of length 1");
+                }
+                assert(thrown);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd CTFE reports a slice that is out of bounds as a compile-time error that a guest cannot catch"),
+)) {
+    @("staticArray.fromSlice.constantBoundsPastEnd.cast." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: ArraySliceError;
+            void take(ubyte[2] a) {}
+            void main() {
+                ubyte[] d = [1];
+                bool thrown;
+                try {
+                    auto a = cast(ubyte[2]) d[0 .. 2];
+                } catch (ArraySliceError e) {
+                    thrown = true;
+                    assert(e.msg == "slice [0 .. 2] extends past source array of length 1");
+                }
+                assert(thrown);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd CTFE reports a slice that is out of bounds as a compile-time error that a guest cannot catch"),
+)) {
+    @("staticArray.fromSlice.constantBoundsPastEnd.assignTarget." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: ArraySliceError;
+            void take(ubyte[2] a) {}
+            void main() {
+                ubyte[] d = [1];
+                bool thrown;
+                try {
+                    ubyte[2] v;
+                    cast(ubyte[2]) d[0 .. 2] = v;
+                } catch (ArraySliceError e) {
+                    thrown = true;
+                    assert(e.msg == "slice [0 .. 2] extends past source array of length 1");
+                }
+                assert(thrown);
             }
         });
     }
