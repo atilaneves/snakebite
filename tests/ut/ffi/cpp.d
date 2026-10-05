@@ -10,7 +10,6 @@ import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import std.file: mkdirRecurse, tempDir;
 import std.path: buildPath;
-import std.process: Config, execute;
 
 
 // The C++ test library for issue #336: free functions over integers,
@@ -21,7 +20,7 @@ import std.process: Config, execute;
 // own method; a non-trivially-copyable type (a user-declared copy
 // constructor and a counting destructor) passed and returned by
 // value; a callback that itself takes a non-trivially-copyable value;
-// a function that throws; and a template the library never
+// and a template the library never
 // instantiates. Every test in this module reaches it through the
 // dependency image (`prepareImage`'s own `cppSource` parameter), never
 // through a build target of its own.
@@ -155,9 +154,6 @@ int call_non_pod_callback(NonPodCallback callback, int v) {
     return callback(NonPod(v));
 }
 
-#include <stdexcept>
-void throws_exception() { throw std::runtime_error("boom"); }
-
 // Never instantiated anywhere in this file: its mangled name never
 // reaches the compiled object.
 template <typename T>
@@ -228,7 +224,6 @@ private enum cppBindings = q{
     alias NonPodCallback = extern(C++) int function(NonPod);
     extern(C++) int call_non_pod_callback(NonPodCallback callback, int v);
 
-    extern(C++) void throws_exception();
     extern(C++) T uninstantiated_template(T)(T value);
 };
 
@@ -817,101 +812,5 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
                 findFunction(module_, "callBigVirtual"), &big, []);
             (big.a * 100 + big.b * 10 + big.c).should == 345;
         }
-    }
-}
-
-// A C++ exception unwinding past every frame this project owns must
-// end the process the same way it would in compiled D: nothing here
-// catches or translates it (ADR-0004), and a D `catch (Throwable)`
-// never matches a foreign exception's own type tag, so it is never
-// caught either. Checking that means letting the exception actually
-// run off the top of a process, which only a child process can survive
-// checking - `cpp.exception.child` is that child's own body, never run
-// by the suite directly; `cpp.exception.terminatesUncaught.*` spawns
-// `bin/ut` filtered to it, with the backend named through an
-// environment variable, and reads back how the child ended.
-private enum childBackendVar = "SNAKEBITE_CPP_EXCEPTION_BACKEND";
-private enum caughtMarker = "SNAKEBITE_CPP_EXCEPTION_CAUGHT";
-private enum aboutToThrowMarker = "SNAKEBITE_CPP_EXCEPTION_ABOUT_TO_THROW";
-
-@("cpp.exception.child")
-unittest {
-    import std.process: environment;
-
-    const backendName = environment.get(childBackendVar);
-    if (backendName is null)
-        return;
-
-    auto image = cppImage;
-    auto module_ = parseSnippet(cppBindings ~ q{
-        int callThrows() {
-            try {
-                throws_exception();
-            } catch (Throwable) {
-                return 999;
-            }
-            return 0;
-        }
-    });
-    auto program = Program([module_]);
-    program.dependencyImage = &image;
-
-    int result;
-    void runOn(BackendType)() {
-        scope instance = new BackendType(program);
-        instance.call(findFunction(module_, "callThrows"), &result, []);
-    }
-
-    import core.stdc.stdio: fflush, printf, stdout;
-
-    // Printed, and flushed, right before the call: the parent test can
-    // then tell "reached the C++ call, then the process died" from
-    // "died earlier than that, for an unrelated reason" (issue #336
-    // review, finding 2).
-    printf(aboutToThrowMarker ~ "\n");
-    fflush(stdout);
-
-    if (backendName == "Interpreter")
-        runOn!Interpreter;
-    else if (backendName == "Bytecode")
-        runOn!Bytecode;
-    else
-        assert(false, "cpp.exception.child: unknown backend " ~ backendName);
-
-    // Only reached if the guest's own `catch (Throwable)` caught the
-    // C++ exception - the outcome ADR-0004 rules out.
-    printf(caughtMarker ~ " %d\n", result);
-}
-
-static foreach (backendName; ["Interpreter", "Bytecode"]) {
-    @("cpp.exception.terminatesUncaught." ~ backendName)
-    unittest {
-        import std.algorithm: canFind;
-        import std.file: thisExePath;
-
-        const sandbox = Sandbox();
-        sandbox.writeFile("parent-fixture", "must survive child startup");
-        string[string] env = [childBackendVar: backendName];
-        // unit-threaded clears its sandbox tree at process startup.
-        // The child needs a separate working directory to protect ours.
-        const result = execute(
-            [thisExePath, "ut.ffi.cpp.cpp.exception.child"], env,
-            Config.none, size_t.max, sandbox.sandboxPath);
-        sandbox.shouldExist("parent-fixture");
-
-        // Compiled D, calling `throws_exception()` inside a
-        // `catch (Throwable)`, prints
-        // "terminate called after throwing an instance of
-        // 'std::runtime_error'" and dies of `SIGABRT` (verified: a
-        // dmd-built and an ldc-built program both do this, matching
-        // ADR-0004). `std.process.wait` reports a process a signal
-        // killed as a negative status, so all three facts together -
-        // not only "something went wrong" - show the same outcome
-        // (issue #336 review, finding 2).
-        result.output.canFind(aboutToThrowMarker).should == true;
-        result.output.canFind(caughtMarker).should == false;
-        result.output.canFind("std::runtime_error").should == true;
-        import core.sys.posix.signal: SIGABRT;
-        result.status.should == -SIGABRT;
     }
 }

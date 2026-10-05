@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# dependencies = ["pytest==8.4.1"]
+# dependencies = ["pytest==8.4.1", "pytest-xdist==3.8.0"]
 # ///
 
 # End-to-end tests of the `bin/sb` command line. They start the built
@@ -2665,6 +2665,7 @@ def finalizer_shapes(
     )
 
 
+@pytest.mark.xdist_group("finalizer-shapes")
 @pytest.mark.parametrize("shape", sorted(FINALIZER_SHAPES))
 def test_destructor_shape_runs_in_finalizer(
     finalizer_shapes: FinalizerShapes, shape: str,
@@ -2708,6 +2709,104 @@ def test_throw_from_a_crt_destructor_fails_the_program(
 
     assert "destructor failed" in result.stderr
     assert result.returncode == 1, output(result)
+
+
+def write_cpp_exception_project(tmp_path: Path) -> None:
+    write(
+        tmp_path / "app" / "dub.sdl",
+        dub_project_recipe("cpp-exception")
+        + 'dependency "cpp-exception-dep" path="../dependency"\n',
+    )
+    write(
+        tmp_path / "app" / "source" / "main.d",
+        """
+        module main;
+        import core.stdc.stdio: fflush, printf, stdout;
+        import dep: throwsFromCpp;
+        int main() {
+            printf("about to throw\\n");
+            fflush(stdout);
+            try {
+                throwsFromCpp;
+            } catch (Throwable) {
+                printf("caught\\n");
+                return 3;
+            }
+            return 0;
+        }
+        """,
+    )
+    write(
+        tmp_path / "dependency" / "dub.sdl",
+        'name "cpp-exception-dep"\ntargetType "staticLibrary"\n'
+        'preBuildCommands "c++ -c -fPIC $PACKAGE_DIR/throws.cpp'
+        ' -o $PACKAGE_DIR/throws.o"\n'
+        'sourceFiles "throws.o"\nlibs "stdc++"\n',
+    )
+    write(
+        tmp_path / "dependency" / "throws.cpp",
+        """
+        #include <stdexcept>
+        void throwsFromCpp() { throw std::runtime_error("boom"); }
+        """,
+    )
+    write(
+        tmp_path / "dependency" / "source" / "dep.d",
+        "module dep;\nextern(C++) void throwsFromCpp();\n",
+    )
+
+
+# A C++ exception that unwinds past every frame of the program ends the
+# process as it ends compiled D: nothing catches or translates it, and a D
+# `catch (Throwable)` never matches a foreign exception. Compiled D dies of
+# `SIGABRT` here, and only a process shows that. The dependency compiles its
+# own C++ source into an object file that the image links.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_cpp_exception_terminates_the_process_uncaught(
+    tmp_path: Path, backend: str,
+) -> None:
+    if shutil.which("c++") is None:
+        pytest.skip("no C++ compiler is on PATH")
+
+    write_cpp_exception_project(tmp_path)
+
+    result = run_app(tmp_path, backend)
+
+    assert "about to throw" in result.stdout, output(result)
+    assert "caught" not in result.stdout, output(result)
+    assert "std::runtime_error" in result.stderr, output(result)
+    assert result.returncode == -signal.SIGABRT, output(result)
+
+
+# A library that a dependency names must follow the objects that need it on
+# the link line: a linker that resolves in order, such as GNU ld with
+# `--as-needed`, drops it otherwise. `CC` forces that linker here, whatever
+# the machine's default is.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_dependency_library_is_linked_after_the_objects_that_need_it(
+    tmp_path: Path, backend: str,
+) -> None:
+    if shutil.which("c++") is None:
+        pytest.skip("no C++ compiler is on PATH")
+    if shutil.which("ld.bfd") is None:
+        pytest.skip("no GNU ld on PATH")
+
+    write_cpp_exception_project(tmp_path)
+    cc = tmp_path / "order-sensitive-cc"
+    write(
+        cc,
+        "#!/bin/sh\n"
+        'exec cc -fuse-ld=bfd -Wl,--as-needed "$@"\n',
+    )
+    cc.chmod(0o755)
+
+    result = run_sb(
+        f"--backend={backend}", "--no-optimise-image", str(tmp_path / "app"),
+        cwd=tmp_path, env={"CC": str(cc)},
+    )
+
+    assert "about to throw" in result.stdout, output(result)
+    assert "linking failed" not in result.stderr, output(result)
 
 
 # `exit` in a module destructor ends druntime's destructor phase. The
@@ -2794,5 +2893,8 @@ def sb_path() -> str:
     return sb
 
 
+# The tests can run in parallel (see build/pytest-workers.sh) because the
+# state that they share, the `.snakebite` directory and the dub package store,
+# is keyed by project path and published with an atomic rename.
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

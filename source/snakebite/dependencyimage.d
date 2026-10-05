@@ -304,9 +304,19 @@ public DependencyImage prepareImage(
         responsePath.write(dependencyFlags.map!(argument =>
             "\"" ~ argument.replace("\\", "\\\\").replace("\"", "\\\"") ~ "\"")
             .join("\n"));
-        runCompiler("linking", [executable] ~ linkFlags ~ linkerArguments
+        // A linker that resolves symbols in order, such as GNU ld with
+        // `--as-needed`, drops a library named before the objects that
+        // need it. Libraries therefore follow every object; the other
+        // linker arguments keep their place before them.
+        import std.algorithm: filter, startsWith;
+        bool isLibrary(string argument) { return argument.startsWith("-L-l"); }
+        const otherArguments = linkerArguments.filter!(a => !isLibrary(a)).array;
+        const libraryArguments = linkerArguments.filter!isLibrary.array;
+        runCompiler("linking", [executable] ~ linkFlags
+            ~ otherArguments
             ~ ["-Xcc=-Wl,@linker.rsp"]
-            ~ objectPaths ~ extraLinkFlags ~ ["-of=" ~ imagePath], staging);
+            ~ objectPaths ~ libraryArguments ~ extraLinkFlags
+            ~ ["-of=" ~ imagePath], staging);
         // Readers must never observe a partially linked image. Concurrent
         // builders publish equivalent complete files with atomic rename.
         rename(imagePath, destination);
