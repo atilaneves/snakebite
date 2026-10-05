@@ -603,8 +603,12 @@ unittest {
     installFaultHandlers.shouldBeTrue;
     shared bool done;
     auto collector = new Thread({
-        while (!atomicLoad(done))
+        while (!atomicLoad(done)) {
             GC.collect;
+            // kcov pins all threads to one CPU. Let the faulting threads run
+            // between collections instead of suspending them again at once.
+            Thread.yield;
+        }
     });
     collector.start;
 
