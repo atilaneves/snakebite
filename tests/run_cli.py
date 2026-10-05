@@ -2688,8 +2688,6 @@ def dub_project_recipe(name: str) -> str:
     )
 
 
-
-
 # A throw from a `crt_destructor` function makes the program fail. Compiled D
 # aborts there, so only the backends have a row.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
@@ -2871,6 +2869,8 @@ def snippet_shape(code: str, result: int, backends: tuple[str, ...]) -> ImageSha
     )
 
 
+# CTFE cannot call native code, so the shapes and C projects that need a
+# dependency image run on the other backends only.
 NATIVE_AND_BACKENDS = ("native", *BACKENDS)
 NATIVE_AND_FILE_BACKENDS = ("native", *FILE_BACKENDS)
 
@@ -4558,7 +4558,6 @@ def test_c_module_is_imported_by_d(
     )
 
     assert result.returncode == case.status, output(result)
-
 
 
 DUB_DESCRIBE_FIXTURES = Path(__file__).parent / "fixtures" / "dub-describe"
