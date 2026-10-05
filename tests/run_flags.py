@@ -92,6 +92,7 @@ def run_compiled(
         timeout=TIMEOUT,
     )
     assert compiled.returncode == 0, compiled.stdout + compiled.stderr
+    assert (directory / "app").is_file(), compiled.stdout + compiled.stderr
 
     return outcome_of(
         subprocess.run(
@@ -1401,8 +1402,9 @@ def test_check_bounds_not_off_does_not_define_d_noboundschecks(
 # A template of a dub dependency that the project instantiates has the
 # checks of the project's flags, as it has in a native build.
 @pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("extra_flags", [[], ["-c", "-g"]])
 def test_check_flag_applies_to_a_dependency_template(
-    tmp_path: Path, backend: str,
+    tmp_path: Path, backend: str, extra_flags: list[str],
 ) -> None:
     app = tmp_path / "app"
     dependency = tmp_path / "dependency"
@@ -1410,7 +1412,8 @@ def test_check_flag_applies_to_a_dependency_template(
     (dependency / "source").mkdir(parents=True)
     (app / "dub.sdl").write_text(
         'name "app"\ntargetType "library"\ndflags "-check=in=off"\n'
-        'dependency "dep" path="../dependency"\n',
+        + "".join(f'dflags "{flag}"\n' for flag in extra_flags)
+        + 'dependency "dep" path="../dependency"\n',
         encoding="utf-8",
     )
     (app / "source" / "app.d").write_text(
@@ -1604,6 +1607,187 @@ def test_dependency_that_fails_to_build_is_reported(
     output = result.stdout + result.stderr
     assert result.returncode != 0, output
     assert "dependency does not build" in output, output
+
+
+# CTFE does not build native dependencies or run dub build hooks.
+@pytest.mark.parametrize("backend", ["native", "bytecode", "interpreter", "native-ldc"])
+@pytest.mark.parametrize("stage,flags", [
+    ("preBuildCommands", []),
+    ("postBuildCommands", []),
+    ("postBuildCommands", ["--enable-preconditions=false"]),
+    ("preBuildCommands", ["-check=in=off"]),
+    ("postBuildCommands", ["-check=in=off"]),
+])
+def test_root_build_command_failure_is_reported(
+    tmp_path: Path, backend: str, stage: str, flags: list[str],
+) -> None:
+    marker = "root-build-command-failed"
+    dependency = tmp_path / "dependency"
+    (dependency / "source").mkdir(parents=True)
+    (dependency / "dub.sdl").write_text(
+        'name "dep"\ntargetType "library"\n', encoding="utf-8",
+    )
+    (dependency / "source" / "dep.d").write_text(
+        "module dep; int value() { return 1; }\n", encoding="utf-8",
+    )
+    (tmp_path / "source").mkdir()
+    (tmp_path / "dub.json").write_text(json.dumps({
+        "name": "app", "targetType": "library",
+        "dependencies": {"dep": {"path": "dependency"}},
+        "dflags": [
+            "-check=in=off" if backend == "native" and flag == "--enable-preconditions=false"
+            else "--enable-preconditions=false" if backend == "native-ldc" and flag == "-check=in=off"
+            else flag for flag in flags
+        ],
+        stage: [f"echo {marker} >&2; exit 27"],
+    }), encoding="utf-8")
+    (tmp_path / "source" / "app.d").write_text(
+        "module app; import dep;\nunittest { assert(value() == 1); }\n",
+        encoding="utf-8",
+    )
+    if backend in ["native", "native-ldc"]:
+        compiler = native_compiler() if backend == "native" else shutil.which("ldc2")
+        if compiler is None:
+            pytest.skip("ldc2 is not on PATH")
+        command = ["dub", "build", f"--compiler={compiler}"]
+    else:
+        command = [sb_path(), f"--backend={backend}", "--no-optimise-image",
+                   str(tmp_path)]
+    result = subprocess.run(
+        command, cwd=tmp_path, capture_output=True, check=False, text=True,
+        timeout=TIMEOUT,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    assert marker in output, output
+    assert "Command failed with exit code 27" in output, output
+    assert not list((tmp_path / ".snakebite").rglob("dub-dependencies"))
+
+
+@pytest.mark.parametrize("backend", ["native", "bytecode", "interpreter", "native-ldc"])
+def test_unrelated_root_compiler_flag_failure_is_reported(
+    tmp_path: Path, backend: str,
+) -> None:
+    dependency = tmp_path / "dependency"
+    (dependency / "source").mkdir(parents=True)
+    (dependency / "dub.sdl").write_text(
+        'name "dep"\ntargetType "library"\n', encoding="utf-8",
+    )
+    (dependency / "source" / "dep.d").write_text("module dep;\n", encoding="utf-8")
+    (tmp_path / "source").mkdir()
+    (tmp_path / "source" / "app.d").write_text(
+        "module app; unittest {}\n", encoding="utf-8",
+    )
+    check_flag = (
+        "--enable-preconditions=false" if backend == "native-ldc"
+        else "-check=in=off"
+    )
+    (tmp_path / "dub.json").write_text(json.dumps({
+        "name": "app", "targetType": "library",
+        "dependencies": {"dep": {"path": "dependency"}},
+        "dflags": [check_flag, "--not-a-real-compiler-option"],
+    }), encoding="utf-8")
+    if backend in ["native", "native-ldc"]:
+        compiler = native_compiler() if backend == "native" else shutil.which("ldc2")
+        if compiler is None:
+            pytest.skip("ldc2 is not on PATH")
+        command = ["dub", "build", f"--compiler={compiler}"]
+    else:
+        command = [sb_path(), f"--backend={backend}", "--no-optimise-image", str(tmp_path)]
+    result = subprocess.run(
+        command, cwd=tmp_path, capture_output=True, check=False, text=True,
+        timeout=TIMEOUT,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    if backend not in ["native", "native-ldc"]:
+        assert "Dub dependency build failed" in output, output
+    assert not list((tmp_path / ".snakebite").rglob("dub-dependencies"))
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("path_kind", ["absolute", "relative", "nested"])
+@pytest.mark.parametrize("with_dependency", [False, True])
+def test_response_file_check_flags_apply_to_guest_and_image(
+    tmp_path: Path, backend: str, path_kind: str, with_dependency: bool,
+) -> None:
+    response = tmp_path / "flags.rsp"
+    imports = tmp_path / "imports with spaces"
+    imports.mkdir()
+    (imports / "marker.txt").write_text("response-file marker", encoding="utf-8")
+    response.write_text(
+        f'# check selection\n"-J{imports}"\n"-check=in=off"\n',
+        encoding="utf-8",
+    )
+    if path_kind == "nested":
+        outer = tmp_path / "outer.rsp"
+        outer.write_text(f'@{response}\n', encoding="utf-8")
+        response = outer
+    response_argument = "@" + (
+        response.name if path_kind == "relative" else str(response)
+    )
+    (tmp_path / "source").mkdir()
+    (tmp_path / "source" / "app.d").write_text(
+        PRELUDE + 'static assert(import("marker.txt") == "response-file marker");\n'
+        + IN_PROGRAM, encoding="utf-8",
+    )
+    recipe = {
+        "name": "app", "targetType": "library",
+        "dflags": ["-check=in=on", response_argument],
+    }
+    if with_dependency:
+        dependency = tmp_path / "dependency"
+        (dependency / "source").mkdir(parents=True)
+        (dependency / "dub.sdl").write_text(
+            'name "dep"\ntargetType "library"\n', encoding="utf-8",
+        )
+        (dependency / "source" / "dep.d").write_text(
+            "module dep;\n", encoding="utf-8",
+        )
+        recipe["dependencies"] = {"dep": {"path": "dependency"}}
+    (tmp_path / "dub.json").write_text(json.dumps(recipe), encoding="utf-8")
+    command = (
+        ["dub", "test", f"--compiler={native_compiler()}"]
+        if backend == "native" else
+        [sb_path(), f"--backend={backend}", "--no-optimise-image", str(tmp_path)]
+    )
+    result = subprocess.run(
+        command, cwd=tmp_path, capture_output=True, check=False, text=True,
+        timeout=TIMEOUT,
+    )
+    assert_passes_after_start(backend, outcome_of(result))
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_changed_response_file_changes_checks_on_cached_runs(
+    tmp_path: Path, backend: str,
+) -> None:
+    response = tmp_path / "checks.rsp"
+    (tmp_path / "source").mkdir()
+    (tmp_path / "source" / "app.d").write_text(
+        PRELUDE + IN_PROGRAM, encoding="utf-8",
+    )
+    (tmp_path / "dub.json").write_text(json.dumps({
+        "name": "app", "targetType": "library", "dflags": [f"@{response}"],
+    }), encoding="utf-8")
+    for index, enabled in enumerate([False, True, False]):
+        response.write_text(
+            f"-check=in={'on' if enabled else 'off'}\n", encoding="utf-8",
+        )
+        if backend == "native":
+            run_directory = tmp_path / f"native-{index}"
+            run_directory.mkdir()
+            outcome = run_native(run_directory, [f"@{response}"], PRELUDE + IN_PROGRAM)
+        else:
+            outcome = outcome_of(subprocess.run(
+                [sb_path(), f"--backend={backend}", "--no-optimise-image", str(tmp_path)],
+                cwd=tmp_path, capture_output=True, check=False, text=True,
+                timeout=TIMEOUT,
+            ))
+        if enabled:
+            assert_raises_after_start(backend, outcome, "AssertError")
+        else:
+            assert_passes_after_start(backend, outcome)
 
 
 if __name__ == "__main__":

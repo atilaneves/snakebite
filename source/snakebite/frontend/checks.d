@@ -288,7 +288,7 @@ private bool isLdcCheckFlag(in const(char)[] argument) @safe pure nothrow @nogc 
 
 // Normalize both compiler dialects so a later native flag cannot override
 // the resolved DMD precedence in the image alone.
-public string[] ldcArguments(in string[] arguments) @safe pure nothrow {
+public string[] ldcArguments(in string[] arguments) {
     import std.algorithm.searching: startsWith;
 
     bool isCheckFlag(in string argument) @safe pure nothrow @nogc {
@@ -302,7 +302,7 @@ public string[] ldcArguments(in string[] arguments) @safe pure nothrow {
 
     Checks checks;
     string[] kept;
-    foreach (argument; joinedCheckArguments(arguments)) {
+    foreach (argument; joinedCheckArguments(expandedCompilerArguments(arguments))) {
         // The compiler reports a flag that is not valid.
         if (!checks.accept(argument) || !isCheckFlag(argument))
             kept ~= argument;
@@ -310,6 +310,31 @@ public string[] ldcArguments(in string[] arguments) @safe pure nothrow {
     checks.resolve;
 
     return kept ~ checks.ldcFlags;
+}
+
+// Use the frontend's response syntax, including environment lookup and
+// nested files, before any consumer resolves compiler flags.
+public string[] expandedCompilerArguments(in string[] arguments) {
+    import dmd.arraytypes: Strings;
+    import dmd.root.response: responseExpand;
+    import dmd.root.string: toDString;
+    import std.algorithm: any, startsWith;
+    import std.algorithm.iteration: map;
+    import std.array: array;
+    import std.conv: text;
+    import std.string: toStringz;
+
+    if (!arguments.any!(argument => argument.startsWith("@")))
+        return arguments.dup;
+    const argumentText = ["dmd"] ~ arguments;
+    auto expanded = Strings(argumentText.length);
+    foreach (index, argument; argumentText)
+        expanded[index] = argument.toStringz;
+    if (const missing = responseExpand(expanded))
+        throw new Exception(text(
+            "failed to expand dub compiler response file ", missing.toDString,
+        ));
+    return expanded[][1 .. $].map!(argument => argument.toDString.idup).array;
 }
 
 // LDC also accepts a separate value for enum options. Use one argument

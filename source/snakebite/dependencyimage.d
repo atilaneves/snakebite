@@ -161,8 +161,10 @@ public DependencyImage prepareImage(
         version (LDC) {
             import snakebite.frontend.checks: ldcArguments;
             return ldcArguments(compilerArguments);
-        } else
-            return compilerArguments.dup;
+        } else {
+            import snakebite.frontend.checks: expandedCompilerArguments;
+            return expandedCompilerArguments(compilerArguments);
+        }
     }
     const importFlags = imageArguments.map!imageArgument.array
         ~ importPaths.map!(path => "-I" ~ path).array

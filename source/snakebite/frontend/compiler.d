@@ -1571,21 +1571,14 @@ private void expandArguments(
     ref imported!"dmd.arraytypes".Strings arguments,
 ) {
     import dmd.arraytypes: Strings;
-    import dmd.root.response: responseExpand;
-    import dmd.root.string: toDString;
-    import std.conv: text;
+    import snakebite.frontend.checks: expandedCompilerArguments;
     import std.string: toStringz;
 
-    auto argumentText = ["dmd"] ~ owned(flags.compilerArguments);
+    auto argumentText = ["dmd"] ~ expandedCompilerArguments(owned(flags.compilerArguments));
     arguments = Strings(argumentText.length);
     foreach (i, argument; argumentText)
         arguments[i] = argument.toStringz;
 
-    if (const missing = responseExpand(arguments))
-        throw new Exception(text(
-            "failed to expand dub compiler response file ",
-            missing.toDString,
-        ));
 }
 
 private void applyChecks(in imported!"snakebite.frontend.checks".Checks checks) {
