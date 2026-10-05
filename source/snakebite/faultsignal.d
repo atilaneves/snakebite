@@ -61,19 +61,30 @@ public final class HardwareFault: Halted {
 // This does not restore other host state owned inside `body`.
 // Backends must discard halted execution state, as required by #523.
 public void runGuest(scope void delegate() body) @system {
+    static if (supported)
+        runGuest(&body, &invokeGuestBody);
+    else
+        body();
+}
+
+
+public alias GuestBody = extern(C) void function(void*);
+
+// A backend already has an entry record. Calling its entry directly avoids
+// a second delegate entry and keeps the same protected cleanup owner.
+public void runGuest(void* context, GuestBody body) @system {
     static if (supported) {
         if (_state.prepared is null)
             prepareThread;
         ++_state.runs;
         scope(exit) --_state.runs;
-        snakebite_fault_invoke(&body, &invokeGuestBody);
+        snakebite_fault_invoke(context, body);
     } else
-        body();
+        body(context);
 }
 
 
 static if (supported) {
-    private alias GuestBody = extern(C) void function(void*);
     private extern(C) void snakebite_fault_invoke(void* context, GuestBody body);
 
     private extern(C) void invokeGuestBody(void* context) {

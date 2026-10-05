@@ -105,6 +105,7 @@ def test_process_action(binaries, tmp_path, scenario, expected):
 @pytest.mark.parametrize("scenario", [
     "recover", "nested", "fibers", "after-fault", "after-nested",
     "after-return", "after-exception", "after-fibers",
+    "recover-direct", "after-fault-direct",
 ])
 def test_recovery_boundary(binaries, tmp_path, scenario):
     result = subprocess.run(

@@ -101,6 +101,10 @@ public struct Program {
         _actions.halt();
     }
 
+    public GuestFault.Action faultAction() const {
+        return _actions.fault;
+    }
+
     public noreturn fault(
         in GuestFault.Kind kind,
         in const(char)[] file,

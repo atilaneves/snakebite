@@ -30,6 +30,87 @@ FILE_BACKENDS = ["bytecode", "interpreter"]
 PROGRAM_BACKENDS = ["native", *FILE_BACKENDS]
 
 
+# Native execution dies of the signal. Interpreter entry is step 4 of #523;
+# CTFE diagnoses the null read before native execution. Keep these arms so
+# the same source also pins those limits, without crashing the unit runner.
+@pytest.mark.parametrize("backend", ["native", *BACKENDS])
+def test_hardware_fault_position_and_guest_halt(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    write(
+        app / "main.d",
+        "module main;\n"
+        "import core.stdc.stdio: puts;\n"
+        "struct Local { ~this() { puts(\"destructor ran\"); } }\n"
+        "int leaf(int* p) {\n"
+        "    Local local;\n"
+        "    try { return *p; }\n"
+        "    catch (Throwable) { puts(\"catch ran\"); return 0; }\n"
+        "    finally { puts(\"finally ran\"); }\n"
+        "}\n"
+        "int main() { return leaf(null); }\n",
+    )
+    if backend == "native":
+        binary = tmp_path / "native"
+        built = subprocess.run(
+            ["dmd", f"-of={binary}", str(app / "main.d")],
+            capture_output=True, text=True, check=False,
+        )
+        assert built.returncode == 0, output(built)
+        result = subprocess.run(
+            [str(binary)], capture_output=True, text=True, timeout=30,
+        )
+    else:
+        result = run_sb(f"--backend={backend}", str(app), cwd=tmp_path)
+    assert "catch ran" not in output(result)
+    assert "finally ran" not in output(result)
+    assert "destructor ran" not in output(result)
+    if backend == "bytecode":
+        assert result.returncode == 1, output(result)
+        assert "main.d(6): fatal: null pointer dereference" in result.stderr
+        assert "in main.leaf (main.d(6))" in result.stderr
+        assert "in D main (main.d(10))" in result.stderr
+    elif backend == "ctfe":
+        assert result.returncode == 1, output(result)
+        assert "dereference of null pointer" in result.stderr
+    else:
+        assert result.returncode == -signal.SIGSEGV, output(result)
+
+
+# The full source matrix was also checked before limiting the report checks
+# to Bytecode: Native gets SIGFPE/SIGSEGV; CTFE diagnoses these expressions;
+# Interpreter overflow and null-call/throw handling belong to #523 step 4.
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ("int f(int a, int b) { return a / b; } "
+         "int main() { return f(int.min, -1); }",
+         "integer overflow in division"),
+        ("int f(int a, int b) { return a % b; } "
+         "int main() { return f(int.min, -1); }",
+         "integer overflow in division"),
+        ("long f(long a, long b) { return a / b; } "
+         "int main() { return cast(int) f(long.min, -1); }",
+         "integer overflow in division"),
+        ("int main() { int function() f; return f(); }",
+         "call of a null function pointer"),
+        ("int main() { Throwable t; throw t; }",
+         "throw of a null reference"),
+        ("int main() { return *cast(int*) 0x10000; }",
+         "invalid memory access"),
+    ],
+)
+def test_bytecode_hardware_fault_messages(
+    tmp_path: Path, body: str, message: str,
+) -> None:
+    app = tmp_path / "app"
+    write(app / "main.d", "module main;\n" + body + "\n")
+    result = run_sb("--backend=bytecode", str(app), cwd=tmp_path)
+    assert result.returncode == 1, output(result)
+    assert f"main.d(2): fatal: {message}" in result.stderr
+
+
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
 def test_module_constructor_uses_project_directory(
     tmp_path: Path, backend: str,
@@ -1667,10 +1748,9 @@ def write_faulting_project(app: Path, main: str) -> None:
     write(app / "source" / "main.d", main)
 
 
-# A guest that dereferences null or divides by zero dies of the signal, as
-# compiled D does: the fault handlers must not change the exit status.
+# Bytecode reports through its controlled entry. Interpreter entry is step 4.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
-def test_guest_null_dereference_dies_of_sigsegv(
+def test_guest_null_dereference_ends_the_program(
     tmp_path: Path, backend: str,
 ) -> None:
     write_faulting_project(tmp_path / "app", NULL_DEREFERENCE_MAIN)
@@ -1680,13 +1760,17 @@ def test_guest_null_dereference_dies_of_sigsegv(
         cwd=tmp_path,
     )
 
-    assert result.returncode == -signal.SIGSEGV, output(result)
+    if backend == "bytecode":
+        assert result.returncode == 1, output(result)
+        assert "source/main.d(3): fatal: null pointer dereference" in result.stderr
+    else:
+        assert result.returncode == -signal.SIGSEGV, output(result)
 
 
 # The interpreter checks the divisor in its walker, so for now it ends with a
 # message of its own and not with the signal.
 @pytest.mark.parametrize("backend", ["bytecode"])
-def test_guest_division_by_zero_dies_of_sigfpe(
+def test_guest_division_by_zero_reports_its_position(
     tmp_path: Path, backend: str,
 ) -> None:
     write_faulting_project(tmp_path / "app", DIVISION_BY_ZERO_MAIN)
@@ -1696,7 +1780,8 @@ def test_guest_division_by_zero_dies_of_sigfpe(
         cwd=tmp_path,
     )
 
-    assert result.returncode == -signal.SIGFPE, output(result)
+    assert result.returncode == 1, output(result)
+    assert "source/main.d(3): fatal: integer division by zero" in result.stderr
 
 
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
@@ -1710,7 +1795,11 @@ def test_fault_handlers_do_not_blame_the_host_for_an_unclassified_guest_fault(
         cwd=tmp_path,
     )
 
-    assert result.returncode == -signal.SIGSEGV, output(result)
+    if backend == "bytecode":
+        assert result.returncode == 1, output(result)
+        assert "fatal: null pointer dereference" in result.stderr
+    else:
+        assert result.returncode == -signal.SIGSEGV, output(result)
     assert "snakebite:" not in result.stderr
 
 

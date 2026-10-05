@@ -20,15 +20,22 @@ private void outsideFault() {
     leaf;
 }
 
-private void entry() {
-    pragma(inline, false);
-    scope(exit) ++cleaned;
-    runGuest({ leaf; });
+private extern(C) void directBody(void*) {
+    leaf;
 }
 
-private bool catchEntry() {
+private void entry(bool direct = false) {
+    pragma(inline, false);
+    scope(exit) ++cleaned;
+    if (direct)
+        runGuest(null, &directBody);
+    else
+        runGuest({ leaf; });
+}
+
+private bool catchEntry(bool direct = false) {
     try {
-        entry;
+        entry(direct);
     } catch (HardwareFault fault) {
         takeFault(fault);
         return true;
@@ -68,11 +75,15 @@ int main(string[] args) {
             return 21;
         case "recover":
         case "after-fault":
+        case "recover-direct":
+        case "after-fault-direct":
             foreach (round; 0 .. 1000) {
-                if (!catchEntry || cleaned != round + 1)
+                if (!catchEntry(args[1] == "recover-direct"
+                        || args[1] == "after-fault-direct")
+                        || cleaned != round + 1)
                     return 10;
             }
-            if (args[1] == "recover")
+            if (args[1] == "recover" || args[1] == "recover-direct")
                 return 0;
             outsideFault;
             return 11;

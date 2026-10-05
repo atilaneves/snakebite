@@ -20,6 +20,7 @@ extern(C) bool executeIndirectCallPlan(
 import snakebite.backends.argumentflow: ArgumentFlow, Shape, Signature;
 import snakebite.backends.builtins: BuiltinCall;
 import snakebite.backends.haltprocess: HaltAction, isHalt;
+import snakebite.backends.guestfault: GuestFault;
 import snakebite.backends.unwindplan:
     ExceptionCandidate, UnwindPlan, unwindPlanOf;
 import snakebite.callarguments: CallArguments;
@@ -410,6 +411,17 @@ public struct Function {
     package size_t cursorOffset = size_t.max;
     package size_t declaredParameters;
     package const(Signature)* signature;
+    package string name;
+    package string file;
+    package size_t line;
+    package SourcePosition[] positions;
+    package bool rootOwned;
+    package const(Function)* previous;
+}
+
+package struct SourcePosition {
+    package string file;
+    package size_t line;
 }
 
 
@@ -417,6 +429,9 @@ import snakebite.framestack: FrameStack;
 
 public struct Vm {
     private FrameStack _frames;
+    private Throwable _halt;
+    private const(Function)* delegate(const(Instruction)*) _functionOf;
+    private GuestFault.Action _fault;
 
     @disable this();
     @disable this(this);
@@ -425,6 +440,14 @@ public struct Vm {
 
     public this(in size_t frameCapacity, TlsSlots* tls = null) {
         _frames = FrameStack(frameCapacity, tls);
+    }
+
+    public void faultReporting(
+        const(Function)* delegate(const(Instruction)*) functionOf,
+        GuestFault.Action fault,
+    ) {
+        _functionOf = functionOf;
+        _fault = fault;
     }
 
     // One argument the host hands a guest function: the callee frame
@@ -452,6 +475,8 @@ public struct Vm {
     ) {
         import core.stdc.string: memcpy;
 
+        if (_halt !is null)
+            throw _halt;
         assert(function_.instructions.length > 0);
         assert(function_.frameAlignment > 0);
 
@@ -470,6 +495,7 @@ public struct Vm {
             pc, frame.base, returnPlace, function_.constants,
             function_.callSites, function_.assertSites,
             function_.exceptionHandlers, &_frames,
+            &this,
         );
     }
 }
@@ -524,8 +550,7 @@ private struct Activation {
     Activation* parent;
 
     void cleanup(FrameStack* frames) {
-        cleanupSince(cleanupMark, frame, constants, callSites, assertSites,
-            frames);
+        cleanupSince(cleanupMark, &this, frames);
     }
 
     // Forgets the temporaries that `cleanup` would destroy.
@@ -538,8 +563,11 @@ private struct DispatchState {
     FrameStack* frames;
     Activation* current;
     Activation* pending;
+    Vm* vm;
+    DispatchState* parent;
 }
 
+pragma(inline, false)
 private void dispatch(
     const(Instruction)* pc,
     ubyte* frame,
@@ -549,8 +577,11 @@ private void dispatch(
     scope const AssertSite[] assertSites,
     scope const ExceptionHandler[] exceptionHandlers,
     FrameStack* frames,
+    Vm* vm,
     const(Instruction)* end = null,
 ) {
+    import snakebite.faultsignal: runGuest;
+
     Activation root;
     root.pc = root.start = pc;
     root.end = end;
@@ -561,8 +592,33 @@ private void dispatch(
     root.assertSites = assertSites;
     root.exceptionHandlers = exceptionHandlers;
     root.cleanupMark = frames.cleanupMark;
-    auto state = DispatchState(frames);
-    auto active = &root;
+    auto state = DispatchState(frames, &root, null, vm,
+        cast(DispatchState*) frames.backendEntry);
+    // These owners are above the assembly call, not in a frame that can
+    // fault. A halt must also discard a partially reserved activation.
+    const frameMark = frames.mark;
+    scope(failure) {
+        frames.finishCleanups(root.cleanupMark, (in size_t) {});
+        frames.release(frameMark);
+    }
+    scope(exit) frames.backendEntry = state.parent;
+    frames.backendEntry = &state;
+    runGuest(&state, &invokeDispatch);
+}
+
+private extern(C) void invokeDispatch(void* context) {
+    auto state = cast(DispatchState*) context;
+    dispatchLoop(state.current.pc, state.current, state);
+}
+
+private void dispatchLoop(
+    const(Instruction)* pc,
+    Activation* root,
+    DispatchState* state,
+) {
+    // Cleanup writes the frame stack.
+    auto frames = state.frames;
+    auto active = root;
 
     while (true) {
         try {
@@ -580,7 +636,7 @@ private void dispatch(
             if (handler is &opCall) {
                 active.pc = instruction;
                 state.current = active;
-                const next = handler(instruction, active, &state);
+                const next = handler(instruction, active, state);
                 if (state.pending !is null) {
                     active = state.pending;
                     state.pending = null;
@@ -588,12 +644,71 @@ private void dispatch(
                 } else
                     pc = next;
             } else
-                pc = handler(instruction, active, &state);
+                pc = handler(instruction, active, state);
         } catch (Throwable throwable) {
             active.pc = pc;
-            active = handleException(active, frames, throwable);
+            import snakebite.faultsignal: HardwareFault;
+
+            if (auto hardware = cast(HardwareFault) throwable)
+                throwable = reportHardwareFault(hardware, active, state);
+            active = handleException(active, frames, throwable, state.vm);
             pc = active.pc;
         }
+    }
+}
+
+private Throwable reportHardwareFault(
+    imported!"snakebite.faultsignal".HardwareFault fault,
+    Activation* active,
+    DispatchState* state,
+) {
+    import snakebite.faultsignal: takeFault;
+    import snakebite.backends.guestfault: GuestFault;
+
+    takeFault(fault);
+    if (state.vm._fault is null)
+        return fault;
+    return reportGuestFault(fault.kind, active, state);
+}
+
+private Throwable reportGuestFault(
+    imported!"snakebite.backends.guestfault".GuestFault.Kind kind,
+    Activation* active,
+    DispatchState* state,
+) {
+    import snakebite.backends.guestfault: GuestFault;
+
+    auto position = SourcePosition.init;
+    bool foundRoot;
+    GuestFault.Stack stack = (scope GuestFault.FrameSink sink) {
+        auto activation = active;
+        auto dispatch = state;
+        while (dispatch !is null) {
+            while (activation !is null) {
+                const function_ = dispatch.vm._functionOf(activation.pc);
+                if (function_ !is null) {
+                    const source = function_.positions[
+                        activation.pc - function_.instructions.ptr];
+                    if (position.file.length == 0
+                            || (!foundRoot && function_.rootOwned)) {
+                        position = source;
+                        foundRoot = function_.rootOwned;
+                    }
+                    sink(GuestFault.Frame(function_.name, source.file,
+                        source.line));
+                }
+                activation = activation.parent;
+            }
+            dispatch = dispatch.parent;
+            if (dispatch !is null)
+                activation = dispatch.current;
+        }
+    };
+    stack((in GuestFault.Frame) {});
+    try {
+        state.vm._fault(kind, position.file, position.line, stack);
+    } catch (Throwable reported) {
+        return reported;
     }
 }
 
@@ -603,12 +718,15 @@ private Activation* handleException(
     Activation* active,
     FrameStack* frames,
     Throwable throwable,
+    Vm* vm,
 ) {
     size_t firstHandler;
     while (true) {
         // A halt that ends a cell is not an error guest code handles: no
         // temporary's destructor, `catch` or `finally` sees it.
         const halting = isHalt(throwable);
+        if (halting)
+            vm._halt = throwable;
         try {
             unwindFinally(throwable, () {
                 if (halting)
@@ -643,10 +761,11 @@ private Activation* handleException(
         if (handler.cleanupEnd !is null) {
             try {
                 unwindFinally(throwable, () {
+                    (cast(DispatchState*) frames.backendEntry).current = active;
                     dispatch(handler.handler, active.frame,
                         active.returnPlace, active.constants,
                         active.callSites, active.assertSites,
-                        active.exceptionHandlers, frames,
+                        active.exceptionHandlers, frames, vm,
                         handler.cleanupEnd);
                 });
             } catch (Throwable chained) {
@@ -681,18 +800,18 @@ private void unwindFinally(Throwable throwable, scope void delegate() cleanup) {
 
 private void cleanupSince(
     in size_t mark,
-    ubyte* frame,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
+    Activation* active,
     FrameStack* frames,
 ) {
     frames.finishCleanups(mark, (in size_t siteIndex) {
-        auto site = &callSites[siteIndex];
+        auto site = &active.callSites[siteIndex];
         assert(site.cleanupStart !is null, "temporary cleanup start missing");
         assert(site.cleanupEnd !is null, "temporary cleanup end missing");
+        auto state = cast(DispatchState*) frames.backendEntry;
+        state.current = active;
         dispatch(cast(const(Instruction)*) site.cleanupStart,
-            frame, null, constants, callSites, assertSites, null, frames,
+            active.frame, null, active.constants, active.callSites,
+            active.assertSites, null, frames, state.vm,
             cast(const(Instruction)*) site.cleanupEnd);
     });
 }
@@ -754,15 +873,16 @@ private const(Instruction)* runTemporaryArmAddress(Decoded)(
 }
 
 
-public alias opTemporaryEnd =
-    execute!(runTemporaryEnd, OperandKind.storage, OperandKind.immediate);
-
-private const(Instruction)* runTemporaryEnd(Decoded)(
-    ref Decoded execution,
+public const(Instruction)* opTemporaryEnd(
+    const(Instruction)* pc,
+    Activation* activation,
+    DispatchState* state,
 ) {
+    auto execution = Execution!(OperandKind.storage, OperandKind.immediate)(
+        pc, activation, state);
     const mark = loadUnsigned(execution.destination, size_t.sizeof);
-    cleanupSince(mark, execution._frame, execution.constants,
-        execution.callSites, execution.assertSites, execution.frames);
+    activation.pc = pc;
+    cleanupSince(mark, activation, execution.frames);
     return execution.next;
 }
 
@@ -986,13 +1106,20 @@ private const(Instruction)* runAssert(Decoded)(
 // Throws the Throwable reference at `execution.destination`. The expression has
 // already been evaluated into the frame, so this preserves the original
 // object while dispatch unwinds through guest catch handlers and frames.
-package alias opThrow =
-    execute!(runThrow, OperandKind.storage, OperandKind.immediate);
-
-private const(Instruction)* runThrow(Decoded)(
-    ref Decoded execution,
+package const(Instruction)* opThrow(
+    const(Instruction)* pc,
+    Activation* activation,
+    DispatchState* state,
 ) {
+    auto execution = Execution!(OperandKind.storage, OperandKind.immediate)(
+        pc, activation, state);
     auto throwable = cast(Throwable) *cast(void**) (execution.destination);
+    if (throwable is null) {
+        import snakebite.backends.guestfault: GuestFault;
+
+        activation.pc = pc;
+        throw reportGuestFault(GuestFault.Kind.throwNull, activation, state);
+    }
     throw throwable;
 }
 
@@ -1521,6 +1648,22 @@ private const(Instruction)* runShiftRightArithmetic(Decoded)(
 // nothing more than that operator applied to the widened execution.
 package alias opDivideSigned =
     execute!(runDivideSigned, OperandKind.storage, OperandKind.storage);
+
+package alias opDivideSigned32 =
+    execute!(runSigned32, OperandKind.storage, OperandKind.storage, "/");
+
+package alias opModuloSigned32 =
+    execute!(runSigned32, OperandKind.storage, OperandKind.storage, "%");
+
+private const(Instruction)* runSigned32(string operation, Decoded)(
+    ref Decoded execution,
+) {
+    const dividend = *cast(int*) execution.destination;
+    const divisor = *cast(int*) execution.source;
+    mixin("*cast(int*) execution.destination = dividend "
+        ~ operation ~ " divisor;");
+    return execution.next;
+}
 
 private const(Instruction)* runDivideSigned(Decoded)(
     ref Decoded execution,
