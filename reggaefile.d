@@ -74,8 +74,27 @@ Target registryImageObject() {
             "$project/registry_slot.so",
             "cc -shared -fPIC -nostdlib -o $out $in",
             Target(registrySlotSource),
-        )],
+        )] ~ testFixtureLibraries,
     );
+}
+
+// The native libraries that `bin/ut` loads, built here so that no test
+// starts a compiler for them. They lie in `bin/fixtures`, next to the test
+// executable. They are implicit inputs of the registry image object because
+// `ninja bin/ut` must make them, and every target links that object.
+Target[] testFixtureLibraries() {
+    return [
+        Target(
+            "$project/bin/fixtures/symbols.so",
+            "cc -shared -fPIC -o $out $in",
+            Target("tests/fixtures/native/symbols.c"),
+        ),
+        Target(
+            "$project/bin/fixtures/cpp_image.so",
+            "c++ -shared -fPIC -O2 -std=c++17 -o $out $in",
+            Target("tests/fixtures/native/cpp_image.cpp"),
+        ),
+    ];
 }
 
 Target dubTarget(string compiler, string config, string objectSet,

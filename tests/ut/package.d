@@ -19,3 +19,15 @@ string[] selectFrontendMemoryFromArguments(string[] args) {
         writeln("  --lowmem: ", lowmemHelp);
     return args.filter!(arg => arg != "--lowmem").array;
 }
+
+
+// A native library that the build of `bin/ut` made from tests/fixtures/native.
+// It lies next to the executable, so no test needs a compiler to have it.
+string nativeFixture(in string name) {
+    import std.file: exists, thisExePath;
+    import std.path: buildPath, dirName;
+
+    const path = buildPath(thisExePath.dirName, "fixtures", name);
+    assert(path.exists, "missing " ~ path ~ ": build bin/ut with ninja");
+    return path;
+}

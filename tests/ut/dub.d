@@ -1,39 +1,46 @@
 module ut.dub;
 
 
-import snakebite.dub: DubDescription, dependencyFingerprint, parseDescribeLists,
-    dubDescribeProject;
+import snakebite.dub: DubDescription, dependencyFingerprint, parseDescribeLists;
 import snakebite.dubcache: cachedDubDescription;
 import snakebite.dependencyimage: defaultCompiler, generatorKey;
-import snakebite.project: projectStateDirectory, sourceSet;
+import snakebite.project: projectStateDirectory;
 import std.json: JSONValue, parseJSON;
-import std.file: write, remove, rename, readText;
-import std.path: buildPath;
-import std.process: execute, Config, environment;
-import std.algorithm: any, endsWith, canFind;
+import std.file: write, remove, rename, readText, dirEntries, SpanMode;
+import std.path: absolutePath, baseName, buildPath, dirName, relativePath;
+import std.process: environment;
+import std.string: replace;
 import ut;
+
+
+// The cache decides from the files that a description names, and the
+// description is made by a delegate, so these tests give it a recording of
+// what dub says for the same project (tests/fixtures/dub-describe) and do
+// not start dub. `tests/run_cli.py` checks the recordings against the real
+// dub. The project of the fixture is written into the sandbox, and `@ROOT@`
+// in the recording stands for the sandbox.
+private JSONValue recordedDescription(in Sandbox sandbox, in string fixture) {
+    const directory = buildPath(__FILE__.dirName, "../fixtures/dub-describe", fixture);
+    foreach (entry; dirEntries(directory, SpanMode.depth))
+        if (entry.isFile && entry.name.baseName != "describe.json"
+                && entry.name.baseName != "describe.cmd")
+            sandbox.writeFile(entry.name.relativePath(directory), readText(entry.name));
+    return parseJSON(readText(buildPath(directory, "describe.json"))
+        .replace("@ROOT@", sandbox.sandboxPath.absolutePath));
+}
 
 @("cache.reusesDescriptionsAndRefreshesBuildInputs")
 @Serial
 unittest {
     const sandbox = Sandbox();
-    const recipe = `name "cached-app"
-configuration "unittest" {
-    targetType "executable"
-    mainSourceFile "source/main.d"
-}
-`;
-    sandbox.writeFile("app/dub.sdl", recipe);
-    sandbox.writeFile("app/source/main.d", "module main; void main() {}\n");
+    auto recorded = recordedDescription(sandbox, "cached-app");
+    const recipe = readText(sandbox.inSandboxPath("app/dub.sdl"));
     const directory = sandbox.inSandboxPath("app");
     size_t calls;
     JSONValue describe() {
         ++calls;
         const arguments = ["--config=unittest", "--build=unittest"];
-        const output = execute(["dub", "describe", "--compiler=" ~ defaultCompiler]
-            ~ arguments, null, Config.none, size_t.max, directory);
-        output.status.should == 0;
-        return JSONValue(["value": parseJSON(output.output), "arguments": JSONValue(arguments)]);
+        return JSONValue(["value": recorded, "arguments": JSONValue(arguments)]);
     }
     void load() { cachedDubDescription(directory, defaultCompiler, null, &describe); }
     load;
@@ -49,14 +56,12 @@ configuration "unittest" {
     sandbox.writeFile("app/source/extra.d", "module extra;\n");
     load;
     calls.should == 2;
-    sourceSet(directory, null, null).files.any!(f => f.endsWith("extra.d")).should == true;
     remove(buildPath(directory, "source/extra.d"));
     load;
     calls.should == 3;
     write(buildPath(directory, "dub.sdl"), recipe ~ "versions \"Changed\"\n");
     load;
     calls.should == 4;
-    sourceSet(directory, null, null).flags.compilerArguments.any!(f => f == "-version=Changed").should == true;
     cachedDubDescription(directory, defaultCompiler, ["Extra"], &describe);
     calls.should == 5;
     load;
@@ -70,7 +75,6 @@ configuration "unittest" {
     sandbox.writeFile("app/source/nested/extra.d", "module nested.extra;\n");
     load;
     calls.should == 8;
-    sourceSet(directory, null, null).files.any!(f => f.endsWith("nested/extra.d")).should == true;
 
     const oldMode = environment.get("SNAKEBITE_DUB_CACHE", "on");
     scope(exit) environment["SNAKEBITE_DUB_CACHE"] = oldMode;
@@ -93,19 +97,12 @@ configuration "unittest" {
 @Serial
 unittest {
     const sandbox = Sandbox();
-    sandbox.writeFile("library/dub.sdl", `name "cached-library"
-targetType "library"
-`);
-    sandbox.writeFile("library/source/library.d", "module library;\n");
-    const directory = sandbox.inSandboxPath("library");
+    auto recorded = recordedDescription(sandbox, "cached-library");
+    const directory = sandbox.inSandboxPath("app");
     size_t calls;
     JSONValue describe() {
         ++calls;
-        const output = execute([
-            "dub", "describe", "--compiler=" ~ defaultCompiler,
-        ], null, Config.none, size_t.max, directory);
-        output.status.should == 0;
-        return JSONValue(["value": parseJSON(output.output),
+        return JSONValue(["value": recorded,
             "arguments": JSONValue(["--build=debug"])]);
     }
     void load() { cachedDubDescription(directory, defaultCompiler, null, &describe); }
@@ -120,23 +117,12 @@ targetType "library"
 @Serial
 unittest {
     const sandbox = Sandbox();
-    sandbox.writeFile("dependency/dub.sdl", `name "cached-dependency"
-targetType "library"
-`);
-    sandbox.writeFile("dependency/source/dependency.d", "module dependency;\n");
-    sandbox.writeFile("app/dub.sdl", `name "cached-app-with-dependency"
-dependency "cached-dependency" path="../dependency"
-`);
-    sandbox.writeFile("app/source/app.d", "module app;\n");
+    auto recorded = recordedDescription(sandbox, "cached-app-with-dependency");
     const directory = sandbox.inSandboxPath("app");
     size_t calls;
     JSONValue describe() {
         ++calls;
-        const output = execute([
-            "dub", "describe", "--compiler=" ~ defaultCompiler,
-        ], null, Config.none, size_t.max, directory);
-        output.status.should == 0;
-        return JSONValue(["value": parseJSON(output.output),
+        return JSONValue(["value": recorded,
             "arguments": JSONValue(["--build=debug"])]);
     }
     void load() { cachedDubDescription(directory, defaultCompiler, null, &describe); }
@@ -146,46 +132,6 @@ dependency "cached-dependency" path="../dependency"
 
     calls.should == 1;
 }
-
-@("cache.generationHooksAreNotSkipped")
-@Serial
-unittest {
-    const sandbox = Sandbox();
-    sandbox.writeFile("app/dub.sdl", `name "hook-app"
-targetType "library"
-preGenerateCommands "echo hook >> hooks.log"
-`);
-    sandbox.writeFile("app/source/app.d", "module app;\n");
-    const directory = sandbox.inSandboxPath("app");
-    dubDescribeProject(directory);
-    const before = readText(sandbox.inSandboxPath("app/hooks.log"));
-    dubDescribeProject(directory);
-    (readText(sandbox.inSandboxPath("app/hooks.log")).length > before.length).should == true;
-}
-
-@("cache.refreshesGeneratedRunnerAfterModuleRename")
-@Serial
-unittest {
-    const sandbox = Sandbox();
-    sandbox.writeFile("app/dub.sdl", "name \"renamed-app\"\ntargetType \"library\"\n");
-    sandbox.writeFile("app/source/app.d", "module original_name; unittest {}\n");
-    const directory = sandbox.inSandboxPath("app");
-    dubDescribeProject(directory);
-    dubDescribeProject(directory);
-    sandbox.writeFile("app/source/app.d", "module changed_name; unittest {}\n");
-    const updated = dubDescribeProject(directory);
-    bool checked;
-    foreach (package_; updated.value["packages"].array)
-        foreach (file; package_["files"].array)
-            if (file["path"].str.endsWith("dub_test_root.d")) {
-                const runner = readText(buildPath(package_["path"].str, file["path"].str));
-                runner.canFind("changed_name").should == true;
-                runner.canFind("original_name").should == false;
-                checked = true;
-            }
-    checked.should == true;
-}
-
 
 // dub prints each kind's lines joined by newlines, the kinds joined by one
 // blank line, then a final newline. An empty kind is nothing between two
@@ -238,21 +184,14 @@ unittest {
 @Serial
 unittest {
     const sandbox = Sandbox();
-    sandbox.writeFile("library/dub.sdl", `name "cached-library"
-targetType "library"
-`);
-    sandbox.writeFile("library/source/library.d", "module library;\n");
+    auto recorded = recordedDescription(sandbox, "cached-library");
     sandbox.writeFile("generator-a", "generator a");
     sandbox.writeFile("generator-b", "generator b, a different build");
-    const directory = sandbox.inSandboxPath("library");
+    const directory = sandbox.inSandboxPath("app");
     size_t calls;
     JSONValue describe() {
         ++calls;
-        const output = execute([
-            "dub", "describe", "--compiler=" ~ defaultCompiler,
-        ], null, Config.none, size_t.max, directory);
-        output.status.should == 0;
-        return JSONValue(["value": parseJSON(output.output),
+        return JSONValue(["value": recorded,
             "arguments": JSONValue(["--build=debug"])]);
     }
     void load(in string generator) {

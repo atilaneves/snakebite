@@ -328,7 +328,9 @@ public DependencyImage prepareImage(
 }
 
 
-private DependencyImage loadImage(in string path) {
+// Public for the tests, which load a shared object that `bin/ut`'s build made
+// instead of having `prepareImage` make one.
+public DependencyImage loadImage(in string path) {
     import core.sys.posix.dlfcn:
         dlerror, dlopen, RTLD_LAZY, RTLD_NODELETE;
     import std.string: fromStringz, toStringz;
