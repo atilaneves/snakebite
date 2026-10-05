@@ -2055,6 +2055,38 @@ FINALIZER_SHAPES: dict[str, tuple[str | None, ...]] = {
         "int f(int x) in (x >= 0) out (r; r > 0) { return x + 1; }",
         "total += f(dead);",
     ),
+    "compound_fields": (
+        "struct Owner { byte pad = 9; double d = 1.5; long l = 20; "
+        "double run() { d += 0.5; l <<= 1; return d + l; } }",
+        "Owner owner; auto result = owner.run; assert(result == 42.0); "
+        "total += cast(long) result;",
+    ),
+    "inherited_class_contracts": (
+        "class Base { int limit = 7; int f(int x) "
+        "in { ++total; assert(x < limit); } "
+        "out (r) { ++total; assert(r == x * limit); } "
+        "do { return x * limit; } } "
+        "class Derived: Base { override int f(int x) in (x > 0) "
+        "do { return x * limit; } } __gshared Base target; "
+        "shared static this() { target = new Derived; }",
+        "auto before = total; auto result = target.f(3); "
+        "assert(result == 21); assert(total == before + 2); "
+        "total += result;",
+    ),
+    "inherited_interface_contracts": (
+        "interface First { int a(); } interface Second { int f(int x) "
+        "in { record(); assert(x == g()); } "
+        "out (r) { record(); assert(r == g() * 2); } "
+        "int g(); void record(); } class Impl: First, Second { "
+        "int value = 7; int a() { return 1; } "
+        "int g() { return value; } void record() { ++total; } "
+        "int f(int x) in (x > 0) do { return x * 2; } } "
+        "__gshared Second target; "
+        "shared static this() { target = new Impl; }",
+        "auto before = total; auto result = target.f(7); "
+        "assert(result == 14); assert(total == before + 2); "
+        "total += result;",
+    ),
     "copyctor": (
         "struct P { int x; this(int v) { x = v; } this(ref return "
         "scope P o) { x = o.x + 1; } }",
