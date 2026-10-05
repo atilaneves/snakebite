@@ -121,11 +121,13 @@ public struct FrameStack {
             GC.removeRange(registered);
         if (_ownsTls)
             heapDelete(_tls);
-        if (_base !is null)
-            assert(
-                munmap(_base, _reservation + pageSize) == 0,
-                "could not release the frame stack reservation",
-            );
+        if (_base !is null) {
+            const unmapped = munmap(_base, _reservation + pageSize);
+            // `assert(0)` still halts under `-release`; the call must not
+            // sit inside an `assert` condition, which `-release` removes.
+            if (unmapped != 0)
+                assert(0, "could not release the frame stack reservation");
+        }
     }
 
     public Mark mark() const {
