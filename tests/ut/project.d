@@ -87,7 +87,10 @@ unittest {
 // not the file lies under an import path. A project loaded here names
 // its root modules the same way, relative to the project directory,
 // whatever the current working directory is.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot express a dub project"),
+)) {
     @("rootModuleFileIsRelativeToProjectDirectory." ~ backend.stringof)
     @Serial
     unittest {
@@ -110,7 +113,10 @@ static foreach (backend; Matrix!()) {
 // infer (`auto`) and that the guest never calls. Resolving that inherited
 // vtable slot's native address must not depend on something else having
 // already driven semantic analysis of that method's body.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot express a dub project"),
+)) {
     @("guestSubclassOfNativeClassWithInferredVirtualMethod." ~ backend.stringof)
     @Serial
     unittest {
@@ -159,7 +165,10 @@ targetType "library"
 // a plain function pointer the guest itself takes and calls - reaching
 // `snakebite.ffi.plan.PlanCache.addressOf`/`prepareCommon` directly,
 // never a class's vtable.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot express a dub project"),
+)) {
     @("guestTakesAddressOfNativeInferredFreeFunction." ~ backend.stringof)
     @Serial
     unittest {
@@ -194,6 +203,8 @@ targetType "library"
 // by the guest: the call passes the `TypeInfo` tuple before the declared
 // parameters and the extra arguments after them, as compiled D does.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot express a dub project"),
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot run D-style variadic functions"),
 )) {
@@ -238,6 +249,8 @@ targetType "library"
 // by the guest: the call passes the `TypeInfo` tuple before the declared
 // parameters and the extra arguments after them, as compiled D does.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot express a dub project"),
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot run D-style variadic functions"),
 )) {
@@ -283,7 +296,10 @@ targetType "library"
 // `snakebite.frontend.dmd.delegates.delegateTargetOf` decides the call's
 // shape, and the method's own inferred return type and attributes still
 // have to be complete before `snakebite.ffi.plan` resolves its address.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot express a dub project"),
+)) {
     @("guestCallsNativeInferredMethodThroughDelegate." ~ backend.stringof)
     @Serial
     unittest {
@@ -320,7 +336,10 @@ targetType "library"
 
 // An empty source file is a valid module, including when the project
 // directory differs from the process's current directory.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot express a dub project"),
+)) {
     @("emptyRootSourceOutsideWorkingDirectory." ~ backend.stringof)
     @Serial
     unittest {
@@ -340,7 +359,10 @@ static foreach (backend; Matrix!()) {
 // `debug` block in a root module is compiled in. A project loaded here
 // gets the same flag from its dub options, and the frontend has to
 // honour the bare flag, not only `-debug=identifier`.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot express a dub project"),
+)) {
     @("dubDebugModeCompilesDebugBlocks." ~ backend.stringof)
     @Serial
     unittest {
@@ -362,25 +384,14 @@ private string dubProjectRecipe(in string name, in string settings = "") {
         ~ "configuration \"unittest\" {\n    targetType \"executable\"\n}\n";
 }
 
-// The dub project at `directory` has a `main` that returns 0: run through
-// dub itself for the native oracle, or through the backend.
+// The dub project at `directory` has a `main` that returns 0 on the backend.
 private void dubProjectMainShouldSucceed(backend)(in string directory) {
     import snakebite.backends.backend: run;
-    import snakebite.dependencyimage: defaultCompiler;
     import snakebite.execution: prepareProject;
-    import std.process: Config, execute;
 
-    static if (is(backend == Native)) {
-        const result = execute(
-            ["dub", "run", "-q", "--config=unittest",
-                "--compiler=" ~ defaultCompiler],
-            null, Config.none, size_t.max, directory);
-        result.status.shouldEqual(0, result.output);
-    } else {
-        auto project = prepareProject(directory).project;
-        scope instance = new backend(project.program);
-        run(instance, project.program).should == 0;
-    }
+    auto project = prepareProject(directory).project;
+    scope instance = new backend(project.program);
+    run(instance, project.program).should == 0;
 }
 
 
@@ -393,6 +404,8 @@ private void dubProjectMainShouldSucceed(backend)(in string directory) {
 // a guest thread still walks when it ends, which segfaults `bin/sb`. The
 // host must hand the runtime back at the depth it found it.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot express a dub project"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot install a runtime hook"),
 )) {
     @("runtime.escapingUnittestThrowableKeepsInitDepth." ~ backend.stringof)
@@ -420,22 +433,12 @@ static foreach (backend; Matrix!(
             unittest { throw new Exception("escapes the runner"); }
         });
         const directory = sandbox.inSandboxPath("app");
-        static if (is(backend == Native)) {
-            import snakebite.dependencyimage: defaultCompiler;
-            import std.process: Config, execute;
-            // `dub test` reports a test program that exited 1 as its own 2.
-            execute(["dub", "test", "--compiler=" ~ defaultCompiler],
-                null, Config.none, size_t.max, directory).status.should == 2;
-        } else {
-            import snakebite.execution: executeBackend, prepareProject;
-
-            auto program = prepareProject(directory).project.program;
-            const depth = atomicLoad(runtimeInitDepth);
-            executeBackend(backendIdentity!backend, program).status.should == 1;
-            // Another test's guest run on another thread can hold the depth
-            // one higher for a moment; a skipped `rt_term` holds it forever.
-            runtimeInitDepthReturnsTo(depth).should == true;
-        }
+        auto program = prepareProject(directory).project.program;
+        const depth = atomicLoad(runtimeInitDepth);
+        executeBackend(backendIdentity!backend, program).status.should == 1;
+        // Another test's guest run on another thread can hold the depth
+        // one higher for a moment; a skipped `rt_term` holds it forever.
+        runtimeInitDepthReturnsTo(depth).should == true;
     }
 }
 
