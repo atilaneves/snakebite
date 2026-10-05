@@ -1,0 +1,1 @@
+module fixture_cached_dependency;

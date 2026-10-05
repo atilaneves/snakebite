@@ -1,0 +1,136 @@
+{
+	"rootPackage": "cached-app",
+	"configuration": "unittest",
+	"buildType": "unittest",
+	"compiler": "dmd",
+	"architecture": [
+		"x86_64"
+	],
+	"platform": [
+		"linux",
+		"posix"
+	],
+	"packages": [
+		{
+			"path": "@ROOT@/app/",
+			"name": "cached-app",
+			"version": "~master",
+			"description": "",
+			"homepage": "",
+			"authors": [],
+			"copyright": "",
+			"license": "",
+			"dependencies": [],
+			"active": true,
+			"configuration": "unittest",
+			"targetType": "executable",
+			"targetPath": "",
+			"targetName": "cached-app",
+			"targetFileName": "cached-app",
+			"workingDirectory": "",
+			"mainSourceFile": "source/main.d",
+			"dflags": [],
+			"lflags": [],
+			"libs": [],
+			"frameworks": [],
+			"injectSourceFiles": [],
+			"copyFiles": [],
+			"extraDependencyFiles": [],
+			"versions": [],
+			"debugVersions": [],
+			"importPaths": [
+				"source/"
+			],
+			"cImportPaths": [],
+			"stringImportPaths": [],
+			"preGenerateCommands": [],
+			"postGenerateCommands": [],
+			"preBuildCommands": [],
+			"postBuildCommands": [],
+			"preRunCommands": [],
+			"postRunCommands": [],
+			"environments": {},
+			"buildEnvironments": {},
+			"runEnvironments": {},
+			"preGenerateEnvironments": {},
+			"postGenerateEnvironments": {},
+			"preBuildEnvironments": {},
+			"postBuildEnvironments": {},
+			"preRunEnvironments": {},
+			"postRunEnvironments": {},
+			"buildRequirements": [],
+			"options": [],
+			"files": [
+				{
+					"role": "source",
+					"path": "source/main.d"
+				}
+			]
+		}
+	],
+	"targets": [
+		{
+			"rootPackage": "cached-app",
+			"packages": [
+				"cached-app"
+			],
+			"rootConfiguration": "unittest",
+			"buildSettings": {
+				"targetType": 2,
+				"targetPath": "@ROOT@/app/",
+				"targetName": "cached-app",
+				"workingDirectory": "",
+				"mainSourceFile": "@ROOT@/app/source/main.d",
+				"dflags": [],
+				"lflags": [],
+				"libs": [],
+				"frameworks": [],
+				"linkerFiles": [],
+				"sourceFiles": [
+					"@ROOT@/app/source/main.d"
+				],
+				"injectSourceFiles": [],
+				"copyFiles": [],
+				"extraDependencyFiles": [],
+				"versions": [
+					"Have_cached_app"
+				],
+				"debugVersions": [],
+				"versionFilters": [],
+				"debugVersionFilters": [],
+				"importPaths": [
+					"@ROOT@/app/source/"
+				],
+				"cImportPaths": [],
+				"stringImportPaths": [],
+				"importFiles": [],
+				"stringImportFiles": [],
+				"preGenerateCommands": [],
+				"postGenerateCommands": [],
+				"preBuildCommands": [],
+				"postBuildCommands": [],
+				"preRunCommands": [],
+				"postRunCommands": [],
+				"environments": {},
+				"buildEnvironments": {},
+				"runEnvironments": {},
+				"preGenerateEnvironments": {},
+				"postGenerateEnvironments": {},
+				"preBuildEnvironments": {},
+				"postBuildEnvironments": {},
+				"preRunEnvironments": {},
+				"postRunEnvironments": {},
+				"requirements": [],
+				"options": [
+					"debugMode",
+					"debugInfo",
+					"unittests",
+					"warningsAsErrors"
+				]
+			},
+			"cacheArtifactPath": "<machine specific>",
+			"dependencies": [],
+			"linkDependencies": []
+		}
+	]
+}

@@ -6,6 +6,7 @@
 # End-to-end tests of the `bin/sb` command line. They start the built
 # binary as a child process, so they live here and not in `bin/ut`.
 
+import json
 import os
 import re
 import shutil
@@ -2754,6 +2755,1771 @@ def test_crt_destructor_runs_after_exit_in_a_module_destructor(
     assert guest_lines(result) == [
         "crt constructor", "main", "shared destructor", "crt destructor",
     ]
+
+
+# A guest program that calls a native dependency: the dependency's template
+# instances and functions are built into an image the backends call, and
+# each shape states what the program's `main` returns. A shape without
+# `imports` is a dub project in `app`; with `imports` it is a bare `app`
+# directory that imports from `deps`. `optimised` leaves the image
+# optimisation on, which is the default of `bin/sb`.
+class ImageShape(NamedTuple):
+    files: dict[str, str]
+    backends: tuple[str, ...] = tuple(BACKENDS)
+    imports: bool = False
+    optimised: bool = False
+    status: int = 0
+    arguments: tuple[str, ...] = ()
+
+
+def dub_app_recipe(name: str, settings: str = "") -> str:
+    return (
+        f'name "{name}"\ntargetType "library"\n{settings}'
+        'configuration "unittest" {\n    targetType "executable"\n}\n'
+    )
+
+
+def snippet_shape(code: str, result: int, backends: tuple[str, ...]) -> ImageShape:
+    return ImageShape(
+        {
+            "app/root.d": (
+                "module root;\n" + code
+                + f"\nint main() {{ return answer == {result} ? 0 : 1; }}\n"
+            ),
+        },
+        backends=backends,
+    )
+
+
+NATIVE_AND_BACKENDS = ("native", *BACKENDS)
+NATIVE_AND_FILE_BACKENDS = ("native", *FILE_BACKENDS)
+
+IMAGE_SHAPES: dict[str, ImageShape] = {
+    # Two overloads of one template share the name `answer!int`.
+    "overloaded_template": ImageShape(
+        {
+            "deps/overloads.d": """
+                module overloads;
+                template answer(T) {
+                    T answer() { return 17; }
+                    T answer(T value) { return value + 1; }
+                }
+                int invoke(string moduleName)() {
+                    mixin("import " ~ moduleName ~ ";");
+                    return mixin(moduleName ~ ".rootAnswer()");
+                }
+                """,
+            "app/root.d": """
+                module root;
+                import overloads;
+                int rootAnswer() { return 31; }
+                int main() {
+                    assert(answer!int() == 17);
+                    assert(answer!int(23) == 24);
+                    assert(invoke!(__MODULE__)() == 31);
+                    return 0;
+                }
+                """,
+        },
+        imports=True,
+    ),
+    # Only the guest's own call instantiates `doubled!int`.
+    "template_instantiated_only_by_guest": ImageShape(
+        {
+            "deps/only_guest.d": """
+                module only_guest;
+                auto doubled(T)(T x) { return cast(T) (x + x); }
+                """,
+            "app/root.d": """
+                module root;
+                import only_guest;
+                int main() { return doubled(21) == 42 ? 0 : 1; }
+                """,
+        },
+        imports=True,
+    ),
+    # `&pick!(string)` binds to the more specialised array overload; the
+    # call `pick("hello")` must still reach the scalar overload.
+    "overload_partial_ordering": ImageShape(
+        {
+            "deps/ordering.d": """
+                module ordering;
+                size_t pick(S)(S value) { return 1; }
+                size_t pick(S : C[], C)(S[] values) { return 2; }
+                """,
+            "app/root.d": """
+                module root;
+                import ordering;
+                int main() { assert(pick("hello") == 1); return 0; }
+                """,
+        },
+        imports=True,
+        optimised=True,
+    ),
+    # A nested function that captures a local escapes through the returned
+    # `Wrapped!f`, so `only!false` has a heap closure frame.
+    "closure_across_the_barrier": ImageShape(
+        {
+            "deps/closure_dep.d": """
+                module closure_dep;
+                struct Wrapped(alias pred) {
+                    int value;
+                    int get() { return pred(value); }
+                }
+                auto only(bool exact)(int base) {
+                    int captured = base;
+                    int f(int x) {
+                        static if (exact)
+                            return x * captured;
+                        else
+                            return x + captured;
+                    }
+                    return Wrapped!f(5);
+                }
+                """,
+            "app/root.d": """
+                module root;
+                import closure_dep;
+                int main() { assert(only!false(10).get() == 15); return 0; }
+                """,
+        },
+        backends=tuple(FILE_BACKENDS),
+        imports=True,
+        optimised=True,
+    ),
+    "narrow_template_arguments": ImageShape(
+        {
+            "deps/narrow.d": """
+                module narrow;
+                struct Selection(ushort value) { int member = value; }
+                int read(T)(T value) { return value.member; }
+                int number(short value)() { return value; }
+                int literal(string value)() { return value == "!cast(ushort)1u"; }
+                """,
+            "app/root.d": """
+                module root;
+                import narrow;
+                int main() {
+                    assert(read(Selection!1()) == 1);
+                    assert(number!(-2)() == -2);
+                    assert(literal!"!cast(ushort)1u"() == 1);
+                    return 0;
+                }
+                """,
+        },
+        imports=True,
+    ),
+    "atomic_fetch_add_in_a_project": ImageShape(
+        {
+            "app/root.d": """
+                module root;
+                import core.atomic: atomicFetchAdd;
+                int main() {
+                    shared int value = 17;
+                    assert(atomicFetchAdd(value, 4) == 17);
+                    assert(value == 21);
+                    return 0;
+                }
+                """,
+        },
+        backends=NATIVE_AND_FILE_BACKENDS,
+    ),
+    # A dependency's `__gshared` variable lives in the native image: native
+    # and interpreted code share one storage.
+    "dependency_global": ImageShape(
+        {
+            "app/dub.sdl": """
+                name "global-app"
+                targetType "library"
+                targetName "global-app"
+                dependency "global-dependency" path="../dependency"
+                configuration "unittest" {
+                    targetType "executable"
+                }
+                """,
+            "dependency/dub.sdl": """
+                name "global-dependency"
+                targetType "staticLibrary"
+                """,
+            "dependency/source/global_dependency.d": """
+                module global_dependency;
+                __gshared int counter = 0;
+                void bump() { ++counter; }
+                struct Settings {
+                    static string path = "default";
+                    static void setPath(string value) { path = value; }
+                }
+                """,
+            "app/source/global_app.d": """
+                module global_app;
+                import global_dependency;
+                int main() {
+                    if (counter != 0) return 1;
+                    bump();
+                    if (counter != 1) return 2;
+                    if (Settings.path != "default") return 3;
+                    Settings.setPath("changed");
+                    if (Settings.path != "changed") return 4;
+                    return 0;
+                }
+                """,
+        },
+        backends=tuple(FILE_BACKENDS),
+    ),
+    # The interpreted reader on a new thread sees that thread's own copy of
+    # the dependency's thread-local variable.
+    "dependency_thread_local_per_thread": ImageShape(
+        {
+            "app/dub.sdl": """
+                name "global-app"
+                targetType "library"
+                targetName "global-app"
+                dependency "global-dependency" path="../dependency"
+                configuration "unittest" {
+                    targetType "executable"
+                }
+                """,
+            "dependency/dub.sdl": """
+                name "global-dependency"
+                targetType "staticLibrary"
+                """,
+            "dependency/source/global_dependency.d": """
+                module global_dependency;
+                import core.thread: Thread;
+                struct Settings {
+                    static string path = "default";
+                    static void setPath(string value) { path = value; }
+                }
+                string readOnNewThread(string delegate() read) {
+                    string seen;
+                    auto thread = new Thread({ seen = read(); });
+                    thread.start;
+                    thread.join;
+                    return seen;
+                }
+                """,
+            "app/source/global_app.d": """
+                module global_app;
+                import global_dependency;
+                int main() {
+                    Settings.setPath("changed");
+                    if (Settings.path != "changed") return 1;
+                    if (readOnNewThread(() => Settings.path) != "default")
+                        return 2;
+                    if (Settings.path != "changed") return 3;
+                    return 0;
+                }
+                """,
+        },
+        backends=tuple(FILE_BACKENDS),
+    ),
+    # The native base declares a second virtual method whose return type
+    # dmd must infer and that the guest never calls.
+    "subclass_of_native_class_with_inferred_virtual_method": ImageShape(
+        {
+            "dependency/dub.sdl": 'name "vtable-dep"\ntargetType "library"\n',
+            "dependency/source/vtable_dep.d": """
+                module vtable_dep;
+                import std.algorithm.iteration: filter;
+
+                class Base {
+                    private int _value;
+                    this(int value) { _value = value; }
+                    int value() { return _value; }
+                    auto positives(int[] xs) {
+                        return xs.filter!(x => x > 0);
+                    }
+                }
+                """,
+            "app/dub.sdl": dub_app_recipe(
+                "vtable-app", 'dependency "vtable-dep" path="../dependency"\n',
+            ),
+            "app/source/vtable_app.d": """
+                module vtable_app;
+                import vtable_dep;
+
+                class Derived : Base {
+                    this(int value) { super(value); }
+                    override int value() { return super.value() + 1; }
+                }
+
+                int main() {
+                    auto derived = new Derived(41);
+                    return derived.value() == 42 ? 0 : 1;
+                }
+                """,
+        },
+    ),
+    "address_of_native_inferred_free_function": ImageShape(
+        {
+            "dependency/dub.sdl": 'name "fnptr-dep"\ntargetType "library"\n',
+            "dependency/source/fnptr_dep.d": """
+                module fnptr_dep;
+                auto increment(int x) { return x + 1; }
+                """,
+            "app/dub.sdl": dub_app_recipe(
+                "fnptr-app", 'dependency "fnptr-dep" path="../dependency"\n',
+            ),
+            "app/source/fnptr_app.d": """
+                module fnptr_app;
+                import fnptr_dep;
+                int main() {
+                    auto fp = &increment;
+                    return fp(41) == 42 ? 0 : 1;
+                }
+                """,
+        },
+    ),
+    # The call passes the `TypeInfo` tuple before the declared parameters
+    # and the extra arguments after them, as compiled D does.
+    "new_native_class_with_variadic_constructor": ImageShape(
+        {
+            "dependency/dub.sdl":
+                'name "variadic-ctor-dep"\ntargetType "library"\n',
+            "dependency/source/variadic_ctor_dep.d": """
+                module variadic_ctor_dep;
+                import core.vararg;
+
+                class Summer {
+                    int total;
+                    this(int first, ...) {
+                        total = first;
+                        foreach (type; _arguments) {
+                            assert(type == typeid(int));
+                            total += va_arg!int(_argptr);
+                        }
+                    }
+                }
+                """,
+            "app/dub.sdl": dub_app_recipe(
+                "variadic-ctor-app",
+                'dependency "variadic-ctor-dep" path="../dependency"\n',
+            ),
+            "app/source/variadic_ctor_app.d": """
+                module variadic_ctor_app;
+                import variadic_ctor_dep;
+
+                int main() {
+                    auto summer = new Summer(1, 2, 3);
+                    return summer.total == 6 ? 0 : 1;
+                }
+                """,
+        },
+        backends=tuple(FILE_BACKENDS),
+    ),
+    "new_native_struct_with_variadic_constructor": ImageShape(
+        {
+            "dependency/dub.sdl":
+                'name "variadic-struct-ctor-dep"\ntargetType "library"\n',
+            "dependency/source/variadic_struct_ctor_dep.d": """
+                module variadic_struct_ctor_dep;
+                import core.vararg;
+
+                struct Summer {
+                    int total;
+                    this(int first, ...) {
+                        total = first;
+                        foreach (type; _arguments) {
+                            assert(type == typeid(int));
+                            total += va_arg!int(_argptr);
+                        }
+                    }
+                }
+                """,
+            "app/dub.sdl": dub_app_recipe(
+                "variadic-struct-ctor-app",
+                'dependency "variadic-struct-ctor-dep" path="../dependency"\n',
+            ),
+            "app/source/variadic_struct_ctor_app.d": """
+                module variadic_struct_ctor_app;
+                import variadic_struct_ctor_dep;
+
+                int main() {
+                    auto summer = new Summer(1, 2, 3);
+                    return summer.total == 6 ? 0 : 1;
+                }
+                """,
+        },
+        backends=tuple(FILE_BACKENDS),
+    ),
+    # A native class's `auto` method, reached through a delegate that the
+    # guest takes.
+    "native_inferred_method_through_delegate": ImageShape(
+        {
+            "dependency/dub.sdl":
+                'name "delegate-dep"\ntargetType "library"\n',
+            "dependency/source/delegate_dep.d": """
+                module delegate_dep;
+
+                class Greeter {
+                    private int _base;
+                    this(int base) { _base = base; }
+                    auto answer(int x) { return _base + x; }
+                }
+                """,
+            "app/dub.sdl": dub_app_recipe(
+                "delegate-app",
+                'dependency "delegate-dep" path="../dependency"\n',
+            ),
+            "app/source/delegate_app.d": """
+                module delegate_app;
+                import delegate_dep;
+
+                int main() {
+                    auto instance = new Greeter(40);
+                    auto dg = &instance.answer;
+                    return dg(2) == 42 ? 0 : 1;
+                }
+                """,
+        },
+    ),
+    # dub compiles a package from its own directory with paths relative to
+    # it, so a root module's `__FILE__` is that relative path.
+    "root_module_file_is_relative_to_the_project": ImageShape(
+        {
+            "app/dub.sdl": dub_app_recipe(
+                "filename", 'sourcePaths "sub"\nimportPaths "imports"\n',
+            ),
+            "app/imports/.keep": "",
+            "app/sub/file_name.d": """
+                module file_name;
+                int main() { return __FILE__ == "sub/file_name.d" ? 0 : 1; }
+                """,
+        },
+    ),
+    # An empty source file is a valid module.
+    "empty_root_source": ImageShape(
+        {
+            "app/dub.sdl": dub_app_recipe("emptyroot"),
+            "app/source/main_empty_root.d": """
+                module main_empty_root;
+                int main() { return 0; }
+                """,
+            "app/source/empty_root.d": "",
+        },
+    ),
+    # dub's debug and unittest build types pass `-debug`.
+    "dub_debug_mode_compiles_debug_blocks": ImageShape(
+        {
+            "app/dub.sdl": dub_app_recipe("debugmode"),
+            "app/source/debug_mode.d": """
+                module debug_mode;
+                int main() { debug { return 0; } return 1; }
+                """,
+        },
+    ),
+    # The `-version` flag of the command line reaches the image build.
+    "image_build_receives_version_flag": ImageShape(
+        {
+            "deps/versioned.d": """
+                module versioned;
+                int answer(T)() {
+                    version (ImageSetting) return 42; else return 1;
+                }
+                """,
+            "app/root.d": """
+                module root;
+                import versioned;
+                int main() { return answer!int == 42 ? 0 : 1; }
+                """,
+        },
+        imports=True,
+        arguments=("--version=ImageSetting",),
+    ),
+    # A root-owned type nested two levels deep in the arguments of a
+    # dependency template instance: the instance is not in the image, and
+    # one with only built-in and dependency types is.
+    "nested_template_argument_with_a_root_type": ImageShape(
+        {
+            "deps/nested_root.d": """
+                module nested_root;
+                struct Bucket(K, V) { K key; V value; }
+                void store(T)(T value) {}
+                """,
+            "app/root.d": """
+                module root;
+                import nested_root;
+                class Thing {}
+                int main() {
+                    Bucket!(string, void delegate(Thing)) bucket;
+                    store(bucket);
+                    Bucket!(string, void delegate(int)) other;
+                    store(other);
+                    return 0;
+                }
+                """,
+        },
+        imports=True,
+    ),
+    "thread_object_from_a_druntime_template": snippet_shape("""
+        import core.thread: Thread;
+        int answer() {
+            auto thread = new Thread({});
+            thread.start;
+            thread.join;
+            return 0;
+        }
+        """, 0, NATIVE_AND_FILE_BACKENDS),
+    # A Phobos template instance that the program instantiates.
+    "phobos_rebindable_alias_overloads": snippet_shape("""
+        import std.typecons: rebindable;
+        int answer() {
+            int[] values = [17];
+            return rebindable(values)[0];
+        }
+        """, 17, NATIVE_AND_BACKENDS),
+    "phobos_among_with_a_lambda": snippet_shape("""
+        import std.algorithm.comparison: among;
+        int answer() {
+            return among!((a, b) => a == b)("a", "x", "a");
+        }
+        """, 2, NATIVE_AND_BACKENDS),
+    "recursive_constructor": snippet_shape("""
+        struct Recursive {
+            this(int depth) {
+                if (depth > 0) {
+                    auto child = Recursive(depth - 1);
+                }
+            }
+        }
+        int answer() {
+            auto value = Recursive(0);
+            return 0;
+        }
+        """, 0, NATIVE_AND_BACKENDS),
+    "recursive_function_literal": snippet_shape("""
+        int answer() {
+            int delegate(int) recursive = (int depth) {
+                if (depth > 0) return __traits(parent, depth)(depth - 1);
+                return 7;
+            };
+            return recursive(3);
+        }
+        """, 7, NATIVE_AND_BACKENDS),
+    "phobos_bigint": snippet_shape("""
+        import std.bigint: BigInt;
+        int answer() { return BigInt("123").toInt; }
+        """, 123, NATIVE_AND_BACKENDS),
+    "to_delegate_of_an_extern_c_function": snippet_shape("""
+        import std.functional: toDelegate;
+        extern(C) int increment(int value) { return value + 1; }
+        int answer() { return toDelegate(&increment)(16); }
+        """, 17, NATIVE_AND_FILE_BACKENDS),
+    "atomic_fetch_add_with_phobos_min_max": snippet_shape("""
+        import core.atomic: atomicFetchAdd;
+        import std.algorithm.comparison: min, max;
+        int answer() {
+            shared int value = 17;
+            ulong amount = 4;
+            const previous = atomicFetchAdd(value, min(amount, max(amount, 2UL)));
+            assert(value == 21);
+            return previous;
+        }
+        """, 17, NATIVE_AND_FILE_BACKENDS),
+    "atomic_load_through_a_pointer": snippet_shape("""
+        import core.internal.atomic: atomicLoad;
+        int answer() {
+            shared int value = 42;
+            auto pointer = &value;
+            return atomicLoad(cast(int*) pointer);
+        }
+        """, 42, NATIVE_AND_FILE_BACKENDS),
+}
+
+
+def write_files(root: Path, files: dict[str, str]) -> None:
+    for relative, text in files.items():
+        write(root / relative, text)
+
+
+def run_image_shape(
+    tmp_path: Path, backend: str, shape: ImageShape,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    if backend == "native":
+        sources = sorted(
+            str(path) for folder in ("app", "deps")
+            for path in (tmp_path / folder).glob("*.d")
+        )
+        dmd = shutil.which("dmd")
+        if dmd is None:
+            pytest.skip("dmd, the reference compiler, is not on PATH")
+        executable = tmp_path / "native"
+        compiled = subprocess.run(
+            [dmd, "-unittest", f"-of={executable}", f"-od={tmp_path}",
+             *sources],
+            capture_output=True, check=False, text=True, timeout=120,
+        )
+        assert compiled.returncode == 0, output(compiled)
+        return subprocess.run(
+            [str(executable)], capture_output=True, check=False, text=True,
+            timeout=120, cwd=tmp_path,
+        )
+
+    arguments = [f"--backend={backend}", *shape.arguments]
+    if not shape.optimised:
+        arguments.append("--no-optimise-image")
+    if shape.imports:
+        arguments += ["-I", str(tmp_path / "deps")]
+    return run_sb(*arguments, str(tmp_path / "app"), cwd=tmp_path, env=env)
+
+
+def image_shape_cases() -> list[tuple[str, str]]:
+    return [
+        (name, backend)
+        for name, shape in IMAGE_SHAPES.items()
+        for backend in shape.backends
+    ]
+
+
+@pytest.mark.parametrize(
+    "name, backend", image_shape_cases(),
+    ids=[f"{name}-{backend}" for name, backend in image_shape_cases()],
+)
+def test_guest_runs_against_a_native_dependency(
+    tmp_path: Path, name: str, backend: str,
+) -> None:
+    shape = IMAGE_SHAPES[name]
+    write_files(tmp_path, shape.files)
+
+    result = run_image_shape(tmp_path, backend, shape)
+
+    assert result.returncode == shape.status, output(result)
+
+
+# `bin/sb` is built with LDC, so the image compiler it looks for on PATH is
+# `ldc2`. A stub of that name on the child's PATH records each start and
+# then runs the real compiler, or fails as a test of the error message says.
+IMAGE_COMPILER = "ldc2"
+
+
+def stub_compiler(directory: Path, script_body: str) -> Path:
+    real = shutil.which(IMAGE_COMPILER)
+    assert real is not None, f"{IMAGE_COMPILER} is not on PATH"
+    stub = directory / "stubs" / IMAGE_COMPILER
+    write(stub, "#!/bin/sh\n" + script_body.replace("@REAL@", real))
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    return stub
+
+
+def recording_compiler(directory: Path) -> Path:
+    log = directory / "compiler.log"
+    stub_compiler(directory, f'echo "$*" >> "{log}"\nexec "@REAL@" "$@"\n')
+    return log
+
+
+def image_builds(log: Path) -> int:
+    if not log.exists():
+        return 0
+    return sum(" -shared " in f" {line} " for line in log.read_text().splitlines())
+
+
+def run_with_stubs(
+    tmp_path: Path, backend: str, *arguments: str,
+) -> subprocess.CompletedProcess[str]:
+    path = f"{tmp_path / 'stubs'}:{os.environ.get('PATH', '')}"
+    return run_sb(
+        f"--backend={backend}", *arguments, "-I", str(tmp_path / "deps"),
+        str(tmp_path / "app"), cwd=tmp_path, env={"PATH": path},
+    )
+
+
+def write_answer_project(directory: Path, value: int = 7) -> None:
+    write(
+        directory / "deps" / "answers.d",
+        f"""
+        module answers;
+        int answer(T)() {{ return {value}; }}
+        """,
+    )
+    write(
+        directory / "app" / "root.d",
+        """
+        module root;
+        import answers;
+        int main() { return answer!int(); }
+        """,
+    )
+
+
+# Nothing about an unchanged project asks for another image: the second
+# start, and a start after an edit that leaves the image source as it was,
+# start no image build. The two settings of the image optimisation each
+# have an image of their own, and each is built once.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_unchanged_project_builds_its_image_once(
+    tmp_path: Path, backend: str,
+) -> None:
+    write_answer_project(tmp_path)
+    log = recording_compiler(tmp_path)
+
+    first = run_with_stubs(tmp_path, backend)
+    assert first.returncode == 7, output(first)
+    assert image_builds(log) == 1
+
+    again = run_with_stubs(tmp_path, backend)
+    assert again.returncode == 7, output(again)
+    assert image_builds(log) == 1
+
+    write(
+        tmp_path / "app" / "root.d",
+        """
+        module root;
+        import answers;
+        // An edit that calls the same template.
+        int main() { return answer!int(); }
+        """,
+    )
+    edited = run_with_stubs(tmp_path, backend)
+    assert edited.returncode == 7, output(edited)
+    assert image_builds(log) == 1
+
+    unoptimised = run_with_stubs(tmp_path, backend, "--no-optimise-image")
+    assert unoptimised.returncode == 7, output(unoptimised)
+    assert image_builds(log) == 2
+
+    for arguments in ([], ["--no-optimise-image"]):
+        repeated = run_with_stubs(tmp_path, backend, *arguments)
+        assert repeated.returncode == 7, output(repeated)
+    assert image_builds(log) == 2
+
+
+# An edit to a dependency is in the next start's result, and builds the
+# image that has the edit.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_dependency_edit_is_in_the_next_start(
+    tmp_path: Path, backend: str,
+) -> None:
+    write_answer_project(tmp_path, 7)
+    log = recording_compiler(tmp_path)
+
+    before = run_with_stubs(tmp_path, backend, "--no-optimise-image")
+    assert before.returncode == 7, output(before)
+    assert image_builds(log) == 1
+
+    write_answer_project(tmp_path, 9)
+    after = run_with_stubs(tmp_path, backend, "--no-optimise-image")
+    assert after.returncode == 9, output(after)
+    assert image_builds(log) == 2
+
+
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+@pytest.mark.parametrize(
+    "phase, failing_arguments, message",
+    [
+        ("compilation", "-c", "Dependency image compilation failed"),
+        ("linking", "-shared", "Dependency image linking failed"),
+    ],
+    ids=["compile", "link"],
+)
+def test_failing_image_build_reports_the_compiler_output(
+    tmp_path: Path, backend: str, phase: str, failing_arguments: str,
+    message: str,
+) -> None:
+    write_answer_project(tmp_path)
+    stub_compiler(
+        tmp_path,
+        'case " $* " in\n'
+        f'    *" {failing_arguments} "*) echo "image build diagnostic"; '
+        "exit 1;;\n"
+        'esac\nexec "@REAL@" "$@"\n',
+    )
+
+    failed = run_with_stubs(tmp_path, backend)
+
+    assert failed.returncode != 0, output(failed)
+    assert message in output(failed)
+    assert "Command: " in output(failed)
+    assert "image build diagnostic" in output(failed)
+
+    # The failed build leaves nothing that a start with a working compiler
+    # would take for an image.
+    (tmp_path / "stubs" / IMAGE_COMPILER).unlink()
+    recovered = run_with_stubs(tmp_path, backend)
+    assert recovered.returncode == 7, output(recovered)
+
+
+# A runner hook that a dependency installs replaces the default unit test
+# runner: the app's failing unittest never runs. The `ctfe` backend builds
+# no dependency image, so no hook of one reaches it.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_dependency_runner_replaces_the_default_test_runner(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "dub.sdl",
+        'name "repeat-runner-app"\ntargetType "library"\n'
+        'dependency "repeat-runner" path="../runner"\n',
+    )
+    write(
+        tmp_path / "app" / "source" / "app.d",
+        """
+        module repeat_runner_app;
+        import repeat_runner;
+        unittest { assert(false, "custom runner must replace default tests"); }
+        """,
+    )
+    write(
+        tmp_path / "runner" / "dub.sdl",
+        'name "repeat-runner"\ntargetType "staticLibrary"\n',
+    )
+    write(
+        tmp_path / "runner" / "source" / "repeat_runner.d",
+        """
+        module repeat_runner;
+        import core.runtime: Runtime, UnitTestResult;
+        import core.stdc.stdio: puts;
+        shared static this() {
+            Runtime.extendedModuleUnitTester = () {
+                puts("custom runner ran");
+                return UnitTestResult(1, 1, false, false);
+            };
+        }
+        """,
+    )
+
+    result = run_sb(
+        f"--backend={backend}", "--no-optimise-image", str(tmp_path / "app"),
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, output(result)
+    assert guest_lines(result).count("custom runner ran") == 1, output(result)
+
+
+# A throwable that escapes the runner hook of a dependency ends the program
+# with status 1, not with a crash at exit.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_throwable_escaping_a_unittest_runner_ends_the_program_cleanly(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "dub.sdl",
+        'name "escaping-throwable-app"\ntargetType "library"\n',
+    )
+    write(
+        tmp_path / "app" / "source" / "escaping_throwable_app.d",
+        """
+        module escaping_throwable_app;
+        import core.runtime: Runtime, UnitTestResult;
+        shared static this() {
+            Runtime.extendedModuleUnitTester = {
+                foreach (module_; ModuleInfo)
+                    if (module_ && module_.unitTest
+                            && module_.name == "escaping_throwable_app")
+                        module_.unitTest()();
+                return UnitTestResult(1, 1, false, false);
+            };
+        }
+        unittest { throw new Exception("escapes the runner"); }
+        """,
+    )
+
+    result = run_sb(
+        f"--backend={backend}", "--no-optimise-image", str(tmp_path / "app"),
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 1, output(result)
+    assert "escapes the runner" in output(result)
+
+
+def app_using_unused_member(backend: str, expected: int) -> str:
+    # CTFE has no native image to call a symbol of.
+    check = "" if backend == "ctfe" else (
+        f"if (image_unused_answer() != {expected}) return 1;"
+    )
+    return f"""
+        module image_app;
+        import image_middle;
+        extern(C) int image_unused_answer();
+        int main() {{
+            assert(answer() == 42);
+            {check}
+            return 0;
+        }}
+        """
+
+
+# The dependencies of a dependency are built once and reach the image as
+# archives: a member that nothing refers to still answers a symbol lookup,
+# an edit of the app does not build the dependencies again, an edit of a
+# transitive dependency does, and the image does not use the copy of the
+# archive that dub leaves in the package directory.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_transitive_dub_dependencies_reach_the_image(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "dub.sdl",
+        """
+        name "image-app"
+        targetType "library"
+        targetName "image-app"
+        preBuildCommands "test ! -e reject-build"
+        dependency "image-middle" path="../middle"
+        configuration "unittest" {
+            targetType "executable"
+        }
+        """,
+    )
+    app_source = tmp_path / "app" / "source" / "app.d"
+    write(app_source, app_using_unused_member(backend, 73))
+    write(
+        tmp_path / "middle" / "dub.sdl",
+        """
+        name "image-middle"
+        targetType "staticLibrary"
+        dependency "image-leaf" path="../leaf archives"
+        """,
+    )
+    write(
+        tmp_path / "middle" / "source" / "image_middle.d",
+        """
+        module image_middle;
+        import image_leaf;
+        int answer() { return leaf() + 1; }
+        """,
+    )
+    leaf = tmp_path / "leaf archives"
+    write(leaf / "dub.sdl", 'name "image-leaf"\ntargetType "staticLibrary"\n')
+    write(
+        leaf / "source" / "image_leaf.d",
+        "module image_leaf;\nint leaf() { return 41; }\n",
+    )
+    unused = leaf / "source" / "image_unused.d"
+    write(
+        unused,
+        """
+        module image_unused;
+        extern(C) int image_unused_answer() { return 73; }
+        """,
+    )
+    # dub keeps the build artifacts of a dependency under DPATH.
+    dpath = tmp_path / "dpath"
+    start = lambda: run_sb(  # noqa: E731
+        f"--backend={backend}", "--no-optimise-image", str(tmp_path / "app"),
+        cwd=tmp_path, env={"DPATH": str(dpath)},
+    )
+
+    first = start()
+    assert first.returncode == 0, output(first)
+
+    # With the build command of the app rejecting a build, an edit of the
+    # app still starts: neither the app nor the archives are built again.
+    write(tmp_path / "app" / "reject-build")
+    write(app_source, app_using_unused_member(backend, 73) + "\n")
+    edited_app = start()
+    assert edited_app.returncode == 0, output(edited_app)
+    (tmp_path / "app" / "reject-build").unlink()
+
+    write(
+        unused,
+        """
+        module image_unused;
+        extern(C) int image_unused_answer() { return 179; }
+        """,
+    )
+    write(app_source, app_using_unused_member(backend, 179))
+    edited_leaf = start()
+    assert edited_leaf.returncode == 0, output(edited_leaf)
+
+    # Another compiler's build replaces the copy in the package directory.
+    write(leaf / "libimage-leaf.a", "not an archive")
+    foreign = start()
+    assert foreign.returncode == 0, output(foreign)
+
+    # A missing build artifact is built again. The `ctfe` backend builds no
+    # dependencies, so it has none.
+    if backend == "ctfe":
+        return
+    artifacts = list(dpath.rglob("libimage-leaf.a"))
+    assert len(artifacts) == 1, artifacts
+    artifacts[0].unlink()
+    rebuilt = start()
+    assert rebuilt.returncode == 0, output(rebuilt)
+    assert artifacts[0].exists()
+
+
+# The `preGenerateCommands` of a recipe run at each start: a cached
+# description of the project does not skip them. The `ctfe` backend cannot
+# run the test runner that dub generates.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_generation_hook_runs_at_every_start(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    write(
+        app / "dub.sdl",
+        'name "hook-app"\ntargetType "library"\n'
+        'preGenerateCommands "echo hook >> hooks.log"\n',
+    )
+    write(app / "source" / "app.d", "module app;\n")
+
+    for starts in (1, 2, 3):
+        result = run_sb(
+            f"--backend={backend}", "--no-optimise-image", str(app),
+            cwd=tmp_path,
+        )
+        assert result.returncode == 0, output(result)
+        assert (app / "hooks.log").read_text().splitlines() == (
+            ["hook"] * starts
+        )
+
+
+# The test runner that dub generates for a library names the modules of
+# the package: a module renamed between two starts is run under its new name.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_generated_test_runner_follows_a_module_rename(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    write(app / "dub.sdl", 'name "renamed-app"\ntargetType "library"\n')
+
+    def start(module_name: str) -> subprocess.CompletedProcess[str]:
+        write(
+            app / "source" / "app.d",
+            f"""
+            module {module_name};
+            unittest {{
+                import core.stdc.stdio: puts;
+                puts("{module_name} unittest ran");
+            }}
+            """,
+        )
+        return run_sb(
+            f"--backend={backend}", "--no-optimise-image", str(app),
+            cwd=tmp_path,
+        )
+
+    for module_name in ("original_name", "original_name", "changed_name"):
+        result = start(module_name)
+        assert result.returncode == 0, output(result)
+        assert f"{module_name} unittest ran" in guest_lines(result)
+        other = {"original_name", "changed_name"} - {module_name}
+        assert not any(name in output(result) for name in other)
+
+
+# A C file is a root module of a project (`sourceFiles` of a dub recipe, or
+# any `.c` file of a bare directory), and D code imports it as it imports a
+# D module (ImportC). Each case states the status that the D `main` returns,
+# which a compiled program gives as well. `CMOD` in the D source names the C
+# module.
+class CProject(NamedTuple):
+    c_source: str
+    d_source: str
+    status: int
+    dub: bool = False
+    extra_c: str | None = None
+    extra_d: str | None = None
+    backends: tuple[str, ...] = tuple(BACKENDS)
+
+
+C_PROJECTS: dict[str, CProject] = {
+    "functionCalledFromD": CProject(
+        r"""
+        int add(int a, int b) { return a + b; }
+        """,
+        r"""
+        import CMOD;
+        int main() { return add(40, 2); }
+        """,
+        42,
+        dub=True,
+    ),
+    "vaCopy": CProject(
+        r"""
+        #include <stdarg.h>
+        int twice(int count, ...) {
+            va_list first, second;
+            va_start(first, count);
+            va_copy(second, first);
+            int total = 0;
+            for (int i = 0; i < count; i++) total += va_arg(first, int);
+            for (int i = 0; i < count; i++) total += va_arg(second, int);
+            va_end(first);
+            va_end(second);
+            return total;
+        }
+        """,
+        r"""
+        import CMOD;
+        int main() { return twice(3, 3, 7, 11); }
+        """,
+        42,
+        backends=tuple(FILE_BACKENDS),
+    ),
+    "compilerBuiltins": CProject(
+        r"""
+        int swapped(int x) { return __builtin_bswap32(x); }
+        int leading(unsigned x) { return __builtin_clz(x); }
+        int expected(int x) { return __builtin_expect(x, 1); }
+        """,
+        r"""
+        import CMOD;
+        int main() {
+            return swapped(1) == 0x01000000 && leading(1) == 31
+                && expected(42) == 42 ? 42 : 1;
+        }
+        """,
+        42,
+    ),
+    "addressAsIntegerInitialiser": CProject(
+        r"""
+        int target = 42;
+        unsigned long address = (unsigned long) &target;
+        unsigned long viaChar = (unsigned long) (char *) &target;
+        """,
+        r"""
+        import CMOD;
+        int main() {
+            return address == cast(size_t) &target
+                && viaChar == address ? *cast(int*) address : 1;
+        }
+        """,
+        42,
+        backends=tuple(FILE_BACKENDS),
+    ),
+    "scalarAndArrayInitialisers": CProject(
+        r"""
+        int scalar = 5;
+        double ratio = 0.5;
+        int numbers[4] = {1, 2, 3};
+        int inferred[] = {10, 20};
+        int local(int x) {
+            int a[2] = {x, 3};
+            return a[0] + a[1];
+        }
+        """,
+        r"""
+        import CMOD;
+        int main() {
+            const ok = scalar == 5 && ratio == 0.5
+                && numbers[0] == 1 && numbers[2] == 3 && numbers[3] == 0
+                && inferred.length == 2 && inferred[1] == 20
+                && local(4) == 7;
+            return ok ? 42 : 1;
+        }
+        """,
+        42,
+        backends=tuple(FILE_BACKENDS),
+    ),
+    "structInitialisers": CProject(
+        r"""
+        struct Point { int x; int y; };
+        struct Line { struct Point from; struct Point to; };
+        struct Point origin = {1, 2};
+        struct Line line = {{1, 2}, {3, 4}};
+        struct Line designated = {.to = {.y = 9}, .from = {.x = 7}};
+        int sparse[5] = {[3] = 4, [1] = 2};
+        """,
+        r"""
+        import CMOD;
+        int main() {
+            const ok = origin.x == 1 && origin.y == 2
+                && line.to.x == 3 && line.to.y == 4
+                && designated.from.x == 7 && designated.from.y == 0
+                && designated.to.x == 0 && designated.to.y == 9
+                && sparse[1] == 2 && sparse[3] == 4 && sparse[4] == 0;
+            return ok ? 42 : 1;
+        }
+        """,
+        42,
+        backends=tuple(FILE_BACKENDS),
+    ),
+    "stringAndPointerInitialisers": CProject(
+        r"""
+        const char *greeting = "hello";
+        char buffer[8] = "abc";
+        int target = 41;
+        int *pointer = &target;
+        int **pointerToPointer = &pointer;
+        int *offset = &target;
+        """,
+        r"""
+        import CMOD;
+        int main() {
+            *pointer += 1;
+            const ok = greeting[0] == 'h' && greeting[4] == 'o'
+                && greeting[5] == 0
+                && buffer[2] == 'c' && buffer[3] == 0
+                && **pointerToPointer == 42 && target == 42
+                && offset is pointer;
+            return ok ? target : 1;
+        }
+        """,
+        42,
+        backends=tuple(FILE_BACKENDS),
+    ),
+    "staticFunctionAndVariable": CProject(
+        r"""
+        static int counter = 40;
+        static int bump(void) { return ++counter; }
+        int twice(void) { bump(); return bump(); }
+        """,
+        r"""
+        import CMOD;
+        int main() { return twice(); }
+        """,
+        42,
+        backends=tuple(FILE_BACKENDS),
+    ),
+    "structByValueAndPointer": CProject(
+        r"""
+        struct IntAndLong { int a; long b; };
+        struct IntAndLong make(int a, long b) {
+            struct IntAndLong p = {a, b};
+            return p;
+        }
+        long sum(struct IntAndLong p) { return p.a + p.b; }
+        void scale(struct IntAndLong *p, int factor) {
+            p->a *= factor;
+            p->b *= factor;
+        }
+        """,
+        r"""
+        import CMOD;
+        int main() {
+            auto p = make(3, 4);
+            scale(&p, 2);
+            return cast(int) (sum(p) + sum(make(10, 18)));
+        }
+        """,
+        42,
+    ),
+    "enumAndTypedef": CProject(
+        r"""
+        enum Colour { Red, Green = 10, Blue };
+        typedef unsigned char byte_t;
+        typedef struct { byte_t lo; byte_t hi; } BytePair;
+        enum Colour pick(int i) { return i ? Blue : Green; }
+        BytePair pack(byte_t lo, byte_t hi) {
+            BytePair p = {lo, hi};
+            return p;
+        }
+        """,
+        r"""
+        import CMOD;
+        int main() {
+            const p = pack(20, 11);
+            return pick(1) == Blue && pick(0) == Green && Red == 0
+                ? p.lo + p.hi + Blue : 1;
+        }
+        """,
+        42,
+    ),
+    "controlFlow": CProject(
+        r"""
+        int fall(int x) {
+            int r = 0;
+            switch (x) {
+            case 1: r += 1;
+            case 2: r += 2; break;
+            case 3: r += 4;
+            default: r += 8;
+            }
+            return r;
+        }
+        int jump(int n) {
+            int i = 0;
+            loop:
+            if (i >= n) goto done;
+            i += 2;
+            goto loop;
+            done:
+            return i;
+        }
+        int commas(void) {
+            int a, b;
+            a = (b = 3, b + 4);
+            return a;
+        }
+        int total(void) {
+            int values[5] = {1, 2, 3, 4, 5};
+            int *p = values;
+            int sum = 0;
+            for (int i = 0; i < 5; i++) sum += *(p + i);
+            for (p = values + 4; p != values; p--) sum += *(p - 1);
+            return sum;
+        }
+        """,
+        r"""
+        import CMOD;
+        int main() {
+            const ok = fall(1) == 3 && fall(2) == 2 && fall(3) == 12
+                && fall(9) == 8 && jump(5) == 6 && commas() == 7
+                && total() == 25;
+            return ok ? 42 : 1;
+        }
+        """,
+        42,
+    ),
+    "compoundLiteral": CProject(
+        r"""
+        struct Point { int x; int y; };
+        int norm1(struct Point p) { return p.x + p.y; }
+        int viaLiteral(int a) {
+            return norm1((struct Point){a, 2}) + (int[]){1, 2, 3}[2];
+        }
+        struct Point *global = &(struct Point){40, 2};
+        int *array = (int[]){5, 6, 7};
+        int viaAddress(void) {
+            struct Point *p = &(struct Point){1, 41};
+            p->x += 1;
+            return p->x + p->y;
+        }
+        """,
+        r"""
+        import CMOD;
+        int main() {
+            return viaLiteral(37) == 42 && global.x + global.y == 42
+                && array[2] == 7 && viaAddress() == 43
+                ? 42 : 1;
+        }
+        """,
+        42,
+        backends=tuple(FILE_BACKENDS),
+    ),
+    "genericSelection": CProject(
+        r"""
+        #define KIND(x) _Generic((x), int: 1, double: 2, default: 3)
+        int kinds(void) { return KIND(1) * 100 + KIND(1.0) * 10 + KIND('a'); }
+        """,
+        r"""
+        import CMOD;
+        int main() { return kinds() == 121 ? 42 : 1; }
+        """,
+        42,
+    ),
+    "bitFields": CProject(
+        r"""
+        struct Flags {
+            unsigned a : 3;
+            unsigned b : 5;
+            int c : 4;
+        };
+        struct Flags make(void) {
+            struct Flags f = {5, 17, -2};
+            f.a += 1;
+            return f;
+        }
+        int sizeOfFlags(void) { return sizeof(struct Flags); }
+        """,
+        r"""
+        import CMOD;
+        int main() {
+            const f = make();
+            return f.a == 6 && f.b == 17 && f.c == -2
+                && sizeOfFlags() == Flags.sizeof ? 42 : 1;
+        }
+        """,
+        42,
+    ),
+    "variadicDefinedInC": CProject(
+        r"""
+        #include <stdarg.h>
+        int sum(int count, ...) {
+            va_list args;
+            va_start(args, count);
+            int total = 0;
+            for (int i = 0; i < count; i++) total += va_arg(args, int);
+            va_end(args);
+            return total;
+        }
+        """,
+        r"""
+        import CMOD;
+        int main() { return sum(3, 10, 12, 20); }
+        """,
+        42,
+        backends=tuple(FILE_BACKENDS),
+    ),
+    "cCallsPrintf": CProject(
+        r"""
+        #include <stdio.h>
+        int report(int value) { return printf("total %d\n", value); }
+        """,
+        r"""
+        import CMOD;
+        int main() { return report(42); }
+        """,
+        9,
+        backends=tuple(FILE_BACKENDS),
+    ),
+    "systemHeader": CProject(
+        r"""
+        #include <string.h>
+        int length(const char *text) { return (int) strlen(text); }
+        """,
+        r"""
+        import CMOD;
+        int main() { return length("abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"); }
+        """,
+        42,
+        backends=tuple(FILE_BACKENDS),
+    ),
+    "addressOfCFunction": CProject(
+        r"""
+        int triple(int x) { return 3 * x; }
+        """,
+        r"""
+        import CMOD;
+        int main() {
+            extern(C) int function(int) pointer = &triple;
+            return pointer(14);
+        }
+        """,
+        42,
+    ),
+    "cCallsBackD": CProject(
+        r"""
+        extern int fromD(int);
+        int viaC(int x) { return fromD(x) + 1; }
+        """,
+        r"""
+        import CMOD;
+        extern(C) int fromD(int x) { return x * 2; }
+        int main() { return viaC(20); }
+        """,
+        41,
+        backends=tuple(FILE_BACKENDS),
+    ),
+    "bareDirectoryImportsCModule": CProject(
+        r"""
+        int add(int a, int b) { return a + b; }
+        """,
+        r"""
+        import CMOD;
+        int main() { return add(40, 2); }
+        """,
+        42,
+    ),
+    "cFunctionDeclaredInD": CProject(
+        r"""
+        int add(int a, int b) { return a + b; }
+        """,
+        r"""
+        extern(C) int add(int, int);
+        int main() { return add(40, 2); }
+        """,
+        42,
+        dub=True,
+        backends=tuple(FILE_BACKENDS),
+    ),
+    "comparisonsGiveInt": CProject(
+        r"""
+        int dirty(void) {
+            int a[16] = {-1, -1, -1, -1, -1, -1, -1, -1,
+                -1, -1, -1, -1, -1, -1, -1, -1};
+            return a[0] + a[15];
+        }
+        int less(int x) { return x < 3; }
+        int equal(int x) { return x == 3; }
+        int not(int x) { return !x; }
+        int both(int x, int y) { return x && y; }
+        int either(int x, int y) { return x || y; }
+        int pointer(int *p) { return p && *p > 3; }
+        """,
+        r"""
+        import CMOD;
+        int main() {
+            int three = 3;
+            int ok = 1;
+            dirty;
+            ok &= less(4) == 0;
+            dirty;
+            ok &= equal(4) == 0;
+            dirty;
+            ok &= not(5) == 0;
+            dirty;
+            ok &= both(1, 0) == 0;
+            dirty;
+            ok &= either(0, 0) == 0;
+            dirty;
+            ok &= pointer(&three) == 0;
+            return ok ? 42 : 1;
+        }
+        """,
+        42,
+    ),
+    "staticFunctionIsNotALinkedDefinition": CProject(
+        r"""
+        static int linkedHelper(void) { return 1; }
+        int fromStatic(void) { return linkedHelper(); }
+        """,
+        r"""
+        extern(C) int linkedHelper();
+        extern(C) int fromStatic();
+        int main() { return linkedHelper() * 10 + fromStatic(); }
+        """,
+        21,
+        dub=True,
+        extra_c=r"""
+        int linkedHelper(void) { return 2; }
+        """,
+        backends=tuple(FILE_BACKENDS),
+    ),
+    "declarationWithPragmaMangle": CProject(
+        r"""
+        int mangledAdd(int a, int b) { return a + b; }
+        """,
+        r"""
+        pragma(mangle, "mangledAdd") extern(C) int sum(int, int);
+        int main() { return sum(40, 2); }
+        """,
+        42,
+        dub=True,
+        backends=tuple(FILE_BACKENDS),
+    ),
+    "declarationInCppNamespace": CProject(
+        r"""
+        int unusedInNamespaceTest(void) { return 0; }
+        """,
+        r"""
+        extern(C++, importcns) int inNamespace(int);
+        int main() { return inNamespace(41); }
+        """,
+        42,
+        dub=True,
+        extra_d=r"""
+        extern(C++, importcns) int inNamespace(int x) { return x + 1; }
+        """,
+        backends=tuple(FILE_BACKENDS),
+    ),
+    "declarationInNonRootModule": CProject(
+        r"""
+        int unusedInNonRootTest(void) { return 0; }
+        """,
+        r"""
+        import core.stdc.stdlib: libcAbs = abs;
+        int main() { return libcAbs(-3) - 35; }
+        """,
+        42,
+        dub=True,
+        extra_d=r"""
+        extern(C) int abs(int x) { return 77; }
+        """,
+        backends=tuple(FILE_BACKENDS),
+    ),
+    "externVariableIsTheDefinition": CProject(
+        r"""
+        int linkedCounter = 3;
+        int readCounter(void) { return linkedCounter; }
+        """,
+        r"""
+        extern(C) extern __gshared int linkedCounter;
+        extern(C) int readCounter();
+        extern(C) int bumpCounter();
+        int main() {
+            linkedCounter += 9;
+            bumpCounter();
+            return readCounter();
+        }
+        """,
+        42,
+        dub=True,
+        extra_c=r"""
+        extern int linkedCounter;
+        int bumpCounter(void) { linkedCounter += 30; return linkedCounter; }
+        """,
+        backends=tuple(FILE_BACKENDS),
+    ),
+    "flexibleArrayMember": CProject(
+        r"""
+        struct Flexible { int count; int data[]; };
+        struct OneElement { int count; int data[1]; };
+        int flexible(void) {
+            int storage[8] = {0};
+            struct Flexible *f = (struct Flexible *) storage;
+            struct OneElement *o = (struct OneElement *) storage;
+            f->data[3] = 40;
+            o->data[4] = 2;
+            return f->data[3] + o->data[4];
+        }
+        """,
+        r"""
+        import CMOD;
+        int main() { return flexible(); }
+        """,
+        42,
+        backends=tuple(FILE_BACKENDS),
+    ),
+    "compoundLiteralWithCharArray": CProject(
+        r"""
+        struct Named { int x; char name[8]; };
+        struct Named *named = &(struct Named){41, "a"};
+        """,
+        r"""
+        import CMOD;
+        int main() { return named.x + (named.name[0] == 'a'); }
+        """,
+        42,
+        backends=tuple(FILE_BACKENDS),
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "name, backend",
+    [(name, backend) for name, case in C_PROJECTS.items()
+     for backend in case.backends],
+)
+def test_c_module_is_imported_by_d(
+    tmp_path: Path, name: str, backend: str,
+) -> None:
+    case = C_PROJECTS[name]
+    module = f"importc_{name.lower()}"
+    app = tmp_path / "app"
+    source = app / "source" if case.dub else app
+    if case.dub:
+        write(
+            app / "dub.sdl",
+            f'''
+            name "importc_project"
+            targetType "library"
+            mainSourceFile "source/{module}_app.d"
+            sourceFiles "source/{module}.c"
+            {f'sourceFiles "source/{module}_extra.c"' if case.extra_c else ""}
+            configuration "unittest" {{
+                targetType "executable"
+            }}
+            ''',
+        )
+    write(source / f"{module}.c", case.c_source)
+    if case.extra_c is not None:
+        write(source / f"{module}_extra.c", case.extra_c)
+    if case.extra_d is not None:
+        write(
+            source / f"{module}_defs.d",
+            f"module {module}_defs;\n{case.extra_d}",
+        )
+    write(
+        source / f"{module}_app.d",
+        f"module {module}_app;\n" + case.d_source.replace("CMOD", module),
+    )
+
+    result = run_sb(
+        f"--backend={backend}", "--no-optimise-image", str(app), cwd=tmp_path,
+    )
+
+    assert result.returncode == case.status, output(result)
+
+
+
+DUB_DESCRIBE_FIXTURES = Path(__file__).parent / "fixtures" / "dub-describe"
+
+
+# `bin/ut` runs the dub description cache on these recordings instead of
+# starting dub. The recording has to be what dub gives for the project that
+# sits next to it.
+@pytest.mark.parametrize(
+    "fixture",
+    sorted(path.name for path in DUB_DESCRIBE_FIXTURES.iterdir() if path.is_dir()),
+)
+def test_recorded_dub_describe_is_what_dub_gives(
+    tmp_path: Path, fixture: str,
+) -> None:
+    root = tmp_path / fixture
+    shutil.copytree(DUB_DESCRIBE_FIXTURES / fixture, root)
+    project, *arguments = (root / "describe.cmd").read_text().split()
+
+    described = subprocess.run(
+        ["dub", "describe", *arguments], capture_output=True, check=False,
+        text=True, timeout=120, cwd=root / project,
+    )
+
+    assert described.returncode == 0, output(described)
+    recorded = (DUB_DESCRIBE_FIXTURES / fixture / "describe.json").read_text()
+    real = json.loads(described.stdout)
+    for target in real["targets"]:
+        target["cacheArtifactPath"] = "<machine specific>"
+    assert real == json.loads(
+        recorded.replace("@ROOT@", str(root))
+    ), "stale recording: run tests/fixtures/dub-describe/record.sh"
+
+
+# A new source file, a deleted one and a changed recipe are in the next
+# start of a project: what dub finds in the project is not taken from an
+# earlier start.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_project_changes_are_in_the_next_start(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    recipe = dub_project_recipe("changing")
+    write(app / "dub.sdl", recipe)
+    write(
+        app / "source" / "main.d",
+        """
+        module main;
+        int main() {
+            int status = 0;
+            static if (__traits(compiles, { import extra; })) status += 1;
+            static if (__traits(compiles, { import nested.extra; })) status += 2;
+            version (Changed) status += 4;
+            return status;
+        }
+        """,
+    )
+
+    def start() -> int:
+        result = run_sb(
+            f"--backend={backend}", "--no-optimise-image", str(app),
+            cwd=tmp_path,
+        )
+        return result.returncode
+
+    assert start() == 0
+    assert start() == 0
+    write(app / "source" / "extra.d", "module extra;\n")
+    assert start() == 1
+    (app / "source" / "extra.d").unlink()
+    assert start() == 0
+    write(app / "source" / "nested" / "extra.d", "module nested.extra;\n")
+    assert start() == 2
+    write(app / "dub.sdl", recipe + 'versions "Changed"\n')
+    assert start() == 6
+
+
+# A unittest configuration of a project can name its own main source file,
+# source and import directories.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_unittest_configuration_settings_are_loaded(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    write(
+        app / "dub.sdl",
+        """
+        name "dub-package-settings"
+        targetType "library"
+
+        configuration "library" {
+        }
+
+        configuration "unittest" {
+            targetType "executable"
+            targetName "ut"
+            mainSourceFile "tests/main.d"
+            sourcePaths "tests"
+            importPaths "tests"
+        }
+        """,
+    )
+    write(app / "source" / "package.d", "module dub_package_settings;\n")
+    write(
+        app / "tests" / "main.d",
+        """
+        module tests.main;
+        int main() { return 3; }
+        """,
+    )
+
+    result = run_sb(
+        f"--backend={backend}", "--no-optimise-image", str(app), cwd=tmp_path,
+    )
+
+    assert result.returncode == 3, output(result)
 
 
 def write(path: Path, text: str = "") -> None:

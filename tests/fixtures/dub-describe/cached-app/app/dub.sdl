@@ -1,0 +1,5 @@
+name "cached-app"
+configuration "unittest" {
+    targetType "executable"
+    mainSourceFile "source/main.d"
+}
