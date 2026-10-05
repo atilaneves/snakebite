@@ -110,7 +110,11 @@ wrong family fails when it compiles the image. The image source holds a
 `static assert` on the frontend version, so a compiler with a different
 frontend version also fails when it compiles the image. A compiler that is a
 wrapper script is identified by the path and the content of the wrapper only.
-Nothing proves that two installations use the same runtime build.
+The C++ compiler of an image with C++ source is run once per build to ask
+which C++ runtime library it links. Its version text is not used. A C++
+compiler that is a wrapper, such as `ccache c++`, is identified by the whole
+command and the content of the wrapper only. Nothing proves that two
+installations use the same runtime build.
 
 All Reggae executable configurations link druntime and Phobos shared. The image
 does the same. The loader runs D module constructors and registers the image

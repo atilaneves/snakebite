@@ -252,7 +252,6 @@ public DependencyImage prepareImage(
 
     string cxxRuntimeLibrary;
     if (hasCppSource) {
-        const cxxIdentity = compilerIdentity(cxxCommand);
         // The C++ runtime library this pulls in is what gives the image
         // `operator new`/`delete`, RTTI and the exception personality
         // routine a thrown C++ exception (issue #336 step 5) needs. Which
@@ -264,7 +263,7 @@ public DependencyImage prepareImage(
         // - is right for any compiler and configuration.
         cxxRuntimeLibrary = probeCxxRuntimeLibrary(cxxCommand);
         fingerprint ~= text("\ncxx:", cxxCommand, "\n",
-            fileDigest(cxxExecutable), "\n", cxxIdentity,
+            fileDigest(cxxExecutable),
             "\n", cxxCompileFlags, "\n", cxxCompilerArguments,
             "\n", cxxRuntimeLibrary, "\n", cppSource.length, ":", cppSource);
     }
@@ -407,19 +406,6 @@ private void runCompiler(
         throw new SnakebiteException(text("Dependency image ", phase,
             " failed\nCommand: ", command, "\n", result.output));
     }
-}
-
-
-// `command` is the whole invocation - a wrapper such as `ccache` ahead of
-// the real compiler counts, since it can change what actually runs. This
-// runs only when an image's stamp record misses, so the stamp record is
-// what keeps it to one probe per compiler, across processes as well.
-private string compilerIdentity(in string[] command) {
-    import std.process: execute;
-
-    const identity = execute(command ~ ["--version"]);
-    require(identity.status == 0, "Cannot identify image compiler: " ~ identity.output);
-    return identity.output;
 }
 
 

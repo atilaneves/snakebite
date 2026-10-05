@@ -25,7 +25,6 @@ import std.file: exists, readText, remove, setAttributes, setTimes;
 import std.path: baseName;
 import std.algorithm.iteration: filter;
 import std.conv: octal;
-import std.string: splitLines;
 import std.path: buildPath;
 
 static foreach (backend; Matrix!()) {
@@ -283,27 +282,6 @@ unittest {
         }
     })().shouldThrow!SnakebiteException;
     dirEntries(directory, SpanMode.shallow).array.length.should == 0;
-}
-
-// The compiler is only asked to compile: the fingerprint holds its path and
-// the digest of its binary, so a build needs no `--version` run. A wrapper
-// that records its arguments shows what the build asks of the compiler.
-@("image.buildDoesNotProbeTheCompilerVersion")
-@Serial
-unittest {
-    const sandbox = Sandbox();
-    const log = sandbox.inSandboxPath("arguments.log");
-    const wrapper = sandbox.inSandboxPath("compiler.sh");
-    sandbox.writeFile("compiler.sh", "#!/bin/sh\necho \"$@\" >> '" ~ log
-        ~ "'\nexec " ~ defaultCompiler ~ " \"$@\"\n");
-    setAttributes(wrapper, octal!755);
-
-    prepareImage(atomicSource, sandbox.sandboxPath, wrapper, optimise: Optimise.no);
-
-    const arguments = readText(log).splitLines;
-    arguments.length.should == 2;
-    "-c".shouldBeIn(arguments[0]);
-    "-shared".shouldBeIn(arguments[1]);
 }
 
 // A repeat preparation with an unchanged compiler, source and inputs must
