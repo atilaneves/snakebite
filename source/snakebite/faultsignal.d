@@ -151,7 +151,7 @@ public bool installFaultHandlers() @trusted nothrow @nogc {
         }
 
         sigaction_t action;
-        action.sa_sigaction = &onFault;
+        action.sa_sigaction = &snakebite_fault_signal_entry;
         action.sa_flags = SA_SIGINFO | SA_ONSTACK;
         // The collector suspends threads with a signal. While the handler
         // runs on the alternate stack, the collector would take the pointer
@@ -525,7 +525,13 @@ static if (supported) {
         throw fault;
     }
 
-    private extern(C) void onFault(int signal, siginfo_t* info, void* context) nothrow @nogc {
+    private extern(C) void snakebite_fault_signal_entry(
+        int, siginfo_t*, void*) nothrow @nogc;
+
+    // The assembly entry supplies the unmodified kernel frame address and
+    // can tail-enter a saved handler after moving off the alternate stack.
+    private extern(C) Forward* snakebite_fault_dispatch(
+        int signal, siginfo_t* info, void* context, size_t frame) nothrow @nogc {
         // A signal that a program sent (`kill`, `raise`) has no faulting
         // instruction to continue from.
         const hardware = info.si_code > 0;
@@ -533,7 +539,7 @@ static if (supported) {
             || info.si_code == fpeIntegerDivide
             || info.si_code == fpeIntegerOverflow;
         if (!hardware || !reportable || _state.runs == 0 || _state.pending)
-            return hostDefect(signal, info, context);
+            return hostDefect(signal, info, context, frame);
 
         auto registers = &(cast(ucontext_t*) context).uc_mcontext.gregs;
         const pc = cast(size_t) (*registers)[REG_RIP];
@@ -560,13 +566,14 @@ static if (supported) {
         // return address on the stack already.
         if (signal == SIGSEGV && cast(size_t) info.si_addr == pc) {
             (*registers)[REG_RIP] = cast(size_t) &snakebite_fault_trampoline_call;
-            return;
+            return null;
         }
 
         auto top = cast(size_t*) (*registers)[REG_RSP] - 1;
         *top = pc;
         (*registers)[REG_RSP] = cast(size_t) top;
         (*registers)[REG_RIP] = cast(size_t) &snakebite_fault_trampoline;
+        return null;
     }
 
     private Divisor divisorOfContext(ref const(ucontext_t) context) @system nothrow @nogc {
@@ -594,7 +601,8 @@ static if (supported) {
     // if there was one, else the default action. Returning from the
     // handler runs the faulting instruction again, and that ends the
     // process with the signal (and a core dump if the user enabled them).
-    private void hostDefect(int signal, siginfo_t* info, void* context) nothrow @nogc {
+    private Forward* hostDefect(
+        int signal, siginfo_t* info, void* context, size_t frame) nothrow @nogc {
         import core.atomic: atomicLoad, cas;
         import core.stdc.signal: raise;
         import core.sys.posix.signal:
@@ -628,6 +636,12 @@ static if (supported) {
             const alternate = cast(size_t) interrupted.uc_stack.ss_sp;
             const onAlternate = location >= alternate
                 && location - alternate < interrupted.uc_stack.ss_size;
+            const sp = cast(size_t) interrupted.uc_mcontext.gregs[REG_RSP];
+            const wasOnAlternate = sp >= alternate
+                && sp - alternate < interrupted.uc_stack.ss_size;
+            if (onAlternate && !wasOnAlternate && !(previous.sa_flags & SA_ONSTACK))
+                return forwardOnNormalStack(signal, info, interrupted, frame, handler,
+                    previous.sa_mask, (previous.sa_flags & SA_NODEFER) != 0);
             const unmask = (previous.sa_flags & SA_NODEFER)
                 && !sigismember(&previous.sa_mask, signal)
                 && !sigismember(&interrupted.uc_sigmask, signal);
@@ -653,13 +667,13 @@ static if (supported) {
                 (cast(WithoutInformation) handler)(signal);
             if (changed)
                 sigprocmask(SIG_SETMASK, &savedMask, null);
-            return;
+            return null;
         }
 
         // A program that ignored the signal and a program that sent it get
         // what they asked for.
         if (info.si_code <= 0 && handler is cast(void*) SIG_IGN)
-            return;
+            return null;
 
         if (info.si_code > 0 && _state.runs != 0)
             reportUnhandledGuestFault(signal, info, context);
@@ -669,6 +683,107 @@ static if (supported) {
         // A signal that was sent is not raised again by returning.
         if (info.si_code <= 0)
             raise(signal);
+        return null;
+    }
+
+    private struct Forward {
+        void* stack;
+        void* handler;
+        siginfo_t* info;
+        ucontext_t* context;
+        int signal;
+        imported!"core.sys.posix.signal".sigset_t mask;
+    }
+    // The assembly reads every field before unblocking signals. Nested
+    // delivery can then reuse this thread's packet, not the moved frame.
+    private Forward _forward;
+    static assert(Forward.mask.offsetof == 40);
+    static assert(ucontext_t.uc_mcontext.offsetof == 40);
+
+    private Forward* forwardOnNormalStack(int signal, siginfo_t* info,
+        const(ucontext_t)* context, size_t frame, const(void)* handler,
+        ref const(imported!"core.sys.posix.signal".sigset_t) savedMask,
+        bool nodefer) nothrow @nogc {
+        import core.sys.linux.unistd: syscall;
+        import core.sys.posix.sys.uio: iovec;
+        import core.sys.posix.signal: sigaddset;
+        import core.sys.posix.unistd: getpid;
+
+        // Linux x86-64 rt_sigreturn receives the context just after the
+        // restorer slot. Relocate the kernel's actual frame, including its
+        // variable-length XSAVE image, rather than construct a new frame.
+        // Keep the same alignment and leave the interrupted red zone alone.
+        const source = cast(size_t) context - size_t.sizeof;
+        const base = cast(size_t) context.uc_stack.ss_sp;
+        const limit = base + context.uc_stack.ss_size;
+        if (source != frame || source < base || limit < base || source >= limit)
+            brokenSignalFrame;
+        size_t end = cast(size_t) info + siginfo_t.sizeof;
+        if (end < source || end > limit)
+            brokenSignalFrame;
+        if (context.uc_mcontext.fpregs !is null) {
+            const fp = cast(const(ubyte)*) context.uc_mcontext.fpregs;
+            const address = cast(size_t) fp;
+            size_t size = typeof(*context.uc_mcontext.fpregs).sizeof;
+            if (address < source || address > limit || size > limit - address)
+                brokenSignalFrame;
+            // Linux's _fpx_sw_bytes header is in the legacy FXSAVE area.
+            // extended_size includes the trailing FP_XSTATE_MAGIC2 word.
+            if (*cast(const(uint)*) (fp + 464) == 0x46505853) {
+                const extended = *cast(const(uint)*) (fp + 468);
+                if (extended < size || extended > limit - address)
+                    brokenSignalFrame;
+                size = extended;
+            }
+            if (address + size > end)
+                end = address + size;
+        }
+        const length = end - source;
+        const low = source & 63;
+        const sp = cast(size_t) context.uc_mcontext.gregs[REG_RSP];
+        if (sp < 128 + length + low)
+            brokenSignalFrame;
+        const target = ((sp - 128 - length - low) & ~cast(size_t) 63) + low;
+        iovec local = iovec(cast(void*) source, length);
+        iovec remote = iovec(cast(void*) target, length);
+        // The kernel reports an inaccessible normal stack without delivering
+        // another fault recursively in this handler. A failed frame placement
+        // terminates with SIGSEGV, as a failed native signal delivery does.
+        enum processVmWritev = 311; // Linux x86-64 syscall ABI.
+        if (syscall(processVmWritev, getpid(), &local, size_t(1), &remote,
+                size_t(1), size_t(0)) != cast(ptrdiff_t) length)
+            brokenSignalFrame;
+        auto copy = cast(ucontext_t*) (target + size_t.sizeof);
+        if (copy.uc_mcontext.fpregs !is null)
+            copy.uc_mcontext.fpregs = cast(typeof(copy.uc_mcontext.fpregs))
+                (target + cast(size_t) copy.uc_mcontext.fpregs - source);
+        _forward.stack = cast(void*) target;
+        _forward.handler = cast(void*) handler;
+        _forward.info = cast(siginfo_t*) (target + cast(size_t) info - source);
+        _forward.context = copy;
+        _forward.signal = signal;
+        _forward.mask = savedMask;
+        _forward.mask.__val[0] |= context.uc_sigmask.__val[0];
+        if (!nodefer)
+            sigaddset(&_forward.mask, signal);
+        return &_forward;
+    }
+
+    private void brokenSignalFrame() nothrow @nogc {
+        import core.stdc.signal: raise;
+        import core.sys.posix.signal:
+            SIG_UNBLOCK, sigaddset, sigemptyset, sigprocmask, sigset_t;
+        import core.sys.posix.unistd: _exit;
+
+        sigaction_t action;
+        action.sa_handler = SIG_DFL;
+        sigaction(SIGSEGV, &action, null);
+        sigset_t allowed;
+        sigemptyset(&allowed);
+        sigaddset(&allowed, SIGSEGV);
+        sigprocmask(SIG_UNBLOCK, &allowed, null);
+        raise(SIGSEGV);
+        _exit(128 + SIGSEGV);
     }
 
     private void reportUnhandledGuestFault(int signal, siginfo_t* info, void* context) nothrow @nogc {

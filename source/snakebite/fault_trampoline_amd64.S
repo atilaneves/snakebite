@@ -77,4 +77,67 @@ snakebite_fault_trampoline_call:
 
 #endif
 
+    /* A saved action without SA_ONSTACK uses the interrupted normal stack.
+     * The D dispatcher moves the complete kernel frame. Tail entry keeps the
+     * kernel restorer as the callback's return address; rt_sigreturn consumes
+     * that moved frame only once, including any callback context edits.
+     */
+    .globl snakebite_fault_signal_entry
+    .type snakebite_fault_signal_entry,@function
+snakebite_fault_signal_entry:
+    .cfi_startproc
+    mov %rsp,%rcx
+    push %rbp
+    .cfi_def_cfa_offset 16
+    .cfi_offset %rbp,-16
+    mov %rsp,%rbp
+    .cfi_def_cfa_register %rbp
+    cld
+    call snakebite_fault_dispatch@PLT
+    leave
+    .cfi_def_cfa %rsp,8
+    .cfi_restore %rbp
+    test %rax,%rax
+    jz .Lsignal_return
+    mov %rax,%rdi
+    mov 0(%rax),%r10
+    mov 8(%rax),%r12
+    mov 16(%rax),%r13
+    mov 24(%rax),%r14
+    mov 32(%rax),%r15d
+    mov %r10,%rsp
+    mov %r12,-8(%rsp)
+    lea 40(%rdi),%rsi
+    mov $2,%edi
+    xor %edx,%edx
+    mov $8,%r10d
+    mov $14,%eax
+    syscall
+    test %rax,%rax
+    jnz .Lsignal_failure
+    mov %r15d,%edi
+    mov %r13,%rsi
+    mov %r14,%rdx
+    /* All original registers remain in the moved frame, which the collector
+     * can scan. Also retain native callee-saved register values on entry.
+     */
+    mov 72(%rdx),%r12
+    mov 80(%rdx),%r13
+    mov 88(%rdx),%r14
+    mov 96(%rdx),%r15
+    mov 120(%rdx),%rbx
+    mov 128(%rdx),%rbp
+    xor %eax,%eax
+    jmp *-8(%rsp)
+.Lsignal_return:
+    ret
+.Lsignal_failure:
+    /* Unmasking failed: do not run the callback under the wrong mask. */
+    mov $139,%edi
+    mov $231,%eax
+    syscall
+    ud2
+    .cfi_endproc
+    .size snakebite_fault_signal_entry,.-snakebite_fault_signal_entry
+
     .section .note.GNU-stack,"",@progbits

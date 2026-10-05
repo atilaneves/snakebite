@@ -39,6 +39,7 @@ extern void thread_getGCSignals(int *, int *);
 static _Atomic int calls;
 static int mode, ready[2], wait_forever[2];
 static int suspend_signal, resume_signal;
+static char alternate[128 * 1024] __attribute__((aligned(16)));
 static _Atomic int delay_install, published, attempting, copied;
 static pthread_t installer;
 static int (*native_sigaction)(int, const struct sigaction *, struct sigaction *);
@@ -148,6 +149,10 @@ int main(int argc, char **argv) {
         action.sa_sigaction = previous_info;
     } else action.sa_handler = previous;
     if (sigaction(sig, &action, 0)) return 96;
+    if (argc > 9 && atoi(argv[9])) {
+        stack_t stack = {.ss_sp=alternate, .ss_size=sizeof alternate};
+        if (sigaltstack(&stack, 0)) return 90;
+    }
     if (mode == 5 && sigaction(SIGBUS, &action, 0)) return 96;
     if (mode == 7 || mode == 8) {
         pthread_t thread;
@@ -220,14 +225,22 @@ def checked(command, directory):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.fixture(scope="module", params=["dmd", "ldc2"])
+PROFILES = ["dmd-debug", "dmd", "ldc2-debug", "ldc2-opt", "ldc2-full", "ldc2"]
+
+
+@pytest.fixture(scope="module", params=PROFILES)
 def host(request, tmp_path_factory):
-    compiler = shutil.which(request.param)
+    return build_host(request, tmp_path_factory, HOST)
+
+
+def build_host(request, tmp_path_factory, source, bridge=None):
+    compiler_name = request.param.split("-")[0]
+    compiler = shutil.which(compiler_name)
     if compiler is None:
         pytest.skip(f"{request.param} is not on PATH")
     directory = tmp_path_factory.mktemp(f"previous-action-{request.param}")
-    (directory / "host.c").write_text(HOST)
-    (directory / "bridge.d").write_text(BRIDGE)
+    (directory / "host.c").write_text(source)
+    (directory / "bridge.d").write_text(BRIDGE if bridge is None else bridge)
     checked(["cc", "-std=c11", "-pthread", "-c", "host.c", "-o", "driver.o"],
             directory)
     checked(["cc", "-c", str(ROOT / "source/snakebite/fault_trampoline_amd64.S"),
@@ -236,9 +249,15 @@ def host(request, tmp_path_factory):
         "faultsignal.d", "backends/guestfault.d", "backends/haltprocess.d",
     )]
     flags = ["-O", "-release"]
+    if request.param.endswith("-debug"):
+        flags = ["-g", "-debug"] if compiler_name == "dmd" else ["-g", "-O0"]
     shared = ["-defaultlib=phobos2", "-debuglib=phobos2", "-L-lphobos2"]
-    if request.param == "ldc2":
-        flags += ["-flto=thin", "-gcc=clang"]
+    if compiler_name == "ldc2":
+        flags += ["-gcc=clang"]
+        if request.param == "ldc2":
+            flags += ["-flto=thin"]
+        elif request.param == "ldc2-full":
+            flags += ["-flto=full"]
         shared = ["-link-defaultlib-shared"]
     checked([compiler, *flags, *shared, f"-I={ROOT / 'source'}", "bridge.d",
              *map(str, sources), "driver.o", "trampoline.o", "-L-lpthread",
@@ -330,11 +349,14 @@ def test_one_shot_nodefer(host, sig, with_info, block_self):
 @pytest.mark.parametrize("with_info", [False, True])
 @pytest.mark.parametrize("nodefer", [False, True])
 @pytest.mark.parametrize("block_extra", [False, True])
-def test_saved_mask_on_normal_stack(host, sig, with_info, nodefer, block_extra):
+@pytest.mark.parametrize("alternate", [False, True])
+def test_saved_mask_on_normal_stack(host, sig, with_info, nodefer, block_extra,
+                                   alternate):
     for installed in (False, True):
         result = subprocess.run(
             [str(host), str(sig.value), "6", "1", str(int(with_info)),
-             str(int(installed)), str(int(nodefer)), "0", str(int(block_extra))],
+             str(int(installed)), str(int(nodefer)), "0", str(int(block_extra)),
+             str(int(alternate))],
             capture_output=True, timeout=5,
         )
         assert result.returncode == 0, result
@@ -360,3 +382,236 @@ def test_concurrent_install_returns_only_after_installation(host):
     )
     assert result.returncode == 0, result
     assert result.stdout == b"install complete\n", result
+
+
+NORMAL_HOST = r"""
+#define _GNU_SOURCE
+#include <signal.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <ucontext.h>
+#include <sys/mman.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <stdatomic.h>
+#include <sched.h>
+#include <time.h>
+extern int rt_init(void);
+extern int install_saved_action(void);
+extern void start_collector(void);
+static void *alternate, *replacement;
+enum { stack_size = 128 * 1024 };
+static int mode, target, stack_flags;
+static volatile sig_atomic_t calls, depth, failures;
+static _Atomic int entered, collected;
+_Static_assert(ATOMIC_INT_LOCK_FREE == 2, "signal state must be lock-free");
+void wait_for_handler(void) {
+    while (!atomic_load(&entered)) sched_yield();
+}
+void finish_gc(void) { atomic_store(&collected, 1); }
+static uint64_t first[4] = {1,2,3,4}, last[4] = {11,12,13,14};
+void native_fault(void) { *(volatile int *)0 = 42; }
+static void previous(int sig, siginfo_t *info, void *opaque) {
+    ucontext_t *context = opaque;
+    volatile uint64_t marker = 0x123456789abcdef0UL;
+    ++calls;
+    if (sig != target || (info && info->si_signo != target)) ++failures;
+    if ((uintptr_t)&marker >= (uintptr_t)alternate &&
+        (uintptr_t)&marker < (uintptr_t)alternate + stack_size) ++failures;
+    if (mode == 0) {
+        stack_t stack;
+        if (sigaltstack(0, &stack)) _exit(90);
+        // Linux disarms on every signal delivery, not only SA_ONSTACK.
+        int disarmed = !!(stack_flags & 0x80000000);
+        if (stack.ss_flags != (disarmed ? SS_DISABLE : 0) ||
+            stack.ss_sp != (disarmed ? 0 : alternate)) ++failures;
+    } else if (mode == 1) {
+        sigaddset(&context->uc_sigmask, SIGUSR2);
+        context->uc_mcontext.fpregs->mxcsr =
+            (context->uc_mcontext.fpregs->mxcsr & ~0x6000u) | 0x4000u;
+    } else if (mode == 2 && depth < 24) {
+        ++depth;
+        raise(sig);
+        --depth;
+    } else if (mode == 3) {
+        context->uc_mcontext.gregs[REG_RIP] = context->uc_mcontext.gregs[REG_R12];
+        context->uc_mcontext.gregs[REG_RAX] = 137;
+    } else if (mode == 4) {
+        stack_t next = {.ss_sp=replacement, .ss_size=stack_size,
+                        .ss_flags=stack_flags};
+        if (sigaltstack(&next, 0)) _exit(91);
+        context->uc_stack = next;
+        if (munmap(alternate, stack_size)) _exit(92);
+    } else if (mode == 5) {
+        unsigned char *fp = (void *)context->uc_mcontext.fpregs;
+        uint64_t *xmm0 = (void *)(fp + 160);
+        uint64_t *ymm0 = (void *)(fp + 576);
+        uint64_t *ymm15 = (void *)(fp + 576 + 15 * 16);
+        if (xmm0[0] != 1 || xmm0[1] != 2 || ymm0[0] != 3 ||
+            ymm0[1] != 4 || ymm15[0] != 13 || ymm15[1] != 14) ++failures;
+        ymm0[0] = 137;
+        ymm15[1] = 439;
+    } else if (mode == 7) {
+        atomic_store(&entered, 1);
+        struct timespec now, end;
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        ++end.tv_sec;
+        do {
+            if (atomic_load(&collected)) break;
+            sched_yield();
+            clock_gettime(CLOCK_MONOTONIC, &now);
+        } while (now.tv_sec < end.tv_sec ||
+                 (now.tv_sec == end.tv_sec && now.tv_nsec < end.tv_nsec));
+        if (!atomic_load(&collected)) ++failures;
+    }
+    if (marker != 0x123456789abcdef0UL) ++failures;
+}
+static void simple(int sig) { previous(sig, 0, 0); }
+__attribute__((target("avx"))) static int vector_signal(void) {
+    long pid=getpid(), tid=syscall(SYS_gettid), result=SYS_tgkill;
+    uint64_t out_first[4], out_last[4];
+    __asm__ volatile("vmovdqu (%[first]),%%ymm0\n\t"
+                     "vmovdqu (%[last]),%%ymm15\n\t"
+                     "syscall\n\t"
+                     "vmovdqu %%ymm0,(%[out_first])\n\t"
+                     "vmovdqu %%ymm15,(%[out_last])\n\t"
+                     : "+a"(result)
+                     : "D"(pid), "S"(tid), "d"((long)target),
+                       [first]"r"(first), [last]"r"(last),
+                       [out_first]"r"(out_first), [out_last]"r"(out_last)
+                     : "rcx", "r11", "ymm0", "ymm15", "memory");
+    return out_first[0] != 1 || out_first[1] != 2 || out_first[2] != 137 ||
+           out_first[3] != 4 || out_last[0] != 11 || out_last[1] != 12 ||
+           out_last[2] != 13 || out_last[3] != 439;
+}
+int main(int argc, char **argv) {
+    prctl(PR_SET_DUMPABLE, 0);
+    setenv("SNAKEBITE_NO_FAULT_HANDLER", "1", 1);
+    if (!rt_init()) return 97;
+    unsetenv("SNAKEBITE_NO_FAULT_HANDLER");
+    target=atoi(argv[1]); mode=atoi(argv[2]);
+    if (mode == 5 && !__builtin_cpu_supports("avx")) return 77;
+    alternate=mmap(0, stack_size, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    replacement=mmap(0, stack_size, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (alternate == MAP_FAILED || replacement == MAP_FAILED) return 96;
+    stack_flags = argc > 5 ? (int)strtoul(argv[5], 0, 0) : 0;
+    stack_t stack = {.ss_sp=alternate, .ss_size=stack_size,
+                     .ss_flags=stack_flags};
+    if (sigaltstack(&stack, 0)) return 95;
+    struct sigaction action = {0};
+    int information=atoi(argv[3]);
+    if (information) action.sa_sigaction=previous;
+    else action.sa_handler=simple;
+    action.sa_flags=(information ? SA_SIGINFO : 0) |
+                    (mode == 2 ? SA_NODEFER : 0);
+    sigemptyset(&action.sa_mask);
+    if (sigaction(target, &action, 0)) return 94;
+    if (atoi(argv[4]) && !install_saved_action()) return 93;
+    if (mode == 7) start_collector();
+    if (mode == 3) {
+        long value;
+        __asm__ volatile("lea 1f(%%rip),%%r12\n\t"
+                         "xor %%eax,%%eax\n\t"
+                         "mov (%%rax),%%rax\n\t1:"
+                         : "=a"(value) : : "r12", "memory");
+        if (value != 137) ++failures;
+    } else if (mode == 6) {
+        // Kernel signal-frame placement must fail on this exhausted normal
+        // stack. The wrapper must fail with the same signal, not recurse.
+        long pid=getpid(), tid=syscall(SYS_gettid), result=SYS_tgkill;
+        long page=sysconf(_SC_PAGESIZE);
+        char *guard=mmap(0, 2 * page, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (guard == MAP_FAILED || mprotect(guard, page, PROT_NONE)) return 91;
+        void *sp=guard + page + 256;
+        __asm__ volatile("mov %%rsp,%%r12\n\t"
+                         "mov %[sp],%%rsp\n\t"
+                         "syscall\n\t"
+                         "mov %%r12,%%rsp"
+                         : "+a"(result)
+                         : "D"(pid), "S"(tid), "d"((long)target), [sp]"r"(sp)
+                         : "rcx", "r11", "r12", "memory");
+        return 90;
+    } else if (mode == 5) failures += vector_signal();
+    else raise(target);
+    if (mode == 7) while (!atomic_load(&collected)) sched_yield();
+    if (mode == 1) {
+        sigset_t mask;
+        unsigned mxcsr;
+        sigprocmask(SIG_SETMASK, 0, &mask);
+        __asm__ volatile("stmxcsr %0" : "=m"(mxcsr));
+        if (!sigismember(&mask, SIGUSR2) || (mxcsr & 0x6000) != 0x4000)
+            ++failures;
+    }
+    if (sigaltstack(0, &stack)) return 92;
+    if (stack.ss_flags != stack_flags || stack.ss_size != stack_size ||
+        stack.ss_sp != (mode == 4 ? replacement : alternate)) ++failures;
+    if (calls != (mode == 2 ? 25 : 1)) ++failures;
+    return failures ? 99 : 0;
+}
+"""
+
+
+NORMAL_BRIDGE = BRIDGE + r"""
+import core.thread: Thread;
+import core.memory: GC;
+extern(C) void wait_for_handler();
+extern(C) void finish_gc();
+extern(C) void start_collector() {
+    (new Thread({ wait_for_handler(); GC.collect(); finish_gc(); })).start();
+}
+"""
+
+
+@pytest.fixture(scope="module", params=PROFILES)
+def normal_host(request, tmp_path_factory):
+    return build_host(request, tmp_path_factory, NORMAL_HOST, NORMAL_BRIDGE)
+
+
+@pytest.mark.parametrize("sig", [signal.SIGSEGV, signal.SIGFPE, signal.SIGBUS])
+@pytest.mark.parametrize("mode", [0, 1, 2, 4, 5])
+@pytest.mark.parametrize("autodisarm", [False, True])
+def test_normal_stack_callback_and_context(normal_host, sig, mode, autodisarm):
+    for installed in (False, True):
+        signatures = (False, True) if mode in (0, 2) else (True,)
+        for information in signatures:
+            result = subprocess.run(
+                [str(normal_host), str(sig.value), str(mode),
+                 str(int(information)), str(int(installed)),
+                 str(0x80000000 if autodisarm else 0)],
+                capture_output=True, timeout=5,
+            )
+            if mode == 5 and result.returncode == 77:
+                pytest.skip("AVX state is not available")
+            assert result.returncode == 0, result
+
+
+def test_normal_stack_callback_can_edit_fault_pc_and_result(normal_host):
+    for installed in (False, True):
+        result = subprocess.run(
+            [str(normal_host), str(signal.SIGSEGV.value), "3", "1",
+             str(int(installed))], capture_output=True, timeout=5,
+        )
+        assert result.returncode == 0, result
+
+
+@pytest.mark.parametrize("sig", [signal.SIGSEGV, signal.SIGFPE, signal.SIGBUS])
+def test_failed_normal_stack_delivery_has_the_native_signal(normal_host, sig):
+    for installed in (False, True):
+        result = subprocess.run(
+            [str(normal_host), str(sig.value), "6", "1", str(int(installed))],
+            capture_output=True, timeout=5,
+        )
+        assert result.returncode == -signal.SIGSEGV.value, result
+
+
+def test_collection_can_finish_inside_the_normal_stack_callback(normal_host):
+    for installed in (False, True):
+        result = subprocess.run(
+            [str(normal_host), str(signal.SIGSEGV.value), "7", "1",
+             str(int(installed))], capture_output=True, timeout=5,
+        )
+        assert result.returncode == 0, result
