@@ -26,6 +26,20 @@
 
     .text
 
+    /* The compiler must not infer nounwind from the guest body, even with
+     * LTO. A tail jump keeps the entry's real call site on the stack without
+     * adding an unwind frame or a check to a guest instruction.
+     * SysV arguments: context in rdi, body in rsi.
+     */
+    .globl  snakebite_fault_invoke
+    .type   snakebite_fault_invoke, @function
+    .align  16
+snakebite_fault_invoke:
+    .cfi_startproc
+    jmp     *%rsi
+    .cfi_endproc
+    .size   snakebite_fault_invoke, . - snakebite_fault_invoke
+
     .globl  snakebite_fault_trampoline
     .type   snakebite_fault_trampoline, @function
     .align  16

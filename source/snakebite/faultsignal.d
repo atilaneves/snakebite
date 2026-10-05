@@ -24,7 +24,7 @@ static if (!is(typeof(supported)))
 // throws a `HardwareFault`. Everything after that is normal D code. This is
 // the technique of druntime's `etc.linux.memoryerror`.
 //
-// Only a thread marked as running guest code (`GuestRun`) gets that. Other
+// Only a thread marked as running guest code (`runGuest`) gets that. Other
 // faults keep the previous or default action, with a core dump when enabled.
 // Until the backends mark their runs, this includes guest faults: an absent
 // mark cannot establish that the host has a defect.
@@ -52,7 +52,38 @@ public final class HardwareFault: Halted {
 }
 
 
-// What this thread's guest run is, for as long as the value lives. It
+// A recovery entry must own required host cleanup outside `body`. The
+// compiler can remove catches and cleanup around a faulting load or divide,
+// even in a caller when it proves that the callee cannot throw. The assembly
+// call keeps a real throwing call site here, including with LTO. Each entry
+// releases only its own mark: other Fibers can have suspended entries on
+// this thread. Use nested entries, not `GuestRun` locals, inside `body`.
+// This does not restore other host state owned inside `body`.
+// Backends must discard halted execution state, as required by #523.
+public void runGuest(scope void delegate() body) @system {
+    static if (supported) {
+        if (_state.prepared is null)
+            prepareThread;
+        ++_state.runs;
+        scope(exit) --_state.runs;
+        snakebite_fault_invoke(&body, &invokeGuestBody);
+    } else
+        body();
+}
+
+
+static if (supported) {
+    private alias GuestBody = extern(C) void function(void*);
+    private extern(C) void snakebite_fault_invoke(void* context, GuestBody body);
+
+    private extern(C) void invokeGuestBody(void* context) {
+        (*cast(void delegate()*) context)();
+    }
+}
+
+
+// A low-level mark, not a recovery entry: use `runGuest` around faulting
+// work. A mark alone cannot preserve cleanup in its owning frame. It
 // makes the state of the thread (an alternate signal stack, so that a
 // fault of the stack itself can be handled, and the object to throw) the
 // first time. Runs nest.
