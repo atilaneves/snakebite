@@ -41,13 +41,13 @@ def test_hardware_fault_position_and_guest_halt(
     write(
         app / "main.d",
         "module main;\n"
-        "import core.stdc.stdio: puts;\n"
-        "struct Local { ~this() { puts(\"destructor ran\"); } }\n"
+        "import core.sys.posix.unistd: write;\n"
+        "struct Local { ~this() { write(1, \"destructor ran\\n\".ptr, 15); } }\n"
         "int leaf(int* p) {\n"
         "    Local local;\n"
         "    try { return *p; }\n"
-        "    catch (Throwable) { puts(\"catch ran\"); return 0; }\n"
-        "    finally { puts(\"finally ran\"); }\n"
+        "    catch (Throwable) { write(1, \"catch ran\\n\".ptr, 10); return 0; }\n"
+        "    finally { write(1, \"finally ran\\n\".ptr, 12); }\n"
         "}\n"
         "int main() { return leaf(null); }\n",
     )
@@ -74,6 +74,108 @@ def test_hardware_fault_position_and_guest_halt(
     elif backend == "ctfe":
         assert result.returncode == 1, output(result)
         assert "dereference of null pointer" in result.stderr
+    else:
+        assert result.returncode == -signal.SIGSEGV, output(result)
+
+
+@pytest.mark.parametrize("backend", ["native", *BACKENDS])
+@pytest.mark.parametrize("shape", ["thread", "finalizer"])
+def test_hardware_fault_in_thread_or_gc_finalizer(
+    tmp_path: Path, backend: str, shape: str,
+) -> None:
+    app = tmp_path / "app"
+    if shape == "thread":
+        source = (
+            'module main;\nimport core.thread: Thread;\n'
+            'void leaf() { int* p; *p = 1; }\n'
+            'int main() { auto t = new Thread(&leaf); '
+            't.start(); t.join(); return 0; }\n'
+        )
+    else:
+        source = (
+            'module main;\nimport core.memory: GC;\n'
+            'class C { ~this() { int* p; *p = 1; } }\n'
+            'int main() { auto c = new C; '
+            'GC.runFinalizers((cast(const void*) typeid(C).destructor)[0 .. 1]); '
+            'return 0; }\n'
+        )
+    write(app / "main.d", source)
+    if backend == "native":
+        binary = tmp_path / "native"
+        built = subprocess.run(
+            ["ldc2", "-link-defaultlib-shared", f"-of={binary}",
+             str(app / "main.d")], capture_output=True, text=True,
+        )
+        assert built.returncode == 0, output(built)
+        result = subprocess.run([str(binary)], capture_output=True, text=True)
+    else:
+        result = run_sb(f"--backend={backend}", str(app), cwd=tmp_path)
+    if backend == "bytecode":
+        assert result.returncode == 1, output(result)
+        assert "main.d(3): fatal: null pointer dereference" in result.stderr
+        assert "in main." in result.stderr
+    elif backend == "ctfe":
+        assert result.returncode == 1, output(result)
+    else:
+        assert result.returncode == -signal.SIGSEGV, output(result)
+
+
+@pytest.mark.parametrize("backend", ["native", *BACKENDS])
+def test_native_fault_unwind_keeps_host_cleanup_but_skips_guest_callback(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    write(app / "dub.sdl", dub_project_recipe("fault-unwind")
+          + 'sourceFiles "../fixture.o" "../trap.o"\n')
+    write(
+        app / "source" / "main.d",
+        'module main;\nimport core.sys.posix.unistd: write;\n'
+        'extern(C) void nativeFault(void function());\n'
+        'extern(C) void cleanup() { write(1, "guest cleanup\\n".ptr, 14); }\n'
+        'int main() { nativeFault(&cleanup); return 0; }\n',
+    )
+    write(
+        tmp_path / "native.d",
+        'module native_fixture;\nimport core.sys.posix.unistd: write;\n'
+        'extern(C) void nativeTrap();\n'
+        'extern(C) void nativeFault(void function() cleanup) {\n'
+        ' scope(exit) write(1, "host released\\n".ptr, 14);\n'
+        ' scope(exit) cleanup();\n nativeTrap();\n}\n',
+    )
+    write(
+        tmp_path / "trap.S",
+        '.text\n.globl nativeTrap\n.type nativeTrap,@function\n'
+        'nativeTrap:\n.cfi_startproc\nxor %eax,%eax\n'
+        'mov (%rax),%rax\nret\n.cfi_endproc\n'
+        '.section .note.GNU-stack,"",@progbits\n',
+    )
+    for command in (
+        ["ldc2", "-c", "-relocation-model=pic", "-O", "-release",
+         f"-of={tmp_path / 'fixture.o'}", str(tmp_path / "native.d")],
+        ["cc", "-c", "-fPIC", str(tmp_path / "trap.S"),
+         "-o", str(tmp_path / "trap.o")],
+    ):
+        built = subprocess.run(command, capture_output=True, text=True)
+        assert built.returncode == 0, output(built)
+    if backend == "native":
+        binary = tmp_path / "native"
+        built = subprocess.run(
+            ["ldc2", "-link-defaultlib-shared", f"-of={binary}",
+             str(app / "source" / "main.d"),
+             str(tmp_path / "fixture.o"), str(tmp_path / "trap.o")],
+            capture_output=True, text=True,
+        )
+        assert built.returncode == 0, output(built)
+        result = subprocess.run([str(binary)], capture_output=True, text=True)
+    else:
+        result = run_app(tmp_path, backend)
+    assert "guest cleanup" not in output(result), output(result)
+    if backend == "bytecode":
+        assert result.returncode == 1, output(result)
+        assert result.stdout == "host released\n", output(result)
+        assert "fatal: null pointer dereference" in result.stderr
+    elif backend == "ctfe":
+        assert result.returncode == 1, output(result)
     else:
         assert result.returncode == -signal.SIGSEGV, output(result)
 

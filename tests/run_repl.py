@@ -32,7 +32,9 @@ def history_file(
 UP_ARROW = "\x1b[A"
 
 
-@pytest.mark.parametrize("shape", ["direct", "deep", "callback", "fiber"])
+@pytest.mark.parametrize(
+    "shape", ["direct", "deep", "callback", "reentrant", "fiber", "thread"],
+)
 def test_bytecode_hardware_fault_recovery_uses_fresh_cell_state(shape: str) -> None:
     declarations = {
         "direct": ["int fault() { int* p; return *p; }"],
@@ -53,6 +55,22 @@ def test_bytecode_hardware_fault_recovery_uses_fresh_cell_state(shape: str) -> N
             "void fiberFault() { int* p; int value = *p; }",
             "int fault() { auto f = new Fiber(&fiberFault); "
             "f.call(); return 0; }",
+        ],
+        "thread": [
+            "import core.thread: Thread",
+            "void threadFault() { int* p; int value = *p; }",
+            "int fault() { auto t = new Thread(&threadFault); "
+            "t.start(); t.join(); return 0; }",
+        ],
+        "reentrant": [
+            "import core.stdc.stdlib: qsort",
+            "extern(C) int innerCompare(const void* a, const void* b) { "
+            "int* p; return *p; }",
+            "extern(C) int outerCompare(const void* a, const void* b) { "
+            "int[2] nested = [2, 1]; qsort(nested.ptr, 2, int.sizeof, "
+            "&innerCompare); return 0; }",
+            "int fault() { int[2] a = [2, 1]; "
+            "qsort(a.ptr, 2, int.sizeof, &outerCompare); return 0; }",
         ],
     }
     child = pexpect.spawn(

@@ -567,7 +567,6 @@ private struct DispatchState {
     DispatchState* parent;
 }
 
-pragma(inline, false)
 private void dispatch(
     const(Instruction)* pc,
     ubyte* frame,
@@ -582,9 +581,12 @@ private void dispatch(
 ) {
     import snakebite.faultsignal: runGuest;
 
-    Activation root;
+    // Fill each field once. Default initialization otherwise clears the
+    // arrays before these assignments on every callback entry.
+    Activation root = void;
     root.pc = root.start = pc;
     root.end = end;
+    root.resume = null;
     root.frame = frame;
     root.returnPlace = returnPlace;
     root.constants = constants;
@@ -592,7 +594,9 @@ private void dispatch(
     root.assertSites = assertSites;
     root.exceptionHandlers = exceptionHandlers;
     root.cleanupMark = frames.cleanupMark;
-    auto state = DispatchState(frames, &root, null, vm,
+    root.frameMark = FrameStack.Mark.init;
+    root.parent = null;
+    auto state = DispatchState(frames, null, null, vm,
         cast(DispatchState*) frames.backendEntry);
     // These owners are above the assembly call, not in a frame that can
     // fault. A halt must also discard a partially reserved activation.
@@ -603,7 +607,15 @@ private void dispatch(
     }
     scope(exit) frames.backendEntry = state.parent;
     frames.backendEntry = &state;
-    runGuest(&state, &invokeDispatch);
+    // A re-entry uses this execution state's existing controlled entry.
+    // dispatchLoop is a throwing seam: it propagates ordinary exceptions
+    // and halts. Its caller's cleanup is therefore kept without an opaque
+    // assembly call. Other Fibers have other FrameStacks (ADR-0006).
+    if (state.parent is null) {
+        state.current = &root;
+        runGuest(&state, &invokeDispatch, vm, &haltBeforeUnwind);
+    } else
+        dispatchLoop(root.pc, &root, &state);
 }
 
 private extern(C) void invokeDispatch(void* context) {
@@ -611,6 +623,13 @@ private extern(C) void invokeDispatch(void* context) {
     dispatchLoop(state.current.pc, state.current, state);
 }
 
+private void haltBeforeUnwind(
+    void* context, imported!"snakebite.faultsignal".HardwareFault fault,
+) nothrow @nogc {
+    (cast(Vm*) context)._halt = fault;
+}
+
+pragma(inline, true)
 private void dispatchLoop(
     const(Instruction)* pc,
     Activation* root,
@@ -680,7 +699,7 @@ private Throwable reportGuestFault(
 
     auto position = SourcePosition.init;
     bool foundRoot;
-    GuestFault.Stack stack = (scope GuestFault.FrameSink sink) {
+    scope GuestFault.Stack stack = (scope GuestFault.FrameSink sink) {
         auto activation = active;
         auto dispatch = state;
         while (dispatch !is null) {
