@@ -7,12 +7,14 @@ module ut.importc;
 
 
 import std.array: replace;
-import std.path: buildPath;
 import ut;
 import ut.backends;
 
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
+)) {
     @("importc.functionCalledFromD." ~ backend.stringof)
     @Tags(backend.stringof)
     @Serial
@@ -27,6 +29,8 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
     Omit!(Ctfe, Because.inexpressible, "CTFE does not implement C-style variadic functions"),
 )) {
     @("importc.vaCopy." ~ backend.stringof)
@@ -54,7 +58,10 @@ static foreach (backend; Matrix!(
 }
 
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
+)) {
     @("importc.compilerBuiltins." ~ backend.stringof)
     @Tags(backend.stringof)
     @Serial
@@ -76,6 +83,8 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot read a C global, which is a mutable static variable"),
 )) {
     @("importc.addressAsIntegerInitialiser." ~ backend.stringof)
@@ -97,6 +106,8 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot read a C global, which is a mutable static variable"),
 )) {
     @("importc.scalarAndArrayInitialisers." ~ backend.stringof)
@@ -126,6 +137,8 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot read a C global, which is a mutable static variable"),
 )) {
     @("importc.structInitialisers." ~ backend.stringof)
@@ -154,6 +167,8 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot read a C global, which is a mutable static variable"),
 )) {
     @("importc.stringAndPointerInitialisers." ~ backend.stringof)
@@ -183,6 +198,8 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot read a C global, which is a mutable static variable"),
 )) {
     @("importc.staticFunctionAndVariable." ~ backend.stringof)
@@ -200,7 +217,10 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
+)) {
     @("importc.structByValueAndPointer." ~ backend.stringof)
     @Tags(backend.stringof)
     @Serial
@@ -227,7 +247,10 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
+)) {
     @("importc.enumAndTypedef." ~ backend.stringof)
     @Tags(backend.stringof)
     @Serial
@@ -252,7 +275,10 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
+)) {
     @("importc.controlFlow." ~ backend.stringof)
     @Tags(backend.stringof)
     @Serial
@@ -303,6 +329,8 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot read a C global, which is a mutable static variable"),
 )) {
     @("importc.compoundLiteral." ~ backend.stringof)
@@ -333,7 +361,10 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
+)) {
     @("importc.genericSelection." ~ backend.stringof)
     @Tags(backend.stringof)
     @Serial
@@ -348,7 +379,10 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
+)) {
     @("importc.bitFields." ~ backend.stringof)
     @Tags(backend.stringof)
     @Serial
@@ -377,6 +411,8 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
     Omit!(Ctfe, Because.inexpressible, "CTFE does not implement C-style variadic functions"),
 )) {
     @("importc.variadicDefinedInC." ~ backend.stringof)
@@ -401,6 +437,8 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot call `printf`, which has no source code"),
 )) {
     @("importc.cCallsPrintf." ~ backend.stringof)
@@ -419,6 +457,8 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot call `strlen`, which has no source code"),
 )) {
     @("importc.systemHeader." ~ backend.stringof)
@@ -435,7 +475,10 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
+)) {
     @("importc.addressOfCFunction." ~ backend.stringof)
     @Tags(backend.stringof)
     @Serial
@@ -453,6 +496,8 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot resolve a C declaration to the D definition of the same symbol"),
 )) {
     @("importc.cCallsBackD." ~ backend.stringof)
@@ -471,7 +516,10 @@ static foreach (backend; Matrix!(
 }
 
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
+)) {
     @("importc.bareDirectoryImportsCModule." ~ backend.stringof)
     @Tags(backend.stringof)
     @Serial
@@ -488,6 +536,8 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot resolve a D declaration to the C definition of the same symbol"),
 )) {
@@ -507,7 +557,10 @@ static foreach (backend; Matrix!(
 
 // In C the type of `!`, `&&`, `||` and a comparison is `int`, not `bool`, so
 // the whole result must be 0 or 1, whatever the stack held before.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
+)) {
     @("importc.comparisonsGiveInt." ~ backend.stringof)
     @Tags(backend.stringof)
     @Serial
@@ -551,6 +604,8 @@ static foreach (backend; Matrix!()) {
 // A C `static` function has internal linkage: it is not the definition
 // of the same name that another translation unit declares.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot resolve a D declaration to the C definition of the same symbol"),
 )) {
     @("importc.staticFunctionIsNotALinkedDefinition." ~ backend.stringof)
@@ -573,6 +628,8 @@ static foreach (backend; Matrix!(
 // `pragma(mangle)` gives the symbol; the D identifier of the declaration
 // is not the name of the C function.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot resolve a D declaration to the C definition of the same symbol"),
 )) {
     @("importc.declarationWithPragmaMangle." ~ backend.stringof)
@@ -590,6 +647,8 @@ static foreach (backend; Matrix!(
 
 // A declaration in a C++ namespace is not a direct member of its module.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot resolve a D declaration to the definition of the same symbol"),
 )) {
     @("importc.declarationInCppNamespace." ~ backend.stringof)
@@ -611,6 +670,8 @@ static foreach (backend; Matrix!(
 // declares it, so a declaration in a module that the project does not own
 // (druntime's `abs`) is the definition that the project gives of the symbol.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot resolve a D declaration to the definition of the same symbol"),
 )) {
     @("importc.declarationInNonRootModule." ~ backend.stringof)
@@ -631,6 +692,8 @@ static foreach (backend; Matrix!(
 // An `extern` variable is the one object that another translation unit
 // defines, for C and for D declarations of it.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot read a C global, which is a mutable static variable"),
 )) {
     @("importc.externVariableIsTheDefinition." ~ backend.stringof)
@@ -659,6 +722,8 @@ static foreach (backend; Matrix!(
 // C has no array bounds checks: a flexible array member, and the older
 // one-element form of it, are indexed past their declared length.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
     Omit!(Ctfe, Because.inexpressible, "CTFE checks every array index, and the C module is no exception"),
 )) {
     @("importc.flexibleArrayMember." ~ backend.stringof)
@@ -686,6 +751,8 @@ static foreach (backend; Matrix!(
 // A compound literal at file scope has static storage, and a string
 // initialises a `char` array member of it.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot compile a C source file"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot read a C global, which is a mutable static variable"),
 )) {
     @("importc.compoundLiteralWithCharArray." ~ backend.stringof)
@@ -710,11 +777,10 @@ static foreach (backend; Matrix!(
 
 // Builds a project whose `<name>.c` is `cSource` and whose
 // `<name>_app.d` is `dSource` (`CMOD` there names the C module), and
-// checks the exit status of the D `main`. A `Layout.bare` directory has no recipe,
-// and natively is `dmd -i`'s: the common case, because it is the faster. A
-// `Layout.dub` project names the C file in `sourceFiles`, and natively is the
-// program `dub build` makes. A
-// module name is unique per test: every test shares one frontend.
+// checks the exit status of the D `main`. A `Layout.bare` directory has no
+// recipe: the common case, because it is the faster. A `Layout.dub` project
+// names the C file in `sourceFiles`. A module name is unique per test: every
+// test shares one frontend.
 private enum Layout { dub, bare }
 
 private void cProjectStatus(
@@ -724,9 +790,7 @@ private void cProjectStatus(
     in int expected,
 ) {
     import snakebite.backends.backend: run;
-    import snakebite.dependencyimage: defaultCompiler;
     import snakebite.project: loadProject, sourceSet;
-    import std.process: Config, execute;
 
     enum moduleName = "importc_" ~ name ~ "_" ~ backend.stringof;
     const sandbox = Sandbox();
@@ -739,7 +803,6 @@ private void cProjectStatus(
             ` ~ (extraC is null ? "" : `sourceFiles "source/` ~ moduleName ~ `_extra.c"`) ~ `
             configuration "unittest" {
                 targetType "executable"
-                targetName "importc_program"
             }
         `);
     enum sources = layout == Layout.dub ? "app/source/" : "app/";
@@ -753,22 +816,7 @@ private void cProjectStatus(
         "module " ~ moduleName ~ "_app;\n" ~ dSource.replace("CMOD", moduleName));
     const directory = sandbox.inSandboxPath("app");
 
-    static if (is(backend == Native)) {
-        static if (layout == Layout.dub)
-            const command = ["dub", "build", "-q", "--config=unittest",
-                "--compiler=" ~ defaultCompiler];
-        else
-            const command = [defaultCompiler, "-i", "-ofimportc_program",
-                moduleName ~ "_app.d"];
-        const build = execute(
-            command, null, Config.none, size_t.max, directory);
-        if (build.status != 0)
-            assert(0, build.output);
-        execute([directory.buildPath("importc_program")])
-            .status.should == expected;
-    } else {
-        auto project = loadProject(directory, sourceSet(directory, null, null));
-        scope instance = new backend(project.program);
-        run(instance, project.program).should == expected;
-    }
+    auto project = loadProject(directory, sourceSet(directory, null, null));
+    scope instance = new backend(project.program);
+    run(instance, project.program).should == expected;
 }
