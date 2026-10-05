@@ -217,9 +217,9 @@ public void buildDubDependencies(
 ) {
     import snakebite.dependencyimage: defaultCompiler;
     import snakebite.exception: SnakebiteException;
-    import std.process: Config, execute;
+    import std.process: Config, execute, environment;
     import std.algorithm: all;
-    import std.file: exists, mkdirRecurse, readText, write;
+    import std.file: exists, mkdirRecurse, readText, write, remove, rmdir;
     import std.path: buildPath;
 
     const statePath = buildPath(stateDirectory, "dub-dependencies");
@@ -229,8 +229,16 @@ public void buildDubDependencies(
             && statePath.readText == fingerprint ~ before)
         return;
 
+    const wrapperDirectory = rootCompilerWrapper(description, stateDirectory);
+    scope(exit) if (wrapperDirectory.length) {
+        remove(buildPath(wrapperDirectory, defaultCompiler));
+        rmdir(wrapperDirectory);
+    }
+    auto buildEnvironment = environment.toAA;
+    if (wrapperDirectory.length)
+        buildEnvironment["PATH"] = wrapperDirectory ~ ":" ~ buildEnvironment["PATH"];
     const result = execute(["dub", "build", "--deep", "--compiler=" ~ defaultCompiler]
-        ~ description.buildArguments, null, Config.none,
+        ~ description.buildArguments, buildEnvironment, Config.none,
         size_t.max, directory);
     if (result.status != 0)
         throw new SnakebiteException("Dub dependency build failed:\n" ~ result.output);
@@ -238,6 +246,97 @@ public void buildDubDependencies(
         throw new SnakebiteException("Dub build did not produce all dependency libraries");
     stateDirectory.mkdirRecurse;
     statePath.write(fingerprint ~ fileFingerprint(linkerFiles));
+}
+
+// Keep dub's compiler identity and dependency cache paths. Only the root
+// output gets translated flags; dependencies retain their own checks.
+// A real build lets dub run its hooks and report every build failure.
+private string rootCompilerWrapper(
+    in DubDescription description, in string stateDirectory,
+) {
+    import snakebite.dependencyimage: defaultCompiler;
+    import snakebite.frontend.checks: isCheckFlag, ldcArguments;
+    import std.algorithm: startsWith;
+    import std.array: array;
+    import std.algorithm.iteration: map;
+    import std.conv: octal;
+    import std.json: JSONValue;
+    import std.file: mkdirRecurse, setAttributes, write;
+    import std.path: absolutePath, buildPath;
+    import std.process: environment, escapeShellCommand;
+    import std.uuid: randomUUID;
+
+    if (defaultCompiler != "ldc2")
+        return null;
+    foreach (target; description.value["targets"].array) {
+        if (target["rootPackage"].str != description.value["rootPackage"].str)
+            continue;
+        const settings = target["buildSettings"];
+        const flags = settings["dflags"].array.map!(value => value.str).array;
+        const translatedFlags = ldcArguments(flags);
+        if (flags == translatedFlags)
+            continue;
+        const output = target["cacheArtifactPath"].str;
+        string responseArgument(in string argument) {
+            import std.algorithm: canFind;
+            import std.string: replace;
+
+            return argument.canFind(' ') || argument.canFind('\t') || argument.canFind('"')
+                ? "\"" ~ argument.replace("\\", "\\\\").replace("\"", "\\\"") ~ "\""
+                : argument;
+        }
+        string rewrite = "BEGIN {\n";
+        foreach (flag; flags)
+            rewrite ~= "remove[" ~ JSONValue(responseArgument(flag)).toString ~ "] = 1;\n";
+        rewrite ~= "}\n!($0 in remove) { print }\nEND {\n";
+        foreach (flag; translatedFlags)
+            rewrite ~= "print " ~ JSONValue(responseArgument(flag)).toString ~ ";\n";
+        rewrite ~= "}\n";
+        string[] outputArguments;
+        foreach (suffix; ["", ".o"])
+            foreach (prefix; ["-of", "-of=", "--of="])
+                outputArguments ~= ["-e", responseArgument(prefix ~ output ~ suffix)];
+        string[] checkArguments;
+        foreach (flag; flags)
+            if (isCheckFlag(flag) || flag.startsWith("@"))
+                checkArguments ~= ["-e", responseArgument(flag)];
+        const directory = buildPath(stateDirectory,
+            "dub-compiler-" ~ randomUUID.toString).absolutePath;
+        directory.mkdirRecurse;
+        const script = "#!/bin/bash\nPATH="
+            ~ escapeShellCommand([environment["PATH"]]) ~ "\nexport PATH\n"
+            // dub serializes one argument per line in its compiler response
+            // file. Replace those records, not the response-file grammar.
+            ~ "for arg in \"$@\"; do\ncase \"$arg\" in @*)\nfile=${arg:1}\n"
+            ~ "if grep -Fxq " ~ escapeShellCommand(outputArguments) ~ " -- \"$file\""
+            ~ " && grep -Fxq " ~ escapeShellCommand(checkArguments) ~ " -- \"$file\"; then\n"
+            ~ "temporary=$(mktemp " ~ escapeShellCommand([buildPath(directory, "arguments.XXXXXX")]) ~ ") || exit 1\n"
+            ~ "trap 'rm -f -- \"$temporary\"' EXIT\nawk " ~ escapeShellCommand([rewrite])
+            ~ " \"$file\" > \"$temporary\" || exit 1\n"
+            ~ "args=()\nfor original in \"$@\"; do\n"
+            ~ "if [[ $original == \"$arg\" ]]; then args+=(\"@$temporary\"); else args+=(\"$original\"); fi\ndone\n"
+            ~ "ldc2 \"${args[@]}\"\nexit $?\nfi\n;;\nesac\ndone\n"
+            ~ "root=false\nfor arg in \"$@\"; do\ncase \"$arg\" in\n"
+            ~ escapeShellCommand(["-of" ~ output]) ~ "|"
+            ~ escapeShellCommand(["-of=" ~ output]) ~ "|"
+            ~ escapeShellCommand(["--of=" ~ output]) ~ "|"
+            ~ escapeShellCommand(["-of" ~ output ~ ".o"]) ~ "|"
+            ~ escapeShellCommand(["-of=" ~ output ~ ".o"]) ~ "|"
+            ~ escapeShellCommand(["--of=" ~ output ~ ".o"])
+            ~ ") root=true;;\nesac\ndone\n"
+            ~ "if $root; then\nargs=(\"$@\")\nflags=(" ~ escapeShellCommand(flags) ~ ")\n"
+            ~ "for ((i=0; i<=${#args[@]}-${#flags[@]}; ++i)); do\nmatch=true\n"
+            ~ "for ((j=0; j<${#flags[@]}; ++j)); do\n"
+            ~ "if [[ ${args[i+j]} != \"${flags[j]}\" ]]; then match=false; break; fi\ndone\n"
+            ~ "if $match; then\nexec ldc2 \"${args[@]:0:i}\" "
+            ~ escapeShellCommand(translatedFlags)
+            ~ " \"${args[@]:i+${#flags[@]}}\"\nfi\ndone\nfi\nexec ldc2 \"$@\"\n";
+        const path = buildPath(directory, defaultCompiler);
+        path.write(script);
+        path.setAttributes(octal!700);
+        return directory;
+    }
+    return null;
 }
 
 
@@ -252,7 +351,7 @@ public string dependencyFingerprint(in string directory, in DubDescription descr
     import std.process: environment;
     import snakebite.dependencyimage: defaultCompiler;
 
-    return text("snakebite-dub-v1", defaultCompiler, __VERSION__,
+    return text("snakebite-dub-v2", defaultCompiler, __VERSION__,
         environment.get("DFLAGS", ""), environment.get("LFLAGS", ""),
         description.value.toString, description.buildArguments,
         fileFingerprint(dubInputs(directory, description))).sha256Of.toHexString.idup;
