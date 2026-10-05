@@ -310,6 +310,41 @@ def test_state_directory_stays_in_caller_directory(
     assert not (tmp_path / "app" / ".snakebite").exists()
 
 
+# The `dub describe` record of a project that nothing changed since the
+# first start holds on the second start. The state directory lies in the
+# project directory here, which the record watches: creating it must not
+# change what the record saw.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_second_start_does_not_describe_again(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    write(app / "dub.sdl", dub_project_recipe("describe-once"))
+    write(
+        app / "source" / "main.d",
+        """
+        module main;
+        int main() { return 0; }
+        """,
+    )
+    real_dub = shutil.which("dub")
+    assert real_dub is not None
+    log = tmp_path / "dub.log"
+    fake_dub(tmp_path, f'echo "$*" >> "{log}"\nexec "{real_dub}" "$@"\n')
+
+    for _ in range(2):
+        result = run_with_fake_dub_in(
+            tmp_path, app, f"--backend={backend}", "--no-optimise-image", ".",
+        )
+        assert result.returncode == 0, output(result)
+
+    describes = [
+        line for line in log.read_text().splitlines()
+        if line.split()[0] == "describe"
+    ]
+    assert len(describes) == 1, describes
+
+
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
 def test_dependency_constructor_uses_project_directory(
     tmp_path: Path, backend: str,
@@ -2101,6 +2136,38 @@ FINALIZER_SHAPES: dict[str, tuple[str | None, ...]] = {
         "int f(int x) in (x >= 0) out (r; r > 0) { return x + 1; }",
         "total += f(dead);",
     ),
+    "compound_fields": (
+        "struct Owner { byte pad = 9; double d = 1.5; long l = 20; "
+        "double run() { d += 0.5; l <<= 1; return d + l; } }",
+        "Owner owner; auto result = owner.run; assert(result == 42.0); "
+        "total += cast(long) result;",
+    ),
+    "inherited_class_contracts": (
+        "class Base { int limit = 7; int f(int x) "
+        "in { ++total; assert(x < limit); } "
+        "out (r) { ++total; assert(r == x * limit); } "
+        "do { return x * limit; } } "
+        "class Derived: Base { override int f(int x) in (x > 0) "
+        "do { return x * limit; } } __gshared Base target; "
+        "shared static this() { target = new Derived; }",
+        "auto before = total; auto result = target.f(3); "
+        "assert(result == 21); assert(total == before + 2); "
+        "total += result;",
+    ),
+    "inherited_interface_contracts": (
+        "interface First { int a(); } interface Second { int f(int x) "
+        "in { record(); assert(x == g()); } "
+        "out (r) { record(); assert(r == g() * 2); } "
+        "int g(); void record(); } class Impl: First, Second { "
+        "int value = 7; int a() { return 1; } "
+        "int g() { return value; } void record() { ++total; } "
+        "int f(int x) in (x > 0) do { return x * 2; } } "
+        "__gshared Second target; "
+        "shared static this() { target = new Impl; }",
+        "auto before = total; auto result = target.f(7); "
+        "assert(result == 14); assert(total == before + 2); "
+        "total += result;",
+    ),
     "copyctor": (
         "struct P { int x; this(int v) { x = v; } this(ref return "
         "scope P o) { x = o.x + 1; } }",
@@ -2689,6 +2756,13 @@ def run_with_fake_dub(
     outside.mkdir(exist_ok=True)
     path = f"{directory / 'bin'}:{os.environ.get('PATH', '')}"
     return run_sb(*args, cwd=outside, env={"PATH": path})
+
+
+def run_with_fake_dub_in(
+    directory: Path, cwd: Path, *args: str,
+) -> subprocess.CompletedProcess[str]:
+    path = f"{directory / 'bin'}:{os.environ.get('PATH', '')}"
+    return run_sb(*args, cwd=cwd, env={"PATH": path})
 
 
 def output(result: subprocess.CompletedProcess[str]) -> str:
