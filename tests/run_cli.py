@@ -1664,7 +1664,7 @@ def test_guest_division_by_zero_dies_of_sigfpe(
 
 
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
-def test_fault_handlers_report_a_fault_that_no_guest_run_owns(
+def test_fault_handlers_do_not_blame_the_host_for_an_unclassified_guest_fault(
     tmp_path: Path, backend: str,
 ) -> None:
     write_faulting_project(tmp_path / "app", NULL_DEREFERENCE_MAIN)
@@ -1675,7 +1675,7 @@ def test_fault_handlers_report_a_fault_that_no_guest_run_owns(
     )
 
     assert result.returncode == -signal.SIGSEGV, output(result)
-    assert "snakebite: internal error: signal 11" in result.stderr
+    assert "snakebite:" not in result.stderr
 
 
 @pytest.mark.parametrize("backend", FILE_BACKENDS)

@@ -24,10 +24,10 @@ static if (!is(typeof(supported)))
 // throws a `HardwareFault`. Everything after that is normal D code. This is
 // the technique of druntime's `etc.linux.memoryerror`.
 //
-// Only a thread that runs guest code (`GuestRun`) gets that. A fault of any
-// other thread is a defect of the host, and a defect of the host gets the
-// default action of the signal, with a core dump, as it does without this
-// module: it must never be reported as a fault of the guest.
+// Only a thread marked as running guest code (`GuestRun`) gets that. Other
+// faults keep the previous or default action, with a core dump when enabled.
+// Until the backends mark their runs, this includes guest faults: an absent
+// mark cannot establish that the host has a defect.
 //
 // The process that owns the guest installs the handlers one time at start
 // (`installFaultHandlers`). A guest that installs a handler of its own for
@@ -559,8 +559,8 @@ static if (supported) {
         if (info.si_code <= 0 && handler is cast(void*) SIG_IGN)
             return;
 
-        if (info.si_code > 0)
-            reportHostDefect(signal, info, context);
+        if (info.si_code > 0 && _state.runs != 0)
+            reportUnhandledGuestFault(signal, info, context);
         sigaction_t default_;
         default_.sa_handler = SIG_DFL;
         sigaction(signal, &default_, null);
@@ -569,7 +569,7 @@ static if (supported) {
             raise(signal);
     }
 
-    private void reportHostDefect(int signal, siginfo_t* info, void* context) nothrow @nogc {
+    private void reportUnhandledGuestFault(int signal, siginfo_t* info, void* context) nothrow @nogc {
         import core.sys.posix.unistd: write;
 
         char[128] line = void;
@@ -591,9 +591,7 @@ static if (supported) {
 
         // A thread in a guest run most likely has a fault of the guest that
         // no handler of the guest run took: do not blame the host.
-        put(_state.runs != 0
-            ? "snakebite: fatal: fault of the guest program: signal "
-            : "snakebite: internal error: signal ");
+        put("snakebite: fatal: fault of the guest program: signal ");
         putNumber(signal, 10);
         put(" at address 0x");
         putNumber(cast(size_t) info.si_addr, 16);
