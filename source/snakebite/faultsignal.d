@@ -472,6 +472,18 @@ static if (supported) {
 
         auto registers = &(cast(ucontext_t*) context).uc_mcontext.gregs;
         const pc = cast(size_t) (*registers)[REG_RIP];
+        const sp = cast(size_t) (*registers)[REG_RSP];
+        const address = cast(size_t) info.si_addr;
+        if (signal == SIGSEGV
+            && (info.si_code == segvMapError || info.si_code == segvAccessError)
+            && (address < sp ? sp - address <= guardSize : address - sp < nullLimit)) {
+            import core.sys.posix.unistd: _exit, write;
+
+            // The trampoline and unwinder cannot use an exhausted stack.
+            enum message = "snakebite: fatal: stack overflow\n";
+            write(2, message.ptr, message.length);
+            _exit(1);
+        }
         _state.pending = true;
         _state.record = FaultReport(
             signal, info.si_code, cast(size_t) info.si_addr, pc,
