@@ -303,6 +303,77 @@ def test_bytecode_hardware_fault_messages(
     assert f"main.d(2): fatal: {message}" in result.stderr
 
 
+# Keep all backends on the same source. Only Bytecode currently reports
+# a guest stack for a null throw; the others keep their existing failure.
+@pytest.mark.parametrize("backend", ["native", *BACKENDS])
+@pytest.mark.parametrize("source,frames", [
+    ("module main;\n"
+     "void fail() {\n"
+     "    Throwable t;\n"
+     "    throw t;\n"
+     "}\n"
+     "int main() { fail(); return 0; }\n",
+     [("main.fail", 4), ("D main", 6)]),
+    ("module main;\n"
+     "void owner(int n) {\n"
+     "    try {\n"
+     "        if (n) owner(n - 1);\n"
+     "        else throw new Exception(\"ordinary\");\n"
+     "    } finally {\n"
+     "        if (!n) {\n"
+     "            Throwable t;\n"
+     "            throw t;\n"
+     "        }\n"
+     "    }\n"
+     "}\n"
+     "int main() { owner(2); return 0; }\n",
+     [("main.owner", 9), ("main.owner", 4), ("main.owner", 4),
+      ("D main", 13)]),
+    ("module main;\n"
+     "int fail(bool yes) {\n"
+     "    Throwable t;\n"
+     "    return yes\n"
+     "        ? 0\n"
+     "        : throw t;\n"
+     "}\n"
+     "int main() { return fail(false); }\n",
+     [("main.fail", 6), ("D main", 8)]),
+], ids=["statement", "recursive-finally", "expression"])
+def test_null_throw_reports_throw_position(
+    tmp_path: Path, backend: str, source: str, frames: list[tuple[str, int]],
+) -> None:
+    app = tmp_path / "app"
+    write(app / "main.d", source)
+    if backend == "native":
+        binary = tmp_path / "native"
+        built = subprocess.run(
+            ["dmd", f"-of={binary}", str(app / "main.d")],
+            capture_output=True, text=True,
+        )
+        assert built.returncode == 0, output(built)
+        result = subprocess.run(
+            [str(binary)], capture_output=True, text=True, timeout=30,
+        )
+    else:
+        result = run_sb(f"--backend={backend}", str(app), cwd=tmp_path)
+    if backend == "bytecode":
+        expected = f"main.d({frames[0][1]}): fatal: throw of a null reference\n"
+        expected += "".join(f"    in {name} (main.d({line}))\n"
+                            for name, line in frames)
+        assert result.returncode == 1, output(result)
+        assert result.stderr == expected, output(result)
+    elif backend == "native":
+        assert result.returncode == -signal.SIGSEGV, output(result)
+    elif backend == "interpreter" and len(frames) == 4:
+        # Interpreter currently preserves the original exception instead
+        # of the null throw from finally. This is separate #523 scope.
+        assert result.returncode == 1, output(result)
+        assert result.stderr == "ordinary\nat main.d:5\n", output(result)
+    else:
+        assert result.returncode == 1, output(result)
+        assert "null" in result.stderr, output(result)
+
+
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
 def test_module_constructor_uses_project_directory(
     tmp_path: Path, backend: str,

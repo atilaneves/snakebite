@@ -1078,6 +1078,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t source,
         in size_t width,
         in size_t sourceWidth = 0,
+        in Loc* sourceLocation = null,
     ) {
         if (width == int.sizeof) {
             if (handler is &opDivideSigned)
@@ -1114,7 +1115,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import std.string: fromStringz;
 
         const root = cast(const(Expression)) _expressions.root;
-        const location = root is null ? _function.loc : root.loc;
+        const location = sourceLocation !is null ? *sourceLocation
+            : root is null ? _function.loc : root.loc;
         _positions ~= SourcePosition(location.filename.fromStringz.idup,
             location.linnum);
     }
@@ -1642,7 +1644,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const facts = TypeFacts.of(expression.type);
         const offset = reserveTemp(facts);
         evalInto(expression, offset, facts.size);
-        emit(&opThrow, offset, 0, 0);
+        // A throw can follow its operand's full-expression scope or be
+        // inside a larger expression whose root starts on another line.
+        emit(&opThrow, offset, 0, 0, 0, &loc);
         _finished = true;
     }
 
