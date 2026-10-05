@@ -3729,8 +3729,9 @@ def test_dependency_runner_replaces_the_default_test_runner(
 # A throwable that escapes the runner hook of a dependency ends the program
 # with status 1, not with a crash at exit, and the runtime ends as it does
 # in compiled D: a thread that the program started is joined and the module
-# destructors run. The thread sleeps so that it is still running when the
-# runner hook ends.
+# destructors run. The thread waits for a signal that the runner hook gives
+# after the thread has started, just before the throwable escapes, so no time
+# decides the result.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
 @pytest.mark.usefixtures("private_dub_cache")
 def test_throwable_escaping_a_unittest_runner_ends_the_program_cleanly(
@@ -3746,14 +3747,19 @@ def test_throwable_escaping_a_unittest_runner_ends_the_program_cleanly(
         module escaping_throwable_app;
         import core.runtime: Runtime, UnitTestResult;
         import core.stdc.stdio: puts;
+        import core.sync.semaphore: Semaphore;
         import core.thread: Thread;
-        import core.time: msecs;
         shared static this() {
             Runtime.extendedModuleUnitTester = {
+                auto started = new Semaphore;
+                auto release = new Semaphore;
                 new Thread({
-                    Thread.sleep(300.msecs);
+                    started.notify;
+                    release.wait;
                     puts("guest thread ended");
                 }).start;
+                started.wait;
+                release.notify;
                 foreach (module_; ModuleInfo)
                     if (module_ && module_.unitTest
                             && module_.name == "escaping_throwable_app")
