@@ -2,8 +2,12 @@ module fault_boundary;
 
 import core.volatile: volatileLoad;
 import core.thread.fiber: Fiber;
+import core.thread: Thread;
+import core.memory: GC;
 import core.sys.linux.sys.prctl: PR_SET_DUMPABLE, prctl;
-import snakebite.faultsignal: runGuest, HardwareFault, takeFault;
+import snakebite.faultsignal: runGuest, GuestBody, HardwareFault, takeFault;
+
+extern(C) void snakebite_fault_invoke(void*, GuestBody);
 
 __gshared uint* pointer;
 private int cleaned;
@@ -43,11 +47,98 @@ private bool catchEntry(bool direct = false) {
     return false;
 }
 
+private int finalized;
+private bool finalizerFailed;
+
+private final class Collected {
+    ~this() {
+        const before = cleaned;
+        if (!catchEntry(true) || cleaned != before + 1)
+            finalizerFailed = true;
+        ++finalized;
+    }
+}
+
+private void allocateCollected() {
+    pragma(inline, false);
+    cast(void) new Collected;
+}
+
 int main(string[] args) {
     prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
     if (args.length != 2)
         return 64;
     switch (args[1]) {
+        case "recover-finalizer":
+        case "after-finalizer":
+            foreach (_; 0 .. 32) {
+                allocateCollected;
+                GC.collect;
+            }
+            if (finalized == 0 || finalizerFailed)
+                return 23;
+            // A finalizer catch must not leave a pending fault or a run mark.
+            if (!catchEntry)
+                return 24;
+            if (args[1] == "recover-finalizer")
+                return 0;
+            outsideFault;
+            return 25;
+        case "recover-thread":
+        case "after-thread":
+            bool threadRecovered;
+            auto thread = new Thread({
+                foreach (round; 0 .. 1000)
+                    if (!catchEntry(true) || cleaned != round + 1)
+                        return;
+                threadRecovered = true;
+            });
+            thread.start;
+            thread.join;
+            if (!threadRecovered || cleaned != 0)
+                return 26;
+            if (args[1] == "recover-thread")
+                return 0;
+            outsideFault;
+            return 27;
+        case "fibers-fault-first":
+            auto faulting = new Fiber({ runGuest({ Fiber.yield(); leaf; }); });
+            auto waiting = new Fiber({ runGuest({ Fiber.yield(); }); });
+            faulting.call;
+            waiting.call;
+            bool firstCaught;
+            try {
+                faulting.call;
+            } catch (HardwareFault fault) {
+                takeFault(fault);
+                firstCaught = true;
+            }
+            if (!firstCaught)
+                return 28;
+            waiting.call;
+            return 0;
+        case "after-suspended":
+        case "after-other-fiber-suspended":
+            auto suspended = new Fiber({ runGuest({ Fiber.yield(); }); });
+            suspended.call;
+            void faultOutside() {
+                import core.sys.posix.unistd: write;
+                enum marker = "outside-run\n";
+                write(1, marker.ptr, marker.length);
+                try {
+                    // No run mark. Keep the catch even in optimized builds.
+                    snakebite_fault_invoke(null, &directBody);
+                } catch (HardwareFault fault) {
+                    takeFault(fault);
+                    import core.stdc.stdlib: exit;
+                    exit(77);
+                }
+            }
+            if (args[1] == "after-suspended")
+                faultOutside;
+            else
+                (new Fiber({ faultOutside; })).call;
+            return 22;
         case "fibers":
         case "after-fibers":
             auto first = new Fiber({ runGuest({ Fiber.yield(); }); });

@@ -76,8 +76,9 @@ public void runGuest(void* context, GuestBody body) @system {
     static if (supported) {
         if (_state.prepared is null)
             prepareThread;
-        ++_state.runs;
-        scope(exit) --_state.runs;
+        RunOwner owner;
+        owner.enter;
+        scope(exit) owner.leave;
         snakebite_fault_invoke(context, body);
     } else
         body(context);
@@ -89,6 +90,27 @@ static if (supported) {
 
     private extern(C) void invokeGuestBody(void* context) {
         (*cast(void delegate()*) context)();
+    }
+
+    private struct RunOwner {
+        import core.thread.fiber: Fiber;
+
+        Fiber fiber;
+        RunOwner* next;
+
+        void enter() nothrow @nogc {
+            // Resolve druntime's TLS accessor before a signal can use it.
+            fiber = Fiber.getThis;
+            next = _state.runs;
+            _state.runs = &this;
+        }
+
+        void leave() nothrow @nogc {
+            auto link = &_state.runs;
+            while (*link !is &this)
+                link = &(*link).next;
+            *link = next;
+        }
     }
 }
 
@@ -106,19 +128,30 @@ public struct GuestRun {
         static if (supported) {
             if (_state.prepared is null)
                 prepareThread;
-            ++_state.runs;
-            run._active = true;
+            import core.stdc.stdlib: malloc;
+
+            // This legacy mark can move on return. Its linked record cannot.
+            run._owner = cast(RunOwner*) malloc(RunOwner.sizeof);
+            assert(run._owner !is null);
+            *run._owner = RunOwner.init;
+            run._owner.enter;
         }
         return run;
     }
 
     public ~this() @trusted @nogc nothrow {
-        static if (supported)
-            if (_active)
-                --_state.runs;
+        static if (supported) {
+            import core.stdc.stdlib: free;
+
+            if (_owner !is null) {
+                _owner.leave;
+                free(_owner);
+            }
+        }
     }
 
-    private bool _active;
+    static if (supported)
+        private RunOwner* _owner;
 }
 
 
@@ -376,9 +409,23 @@ static if (supported) {
 
     // What each thread knows. In the executable, so that the handler
     // reaches it with one instruction that is relative to `fs`.
+    private bool ownsCurrentFiber() nothrow @nogc {
+        import core.thread.fiber: Fiber;
+
+        if (_state.runs is null)
+            return false;
+        const fiber = Fiber.getThis;
+        auto owner = _state.runs;
+        while (owner !is null) {
+            if (owner.fiber is fiber)
+                return true;
+            owner = owner.next;
+        }
+        return false;
+    }
+
     private struct ThreadState {
-        // How many guest runs this thread is in.
-        size_t runs;
+        RunOwner* runs;
         // A fault was recorded and no catcher has taken it yet (`takeFault`).
         // A fault of the thread in that time happens while the first one
         // unwinds, and is a defect of the host.
@@ -543,7 +590,7 @@ static if (supported) {
         const reportable = signal != SIGFPE
             || info.si_code == fpeIntegerDivide
             || info.si_code == fpeIntegerOverflow;
-        if (!hardware || !reportable || _state.runs == 0 || _state.pending)
+        if (!hardware || !reportable || _state.pending || !ownsCurrentFiber)
             return hostDefect(signal, info, context);
 
         auto registers = &(cast(ucontext_t*) context).uc_mcontext.gregs;
@@ -672,7 +719,7 @@ static if (supported) {
         if (info.si_code <= 0 && handler is cast(void*) SIG_IGN)
             return;
 
-        if (info.si_code > 0 && _state.runs != 0)
+        if (info.si_code > 0 && ownsCurrentFiber)
             reportUnhandledGuestFault(signal, info, context);
         sigaction_t default_;
         default_.sa_handler = SIG_DFL;

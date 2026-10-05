@@ -106,6 +106,9 @@ def test_process_action(binaries, tmp_path, scenario, expected):
     "recover", "nested", "fibers", "after-fault", "after-nested",
     "after-return", "after-exception", "after-fibers",
     "recover-direct", "after-fault-direct",
+    "after-suspended", "after-other-fiber-suspended",
+    "recover-thread", "after-thread", "recover-finalizer", "after-finalizer",
+    "fibers-fault-first",
 ])
 def test_recovery_boundary(binaries, tmp_path, scenario):
     result = subprocess.run(
