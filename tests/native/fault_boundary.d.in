@@ -1,0 +1,122 @@
+module fault_boundary;
+
+import core.volatile: volatileLoad;
+import core.thread.fiber: Fiber;
+import core.sys.linux.sys.prctl: PR_SET_DUMPABLE, prctl;
+import snakebite.faultsignal: runGuest, HardwareFault, takeFault;
+
+__gshared uint* pointer;
+private int cleaned;
+
+private void leaf() {
+    pragma(inline, false);
+    volatileLoad(pointer);
+}
+
+private void outsideFault() {
+    import core.sys.posix.unistd: write;
+    enum marker = "outside-run\n";
+    write(1, marker.ptr, marker.length);
+    leaf;
+}
+
+private void entry() {
+    pragma(inline, false);
+    scope(exit) ++cleaned;
+    runGuest({ leaf; });
+}
+
+private bool catchEntry() {
+    try {
+        entry;
+    } catch (HardwareFault fault) {
+        takeFault(fault);
+        return true;
+    }
+    return false;
+}
+
+int main(string[] args) {
+    prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
+    if (args.length != 2)
+        return 64;
+    switch (args[1]) {
+        case "fibers":
+        case "after-fibers":
+            auto first = new Fiber({ runGuest({ Fiber.yield(); }); });
+            auto second = new Fiber({
+                runGuest({
+                    Fiber.yield();
+                    leaf;
+                });
+            });
+            first.call;
+            second.call;
+            first.call;
+            bool fiberCaught;
+            try {
+                second.call;
+            } catch (HardwareFault fault) {
+                takeFault(fault);
+                fiberCaught = true;
+            }
+            if (!fiberCaught)
+                return 20;
+            if (args[1] == "fibers")
+                return 0;
+            outsideFault;
+            return 21;
+        case "recover":
+        case "after-fault":
+            foreach (round; 0 .. 1000) {
+                if (!catchEntry || cleaned != round + 1)
+                    return 10;
+            }
+            if (args[1] == "recover")
+                return 0;
+            outsideFault;
+            return 11;
+        case "nested":
+        case "after-nested":
+            foreach (round; 0 .. 1000) {
+                bool innerCaught;
+                bool outerCaught;
+                try {
+                    runGuest({
+                        innerCaught = catchEntry;
+                        leaf;
+                    });
+                } catch (HardwareFault fault) {
+                    takeFault(fault);
+                    outerCaught = true;
+                }
+                if (!innerCaught || !outerCaught || cleaned != round + 1)
+                    return 14;
+            }
+            if (args[1] == "nested")
+                return 0;
+            outsideFault;
+            return 15;
+        case "after-return":
+            int called;
+            runGuest({ ++called; });
+            if (called != 1)
+                return 16;
+            outsideFault;
+            return 17;
+        case "after-exception":
+            auto expected = new Exception("ordinary");
+            bool caught;
+            try {
+                runGuest({ throw expected; });
+            } catch (Exception e) {
+                caught = e is expected;
+            }
+            if (!caught)
+                return 18;
+            outsideFault;
+            return 19;
+        default:
+            return 64;
+    }
+}

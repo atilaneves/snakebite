@@ -15,6 +15,6 @@ int run(string[] args) {
         "at.runtime.arraycopy", "at.runtime.messaging",
         "ut.ffi.symbol", "at.cli", "at.runtime.startup", "at.dub",
         "at.runtime.threads", "at.backends.interpreter.nativestack",
-        "ut.process", "at.process",
+        "ut.process", "at.process", "at.runtime.faultregistration",
     );
 }
