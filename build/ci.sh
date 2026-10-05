@@ -16,5 +16,6 @@ bin/at -s '@alone'
 build/test-repl.sh
 build/test-cli.sh
 build/test-flags.sh
+build/test-fault-process.sh
 bin/sb -b bytecode examples/rt-simple
 build/benches.sh

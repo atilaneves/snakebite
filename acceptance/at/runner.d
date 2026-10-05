@@ -18,5 +18,6 @@ int run(string[] args) {
         "at.runtime.threads", "at.runtime.registration",
         "at.backends.interpreter.nativestack",
         "ut.process", "at.process", "at.stackrelease",
+        "at.runtime.faultregistration",
     );
 }
