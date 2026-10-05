@@ -3456,6 +3456,7 @@ def image_shape_cases() -> list[tuple[str, str]]:
     "name, backend", image_shape_cases(),
     ids=[f"{name}-{backend}" for name, backend in image_shape_cases()],
 )
+@pytest.mark.usefixtures("private_dub_cache")
 def test_guest_runs_against_a_native_dependency(
     tmp_path: Path, name: str, backend: str,
 ) -> None:
@@ -3494,6 +3495,14 @@ def image_builds(log: Path) -> int:
     return sum(" -shared " in f" {line} " for line in log.read_text().splitlines())
 
 
+def compiler_starts(log: Path) -> int:
+    return len(log.read_text().splitlines()) if log.exists() else 0
+
+
+def image_directory_entries(project_root: Path) -> list[Path]:
+    return sorted(project_root.glob(".snakebite/*/images/*"))
+
+
 def run_with_stubs(
     tmp_path: Path, backend: str, *arguments: str,
 ) -> subprocess.CompletedProcess[str]:
@@ -3524,7 +3533,7 @@ def write_answer_project(directory: Path, value: int = 7) -> None:
 
 # Nothing about an unchanged project asks for another image: the second
 # start, and a start after an edit that leaves the image source as it was,
-# start no image build. The two settings of the image optimisation each
+# start no compiler at all. The two settings of the image optimisation each
 # have an image of their own, and each is built once.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
 def test_unchanged_project_builds_its_image_once(
@@ -3537,9 +3546,10 @@ def test_unchanged_project_builds_its_image_once(
     assert first.returncode == 7, output(first)
     assert image_builds(log) == 1
 
+    starts = compiler_starts(log)
     again = run_with_stubs(tmp_path, backend)
     assert again.returncode == 7, output(again)
-    assert image_builds(log) == 1
+    assert compiler_starts(log) == starts
 
     write(
         tmp_path / "app" / "root.d",
@@ -3552,7 +3562,7 @@ def test_unchanged_project_builds_its_image_once(
     )
     edited = run_with_stubs(tmp_path, backend)
     assert edited.returncode == 7, output(edited)
-    assert image_builds(log) == 1
+    assert compiler_starts(log) == starts
 
     unoptimised = run_with_stubs(tmp_path, backend, "--no-optimise-image")
     assert unoptimised.returncode == 7, output(unoptimised)
@@ -3612,6 +3622,8 @@ def test_failing_image_build_reports_the_compiler_output(
     assert "Command: " in output(failed)
     assert "image build diagnostic" in output(failed)
 
+    assert image_directory_entries(tmp_path) == []
+
     # The failed build leaves nothing that a start with a working compiler
     # would take for an image.
     (tmp_path / "stubs" / IMAGE_COMPILER).unlink()
@@ -3619,10 +3631,58 @@ def test_failing_image_build_reports_the_compiler_output(
     assert recovered.returncode == 7, output(recovered)
 
 
-# A runner hook that a dependency installs replaces the default unit test
-# runner: the app's failing unittest never runs. The `ctfe` backend builds
-# no dependency image, so no hook of one reaches it.
+# A link failure of the real linker, with no stub: the dependency calls a
+# symbol that nothing defines. The image link fails at build time, not when
+# the guest runs, the user sees the symbol, and the failed build leaves
+# nothing in the image directory. A later start with the symbol defined
+# builds the image.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_unresolved_dependency_symbol_fails_the_image_link(
+    tmp_path: Path, backend: str,
+) -> None:
+    write_files(tmp_path, {
+        "deps/missing.d": """
+            module missing;
+            extern(C) int image_missing_dependency();
+            int answer(T)() { return image_missing_dependency(); }
+            """,
+        "app/root.d": """
+            module root;
+            import missing;
+            int main() { return answer!int(); }
+            """,
+    })
+    log = recording_compiler(tmp_path)
+
+    failed = run_with_stubs(tmp_path, backend, "--no-optimise-image")
+
+    assert failed.returncode == 1, output(failed)
+    assert "Dependency image linking failed" in output(failed)
+    assert "image_missing_dependency" in output(failed)
+    assert image_directory_entries(tmp_path) == []
+
+    write(
+        tmp_path / "deps" / "missing.d",
+        """
+        module missing;
+        extern(C) int image_missing_dependency() { return 5; }
+        int answer(T)() { return image_missing_dependency(); }
+        """,
+    )
+    builds = image_builds(log)
+    recovered = run_with_stubs(tmp_path, backend, "--no-optimise-image")
+
+    assert recovered.returncode == 5, output(recovered)
+    assert image_builds(log) == builds + 1
+    entries = [path.name for path in image_directory_entries(tmp_path)]
+    assert any(name.endswith(".so") for name in entries), entries
+    assert not any(name.startswith("build-") for name in entries), entries
+
+
+# A runner hook that a dependency installs replaces the default unit test
+# runner: the app's failing unittest never runs. CTFE cannot call native code.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+@pytest.mark.usefixtures("private_dub_cache")
 def test_dependency_runner_replaces_the_default_test_runner(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -3668,8 +3728,12 @@ def test_dependency_runner_replaces_the_default_test_runner(
 
 
 # A throwable that escapes the runner hook of a dependency ends the program
-# with status 1, not with a crash at exit.
+# with status 1, not with a crash at exit, and the runtime ends as it does
+# in compiled D: a thread that the program started is joined and the module
+# destructors run. The thread sleeps so that it is still running when the
+# runner hook ends.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
+@pytest.mark.usefixtures("private_dub_cache")
 def test_throwable_escaping_a_unittest_runner_ends_the_program_cleanly(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -3682,8 +3746,15 @@ def test_throwable_escaping_a_unittest_runner_ends_the_program_cleanly(
         """
         module escaping_throwable_app;
         import core.runtime: Runtime, UnitTestResult;
+        import core.stdc.stdio: puts;
+        import core.thread: Thread;
+        import core.time: msecs;
         shared static this() {
             Runtime.extendedModuleUnitTester = {
+                new Thread({
+                    Thread.sleep(300.msecs);
+                    puts("guest thread ended");
+                }).start;
                 foreach (module_; ModuleInfo)
                     if (module_ && module_.unitTest
                             && module_.name == "escaping_throwable_app")
@@ -3691,6 +3762,7 @@ def test_throwable_escaping_a_unittest_runner_ends_the_program_cleanly(
                 return UnitTestResult(1, 1, false, false);
             };
         }
+        shared static ~this() { puts("module destructor ran"); }
         unittest { throw new Exception("escapes the runner"); }
         """,
     )
@@ -3702,10 +3774,12 @@ def test_throwable_escaping_a_unittest_runner_ends_the_program_cleanly(
 
     assert result.returncode == 1, output(result)
     assert "escapes the runner" in output(result)
+    assert "guest thread ended" in guest_lines(result), output(result)
+    assert "module destructor ran" in guest_lines(result), output(result)
 
 
 def app_using_unused_member(backend: str, expected: int) -> str:
-    # CTFE has no native image to call a symbol of.
+    # CTFE cannot call native code.
     check = "" if backend == "ctfe" else (
         f"if (image_unused_answer() != {expected}) return 1;"
     )
@@ -3809,8 +3883,8 @@ def test_transitive_dub_dependencies_reach_the_image(
     foreign = start()
     assert foreign.returncode == 0, output(foreign)
 
-    # A missing build artifact is built again. The `ctfe` backend builds no
-    # dependencies, so it has none.
+    # A missing build artifact is built again. CTFE cannot call native code,
+    # so it builds none.
     if backend == "ctfe":
         return
     artifacts = list(dpath.rglob("libimage-leaf.a"))
@@ -3822,9 +3896,9 @@ def test_transitive_dub_dependencies_reach_the_image(
 
 
 # The `preGenerateCommands` of a recipe run at each start: a cached
-# description of the project does not skip them. The `ctfe` backend cannot
-# run the test runner that dub generates.
+# description of the project does not skip them.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
+@pytest.mark.usefixtures("private_dub_cache")
 def test_generation_hook_runs_at_every_start(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -3850,6 +3924,7 @@ def test_generation_hook_runs_at_every_start(
 # The test runner that dub generates for a library names the modules of
 # the package: a module renamed between two starts is run under its new name.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
+@pytest.mark.usefixtures("private_dub_cache")
 def test_generated_test_runner_follows_a_module_rename(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -4444,6 +4519,7 @@ C_PROJECTS: dict[str, CProject] = {
     [(name, backend) for name, case in C_PROJECTS.items()
      for backend in case.backends],
 )
+@pytest.mark.usefixtures("private_dub_cache")
 def test_c_module_is_imported_by_d(
     tmp_path: Path, name: str, backend: str,
 ) -> None:
@@ -4522,6 +4598,7 @@ def test_recorded_dub_describe_is_what_dub_gives(
 # start of a project: what dub finds in the project is not taken from an
 # earlier start.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
+@pytest.mark.usefixtures("private_dub_cache")
 def test_project_changes_are_in_the_next_start(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -4564,6 +4641,7 @@ def test_project_changes_are_in_the_next_start(
 # A unittest configuration of a project can name its own main source file,
 # source and import directories.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
+@pytest.mark.usefixtures("private_dub_cache")
 def test_unittest_configuration_settings_are_loaded(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -4632,6 +4710,14 @@ def run_with_fake_dub_in(
 
 def output(result: subprocess.CompletedProcess[str]) -> str:
     return result.stdout + result.stderr
+
+
+# dub keeps the build directories of a project under `DPATH`, and nothing
+# removes them. A test that builds dub projects keeps them in its own
+# temporary directory.
+@pytest.fixture
+def private_dub_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DPATH", str(tmp_path / "dpath"))
 
 
 def run_sb(

@@ -1,29 +1,35 @@
 #!/usr/bin/env bash
-# Runs bin/ut with a stub of each compiler, linker and dub first on PATH.
-# A test that starts one of them makes the stub write its name to a log and
-# exit with a failure, and the run fails. The tests of what a build gives
-# the user belong in tests/run_*.py, which run the real bin/sb.
+# Runs bin/ut under strace and fails when it starts any program other than
+# the helpers of the tests: `sh` and `sleep`. A test of what a build gives the
+# user belongs in tests/run_*.py, which run the real bin/sb. This is the rule
+# that no test in bin/ut starts a compiler, a linker or dub, by any name, any
+# path or any environment variable. strace sees each successful execve of the
+# process and of every thread and child it makes.
 # Arguments are passed on to bin/ut.
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
-stubs=$(mktemp -d)
-trap 'rm -rf "$stubs"' EXIT
-log="$stubs/started"
-touch "$log"
-mkdir "$stubs/bin"
-for tool in dmd ldc2 ldmd2 gdc gcc g++ cc c++ cpp clang clang++ ld ld.bfd \
-        ld.gold ld.lld mold collect2 dub; do
-    printf '#!/bin/sh\necho "%s $*" >> "%s"\nexit 97\n' "$tool" "$log" \
-        > "$stubs/bin/$tool"
-    chmod +x "$stubs/bin/$tool"
-done
+allowed='^(sh|sleep)$'
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+trace="$work/execve.log"
 
 status=0
-PATH="$stubs/bin:$PATH" bin/ut "$@" || status=$?
-if [[ -s "$log" ]]; then
-    echo "bin/ut started a build tool:" >&2
-    cat "$log" >&2
+strace -f -qq -e trace=execve,execveat -o "$trace" bin/ut "$@" || status=$?
+
+# A line of a successful start is `PID execve("PATH", [...], ...) = 0`. A
+# start that failed (`= -1 ENOENT`) is a lookup along PATH, not a start. The
+# first start is bin/ut itself.
+unexpected=$(grep -E '\) += 0$' "$trace" \
+    | sed -E 's/^[^"]*"([^"]*)".*/\1/' \
+    | tail -n +2 \
+    | awk -v allowed="$allowed" '{ name = $0; sub(".*/", "", name) }
+        name !~ allowed { print }' || true)
+
+if [[ -n "$unexpected" ]]; then
+    echo "bin/ut started a program that is not a test helper:" >&2
+    echo "$unexpected" | sort | uniq -c >&2
     status=1
 fi
 exit "$status"
