@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# dependencies = ["pytest==8.4.1"]
+# dependencies = ["pytest==8.4.1", "pytest-xdist==3.8.0"]
 # ///
 
 # End-to-end tests of the `bin/sb` command line. They start the built
@@ -2681,5 +2681,7 @@ def sb_path() -> str:
     return sb
 
 
+# Every test is one or a few child processes with its own temporary
+# directory, so the tests run in parallel.
 if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v", "-n", "4"]))

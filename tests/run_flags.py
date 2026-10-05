@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# dependencies = ["pytest==8.4.1"]
+# dependencies = ["pytest==8.4.1", "pytest-xdist==3.8.0"]
 # ///
 
 # Compiler flags change what a whole program means, and a halt ends the
@@ -789,5 +789,7 @@ def test_unknown_checkaction_value_is_an_error(
     assert "switch `-checkaction=bogus` is invalid" in output
 
 
+# Every test is one or a few child processes with its own temporary
+# directory, so the tests run in parallel.
 if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v", "-n", "4"]))

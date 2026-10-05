@@ -1,10 +1,13 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# dependencies = ["pexpect==4.9.0", "pytest==8.4.1"]
+# dependencies = [
+#     "pexpect==4.9.0", "pytest==8.4.1", "pytest-xdist==3.8.0",
+# ]
 # ///
 
 import os
 import re
+import signal
 import subprocess
 from pathlib import Path
 
@@ -19,7 +22,7 @@ UP_ARROW = "\x1b[A"
 
 def test_repl() -> None:
     repl = sb_path()
-    child = pexpect.spawn(repl, timeout=TIMEOUT, encoding="utf-8")
+    child = spawn(repl, timeout=TIMEOUT, encoding="utf-8")
     try:
         child.expect_exact("Snakebite REPL")
         child.expect_exact("[   0.0 ms] > ")
@@ -35,7 +38,7 @@ def test_repl() -> None:
         assert "3\n" in output
 
         child.sendline(":q")
-        child.expect(pexpect.EOF)
+        expect_exit(child)
     finally:
         child.close(force=True)
 
@@ -59,7 +62,7 @@ def test_halting_cell_does_not_end_the_session(
         "module repl_halt_test;\n", encoding="utf-8",
     )
 
-    child = pexpect.spawn(
+    child = spawn(
         sb_path(),
         ["--project", str(tmp_path), "-b", backend],
         timeout=TIMEOUT,
@@ -81,7 +84,7 @@ def test_halting_cell_does_not_end_the_session(
         assert "42\n" in clean(child.before)
 
         child.sendline(":q")
-        child.expect(pexpect.EOF)
+        expect_exit(child)
     finally:
         child.close(force=True)
 
@@ -101,7 +104,7 @@ def test_project_import_without_semicolon(tmp_path: Path, backend: str) -> None:
         encoding="utf-8",
     )
 
-    child = pexpect.spawn(
+    child = spawn(
         sb_path(),
         ["--project", str(tmp_path), "-b", backend],
         timeout=TIMEOUT,
@@ -120,7 +123,7 @@ def test_project_import_without_semicolon(tmp_path: Path, backend: str) -> None:
         assert "42\n" in clean(child.before)
 
         child.sendline(":q")
-        child.expect(pexpect.EOF)
+        expect_exit(child)
     finally:
         child.close(force=True)
 
@@ -454,7 +457,7 @@ def test_piped_whitespace_line_is_silent_noop() -> None:
 
 
 def test_interactive_error_label_is_red() -> None:
-    child = pexpect.spawn(sb_path(), timeout=TIMEOUT, encoding="utf-8")
+    child = spawn(sb_path(), timeout=TIMEOUT, encoding="utf-8")
     try:
         child.expect_exact("Snakebite REPL")
         child.expect_exact("[   0.0 ms] > ")
@@ -469,7 +472,7 @@ def test_interactive_error_label_is_red() -> None:
         child.expect(r"\[\s+\d+\.\d ms\] > ")
 
         child.sendline(":q")
-        child.expect(pexpect.EOF)
+        expect_exit(child)
     finally:
         child.close(force=True)
 
@@ -635,14 +638,14 @@ def test_file_argument_loads_example_fixture() -> None:
 
 
 def test_file_argument_exits_without_interactive_prompt() -> None:
-    child = pexpect.spawn(
+    child = spawn(
         sb_path(),
         ["tests/examples/ct.d"],
         timeout=TIMEOUT,
         encoding="utf-8",
     )
     try:
-        child.expect(pexpect.EOF)
+        expect_exit(child)
     finally:
         child.close(force=True)
 
@@ -658,7 +661,7 @@ def test_live_flag_keeps_repl_open_after_file_arguments(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    child = pexpect.spawn(
+    child = spawn(
         sb_path(),
         ["-l", str(module)],
         timeout=TIMEOUT,
@@ -674,7 +677,7 @@ def test_live_flag_keeps_repl_open_after_file_arguments(tmp_path: Path) -> None:
         assert "42\n" in output
 
         child.sendline(":q")
-        child.expect(pexpect.EOF)
+        expect_exit(child)
     finally:
         child.close(force=True)
 
@@ -800,9 +803,38 @@ def sb_path() -> str:
     return repl
 
 
+# pexpect sleeps by default: `delaybeforesend` 50 ms before each send and
+# `delayafterclose` 100 ms in `close`. Every send here follows an expect
+# on the prompt, so the child is ready for input, and every close follows
+# the exit of the child.
+def spawn(command: str, args: list[str] | None = None, **options):
+    child = pexpect.spawn(command, args or [], **options)
+    child.delaybeforesend = None
+    child.ptyproc.delayafterclose = 0
+    return child
+
+
+# The child has closed its terminal when EOF arrives. Waiting for the exit
+# status then ends in the child's own time. The alarm only bounds a hang.
+def expect_exit(child) -> None:
+    child.expect(pexpect.EOF)
+    signal.signal(signal.SIGALRM, _exit_timeout)
+    signal.alarm(TIMEOUT)
+    try:
+        child.wait()
+    finally:
+        signal.alarm(0)
+
+
+def _exit_timeout(signum, frame) -> None:
+    raise TimeoutError("the child did not exit")
+
+
 def clean(text: str) -> str:
     return _ANSI_ESCAPE.sub("", text).replace("\r", "")
 
 
+# Every test is one or a few child processes with its own temporary
+# directory, so the tests run in parallel.
 if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-v"]))
+    raise SystemExit(pytest.main([__file__, "-v", "-n", "4"]))
