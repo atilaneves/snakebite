@@ -642,6 +642,38 @@ unittest {
 }
 
 
+@("faultsignal.guestRun.releasesTheAlternateStackOfARawPthread")
+unittest {
+    import core.stdc.errno: errno, ENOMEM;
+    import core.sys.linux.sys.mman: mincore;
+    import core.sys.posix.pthread: pthread_create, pthread_join, pthread_t;
+    import core.sys.posix.signal: sigaltstack, stack_t;
+
+    // A foreign thread must release its stack without druntime attachment.
+    static extern(C) void* enter(void* result) {
+        auto run = GuestRun.begin;
+        stack_t current;
+        sigaltstack(null, &current);
+        *cast(void**) result = current.ss_sp;
+        return null;
+    }
+
+    foreach (round; 0 .. 10) {
+        void* stack;
+        pthread_t thread;
+        pthread_create(&thread, null, &enter, &stack).should == 0;
+        pthread_join(thread, null).should == 0;
+        stack.shouldNotBeNull;
+
+        ubyte resident;
+        const status = mincore(stack, 1, &resident);
+        const error = errno;
+        status.should == -1;
+        error.should == ENOMEM;
+    }
+}
+
+
 // A fault that no guest run owns is a defect of the host, and the host
 // keeps the default action of the signal. That ends the process, so these
 // tests run the test binary as a child process and look at how it died.

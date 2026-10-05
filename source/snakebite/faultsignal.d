@@ -357,6 +357,7 @@ static if (supported) {
 
     private void prepareThread() @trusted {
         import core.sys.linux.sys.mman: MAP_ANONYMOUS;
+        import core.sys.posix.pthread: pthread_once, pthread_setspecific;
         import core.sys.posix.signal: SS_DISABLE;
         import core.sys.posix.sys.mman:
             MAP_FAILED, MAP_PRIVATE, mmap, mprotect, PROT_NONE, PROT_READ,
@@ -390,6 +391,10 @@ static if (supported) {
 
             _state.mapping = mapping;
             _state.mappingSize = total;
+            // Raw pthreads do not run druntime's module destructors.
+            if (pthread_once(&_threadKeyOnce, &createThreadKey) != 0
+                || pthread_setspecific(_threadKey, &_state) != 0)
+                assert(0, "cannot register alternate signal stack cleanup");
         }
 
         _state.storage[] = typeid(HardwareFault).initializer[];
@@ -400,22 +405,46 @@ static if (supported) {
     }
 
     private static ~this() @trusted {
+        import core.sys.posix.pthread: pthread_setspecific;
+
+        if (_state.mapping !is null) {
+            pthread_setspecific(_threadKey, null);
+            releaseThread(_state);
+        }
+    }
+
+    import core.sys.posix.pthread: pthread_key_t, pthread_once_t, PTHREAD_ONCE_INIT;
+    private __gshared pthread_key_t _threadKey;
+    private __gshared pthread_once_t _threadKeyOnce = PTHREAD_ONCE_INIT;
+
+    private extern(C) void createThreadKey() nothrow @nogc {
+        import core.sys.posix.pthread: pthread_key_create;
+
+        if (pthread_key_create(&_threadKey, &releaseForeignThread) != 0)
+            assert(0, "cannot create alternate signal stack cleanup key");
+    }
+
+    private extern(C) void releaseForeignThread(void* state) nothrow @nogc {
+        releaseThread(*cast(ThreadState*) state);
+    }
+
+    private void releaseThread(ref ThreadState state) nothrow @nogc {
         import core.sys.posix.sys.mman: munmap;
         import core.sys.posix.signal: SS_DISABLE;
 
-        if (_state.mapping is null)
+        if (state.mapping is null)
             return;
 
         // The guest can have replaced the stack: its own stays.
         stack_t current;
         sigaltstack(null, &current);
-        if (current.ss_sp is _state.mapping + guardSize) {
+        if (current.ss_sp is state.mapping + guardSize) {
             stack_t disabled;
             disabled.ss_flags = SS_DISABLE;
             sigaltstack(&disabled, null);
         }
-        munmap(_state.mapping, _state.mappingSize);
-        _state.mapping = null;
+        munmap(state.mapping, state.mappingSize);
+        state.mapping = null;
     }
 
     // Runs on the thread that faulted, off signal context.
