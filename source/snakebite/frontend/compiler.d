@@ -1372,6 +1372,11 @@ private struct SavedFrontendFlags {
     CHECKENABLE useArrayBounds;
     CHECKENABLE useSwitchError;
     CHECKACTION checkAction;
+    bool betterC;
+    bool useModuleInfo;
+    bool useTypeInfo;
+    bool useExceptions;
+    bool useGC;
 }
 
 private SavedFrontendFlags saveFrontendFlags() {
@@ -1409,6 +1414,11 @@ private SavedFrontendFlags saveFrontendFlags() {
         global.params.useArrayBounds,
         global.params.useSwitchError,
         global.params.checkAction,
+        global.params.betterC,
+        global.params.useModuleInfo,
+        global.params.useTypeInfo,
+        global.params.useExceptions,
+        global.params.useGC,
     );
 }
 
@@ -1450,6 +1460,11 @@ private void restoreFrontendFlags(ref const SavedFrontendFlags saved) {
     global.params.useArrayBounds = saved.useArrayBounds;
     global.params.useSwitchError = saved.useSwitchError;
     global.params.checkAction = saved.checkAction;
+    global.params.betterC = saved.betterC;
+    global.params.useModuleInfo = saved.useModuleInfo;
+    global.params.useTypeInfo = saved.useTypeInfo;
+    global.params.useExceptions = saved.useExceptions;
+    global.params.useGC = saved.useGC;
 }
 
 private void applyFrontendFlags(in FrontendFlags flags) {

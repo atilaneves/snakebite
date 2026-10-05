@@ -27,6 +27,9 @@ public struct Checks {
     public CHECKENABLE arrayBounds = CHECKENABLE.on;
     public CHECKENABLE switchError = CHECKENABLE.on;
     public CHECKACTION action = CHECKACTION.D;
+    // Imported template declarations use the root compilation's versions,
+    // while ordinary dependency functions keep their library's flags.
+    public bool betterC;
 
     private enum Category {
         assertion,
@@ -50,6 +53,8 @@ public struct Checks {
 
         if (argument == "-release" || argument == "--release")
             _release = true;
+        else if (argument == "-betterC" || argument == "--betterC")
+            betterC = true;
         else if (argument == "-noboundscheck")
             _boundscheck = CHECKENABLE.off;
         else if (argument.startsWith("--boundscheck"))
@@ -157,6 +162,9 @@ public struct Checks {
     public void resolve() @safe pure nothrow @nogc {
         import std.traits: EnumMembers;
 
+        if (betterC && action != CHECKACTION.halt)
+            action = CHECKACTION.C;
+
         static foreach (category; EnumMembers!Category)
             fieldOf(category) = _requested[category] == CHECKENABLE._default
                 ? defaultOf(category)
@@ -200,6 +208,11 @@ public struct Checks {
         params.useArrayBounds = arrayBounds;
         params.useSwitchError = switchError;
         params.checkAction = action;
+        params.betterC = betterC;
+        params.useModuleInfo = !betterC;
+        params.useTypeInfo = !betterC;
+        params.useExceptions = !betterC;
+        params.useGC = !betterC;
     }
 
     // The predefined version identifiers that dmd defines only when the
@@ -210,6 +223,10 @@ public struct Checks {
             case "D_PreConditions": return preconditions == CHECKENABLE.on;
             case "D_PostConditions": return postconditions == CHECKENABLE.on;
             case "D_Invariants": return invariants == CHECKENABLE.on;
+            case "D_BetterC": return betterC;
+            case "D_ModuleInfo":
+            case "D_Exceptions":
+            case "D_TypeInfo": return !betterC;
             default: return true;
         }
     }
@@ -218,7 +235,11 @@ public struct Checks {
     // check is off.
     public immutable(string)[] definitions() const @safe pure nothrow @nogc {
         static immutable noBounds = ["D_NoBoundsChecks"];
+        static immutable betterCVersion = ["D_BetterC"];
+        static immutable both = ["D_NoBoundsChecks", "D_BetterC"];
 
+        if (betterC)
+            return arrayBounds == CHECKENABLE.off ? both : betterCVersion;
         return arrayBounds == CHECKENABLE.off ? noBounds : null;
     }
 

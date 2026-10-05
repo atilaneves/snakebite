@@ -8,6 +8,7 @@ module ut.frontend.checks;
 
 import dmd.astenums: CHECKACTION, CHECKENABLE;
 import snakebite.frontend.checks: Checks, ldcArguments;
+import snakebite.frontend.compiler: FrontendFlags, parseSnippet;
 import ut;
 
 
@@ -116,6 +117,45 @@ unittest {
     resolved(["-boundscheck=off", "-check=bounds=on"]).definitions.length.should == 0;
     resolved([]).definitions.length.should == 0;
     resolved(["-release"]).definitions.length.should == 0;
+}
+
+
+@("checks.betterC")
+unittest {
+    foreach (flag; ["-betterC", "--betterC"]) {
+        const checks = resolved([flag]);
+        checks.betterC.should == true;
+        checks.action.should == CHECKACTION.C;
+        checks.definitions.should == ["D_BetterC"];
+        checks.defines("D_BetterC").should == true;
+        foreach (identifier; ["D_ModuleInfo", "D_TypeInfo", "D_Exceptions"])
+            checks.defines(identifier).should == false;
+        resolved([flag, "-checkaction=D"]).action.should == CHECKACTION.C;
+        resolved([flag, "-checkaction=halt"]).action.should == CHECKACTION.halt;
+        resolved([flag, "-boundscheck=off"]).definitions
+            .should == ["D_NoBoundsChecks", "D_BetterC"];
+    }
+    resolved([]).betterC.should == false;
+    resolved([]).defines("D_BetterC").should == false;
+}
+
+
+@("checks.betterC.parseState")
+unittest {
+    foreach (betterC; [false, true, false, true]) {
+        const source = betterC ? q{
+            version (D_BetterC) {} else static assert(false);
+            version (D_ModuleInfo) static assert(false);
+            version (D_TypeInfo) static assert(false);
+            version (D_Exceptions) static assert(false);
+        } : q{
+            version (D_BetterC) static assert(false);
+            version (D_ModuleInfo) {} else static assert(false);
+            version (D_TypeInfo) {} else static assert(false);
+            version (D_Exceptions) {} else static assert(false);
+        };
+        parseSnippet(source, null, FrontendFlags(betterC ? ["-betterC"] : null));
+    }
 }
 
 

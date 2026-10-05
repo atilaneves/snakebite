@@ -166,7 +166,8 @@ public DependencyImage prepareImage(
             return expandedCompilerArguments(compilerArguments);
         }
     }
-    const importFlags = imageArguments.map!imageArgument.array
+    const arguments = imageArguments;
+    const importFlags = arguments.map!imageArgument.array
         ~ importPaths.map!(path => "-I" ~ path).array
         ~ stringImportPaths.map!(path => "-J" ~ path).array;
     const executable = compilerPath(compiler);
@@ -175,20 +176,29 @@ public DependencyImage prepareImage(
     // `-O`: `-allinst`/`-linkonce-templates` below are for correctness
     // (a guest object supplies no template bodies of its own), not speed.
     const optimiseFlags = optimise ? ["-O"] : null;
+    import snakebite.frontend.checks: Checks;
+
+    Checks checks;
+    foreach (argument; arguments)
+        checks.accept(argument);
+
+    // A BetterC object has no ModuleInfo section for the DSO startup object.
+    // Keep the same runtime choice for compilation and linking.
+    const runtimeFlags = checks.betterC ? ["-betterC"] : null;
 
     // The image must emit transitive template bodies too, including runtime
     // helpers introduced by assertion lowering. No guest object supplies them.
     version (DigitalMars) {
         const compileFlags = ["-c", "-fPIC", "-allinst"] ~ optimiseFlags;
         const linkFlags = ["-shared", "-defaultlib=libphobos2.so",
-            "-L--no-undefined"];
+            "-L--no-undefined"] ~ runtimeFlags;
     } else version (LDC) {
         // -allinst also analyzes unused template members, which can fail
         // under the project's compiler options. Emit referenced bodies instead.
         const compileFlags = ["-c", "-relocation-model=pic",
             "-linkonce-templates"] ~ optimiseFlags;
         const linkFlags = ["-shared", "-link-defaultlib-shared",
-            "-L--no-undefined"];
+            "-L--no-undefined"] ~ runtimeFlags;
     } else {
         static assert(false, "Dependency images require DMD or LDC");
     }
