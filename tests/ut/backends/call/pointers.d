@@ -654,7 +654,7 @@ static foreach (backend; Matrix!(
                 hostCallbackDeclarations,
             ])();
             auto function_ = findFunction(modules[0], "answer");
-            auto backend_ = new backend(Program([modules[0]]));
+            auto backend_ = Owned!backend(Program([modules[0]]));
 
             int result;
             backend_.call(function_, &result, []);
@@ -690,7 +690,7 @@ static foreach (backend; Matrix!(
                 hostCallbackDeclarations,
             ])();
             auto function_ = findFunction(modules[0], "answer");
-            auto backend_ = new backend(Program([modules[0]]));
+            auto backend_ = Owned!backend(Program([modules[0]]));
 
             int result;
             try
@@ -735,7 +735,7 @@ static foreach (backend; Matrix!(
                 hostCallbackDeclarations,
             ])();
             auto function_ = findFunction(modules[0], "answer");
-            auto backend_ = new backend(Program([modules[0]]));
+            auto backend_ = Owned!backend(Program([modules[0]]));
 
             bool result;
             backend_.call(function_, &result, []);
@@ -793,7 +793,7 @@ static foreach (backend; Matrix!(
                 hostCallbackDeclarations,
             ])();
             auto function_ = findFunction(modules[0], "answer");
-            auto backend_ = new backend(Program([modules[0]]));
+            auto backend_ = Owned!backend(Program([modules[0]]));
 
             long result;
             backend_.call(function_, &result, []);
@@ -834,7 +834,7 @@ static foreach (backend; Matrix!(
                 hostCallbackDeclarations,
             ])();
             auto function_ = findFunction(modules[0], "answer");
-            auto backend_ = new backend(Program([modules[0]]));
+            auto backend_ = Owned!backend(Program([modules[0]]));
 
             string result;
             backend_.call(function_, &result, []);
@@ -885,7 +885,7 @@ static foreach (backend; Matrix!(
                 hostCallbackDeclarations,
             ])();
             auto function_ = findFunction(modules[0], "answer");
-            auto backend_ = new backend(Program([modules[0]]));
+            auto backend_ = Owned!backend(Program([modules[0]]));
 
             int result;
             backend_.call(function_, &result, []);
@@ -930,7 +930,7 @@ static foreach (backend; Matrix!(
                 hostCallbackDeclarations,
             ])();
             auto function_ = findFunction(modules[0], "answer");
-            auto backend_ = new backend(Program([modules[0]]));
+            auto backend_ = Owned!backend(Program([modules[0]]));
 
             string result;
             backend_.call(function_, &result, []);
@@ -982,7 +982,7 @@ static foreach (backend; Matrix!(
                 hostCallbackDeclarations,
             ])();
             auto function_ = findFunction(modules[0], "answer");
-            auto backend_ = new backend(Program([modules[0]]));
+            auto backend_ = Owned!backend(Program([modules[0]]));
 
             int result;
             backend_.call(function_, &result, []);
@@ -1080,7 +1080,7 @@ static foreach (backend; Matrix!(
                 hostCallbackDeclarations,
             ])();
             auto function_ = findFunction(modules[0], "answer");
-            auto backend_ = new backend(Program([modules[0]]));
+            auto backend_ = Owned!backend(Program([modules[0]]));
 
             int result;
             backend_.call(function_, &result, []);
@@ -1132,7 +1132,7 @@ static foreach (backend; Matrix!(
                 hostCallbackDeclarations,
             ])();
             auto function_ = findFunction(modules[0], "answer");
-            auto backend_ = new backend(Program([modules[0]]));
+            auto backend_ = Owned!backend(Program([modules[0]]));
 
             long result;
             backend_.call(function_, &result, []);
@@ -1180,7 +1180,7 @@ static foreach (backend; Matrix!(
                 hostCallbackDeclarations,
             ])();
             auto function_ = findFunction(modules[0], "answer");
-            auto backend_ = new backend(Program([modules[0]]));
+            auto backend_ = Owned!backend(Program([modules[0]]));
 
             int result;
             backend_.call(function_, &result, []);
@@ -1281,7 +1281,7 @@ static foreach (backend; Matrix!(
 
                 functions[i] = findFunction(modules[0], text("test", i));
             }
-            auto backend_ = new backend(Program([modules[0]]));
+            auto backend_ = Owned!backend(Program([modules[0]]));
 
             // Same reasoning as the `Native` branch above.
             __gshared typeof(functions) sharedParallelismFunctions;
@@ -1346,7 +1346,7 @@ static foreach (backend; Matrix!(
                 hostCallbackDeclarations,
             ]);
             auto function_ = findFunction(modules[0], "answer");
-            auto backend_ = new backend(Program([modules[0]]));
+            auto backend_ = Owned!backend(Program([modules[0]]));
 
             int result;
             backend_.call(function_, &result, []);

@@ -54,17 +54,21 @@ public bool parseBackendName(
 }
 
 
-public Backend makeBackend(in BackendName name, Program program) {
+public imported!"snakebite.backends.backend".Owned!Backend makeBackend(
+    in BackendName name,
+    Program program,
+) {
+    import snakebite.backends.backend: Owned;
     import snakebite.backends.interpreter: Interpreter;
     import snakebite.backends.bytecode: Bytecode;
     import snakebite.backends.ctfe: Ctfe;
 
     final switch (name) with (BackendName) {
         case interpreter:
-            return new Interpreter(program);
+            return Owned!Backend(new Interpreter(program));
         case bytecode:
-            return new Bytecode(program);
+            return Owned!Backend(new Bytecode(program));
         case ctfe:
-            return new Ctfe(program);
+            return Owned!Backend(new Ctfe(program));
     }
 }

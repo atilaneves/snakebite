@@ -2064,3 +2064,716 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// dmd runs `scope(success)` only when the body leaves normally. A throw
+// from the operand of `return` leaves the body abnormally, so the guard
+// must not run and the throw must reach the caller, whatever the call
+// modifies before it throws.
+static foreach (backend; Matrix!()) {
+    @("scopeSuccessReturnOfThrowingCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int inner(ref string s) {
+                if (s.length == 0 || s[0] == 'b')
+                    throw new Exception("inner");
+                s = s[1 .. $];
+                return 5;
+            }
+
+            int outer(string value) {
+                scope(success) {
+                    if (value.length != 0)
+                        throw new Exception("rest");
+                }
+                return inner(value);
+            }
+
+            int t(string s) {
+                try
+                    return outer(s);
+                catch (Exception)
+                    return -999;
+            }
+
+            int main() {
+                return t("7") == 5 && t("b") == -999
+                    && t("") == -999 && t("1x") == -999 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A `return` whose operand does not throw leaves the body normally, so
+// the guard runs after the operand.
+static foreach (backend; Matrix!()) {
+    @("scopeSuccessReturnOfNonThrowingCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int fine() {
+                    log ~= "fine,";
+                    return 3;
+                }
+                int f() {
+                    scope(success) log ~= "S,";
+                    return fine();
+                }
+
+                if (f() != 3)
+                    return 2;
+                return log == "fine,S," ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// Each branch of an `if`/`else` that returns leaves the guard's scope
+// by its own `return`.
+static foreach (backend; Matrix!()) {
+    @("scopeSuccessReturnInIfElse." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int boom() {
+                    log ~= "boom,";
+                    throw new Exception("boom");
+                }
+                int fine() {
+                    log ~= "fine,";
+                    return 3;
+                }
+                int f(int mode) {
+                    scope(success) log ~= "S,";
+                    if (mode == 0)
+                        return boom();
+                    else if (mode == 1)
+                        return fine();
+                    else
+                        return 9;
+                }
+                int g(int mode) {
+                    try
+                        return f(mode);
+                    catch (Exception)
+                        return -1;
+                }
+
+                if (g(0) != -1 || g(1) != 3 || g(2) != 9)
+                    return 2;
+                return log == "boom,fine,S,S," ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A `return` in a `case` leaves the scope that holds the `switch`.
+static foreach (backend; Matrix!()) {
+    @("scopeSuccessReturnInSwitchCase." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int boom() {
+                    log ~= "boom,";
+                    throw new Exception("boom");
+                }
+                int fine() {
+                    log ~= "fine,";
+                    return 3;
+                }
+                int f(int mode) {
+                    scope(success) log ~= "S,";
+                    switch (mode) {
+                        case 0:
+                            return boom();
+                        case 1:
+                            return fine();
+                        default:
+                            return 9;
+                    }
+                }
+                int g(int mode) {
+                    try
+                        return f(mode);
+                    catch (Exception)
+                        return -1;
+                }
+
+                if (g(0) != -1 || g(1) != 3 || g(2) != 9)
+                    return 2;
+                return log == "boom,fine,S,S," ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// `break` and `continue` leave the guard of the loop body normally. A
+// `return` of a throwing call in the same body leaves it abnormally.
+static foreach (backend; Matrix!()) {
+    @("scopeSuccessReturnInLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int boom() {
+                    log ~= "boom,";
+                    throw new Exception("boom");
+                }
+                int f(int stop) {
+                    for (int i = 0; i < 5; i++) {
+                        scope(success) log ~= "S,";
+                        if (i == 0)
+                            continue;
+                        if (i == 1)
+                            break;
+                    }
+                    for (int i = 0; i < 5; i++) {
+                        scope(success) log ~= "T,";
+                        if (i == stop)
+                            return boom();
+                    }
+                    return 0;
+                }
+                int g(int stop) {
+                    try
+                        return f(stop);
+                    catch (Exception)
+                        return -1;
+                }
+
+                if (g(1) != -1)
+                    return 2;
+                return log == "S,S,T,boom," ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A `catch` that does not match lets the throw pass the guard that is
+// outside of the `try`. A `catch` that matches turns the `return` into a
+// normal exit of the guard's scope.
+static foreach (backend; Matrix!()) {
+    @("scopeSuccessReturnInTryCatch." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int boom() {
+                    log ~= "boom,";
+                    throw new Exception("boom");
+                }
+                int f(bool matching) {
+                    scope(success) log ~= "S,";
+                    try {
+                        return boom();
+                    } catch (Error) {
+                        return 1;
+                    } catch (Exception) {
+                        if (matching)
+                            return 4;
+                        throw new Exception("again");
+                    }
+                }
+                int g(bool matching) {
+                    try
+                        return f(matching);
+                    catch (Exception)
+                        return -1;
+                }
+
+                if (g(true) != 4 || g(false) != -1)
+                    return 2;
+                return log == "boom,S,boom," ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A handler that completes lets the function go on after the `try`: the
+// `return` whose operand threw must not be pending any more.
+static foreach (backend; Matrix!()) {
+    @("returnOfThrowingCallCaughtThenFunctionContinues."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int boom() {
+                    log ~= "boom,";
+                    throw new Exception("boom");
+                }
+                int f() {
+                    try {
+                        return boom();
+                    } catch (Exception) {
+                        log ~= "c,";
+                    }
+                    log ~= "after,";
+                    return 7;
+                }
+
+                if (f() != 7)
+                    return 2;
+                return log == "boom,c,after," ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A handler that does `continue` starts the next iteration, and the
+// function returns after the loop.
+static foreach (backend; Matrix!()) {
+    @("returnOfThrowingCallCaughtThenContinue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int boom() {
+                    log ~= "boom,";
+                    throw new Exception("boom");
+                }
+                int f() {
+                    foreach (i; 0 .. 3) {
+                        try {
+                            return boom();
+                        } catch (Exception) {
+                            log ~= "c,";
+                            continue;
+                        }
+                    }
+                    return 7;
+                }
+
+                if (f() != 7)
+                    return 2;
+                return log == "boom,c,boom,c,boom,c," ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A `finally` runs when the `return` operand throws, and the guard
+// outside the `try` does not run.
+static foreach (backend; Matrix!()) {
+    @("scopeSuccessReturnInTryFinally." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int boom() {
+                    log ~= "boom,";
+                    throw new Exception("boom");
+                }
+                int f() {
+                    scope(success) log ~= "S,";
+                    try {
+                        return boom();
+                    } finally {
+                        log ~= "F,";
+                    }
+                }
+                int g() {
+                    try
+                        return f();
+                    catch (Exception)
+                        return -1;
+                }
+
+                if (g() != -1)
+                    return 2;
+                return log == "boom,F," ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// The guard is the first statement and the throwing `return` is the last
+// statement of the function body.
+static foreach (backend; Matrix!()) {
+    @("scopeSuccessReturnAsLastStatement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int boom() {
+                    log ~= "boom,";
+                    throw new Exception("boom");
+                }
+                int f() {
+                    log ~= "a,";
+                    scope(success) log ~= "S,";
+                    log ~= "b,";
+                    return boom();
+                }
+                int g() {
+                    try
+                        return f();
+                    catch (Exception)
+                        return -1;
+                }
+
+                if (g() != -1)
+                    return 2;
+                return log == "a,b,boom," ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// Both guards skip when the operand throws. Both run, the inner one first,
+// when it does not.
+static foreach (backend; Matrix!()) {
+    @("scopeSuccessNestedGuards." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int boom() {
+                    log ~= "boom,";
+                    throw new Exception("boom");
+                }
+                int fine() {
+                    log ~= "fine,";
+                    return 3;
+                }
+                int f(bool throws) {
+                    scope(success) log ~= "outer,";
+                    {
+                        scope(success) log ~= "inner,";
+                        return throws ? boom() : fine();
+                    }
+                }
+                int g(bool throws) {
+                    try
+                        return f(throws);
+                    catch (Exception)
+                        return -1;
+                }
+
+                if (g(true) != -1 || g(false) != 3)
+                    return 2;
+                return log == "boom,fine,inner,outer," ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A throwing `return` runs `scope(failure)` and `scope(exit)` guards in
+// reverse order of declaration and skips `scope(success)`. A normal
+// `return` runs `scope(success)` and `scope(exit)` the same way.
+static foreach (backend; Matrix!()) {
+    @("scopeGuardsOfEachKindOrder." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int boom() {
+                    log ~= "boom,";
+                    throw new Exception("boom");
+                }
+                int fine() {
+                    log ~= "fine,";
+                    return 3;
+                }
+                int f(bool throws) {
+                    scope(exit) log ~= "E1,";
+                    scope(success) log ~= "S,";
+                    scope(failure) log ~= "Fa,";
+                    scope(exit) log ~= "E2,";
+                    return throws ? boom() : fine();
+                }
+                int g(bool throws) {
+                    try
+                        return f(throws);
+                    catch (Exception)
+                        return -1;
+                }
+
+                if (g(true) != -1 || g(false) != 3)
+                    return 2;
+                return log == "boom,E2,Fa,E1,fine,E2,S,E1," ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A `return` of a call to a `void` function that throws leaves the
+// guard's scope abnormally.
+static foreach (backend; Matrix!()) {
+    @("scopeSuccessInVoidFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                void thrower() {
+                    log ~= "boom,";
+                    throw new Exception("boom");
+                }
+                void quiet() {
+                    log ~= "quiet,";
+                }
+                void f(bool throws) {
+                    scope(success) log ~= "S,";
+                    return throws ? thrower() : quiet();
+                }
+                bool g(bool throws) {
+                    try {
+                        f(throws);
+                        return false;
+                    } catch (Exception) {
+                        return true;
+                    }
+                }
+
+                if (!g(true) || g(false))
+                    return 2;
+                return log == "boom,quiet,S," ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// The destructor of the returned value runs once, and no guard runs after
+// a throw from the call that makes the value.
+static foreach (backend; Matrix!()) {
+    @("scopeSuccessReturnOfStructWithDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                struct S {
+                    int x;
+                    ~this() {
+                        log ~= "d,";
+                    }
+                }
+                S make(bool throws) {
+                    if (throws) {
+                        log ~= "boom,";
+                        throw new Exception("boom");
+                    }
+                    return S(5);
+                }
+                S f(bool throws) {
+                    scope(success) log ~= "S,";
+                    return make(throws);
+                }
+                int g(bool throws) {
+                    try {
+                        auto s = f(throws);
+                        return s.x;
+                    } catch (Exception)
+                        return -1;
+                }
+
+                if (g(true) != -1 || g(false) != 5)
+                    return 2;
+                return log == "boom,S,d," ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A throw from the body of `scope(success)` replaces the return value and
+// reaches the caller. A `scope(exit)` that was declared before it still
+// runs.
+static foreach (backend; Matrix!()) {
+    @("scopeSuccessBodyThrows." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int fine() {
+                    log ~= "fine,";
+                    return 3;
+                }
+                int f() {
+                    scope(exit) log ~= "E,";
+                    scope(success) {
+                        log ~= "S,";
+                        throw new Exception("guard");
+                    }
+                    return fine();
+                }
+                string g() {
+                    try {
+                        f();
+                        return "none";
+                    } catch (Exception exception) {
+                        return exception.msg;
+                    }
+                }
+
+                if (g() != "guard")
+                    return 2;
+                return log == "fine,S,E," ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A throw from a `scope(exit)` guard after a `return` replaces the return
+// value, and the guard declared before it runs.
+static foreach (backend; Matrix!()) {
+    @("scopeExitBodyThrowsAfterReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int fine() {
+                    log ~= "fine,";
+                    return 3;
+                }
+                int f() {
+                    scope(exit) log ~= "E1,";
+                    scope(exit) throw new Exception("guard");
+                    return fine();
+                }
+                string g() {
+                    try {
+                        f();
+                        return "none";
+                    } catch (Exception exception) {
+                        return exception.msg;
+                    }
+                }
+
+                if (g() != "guard")
+                    return 2;
+                return log == "fine,E1," ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A throw from a `scope(failure)` guard replaces the throw that made it
+// run.
+static foreach (backend; Matrix!()) {
+    @("scopeFailureBodyThrowsAfterThrowingReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int boom() {
+                    log ~= "boom,";
+                    throw new Exception("boom");
+                }
+                int f() {
+                    scope(failure) {
+                        log ~= "Fa,";
+                        throw new Exception("guard");
+                    }
+                    return boom();
+                }
+                string g() {
+                    try {
+                        f();
+                        return "none";
+                    } catch (Exception exception) {
+                        return exception.msg;
+                    }
+                }
+
+                if (g() != "guard")
+                    return 2;
+                return log == "boom,Fa," ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A `catch` handler that does something and then rethrows is how dmd
+// lowers `scope(success)` and `scope(failure)`. The rethrow must run after
+// a `return` whose operand threw.
+static foreach (backend; Matrix!()) {
+    @("rethrowFromCatchAfterThrowingReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int boom() {
+                    log ~= "boom,";
+                    throw new Exception("boom");
+                }
+                int f() {
+                    try {
+                        return boom();
+                    } catch (Throwable thrown) {
+                        log ~= "caught,";
+                        throw thrown;
+                    }
+                }
+                int g() {
+                    try
+                        return f();
+                    catch (Exception)
+                        return -1;
+                }
+
+                if (g() != -1)
+                    return 2;
+                return log == "boom,caught," ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// `std.conv.to!int` of a text that is not a number throws. Phobos reaches
+// that throw through a `scope(success)` guard and a `return` of the call.
+static foreach (backend; Matrix!()) {
+    @("scopeSuccessGuardOfToIntThrowsConvException." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.conv: ConvException, to;
+
+            int main() {
+                try {
+                    "b".to!int;
+                } catch (ConvException) {
+                    return 0;
+                }
+                return 1;
+            }
+        });
+    }
+}

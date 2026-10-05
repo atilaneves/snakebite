@@ -156,7 +156,7 @@ private void shouldNotAllocate(
     import core.memory: GC;
 
     auto guestModule = parseSnippet(guest);
-    auto backend = new Interpreter(Program([guestModule]));
+    auto backend = Owned!Interpreter(Program([guestModule]));
     auto function_ = guestFunction(guestModule, functionName);
     long result;
 
@@ -254,7 +254,7 @@ private void shouldCostPerIteration(string counter)(
     in size_t line = __LINE__,
 ) {
     auto guestModule = parseSnippet(guest);
-    auto backend = new Interpreter(Program([guestModule]));
+    auto backend = Owned!Interpreter(Program([guestModule]));
     long result;
 
     auto few = guestFunction(guestModule, fewName);

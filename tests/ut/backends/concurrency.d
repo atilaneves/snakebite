@@ -116,10 +116,10 @@ unittest {
                         long result;
 
                         if (threadIndex % 2 == 0) {
-                            auto backend = new Bytecode(program);
+                            auto backend = Owned!Bytecode(program);
                             backend.call(function_, &result, []);
                         } else {
-                            auto backend = new Interpreter(program);
+                            auto backend = Owned!Interpreter(program);
                             backend.call(function_, &result, []);
                         }
 

@@ -35,7 +35,7 @@ public struct Repl {
     private uint _cellCount = 1;
     private Module _module;
     private imported!"snakebite.backends".Program _program;
-    private Backend _backend;
+    private imported!"snakebite.backends.backend".Owned!Backend _backend;
 
     public this(
         BackendName backendName,
@@ -259,12 +259,14 @@ public struct Repl {
         in string fullSource,
         Module module_,
         imported!"snakebite.backends".Program program,
-        Backend backend,
+        imported!"snakebite.backends.backend".Owned!Backend backend,
     ) {
+        import core.lifetime: move;
+
         _accumulatedSource = fullSource;
         _module = module_;
         _program = program;
-        _backend = backend;
+        _backend = move(backend);
         ++_cellCount;
         _pendingInput = null;
     }

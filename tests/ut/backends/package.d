@@ -4,6 +4,7 @@ public import ut;
 public import snakebite.backends.bytecode: Bytecode;
 public import snakebite.backends.ctfe: Ctfe;
 public import snakebite.backends.interpreter: Interpreter;
+public import snakebite.backends.backend: Owned;
 public import std.meta: AliasSeq;
 
 import core.sync.mutex: Mutex;
@@ -88,8 +89,8 @@ public template Matrix(specs...) {
 // An `Interpreter` whose program owns exactly `module_`, for tests that
 // call one parsed guest function directly rather than running a whole
 // program.
-public Interpreter interpreter(Module module_) {
-    return new Interpreter(Program([module_]));
+public Owned!Interpreter interpreter(Module module_) {
+    return Owned!Interpreter(Program([module_]));
 }
 
 
@@ -148,7 +149,8 @@ public void shouldBeStatusOf(
     } else {
         enum program_ = RegisterProgram!(module_, code).program;
         auto program = Program([parsedProgram(program_)], "snakebite");
-        asTestFailure(run(new BackendType(program), program), file, line)
+        auto backend = Owned!BackendType(program);
+        asTestFailure(run(backend, program), file, line)
             .should == expected;
     }
 }
@@ -292,8 +294,9 @@ public template shouldBeRetOf(
                 );
 
             T result;
+            auto backend = Owned!BackendType(program);
             asTestFailure(
-                (new BackendType(program)).call(function_, &result, []),
+                backend.call(function_, &result, []),
                 file, line,
             );
             result.should == expected;
@@ -362,8 +365,8 @@ private string evaluate(
     } else {
         auto function_ = parsedFunction(snippet);
         auto program = Program([function_.getModule]);
-        return asTestFailure(
-            (new BackendType(program)).eval(function_), file, line);
+        auto backend = Owned!BackendType(program);
+        return asTestFailure(backend.eval(function_), file, line);
     }
 }
 

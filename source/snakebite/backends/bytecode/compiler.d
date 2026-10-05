@@ -118,6 +118,11 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             new CallbackBridge(&invokeCallback, cast(void*) this));
     }
 
+    protected override void release() {
+        _vms.release;
+        _nativeData.release;
+    }
+
     private void* constantSymbolAddress(
         Declaration symbol,
     ) {
@@ -554,9 +559,10 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             auto returnType = function_.type.nextOf;
             const isVoidReturn = returnType !is null && returnType.ty == Tvoid;
             // A `ref` return hands the caller the returned storage's own
-            // address rather than a copy of its value - see `compileReturn`
-            // and `compileAddress` - so the frame slot a caller reads it
-            // into is one pointer wide regardless of what the returned type
+            // address rather than a copy of its value - see
+            // `visitReturnOperand` and `compileAddress` - so the frame slot
+            // a caller reads it into is one pointer wide regardless of what
+            // the returned type
             // itself would otherwise need, the same convention `snakebite.
             // ffi.plan` already uses for a native `ref`-returning callee.
             const isRefReturn = functionType.isRef;
@@ -697,12 +703,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private ClosurePlan[FuncDeclaration] _closurePlans;
     private TypeFacts _returnFacts;
     private bool _isVoidReturn;
-    // Whether this function returns by `ref`: `compileReturn` then compiles
-    // its own returned storage's address instead of its value, and a
+    // Whether this function returns by `ref`: `visitReturnOperand` then
+    // compiles its own returned storage's address instead of its value, and a
     // caller's own `opCall` result slot holds that address rather than a
     // copy - see `compileAddress`'s own `CallExp` case, the one place that
     // address is read back out.
     private bool _isRefReturn;
+    // Where `visitReturnOperand` left the value, or the address of the
+    // returned storage, for `visitReturnTransfer` to return.
+    private size_t _returnOffset;
 
     private Instruction[] _instructions;
     private long[] _constants;
@@ -734,8 +743,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private bool _finished;
     // The `finalbody` of every `TryFinallyStatement` this compiler is
     // currently inside the `_body` of, outermost first - what
-    // `compileReturn` inlines, innermost first, before a `return` inside
-    // one of these actually leaves the function. Pushed/popped around
+    // `visitReturnTransfer` inlines, innermost first, before a `return`
+    // inside one of these actually leaves the function. Pushed/popped around
     // `_body` alone (see `visit(TryFinallyStatement)`): a `return` inside
     // `finalbody` itself must not re-run the `finally` it is already in.
     private Statement[] _pendingFinallyBodies;
@@ -1531,6 +1540,42 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _finished = bodyFinished || cleanupFinished;
     }
 
+    protected override void visitReturnOperand(ReturnStatement statement) {
+        // A `void` return's own expression, when it has one, is only the
+        // synthetic `0` dmd appends to `main` - nowhere to write it, so it
+        // is discarded the same way the interpreter discards it.
+        if (_isVoidReturn || statement.exp is null)
+            return;
+
+        if (_isRefReturn) {
+            _returnOffset = compileAddress(statement.exp);
+            return;
+        }
+
+        // The return value is computed before any enclosing `finally`
+        // runs, exactly as a compiled `return` inside a `try` does: the
+        // finally can go on to use its own temporaries without disturbing
+        // the value already on its way out.
+        _returnOffset = reserveTemp(_returnFacts);
+        compileValue(statement.exp, _returnOffset, _returnFacts.size);
+    }
+
+    protected override void visitReturnTransfer(ReturnStatement statement) {
+        const returnOffset = _returnOffset;
+        runPendingFinallyBodies(unwindPlanOf(activeScopePath));
+        if (_finished)
+            return;
+
+        if (_isVoidReturn || statement.exp is null)
+            emit(&opReturnVoid, 0, 0, 0);
+        else
+            emit(
+                &opReturn, 0, returnOffset,
+                _isRefReturn ? size_t.sizeof : _returnFacts.size,
+            );
+        _finished = true;
+    }
+
     protected override void visitThrowStatement(ThrowStatement statement) {
         compileThrow(statement.exp, statement.loc);
     }
@@ -1552,10 +1597,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         evalInto(expression, offset, facts.size);
         emit(&opThrow, offset, 0, 0);
         _finished = true;
-    }
-
-    override void visit(ReturnStatement statement) {
-        compileReturn(statement);
     }
 
     override void visit(ExpStatement statement) {
@@ -1773,43 +1814,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     extern(D):
-
-    private void compileReturn(ReturnStatement statement) {
-        // A `void` return's own expression, when it has one, is only the
-        // synthetic `0` dmd appends to `main` - nowhere to write it, so it
-        // is discarded the same way the interpreter discards it.
-        if (_isVoidReturn || statement.exp is null) {
-            runPendingFinallyBodies(unwindPlanOf(activeScopePath));
-            if (_finished)
-                return;
-            emit(&opReturnVoid, 0, 0, 0);
-            _finished = true;
-            return;
-        }
-
-        if (_isRefReturn) {
-            const addressOffset = compileAddress(statement.exp);
-            runPendingFinallyBodies(unwindPlanOf(activeScopePath));
-            if (_finished)
-                return;
-            emit(&opReturn, 0, addressOffset, size_t.sizeof);
-            _finished = true;
-            return;
-        }
-
-        // The return value is computed before any enclosing `finally`
-        // runs, exactly as a compiled `return` inside a `try` does: the
-        // finally can go on to use its own temporaries, or even run
-        // another `return`, without disturbing the value already on its
-        // way out.
-        const offset = reserveTemp(_returnFacts);
-        compileValue(statement.exp, offset, _returnFacts.size);
-        runPendingFinallyBodies(unwindPlanOf(activeScopePath));
-        if (_finished)
-            return;
-        emit(&opReturn, 0, offset, _returnFacts.size);
-        _finished = true;
-    }
 
     // Each exit emits the shared scope plan's cleanup sequence. Temporarily
     // leave each scope before compiling its cleanup: transfers and failures
