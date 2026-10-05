@@ -3502,6 +3502,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         public void* storageSlice(SliceExp expression) {
+            import snakebite.backends.sliceplan: planSlice;
+
+            if (planSlice(expression).yieldsStaticArray)
+                return evaluator.sliceView(expression).pointer;
             return storageValue(expression);
         }
 
@@ -5459,8 +5463,32 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // (rather than a bare pointer) works the same way, just starting
     // from that array's own base and length instead of an unbounded one.
     override void visit(SliceExp expression) {
+        import core.stdc.string: memcpy;
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset, storeIntegral;
+        import snakebite.backends.sliceplan: planSlice;
+
+        auto view = sliceView(expression);
+        if (planSlice(expression).yieldsStaticArray) {
+            memcpy(_place, view.pointer, _facts.size);
+            return;
+        }
+
+        auto bytes = cast(ubyte*) _place;
+        storeIntegral(
+            bytes + arrayLengthOffset, view.length, size_t.sizeof);
+        *cast(ubyte**) (bytes + arrayPointerOffset) = view.pointer;
+    }
+
+    private struct SliceView {
+        ubyte* pointer;
+        size_t length;
+    }
+
+    // The elements a slice names, bounds checked. A slice that dmd typed as
+    // a static array (`cast(T[N]) a[lo .. hi]`) is those elements in
+    // place, so the address of that value is `pointer`.
+    private SliceView sliceView(SliceExp expression) {
         import snakebite.backends.sliceplan: planSlice;
         import std.conv: text;
 
@@ -5534,10 +5562,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         const stride = factsOf(sourceType.nextOf).size;
-        auto bytes = cast(ubyte*) _place;
-        storeIntegral(
-            bytes + arrayLengthOffset, cast(size_t) (hi - lo), size_t.sizeof);
-        *cast(ubyte**) (bytes + arrayPointerOffset) = base + lo * stride;
+        return SliceView(base + lo * stride, cast(size_t) (hi - lo));
     }
 
     // `_d_arrayliteralTX`, the druntime hook real compiled D calls for a
