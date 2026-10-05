@@ -59,7 +59,7 @@ configuration "acceptance-test" {
 
     mainSourceFile "acceptance/main.d"
     sourcePaths "acceptance"
-    sourceFiles "tests/ut/ffi/symbol.d" "tests/ut/process.d"
+    sourceFiles "tests/ut/process.d"
     sourceFiles "tests/ut/package.d" "tests/ut/backends/package.d"
     sourcePaths "bench"
     excludedSourceFiles "bench/main.d"
