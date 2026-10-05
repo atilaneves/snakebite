@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# dependencies = ["pytest==8.4.1"]
+# dependencies = ["pytest==8.4.1", "pytest-xdist==3.8.0"]
 # ///
 
 # End-to-end tests of the `bin/sb` command line. They start the built
@@ -2584,6 +2584,7 @@ def finalizer_shapes(
     )
 
 
+@pytest.mark.xdist_group("finalizer-shapes")
 @pytest.mark.parametrize("shape", sorted(FINALIZER_SHAPES))
 def test_destructor_shape_runs_in_finalizer(
     finalizer_shapes: FinalizerShapes, shape: str,
@@ -2713,5 +2714,8 @@ def sb_path() -> str:
     return sb
 
 
+# The tests can run in parallel (see build/pytest-workers.sh) because the
+# state that they share, the `.snakebite` directory and the dub package store,
+# is keyed by project path and published with an atomic rename.
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
