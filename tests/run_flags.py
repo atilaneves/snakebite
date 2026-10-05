@@ -1824,5 +1824,123 @@ def test_changed_response_file_changes_checks_on_cached_runs(
             assert_passes_after_start(backend, outcome)
 
 
+BETTERC_DEPENDENCY = """\
+module dep;
+version (D_BetterC) enum moduleBetterC = true;
+else enum moduleBetterC = false;
+bool nativeBody() {
+    version (D_BetterC) return true;
+    else return false;
+}
+template selected(T) {
+    version (D_BetterC) enum selected = true;
+    else enum selected = false;
+}
+bool body(T)() {
+    version (D_BetterC) return true;
+    else return false;
+}
+version (D_BetterC) {
+    bool conditional(T)() { return true; }
+} else {
+    bool conditional(T)() { return false; }
+}
+bool imported(T)() {
+    import helper;
+    return helperBody!T();
+}
+bool phobos(T)() {
+    import std.algorithm.searching: countUntil;
+    T[3] values = [1, 2, 3];
+    return values[].countUntil(2) == 1;
+}
+bool druntime(T)() {
+    import core.lifetime: emplace;
+    T storage;
+    emplace!T(&storage, T(7));
+    return storage == 7;
+}
+mixin template Mixed(T) {
+    version (D_BetterC) enum mixed = true;
+    else enum mixed = false;
+}
+T positive(T)(T value) in (value > 0) { return value; }
+"""
+
+
+@pytest.mark.parametrize("backend", [*BACKENDS, "native-ldc"])
+@pytest.mark.parametrize("shape", [
+    "body", "conditional", "imported", "mixin", "phobos", "druntime",
+])
+def test_betterc_dependency_versions(
+    tmp_path: Path, backend: str, shape: str,
+) -> None:
+    dependency = tmp_path / "dependency"
+    (dependency / "source").mkdir(parents=True)
+    (dependency / "dub.sdl").write_text(
+        'name "dep"\ntargetType "library"\n', encoding="utf-8",
+    )
+    (dependency / "source" / "dep.d").write_text(
+        BETTERC_DEPENDENCY, encoding="utf-8",
+    )
+    (dependency / "source" / "helper.d").write_text("""\
+module helper;
+bool helperBody(T)() {
+    version (D_BetterC) return true;
+    else return false;
+}
+""", encoding="utf-8")
+    root = tmp_path / "root"
+    (root / "source").mkdir(parents=True)
+    (root / "dub.json").write_text(json.dumps({
+        "name": "app", "targetType": "library",
+        "dependencies": {"dep": {"path": "../dependency"}},
+        "dflags": ["-betterC"],
+        "dflags-dmd": ["-check=in=off"],
+        "dflags-ldc": ["--enable-preconditions=false"],
+        "libs-dmd": ["phobos2"],
+        "configurations": [{
+            "name": "unittest", "targetType": "executable",
+            "mainSourceFile": "source/app.d",
+        }],
+    }), encoding="utf-8")
+    expression = "mixed" if shape == "mixin" else f"{shape}!int()"
+    (root / "source" / "app.d").write_text(PRELUDE + f"""
+import dep;
+mixin Mixed!int;
+static assert(moduleBetterC);
+static assert(selected!int);
+version (D_ModuleInfo) static assert(false);
+version (D_TypeInfo) static assert(false);
+version (D_Exceptions) static assert(false);
+unittest {{
+    log("start\\n");
+    assert({expression});
+    if (!__ctfe) assert(!nativeBody());
+    assert(positive(-1) == -1);
+    log("after\\n");
+}}
+extern(C) int main() {{
+    foreach (test; __traits(getUnitTests, app)) test();
+    return 0;
+}}
+""", encoding="utf-8")
+    if backend in ["native", "native-ldc"]:
+        compiler = native_compiler() if backend == "native" else shutil.which("ldc2")
+        if compiler is None:
+            pytest.skip("ldc2 is not on PATH")
+        command = ["dub", "test", f"--compiler={compiler}"]
+    else:
+        command = [sb_path(), f"--backend={backend}", "--no-optimise-image", str(root)]
+    result = subprocess.run(
+        command, cwd=root, capture_output=True, check=False, text=True,
+        timeout=TIMEOUT,
+    )
+    assert_passes_after_start(backend, outcome_of(result))
+
+
+# The tests can run in parallel (see build/pytest-workers.sh) because the
+# state that they share, the `.snakebite` directory and the dub package store,
+# is keyed by project path and published with an atomic rename.
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

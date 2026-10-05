@@ -130,15 +130,15 @@ public struct Program {
         return _links.definitionOf(variable);
     }
 
-    // A `main` in a C module is the entry of the process, as the C runtime
+    // A C-linkage `main` is the entry of the process, as the C runtime
     // calls it: druntime does not start, so a build with unit tests runs
     // none of them and no module constructor, and the program is only
     // that function.
     public bool hasCEntryPoint() const {
-        import dmd.astenums: FileType;
+        import dmd.astenums: LINK;
 
         return main.func !is null
-            && (cast() main.func).getModule.filetype == FileType.c;
+            && (cast() main.func).resolvedLinkage == LINK.c;
     }
 
     public bool isInterpreted(
@@ -265,7 +265,7 @@ public int run(
 
     // A C `main` starts no druntime: no module constructor or destructor
     // of a D module runs.
-    if (program.hasCEntryPoint)
+    if (program.hasCEntryPoint || program.checks.betterC)
         return runMain(backend, program, hostArguments);
 
     auto modules = GuestModules.start(

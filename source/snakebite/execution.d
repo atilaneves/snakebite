@@ -111,7 +111,7 @@ public ExecutionReport executeBackend(
     int status;
     // Snippet callers construct Programs that do not start as a project,
     // and a program with a C `main` is not started as a project either.
-    if (!program.startsAsProject || program.hasCEntryPoint)
+    if (!program.startsAsProject || program.hasCEntryPoint || program.checks.betterC)
         status = run(backend, program, hostArguments);
     else {
         startup = runTestsAndMain(
