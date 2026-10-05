@@ -80,6 +80,35 @@ Target registryImageObject() {
     );
 }
 
+// The native libraries that `bin/ut` loads, built here so that no test
+// starts a compiler for them. They lie in `bin/fixtures`, next to the test
+// executable. They are implicit inputs of an empty object that only
+// `bin/ut` links, so that `ninja bin/ut` makes them and no other target
+// needs a C or C++ compiler for them.
+Target testFixtureObject() {
+    return Target(
+        "$project/test_fixtures.o",
+        "cc -x c -c /dev/null -o $out",
+        Target[].init,
+        testFixtureLibraries,
+    );
+}
+
+Target[] testFixtureLibraries() {
+    return [
+        Target(
+            "$project/bin/fixtures/symbols.so",
+            "cc -shared -fPIC -o $out $in",
+            Target("tests/fixtures/native/symbols.c"),
+        ),
+        Target(
+            "$project/bin/fixtures/cpp_image.so",
+            "c++ -shared -fPIC -O2 -std=c++17 -o $out $in",
+            Target("tests/fixtures/native/cpp_image.cpp"),
+        ),
+    ];
+}
+
 Target dubTarget(string compiler, string config, string objectSet,
                  string output, CompilerFlags flags = CompilerFlags()) {
     auto buildOptions = options.dup;
@@ -131,6 +160,8 @@ Target dubTarget(string compiler, string config, string objectSet,
     // into the same link line as the D-compiled ones.
     info.packages[0].files ~= assembledSources.map!assembledObjectPath.array
         ~ assembledObjectPath(registryImageSource);
+    if (config == "unittest")
+        info.packages[0].files ~= "$project/test_fixtures.o";
 
     auto target = dubBuild(buildOptions, info, CompilationMode.options, flags);
     target.rawOutputs[0] = "bin/" ~ output;
@@ -140,6 +171,7 @@ Target dubTarget(string compiler, string config, string objectSet,
 Build reggaeBuild() {
     Target[] targets = assembledSources.map!assembledObject.array ~ [
         registryImageObject,
+        testFixtureObject,
         dubTarget("dmd", "unittest", "unittest", "ut"),
         dubTarget("ldc2", "acceptance-test", "release", "at", CompilerFlags("-release", "-O", "-flto=thin")),
         dubTarget("ldc2", "sb", "release", "sb", CompilerFlags("-release", "-O", "-flto=thin")),

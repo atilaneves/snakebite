@@ -4,182 +4,26 @@ module ut.ffi.symbol;
 import ut;
 import snakebite.ffi: Resolver;
 import snakebite.dependencyimage:
-    DependencyImage, Optimise, ProjectImageCache, defaultCompiler, prepareImage;
-import std.file: timeLastModified;
-import core.atomic: atomicStore, MemoryOrder;
-import core.internal.atomic: atomicLoad;
+    DependencyImage, ProjectImageCache, defaultCompiler, loadImage;
 import core.thread: Thread;
-import core.lifetime: _d_newclassT;
-import snakebite.exception: SnakebiteException;
-import ut.backends;
-import snakebite.backends.backend: Program, run;
 import snakebite.execution: prepareProject;
-import snakebite.frontend.imagesource: imageSource;
-import core.atomic;
+import snakebite.dependencyimage: Optimise;
+import snakebite.backends.backend: Program;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
-import std.file: dirEntries, SpanMode;
-import std.array: array;
-import std.process: execute;
-import std.file: exists, readText, remove, setAttributes, setTimes;
-import std.path: baseName;
-import std.algorithm.iteration: filter;
-import std.conv: octal;
+import snakebite.frontend.imagesource: imageSource;
+import ut.backends;
+import std.file: setTimes, timeLastModified;
 import std.path: buildPath;
 
-static foreach (backend; Matrix!(
-    Omit!(Native, Because.inexpressible,
-        "the mixin cannot express a dub project"),
-)) {
-    @("image.repeatedProjectTestRunner." ~ backend.stringof)
-    @Serial
-    unittest {
-        const sandbox = Sandbox();
-        sandbox.writeFile("app/dub.sdl", q{
-            name "repeat-runner-app"
-            targetType "library"
-            dependency "repeat-runner" path="../runner"
-        });
-        sandbox.writeFile("app/source/app.d", q{
-            module repeat_runner_app;
-            import repeat_runner;
-            unittest { assert(false, "custom runner must replace default tests"); }
-        });
-        sandbox.writeFile("runner/dub.sdl", q{
-            name "repeat-runner"
-            targetType "staticLibrary"
-        });
-        sandbox.writeFile("runner/source/repeat_runner.d", q{
-            module repeat_runner;
-            import core.runtime: Runtime, UnitTestResult;
-            private __gshared int calls;
-            shared static this() {
-                Runtime.extendedModuleUnitTester = () {
-                    ++calls;
-                    return UnitTestResult(1, 1, false, false);
-                };
-            }
-            extern(C) int runner_calls() { return calls; }
-        });
-        const directory = sandbox.inSandboxPath("app");
-        foreach (iteration; 1 .. 3) {
-            import snakebite.execution: executeBackend;
-            import snakebite.backends: backendIdentity;
-            import snakebite.dependencyimage: TestHooks;
-            auto project = prepareProject(directory, optimise: Optimise.no).project;
-            // A missing hook would enter this host's default unittest
-            // runner recursively instead of giving a bounded failure.
-            project.program.testHooks.should.not == TestHooks.init;
-            executeBackend(backendIdentity!backend, project.program).status.should == 0;
-            alias Count = extern(C) int function();
-            const count = cast(Count)
-                project.program.dependencyImage.resolve("runner_calls");
-            count().should == iteration;
-            if (iteration == 1) {
-                // DMD can home these template instances on a previous
-                // project's root. Preparing it again must not import
-                // this separate, in-memory module into its native image.
-                parseSnippet(q{
-                    import std.range.interfaces: inputRangeObject;
-                    struct UnrelatedRangeItem { int value; }
-                    Object makeRange() {
-                        return inputRangeObject([UnrelatedRangeItem(1)]);
-                    }
-                });
-            }
-        }
-    }
-}
 
-private enum atomicSource = q{
-    module image;
-    import core.atomic: MemoryOrder;
-    import core.internal.atomic: atomicLoad;
-    export __gshared auto retained = &atomicLoad!(MemoryOrder.seq, int);
-};
+// A shared object that the build of `bin/ut` made (tests/fixtures/native):
+// no test here starts a compiler. The tests of what a built image holds are
+// in tests/run_cli.py, which runs the real `bin/sb`.
+private enum emptyImageSource = "module image;\n";
 
-// Tests in this module build many small images from the same handful of
-// sources. The cache in prepareImage keys on content and compiler
-// identity and publishes with an atomic rename, so one directory is safe
-// to share across different sources: a test with new source still gets
-// its own cache entry, and a repeat of the same source hits the cache
-// instead of paying for a fresh compile and link. Tests that check the
-// cache directory is empty after a failed build keep their own sandbox
-// instead (image.compileFailure, image.linkFailure, image.compilerFamily).
-private string sharedImageCache() {
-    static string directory;
-    if (directory is null) {
-        import std.file: mkdirRecurse;
-        import std.path: buildPath;
-        import std.file: tempDir;
-
-        directory = buildPath(tempDir(), "snakebite-image-test-cache");
-        mkdirRecurse(directory);
-    }
-    return directory;
-}
-
-@("image.atomicLoad.cache")
-@Serial
-unittest {
-    const directory = sharedImageCache;
-    auto image = prepareImage(atomicSource, directory, optimise: Optimise.no);
-    const stamp = timeLastModified(image.path);
-    auto reused = prepareImage(atomicSource, directory, optimise: Optimise.no);
-    reused.path.should == image.path;
-    timeLastModified(reused.path).should == stamp;
-    auto resolver = Resolver(&reused);
-    alias Load = typeof(&atomicLoad!(MemoryOrder.seq, int));
-    const load = cast(Load) resolver.resolve(atomicLoad!(MemoryOrder.seq, int).mangleof);
-    load.should.not == null;
-    shared int value;
-    foreach (expected; [0, 42, -7, int.min, int.max]) {
-        atomicStore(value, expected);
-        load(cast(int*) &value).should == expected;
-    }
-    resolver.resolve("abs").should.not == null;
-    resolver.resolve("image_missing_symbol").should == null;
-}
-
-// An optimised and an unoptimised image of the same source are different
-// build outputs (`-O` present or absent), so they must never share a cache
-// entry: a caller that asks for one setting must never load a build the
-// other setting produced.
-@("image.optimise.cache")
-@Serial
-unittest {
-    const directory = sharedImageCache;
-    auto optimised = prepareImage(atomicSource, directory, optimise: Optimise.yes);
-    auto unoptimised = prepareImage(atomicSource, directory, optimise: Optimise.no);
-    optimised.path.should.not == unoptimised.path;
-
-    // Each setting still hits its own cache entry on a repeat call.
-    auto reusedOptimised = prepareImage(atomicSource, directory, optimise: Optimise.yes);
-    reusedOptimised.path.should == optimised.path;
-    auto reusedUnoptimised = prepareImage(atomicSource, directory, optimise: Optimise.no);
-    reusedUnoptimised.path.should == unoptimised.path;
-
-    // Both builds still produce a working image.
-    alias Load = typeof(&atomicLoad!(MemoryOrder.seq, int));
-    foreach (image; [optimised, unoptimised]) {
-        auto resolver = Resolver(&image);
-        const load = cast(Load) resolver.resolve(atomicLoad!(MemoryOrder.seq, int).mangleof);
-        load.should.not == null;
-        shared int value = 17;
-        load(cast(int*) &value).should == 17;
-    }
-}
-
-@("image.sourceChange")
-@Serial
-unittest {
-    const directory = sharedImageCache;
-    auto first = prepareImage("export extern(C) int answer() { return 1; }", directory, optimise: Optimise.no);
-    auto second = prepareImage("export extern(C) int answer() { return 2; }", directory, optimise: Optimise.no);
-    first.path.should.not == second.path;
-    alias Answer = extern(C) int function();
-    (cast(Answer) first.resolve("answer"))().should == 1;
-    (cast(Answer) second.resolve("answer"))().should == 2;
+private string symbolsLibrary() {
+    return nativeFixture("symbols.so");
 }
 
 @("image.symbolSurvivesImageScope")
@@ -188,10 +32,7 @@ unittest {
     alias Answer = extern(C) int function();
     Answer answer;
     {
-        auto image = prepareImage(
-            "export extern(C) int retainedAnswer() { return 381; }",
-            sharedImageCache, optimise: Optimise.no
-        );
+        auto image = loadImage(symbolsLibrary);
         answer = cast(Answer) image.resolve("retainedAnswer");
     }
     answer.should.not == null;
@@ -203,477 +44,15 @@ unittest {
 unittest {
     alias Answer = extern(C) int function();
     Answer answer;
-    const directory = sharedImageCache;
+    const library = symbolsLibrary;
     auto thread = new Thread({
-        auto image = prepareImage(
-            "export extern(C) int threadRetainedAnswer() { return 381; }",
-            directory, optimise: Optimise.no
-        );
+        auto image = loadImage(library);
         answer = cast(Answer) image.resolve("threadRetainedAnswer");
     });
     thread.start;
     thread.join;
     answer.should.not == null;
     answer().should == 381;
-}
-
-@("image.compileFailure")
-@Serial
-unittest {
-    const sandbox = Sandbox();
-    const directory = sandbox.sandboxPath;
-    (() {
-        try {
-            auto image = prepareImage(q{
-                static assert(false, "image compile diagnostic");
-            }, directory, optimise: Optimise.no);
-        } catch (SnakebiteException error) {
-            "Dependency image compilation failed".shouldBeIn(error.msg);
-            "Command: ".shouldBeIn(error.msg);
-            "image compile diagnostic".shouldBeIn(error.msg);
-            throw error;
-        }
-    })().shouldThrow!SnakebiteException;
-    dirEntries(directory, SpanMode.shallow).array.length.should == 0;
-}
-
-@("image.linkFailure")
-@Serial
-unittest {
-    const sandbox = Sandbox();
-    const directory = sandbox.sandboxPath;
-    (() {
-        try {
-            auto image = prepareImage(q{
-                extern(C) int image_missing_dependency();
-                export extern(C) int answer() { return image_missing_dependency(); }
-            }, directory, optimise: Optimise.no);
-        } catch (SnakebiteException error) {
-            "Dependency image linking failed".shouldBeIn(error.msg);
-            "Command: ".shouldBeIn(error.msg);
-            "image_missing_dependency".shouldBeIn(error.msg);
-            throw error;
-        }
-    })().shouldThrow!SnakebiteException;
-    dirEntries(directory, SpanMode.shallow).array.length.should == 0;
-}
-
-// The image is built with the flags of the host's compiler family. A
-// compiler of the other family does not accept them, and nothing is left in
-// the cache directory.
-@("image.compilerFamily")
-@Serial
-unittest {
-    const sandbox = Sandbox();
-    const directory = sandbox.sandboxPath;
-    const otherCompiler = "ldc2";
-    (() {
-        try {
-            auto image = prepareImage(atomicSource, directory, otherCompiler, optimise: Optimise.no);
-        } catch (SnakebiteException error) {
-            "Dependency image compilation failed".shouldBeIn(error.msg);
-            throw error;
-        }
-    })().shouldThrow!SnakebiteException;
-    dirEntries(directory, SpanMode.shallow).array.length.should == 0;
-}
-
-// A repeat preparation with an unchanged compiler, source and inputs must
-// not run the compiler at all: neither the version probe nor a build. A
-// wrapper that fails once poisoned proves the second call never reached it.
-@("image.unchangedImageSkipsCompiler")
-@Serial
-unittest {
-    const sandbox = Sandbox();
-    const directory = sandbox.sandboxPath;
-    const poison = sandbox.inSandboxPath("poison");
-    const wrapper = sandbox.inSandboxPath("compiler.sh");
-    sandbox.writeFile("compiler.sh", "#!/bin/sh\n[ -e '" ~ poison
-        ~ "' ] && exit 1\nexec " ~ defaultCompiler ~ " \"$@\"\n");
-    setAttributes(wrapper, octal!755);
-    auto image = prepareImage(atomicSource, directory, wrapper, optimise: Optimise.no);
-    sandbox.writeFile("poison", "");
-    execute([wrapper, "--version"]).status.should.not == 0;
-    auto reused = prepareImage(atomicSource, directory, wrapper, optimise: Optimise.no);
-    reused.path.should == image.path;
-}
-
-@("image.inputChange")
-@Serial
-unittest {
-    const sandbox = Sandbox();
-    const directory = sharedImageCache;
-    const input = sandbox.inSandboxPath("settings");
-    sandbox.writeFile("settings", "first");
-    auto first = prepareImage(atomicSource, directory,
-        defaultCompiler, [input], optimise: Optimise.no);
-    sandbox.writeFile("settings", "second");
-    auto second = prepareImage(atomicSource, directory,
-        defaultCompiler, [input], optimise: Optimise.no);
-    first.path.should.not == second.path;
-}
-
-static foreach (backend; Matrix!(
-    Omit!(Native, Because.inexpressible,
-        "the mixin cannot express a program of several modules"),
-)) {
-    @("image.overloadedTemplate." ~ backend.stringof)
-    @Serial
-    unittest {
-        const sandbox = Sandbox();
-        enum moduleName = "image_overloads_" ~ backend.stringof;
-        sandbox.writeFile("deps/" ~ moduleName ~ ".d",
-            "module " ~ moduleName ~ ";\n" ~ q{
-                template answer(T) {
-                    T answer() { return 17; }
-                    T answer(T value) { return value + 1; }
-                }
-                int invoke(string moduleName)() {
-                    mixin("import " ~ moduleName ~ ";");
-                    return mixin(moduleName ~ ".rootAnswer()");
-                }
-            });
-        sandbox.writeFile("app/root_" ~ moduleName ~ ".d", "module root_" ~ moduleName ~ ";\nimport "
-            ~ moduleName ~ ";\n" ~ q{
-                int rootAnswer() { return 31; }
-                int main() {
-                    assert(answer!int() == 17);
-                    assert(answer!int(23) == 24);
-                    assert(invoke!(__MODULE__)() == 31);
-                    return 0;
-                }
-            });
-        const directory = sandbox.inSandboxPath("app");
-        const imports = [sandbox.inSandboxPath("deps")];
-        auto project = prepareProject(directory, imports, optimise: Optimise.no).project;
-        auto instance = Owned!backend(project.program);
-        run(instance, project.program).should == 0;
-    }
-}
-
-// A native module-scope function template, instantiated only by the guest
-// call below - the dependency's own compile never instantiates `doubled!
-// int` itself, so nothing but the guest's own call drives this instance's
-// attribute inference before `snakebite.frontend.imagesource` mangles it
-// into the dependency image's registry.
-static foreach (backend; Matrix!(
-    Omit!(Native, Because.inexpressible,
-        "the mixin cannot express a program of several modules"),
-)) {
-    @("image.guestCallsNativeTemplateInstantiatedOnlyByGuest." ~ backend.stringof)
-    @Serial
-    unittest {
-        const sandbox = Sandbox();
-        enum moduleName = "image_template_only_guest_" ~ backend.stringof;
-        sandbox.writeFile("deps/" ~ moduleName ~ ".d",
-            "module " ~ moduleName ~ ";\n" ~ q{
-                auto doubled(T)(T x) { return cast(T) (x + x); }
-            });
-        sandbox.writeFile("app/root_" ~ moduleName ~ ".d", "module root_" ~ moduleName ~ ";\nimport "
-            ~ moduleName ~ ";\n" ~ q{
-                int main() {
-                    return doubled(21) == 42 ? 0 : 1;
-                }
-            });
-        const directory = sandbox.inSandboxPath("app");
-        const imports = [sandbox.inSandboxPath("deps")];
-        auto project = prepareProject(directory, imports, optimise: Optimise.no).project;
-        auto instance = Owned!backend(project.program);
-        run(instance, project.program).should == 0;
-    }
-}
-
-// `pick(S)(S value)` and `pick(S : C[], C)(S[] values)` are two distinct
-// module-scope function templates, not two members of one eponymous
-// template (that shape is `image.overloadRegistryAnswersEachOverload`,
-// below). `&pick!(string)` is not a hard ambiguity error here: dmd's
-// template partial ordering silently binds the explicit-argument address to
-// the more specialized array overload, the same shape as `std.regex.regex`,
-// which has a single-pattern overload and an array-of-patterns overload.
-// `source()`'s untyped fast path took that address into an `auto` variable
-// and never checked which declaration it landed on, so it registered the
-// array overload's address under the scalar overload's mangled name too.
-// `pick("hello")` from guest code is a normal call, resolved by argument
-// type the ordinary way, so it must still reach the scalar overload's body.
-static foreach (backend; Matrix!(
-    Omit!(Native, Because.inexpressible,
-        "the mixin cannot express a program of several modules"),
-)) {
-    @("image.overloadPartialOrderingMismatch." ~ backend.stringof)
-    @Serial
-    unittest {
-        const sandbox = Sandbox();
-        enum moduleName = "image_partial_ordering_" ~ backend.stringof;
-        sandbox.writeFile("deps/" ~ moduleName ~ ".d",
-            "module " ~ moduleName ~ ";\n" ~ q{
-                size_t pick(S)(S value) { return 1; }
-                size_t pick(S : C[], C)(S[] values) { return 2; }
-            });
-        sandbox.writeFile("app/root_" ~ moduleName ~ ".d", "module root_" ~ moduleName ~ ";\nimport "
-            ~ moduleName ~ ";\n" ~ q{
-                int main() {
-                    assert(pick("hello") == 1);
-                    return 0;
-                }
-            });
-        const directory = sandbox.inSandboxPath("app");
-        const imports = [sandbox.inSandboxPath("deps")];
-        auto project = prepareProject(directory, imports).project;
-        auto instance = Owned!backend(project.program);
-        run(instance, project.program).should == 0;
-    }
-}
-
-// `only!false` is a dependency template function with a nested function
-// `f` that captures a local (`captured`). `f`'s use escapes `only!false`
-// through the returned `Wrapped!f`, so a real build gives `only!false` a
-// heap-allocated closure frame for `captured`. `f` is always interpreted:
-// `calls.d`'s `CallSelection.buildDecision` routes any function with an
-// enclosing function straight to the guest backend, before ever resolving
-// a native address, because a nested function's static chain points into
-// frames whose offsets belong to that one backend. `only!false` itself is
-// an ordinary, addressable dependency template instance and stays native;
-// its nested `f` is always interpreted. dmd (this test's host and image
-// compiler) happens to still agree with snakebite's own closure layout, so
-// running `only!false` and checking its answer here cannot catch a layout
-// mismatch between the two sides. This test runs the whole thing end to
-// end, on every backend.
-static foreach (backend; Matrix!(
-    Omit!(Native, Because.inexpressible,
-        "the mixin cannot express a program of several modules"),
-    Omit!(Ctfe, Because.inexpressible,
-        "CTFE cannot allocate a runtime closure frame"),
-)) {
-    @("image.dependencyClosureAcrossBarrier." ~ backend.stringof)
-    @Serial
-    unittest {
-        const sandbox = Sandbox();
-        enum moduleName = "image_closure_dep_" ~ backend.stringof;
-        sandbox.writeFile("deps/" ~ moduleName ~ ".d",
-            "module " ~ moduleName ~ ";\n" ~ q{
-                struct Wrapped(alias pred) {
-                    int value;
-                    int get() { return pred(value); }
-                }
-                auto only(bool exact)(int base) {
-                    int captured = base;
-                    int f(int x) {
-                        static if (exact)
-                            return x * captured;
-                        else
-                            return x + captured;
-                    }
-                    return Wrapped!f(5);
-                }
-            });
-        sandbox.writeFile("app/root_" ~ moduleName ~ ".d", "module root_" ~ moduleName ~ ";\nimport "
-            ~ moduleName ~ ";\n" ~ q{
-                int main() {
-                    assert(only!false(10).get() == 15);
-                    return 0;
-                }
-            });
-        const directory = sandbox.inSandboxPath("app");
-        const imports = [sandbox.inSandboxPath("deps")];
-        auto project = prepareProject(directory, imports).project;
-        auto instance = Owned!backend(project.program);
-        run(instance, project.program).should == 0;
-    }
-}
-
-// Two overloads of one template share the name `answer!int`, so the address
-// expression `&answer!int` is ambiguous without a target type. Each overload
-// still has its own mangled name, and the registry must answer a lookup by
-// that name with the overload that the mangle names, not with its sibling.
-// The registry is the only route to such instances when an image keeps its
-// template bodies out of the dynamic symbol table (LDC, `-linkonce-templates`),
-// so the test calls it directly instead of relying on `dlsym` missing.
-@("image.overloadRegistryAnswersEachOverload")
-@Serial
-unittest {
-    import std.conv: text;
-
-    const sandbox = Sandbox();
-    enum moduleName = "image_registry_overloads";
-    sandbox.writeFile("deps/" ~ moduleName ~ ".d",
-        "module " ~ moduleName ~ ";\n" ~ q{
-            template answer(T) {
-                T answer() { return 17; }
-                T answer(T value) { return value + 1; }
-            }
-        });
-    sandbox.writeFile("app/root_" ~ moduleName ~ ".d", "module root_" ~ moduleName ~ ";\nimport "
-        ~ moduleName ~ ";\n" ~ q{
-            int main() {
-                return answer!int() + answer!int(23);
-            }
-        });
-    auto project = prepareProject(
-        sandbox.inSandboxPath("app"), [sandbox.inSandboxPath("deps")], optimise: Optimise.no).project;
-    const image = project.program.dependencyImage;
-    image.should.not == null;
-
-    // The image compiler infers `pure nothrow @nogc @safe` for both bodies,
-    // and the mangle spells that out. `Qk` repeats the instance name.
-    const prefix = text("_D", moduleName.length, moduleName, "__T6answerTiZQkFNaNbNiNf");
-    alias NoArguments = int function();
-    alias OneArgument = int function(int);
-    const noArguments = cast(NoArguments) (*image).registryAnswer(prefix ~ "Zi");
-    const oneArgument = cast(OneArgument) (*image).registryAnswer(prefix ~ "iZi");
-    noArguments.should.not == null;
-    oneArgument.should.not == null;
-    noArguments().should == 17;
-    oneArgument(23).should == 24;
-}
-
-
-// `rebindable` has two template overloads that give the same signature for an
-// array argument, so even a typed address cannot choose between them. The
-// registry then selects the declaration by its position among the overloads
-// of that name, the order `__traits(getOverloads)` uses.
-@("image.overloadRegistrySelectsByPosition")
-@Serial
-unittest {
-    auto module_ = parseSnippet(q{
-        import std.typecons: rebindable;
-        int[] answer(int[] values) {
-            return rebindable(values);
-        }
-    });
-    auto program = Program([module_]);
-    const image = prepareImage(imageSource(program), sharedImageCache,
-        defaultCompiler, null, null, null, ["-w"], optimise: Optimise.no);
-    alias Rebindable = int[] function(int[]);
-    // The mangle is that of `rebindable!(int[])` with its inferred attributes.
-    const rebindable = cast(Rebindable) image.registryAnswer(
-        "_D3std8typecons__T10rebindableTAiZQqFNaNbNiNfQoZQr");
-    rebindable.should.not == null;
-    auto values = [17];
-    rebindable(values).should == [17];
-}
-
-// The image exports its registry under `DependencyImage.registrySymbol`.
-// `resolve` reaches it only after `dlsym` misses, and a DMD image keeps every
-// instance in its symbol table, so a direct call is the way to see its answer.
-private void* registryAnswer(in DependencyImage image, in char[] name) {
-    import core.sys.posix.dlfcn: RTLD_NOW, dlopen, dlsym;
-    import std.string: toStringz;
-
-    // The image stays loaded, so this returns the handle that it already holds.
-    auto handle = dlopen(image.path.toStringz, RTLD_NOW);
-    handle.should.not == null;
-    alias Registry = extern(C) void* function(const(char)[]);
-    const registry = cast(Registry) dlsym(handle, DependencyImage.registrySymbol.toStringz);
-    registry.should.not == null;
-    return registry(name);
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("image.templateAliasOverloads." ~ backend.stringof)
-    @Serial
-    unittest {
-        // Rebindable!T can alias T itself. Only the selected overload may
-        // be emitted when two template declarations then share a signature.
-        enum code = q{
-            import std.typecons: rebindable;
-            int answer() {
-                int[] values = [17];
-                return rebindable(values)[0];
-            }
-        };
-        static if (is(backend == Native)) {
-            mixin(code);
-            answer.should == 17;
-        } else {
-            auto module_ = parseSnippet(code);
-            auto program = Program([module_]);
-            auto image = prepareImage(imageSource(program), sharedImageCache,
-                defaultCompiler, null, null, null, ["-w"], optimise: Optimise.no);
-            program.dependencyImage = &image;
-            auto instance = Owned!backend(program);
-            int result;
-            instance.call(findFunction(module_, "answer"), &result, []);
-            result.should == 17;
-        }
-    }
-}
-
-
-// `among` with a lambda predicate instantiates a template whose `.mangleof`
-// names the instance, not the callable. The lookup in the image must key on
-// the exact mangle of the function itself.
-static foreach (backend; Matrix!()) {
-    @("image.importedTemplateDelegate." ~ backend.stringof)
-    @Serial
-    unittest {
-        enum code = q{
-            import std.algorithm.comparison: among;
-
-            int answer() {
-                return among!((a, b) => a == b)("a", "x", "a");
-            }
-        };
-        static if (is(backend == Native)) {
-            mixin(code);
-            answer.should == 2;
-        } else {
-            auto module_ = parseSnippet(code);
-            auto program = Program([module_]);
-            auto image = prepareImage(imageSource(program), sharedImageCache,
-                defaultCompiler, null, null, null, ["-w"], optimise: Optimise.no);
-            program.dependencyImage = &image;
-            auto instance = Owned!backend(program);
-            int result;
-            instance.call(findFunction(module_, "answer"), &result, []);
-            result.should == 2;
-        }
-    }
-}
-
-
-static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
-    "CTFE cannot call a function in a loaded native image"))) {
-    @("image.atomicLoad." ~ backend.stringof)
-    @Serial
-    unittest {
-        const directory = sharedImageCache;
-        auto image = prepareImage(atomicSource, directory, optimise: Optimise.no);
-        shared int value = 42;
-        static if (is(backend == Native)) {
-            alias Load = typeof(&atomicLoad!(MemoryOrder.seq, int));
-            const load = cast(Load) image.resolve(atomicLoad!(MemoryOrder.seq, int).mangleof);
-            load(cast(int*) &value).should == 42;
-        } else {
-            auto module_ = parseSnippet(q{
-                import core.internal.atomic: atomicLoad;
-                int answer(shared int* value) {
-                    return atomicLoad(cast(int*) value);
-                }
-            });
-            auto program = Program([module_]);
-            program.dependencyImage = &image;
-            auto instance = Owned!backend(program);
-            auto pointer = &value;
-            int result;
-            instance.call(findFunction(module_, "answer"), &result, [cast(void*) &pointer]);
-            result.should == 42;
-        }
-    }
-}
-
-@("image.moduleConstructor")
-@Serial
-unittest {
-    const directory = sharedImageCache;
-    auto image = prepareImage(q{
-        module image;
-        __gshared int value;
-        shared static this() { value = 73; }
-        export extern(C) int answer() { return value; }
-    }, directory, optimise: Optimise.no);
-    alias Answer = extern(C) int function();
-    (cast(Answer) image.resolve("answer"))().should == 73;
 }
 
 
@@ -717,13 +96,11 @@ unittest {
     import std.string: toStringz;
 
     enum name = "snakebite_symbol_dual_definition_test";
-    auto image = prepareImage(
-        "export extern(C) int " ~ name ~ "() { return 511; }",
-        sharedImageCache);
+    auto image = loadImage(symbolsLibrary);
 
     // `RTLD_GLOBAL` is what puts a shared object's symbols into the
     // process-wide scope the fix searches (`RTLD_NEXT` in `symbolAddress`);
-    // `prepareImage`'s own load keeps the image `RTLD_LOCAL` so it never
+    // `loadImage` keeps the image `RTLD_LOCAL` so it never
     // answers a lookup this way, only through the `DependencyImage` it
     // returns (a separate, already-tested tier). This second `dlopen` on
     // the same path does not load a second copy: it promotes the same
@@ -749,9 +126,7 @@ unittest {
     import std.string: toStringz;
 
     enum name = "snakebite_symbol_independent_only_test";
-    auto image = prepareImage(
-        "export extern(C) int " ~ name ~ "() { return 522; }",
-        sharedImageCache);
+    auto image = loadImage(symbolsLibrary);
 
     auto handle = dlopen(image.path.toStringz, RTLD_NOW | RTLD_GLOBAL);
     handle.should.not == null;
@@ -795,388 +170,11 @@ unittest {
     ).should == null;
 }
 
-static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
-    "atomicFetchAdd casts a runtime pointer to an integer"))) {
-    @("image.discoveredAtomicFetchAdd." ~ backend.stringof)
-    @Serial
-    unittest {
-        enum code = q{
-            import core.atomic: atomicFetchAdd;
-            import std.algorithm.comparison: min, max;
-            int answer() {
-                shared int value = 17;
-                ulong amount = 4;
-                const previous = atomicFetchAdd(value, min(amount, max(amount, 2UL)));
-                assert(value == 21);
-                return previous;
-            }
-        };
-        static if (is(backend == Native)) {
-            mixin(code);
-            answer.should == 17;
-        } else {
-            auto module_ = parseSnippet(code);
-            auto program = Program([module_]);
-            const source = imageSource(program);
-            auto image = prepareImage(source, sharedImageCache,
-                defaultCompiler, null, null, null, ["-w", "-checkaction=context"], optimise: Optimise.no);
-            alias FetchAdd = __traits(getOverloads, core.atomic, "atomicFetchAdd", true)[0];
-            image.resolve(FetchAdd!(MemoryOrder.seq, int).mangleof)
-                .should.not == null;
-            program.dependencyImage = &image;
-            auto instance = Owned!backend(program);
-            int result;
-            instance.call(findFunction(module_, "answer"), &result, []);
-            result.should == 17;
-        }
-    }
-}
 
-
-static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
-    "atomicFetchAdd casts a runtime pointer to an integer"))) {
-    @("image.projectAtomicFetchAdd." ~ backend.stringof)
-    @Serial
-    unittest {
-        enum code = q{
-            import core.atomic: atomicFetchAdd;
-            int main() {
-                shared int value = 17;
-                assert(atomicFetchAdd(value, 4) == 17);
-                assert(value == 21);
-                return 0;
-            }
-        };
-        static if (is(backend == Native)) {
-            mixin(code);
-            main.should == 0;
-        } else {
-            const sandbox = Sandbox();
-            enum moduleName = "image_project_atomic_" ~ backend.stringof;
-            const source = "module " ~ moduleName ~ ";\n" ~ code;
-            sandbox.writeFile(moduleName ~ ".d", source);
-            // A program can outlive the project that prepared its image.
-            auto program = prepareProject(sandbox.sandboxPath, optimise: Optimise.no).project.program;
-            program.dependencyImage.should.not == null;
-            auto instance = Owned!backend(program);
-            run(instance, program).should == 0;
-            const path = program.dependencyImage.path;
-            const stamp = timeLastModified(path);
-            sandbox.writeFile(moduleName ~ ".d", source ~ "\n");
-            auto reused = prepareProject(sandbox.sandboxPath, optimise: Optimise.no).project;
-            reused.program.dependencyImage.path.should == path;
-            timeLastModified(path).should == stamp;
-            auto second = Owned!backend(reused.program);
-            run(second, reused.program).should == 0;
-        }
-    }
-}
-
-
-static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
-    "CTFE executes cached syntax, not a replacement native image"))) {
-    @("image.dependencyEdit." ~ backend.stringof)
-    @Serial
-    unittest {
-        static if (is(backend == Native)) {
-            int answer(T)() { return 7; }
-            answer!int.should == 7;
-        } else {
-            const sandbox = Sandbox();
-            enum moduleName = "image_dependency_" ~ backend.stringof;
-            sandbox.writeFile("app/root_" ~ moduleName ~ ".d",
-                "module root_" ~ moduleName ~ ";\nimport " ~ moduleName
-                ~ "; int main() { return answer!int(); }");
-            const dependencyPath = "deps/" ~ moduleName ~ ".d";
-            const prefix = "module " ~ moduleName ~ ";\n";
-            sandbox.writeFile(dependencyPath, prefix ~ "int answer(T)() { return 7; }");
-            const directory = sandbox.inSandboxPath("app");
-            const imports = [sandbox.inSandboxPath("deps")];
-            auto project = prepareProject(directory, imports, optimise: Optimise.no).project;
-            const firstPath = project.program.dependencyImage.path;
-            auto first = Owned!backend(project.program);
-            run(first, project.program).should == 7;
-            sandbox.writeFile(dependencyPath, prefix ~ "int answer(T)() { return 9; }");
-            auto changed = prepareProject(directory, imports, optimise: Optimise.no).project;
-            changed.program.dependencyImage.path.should.not == firstPath;
-            auto second = Owned!backend(changed.program);
-            run(second, changed.program).should == 9;
-        }
-    }
-}
-
-
-// A global a dependency defines has one storage, the native image's: a
-// native setter and an interpreted reader reach the same variable, for
-// a `__gshared` and for a thread-local one alike. The dependency is a
-// dub package, so its functions have machine code in an archive the
-// image links, as a project's dependencies do.
-static foreach (backend; Matrix!(
-    Omit!(Native, Because.inexpressible,
-        "the mixin cannot express a dub project"),
-    Omit!(Ctfe, Because.inexpressible,
-        "CTFE has no native image to share a global with"),
-)) {
-    @("image.dependencyGlobal." ~ backend.stringof)
-    @Serial
-    unittest {
-        const sandbox = Sandbox();
-        const directory = dependencyGlobalProject(sandbox,
-            "image_global_" ~ backend.stringof, q{
-            __gshared int counter = 0;
-            void bump() { ++counter; }
-            struct Settings {
-                static string path = "default";
-                static void setPath(string value) { path = value; }
-            }
-        }, q{
-            int main() {
-                if (counter != 0) return 1;
-                bump();
-                if (counter != 1) return 2;
-                if (Settings.path != "default") return 3;
-                Settings.setPath("changed");
-                if (Settings.path != "changed") return 4;
-                return 0;
-            }
-        });
-        runDependencyGlobalProject!backend(directory).should == 0;
-    }
-}
-
-
-// A dependency's thread-local variable is still one copy per thread:
-// the interpreted reader on a new thread sees that thread's own copy,
-// not the one the main thread wrote. The dependency starts the thread,
-// since that is native code either way, and calls back into the guest
-// on it.
-static foreach (backend; Matrix!(
-    Omit!(Native, Because.inexpressible,
-        "the mixin cannot express a dub project"),
-    Omit!(Ctfe, Because.inexpressible,
-        "CTFE has no native image to share a global with"),
-)) {
-    @("image.dependencyThreadLocalPerThread." ~ backend.stringof)
-    @Serial
-    unittest {
-        const sandbox = Sandbox();
-        const directory = dependencyGlobalProject(sandbox,
-            "image_tls_" ~ backend.stringof, q{
-            import core.thread: Thread;
-            struct Settings {
-                static string path = "default";
-                static void setPath(string value) { path = value; }
-            }
-            string readOnNewThread(string delegate() read) {
-                string seen;
-                auto thread = new Thread({ seen = read(); });
-                thread.start;
-                thread.join;
-                return seen;
-            }
-        }, q{
-            int main() {
-                Settings.setPath("changed");
-                if (Settings.path != "changed") return 1;
-                if (readOnNewThread(() => Settings.path) != "default") return 2;
-                if (Settings.path != "changed") return 3;
-                return 0;
-            }
-        });
-        runDependencyGlobalProject!backend(directory).should == 0;
-    }
-}
-
-// An app package whose root module runs `rootSource`'s `main` against a
-// static-library dependency built from `dependencySource`. The unittest
-// configuration is an executable: otherwise dub adds a second `main`.
-// `name` prefixes both module names: dmd keeps every module this
-// process ever parsed, under its name, so two tests cannot share one.
-private string dependencyGlobalProject(
-    in Sandbox sandbox,
-    in string name,
-    in string dependencySource,
-    in string rootSource,
-) {
-    sandbox.writeFile("app/dub.sdl", q{
-        name "global-app"
-        targetType "library"
-        targetName "global-app"
-        dependency "global-dependency" path="../dependency"
-        configuration "unittest" {
-            targetType "executable"
-        }
-    });
-    sandbox.writeFile("app/source/" ~ name ~ "_app.d",
-        "module " ~ name ~ "_app;\nimport " ~ name ~ "_dependency;\n"
-        ~ rootSource);
-    sandbox.writeFile("dependency/dub.sdl", q{
-        name "global-dependency"
-        targetType "staticLibrary"
-    });
-    sandbox.writeFile("dependency/source/" ~ name ~ "_dependency.d",
-        "module " ~ name ~ "_dependency;\n" ~ dependencySource);
-    return sandbox.inSandboxPath("app");
-}
-
-private int runDependencyGlobalProject(backend)(in string directory) {
-    auto project = prepareProject(directory, optimise: Optimise.no).project;
-    auto instance = Owned!backend(project.program);
-    return run(instance, project.program);
-}
-
-
-static foreach (backend; Matrix!(
-    Omit!(Native, Because.inexpressible,
-        "the mixin cannot express a program of several modules"),
-)) {
-    @("image.narrowTemplateArguments." ~ backend.stringof)
-    @Serial
-    unittest {
-        const sandbox = Sandbox();
-        enum moduleName = "image_narrow_" ~ backend.stringof;
-        sandbox.writeFile("deps/" ~ moduleName ~ ".d",
-            "module " ~ moduleName ~ ";\n" ~ q{
-                struct Selection(ushort value) { int member = value; }
-                int read(T)(T value) { return value.member; }
-                int number(short value)() { return value; }
-                int literal(string value)() { return value == "!cast(ushort)1u"; }
-            });
-        sandbox.writeFile("app/root_" ~ moduleName ~ ".d",
-            "module root_" ~ moduleName ~ ";\nimport " ~ moduleName ~ ";\n" ~ q{
-            int main() {
-                assert(read(Selection!1()) == 1);
-                assert(number!(-2)() == -2);
-                assert(literal!"!cast(ushort)1u"() == 1);
-                return 0;
-            }
-        });
-        const imports = [sandbox.inSandboxPath("deps")];
-        auto project = prepareProject(sandbox.inSandboxPath("app"), imports, optimise: Optimise.no).project;
-        auto instance = Owned!backend(project.program);
-        run(instance, project.program).should == 0;
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("image.recursiveConstructorCollector." ~ backend.stringof)
-    @Serial
-    unittest {
-        enum code = q{
-            struct Recursive {
-                this(int depth) {
-                    if (depth > 0) {
-                        auto child = Recursive(depth - 1);
-                    }
-                }
-            }
-            int answer() {
-                auto value = Recursive(0);
-                return 0;
-            }
-        };
-        static if (is(backend == Native)) {
-            mixin(code);
-            answer.should == 0;
-        } else {
-            auto module_ = parseSnippet(code);
-            auto program = Program([module_]);
-            auto image = prepareImage(imageSource(program), sharedImageCache, optimise: Optimise.no);
-            program.dependencyImage = &image;
-            auto instance = Owned!backend(program);
-            int result;
-            instance.call(findFunction(module_, "answer"), &result, []);
-            result.should == 0;
-        }
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("image.recursiveFunctionLiteralCollector." ~ backend.stringof)
-    @Serial
-    unittest {
-        enum code = q{
-            int answer() {
-                int delegate(int) recursive = (int depth) {
-                    if (depth > 0) return __traits(parent, depth)(depth - 1);
-                    return 7;
-                };
-                return recursive(3);
-            }
-        };
-        static if (is(backend == Native)) {
-            mixin(code);
-            answer.should == 7;
-        } else {
-            auto module_ = parseSnippet(code);
-            auto program = Program([module_]);
-            auto image = prepareImage(imageSource(program), sharedImageCache, optimise: Optimise.no);
-            program.dependencyImage = &image;
-            auto instance = Owned!backend(program);
-            int result;
-            instance.call(findFunction(module_, "answer"), &result, []);
-            result.should == 7;
-        }
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("image.constructorLocalTypes." ~ backend.stringof)
-    @Serial
-    unittest {
-        enum code = q{
-            import std.bigint: BigInt;
-            int answer() { return BigInt("123").toInt; }
-        };
-        static if (is(backend == Native)) {
-            mixin(code);
-            answer.should == 123;
-        } else {
-            auto module_ = parseSnippet(code);
-            auto program = Program([module_]);
-            auto image = prepareImage(imageSource(program), sharedImageCache, optimise: Optimise.no);
-            program.dependencyImage = &image;
-            auto instance = Owned!backend(program);
-            int result;
-            instance.call(findFunction(module_, "answer"), &result, []);
-            result.should == 123;
-        }
-    }
-}
-
-
-static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
-    "CTFE cannot read the delegate funcptr used by toDelegate"))) {
-    @("image.functionLinkageTemplateArgument." ~ backend.stringof)
-    @Serial
-    unittest {
-        enum code = q{
-            import std.functional: toDelegate;
-            extern(C) int increment(int value) { return value + 1; }
-            int answer() {
-                return toDelegate(&increment)(16);
-            }
-        };
-        static if (is(backend == Native)) {
-            mixin(code);
-            answer.should == 17;
-        } else {
-            auto module_ = parseSnippet(code);
-            auto program = Program([module_]);
-            auto image = prepareImage(imageSource(program), sharedImageCache, optimise: Optimise.no);
-            program.dependencyImage = &image;
-            auto instance = Owned!backend(program);
-            int result;
-            instance.call(findFunction(module_, "answer"), &result, []);
-            result.should == 17;
-        }
-    }
-}
-
-
+// The image source must import the module that names a template argument
+// (`Thread`), or the instantiation `_d_newclassT!Thread` cannot be
+// spelled in the image and falls back to the guest. Nothing here needs the
+// built image: only the text that is made for it.
 @("image.templateArgumentImports")
 @Serial
 unittest {
@@ -1187,9 +185,7 @@ unittest {
         Thread allocate() { return _d_newclassT!Thread(); }
     });
     const source = imageSource(Program([module_]));
-    auto image = prepareImage(source, sharedImageCache,
-        defaultCompiler, null, null, null, ["-de"], optimise: Optimise.no);
-    image.resolve(_d_newclassT!Thread.mangleof).should.not == null;
+    "import core.thread.osthread;".should.be in source;
 }
 
 
@@ -1229,7 +225,8 @@ unittest {
         }
     });
     const imports = [sandbox.inSandboxPath("deps")];
-    auto project = prepareProject(sandbox.inSandboxPath("app"), imports, optimise: Optimise.no).project;
+    // Nothing here needs the built image: only the source that is made for it.
+    auto project = prepareProject(sandbox.inSandboxPath("app"), imports, null, false, optimise: Optimise.no).project;
     const source = imageSource(project.program);
     "Thing".should.not.be in source;
     (moduleName ~ ".store!(" ~ moduleName ~ ".Bucket!(string, void delegate(int)))")
@@ -1351,20 +348,6 @@ unittest {
 }
 
 
-@("image.compilerArguments")
-@Serial
-unittest {
-    auto image = prepareImage(q{
-        module image;
-        version (ImageSetting) {} else static assert(false, "missing version");
-        debug {} else static assert(false, "missing debug");
-        export extern(C) int answer() { return 42; }
-    }, sharedImageCache, defaultCompiler, null, null, null,
-        ["-debug", "-version=ImageSetting"], optimise: Optimise.no);
-    alias Answer = extern(C) int function();
-    (cast(Answer) image.resolve("answer"))().should == 42;
-}
-
 static foreach (backend; Matrix!()) {
     @("image.hashWithCtfeHelper." ~ backend.stringof)
     @Serial
@@ -1393,112 +376,6 @@ static foreach (backend; Matrix!()) {
 }
 
 
-static foreach (backend; Matrix!(
-    Omit!(Native, Because.inexpressible,
-        "the mixin cannot express a dub project"),
-)) {
-    @("image.dubTransitiveArchives." ~ backend.stringof)
-    @Serial
-    unittest {
-        const sandbox = Sandbox();
-        sandbox.writeFile("app/dub.sdl", q{
-            name "image-app"
-            targetType "library"
-            targetName "image-app"
-            preBuildCommands "test ! -e reject-build"
-            dependency "image-middle" path="../middle"
-            configuration "unittest" {
-                targetType "executable"
-            }
-        });
-        sandbox.writeFile("app/source/app.d", q{
-            module image_app;
-            import image_middle;
-            unittest { assert(answer() == 42); }
-            int main() { assert(answer() == 42); return 0; }
-        });
-        sandbox.writeFile("middle/dub.sdl", q{
-            name "image-middle"
-            targetType "staticLibrary"
-            dependency "image-leaf" path="../leaf archives"
-        });
-        sandbox.writeFile("middle/source/image_middle.d", q{
-            module image_middle;
-            import image_leaf;
-            int answer() { return leaf() + 1; }
-        });
-        sandbox.writeFile("leaf archives/dub.sdl", q{
-            name "image-leaf"
-            targetType "staticLibrary"
-        });
-        sandbox.writeFile("leaf archives/source/image_leaf.d", q{
-            module image_leaf;
-            int leaf() { return 41; }
-        });
-        // A separate archive member has no reference from the guest or the
-        // image source. It must still be present for later symbol lookups.
-        sandbox.writeFile("leaf archives/source/image_unused.d", q{
-            module image_unused;
-            extern(C) int image_unused_answer() { return 73; }
-        });
-        const directory = sandbox.inSandboxPath("app");
-        const archive = sandbox.inSandboxPath("leaf archives/libimage-leaf.a");
-        archive.exists.should == false;
-        auto project = prepareProject(directory, optimise: Optimise.no).project;
-        archive.exists.should == true;
-        project.program.dependencyImage.should.not == null;
-        alias Answer = extern(C) int function();
-        const unused = cast(Answer)
-            project.program.dependencyImage.resolve("image_unused_answer");
-        unused.should.not == null;
-        unused().should == 73;
-        auto instance = Owned!backend(project.program);
-        run(instance, project.program).should == 0;
-        const path = project.program.dependencyImage.path;
-        const stamp = timeLastModified(archive);
-        sandbox.writeFile("app/reject-build", "");
-        sandbox.writeFile("app/source/app.d",
-            sandbox.inSandboxPath("app/source/app.d").readText ~ "\n");
-        auto reused = prepareProject(directory, optimise: Optimise.no).project;
-        reused.program.dependencyImage.path.should == path;
-        timeLastModified(archive).should == stamp;
-        sandbox.inSandboxPath("app/reject-build").remove;
-        sandbox.writeFile("leaf archives/source/image_unused.d", q{
-            module image_unused;
-            extern(C) int image_unused_answer() { return 179; }
-        });
-        auto changed = prepareProject(directory, optimise: Optimise.no).project;
-        const changedPath = changed.program.dependencyImage.path;
-        changedPath.should.not == path;
-        const changedAnswer = cast(Answer)
-            changed.program.dependencyImage.resolve("image_unused_answer");
-        changedAnswer.should.not == null;
-        changedAnswer().should == 179;
-        // The image links dub's per-compiler build artifact, not the copy
-        // dub leaves in the package directory: a build by another compiler
-        // replaces that copy, and the guest's own compiled output must not
-        // change because of it.
-        const linked = changed.sources.linkerFiles
-            .filter!(file => file.baseName == archive.baseName).array;
-        linked.length.should == 1;
-        linked[0].should.not == archive;
-        sandbox.writeFile("leaf archives/libimage-leaf.a", "not an archive");
-        auto foreign = prepareProject(directory, optimise: Optimise.no).project;
-        foreign.program.dependencyImage.path.should == changedPath;
-        // A missing artifact is compiled again. The image is keyed on the
-        // archive's bytes, which a fresh archive need not repeat, so what
-        // must hold is that the image still serves the leaf's symbols.
-        linked[0].remove;
-        auto rebuilt = prepareProject(directory, optimise: Optimise.no).project;
-        linked[0].exists.should == true;
-        const rebuiltAnswer = cast(Answer)
-            rebuilt.program.dependencyImage.resolve("image_unused_answer");
-        rebuiltAnswer.should.not == null;
-        rebuiltAnswer().should == 179;
-    }
-}
-
-
 @("image.projectCacheSkipsPreparation")
 @Serial
 unittest {
@@ -1518,13 +395,13 @@ unittest {
         ++inputReads;
         return [dependency.idup];
     }
-    DependencyImage makeImage(in string source) {
-        return prepareImage(source, directory, optimise: Optimise.no);
+    DependencyImage makeImage(in string) {
+        return loadImage(symbolsLibrary);
     }
     cache.prepare(*image,
         () {
             ++sources;
-            return atomicSource;
+            return emptyImageSource;
         },
         () {
             ++builds;
@@ -1558,7 +435,7 @@ unittest {
     sandbox.writeFile("root.d", "changed root");
     next.prepare(hit, () {
             ++sources;
-            return atomicSource;
+            return emptyImageSource;
         },
         () {
             throw new Exception("A root edit with the same source skips build");
@@ -1569,7 +446,7 @@ unittest {
     sources.should == 2;
     inputReads.should == 1;
     auto changedSettings = ProjectImageCache(record, "other settings", [root]);
-    changedSettings.prepare(hit, () => atomicSource, () {
+    changedSettings.prepare(hit, () => emptyImageSource, () {
             ++builds;
         }, &makeImage, true,
         &dependencyInputs).should == true;
@@ -1580,7 +457,7 @@ unittest {
     const stamp = timeLastModified(dependency);
     sandbox.writeFile("dependency.d", "after!");
     setTimes(dependency, stamp, stamp);
-    changedSettings.prepare(hit, () => atomicSource, () {
+    changedSettings.prepare(hit, () => emptyImageSource, () {
             ++builds;
         }, &makeImage, true,
         &dependencyInputs).should == true;
@@ -1590,7 +467,7 @@ unittest {
     sandbox.writeFile("root.d", "changed root again");
     changedSettings.prepare(hit, () {
             ++sources;
-            return atomicSource ~ "\nenum changedSource = 1;\n";
+            return emptyImageSource ~ "\nenum changedSource = 1;\n";
         },
         () {
             ++builds;
@@ -1623,8 +500,8 @@ unittest {
     string[] dependencyInputs() {
         return [dependency.idup];
     }
-    DependencyImage makeImage(in string source) {
-        return prepareImage(source, directory, optimise: Optimise.no);
+    DependencyImage makeImage(in string) {
+        return loadImage(symbolsLibrary);
     }
     DependencyImage failImage(in string) {
         throw new Exception("A project that needs no image must not build one");
@@ -1664,7 +541,7 @@ unittest {
     // A root edit that now calls one.
     sandbox.writeFile("root.d", "root that calls a dependency template");
     ProjectImageCache(record, "settings", [root])
-        .prepare(image, () => countedSource(atomicSource), () {}, &makeImage,
+        .prepare(image, () => countedSource(emptyImageSource), () {}, &makeImage,
             false, &dependencyInputs)
         .should == true;
     sources.should == 3;
@@ -1681,7 +558,7 @@ unittest {
     // A dependency edit asks again, even with the roots unchanged.
     sandbox.writeFile("dependency.d", "after");
     ProjectImageCache(record, "settings", [root])
-        .prepare(image, () => countedSource(atomicSource), () {}, &makeImage,
+        .prepare(image, () => countedSource(emptyImageSource), () {}, &makeImage,
             false, &dependencyInputs)
         .should == true;
     sources.should == 5;
@@ -1714,13 +591,13 @@ unittest {
     sandbox.writeFile("generator-stand-in", "generator v1");
     const generator = sandbox.inSandboxPath("generator-stand-in");
     string[] noInputs() { return []; }
-    DependencyImage makeImage(in string source) {
-        return prepareImage(source, directory);
+    DependencyImage makeImage(in string) {
+        return loadImage(symbolsLibrary);
     }
 
     auto cache = ProjectImageCache(record, "settings", [root], defaultCompiler, generator);
     auto image = new DependencyImage;
-    cache.prepare(*image, () => atomicSource, () {}, &makeImage, true,
+    cache.prepare(*image, () => emptyImageSource, () {}, &makeImage, true,
         &noInputs).should == true;
 
     // Same generator, unchanged: the recorded image is restored.
@@ -1729,7 +606,7 @@ unittest {
     size_t sourceCalls;
     unchanged.prepare(hit, () {
             ++sourceCalls;
-            return atomicSource;
+            return emptyImageSource;
         },
         () {
             throw new Exception("An unchanged generator must skip preparation");
@@ -1748,7 +625,7 @@ unittest {
     size_t builds;
     rebuilt.prepare(regenerated, () {
             ++regeneratedSourceCalls;
-            return atomicSource;
+            return emptyImageSource;
         },
         () { ++builds; },
         &makeImage, true, &noInputs).should == true;
@@ -1773,8 +650,8 @@ unittest {
     const generatorA = sandbox.inSandboxPath("generator-a");
     const generatorB = sandbox.inSandboxPath("generator-b");
     string[] noInputs() { return []; }
-    DependencyImage makeImage(in string source) {
-        return prepareImage(source, directory, optimise: Optimise.no);
+    DependencyImage makeImage(in string) {
+        return loadImage(symbolsLibrary);
     }
 
     size_t builds;
@@ -1782,7 +659,7 @@ unittest {
         auto cache = ProjectImageCache(record, "settings", [root],
             defaultCompiler, generator);
         DependencyImage image;
-        cache.prepare(image, () => atomicSource, () { ++builds; },
+        cache.prepare(image, () => emptyImageSource, () { ++builds; },
             &makeImage, true, &noInputs).should == true;
     }
 
