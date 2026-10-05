@@ -1611,15 +1611,19 @@ def test_dependency_that_fails_to_build_is_reported(
 
 # CTFE does not build native dependencies or run dub build hooks.
 @pytest.mark.parametrize("backend", ["native", "bytecode", "interpreter", "native-ldc"])
-@pytest.mark.parametrize("stage,flags", [
-    ("preBuildCommands", []),
-    ("postBuildCommands", []),
-    ("postBuildCommands", ["--enable-preconditions=false"]),
-    ("preBuildCommands", ["-check=in=off"]),
-    ("postBuildCommands", ["-check=in=off"]),
+@pytest.mark.parametrize("stage,flags,flag_form", [
+    ("preBuildCommands", [], "plain"),
+    ("postBuildCommands", [], "plain"),
+    ("postBuildCommands", ["--enable-preconditions=false"], "plain"),
+    ("preBuildCommands", ["-check=in=off"], "plain"),
+    ("postBuildCommands", ["-check=in=off"], "plain"),
+    *[(stage, ["-noboundscheck"], flag_form)
+      for stage in ["preBuildCommands", "postBuildCommands"]
+      for flag_form in ["plain", "response", "nested"]],
 ])
 def test_root_build_command_failure_is_reported(
     tmp_path: Path, backend: str, stage: str, flags: list[str],
+    flag_form: str,
 ) -> None:
     marker = "root-build-command-failed"
     dependency = tmp_path / "dependency"
@@ -1631,14 +1635,25 @@ def test_root_build_command_failure_is_reported(
         "module dep; int value() { return 1; }\n", encoding="utf-8",
     )
     (tmp_path / "source").mkdir()
+    compiler_flags = [
+        "-check=in=off" if backend == "native" and flag == "--enable-preconditions=false"
+        else "--enable-preconditions=false" if backend == "native-ldc" and flag == "-check=in=off"
+        else "--boundscheck=off" if backend == "native-ldc" and flag == "-noboundscheck"
+        else flag for flag in flags
+    ]
+    if flag_form != "plain":
+        response = tmp_path / "checks.rsp"
+        response.write_text("\n".join(json.dumps(flag) for flag in compiler_flags)
+                            + "\n", encoding="utf-8")
+        if flag_form == "nested":
+            outer = tmp_path / "outer.rsp"
+            outer.write_text(f"@{response}\n", encoding="utf-8")
+            response = outer
+        compiler_flags = [f"@{response}"]
     (tmp_path / "dub.json").write_text(json.dumps({
         "name": "app", "targetType": "library",
         "dependencies": {"dep": {"path": "dependency"}},
-        "dflags": [
-            "-check=in=off" if backend == "native" and flag == "--enable-preconditions=false"
-            else "--enable-preconditions=false" if backend == "native-ldc" and flag == "-check=in=off"
-            else flag for flag in flags
-        ],
+        "dflags": compiler_flags,
         stage: [f"echo {marker} >&2; exit 27"],
     }), encoding="utf-8")
     (tmp_path / "source" / "app.d").write_text(
@@ -1706,19 +1721,28 @@ def test_unrelated_root_compiler_flag_failure_is_reported(
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-@pytest.mark.parametrize("path_kind", ["absolute", "relative", "nested"])
+@pytest.mark.parametrize("path_kind", ["plain", "absolute", "relative", "nested"])
 @pytest.mark.parametrize("with_dependency", [False, True])
+@pytest.mark.parametrize("flags,unchecked", [
+    pytest.param(["-check=in=off"], None, id="preconditions"),
+    pytest.param(["-noboundscheck"], True, id="noboundscheck"),
+    pytest.param(["-boundscheck=off"], True, id="boundscheck-off"),
+    pytest.param(["-boundscheck=safeonly"], False, id="boundscheck-safeonly"),
+    pytest.param(["-noboundscheck", "-check=bounds=on"], False, id="check-bounds-last"),
+    pytest.param(["-check=bounds=on", "-noboundscheck"], False, id="check-bounds-first"),
+])
 def test_response_file_check_flags_apply_to_guest_and_image(
     tmp_path: Path, backend: str, path_kind: str, with_dependency: bool,
+    flags: list[str], unchecked: bool | None,
 ) -> None:
     response = tmp_path / "flags.rsp"
     imports = tmp_path / "imports with spaces"
     imports.mkdir()
     (imports / "marker.txt").write_text("response-file marker", encoding="utf-8")
-    response.write_text(
-        f'# check selection\n"-J{imports}"\n"-check=in=off"\n',
-        encoding="utf-8",
-    )
+    import_flag = f"-J{imports}"
+    response.write_text("# check selection\n" + "\n".join(
+        json.dumps(flag) for flag in [import_flag, *flags]
+    ) + "\n", encoding="utf-8")
     if path_kind == "nested":
         outer = tmp_path / "outer.rsp"
         outer.write_text(f'@{response}\n', encoding="utf-8")
@@ -1727,13 +1751,23 @@ def test_response_file_check_flags_apply_to_guest_and_image(
         response.name if path_kind == "relative" else str(response)
     )
     (tmp_path / "source").mkdir()
+    program = IN_PROGRAM if unchecked is None else f"""\
+unittest {{
+    log("start\\n");
+    version (D_NoBoundsChecks) enum unchecked = true;
+    else enum unchecked = false;
+    assert(unchecked == {str(unchecked).lower()});
+    log("after\\n");
+}}
+"""
     (tmp_path / "source" / "app.d").write_text(
         PRELUDE + 'static assert(import("marker.txt") == "response-file marker");\n'
-        + IN_PROGRAM, encoding="utf-8",
+        + program, encoding="utf-8",
     )
     recipe = {
         "name": "app", "targetType": "library",
-        "dflags": ["-check=in=on", response_argument],
+        "dflags": (["-check=in=on"] if unchecked is None else [])
+        + ([import_flag, *flags] if path_kind == "plain" else [response_argument]),
     }
     if with_dependency:
         dependency = tmp_path / "dependency"

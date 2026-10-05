@@ -289,17 +289,6 @@ private bool isLdcCheckFlag(in const(char)[] argument) @safe pure nothrow @nogc 
 // Normalize both compiler dialects so a later native flag cannot override
 // the resolved DMD precedence in the image alone.
 public string[] ldcArguments(in string[] arguments) {
-    import std.algorithm.searching: startsWith;
-
-    bool isCheckFlag(in string argument) @safe pure nothrow @nogc {
-        return argument == "-noboundscheck"
-            || argument.startsWith("-boundscheck")
-            || argument.startsWith("--boundscheck")
-            || isLdcCheckFlag(argument)
-            || (argument.startsWith("-check")
-                && !argument.startsWith("-checkaction="));
-    }
-
     Checks checks;
     string[] kept;
     foreach (argument; joinedCheckArguments(expandedCompilerArguments(arguments))) {
@@ -310,6 +299,17 @@ public string[] ldcArguments(in string[] arguments) {
     checks.resolve;
 
     return kept ~ checks.ldcFlags;
+}
+
+public bool isCheckFlag(in const(char)[] argument) @safe pure nothrow @nogc {
+    import std.algorithm.searching: startsWith;
+
+    return argument == "-noboundscheck"
+        || argument.startsWith("-boundscheck")
+        || argument.startsWith("--boundscheck")
+        || isLdcCheckFlag(argument)
+        || (argument.startsWith("-check")
+            && !argument.startsWith("-checkaction="));
 }
 
 // Use the frontend's response syntax, including environment lookup and

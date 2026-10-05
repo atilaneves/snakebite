@@ -255,8 +255,8 @@ private string rootCompilerWrapper(
     in DubDescription description, in string stateDirectory,
 ) {
     import snakebite.dependencyimage: defaultCompiler;
-    import snakebite.frontend.checks: expandedCompilerArguments, ldcArguments;
-    import std.algorithm: any, startsWith;
+    import snakebite.frontend.checks: isCheckFlag, ldcArguments;
+    import std.algorithm: startsWith;
     import std.array: array;
     import std.algorithm.iteration: map;
     import std.conv: octal;
@@ -273,7 +273,8 @@ private string rootCompilerWrapper(
             continue;
         const settings = target["buildSettings"];
         const flags = settings["dflags"].array.map!(value => value.str).array;
-        if (!expandedCompilerArguments(flags).any!(flag => flag.startsWith("-check=")))
+        const translatedFlags = ldcArguments(flags);
+        if (flags == translatedFlags)
             continue;
         const output = target["cacheArtifactPath"].str;
         string responseArgument(in string argument) {
@@ -288,7 +289,7 @@ private string rootCompilerWrapper(
         foreach (flag; flags)
             rewrite ~= "remove[" ~ JSONValue(responseArgument(flag)).toString ~ "] = 1;\n";
         rewrite ~= "}\n!($0 in remove) { print }\nEND {\n";
-        foreach (flag; ldcArguments(flags))
+        foreach (flag; translatedFlags)
             rewrite ~= "print " ~ JSONValue(responseArgument(flag)).toString ~ ";\n";
         rewrite ~= "}\n";
         string[] outputArguments;
@@ -297,7 +298,7 @@ private string rootCompilerWrapper(
                 outputArguments ~= ["-e", responseArgument(prefix ~ output ~ suffix)];
         string[] checkArguments;
         foreach (flag; flags)
-            if (flag.startsWith("-check=") || flag.startsWith("@"))
+            if (isCheckFlag(flag) || flag.startsWith("@"))
                 checkArguments ~= ["-e", responseArgument(flag)];
         const directory = buildPath(stateDirectory,
             "dub-compiler-" ~ randomUUID.toString).absolutePath;
@@ -328,7 +329,7 @@ private string rootCompilerWrapper(
             ~ "for ((j=0; j<${#flags[@]}; ++j)); do\n"
             ~ "if [[ ${args[i+j]} != \"${flags[j]}\" ]]; then match=false; break; fi\ndone\n"
             ~ "if $match; then\nexec ldc2 \"${args[@]:0:i}\" "
-            ~ escapeShellCommand(ldcArguments(flags))
+            ~ escapeShellCommand(translatedFlags)
             ~ " \"${args[@]:i+${#flags[@]}}\"\nfi\ndone\nfi\nexec ldc2 \"$@\"\n";
         const path = buildPath(directory, defaultCompiler);
         path.write(script);
