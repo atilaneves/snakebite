@@ -171,6 +171,24 @@ unittest {
 }
 
 
+// The image source must import the module that names a template argument
+// (`Thread`), or the instantiation `_d_newclassT!Thread` cannot be
+// spelled in the image and falls back to the guest. Nothing here needs the
+// built image: only the text that is made for it.
+@("image.templateArgumentImports")
+@Serial
+unittest {
+    // Program requires a mutable AST.
+    auto module_ = parseSnippet(q{
+        import core.lifetime: _d_newclassT;
+        import core.thread.osthread: Thread;
+        Thread allocate() { return _d_newclassT!Thread(); }
+    });
+    const source = imageSource(Program([module_]));
+    "import core.thread.osthread;".should.be in source;
+}
+
+
 // `store`'s first instantiation nests a root-owned type (`Thing`) two
 // levels deep: inside `Bucket`'s own template arguments, inside a delegate
 // parameter type. A walk that only follows pointer, array, and
