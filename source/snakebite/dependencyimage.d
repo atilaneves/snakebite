@@ -222,10 +222,9 @@ public DependencyImage prepareImage(
     // contents, keys a stamp record. An unchanged compiler, input set and
     // source hits there without a compiler probe or a content hash: the
     // record was written after a successful build, and a compiler whose
-    // stamp is unchanged is the one whose version output and binary that
-    // build recorded. A CLI run pays this path once per invocation, so it
-    // has to cost a few stats, not a 20 ms subprocess and a hash of the
-    // whole compiler executable.
+    // stamp is unchanged is the one whose binary that build recorded. A CLI
+    // run pays this path once per invocation, so it has to cost a few
+    // stats, not a hash of the whole compiler executable.
     const directory = cacheDirectory.absolutePath;
     const settings = text("snakebite-image-v1\n", executable, "\n",
         __VERSION__, "\n", compileFlags, "\n", linkFlags, "\n", importFlags,
@@ -242,15 +241,8 @@ public DependencyImage prepareImage(
     if (!recorded.isNull)
         return loadImage(recorded.get);
 
-    const identityOutput = compilerIdentity([executable]);
-    import std.algorithm: startsWith;
-    version (DigitalMars)
-        require(identityOutput.startsWith("DMD"), "Image compiler must be DMD");
-    else version (LDC)
-        require(identityOutput.startsWith("LDC"), "Image compiler must be LDC");
-
     string fingerprint = text("snakebite-image-v1\n", executable, "\n",
-        fileDigest(executable), "\n", identityOutput,
+        fileDigest(executable),
         "\n", __VERSION__, "\n", compileFlags, "\n", linkFlags,
         "\n", importFlags, "\n", dependencyFlags, "\n", linkerArguments,
         "\n", source.length, ":", source);
