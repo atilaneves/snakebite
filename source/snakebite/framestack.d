@@ -157,9 +157,7 @@ public struct FrameStack {
         in size_t mark,
         scope void delegate(in size_t) destroy,
     ) {
-        _cleanups.finish(mark, (in TemporaryStack.Entry entry) {
-            destroy(entry.payload);
-        });
+        _cleanups.finish(mark, destroy);
     }
 
     // One `push` reservation: `base` is where its bytes start, a real

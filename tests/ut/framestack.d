@@ -24,6 +24,307 @@ unittest {
 }
 
 
+@("cleanup.reverseSuccessfulConstruction")
+unittest {
+    auto stack = FrameStack(16);
+    auto outer = stack.push(1, 1);
+    auto inner = stack.push(1, 1);
+    const mark = stack.cleanupMark;
+    size_t[2] order;
+    size_t count;
+
+    // The receiver starts before its argument, but it completes after it.
+    stack.registerCleanup(1, outer.base);
+    stack.suspendCleanup(outer.base);
+    stack.registerCleanup(2, inner.base);
+    stack.armCleanup(inner.base);
+    stack.armCleanup(outer.base);
+    stack.finishCleanups(mark, (in size_t site) {
+        order[count++] = site;
+    });
+
+    order.should == [2, 1];
+}
+
+
+@("cleanup.nestedMarkSkipsFailedConstructor")
+unittest {
+    auto stack = FrameStack(16);
+    auto outer = stack.push(1, 1);
+    auto failed = stack.push(1, 1);
+    auto inner = stack.push(1, 1);
+    size_t[2] order;
+    size_t count;
+
+    stack.registerCleanup(1, outer.base);
+    stack.armCleanup(outer.base);
+    const nestedMark = stack.cleanupMark;
+    stack.registerCleanup(2, failed.base);
+    stack.suspendCleanup(failed.base);
+    stack.finishCleanups(nestedMark, (in size_t site) {
+        order[count++] = site;
+    });
+    count.should == 0;
+
+    stack.registerCleanup(3, inner.base);
+    stack.suspendCleanup(inner.base);
+    stack.armCleanup(inner.base);
+    stack.finishCleanups(nestedMark, (in size_t site) {
+        order[count++] = site;
+    });
+    order[0 .. count].should == [3];
+
+    stack.finishCleanups(0, (in size_t site) {
+        order[count++] = site;
+    });
+    order.should == [3, 1];
+}
+
+
+@("cleanup.reentrantDestructorKeepsAddressLookup")
+unittest {
+    auto stack = FrameStack(128);
+    auto frame = stack.push(128, 1);
+    size_t[102] order;
+    size_t count;
+    stack.registerCleanup(1, frame.base);
+    stack.armCleanup(frame.base);
+    stack.registerCleanup(2, frame.base + 1);
+    stack.armCleanup(frame.base + 1);
+    stack.finishCleanups(0, (in size_t site) {
+        order[count++] = site;
+        if (site != 2)
+            return;
+        const nested = stack.cleanupMark;
+        // Reuse an outer address and grow the cleanup storage in a destructor.
+        foreach (i; 0 .. 100) {
+            stack.registerCleanup(i + 3, frame.base);
+            stack.armCleanup(frame.base);
+        }
+        stack.finishCleanups(nested, (in size_t inner) {
+            order[count++] = inner;
+        });
+    });
+    count.should == 102;
+    order[0].should == 2;
+    foreach (i; 0 .. 100)
+        order[i + 1].should == 102 - i;
+    order[$ - 1].should == 1;
+}
+
+
+@("cleanup.orderDoesNotChangeRegistrationMarks")
+unittest {
+    auto stack = FrameStack(16);
+    auto frame = stack.push(16, 1);
+    size_t[3] order;
+    size_t count;
+    stack.registerCleanup(1, frame.base);
+    const nested = stack.cleanupMark;
+    stack.registerCleanup(2, frame.base + 1);
+    stack.registerCleanup(3, frame.base + 2);
+    stack.armCleanup(frame.base + 2);
+    stack.armCleanup(frame.base);
+    stack.armCleanup(frame.base + 1);
+    stack.finishCleanups(nested, (in size_t site) {
+        order[count++] = site;
+    });
+    order[0 .. count].should == [2, 3];
+    stack.finishCleanups(0, (in size_t site) {
+        order[count++] = site;
+    });
+    order.should == [2, 3, 1];
+}
+
+
+@("cleanup.markKeepsOlderValueWithLaterLifetime")
+unittest {
+    auto stack = FrameStack(16);
+    auto older = stack.push(1, 1);
+    auto newer = stack.push(1, 1);
+    size_t[2] order;
+    size_t count;
+
+    stack.registerCleanup(1, older.base);
+    const mark = stack.cleanupMark;
+    stack.registerCleanup(2, newer.base);
+    stack.armCleanup(newer.base);
+    stack.armCleanup(older.base);
+    stack.finishCleanups(mark, (in size_t site) {
+        order[count++] = site;
+    });
+    order[0 .. count].should == [2];
+    stack.finishCleanups(0, (in size_t site) {
+        order[count++] = site;
+    });
+    order.should == [2, 1];
+}
+
+
+@("cleanup.destructorCanGrowStackAndFinishNestedMark")
+unittest {
+    auto stack = FrameStack(256);
+    auto storage = stack.push(256, 1);
+    size_t[132] order;
+    size_t count;
+
+    stack.registerCleanup(1, storage.base);
+    stack.armCleanup(storage.base);
+    stack.registerCleanup(2, storage.base + 1);
+    stack.armCleanup(storage.base + 1);
+    stack.finishCleanups(0, (in size_t site) {
+        order[count++] = site;
+        if (site != 2)
+            return;
+        const mark = stack.cleanupMark;
+        foreach (i; 0 .. 130) {
+            stack.registerCleanup(i + 3, storage.base + i + 2);
+            stack.armCleanup(storage.base + i + 2);
+        }
+        stack.finishCleanups(mark, (in size_t nested) {
+            order[count++] = nested;
+        });
+    });
+    count.should == order.length;
+    order[0].should == 2;
+    foreach (i; 0 .. 130)
+        order[i + 1].should == 132 - i;
+    order[$ - 1].should == 1;
+}
+
+
+@("cleanup.throwContinuesAfterNestedCleanup")
+unittest {
+    auto stack = FrameStack(16);
+    auto storage = stack.push(3, 1);
+    size_t[3] order;
+    size_t count;
+
+    stack.registerCleanup(1, storage.base);
+    stack.armCleanup(storage.base);
+    stack.registerCleanup(2, storage.base + 1);
+    stack.armCleanup(storage.base + 1);
+    void finish() {
+        stack.finishCleanups(0, (in size_t site) {
+            order[count++] = site;
+            if (site != 2)
+                return;
+            const mark = stack.cleanupMark;
+            stack.registerCleanup(3, storage.base + 2);
+            stack.armCleanup(storage.base + 2);
+            stack.finishCleanups(mark, (in size_t nested) {
+                order[count++] = nested;
+            });
+            throw new Exception("cleanup");
+        });
+    }
+    finish.shouldThrowWithMessage("cleanup");
+    order.should == [2, 3, 1];
+    stack.cleanupMark.should == 0;
+}
+
+
+@("cleanup.nestedDestructorPreservesSkippedOlderLifetimes")
+unittest {
+    auto stack = FrameStack(16);
+    auto storage = stack.push(9, 1);
+    size_t[12] order;
+    size_t count;
+    foreach (i; 0 .. 4)
+        stack.registerCleanup(i + 1, storage.base + i);
+    const mark = stack.cleanupMark;
+    foreach (i; 4 .. 8) {
+        stack.registerCleanup(i + 1, storage.base + i);
+        stack.armCleanup(storage.base + i);
+    }
+    // These older registrations have later lifetimes, but belong to the
+    // enclosing expression, not the expression being finished.
+    foreach (i; 0 .. 4)
+        stack.armCleanup(storage.base + i);
+    stack.finishCleanups(mark, (in size_t site) {
+        order[count++] = site;
+        const nested = stack.cleanupMark;
+        stack.registerCleanup(9, storage.base + 8);
+        stack.armCleanup(storage.base + 8);
+        stack.finishCleanups(nested, (in size_t inner) {
+            order[count++] = inner;
+        });
+    });
+    order[0 .. count].should == [8, 9, 7, 9, 6, 9, 5, 9];
+    stack.finishCleanups(0, (in size_t site) {
+        order[count++] = site;
+    });
+    order.should == [8, 9, 7, 9, 6, 9, 5, 9, 4, 3, 2, 1];
+}
+
+
+@("cleanup.destructorArmsAnEarlierConstructorLifetime")
+unittest {
+    auto stack = FrameStack(16);
+    auto storage = stack.push(3, 1);
+    size_t[3] order;
+    size_t count;
+    stack.registerCleanup(1, storage.base);
+    stack.suspendCleanup(storage.base);
+    stack.registerCleanup(2, storage.base + 1);
+    stack.armCleanup(storage.base + 1);
+    stack.registerCleanup(3, storage.base + 2);
+    stack.armCleanup(storage.base + 2);
+    stack.finishCleanups(0, (in size_t site) {
+        order[count++] = site;
+        if (site == 3)
+            stack.armCleanup(storage.base);
+    });
+    order.should == [3, 2, 1];
+}
+
+
+@("cleanup.destructorCannotArmItsConsumedNonTailReceiver")
+unittest {
+    auto stack = FrameStack(16);
+    auto storage = stack.push(3, 1);
+    size_t[] order;
+    foreach (i; 0 .. 3)
+        stack.registerCleanup(i + 1, storage.base + i);
+    foreach_reverse (i; 0 .. 3) {
+        stack.suspendCleanup(storage.base + i);
+        stack.armCleanup(storage.base + i);
+    }
+    stack.finishCleanups(0, (in size_t site) {
+        order ~= site;
+        if (site == 1) {
+            stack.suspendCleanup(storage.base);
+            stack.armCleanup(storage.base);
+        }
+    });
+    order.should == [1, 2, 3];
+    stack.cleanupMark.should == 0;
+}
+
+
+@("cleanup.destructorsFinishSuccessivelyDeeperExpressions")
+unittest {
+    enum depth = 256;
+    auto stack = FrameStack(depth);
+    auto storage = stack.push(depth, 1);
+    size_t count;
+    void destroy(in size_t site) {
+        site.should == ++count;
+        if (site == depth)
+            return;
+        const nested = stack.cleanupMark;
+        stack.registerCleanup(site + 1, storage.base + site);
+        stack.armCleanup(storage.base + site);
+        stack.finishCleanups(nested, &destroy);
+    }
+    stack.registerCleanup(1, storage.base);
+    stack.armCleanup(storage.base);
+    stack.finishCleanups(0, &destroy);
+    count.should == depth;
+    stack.cleanupMark.should == 0;
+}
+
+
 // `push`'s return value is a non-copyable `Frame` that frees its bytes in
 // its own destructor, which is not `@safe` - `shouldThrowWithMessage`
 // evaluates its argument inside a `@safe` wrapper when it can, and a

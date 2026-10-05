@@ -327,8 +327,8 @@ public struct TemporaryLifetime {
             _temporaries.truncate(mark);
         }
 
-        _stack.finish(stackMark, (in TemporaryStack.Entry entry) {
-            _destroy(_temporaries[entry.payload].edtor);
+        _stack.finish(stackMark, (in size_t payload) {
+            _destroy(_temporaries[payload].edtor);
         });
     }
 }
