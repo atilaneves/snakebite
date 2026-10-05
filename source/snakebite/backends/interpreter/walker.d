@@ -201,6 +201,7 @@ private struct Shared {
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.backends.runtimetypes: RuntimeTypes;
     import snakebite.backends.closureplan: ClosurePlan, Hop;
+    import snakebite.backends.dualcontext: ContextSource;
     import snakebite.ffi: PlanCache;
     import dmd.declaration: VarDeclaration;
     import snakebite.nativelayout: NativeData, TypeFacts;
@@ -289,6 +290,7 @@ private struct Shared {
     SharedTable!(TryFinallyStatement, ExceptionCandidate[]) finallyCandidates;
     SharedTable!(FinallyKey, bool) finallyRuns;
     SharedTable!(CallSiteKey, const(CallPlan)*) callSitePlans;
+    SharedTable!(CallSiteKey, ContextSource) calleeContexts;
     SharedTable!(const(void)*, VariadicCallPlan) variadicCallPlans;
     // The guest functions whose preparation is complete, and how to
     // prepare one more.
@@ -602,6 +604,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private CallSitePlan _lastCallSitePlan;
+    private struct CalleeContextSlot {
+        CallSiteKey key;
+        const(ContextSource)* plan;
+    }
+    private CalleeContextSlot[16] _recentCalleeContexts;
 
     private Cache!(Type, TypeFacts) _typeFacts;
     // The function whose body the preparation walks.
@@ -1660,9 +1667,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         CallExp site,
         FuncDeclaration callee,
     ) {
-        layoutOf(callee);
+        const layout = layoutOf(callee);
         callShapeOf(callee);
         prepareContext(outerFunctionOf(callee));
+        if (callee.isThis is null && layout.hiddenThis.variable !is null)
+            calleeContextPlanOf(site, callee);
         auto calleeType = typeFunctionOf(callee);
         foreach (i; 0 .. calleeType.parameterList.length)
             if ((calleeType.parameterList[i].storageClass & STC.out_) != 0)
@@ -1677,7 +1686,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (decision.route == CallSelection.Route.guest
                 && typeFunctionOf(callee).parameterList.varargs
                     == VarArg.variadic) {
-            const layout = layoutOf(callee);
             const hasTypes = layout.variadicTypes != size_t.max;
             variadicCallPlanOf(site.arguments,
                 hasTypes + layout.parameters.length);
@@ -6711,7 +6719,33 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // delegate supplies this context directly because it may
         // outlive the call that created it; a direct call finds it
         // by walking the current static chain.
-        return callContextOf(calleeContextSourceOf(_function, function_));
+        return callContextOf(*calleeContextPlanOf(expression, function_));
+    }
+
+    extern(D) private const(ContextSource)* calleeContextPlanOf(
+        CallExp expression,
+        FuncDeclaration callee,
+    ) {
+        const key = CallSiteKey(cast(const(void)*) expression,
+            cast(const(void)*) callee);
+        auto recent = &_recentCalleeContexts[
+            (cast(size_t) cast(void*) expression >> 4) & 15];
+        if (key == recent.key)
+            return recent.plan;
+
+        if (auto found = _shared.calleeContexts.find(key)) {
+            *recent = CalleeContextSlot(key, found);
+            return found;
+        }
+
+        // Inherited contracts need their base frame layout even when no
+        // call runs that base body. Finalization cannot build it on demand.
+        // `auto`: the shared plan builder takes mutable frontend nodes.
+        auto caller = _preparing is null ? _function : _preparing;
+        const plan = _shared.calleeContexts.insert(
+            key, calleeContextSourceOf(caller, callee));
+        *recent = CalleeContextSlot(key, plan);
+        return plan;
     }
 
     // The context a direct call hands over, which is always reachable from

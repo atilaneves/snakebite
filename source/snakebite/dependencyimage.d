@@ -231,10 +231,9 @@ public DependencyImage prepareImage(
     // contents, keys a stamp record. An unchanged compiler, input set and
     // source hits there without a compiler probe or a content hash: the
     // record was written after a successful build, and a compiler whose
-    // stamp is unchanged is the one whose version output and binary that
-    // build recorded. A CLI run pays this path once per invocation, so it
-    // has to cost a few stats, not a 20 ms subprocess and a hash of the
-    // whole compiler executable.
+    // stamp is unchanged is the one whose binary that build recorded. A CLI
+    // run pays this path once per invocation, so it has to cost a few
+    // stats, not a hash of the whole compiler executable.
     const directory = cacheDirectory.absolutePath;
     const settings = text("snakebite-image-v1\n", executable, "\n",
         __VERSION__, "\n", compileFlags, "\n", linkFlags, "\n", importFlags,
@@ -251,15 +250,8 @@ public DependencyImage prepareImage(
     if (!recorded.isNull)
         return loadImage(recorded.get);
 
-    const identityOutput = compilerIdentity([executable]);
-    import std.algorithm: startsWith;
-    version (DigitalMars)
-        require(identityOutput.startsWith("DMD"), "Image compiler must be DMD");
-    else version (LDC)
-        require(identityOutput.startsWith("LDC"), "Image compiler must be LDC");
-
     string fingerprint = text("snakebite-image-v1\n", executable, "\n",
-        fileDigest(executable), "\n", identityOutput,
+        fileDigest(executable),
         "\n", __VERSION__, "\n", compileFlags, "\n", linkFlags,
         "\n", importFlags, "\n", dependencyFlags, "\n", linkerArguments,
         "\n", source.length, ":", source);
@@ -269,7 +261,6 @@ public DependencyImage prepareImage(
 
     string cxxRuntimeLibrary;
     if (hasCppSource) {
-        const cxxIdentity = compilerIdentity(cxxCommand);
         // The C++ runtime library this pulls in is what gives the image
         // `operator new`/`delete`, RTTI and the exception personality
         // routine a thrown C++ exception (issue #336 step 5) needs. Which
@@ -281,7 +272,7 @@ public DependencyImage prepareImage(
         // - is right for any compiler and configuration.
         cxxRuntimeLibrary = probeCxxRuntimeLibrary(cxxCommand);
         fingerprint ~= text("\ncxx:", cxxCommand, "\n",
-            fileDigest(cxxExecutable), "\n", cxxIdentity,
+            fileDigest(cxxExecutable),
             "\n", cxxCompileFlags, "\n", cxxCompilerArguments,
             "\n", cxxRuntimeLibrary, "\n", cppSource.length, ":", cppSource);
     }
@@ -424,19 +415,6 @@ private void runCompiler(
         throw new SnakebiteException(text("Dependency image ", phase,
             " failed\nCommand: ", command, "\n", result.output));
     }
-}
-
-
-// `command` is the whole invocation - a wrapper such as `ccache` ahead of
-// the real compiler counts, since it can change what actually runs. This
-// runs only when an image's stamp record misses, so the stamp record is
-// what keeps it to one probe per compiler, across processes as well.
-private string compilerIdentity(in string[] command) {
-    import std.process: execute;
-
-    const identity = execute(command ~ ["--version"]);
-    require(identity.status == 0, "Cannot identify image compiler: " ~ identity.output);
-    return identity.output;
 }
 
 

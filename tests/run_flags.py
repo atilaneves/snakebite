@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# dependencies = ["pytest==8.4.1"]
+# dependencies = ["pytest==8.4.1", "pytest-xdist==3.8.0"]
 # ///
 
 # Compiler flags change what a whole program means, and a halt ends the
@@ -1824,5 +1824,8 @@ def test_changed_response_file_changes_checks_on_cached_runs(
             assert_passes_after_start(backend, outcome)
 
 
+# The tests can run in parallel (see build/pytest-workers.sh) because the
+# state that they share, the `.snakebite` directory and the dub package store,
+# is keyed by project path and published with an atomic rename.
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

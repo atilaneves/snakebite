@@ -11,9 +11,10 @@ int run(string[] args) {
     initialize(Snippets.yes);
 
     return args.runTests!(
-        "at.ffi.dvariadic", "at.bench.timing",
+        "at.ffi.dvariadic", "at.ffi.dabi", "at.ffi.image",
+        "at.bench.timing",
         "at.runtime.arraycopy", "at.runtime.messaging",
-        "ut.ffi.symbol", "at.cli", "at.runtime.startup", "at.dub",
+        "at.cli", "at.runtime.startup", "at.dub",
         "at.runtime.threads", "at.backends.interpreter.nativestack",
         "ut.process", "at.process",
     );
