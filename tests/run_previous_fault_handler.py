@@ -238,7 +238,7 @@ def host(request, tmp_path_factory):
     flags = ["-O", "-release"]
     shared = ["-defaultlib=phobos2", "-debuglib=phobos2", "-L-lphobos2"]
     if request.param == "ldc2":
-        flags += ["-flto=thin", "-gcc=clang", "-linker=lld"]
+        flags += ["-flto=thin", "-gcc=clang"]
         shared = ["-link-defaultlib-shared"]
     checked([compiler, *flags, *shared, f"-I={ROOT / 'source'}", "bridge.d",
              *map(str, sources), "driver.o", "trampoline.o", "-L-lpthread",
