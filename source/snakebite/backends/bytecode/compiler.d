@@ -5,6 +5,7 @@ private:
 
 import dmd.mtype: Type;
 import object: TypeInfo_Class;
+import snakebite.backends.argumentflow: Shape;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
 import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
@@ -1004,6 +1005,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _closureOffset == size_t.max ? 1 : _closureLayout.alignment,
             closureSlots,
             parameterOffsets,
+            _layout.variadicTypes == size_t.max
+                ? _layout.variadicCursor : size_t.max,
+            _layout.parameters.length,
+            _layout.signature,
         );
     }
 
@@ -4307,12 +4312,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // through `ref` binding, so this is nothing more than that answer
     // copied to `_destination`.
     override void visit(AddrExp expression) {
+        import snakebite.frontend.storage: typeInfoAddressedBy;
         import snakebite.nativelayout: isStaticStructAddress;
 
         if (isStaticStructAddress(expression))
             return compileConstant(expression);
 
         requireDestination(expression);
+
+        if (auto typeInfo =
+                expression.typeInfoAddressedBy(_bytecode._runtimeTypes)) {
+            emitTypeInfoConstant(typeInfo);
+            return;
+        }
 
         const addressOffset = compileAddress(expression.e1);
         if (addressOffset != _destination)
@@ -5060,7 +5072,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t destination = size_t.max,
         in size_t width = size_t.max,
     ) {
-        auto address = cast(void*) _bytecode._runtimeTypes.get(type);
+        emitTypeInfoConstant(
+            _bytecode._runtimeTypes.get(type), destination, width);
+    }
+
+    private void emitTypeInfoConstant(
+        TypeInfo info,
+        in size_t destination = size_t.max,
+        in size_t width = size_t.max,
+    ) {
+        auto address = cast(void*) info;
 
         emit(&opConstant,
             destination == size_t.max ? _destination : destination,
@@ -6985,12 +7006,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private struct VariadicArguments {
         Arg[] guest;
         Arg[] values;
+        Shape[] shapes;
     }
 
     private VariadicArguments compileVariadicArguments(
         Expressions* arguments,
         in FrameLayout layout,
     ) {
+        import snakebite.backends.layout: shapeOf;
         import snakebite.backends.variadic: FirstState, VariadicLayout;
 
         const hasTypes = layout.variadicTypes != size_t.max;
@@ -7014,6 +7037,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             evalInto((*arguments)[firstExtra + i], storage + offset,
                 facts[i].size);
             result.values ~= Arg(storage + offset, 0, facts[i].size);
+            result.shapes ~=
+                shapeOf((*arguments)[firstExtra + i].type, facts[i]);
         }
         emit(&opCopy, storage + FirstState.offset, storage, FirstState.size);
         const cursor = reserveTemp(pointerFacts);
@@ -7066,15 +7091,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `FuncDeclaration` to read a `FrameLayout` from, since more than one
     // could reach this call site at run time. `FrameLayout.ofParameters`
     // packs from the signature alone, the same packing every callee's own
-    // `FrameLayout.of` uses for its declared parameters, so argument `i`
-    // lands where whichever callee this call reaches at run time reads it
-    // from - and, for a delegate call, so does the context word, packed
-    // first the same way `FrameLayout.of` packs any callee's own hidden
-    // `this` before its declared parameters (see `ofParameters`'s own
-    // `hasContext` doc).
+    // `FrameLayout.of` uses, so a callee with the signature of the value
+    // reads argument `i` where the site puts it - and, for a delegate call,
+    // so does the context word. A callee with another signature reads each
+    // parameter from the argument in the same register (`ValueCall`).
     private void compileIndirectCall(CallExp expression, in size_t destOffset) {
         import dmd.astenums: STC, VarArg;
-        import snakebite.backends.calls: arityMismatches, isIndirectDelegateCall;
+        import snakebite.backends.calls: isIndirectDelegateCall, ValueCall;
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, delegateValueSize;
 
@@ -7116,8 +7139,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             evalInto(deref.e1, calleeOffset, size_t.sizeof);
         }
 
-        if (arityMismatches(functionType.parameterList, expression.arguments,
-                functionType.parameterList.varargs == VarArg.variadic))
+        auto valueCall = ValueCall.of(functionType, isDelegateCall);
+        if (valueCall.mismatches(expression.arguments))
             assert(0, "dmd rejects a call with the wrong number of arguments");
 
         // A `ref` return hands back its target's address in the return
@@ -7131,7 +7154,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (isVoidCallee && destOffset != discardResult)
             assert(0, "a `void` call is only ever evaluated for effect");
 
-        auto calleeLayout = FrameLayout.ofParameters(functionType, isDelegateCall);
+        const calleeLayout = valueCall.layout;
 
         Arg[] args;
         if (isDelegateCall)
@@ -7144,6 +7167,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             functionType, expression.arguments, calleeLayout, args,
             calleeOffset, isVoidCallee ? 0 : returnShape.returnFacts.size,
             isDelegateCall);
+        site.kind = CallSite.Kind.value;
+        site.value.signature = valueCall.signature;
         const siteIndex = _callSites.length;
         _callSites ~= site;
         emit(&opCall,
@@ -7176,10 +7201,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto declared = args[initialCount .. $];
         auto guestArgs = args;
         auto nativeArgs = args;
+        VariadicArguments variadic;
         const isVariadic = functionType.parameterList.varargs
             == VarArg.variadic;
         if (isVariadic) {
-            auto variadic = compileVariadicArguments(arguments, calleeLayout);
+            variadic = compileVariadicArguments(arguments, calleeLayout);
             guestArgs = args ~ variadic.guest;
             const hidden = functionType.isDstyleVariadic
                 ? compileEvaluatedArgument(
@@ -7193,9 +7219,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ? cast(const(void)*) preparation.prepareAtAddress(
                 _bytecode._plans, null, hasContext)
             : _bytecode._plans.signatureOf(functionType, hasContext);
-        return CallSite.indirect(
+        auto site = CallSite.indirect(
             calleeOffset, guestArgs, nativeArgs, returnWidth, nativePlan,
             hasContext);
+        site.value.surplus = variadic.values;
+        site.value.surplusShapes = variadic.shapes;
+        return site;
     }
 
     private TypeFacts pointerFacts() {
@@ -7588,6 +7617,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         FunctionCompiler compiler;
 
         public size_t symbolAddress(SymOffExp expression) {
+            import snakebite.frontend.storage: typeInfoObjectOf;
+
             if (auto function_ = expression.var.isFuncDeclaration) {
                 const result = compiler.reserveTemp(compiler.pointerFacts);
                 const address = compiler._bytecode.callableAddress(function_, 0);
@@ -7599,8 +7630,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             if (auto typeInfo = expression.var.isTypeInfoDeclaration) {
                 const result = compiler.reserveTemp(compiler.pointerFacts);
-                compiler.emitRuntimeTypeInfoConstant(
-                    typeInfo.tinfo, result, size_t.sizeof,
+                compiler.emitTypeInfoConstant(
+                    typeInfoObjectOf(
+                        typeInfo, compiler._bytecode._runtimeTypes),
+                    result, size_t.sizeof,
                 );
                 return result;
             }

@@ -180,7 +180,10 @@ public struct CallAdapter {
         public void eachDeclared(
             scope void delegate(size_t, Declared) emit,
         ) {
-            foreach (i; 0 .. _type.parameterList.length)
+            import std.algorithm: min;
+
+            const bound = _expressions.length - _declaredOffset;
+            foreach (i; 0 .. min(_type.parameterList.length, bound))
                 emit(i, declaredValue(i));
         }
 

@@ -42,6 +42,7 @@ package struct Preparation {
     package void delegate(TryCatchStatement) tryCatch;
     package void delegate(TryFinallyStatement) tryFinally;
     package void delegate(TryFinallyStatement, Statement) gotoOutOf;
+    package void delegate(CallExp) valueCall;
 }
 
 
@@ -163,6 +164,8 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
             ? unresolvedCalleeOf(expression) : expression.f;
         if (callee !is null)
             _preparation.call(expression, callee);
+        else
+            _preparation.valueCall(expression);
     }
 
     // The one address of a literal's text is made at its first use.

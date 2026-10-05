@@ -385,6 +385,76 @@ public bool arityMismatches(
         : count != parameterList.length;
 }
 
+// The caller side of a call through a function pointer or a delegate
+// value. A cast can give the value a type that is not the type of the
+// function that it holds, so the type of the value decides what the
+// arguments are and how each converts, and the callee reads its parameters
+// from where the C calling convention puts them, as native code does
+// (`ArgumentFlow`): a parameter reads the argument that is in the same
+// register, and not the argument at the same position. That is true for the
+// `extern(D)` convention too when the types agree, which is the one that
+// `signature` decides; for a mismatch of the `extern(D)` convention dmd
+// passes the arguments in reverse register order, so only the C convention
+// is matched.
+//
+// When the signature of the value is the signature of the callee the frames
+// agree and the arguments go where the value's layout puts them. A callee
+// that has no context, such as a function literal that a delegate type holds,
+// has the parameters of `withoutContext`.
+public struct ValueCall {
+    import dmd.mtype: TypeFunction;
+    import snakebite.backends.argumentflow: ArgumentFlow, Shape, Signature;
+    import snakebite.backends.layout: FrameLayout;
+
+    public TypeFunction type;
+    public bool hasContext;
+    public FrameLayout layout;
+    public FrameLayout withoutContext;
+
+    public static ValueCall of(TypeFunction type, in bool hasContext) {
+        return ValueCall(
+            type,
+            hasContext,
+            FrameLayout.ofParameters(type, hasContext),
+            FrameLayout.ofParameters(type, false),
+        );
+    }
+
+    public bool isVariadic() const {
+        import dmd.astenums: VarArg;
+
+        return type.parameterList.varargs == VarArg.variadic;
+    }
+
+    public bool mismatches(
+        imported!"dmd.arraytypes".Expressions* arguments,
+    ) {
+        // dmd's `ParameterList` has no `const` methods.
+        return arityMismatches(type.parameterList, arguments, isVariadic);
+    }
+
+    // The layout that the callee reads its arguments by when the signatures
+    // are equal.
+    public const(FrameLayout)* layoutFor(in bool calleeHasContext) const {
+        return hasContext && !calleeHasContext ? &withoutContext : &layout;
+    }
+
+    public const(Signature)* signature() const {
+        return layout.signature;
+    }
+
+    // Where each argument of a call goes for a callee with `callee` as its
+    // signature, given the shapes of the variadic arguments of the call.
+    public ArgumentFlow flowTo(
+        in Signature callee, in Shape[] surplus, in bool calleeHasContext,
+    ) const {
+        return ArgumentFlow(
+            signature.parameters, surplus, callee.parameters,
+            hasContext && calleeHasContext,
+        );
+    }
+}
+
 // An indirect call - one whose callee `expression.e1` is a bare value,
 // not a resolved `FuncDeclaration` - is a delegate call whenever that
 // value's own type is `Tdelegate`, never mind whether dmd's parser put a
