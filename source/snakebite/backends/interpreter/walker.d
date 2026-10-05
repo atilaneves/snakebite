@@ -72,8 +72,20 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         void* context,
         CallbackCall* call,
     ) {
+        version(unittest) import snakebite.sharedtable: PreparedExecution;
+        version(unittest)
+            auto preparedExecution = PreparedExecution(
+                isFinalizerCallback(call.declaration));
         auto interpreter = cast(Interpreter) context;
         interpreter.evaluator.callGuestFromHost(call);
+    }
+
+    version(unittest)
+    private static bool isFinalizerCallback(FuncDeclaration function_) {
+        if (function_.isDtorDeclaration !is null)
+            return true;
+        auto owner = function_.toParent2.isClassDeclaration;
+        return owner !is null && owner.tidtor is function_;
     }
 
     private static void prepareCallback(

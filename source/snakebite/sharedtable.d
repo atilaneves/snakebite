@@ -6,6 +6,46 @@ private:
 import core.atomic: atomicLoad, atomicStore, MemoryOrder;
 import core.sync.mutex: Mutex;
 
+version(unittest) {
+    import snakebite.hostthreads: heapNew, PerThread;
+
+    private struct PreparedState {
+        bool active;
+    }
+
+    private __gshared PerThread!(PreparedState*, true) _preparedChecks =
+        PerThread!(PreparedState*, true).init;
+
+    shared static this() {
+        _preparedChecks = typeof(_preparedChecks)(() => heapNew!PreparedState);
+    }
+
+    // Test the finalizer's cache contract without needing a GC collection.
+    // Fibers can leave callbacks suspended while other execution runs on
+    // the same thread. Their check state must not leak to that execution.
+    public struct PreparedExecution {
+        @disable this(this);
+        private PreparedState* _state;
+        private bool _previous;
+
+        public this(bool active) {
+            _state = _preparedChecks.current;
+            _previous = _state.active;
+            _state.active = _previous || active;
+        }
+
+        public ~this() @safe @nogc nothrow {
+            if (_state !is null)
+                _state.active = _previous;
+        }
+    }
+
+    public void assertCacheFillAllowed(string cache)() {
+        assert(!_preparedChecks.current.active,
+            "unprepared lazy cache insertion: " ~ cache);
+    }
+}
+
 
 // A hash table that every thread running guest code reads without a
 // lock, and that only an insert locks (ADR-0006). It holds the caches a
@@ -148,6 +188,9 @@ public struct SharedTable(Key, Value) {
         // wait for one that another thread holds.
         if (auto found = find(key))
             return found;
+
+        version(unittest)
+            assertCacheFillAllowed!(Key.stringof ~ " -> " ~ Value.stringof);
 
         auto tableLock = lockOf();
         tableLock.lock;
