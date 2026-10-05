@@ -79,6 +79,96 @@ def test_hardware_fault_position_and_guest_halt(
 
 
 @pytest.mark.parametrize("backend", ["native", *BACKENDS])
+@pytest.mark.parametrize("source,frames", [
+    ("module main;\n"
+     "void inner() {\n"
+     "    try {\n"
+     "        throw new Exception(\"ordinary\");\n"
+     "    } finally {\n"
+     "        int* p;\n"
+     "        *p = 1;\n"
+     "    }\n"
+     "}\n"
+     "int main() {\n"
+     "    inner();\n"
+     "    return 0;\n"
+     "}\n", [("main.inner", 7), ("D main", 11)]),
+    ("module main;\n"
+     "void inner(int n) {\n"
+     "    try {\n"
+     "        if (n) inner(n - 1);\n"
+     "        else throw new Exception(\"ordinary\");\n"
+     "    } finally {\n"
+     "        if (n == 0) {\n"
+     "            int* p;\n"
+     "            *p = 1;\n"
+     "        }\n"
+     "    }\n"
+     "}\n"
+     "int main() { inner(2); return 0; }\n",
+     [("main.inner", 9), ("main.inner", 4), ("main.inner", 4), ("D main", 13)]),
+    ("module main;\n"
+     "void inner() {\n"
+     "    try { throw new Exception(\"first\"); }\n"
+     "    finally {\n"
+     "        try { throw new Exception(\"second\"); }\n"
+     "        finally { int* p; *p = 1; }\n"
+     "    }\n"
+     "}\n"
+     "int main() { inner(); return 0; }\n",
+     [("main.inner", 6), ("D main", 9)]),
+    ("module main;\n"
+     "import core.stdc.stdlib: qsort;\n"
+     "int depth;\n"
+     "extern(C) int compare(const void* a, const void* b) {\n"
+     "    try {\n"
+     "        if (depth++ == 0) { int[2] n = [2, 1]; "
+     "qsort(n.ptr, 2, int.sizeof, &compare); }\n"
+     "        else throw new Exception(\"ordinary\");\n"
+     "    } finally {\n"
+     "        if (depth == 2) { int* p; *p = 1; }\n"
+     "    }\n"
+     "    return 0;\n"
+     "}\n"
+     "int main() { int[2] a = [2, 1]; "
+     "qsort(a.ptr, 2, int.sizeof, &compare); return 0; }\n",
+     [("main.compare", 9), ("main.compare", 6), ("D main", 13)]),
+    ("module main;\n"
+     "struct S { ~this() { int* p; *p = 1; } }\n"
+     "void inner() { S s; throw new Exception(\"ordinary\"); }\n"
+     "int main() { inner(); return 0; }\n",
+     [("main.S.~this", 2), ("main.inner", 3), ("D main", 4)]),
+], ids=["finally", "recursive", "nested-finally", "callback", "destructor"])
+def test_hardware_fault_cleanup_reports_real_invocations(
+    tmp_path: Path, backend: str, source: str, frames: list[tuple[str, int]],
+) -> None:
+    app = tmp_path / "app"
+    write(app / "main.d", source)
+    if backend == "native":
+        binary = tmp_path / "native"
+        built = subprocess.run(
+            ["dmd", f"-of={binary}", str(app / "main.d")],
+            capture_output=True, text=True,
+        )
+        assert built.returncode == 0, output(built)
+        result = subprocess.run(
+            [str(binary)], capture_output=True, text=True, timeout=30,
+        )
+    else:
+        result = run_sb(f"--backend={backend}", str(app), cwd=tmp_path)
+    if backend == "bytecode":
+        expected = f"main.d({frames[0][1]}): fatal: null pointer dereference\n"
+        expected += "".join(f"    in {name} (main.d({line}))\n"
+                            for name, line in frames)
+        assert result.returncode == 1, output(result)
+        assert result.stderr == expected, output(result)
+    elif backend == "ctfe":
+        assert result.returncode == 1, output(result)
+    else:
+        assert result.returncode == -signal.SIGSEGV, output(result)
+
+
+@pytest.mark.parametrize("backend", ["native", *BACKENDS])
 @pytest.mark.parametrize("shape", ["thread", "finalizer"])
 def test_hardware_fault_in_thread_or_gc_finalizer(
     tmp_path: Path, backend: str, shape: str,

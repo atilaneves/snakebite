@@ -702,9 +702,20 @@ private Throwable reportGuestFault(
     scope GuestFault.Stack stack = (scope GuestFault.FrameSink sink) {
         auto activation = active;
         auto dispatch = state;
+        bool ownerReported;
         while (dispatch !is null) {
+            // A cleanup range uses its owner's activation, not a new
+            // invocation. Its current PC replaces the owner's saved PC.
+            // Carry this through nested cleanup ranges, but retain every
+            // real caller and callback, including recursive calls.
+            if (ownerReported && activation !is null) {
+                ownerReported = activation.end !is null;
+                activation = activation.parent;
+            }
             while (activation !is null) {
                 const function_ = dispatch.vm._functionOf(activation.pc);
+                ownerReported = function_ !is null
+                    && activation.end !is null;
                 if (function_ !is null) {
                     const source = function_.positions[
                         activation.pc - function_.instructions.ptr];
