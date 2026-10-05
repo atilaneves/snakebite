@@ -693,13 +693,20 @@ static if (supported) {
         ucontext_t* context;
         int signal;
         imported!"core.sys.posix.signal".sigset_t mask;
+        const(void)* source;
+        size_t length;
+        void* floatingPoint;
     }
     // The assembly reads every field before unblocking signals. Nested
     // delivery can then reuse this thread's packet, not the moved frame.
     private Forward _forward;
     static assert(Forward.mask.offsetof == 40);
+    static assert(Forward.source.offsetof == 168);
+    static assert(Forward.length.offsetof == 176);
+    static assert(Forward.floatingPoint.offsetof == 184);
     static assert(ucontext_t.uc_mcontext.offsetof == 40);
     static assert(imported!"core.sys.posix.ucontext".mcontext_t.gregs.offsetof == 0);
+    static assert(imported!"core.sys.posix.ucontext".mcontext_t.fpregs.offsetof == 184);
     static assert(imported!"core.sys.posix.ucontext".REG_RBP == 10);
     static assert(imported!"core.sys.posix.ucontext".REG_RBX == 11);
 
@@ -707,10 +714,7 @@ static if (supported) {
         const(ucontext_t)* context, size_t frame, const(void)* handler,
         ref const(imported!"core.sys.posix.signal".sigset_t) savedMask,
         bool nodefer) nothrow @nogc {
-        import core.sys.linux.unistd: syscall;
-        import core.sys.posix.sys.uio: iovec;
         import core.sys.posix.signal: sigaddset;
-        import core.sys.posix.unistd: getpid;
 
         // Linux x86-64 rt_sigreturn receives the context just after the
         // restorer slot. Relocate the kernel's actual frame, including its
@@ -747,28 +751,22 @@ static if (supported) {
         if (sp < 128 + length + low)
             brokenSignalFrame;
         const target = ((sp - 128 - length - low) & ~cast(size_t) 63) + low;
-        iovec local = iovec(cast(void*) source, length);
-        iovec remote = iovec(cast(void*) target, length);
-        // The kernel reports an inaccessible normal stack without delivering
-        // another fault recursively in this handler. A failed frame placement
-        // terminates with SIGSEGV, as a failed native signal delivery does.
-        enum processVmWritev = 311; // Linux x86-64 syscall ABI.
-        if (syscall(processVmWritev, getpid(), &local, size_t(1), &remote,
-                size_t(1), size_t(0)) != cast(ptrdiff_t) length)
-            brokenSignalFrame;
-        auto copy = cast(ucontext_t*) (target + size_t.sizeof);
-        if (copy.uc_mcontext.fpregs !is null)
-            copy.uc_mcontext.fpregs = cast(typeof(copy.uc_mcontext.fpregs))
-                (target + cast(size_t) copy.uc_mcontext.fpregs - source);
+        // Placement happens in assembly after switching RSP to this stack.
+        // Ordinary page faults can then grow a valid MAP_GROWSDOWN mapping;
+        // remote memory access cannot establish native stack accessibility.
         _forward.stack = cast(void*) target;
         _forward.handler = cast(void*) handler;
         _forward.info = cast(siginfo_t*) (target + cast(size_t) info - source);
-        _forward.context = copy;
+        _forward.context = cast(ucontext_t*) (target + size_t.sizeof);
         _forward.signal = signal;
         _forward.mask = savedMask;
         _forward.mask.__val[0] |= context.uc_sigmask.__val[0];
         if (!nodefer)
             sigaddset(&_forward.mask, signal);
+        _forward.source = cast(const(void)*) source;
+        _forward.length = length;
+        _forward.floatingPoint = context.uc_mcontext.fpregs is null ? null
+            : cast(void*) (target + cast(size_t) context.uc_mcontext.fpregs - source);
         return &_forward;
     }
 

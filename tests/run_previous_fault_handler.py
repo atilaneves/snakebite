@@ -651,3 +651,109 @@ def test_native_callee_saved_registers_at_callback_entry(normal_host, sig):
             capture_output=True, timeout=5,
         )
         assert result.returncode == 0, result
+
+
+PLACEMENT_HOST = r"""
+#define _GNU_SOURCE
+#include <signal.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <linux/seccomp.h>
+#include <linux/filter.h>
+#include <stddef.h>
+#include <errno.h>
+extern int rt_init(void);
+extern int install_saved_action(void);
+void native_fault(void) { *(volatile int *)0 = 42; }
+static char alternate[128 * 1024] __attribute__((aligned(64)));
+static volatile sig_atomic_t calls;
+static void previous(int sig) { ++calls; write(1, "callback\n", 9); }
+int main(int argc, char **argv) {
+    prctl(PR_SET_DUMPABLE, 0);
+    setenv("SNAKEBITE_NO_FAULT_HANDLER", "1", 1);
+    if (!rt_init()) return 97;
+    unsetenv("SNAKEBITE_NO_FAULT_HANDLER");
+    int target=atoi(argv[3]);
+    struct sigaction action={0};
+    action.sa_handler=previous;
+    if (sigaction(target, &action, 0)) return 96;
+    int mode=atoi(argv[2]);
+    stack_t alt={.ss_sp=alternate, .ss_size=sizeof alternate};
+    char *shared=0;
+    if (mode == 3) {
+        shared=mmap(0, sizeof alternate + 4096, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (shared == MAP_FAILED) return 93;
+        alt.ss_sp=shared;
+    }
+    if (sigaltstack(&alt, 0)) return 95;
+    if (atoi(argv[1]) && !install_saved_action()) return 94;
+    if (mode == 1 || mode == 3 || mode == 4) {
+        size_t extent=2 * 1024 * 1024, page=sysconf(_SC_PAGESIZE);
+        char *reserve=mmap(0, extent, PROT_NONE,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (reserve == MAP_FAILED || munmap(reserve, extent)) return 93;
+        void *sp;
+        if (mode == 3) {
+            // The two stack ranges share one mapping. The original kernel
+            // frame and the destination overlap when the normal RSP is just
+            // above the configured alternate range. This requires memmove.
+            sp=shared + sizeof alternate + 512;
+        } else {
+            char *stack=mmap(reserve + extent - page, page,
+                             mode == 4 ? PROT_READ : PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE |
+                             (mode == 1 ? MAP_GROWSDOWN : 0), -1, 0);
+            if (stack == MAP_FAILED) return 92;
+            sp=stack + 512;
+        }
+        long pid=getpid(), tid=syscall(SYS_gettid), result=SYS_tgkill;
+        __asm__ volatile("mov %%rsp,%%r12\n\t"
+                         "mov %[sp],%%rsp\n\t"
+                         "syscall\n\t"
+                         "mov %%r12,%%rsp"
+                         : "+a"(result)
+                         : "D"(pid), "S"(tid), "d"((long)target), [sp]"r"(sp)
+                         : "rcx", "r11", "r12", "memory");
+    } else {
+        if (mode == 2) {
+            struct sock_filter filter[]={
+                BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+                         offsetof(struct seccomp_data, nr)),
+                BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_process_vm_writev, 0, 1),
+                BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+                BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)};
+            struct sock_fprog program={.len=4, .filter=filter};
+            if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) ||
+                prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program)) return 91;
+        }
+        raise(target);
+    }
+    return calls == 1 ? 0 : 90;
+}
+"""
+
+
+@pytest.fixture(scope="module", params=PROFILES)
+def placement_host(request, tmp_path_factory):
+    return build_host(request, tmp_path_factory, PLACEMENT_HOST)
+
+
+@pytest.mark.parametrize("sig", [signal.SIGSEGV, signal.SIGFPE, signal.SIGBUS])
+@pytest.mark.parametrize("mode", [0, 1, 2, 3, 4])
+def test_native_normal_stack_placement(placement_host, sig, mode):
+    for installed in (False, True):
+        result = subprocess.run(
+            [str(placement_host), str(int(installed)), str(mode), str(sig.value)],
+            capture_output=True, timeout=5,
+        )
+        if mode == 4:
+            assert result.returncode == -signal.SIGSEGV.value, result
+            assert result.stdout == b"", result
+        else:
+            assert result.returncode == 0, result
+            assert result.stdout == b"callback\n", result

@@ -99,15 +99,44 @@ snakebite_fault_signal_entry:
     .cfi_restore %rbp
     test %rax,%rax
     jz .Lsignal_return
-    mov %rax,%rdi
+    mov %rax,%rbx
     mov 0(%rax),%r10
     mov 8(%rax),%r12
     mov 16(%rax),%r13
     mov 24(%rax),%r14
     mov 32(%rax),%r15d
+    mov 168(%rax),%rsi
+    mov 176(%rax),%rcx
     mov %r10,%rsp
+    mov %r10,%rdi
+    /* Use the normal stack before the first write. A legitimate growing
+     * stack gets ordinary user page faults, without a remote-write syscall
+     * or permission. All signals remain blocked through placement. A write
+     * to an inaccessible stack therefore terminates on its forced hardware
+     * fault rather than recursively entering our signal handler.
+     * The configured alternate range may share a mapping with this stack,
+     * so the two frames can overlap: use memmove order, not memcpy order.
+     */
+    cmp %rsi,%rdi
+    jbe .Lsignal_copy_forward
+    mov %rdi,%rax
+    sub %rsi,%rax
+    cmp %rcx,%rax
+    jae .Lsignal_copy_forward
+    lea -1(%rsi,%rcx),%rsi
+    lea -1(%rdi,%rcx),%rdi
+    std
+    rep movsb
+    cld
+    jmp .Lsignal_copy_done
+.Lsignal_copy_forward:
+    rep movsb
+.Lsignal_copy_done:
+    mov 184(%rbx),%rax
+    mov %rax,224(%r14)
+    /* Do not write this slot before the copy: it can overlap the source. */
     mov %r12,-8(%rsp)
-    lea 40(%rdi),%rsi
+    lea 40(%rbx),%rsi
     mov $2,%edi
     xor %edx,%edx
     mov $8,%r10d
