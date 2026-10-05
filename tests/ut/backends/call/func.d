@@ -508,7 +508,8 @@ static foreach (backend; Matrix!()) {
             assert(function_ !is null,
                 "No function `outer` in the guest program");
 
-            (new backend(Program([guestModule]))).call(function_, null, []);
+            auto instance = Owned!backend(Program([guestModule]));
+            instance.call(function_, null, []);
         }
     }
 }

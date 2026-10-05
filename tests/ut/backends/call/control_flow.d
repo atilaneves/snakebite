@@ -1248,7 +1248,7 @@ static foreach (backend; Matrix!()) {
             true.shouldBeRetOf!(backend, code, "result");
         else {
             auto module_ = parseSnippet(code);
-            auto backend_ = new backend(Program([module_]));
+            auto backend_ = Owned!backend(Program([module_]));
             Throwable[] values;
             backend_.call(findFunction(module_, "caughtExceptions"), &values, []);
             values.length.should == 3;

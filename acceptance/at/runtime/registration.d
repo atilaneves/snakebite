@@ -31,7 +31,8 @@ private size_t runsThatGiveBack(Backend)(
         const held = GuestModules.held;
         const entries = callbackEntriesInUse;
         auto program = Program([parseSnippet(code)]);
-        run(new Backend(program), program).should == status;
+        auto instance = Owned!Backend(program);
+        run(instance, program).should == status;
         if (GuestModules.held == held && callbackEntriesInUse == entries)
             ++givenBack;
     }

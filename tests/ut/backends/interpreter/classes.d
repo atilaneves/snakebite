@@ -47,7 +47,7 @@ unittest {
             return twin.value;
         }
     });
-    auto backend = new Interpreter(Program([module_]));
+    auto backend = Owned!Interpreter(Program([module_]));
 
     int result;
     backend.call(findFunction(module_, "guestValue"), &result, []);

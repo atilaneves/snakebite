@@ -59,7 +59,8 @@ static foreach (backend; AliasSeq!(Interpreter, Bytecode)) {
         })], "snakebite");
         string[] hostArguments = ["sb", "first", "second"];
 
-        run(new backend(program), program, hostArguments).should == 42;
+        auto instance = Owned!backend(program);
+        run(instance, program, hostArguments).should == 42;
     }
 }
 
@@ -124,7 +125,7 @@ static foreach (backend; Matrix!(
                         + refParam;
                 }
             });
-            auto backend_ = new backend(Program([module_]));
+            auto backend_ = Owned!backend(Program([module_]));
 
             // A `ref`/`out` parameter's own native bytes are the
             // target's address, one pointer wide (`Backend.call`'s own

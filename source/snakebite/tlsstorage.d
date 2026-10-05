@@ -76,6 +76,11 @@ public struct TlsSlots {
         _count = 0;
     }
 
+    // No copy that a guest pointer could reach was made.
+    public bool empty() const {
+        return _count == 0;
+    }
+
     public void[] slotFor(const(TlsDescriptor)* descriptor) {
         if (auto found = find(descriptor.key))
             return found.bytes[0 .. found.size];

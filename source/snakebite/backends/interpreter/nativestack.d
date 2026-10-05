@@ -132,10 +132,9 @@ public struct InterpreterStack {
             return;
         if (active)
             return;
-        assert(
-            munmap(_guard, _size + pageSize) == 0,
-            "could not release the interpreter's native stack",
-        );
+        const unmapped = munmap(_guard, _size + pageSize);
+        if (unmapped != 0)
+            assert(0, "could not release the interpreter's native stack");
     }
 
     // The initial `%rsp` for a call onto this stack: the stack's own high

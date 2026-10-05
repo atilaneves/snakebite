@@ -346,7 +346,7 @@ static foreach (backend; Matrix!(
         const directory = sandbox.inSandboxPath("app");
         const imports = [sandbox.inSandboxPath("deps")];
         auto project = prepareProject(directory, imports, optimise: Optimise.no).project;
-        scope instance = new backend(project.program);
+        auto instance = Owned!backend(project.program);
         run(instance, project.program).should == 0;
     }
 }
@@ -378,7 +378,7 @@ static foreach (backend; Matrix!(
         const directory = sandbox.inSandboxPath("app");
         const imports = [sandbox.inSandboxPath("deps")];
         auto project = prepareProject(directory, imports, optimise: Optimise.no).project;
-        scope instance = new backend(project.program);
+        auto instance = Owned!backend(project.program);
         run(instance, project.program).should == 0;
     }
 }
@@ -419,7 +419,7 @@ static foreach (backend; Matrix!(
         const directory = sandbox.inSandboxPath("app");
         const imports = [sandbox.inSandboxPath("deps")];
         auto project = prepareProject(directory, imports).project;
-        scope instance = new backend(project.program);
+        auto instance = Owned!backend(project.program);
         run(instance, project.program).should == 0;
     }
 }
@@ -476,7 +476,7 @@ static foreach (backend; Matrix!(
         const directory = sandbox.inSandboxPath("app");
         const imports = [sandbox.inSandboxPath("deps")];
         auto project = prepareProject(directory, imports).project;
-        scope instance = new backend(project.program);
+        auto instance = Owned!backend(project.program);
         run(instance, project.program).should == 0;
     }
 }
@@ -591,7 +591,7 @@ static foreach (backend; Matrix!()) {
             auto image = prepareImage(imageSource(program), sharedImageCache,
                 defaultCompiler, null, null, null, ["-w"], optimise: Optimise.no);
             program.dependencyImage = &image;
-            scope instance = new backend(program);
+            auto instance = Owned!backend(program);
             int result;
             instance.call(findFunction(module_, "answer"), &result, []);
             result.should == 17;
@@ -623,7 +623,7 @@ static foreach (backend; Matrix!()) {
             auto image = prepareImage(imageSource(program), sharedImageCache,
                 defaultCompiler, null, null, null, ["-w"], optimise: Optimise.no);
             program.dependencyImage = &image;
-            scope instance = new backend(program);
+            auto instance = Owned!backend(program);
             int result;
             instance.call(findFunction(module_, "answer"), &result, []);
             result.should == 2;
@@ -653,7 +653,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             });
             auto program = Program([module_]);
             program.dependencyImage = &image;
-            scope instance = new backend(program);
+            auto instance = Owned!backend(program);
             auto pointer = &value;
             int result;
             instance.call(findFunction(module_, "answer"), &result, [cast(void*) &pointer]);
@@ -824,7 +824,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             image.resolve(FetchAdd!(MemoryOrder.seq, int).mangleof)
                 .should.not == null;
             program.dependencyImage = &image;
-            scope instance = new backend(program);
+            auto instance = Owned!backend(program);
             int result;
             instance.call(findFunction(module_, "answer"), &result, []);
             result.should == 17;
@@ -858,7 +858,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             // A program can outlive the project that prepared its image.
             auto program = prepareProject(sandbox.sandboxPath, optimise: Optimise.no).project.program;
             program.dependencyImage.should.not == null;
-            scope instance = new backend(program);
+            auto instance = Owned!backend(program);
             run(instance, program).should == 0;
             const path = program.dependencyImage.path;
             const stamp = timeLastModified(path);
@@ -866,7 +866,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             auto reused = prepareProject(sandbox.sandboxPath, optimise: Optimise.no).project;
             reused.program.dependencyImage.path.should == path;
             timeLastModified(path).should == stamp;
-            scope second = new backend(reused.program);
+            auto second = Owned!backend(reused.program);
             run(second, reused.program).should == 0;
         }
     }
@@ -894,12 +894,12 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             const imports = [sandbox.inSandboxPath("deps")];
             auto project = prepareProject(directory, imports, optimise: Optimise.no).project;
             const firstPath = project.program.dependencyImage.path;
-            scope first = new backend(project.program);
+            auto first = Owned!backend(project.program);
             run(first, project.program).should == 7;
             sandbox.writeFile(dependencyPath, prefix ~ "int answer(T)() { return 9; }");
             auto changed = prepareProject(directory, imports, optimise: Optimise.no).project;
             changed.program.dependencyImage.path.should.not == firstPath;
-            scope second = new backend(changed.program);
+            auto second = Owned!backend(changed.program);
             run(second, changed.program).should == 9;
         }
     }
@@ -1021,7 +1021,7 @@ private string dependencyGlobalProject(
 
 private int runDependencyGlobalProject(backend)(in string directory) {
     auto project = prepareProject(directory, optimise: Optimise.no).project;
-    scope instance = new backend(project.program);
+    auto instance = Owned!backend(project.program);
     return run(instance, project.program);
 }
 
@@ -1053,7 +1053,7 @@ static foreach (backend; Matrix!(
         });
         const imports = [sandbox.inSandboxPath("deps")];
         auto project = prepareProject(sandbox.inSandboxPath("app"), imports, optimise: Optimise.no).project;
-        scope instance = new backend(project.program);
+        auto instance = Owned!backend(project.program);
         run(instance, project.program).should == 0;
     }
 }
@@ -1084,7 +1084,7 @@ static foreach (backend; Matrix!()) {
             auto program = Program([module_]);
             auto image = prepareImage(imageSource(program), sharedImageCache, optimise: Optimise.no);
             program.dependencyImage = &image;
-            scope instance = new backend(program);
+            auto instance = Owned!backend(program);
             int result;
             instance.call(findFunction(module_, "answer"), &result, []);
             result.should == 0;
@@ -1114,7 +1114,7 @@ static foreach (backend; Matrix!()) {
             auto program = Program([module_]);
             auto image = prepareImage(imageSource(program), sharedImageCache, optimise: Optimise.no);
             program.dependencyImage = &image;
-            scope instance = new backend(program);
+            auto instance = Owned!backend(program);
             int result;
             instance.call(findFunction(module_, "answer"), &result, []);
             result.should == 7;
@@ -1139,7 +1139,7 @@ static foreach (backend; Matrix!()) {
             auto program = Program([module_]);
             auto image = prepareImage(imageSource(program), sharedImageCache, optimise: Optimise.no);
             program.dependencyImage = &image;
-            scope instance = new backend(program);
+            auto instance = Owned!backend(program);
             int result;
             instance.call(findFunction(module_, "answer"), &result, []);
             result.should == 123;
@@ -1168,7 +1168,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             auto program = Program([module_]);
             auto image = prepareImage(imageSource(program), sharedImageCache, optimise: Optimise.no);
             program.dependencyImage = &image;
-            scope instance = new backend(program);
+            auto instance = Owned!backend(program);
             int result;
             instance.call(findFunction(module_, "answer"), &result, []);
             result.should == 17;
@@ -1384,7 +1384,7 @@ static foreach (backend; Matrix!()) {
             auto module_ = parseSnippet(code);
             auto program = Program([module_]);
             imageSource(program);
-            scope instance = new backend(program);
+            auto instance = Owned!backend(program);
             int result;
             instance.call(findFunction(module_, "answer"), &result, []);
             result.should == 17;
@@ -1452,7 +1452,7 @@ static foreach (backend; Matrix!(
             project.program.dependencyImage.resolve("image_unused_answer");
         unused.should.not == null;
         unused().should == 73;
-        scope instance = new backend(project.program);
+        auto instance = Owned!backend(project.program);
         run(instance, project.program).should == 0;
         const path = project.program.dependencyImage.path;
         const stamp = timeLastModified(archive);

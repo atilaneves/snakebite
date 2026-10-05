@@ -24,7 +24,11 @@ public auto heapNew(T, Args...)(auto ref Args args) {
     if (memory is null)
         assert(0, "out of memory for the state of a thread");
     GC.addRange(memory, size);
+    version(unittest)
+        ++_heapObjects;
     scope(failure) {
+        version(unittest)
+            --_heapObjects;
         GC.removeRange(memory);
         free(memory);
     }
@@ -45,14 +49,28 @@ public void heapDelete(T)(T state) {
         destroy(*state);
     GC.removeRange(cast(void*) state);
     free(cast(void*) state);
+    version(unittest)
+        --_heapObjects;
+}
+
+// `heapNew` calls minus `heapDelete` calls made on the calling thread. An
+// object that one thread makes and another deletes skews both counters, so
+// a reader must make and delete on one thread.
+version(unittest) {
+    private size_t _heapObjects;
+
+    public size_t heapObjectsOfThisThread() {
+        return _heapObjects;
+    }
 }
 
 
 // How a backend keeps the state one thread needs to run guest code
 // (ADR-0006): its frame stack, its evaluator, its per-thread caches. The
 // state for a thread is created the first time that thread enters guest
-// code through the owning backend, and released when the thread ends. A
-// state whose owner and thread are both gone is garbage like any other
+// code through the owning backend. It is released when the owner's handle
+// ends, on the owner's thread (`release`), and when any other thread ends.
+// A state whose owner and thread are both gone is garbage like any other
 // object, and the GC runs its destructor; nothing here runs one from a
 // finalizer, because the GC finalizes garbage in no fixed order.
 //
@@ -61,12 +79,11 @@ public void heapDelete(T)(T state) {
 // stale entry can survive for a later thread that happens to get the
 // same reused `ThreadID`, and no thread ever sees another thread's
 // entry. This is a lifetime of its own, though, not a weak one: the
-// thread's own table holds every backend's state it ever entered, so a
-// long-lived thread - a task pool worker, `main` - keeps every backend
-// it ever entered alive for as long as the thread itself lives, even
-// after the backend that made a given state is otherwise unreachable
-// (finding 5, issue #40 review). `current` reads that table directly,
-// with no lock, on every call after this thread's first. Only the
+// thread's own table holds the state of every backend the thread entered
+// and that nobody released. A thread that enters a backend after its owner
+// released it, such as a GC finalizer that runs a guest destructor, makes a
+// new state that stays until the thread ends. `current` reads that table
+// directly, with no lock, on every call after this thread's first. Only the
 // first call on a thread, which creates this thread's own state, calls
 // `attachedThread` to make sure druntime knows the thread (ADR-0005).
 //
@@ -157,6 +174,31 @@ public struct PerThread(State, bool fiberLocal = false) {
         _cachedKey = key;
         _cachedState = state;
         return state;
+    }
+
+    // Releases every state this `PerThread` made on the calling thread,
+    // and no other thread's: the owner calls it when it ends. Without it
+    // the states, and the frame stacks they hold, stay until the thread
+    // ends. A later entry on this thread makes a new state. A state stays,
+    // until the thread ends, when `releasable` says no.
+    public void release(bool function(State) releasable = null) {
+        import core.lifetime: move;
+
+        CStack!(Held, true) all;
+        move(_held, all);
+        // The C heap: a GC allocation here could run a finalizer that
+        // enters guest code while `_held` is empty.
+        CStack!(State, true) doomed;
+        foreach (held; all[])
+            if (held.key.owner == _core.id
+                    && (releasable is null || releasable(held.state)))
+                doomed.push(held.state);
+            else
+                _held.push(held);
+        _cachedKey = Key(size_t.max);
+        _cachedState = State.init;
+        foreach (state; doomed[])
+            heapDelete(state);
     }
 
     private static void releaseThisThread() {
@@ -268,8 +310,9 @@ private void runThreadEndHooks() nothrow {
 
 static ~this() {
     // druntime collects garbage after the main thread's module destructors.
-    // Guest finalizers still need its state then. Keep that state rooted
-    // until process exit; worker threads release theirs when they end.
+    // Guest finalizers still need the state that owners did not release.
+    // Keep that state rooted until process exit; worker threads release
+    // theirs when they end.
     if (Thread.getThis !is null && Thread.getThis.isMainThread)
         return;
     runThreadEndHooks;

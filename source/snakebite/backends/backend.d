@@ -178,6 +178,44 @@ public struct CompilationStatistics {
 }
 
 
+// Owns one backend: the only release of the execution state the backend
+// made for the calling thread while that thread lives (its frame stacks
+// stay GC roots until then; the end of a thread also releases it). A site
+// that holds the handle cannot forget to release.
+// The backend itself stays on the GC heap: callback entries and guest
+// finalizers can still reach it. A handle must not be a member of a GC
+// object: the destructor calls a virtual function, and the GC can finalize
+// the backend first.
+public struct Owned(B : Backend) {
+    private B _backend;
+
+    @disable this(this);
+
+    public this(B backend) {
+        _backend = backend;
+    }
+
+    static if (!__traits(isAbstractClass, B)) {
+        public this(const Program program) {
+            _backend = new B(program);
+        }
+    }
+
+    ~this() {
+        // `release` is protected: through the base class it is visible here.
+        Backend base = _backend;
+        if (base !is null)
+            base.release;
+    }
+
+    public B backend() {
+        return _backend;
+    }
+
+    alias backend this;
+}
+
+
 public abstract class Backend {
     import dmd.dmodule: Module;
     import dmd.func: FuncDeclaration;
@@ -189,6 +227,18 @@ public abstract class Backend {
 
     protected this(const Program program) {
         _program = program;
+    }
+
+    // Gives back the execution state, with its frame stacks, that this
+    // backend made for the calling thread. A later call of the backend on
+    // this thread, such as a GC finalizer that runs a guest destructor,
+    // makes a new state, and nothing releases that state before the thread
+    // ends. Nothing limits their number: a REPL session whose cells leave
+    // such objects keeps a state for most of them (ADR-0006 has measured
+    // numbers). Host callback entries stay, and so do the guest
+    // thread-local variables that a program touched: an object that is not
+    // finalized yet can still call through them or point into them.
+    protected void release() {
     }
 
     // Read-only cumulative statistics. Backends without a compilation phase
