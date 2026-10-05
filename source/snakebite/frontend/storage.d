@@ -232,6 +232,8 @@ public struct StorageResolver(Result, Adapter) {
     private Result assignmentResult(
         AssignExp expression, Expression targetExpression,
     ) {
+        import snakebite.backends.sliceplan: planSlice;
+
         if (expression.memset == MemorySet.referenceInit)
             return _adapter.storageReferenceInit(expression);
 
@@ -241,8 +243,11 @@ public struct StorageResolver(Result, Adapter) {
         auto target = resolve(targetExpression);
         // dmd marks `a[] = v` with `blockAssign` exactly when it cast `v`
         // to the element type. Every other slice assignment has an array
-        // on the right side, whose elements are copied.
-        if (expression.e1.isSliceExp is null)
+        // on the right side, whose elements are copied. A slice that dmd
+        // typed as a static array (`cast(T[N]) a[lo .. hi] = v`) is the
+        // place of those elements, so it is assigned like any lvalue.
+        if (expression.e1.isSliceExp is null
+                || planSlice(expression.e1.isSliceExp).yieldsStaticArray)
             _adapter.storagePlainAssignment(expression, target);
         else if (expression.memset == MemorySet.blockAssign)
             _adapter.storageSliceFill(expression, target);

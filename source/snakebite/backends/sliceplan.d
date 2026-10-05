@@ -18,6 +18,10 @@ public struct SlicePlan {
     public bool checkOrder;
     public bool checkUpper;
     public bool reportsSourceLength;
+    // dmd types a slice with compile-time bounds as `T[N]` when it converts
+    // it to a static array. Its value is then the `N` elements in place, an
+    // lvalue, not a length and pointer.
+    public bool yieldsStaticArray;
 }
 
 public SlicePlan planSlice(imported!"dmd.expression".SliceExp expression) {
@@ -27,5 +31,6 @@ public SlicePlan planSlice(imported!"dmd.expression".SliceExp expression) {
         !expression.lowerIsLessThanUpper,
         !isPointer && !expression.upperIsInBounds,
         !isPointer,
+        expression.type.toBasetype.isTypeSArray !is null,
     );
 }

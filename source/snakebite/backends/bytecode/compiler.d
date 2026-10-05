@@ -4584,10 +4584,42 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // A dynamic array's whole slice is the same two words as the array
     // itself, so it does not need the bounds work of a bounded slice.
     override void visit(SliceExp expression) {
+        requireDestination(expression);
+
+        if (planSlice(expression).yieldsStaticArray) {
+            const address = compileSlicePointer(expression);
+            emit(&opLoadIndirect, _destination, address, _width);
+            return;
+        }
+        compileSliceHeader(expression);
+    }
+
+    // The address of the elements a slice names, as a word in a temporary.
+    private size_t compileSlicePointer(SliceExp expression) {
+        import snakebite.nativelayout:
+            arrayLengthOffset, arrayPointerOffset, arrayValueSize;
+
+        const sliceFacts = TypeFacts(
+            arrayValueSize, size_t.alignof, false, false, true,
+            TypeFacts.of(expression.e1.type.nextOf).size,
+        );
+        const header = reserveTemp(sliceFacts);
+
+        const destination = _destination;
+        const width = _width;
+        scope (exit) {
+            _destination = destination;
+            _width = width;
+        }
+        _destination = header;
+        _width = arrayValueSize;
+        compileSliceHeader(expression);
+        return header + arrayPointerOffset;
+    }
+
+    private void compileSliceHeader(SliceExp expression) {
         import dmd.astenums: TY;
         import std.conv: text;
-
-        requireDestination(expression);
 
         auto sourceType = expression.e1.type.toBasetype;
         final switch (sourceType.ty) with (TY) {
@@ -7392,6 +7424,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         public size_t storageSlice(SliceExp expression) {
+            if (planSlice(expression).yieldsStaticArray)
+                return compiler.compileSlicePointer(expression);
             return storageValue(expression);
         }
 
