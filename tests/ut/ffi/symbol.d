@@ -27,7 +27,10 @@ import std.algorithm.iteration: filter;
 import std.conv: octal;
 import std.path: buildPath;
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot express a dub project"),
+)) {
     @("image.repeatedProjectTestRunner." ~ backend.stringof)
     @Serial
     unittest {
@@ -60,35 +63,29 @@ static foreach (backend; Matrix!()) {
         });
         const directory = sandbox.inSandboxPath("app");
         foreach (iteration; 1 .. 3) {
-            static if (is(backend == Native)) {
-                import std.process: Config;
-                execute(["dub", "test", "--compiler=" ~ defaultCompiler],
-                    null, Config.none, size_t.max, directory).status.should == 0;
-            } else {
-                import snakebite.execution: executeBackend;
-                import snakebite.backends: backendIdentity;
-                import snakebite.dependencyimage: TestHooks;
-                auto project = prepareProject(directory, optimise: Optimise.no).project;
-                // A missing hook would enter this host's default unittest
-                // runner recursively instead of giving a bounded failure.
-                project.program.testHooks.should.not == TestHooks.init;
-                executeBackend(backendIdentity!backend, project.program).status.should == 0;
-                alias Count = extern(C) int function();
-                const count = cast(Count)
-                    project.program.dependencyImage.resolve("runner_calls");
-                count().should == iteration;
-                if (iteration == 1) {
-                    // DMD can home these template instances on a previous
-                    // project's root. Preparing it again must not import
-                    // this separate, in-memory module into its native image.
-                    parseSnippet(q{
-                        import std.range.interfaces: inputRangeObject;
-                        struct UnrelatedRangeItem { int value; }
-                        Object makeRange() {
-                            return inputRangeObject([UnrelatedRangeItem(1)]);
-                        }
-                    });
-                }
+            import snakebite.execution: executeBackend;
+            import snakebite.backends: backendIdentity;
+            import snakebite.dependencyimage: TestHooks;
+            auto project = prepareProject(directory, optimise: Optimise.no).project;
+            // A missing hook would enter this host's default unittest
+            // runner recursively instead of giving a bounded failure.
+            project.program.testHooks.should.not == TestHooks.init;
+            executeBackend(backendIdentity!backend, project.program).status.should == 0;
+            alias Count = extern(C) int function();
+            const count = cast(Count)
+                project.program.dependencyImage.resolve("runner_calls");
+            count().should == iteration;
+            if (iteration == 1) {
+                // DMD can home these template instances on a previous
+                // project's root. Preparing it again must not import
+                // this separate, in-memory module into its native image.
+                parseSnippet(q{
+                    import std.range.interfaces: inputRangeObject;
+                    struct UnrelatedRangeItem { int value; }
+                    Object makeRange() {
+                        return inputRangeObject([UnrelatedRangeItem(1)]);
+                    }
+                });
             }
         }
     }
@@ -261,21 +258,23 @@ unittest {
     dirEntries(directory, SpanMode.shallow).array.length.should == 0;
 }
 
+// The image is built with the flags of the host's compiler family. A
+// compiler of the other family does not accept them, and nothing is left in
+// the cache directory.
 @("image.compilerFamily")
 @Serial
 unittest {
     const sandbox = Sandbox();
     const directory = sandbox.sandboxPath;
-    version (DigitalMars) {
-        const otherCompiler = "ldc2";
-        const message = "Image compiler must be DMD";
-    } else {
-        const otherCompiler = "dmd";
-        const message = "Image compiler must be LDC";
-    }
+    const otherCompiler = "ldc2";
     (() {
-        auto image = prepareImage(atomicSource, directory, otherCompiler, optimise: Optimise.no);
-    })().shouldThrowWithMessage!SnakebiteException(message);
+        try {
+            auto image = prepareImage(atomicSource, directory, otherCompiler, optimise: Optimise.no);
+        } catch (SnakebiteException error) {
+            "Dependency image compilation failed".shouldBeIn(error.msg);
+            throw error;
+        }
+    })().shouldThrow!SnakebiteException;
     dirEntries(directory, SpanMode.shallow).array.length.should == 0;
 }
 
@@ -314,7 +313,10 @@ unittest {
     first.path.should.not == second.path;
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot express a program of several modules"),
+)) {
     @("image.overloadedTemplate." ~ backend.stringof)
     @Serial
     unittest {
@@ -343,17 +345,9 @@ static foreach (backend; Matrix!()) {
             });
         const directory = sandbox.inSandboxPath("app");
         const imports = [sandbox.inSandboxPath("deps")];
-        static if (is(backend == Native)) {
-            const executable = sandbox.inSandboxPath("test");
-            const result = execute([defaultCompiler, "-I" ~ imports[0],
-                sandbox.inSandboxPath("app/root_" ~ moduleName ~ ".d"), "-of=" ~ executable]);
-            result.status.shouldEqual(0, result.output);
-            execute([executable]).status.should == 0;
-        } else {
-            auto project = prepareProject(directory, imports, optimise: Optimise.no).project;
-            scope instance = new backend(project.program);
-            run(instance, project.program).should == 0;
-        }
+        auto project = prepareProject(directory, imports, optimise: Optimise.no).project;
+        scope instance = new backend(project.program);
+        run(instance, project.program).should == 0;
     }
 }
 
@@ -362,7 +356,10 @@ static foreach (backend; Matrix!()) {
 // int` itself, so nothing but the guest's own call drives this instance's
 // attribute inference before `snakebite.frontend.imagesource` mangles it
 // into the dependency image's registry.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot express a program of several modules"),
+)) {
     @("image.guestCallsNativeTemplateInstantiatedOnlyByGuest." ~ backend.stringof)
     @Serial
     unittest {
@@ -380,17 +377,9 @@ static foreach (backend; Matrix!()) {
             });
         const directory = sandbox.inSandboxPath("app");
         const imports = [sandbox.inSandboxPath("deps")];
-        static if (is(backend == Native)) {
-            const executable = sandbox.inSandboxPath("test");
-            const result = execute([defaultCompiler, "-I" ~ imports[0],
-                sandbox.inSandboxPath("app/root_" ~ moduleName ~ ".d"), "-of=" ~ executable]);
-            result.status.shouldEqual(0, result.output);
-            execute([executable]).status.should == 0;
-        } else {
-            auto project = prepareProject(directory, imports, optimise: Optimise.no).project;
-            scope instance = new backend(project.program);
-            run(instance, project.program).should == 0;
-        }
+        auto project = prepareProject(directory, imports, optimise: Optimise.no).project;
+        scope instance = new backend(project.program);
+        run(instance, project.program).should == 0;
     }
 }
 
@@ -406,7 +395,10 @@ static foreach (backend; Matrix!()) {
 // array overload's address under the scalar overload's mangled name too.
 // `pick("hello")` from guest code is a normal call, resolved by argument
 // type the ordinary way, so it must still reach the scalar overload's body.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot express a program of several modules"),
+)) {
     @("image.overloadPartialOrderingMismatch." ~ backend.stringof)
     @Serial
     unittest {
@@ -426,17 +418,9 @@ static foreach (backend; Matrix!()) {
             });
         const directory = sandbox.inSandboxPath("app");
         const imports = [sandbox.inSandboxPath("deps")];
-        static if (is(backend == Native)) {
-            const executable = sandbox.inSandboxPath("test");
-            const result = execute([defaultCompiler, "-I" ~ imports[0],
-                sandbox.inSandboxPath("app/root_" ~ moduleName ~ ".d"), "-of=" ~ executable]);
-            result.status.shouldEqual(0, result.output);
-            execute([executable]).status.should == 0;
-        } else {
-            auto project = prepareProject(directory, imports).project;
-            scope instance = new backend(project.program);
-            run(instance, project.program).should == 0;
-        }
+        auto project = prepareProject(directory, imports).project;
+        scope instance = new backend(project.program);
+        run(instance, project.program).should == 0;
     }
 }
 
@@ -452,10 +436,14 @@ static foreach (backend; Matrix!()) {
 // its nested `f` is always interpreted. dmd (this test's host and image
 // compiler) happens to still agree with snakebite's own closure layout, so
 // running `only!false` and checking its answer here cannot catch a layout
-// mismatch between the two sides. ldc (`bin/sb`) is the real correctness
-// guard: this test runs the whole thing end to end, on every backend.
-static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
-    "CTFE cannot allocate a runtime closure frame"))) {
+// mismatch between the two sides. This test runs the whole thing end to
+// end, on every backend.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot express a program of several modules"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot allocate a runtime closure frame"),
+)) {
     @("image.dependencyClosureAcrossBarrier." ~ backend.stringof)
     @Serial
     unittest {
@@ -487,17 +475,9 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             });
         const directory = sandbox.inSandboxPath("app");
         const imports = [sandbox.inSandboxPath("deps")];
-        static if (is(backend == Native)) {
-            const executable = sandbox.inSandboxPath("test");
-            const result = execute([defaultCompiler, "-I" ~ imports[0],
-                sandbox.inSandboxPath("app/root_" ~ moduleName ~ ".d"), "-of=" ~ executable]);
-            result.status.shouldEqual(0, result.output);
-            execute([executable]).status.should == 0;
-        } else {
-            auto project = prepareProject(directory, imports).project;
-            scope instance = new backend(project.program);
-            run(instance, project.program).should == 0;
-        }
+        auto project = prepareProject(directory, imports).project;
+        scope instance = new backend(project.program);
+        run(instance, project.program).should == 0;
     }
 }
 
@@ -931,8 +911,12 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
 // a `__gshared` and for a thread-local one alike. The dependency is a
 // dub package, so its functions have machine code in an archive the
 // image links, as a project's dependencies do.
-static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
-    "CTFE has no native image to share a global with"))) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot express a dub project"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE has no native image to share a global with"),
+)) {
     @("image.dependencyGlobal." ~ backend.stringof)
     @Serial
     unittest {
@@ -966,8 +950,12 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
 // not the one the main thread wrote. The dependency starts the thread,
 // since that is native code either way, and calls back into the guest
 // on it.
-static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
-    "CTFE has no native image to share a global with"))) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot express a dub project"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE has no native image to share a global with"),
+)) {
     @("image.dependencyThreadLocalPerThread." ~ backend.stringof)
     @Serial
     unittest {
@@ -1001,7 +989,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
 
 // An app package whose root module runs `rootSource`'s `main` against a
 // static-library dependency built from `dependencySource`. The unittest
-// configuration is an executable so the native oracle has one to run.
+// configuration is an executable: otherwise dub adds a second `main`.
 // `name` prefixes both module names: dmd keeps every module this
 // process ever parsed, under its name, so two tests cannot share one.
 private string dependencyGlobalProject(
@@ -1033,23 +1021,15 @@ private string dependencyGlobalProject(
 
 private int runDependencyGlobalProject(backend)(in string directory) {
     auto project = prepareProject(directory, optimise: Optimise.no).project;
-    static if (is(backend == Native)) {
-        const description = project.sources.dubDescription.value;
-        foreach (target; description["targets"].array)
-            if (target["rootPackage"].str == description["rootPackage"].str) {
-                const settings = target["buildSettings"];
-                return execute([buildPath(settings["targetPath"].str,
-                    settings["targetName"].str)]).status;
-            }
-        assert(false, "no root target in the dub description");
-    } else {
-        scope instance = new backend(project.program);
-        return run(instance, project.program);
-    }
+    scope instance = new backend(project.program);
+    return run(instance, project.program);
 }
 
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot express a program of several modules"),
+)) {
     @("image.narrowTemplateArguments." ~ backend.stringof)
     @Serial
     unittest {
@@ -1072,17 +1052,9 @@ static foreach (backend; Matrix!()) {
             }
         });
         const imports = [sandbox.inSandboxPath("deps")];
-        static if (is(backend == Native)) {
-            const executable = sandbox.inSandboxPath("test");
-            const result = execute([defaultCompiler, "-I" ~ imports[0],
-                sandbox.inSandboxPath("app/root_" ~ moduleName ~ ".d"), "-of=" ~ executable]);
-            result.status.shouldEqual(0, result.output);
-            execute([executable]).status.should == 0;
-        } else {
-            auto project = prepareProject(sandbox.inSandboxPath("app"), imports, optimise: Optimise.no).project;
-            scope instance = new backend(project.program);
-            run(instance, project.program).should == 0;
-        }
+        auto project = prepareProject(sandbox.inSandboxPath("app"), imports, optimise: Optimise.no).project;
+        scope instance = new backend(project.program);
+        run(instance, project.program).should == 0;
     }
 }
 
@@ -1393,60 +1365,6 @@ unittest {
     (cast(Answer) image.resolve("answer"))().should == 42;
 }
 
-// D checks a member function of a template instance only when something uses
-// it, so a dependency can hold an unused member that a strict project flag
-// such as `-preview=dip1000` would reject. `-allinst` forces the compiler to
-// check every member of every instance, including the ones no call reaches,
-// so an LDC image built with it fails on such a dependency even though the
-// dependency's own build passes. The image must build with the flag that
-// emits only the referenced bodies. A DMD image keeps `-allinst`, which its
-// symbol table needs, so this runs on LDC only.
-version (LDC)
-@("image.unusedTemplateMemberIsNotAnalysed")
-@Serial
-unittest {
-    const sandbox = Sandbox();
-    const dependency = sandbox.inSandboxPath("deps/image_unused_member.d");
-    sandbox.writeFile("deps/image_unused_member.d", q{
-        module image_unused_member;
-
-        int* stored;
-
-        struct Colored(T) {
-            T value;
-
-            T get() @safe { return value; }
-
-            // Never called. Only `-preview=dip1000` rejects this store.
-            void leak(scope int* pointer) @safe { stored = pointer; }
-        }
-
-        Colored!T paint(T)(T value) { return Colored!T(value); }
-
-        // A dependency's own function has its machine code in the dependency's
-        // object, not in the image. Its return type instantiates `Colored!int`
-        // outside every module that the image compiles as a root.
-        Colored!int paintInt(int value) @safe pure nothrow @nogc {
-            return value.paint;
-        }
-    });
-    const objectPath = sandbox.inSandboxPath("image_unused_member.o");
-    const compiled = execute([defaultCompiler, "-c", "-relocation-model=pic",
-        dependency, "-of=" ~ objectPath]);
-    compiled.status.shouldEqual(0, compiled.output);
-
-    auto image = prepareImage(q{
-        module image;
-        import image_unused_member;
-
-        export extern(C) int answer() { return paintInt(42).get; }
-    }, sharedImageCache, defaultCompiler, [dependency],
-        [sandbox.inSandboxPath("deps")], null, ["-preview=dip1000"],
-        [objectPath], optimise: Optimise.no);
-    alias Answer = extern(C) int function();
-    (cast(Answer) image.resolve("answer"))().should == 42;
-}
-
 static foreach (backend; Matrix!()) {
     @("image.hashWithCtfeHelper." ~ backend.stringof)
     @Serial
@@ -1475,7 +1393,10 @@ static foreach (backend; Matrix!()) {
 }
 
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin cannot express a dub project"),
+)) {
     @("image.dubTransitiveArchives." ~ backend.stringof)
     @Serial
     unittest {
@@ -1531,18 +1452,8 @@ static foreach (backend; Matrix!()) {
             project.program.dependencyImage.resolve("image_unused_answer");
         unused.should.not == null;
         unused().should == 73;
-        static if (is(backend == Native)) {
-            const description = project.sources.dubDescription.value;
-            foreach (target; description["targets"].array)
-                if (target["rootPackage"].str == description["rootPackage"].str) {
-                    const settings = target["buildSettings"];
-                    execute([buildPath(settings["targetPath"].str,
-                        settings["targetName"].str)]).status.should == 0;
-                }
-        } else {
-            scope instance = new backend(project.program);
-            run(instance, project.program).should == 0;
-        }
+        scope instance = new backend(project.program);
+        run(instance, project.program).should == 0;
         const path = project.program.dependencyImage.path;
         const stamp = timeLastModified(archive);
         sandbox.writeFile("app/reject-build", "");

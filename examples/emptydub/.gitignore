@@ -1,0 +1,17 @@
+.dub
+docs.json
+__dummy.html
+docs/
+/emptydub
+emptydub.so
+emptydub.dylib
+emptydub.dll
+libemptydub.a
+emptydub.a
+emptydub.lib
+emptydub-test-*
+*.exe
+*.pdb
+*.o
+*.obj
+*.lst

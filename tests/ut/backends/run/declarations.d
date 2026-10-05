@@ -8,7 +8,6 @@ module ut.backends.run.declarations;
 
 import ut.backends;
 import snakebite.backends.backend: Program, run;
-import snakebite.dependencyimage: defaultCompiler;
 import snakebite.frontend.compiler: parseSnippet;
 import std.process: execute;
 
@@ -31,75 +30,80 @@ static foreach (backend; Matrix!()) {
 }
 
 
-static foreach (withTls; [false, true])
+// A shared module constructor and, with `withTls`, a thread-local one run
+// before a thread's callback does.
+private enum threadConstructorsGuest(bool withTls) = "enum withTls = "
+    ~ (withTls ? "true;" : "false;") ~ q{
+    import core.thread: Thread;
+
+    __gshared int sharedCalls;
+    shared static this() {
+        ++sharedCalls;
+    }
+
+    static if (withTls) {
+        int value;
+        int calls;
+        static this() {
+            value = 42;
+            ++calls;
+        }
+    }
+
+    void worker() {
+        assert(sharedCalls == 1);
+        static if (withTls) {
+            assert(value == 42);
+            assert(calls == 1);
+            value = 99;
+        }
+    }
+
+    void main() {
+        assert(sharedCalls == 1);
+        static if (withTls) {
+            assert(value == 42);
+            assert(calls == 1);
+            value = 7;
+        }
+        foreach (i; 0 .. 2) {
+            auto thread = new Thread(&worker);
+            thread.start;
+            thread.join;
+        }
+        assert(sharedCalls == 1);
+        static if (withTls) {
+            assert(value == 7);
+            assert(calls == 1);
+        }
+    }
+};
+
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot run thread-local module initialization"),
 )) {
     @("threadModuleConstructorBeforeCallback." ~ backend.stringof
-        ~ (withTls ? ".withTls" : ".sharedOnly"))
+        ~ ".sharedOnly")
     @Tags(backend.stringof)
     unittest {
-        enum code = "module thread_constructors"
-            ~ (withTls ? "_tls;" : "_shared;")
-            ~ "enum withTls = " ~ (withTls ? "true;" : "false;") ~ q{
-            import core.thread: Thread;
+        0.shouldBeStatusOf!(backend, threadConstructorsGuest!false);
+    }
+}
 
-            __gshared int sharedCalls;
-            shared static this() {
-                ++sharedCalls;
-            }
 
-            static if (withTls) {
-                int value;
-                int calls;
-                static this() {
-                    value = 42;
-                    ++calls;
-                }
-            }
-
-            void worker() {
-                assert(sharedCalls == 1);
-                static if (withTls) {
-                    assert(value == 42);
-                    assert(calls == 1);
-                    value = 99;
-                }
-            }
-
-            void main() {
-                assert(sharedCalls == 1);
-                static if (withTls) {
-                    assert(value == 42);
-                    assert(calls == 1);
-                    value = 7;
-                }
-                foreach (i; 0 .. 2) {
-                    auto thread = new Thread(&worker);
-                    thread.start;
-                    thread.join;
-                }
-                assert(sharedCalls == 1);
-                static if (withTls) {
-                    assert(value == 7);
-                    assert(calls == 1);
-                }
-            }
-        };
-        static if (is(backend == Native)) {
-            const sandbox = Sandbox();
-            sandbox.writeFile("thread_constructors.d", code);
-            const executable = sandbox.inSandboxPath("test");
-            const result = execute([defaultCompiler,
-                sandbox.inSandboxPath("thread_constructors.d"),
-                "-of=" ~ executable]);
-            result.status.shouldEqual(0, result.output);
-            execute([executable]).status.should == 0;
-        } else {
-            auto program = Program([parseSnippet(code)]);
-            run(new backend(program), program).should == 0;
-        }
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin runs a thread-local constructor on one thread only"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run thread-local module initialization"),
+)) {
+    @("threadModuleConstructorBeforeCallback." ~ backend.stringof
+        ~ ".withTls")
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, threadConstructorsGuest!true);
     }
 }
 
@@ -120,28 +124,23 @@ private enum crtTrace = q{
 // Runs `code` as a whole program the way compiled D runs it, module
 // constructors and destructors included, and returns the exit status. The
 // guest finds `traceFile`, a path in `sandbox`, and writes what it observed
-// there. The native oracle builds an executable: `Guest.main` called from a
-// struct would never run the module's constructors or destructors.
+// there. The tests below state the trace of compiled D as a literal. The
+// constructors and destructors of a mixin run when `bin/ut` starts and ends,
+// not around `main`, so the `Native` arm cannot make a trace of their order
+// with `main`.
 private int programStatus(Backend)(in Sandbox sandbox, in string code) {
     const source = "enum traceFile = `" ~ sandbox.inSandboxPath("trace")
         ~ "`;\nvoid trace(string text) {"
         ~ " import std.file: append; traceFile.append(text); }\n"
         ~ crtTrace ~ code;
-    static if (is(Backend == Native)) {
-        sandbox.writeFile("guest.d", source);
-        const executable = sandbox.inSandboxPath("guest");
-        const built = execute([defaultCompiler,
-            sandbox.inSandboxPath("guest.d"), "-of=" ~ executable]);
-        built.status.shouldEqual(0, built.output);
-        return execute([executable]).status;
-    } else {
-        auto program = Program([parseSnippet(source)]);
-        return run(new Backend(program), program);
-    }
+    auto program = Program([parseSnippet(source)]);
+    return run(new Backend(program), program);
 }
 
 
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin runs module constructors and destructors when `bin/ut` starts and ends, not around the guest `main`"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
 )) {
     @("moduleDestructorRunsAfterMain." ~ backend.stringof)
@@ -160,6 +159,8 @@ static foreach (backend; Matrix!(
 // Destructors run in the reverse of declaration order. The main thread's
 // `static ~this` run before every `shared static ~this`.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin runs module constructors and destructors when `bin/ut` starts and ends, not around the guest `main`"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
 )) {
     @("moduleDestructorsRunInReverseOrder." ~ backend.stringof)
@@ -179,6 +180,8 @@ static foreach (backend; Matrix!(
 
 
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin runs module constructors and destructors when `bin/ut` starts and ends, not around the guest `main`"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
 )) {
     @("moduleDestructorRunsAfterMainThrows." ~ backend.stringof)
@@ -200,6 +203,8 @@ static foreach (backend; Matrix!(
 // An exception from a destructor ends the destructor phase: the destructors
 // that would run after it do not, and a program that succeeded now fails.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin runs module constructors and destructors when `bin/ut` starts and ends, not around the guest `main`"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
 )) {
     @("moduleDestructorThatThrowsFailsTheProgram." ~ backend.stringof)
@@ -221,6 +226,8 @@ static foreach (backend; Matrix!(
 
 // A program whose startup failed never ran its module destructors.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin runs module constructors and destructors when `bin/ut` starts and ends, not around the guest `main`"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
 )) {
     @("moduleDestructorDoesNotRunAfterFailedConstructor." ~ backend.stringof)
@@ -241,6 +248,8 @@ static foreach (backend; Matrix!(
 // `pragma(crt_constructor)` functions run before every module constructor,
 // and `pragma(crt_destructor)` functions run after every module destructor.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin runs module constructors and destructors when `bin/ut` starts and ends, not around the guest `main`"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
 )) {
     @("crtFunctionsSurroundTheModulePhases." ~ backend.stringof)
@@ -263,6 +272,8 @@ static foreach (backend; Matrix!(
 // The `crt_constructor` functions run in declaration order and the
 // `crt_destructor` functions in the reverse order.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin runs module constructors and destructors when `bin/ut` starts and ends, not around the guest `main`"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
 )) {
     @("crtFunctionsRunInDeclarationOrder." ~ backend.stringof)
@@ -282,6 +293,8 @@ static foreach (backend; Matrix!(
 
 
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin runs module constructors and destructors when `bin/ut` starts and ends, not around the guest `main`"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
 )) {
     @("crtDestructorRunsAfterMainThrows." ~ backend.stringof)
@@ -304,6 +317,8 @@ static foreach (backend; Matrix!(
 // A failed module constructor skips the module destructors but not the
 // `crt_destructor` functions.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin runs module constructors and destructors when `bin/ut` starts and ends, not around the guest `main`"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
 )) {
     @("crtDestructorRunsAfterFailedConstructor." ~ backend.stringof)
@@ -325,6 +340,8 @@ static foreach (backend; Matrix!(
 // A process that runs a program twice runs the `crt_constructor` and
 // `crt_destructor` functions once for each run.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin runs module constructors and destructors when `bin/ut` starts and ends, not around the guest `main`"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
 )) {
     @("crtFunctionsRunOnceForEachProgramRun." ~ backend.stringof)
@@ -347,6 +364,8 @@ static foreach (backend; Matrix!(
 // A thread's `static ~this` runs when that thread ends, before a `join` on
 // it returns.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin runs module constructors and destructors when `bin/ut` starts and ends, not around the guest `main`"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
 )) {
     @("threadDestructorRunsWhenThreadEnds." ~ backend.stringof)
@@ -375,6 +394,8 @@ static foreach (backend; Matrix!(
 // increments the gate (dmd glue, `callFuncsAndGates`), and the destructor
 // runs its body only when it decrements the gate to zero.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin runs module constructors and destructors when `bin/ut` starts and ends, not around the guest `main`"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
 )) {
     @("moduleDestructorOfTemplateInstanceRuns." ~ backend.stringof)
@@ -401,6 +422,8 @@ static foreach (backend; Matrix!(
 // process, not one for each thread. Thus the destructor body runs only on
 // the last thread that ends.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin runs module constructors and destructors when `bin/ut` starts and ends, not around the guest `main`"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
 )) {
     @("threadDestructorOfTemplateInstanceRunsWhenThreadEnds." ~ backend.stringof)
@@ -430,6 +453,8 @@ static foreach (backend; Matrix!(
 // druntime runs the thread-local constructors and destructors on every thread
 // it starts, also on one that calls no function of the program.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin runs module constructors and destructors when `bin/ut` starts and ends, not around the guest `main`"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
 )) {
     @("threadConstructorRunsOnThreadThatCallsNoProgramCode." ~ backend.stringof)
@@ -1008,6 +1033,8 @@ static foreach (backend; Matrix!(
 // ends. When it ends later, it must not run the thread-local destructors of
 // a different program that runs at that time.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin runs module constructors and destructors when `bin/ut` starts and ends, not around the guest `main`"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot write files"),
 )) {
     @("threadOfEndedProgramDoesNotRunDestructorsOfLaterProgram."
@@ -1072,6 +1099,8 @@ private size_t runsThatGiveBack(Backend)(
 // keeps the registration of that program, so each test below runs in a process
 // of its own that has one thread: there every run gives its registration back.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the Native arm runs no guest program in the test process, so no registration exists"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot run module destructors"),
 )) {
     @HiddenTest
@@ -1131,6 +1160,8 @@ static foreach (backend; Matrix!(
 // A registration that stays because a thread of its program is alive is not
 // lost: the end of the process removes it.
 static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the Native arm runs no guest program in the test process, so no registration exists"),
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot run module destructors"),
 )) {
     @("registrationHeldByThreadIsLeftToTheEndOfTheProcess." ~ backend.stringof)
@@ -1149,8 +1180,6 @@ static foreach (backend; Matrix!(
             void main() {}
         }).should == 0;
 
-        // A native program runs in a process of its own.
-        const expected = is(backend == Native) ? before : before + 1;
-        GuestModules.held.leftToExit.should == expected;
+        GuestModules.held.leftToExit.should == before + 1;
     }
 }
