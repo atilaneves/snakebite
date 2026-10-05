@@ -29,7 +29,7 @@ static if (!is(typeof(supported)))
 // Until the backends mark their runs, this includes guest faults: an absent
 // mark cannot establish that the host has a defect.
 //
-// The process that owns the guest installs the handlers one time at start
+// A shared module constructor installs the handlers one time at start
 // (`installFaultHandlers`). A guest that installs a handler of its own for
 // one of these signals replaces ours, as it does in compiled D.
 //
@@ -122,6 +122,11 @@ public bool installFaultHandlers() @trusted nothrow @nogc {
         return true;
     } else
         return false;
+}
+
+
+private shared static this() @safe @nogc nothrow {
+    installFaultHandlers;
 }
 
 
