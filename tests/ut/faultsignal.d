@@ -644,32 +644,34 @@ unittest {
 
 @("faultsignal.guestRun.releasesTheAlternateStackOfARawPthread")
 unittest {
-    import core.stdc.errno: errno, ENOMEM;
-    import core.sys.linux.sys.mman: mincore;
+    import core.sys.linux.sys.prctl: prctl;
     import core.sys.posix.pthread: pthread_create, pthread_join, pthread_t;
     import core.sys.posix.signal: sigaltstack, stack_t;
+    import std.file: readText;
+
+    enum name = "snakebite-fault-stack-leak-test";
 
     // A foreign thread must release its stack without druntime attachment.
     static extern(C) void* enter(void* result) {
         auto run = GuestRun.begin;
         stack_t current;
         sigaltstack(null, &current);
-        *cast(void**) result = current.ss_sp;
+        // Address reuse by another test must not look like a leaked stack.
+        enum setVma = 0x53564d41;
+        enum setAnonymousName = 0;
+        *cast(int*) result = prctl(setVma, setAnonymousName,
+            cast(size_t) current.ss_sp, current.ss_size,
+            cast(size_t) (name ~ "\0").ptr);
         return null;
     }
 
     foreach (round; 0 .. 10) {
-        void* stack;
+        int named;
         pthread_t thread;
-        pthread_create(&thread, null, &enter, &stack).should == 0;
+        pthread_create(&thread, null, &enter, &named).should == 0;
         pthread_join(thread, null).should == 0;
-        stack.shouldNotBeNull;
-
-        ubyte resident;
-        const status = mincore(stack, 1, &resident);
-        const error = errno;
-        status.should == -1;
-        error.should == ENOMEM;
+        named.should == 0;
+        name.should.not.be in readText("/proc/self/maps");
     }
 }
 
