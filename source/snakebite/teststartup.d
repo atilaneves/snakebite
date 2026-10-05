@@ -26,6 +26,7 @@ public TestStartupReport runTestsAndMain(
     in bool endsProcess = false,
 ) {
     import snakebite.backends.backend: runMain;
+    import snakebite.guestrunlock: guestRunLock;
     import snakebite.backends.guestmodules: GuestModules;
     import snakebite.dependencyimage: TestHooks;
     import std.algorithm.iteration: map;
@@ -37,8 +38,8 @@ public TestStartupReport runTestsAndMain(
     // below. Two runs on two threads would clobber each other's, so one
     // runs at a time. The lock is recursive: a guest run that starts
     // another on the same thread still nests.
-    _guestRunLock.lock;
-    scope(exit) _guestRunLock.unlock;
+    guestRunLock.lock;
+    scope(exit) guestRunLock.unlock;
     const savedHooks = TestHooks.current;
     auto savedArgs = _runtimeArgs; // Restore mutable host argument storage.
     auto savedCArgs = _runtimeCArgs; // C argv contains mutable pointers.
@@ -93,20 +94,6 @@ public TestStartupReport runTestsAndMain(
 
 
 private int delegate(string[]) _main;
-private __gshared imported!"core.sync.mutex".Mutex _guestRunLock;
-// The lock is held while the guest runs. A guest that calls `exit` ends the
-// process with it held, and a GC object would then abort when druntime
-// finalizes it, so the lock lives in static storage.
-private __gshared align(16) ubyte[
-    __traits(classInstanceSize, imported!"core.sync.mutex".Mutex)
-] _guestRunLockStorage;
-
-shared static this() {
-    import core.sync.mutex: Mutex;
-    import core.lifetime: emplace;
-
-    _guestRunLock = emplace!Mutex(_guestRunLockStorage[]);
-}
 
 
 private extern(C) int callMain(char[][] arguments) {

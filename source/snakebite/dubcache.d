@@ -61,17 +61,16 @@ public imported!"std.json".JSONValue cachedDubDescription(
     in string directory, in string compiler, in string[] versions,
     scope imported!"std.json".JSONValue delegate() describe,
     in string generator = imported!"snakebite.dependencyimage".runningExecutable,
+    in string mode = imported!"std.process".environment.get("SNAKEBITE_DUB_CACHE", "on"),
 ) {
     import std.json: JSONValue, JSONType;
     import std.file: exists, read, write, mkdirRecurse, rename, remove, FileException;
     import std.path: baseName, buildPath, dirName;
-    import std.process: environment;
     import std.uuid: randomUUID;
     import std.conv: text;
     import snakebite.dependencyimage: generatorKey;
     import snakebite.project: projectStateDirectory;
 
-    const mode = environment.get("SNAKEBITE_DUB_CACHE", "on");
     if (mode == "off")
         return describe();
     const context = contextKey(directory, compiler, versions);

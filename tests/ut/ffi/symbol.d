@@ -27,7 +27,6 @@ private string symbolsLibrary() {
 }
 
 @("image.symbolSurvivesImageScope")
-@Serial
 unittest {
     alias Answer = extern(C) int function();
     Answer answer;
@@ -40,7 +39,6 @@ unittest {
 }
 
 @("image.symbolSurvivesLoadingThread")
-@Serial
 unittest {
     alias Answer = extern(C) int function();
     Answer answer;
@@ -90,7 +88,6 @@ unittest {
 export extern(C) int snakebite_symbol_dual_definition_test() { return 999; }
 
 @("symbolAddress.loadedSharedObjectAnswersBeforeExecutable")
-@Serial
 unittest {
     import core.sys.posix.dlfcn: dlclose, dlopen, RTLD_GLOBAL, RTLD_NOW;
     import std.string: toStringz;
@@ -120,7 +117,6 @@ unittest {
 // the answer with a symbol the executable-only test above (or any other
 // test's promoted shared object) already put in the process-wide scope.
 @("resolveIndependent.stillAnswersFromALoadedSharedObject")
-@Serial
 unittest {
     import core.sys.posix.dlfcn: dlclose, dlopen, RTLD_GLOBAL, RTLD_NOW;
     import std.string: toStringz;
@@ -176,7 +172,6 @@ unittest {
 // spelled in the image and falls back to the guest. Nothing here needs the
 // built image: only the text that is made for it.
 @("image.templateArgumentImports")
-@Serial
 unittest {
     // Program requires a mutable AST.
     auto module_ = parseSnippet(q{
@@ -205,7 +200,6 @@ unittest {
 // instantiation, not just root-owned ones, would pass the first assertion
 // but fail the second.
 @("image.nestedTemplateArgumentRootType")
-@Serial
 unittest {
     const sandbox = Sandbox();
     enum moduleName = "image_nested_root_type";
@@ -241,7 +235,6 @@ unittest {
 // for an enclosing function, see `imagesource.d`'s
 // `hasFunctionLocalType`) wrongly drops this instantiation from the image.
 @("image.aliasArgumentDependencyFunction")
-@Serial
 unittest {
     const sandbox = Sandbox();
     enum moduleName = "image_alias_argument";
@@ -279,7 +272,6 @@ unittest {
 // instantiation must not leak an unresolvable, unqualified `Thing` spelling
 // into the image.
 @("image.aliasArgumentNestedRootType")
-@Serial
 unittest {
     const sandbox = Sandbox();
     enum moduleName = "image_alias_nested_root";
@@ -320,7 +312,6 @@ unittest {
 // `symbol.parent`. `apply!(pick!int)()` is the positive control: every type
 // it nests is dependency-owned or built in, so it must still resolve.
 @("image.aliasArgumentTemplateInstanceRootType")
-@Serial
 unittest {
     const sandbox = Sandbox();
     enum moduleName = "image_alias_instance_root";
@@ -350,7 +341,6 @@ unittest {
 
 static foreach (backend; Matrix!()) {
     @("image.hashWithCtfeHelper." ~ backend.stringof)
-    @Serial
     unittest {
         enum code = q{
             import core.internal.hash: hashOf;
@@ -377,7 +367,6 @@ static foreach (backend; Matrix!()) {
 
 
 @("image.projectCacheSkipsPreparation")
-@Serial
 unittest {
     const sandbox = Sandbox();
     sandbox.writeFile("root.d", "root");
@@ -488,7 +477,6 @@ unittest {
 // without generating the source, and a changed input asks again, whichever
 // way the answer then goes.
 @("image.projectCacheRemembersNoImage")
-@Serial
 unittest {
     const sandbox = Sandbox();
     sandbox.writeFile("root.d", "root");
@@ -581,7 +569,6 @@ unittest {
 // only of its inputs: a new snakebite binary must not reuse an image an
 // older binary produced, even when nothing about the project changed.
 @("image.projectCacheDetectsChangedGenerator")
-@Serial
 unittest {
     const sandbox = Sandbox();
     sandbox.writeFile("root.d", "root");
@@ -638,7 +625,6 @@ unittest {
 // snakebite do on one project, never accept each other's image. Each keeps
 // its own record, so alternating between them rebuilds nothing.
 @("image.projectCacheKeepsGeneratorsApart")
-@Serial
 unittest {
     const sandbox = Sandbox();
     sandbox.writeFile("root.d", "root");

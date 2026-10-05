@@ -37,7 +37,6 @@ unittest {
 }
 
 @("preparedExecutionFollowsFiber")
-@Serial
 unittest {
     SharedTable!(int, int) table;
     auto paused = new Fiber({
@@ -54,7 +53,6 @@ unittest {
 }
 
 @("preparedExecutionFollowsThread")
-@Serial
 unittest {
     SharedTable!(int, int) table;
     {
@@ -115,7 +113,6 @@ static foreach (backend; Matrix!(
 )) {
     @("preparedFunctionCallbackCacheFill." ~ backend.stringof)
     @Tags(backend.stringof)
-    @Serial
     unittest {
         _finalizerCache = new SharedTable!(int, int);
         static if (is(backend == Interpreter)) {
@@ -163,7 +160,6 @@ static foreach (shape; ["direct", "inherited"]) {
     )) {
         @("firstDestructorCallbackCacheFill." ~ shape ~ "." ~ backend.stringof)
         @Tags(backend.stringof)
-        @Serial
         unittest {
             _finalizerCache = new SharedTable!(int, int);
             static if (is(backend == Interpreter)) {
@@ -184,7 +180,6 @@ static foreach (shape; ["direct", "inherited"]) {
         @("firstDestructorCallbackUsesPreparedCache."
             ~ shape ~ "." ~ backend.stringof)
         @Tags(backend.stringof)
-        @Serial
         unittest {
             _finalizerCache = new SharedTable!(int, int);
             fillFinalizerTestCache.should == 7;
@@ -232,7 +227,6 @@ static foreach (aggregate; ["class", "struct"]) {
             @("firstDestructorCallbackConstant." ~ aggregate ~ "."
                 ~ (warm ? "warm." : "cold.") ~ backend.stringof)
             @Tags(backend.stringof)
-            @Serial
             unittest {
                 0.shouldBeStatusOf!(backend, constantGuest!(aggregate, warm));
             }

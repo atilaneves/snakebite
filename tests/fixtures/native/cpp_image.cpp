@@ -106,7 +106,7 @@ struct NonPod {
     ~NonPod();
 };
 
-static int destroyedCount = 0;
+static thread_local int destroyedCount = 0;
 
 NonPod::NonPod(int v) : value(v) {}
 NonPod::NonPod(const NonPod& other) : value(other.value) {}

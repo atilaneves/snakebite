@@ -18,6 +18,13 @@ public struct TestHooks {
     private typeof(Runtime.moduleUnitTester) _legacy;
     private typeof(Runtime.extendedModuleUnitTester) _extended;
 
+    public static TestHooks of(
+        typeof(Runtime.moduleUnitTester) legacy,
+        typeof(Runtime.extendedModuleUnitTester) extended,
+    ) {
+        return TestHooks(legacy, extended);
+    }
+
     public static TestHooks current() {
         return TestHooks(Runtime.moduleUnitTester, Runtime.extendedModuleUnitTester);
     }
@@ -283,15 +290,22 @@ public DependencyImage prepareImage(
 // Loads an image that is already built, instead of having `prepareImage` make
 // one.
 public DependencyImage loadImage(in string path) {
+    import snakebite.guestrunlock: guestRunLock;
+
+    // Hooks belong to the process, and a guest run installs and watches them
+    // under this lock. A load must not capture or restore a run's hooks.
+    guestRunLock.lock;
+    scope(exit) guestRunLock.unlock;
+    return loadImageLocked(path);
+}
+
+
+private DependencyImage loadImageLocked(in string path) {
     import core.sys.posix.dlfcn:
         dlerror, dlopen, RTLD_LAZY, RTLD_NODELETE;
     import std.string: fromStringz, toStringz;
     import std.conv: text;
 
-    // Hooks belong to the process, so concurrent image loads must not
-    // capture or restore another image's constructor changes.
-    _imageLoadLock.lock;
-    scope(exit) _imageLoadLock.unlock;
     const savedHooks = TestHooks.current;
     scope(exit) savedHooks.install;
     TestHooks.init.install;
@@ -332,14 +346,6 @@ public DependencyImage loadImage(in string path) {
 
 
 private __gshared TestHooks[void*] _imageTestHooks;
-private __gshared imported!"core.sync.mutex".Mutex _imageLoadLock;
-
-
-shared static this() {
-    import core.sync.mutex: Mutex;
-
-    _imageLoadLock = new Mutex;
-}
 
 
 version (DigitalMars)

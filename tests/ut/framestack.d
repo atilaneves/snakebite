@@ -495,7 +495,6 @@ private void growSurvivesConcurrentCollection() @system {
 
 
 @("push.growSurvivesConcurrentCollection")
-@Serial
 unittest {
     growSurvivesConcurrentCollection;
 }
