@@ -2269,11 +2269,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             statement._body.accept(this);
     }
 
-    override void visit(ReturnStatement statement) {
+    protected override void visitReturnOperand(ReturnStatement statement) {
         if (_controlFlow.seeking)
             return;
-
-        _controlFlow.returnFromFunction;
 
         // `return f();` in a `void` function never reaches here with
         // `statement.exp` set to `f()`: dmd's own semantic pass desugars
@@ -2317,6 +2315,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 _place, &referenceAddress, &evaluateValue,
             );
         });
+    }
+
+    protected override void visitReturnTransfer(ReturnStatement) {
+        if (_controlFlow.seeking)
+            return;
+
+        _controlFlow.returnFromFunction;
     }
 
     override void visit(ExpStatement statement) {
