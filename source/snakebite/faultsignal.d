@@ -96,14 +96,28 @@ public void takeFault(in HardwareFault) @trusted @nogc nothrow {
 // that a maintainer can get the crash and the core dump of the guest.
 public bool installFaultHandlers() @trusted nothrow @nogc {
     static if (supported) {
-        import core.atomic: cas;
+        import core.atomic: atomicLoad, atomicStore, cas;
         import core.stdc.stdlib: getenv;
+        import core.sys.posix.signal: SIG_SETMASK, sigprocmask, sigset_t;
 
         if (getenv("SNAKEBITE_NO_FAULT_HANDLER") !is null)
             return false;
 
-        if (!cas(&_installed, false, true))
+        // A handler on this thread must not wait for its own installation.
+        // Block the collector too: a handler on another thread can be
+        // waiting on its alternate stack until the saved action is complete.
+        sigset_t blocked, savedMask;
+        sigfillset(&blocked);
+        if (sigprocmask(SIG_SETMASK, &blocked, &savedMask) != 0)
+            assert(0, "cannot block signals during fault-handler installation");
+        scope(exit)
+            if (sigprocmask(SIG_SETMASK, &savedMask, null) != 0)
+                assert(0, "cannot restore signals after fault-handler installation");
+
+        if (!cas(&_installation, Installation.absent, Installation.inProgress)) {
+            while (atomicLoad(_installation) == Installation.inProgress) {}
             return true;
+        }
 
         sigaction_t action;
         action.sa_sigaction = &onFault;
@@ -117,7 +131,12 @@ public bool installFaultHandlers() @trusted nothrow @nogc {
         foreach (index, signal; handledSignals) {
             if (sigaction(signal, &action, &_previous[index]) != 0)
                 assert(0, "sigaction failed for a fault signal");
+            // sigaction publishes the kernel action before libc can finish
+            // copying the old action to this array. Readers wait for that
+            // copy, not merely for the kernel to accept the new action.
+            atomicStore(_previousReady[index], true);
         }
+        atomicStore(_installation, Installation.complete);
 
         return true;
     } else
@@ -335,10 +354,16 @@ static if (supported) {
     }
 
     private ThreadState _state;
-    private shared bool _installed;
+    private enum Installation {
+        absent,
+        inProgress,
+        complete,
+    }
+    private shared Installation _installation;
     // What the signals did before this module: a fault of the host goes to
     // it (a sanitizer, a host that embeds snakebite).
     private __gshared sigaction_t[3] _previous;
+    private shared bool[3] _previousReady;
     // The saved action stays unchanged while handlers on other threads read
     // it. A one-shot action is consumed before its call, not after it returns.
     // Resetting the installed action here would also disable guest recovery.
@@ -539,7 +564,7 @@ static if (supported) {
     // handler runs the faulting instruction again, and that ends the
     // process with the signal (and a core dump if the user enabled them).
     private void hostDefect(int signal, siginfo_t* info, void* context) nothrow @nogc {
-        import core.atomic: cas;
+        import core.atomic: atomicLoad, cas;
         import core.stdc.signal: raise;
         import core.sys.posix.signal:
             SA_NODEFER, SA_RESETHAND, SIG_IGN, SIG_SETMASK, SIG_UNBLOCK,
@@ -550,6 +575,7 @@ static if (supported) {
             if (handled == signal)
                 index = candidate;
 
+        while (!atomicLoad(_previousReady[index])) {}
         const previous = &_previous[index];
         const handler = previous.sa_flags & SA_SIGINFO
             ? cast(void*) previous.sa_sigaction

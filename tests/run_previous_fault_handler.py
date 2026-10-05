@@ -27,6 +27,8 @@ HOST = r"""
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <dlfcn.h>
+#include <sched.h>
 #include <sys/prctl.h>
 #include <unistd.h>
 
@@ -37,15 +39,40 @@ extern void thread_getGCSignals(int *, int *);
 static _Atomic int calls;
 static int mode, ready[2], wait_forever[2];
 static int suspend_signal, resume_signal;
+static _Atomic int delay_install, published, attempting, copied;
+static pthread_t installer;
+static int (*native_sigaction)(int, const struct sigaction *, struct sigaction *);
 _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "signal counter must be lock-free");
 
 void native_fault(void) { *(volatile int *)0 = 42; }
+
+int sigaction(int sig, const struct sigaction *action, struct sigaction *old) {
+    if (!native_sigaction)
+        native_sigaction = dlsym(RTLD_NEXT, "sigaction");
+    if (!native_sigaction) _exit(90);
+    if (sig == SIGSEGV && action && old &&
+        atomic_exchange(&delay_install, 0)) {
+        struct sigaction captured = {0};
+        int result = native_sigaction(sig, action, &captured);
+        if (result) return result;
+        // glibc can publish the new kernel action before it copies the old
+        // action to its caller. Make that real window deterministic.
+        atomic_store(&published, 1);
+        while (!atomic_load(&attempting)) sched_yield();
+        usleep(50000);
+        *old = captured;
+        atomic_store(&copied, 1);
+        return 0;
+    }
+    return native_sigaction(sig, action, old);
+}
 
 static void replacement(int sig) { write(1, "replacement\n", 12); }
 
 static void previous(int sig) {
     int call = atomic_fetch_add(&calls, 1);
     write(1, "previous\n", 9);
+    if (mode == 7 && !install_saved_action()) _exit(89);
     if (mode == 6) {
         sigset_t mask;
         sigprocmask(SIG_SETMASK, 0, &mask);
@@ -83,6 +110,19 @@ static void *first_signal(void *arg) {
     return 0;
 }
 
+static void *during_install(void *arg) {
+    while (!atomic_load(&published)) sched_yield();
+    atomic_store(&attempting, 1);
+    if (mode == 8) {
+        if (!install_saved_action() || !atomic_load(&copied)) _exit(87);
+        write(1, "install complete\n", 17);
+        return 0;
+    }
+    pthread_kill(installer, SIGSEGV);
+    raise(SIGSEGV);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     prctl(PR_SET_DUMPABLE, 0);
     setenv("SNAKEBITE_NO_FAULT_HANDLER", "1", 1);
@@ -109,6 +149,15 @@ int main(int argc, char **argv) {
     } else action.sa_handler = previous;
     if (sigaction(sig, &action, 0)) return 96;
     if (mode == 5 && sigaction(SIGBUS, &action, 0)) return 96;
+    if (mode == 7 || mode == 8) {
+        pthread_t thread;
+        installer = pthread_self();
+        if (pthread_create(&thread, 0, during_install, 0)) return 94;
+        atomic_store(&delay_install, 1);
+        if (!install_saved_action()) return 95;
+        pthread_join(thread, 0);
+        return mode == 8 || atomic_load(&calls) == 2 ? 0 : 88;
+    }
     if (atoi(argv[5]) && !install_saved_action()) return 95;
     if (mode == 1 && argc > 6 && atoi(argv[5]) && !guest_fault()) return 93;
     if (mode == 2) {
@@ -291,3 +340,23 @@ def test_saved_mask_on_normal_stack(host, sig, with_info, nodefer, block_extra):
         assert result.returncode == 0, result
         expected = f"previous\n{int(block_extra)}{int(not nodefer)}10\n"
         assert result.stdout == expected.encode(), result
+
+
+@pytest.mark.parametrize("with_info", [False, True])
+def test_install_publishes_the_complete_saved_action(host, with_info):
+    result = subprocess.run(
+        [str(host), str(signal.SIGSEGV.value), "7", "0", str(int(with_info)),
+         "1"],
+        capture_output=True, timeout=5,
+    )
+    assert result.returncode == 0, result
+    assert result.stdout == b"previous\nprevious\n", result
+
+
+def test_concurrent_install_returns_only_after_installation(host):
+    result = subprocess.run(
+        [str(host), str(signal.SIGSEGV.value), "8", "0", "0", "1"],
+        capture_output=True, timeout=5,
+    )
+    assert result.returncode == 0, result
+    assert result.stdout == b"install complete\n", result
