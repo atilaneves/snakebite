@@ -244,6 +244,260 @@ static foreach (backend; Matrix!(
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.diverges,
+        "DMD CTFE does not run these call-argument temporary destructors"),
+)) {
+    @("multipleCallArgumentTemporariesDestroyInReverseOrder." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Tracked {
+                int* events;
+                int value;
+                this(int* log, int value) {
+                    events = log;
+                    this.value = value;
+                    *events = *events * 10 + value;
+                }
+                ~this() { *events = *events * 10 + value + 2; }
+                int get() { return value; }
+            }
+            int consume(int first, int second) { return first + second; }
+            void main() {
+                int events;
+                assert(consume(Tracked(&events, 1).get(),
+                    Tracked(&events, 2).get()) == 3);
+                assert(events == 1243);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "DMD CTFE does not run both chained-call temporary destructors"),
+)) {
+    @("chainedCallTemporariesDestroyInReverseOrder." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Tracked {
+                int* events;
+                int* destructions;
+                int* constructionEvents;
+                int* constructions;
+                int value;
+                this(int* log, int* count, int* constructed,
+                    int* constructionCount, int value) {
+                    events = log;
+                    destructions = count;
+                    constructionEvents = constructed;
+                    constructions = constructionCount;
+                    this.value = value;
+                    *constructionEvents = *constructionEvents * 4 + value;
+                    ++*constructions;
+                }
+                ~this() {
+                    *events = *events * 4 + value;
+                    ++*destructions;
+                }
+                Tracked then(int next) {
+                    return Tracked(events, destructions,
+                        constructionEvents, constructions, next);
+                }
+                int get() { return value; }
+            }
+            void main() {
+                int events, destructions, constructionEvents, constructions;
+                assert(Tracked(&events, &destructions,
+                    &constructionEvents, &constructions, 1)
+                    .then(2).get() == 2);
+                assert(constructions == 2);
+                assert(constructionEvents == 6);
+                assert(destructions == 2);
+                assert(events == 9);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "DMD CTFE does not run these conditional temporary destructors"),
+)) {
+    @("conditionalTemporariesDestroyInReverseOrder." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Tracked {
+                int* events;
+                int* constructions;
+                int value;
+                this(int* log, int* count, int value) {
+                    events = log;
+                    constructions = count;
+                    this.value = value;
+                    ++*constructions;
+                }
+                ~this() { *events = *events * 4 + value; }
+                bool predicate(bool result) { return result; }
+                int get() { return value; }
+            }
+            int branch(bool condition) {
+                int events, constructions;
+                const result = Tracked(&events, &constructions, 1)
+                    .predicate(condition)
+                    ? Tracked(&events, &constructions, 2).get()
+                    : Tracked(&events, &constructions, 3).get();
+                assert(result == (condition ? 2 : 3));
+                assert(constructions == 2);
+                assert(events == (condition ? 9 : 13));
+                return result;
+            }
+            void main() {
+                assert(branch(true) == 2);
+                assert(branch(false) == 3);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "DMD CTFE does not run these short-circuit temporary destructors"),
+)) {
+    @("shortCircuitTemporariesDestroyInReverseOrder." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Tracked {
+                int* events;
+                int* constructions;
+                int value;
+                this(int* log, int* count, int value) {
+                    events = log;
+                    constructions = count;
+                    this.value = value;
+                    ++*constructions;
+                }
+                ~this() { *events = *events * 10 + value; }
+                bool predicate(bool result) { return result; }
+            }
+            void main() {
+                int events, constructions;
+
+                assert(!(Tracked(&events, &constructions, 1)
+                    .predicate(false)
+                    && Tracked(&events, &constructions, 2)
+                        .predicate(true)));
+                assert(constructions == 1);
+                assert(events == 1);
+
+                events = 0;
+                constructions = 0;
+                assert(Tracked(&events, &constructions, 3)
+                    .predicate(true)
+                    && Tracked(&events, &constructions, 4)
+                        .predicate(true));
+                assert(constructions == 2);
+                assert(events == 43);
+
+                events = 0;
+                constructions = 0;
+                assert(Tracked(&events, &constructions, 5)
+                    .predicate(true)
+                    || Tracked(&events, &constructions, 6)
+                        .predicate(false));
+                assert(constructions == 1);
+                assert(events == 5);
+
+                events = 0;
+                constructions = 0;
+                assert(Tracked(&events, &constructions, 7)
+                    .predicate(false)
+                    || Tracked(&events, &constructions, 8)
+                        .predicate(true));
+                assert(constructions == 2);
+                assert(events == 87);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "DMD CTFE does not run these outer temporary destructors"),
+)) {
+    @("temporaryDestructorsFinishNestedExpressionsInOrder." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Inner {
+                int* events;
+                int value;
+                this(int* log, int value) {
+                    events = log;
+                    this.value = value;
+                }
+                ~this() { *events = *events * 10 + value; }
+                int get() { return value; }
+            }
+            struct Outer {
+                int* events;
+                int value;
+                this(int* log, int value) {
+                    events = log;
+                    this.value = value;
+                }
+                ~this() {
+                    *events = *events * 10 + value;
+                    assert(Inner(events, 3).get()
+                        + Inner(events, 4).get() == 7);
+                }
+                int get() { return value; }
+            }
+            void main() {
+                int events;
+                assert(Outer(&events, 1).get()
+                    + Outer(&events, 2).get() == 3);
+                assert(events == 243143);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "DMD CTFE does not run the temporary destructor that reconstructs it"),
+)) {
+    @("temporaryDestructorConstructsItsReceiverWithoutAnotherCleanup." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Tracked {
+                int* counts;
+                this(int value, int* counts) {
+                    this.counts = counts;
+                    ++counts[0];
+                }
+                ~this() {
+                    ++counts[1];
+                    if (counts[1] == 1)
+                        this.__ctor(2, counts);
+                }
+                int get() { return 1; }
+            }
+            void main() {
+                int[2] counts;
+                assert(Tracked(1, counts.ptr).get() == 1);
+                assert(counts[0] == 2);
+                assert(counts[1] == 1);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
         "CTFE does not destroy the temporary before the condition body"),
 )) {
     @("temporaryComparisonConditionCleanup." ~ backend.stringof)
