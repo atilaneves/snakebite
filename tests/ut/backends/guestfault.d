@@ -15,7 +15,9 @@ import core.thread: Thread;
 import core.time: msecs, seconds, MonoTime;
 import ut;
 import snakebite.backends.bytecode: Bytecode;
+import snakebite.backends.interpreter: Interpreter;
 import snakebite.frontend.dmd.functions: findFunction;
+import std.meta: AliasSeq;
 
 
 private string rendered(
@@ -32,30 +34,36 @@ private string rendered(
 }
 
 
-@("guestFault.bytecode.discardsHaltedStateAndPreservesCallerCleanup")
+static foreach (BackendType; AliasSeq!(Bytecode, Interpreter)) {
+@("guestFault." ~ BackendType.stringof ~ ".discardsHaltedStateAndPreservesCallerCleanup")
 unittest {
     auto module_ = parseSnippets([q{
         module recovery;
         int fail() { int* pointer; return *pointer; }
+        int failCleanup() {
+            try { throw new Exception("ordinary"); }
+            finally { int* pointer; *pointer = 1; }
+        }
         int good() { return 42; }
     }])[0];
     const program = Program([module_]);
     size_t cleaned;
-    foreach (_; 0 .. 20) {
-        auto backend = new Bytecode(program);
+    foreach (round; 0 .. 40) {
+        const functionName = round % 2 == 0 ? "fail" : "failCleanup";
+        auto backend = new BackendType(program);
         GuestFaultException saved;
         int result;
         try {
             scope(exit) ++cleaned;
-            backend.call(module_.findFunction("fail"), &result, []);
+            backend.call(module_.findFunction(functionName), &result, []);
         } catch (GuestFaultException fault) {
             saved = fault;
         }
         saved.shouldNotBeNull;
         saved.kind.should == GuestFault.Kind.nullDereference;
         saved.stack.length.should == 1;
-        saved.stack[0].function_.should == "recovery.fail";
-        // A later entry must not execute guest code on this halted VM.
+        saved.stack[0].function_.should == "recovery." ~ functionName;
+        // A later entry must not execute guest code on halted execution state.
         GuestFaultException later;
         try
             backend.call(module_.findFunction("good"), &result, []);
@@ -63,11 +71,12 @@ unittest {
             later = fault;
         (later is saved).shouldBeTrue;
         result.should == 0;
-        auto fresh = new Bytecode(program);
+        auto fresh = new BackendType(program);
         fresh.call(module_.findFunction("good"), &result, []);
         result.should == 42;
     }
-    cleaned.should == 20;
+    cleaned.should == 40;
+}
 }
 
 

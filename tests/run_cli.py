@@ -31,9 +31,8 @@ FILE_BACKENDS = ["bytecode", "interpreter"]
 PROGRAM_BACKENDS = ["native", *FILE_BACKENDS]
 
 
-# Native execution dies of the signal. Interpreter entry is step 4 of #523;
-# CTFE diagnoses the null read before native execution. Keep these arms so
-# the same source also pins those limits, without crashing the unit runner.
+# Native execution dies of the signal. CTFE diagnoses the null read before
+# native execution. Keep these arms without crashing the unit runner.
 @pytest.mark.parametrize("backend", ["native", *BACKENDS])
 def test_hardware_fault_position_and_guest_halt(
     tmp_path: Path, backend: str,
@@ -67,11 +66,12 @@ def test_hardware_fault_position_and_guest_halt(
     assert "catch ran" not in output(result)
     assert "finally ran" not in output(result)
     assert "destructor ran" not in output(result)
-    if backend == "bytecode":
+    if backend in ("bytecode", "interpreter"):
         assert result.returncode == 1, output(result)
         assert "main.d(6): fatal: null pointer dereference" in result.stderr
         assert "in main.leaf (main.d(6))" in result.stderr
-        assert "in D main (main.d(10))" in result.stderr
+        if backend == "bytecode":
+            assert "in D main (main.d(10))" in result.stderr
     elif backend == "ctfe":
         assert result.returncode == 1, output(result)
         assert "dereference of null pointer" in result.stderr
@@ -157,8 +157,10 @@ def test_hardware_fault_cleanup_reports_real_invocations(
         )
     else:
         result = run_sb(f"--backend={backend}", str(app), cwd=tmp_path)
-    if backend == "bytecode":
+    if backend in ("bytecode", "interpreter"):
         expected = f"main.d({frames[0][1]}): fatal: null pointer dereference\n"
+        if backend == "interpreter":
+            frames = frames[:1]
         expected += "".join(f"    in {name} (main.d({line}))\n"
                             for name, line in frames)
         assert result.returncode == 1, output(result)
@@ -201,7 +203,7 @@ def test_hardware_fault_in_thread_or_gc_finalizer(
         result = subprocess.run([str(binary)], capture_output=True, text=True)
     else:
         result = run_sb(f"--backend={backend}", str(app), cwd=tmp_path)
-    if backend == "bytecode":
+    if backend in ("bytecode", "interpreter"):
         assert result.returncode == 1, output(result)
         assert "main.d(3): fatal: null pointer dereference" in result.stderr
         assert "in main." in result.stderr
@@ -212,18 +214,27 @@ def test_hardware_fault_in_thread_or_gc_finalizer(
 
 
 @pytest.mark.parametrize("backend", ["native", *BACKENDS])
+@pytest.mark.parametrize("shape", ["direct", "pointer", "variadic-pointer"])
 def test_native_fault_unwind_keeps_host_cleanup_but_skips_guest_callback(
-    tmp_path: Path, backend: str,
+    tmp_path: Path, backend: str, shape: str,
 ) -> None:
     app = tmp_path / "app"
     write(app / "dub.sdl", dub_project_recipe("fault-unwind")
           + 'sourceFiles "../fixture.o" "../trap.o"\n')
+    declaration = ('extern(C) void nativeFault(void function(), ...);\n'
+                   if shape == "variadic-pointer" else
+                   'extern(C) void nativeFault(void function());\n')
+    call = {
+        "direct": "nativeFault(&cleanup);",
+        "pointer": "auto call = &nativeFault; call(&cleanup);",
+        "variadic-pointer": "auto call = &nativeFault; call(&cleanup, 7);",
+    }[shape]
     write(
         app / "source" / "main.d",
         'module main;\nimport core.sys.posix.unistd: write;\n'
-        'extern(C) void nativeFault(void function());\n'
-        'extern(C) void cleanup() { write(1, "guest cleanup\\n".ptr, 14); }\n'
-        'int main() { nativeFault(&cleanup); return 0; }\n',
+        + declaration
+        + 'extern(C) void cleanup() { write(1, "guest cleanup\\n".ptr, 14); }\n'
+        + 'int main() { ' + call + ' return 0; }\n',
     )
     write(
         tmp_path / "native.d",
@@ -261,7 +272,7 @@ def test_native_fault_unwind_keeps_host_cleanup_but_skips_guest_callback(
     else:
         result = run_app(tmp_path, backend)
     assert "guest cleanup" not in output(result), output(result)
-    if backend == "bytecode":
+    if backend in ("bytecode", "interpreter"):
         assert result.returncode == 1, output(result)
         assert result.stdout == "host released\n", output(result)
         assert "fatal: null pointer dereference" in result.stderr
@@ -2012,7 +2023,7 @@ def write_faulting_project(app: Path, main: str) -> None:
     write(app / "source" / "main.d", main)
 
 
-# Bytecode reports through its controlled entry. Interpreter entry is step 4.
+# Both execution backends report through controlled entries.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
 def test_guest_null_dereference_ends_the_program(
     tmp_path: Path, backend: str,
@@ -2024,11 +2035,8 @@ def test_guest_null_dereference_ends_the_program(
         cwd=tmp_path,
     )
 
-    if backend == "bytecode":
-        assert result.returncode == 1, output(result)
-        assert "source/main.d(3): fatal: null pointer dereference" in result.stderr
-    else:
-        assert result.returncode == -signal.SIGSEGV, output(result)
+    assert result.returncode == 1, output(result)
+    assert "source/main.d(3): fatal: null pointer dereference" in result.stderr
 
 
 # The interpreter checks the divisor in its walker, so for now it ends with a
@@ -2059,11 +2067,8 @@ def test_fault_handlers_do_not_blame_the_host_for_an_unclassified_guest_fault(
         cwd=tmp_path,
     )
 
-    if backend == "bytecode":
-        assert result.returncode == 1, output(result)
-        assert "fatal: null pointer dereference" in result.stderr
-    else:
-        assert result.returncode == -signal.SIGSEGV, output(result)
+    assert result.returncode == 1, output(result)
+    assert "fatal: null pointer dereference" in result.stderr
     assert "snakebite:" not in result.stderr
 
 

@@ -34,10 +34,18 @@ UP_ARROW = "\x1b[A"
 
 
 @pytest.mark.parametrize(
-    "shape", ["direct", "deep", "callback", "reentrant", "fiber", "thread"],
+    "shape", ["direct", "deep", "callback", "reentrant", "fiber", "thread",
+              "cleanup"],
 )
-def test_bytecode_hardware_fault_recovery_uses_fresh_cell_state(shape: str) -> None:
+@pytest.mark.parametrize("backend", ["bytecode", "interpreter"])
+def test_hardware_fault_recovery_uses_fresh_cell_state(
+    shape: str, backend: str,
+) -> None:
     declarations = {
+        "cleanup": [
+            "int fault() { try { throw new Exception(\"ordinary\"); } "
+            "finally { int* p; *p = 1; } }",
+        ],
         "direct": ["int fault() { int* p; return *p; }"],
         "deep": [
             "int descend(int n) { if (n) return descend(n - 1); "
@@ -59,9 +67,11 @@ def test_bytecode_hardware_fault_recovery_uses_fresh_cell_state(shape: str) -> N
         ],
         "thread": [
             "import core.thread: Thread",
+            "import core.sys.posix.unistd: write",
             "void threadFault() { int* p; int value = *p; }",
             "int fault() { auto t = new Thread(&threadFault); "
-            "t.start(); t.join(); return 0; }",
+            "try { t.start(); t.join(); return 0; } "
+            "finally { write(1, \"guest cleanup\\n\".ptr, 14); } }",
         ],
         "reentrant": [
             "import core.stdc.stdlib: qsort",
@@ -75,7 +85,7 @@ def test_bytecode_hardware_fault_recovery_uses_fresh_cell_state(shape: str) -> N
         ],
     }
     child = pexpect.spawn(
-        sb_path(), ["-b", "bytecode"], timeout=TIMEOUT, encoding="utf-8",
+        sb_path(), ["-b", backend], timeout=TIMEOUT, encoding="utf-8",
     )
     try:
         child.expect_exact("Snakebite REPL")
@@ -88,6 +98,7 @@ def test_bytecode_hardware_fault_recovery_uses_fresh_cell_state(shape: str) -> N
             child.sendline("fault()")
             child.expect(r"\[\s+\d+\.\d ms\] > ")
             assert "null pointer dereference" in clean(child.before)
+            assert "guest cleanup" not in clean(child.before)
             child.sendline("40 + 2")
             child.expect(r"\[\s+\d+\.\d ms\] > ")
             assert "42\n" in clean(child.before)
