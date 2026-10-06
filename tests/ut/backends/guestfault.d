@@ -8,6 +8,7 @@ import snakebite.backends.haltprocess: Halted, haltProcess, HostActions, isHalt;
 import snakebite.frontend.checks: Checks;
 import snakebite.frontend.compiler: parseSnippets, withCompilerLock;
 import std.algorithm.iteration: map;
+import std.algorithm.searching: canFind;
 import std.array: appender, array;
 import core.atomic: atomicLoad, atomicStore;
 import core.stdc.stdio: stdout;
@@ -155,6 +156,63 @@ static foreach (BackendType; Guests) {
         caller.join;
         finished.shouldBeTrue;
     }
+}
+
+
+private alias NoCtfeArrayDivision = Omit!(Ctfe, Because.diverges,
+    "dmd's interpreter reports the zero divisor as a diagnostic and raises "
+    ~ "no GuestFaultException; "
+    ~ "ut.backends.guestfault.guestFault.Ctfe.integerArrayOperationDivisionByZeroIsADiagnostic "
+    ~ "states what it does");
+
+
+static foreach (BackendType; Matrix!(NoNative, NoCtfeArrayDivision)) {
+    @Tags(BackendType.stringof)
+    @("guestFault." ~ BackendType.stringof ~ ".integerArrayOperationDividesByZero")
+    unittest {
+        auto module_ = parseSnippets([q{
+            module arrayDivision;
+            int quotients() {
+                int[2] numerators = [6, 8];
+                int[2] divisors = [2, 0];
+                int[2] result;
+                result[] = numerators[] / divisors[];
+                return result[0];
+            }
+        }])[0];
+        auto backend = new BackendType(Program([module_]));
+        int result;
+
+        try
+            backend.call(module_.findFunction("quotients"), &result, []);
+        catch (Throwable thrown) {
+            thrown.msg.canFind("division by zero").shouldBeTrue;
+            return;
+        }
+        assert(0, "the zero divisor raised nothing");
+    }
+}
+
+
+@Tags("Ctfe")
+@("guestFault.Ctfe.integerArrayOperationDivisionByZeroIsADiagnostic")
+unittest {
+    auto module_ = parseSnippets([q{
+        module diagnosedArrayDivision;
+        int quotients() {
+            int[2] numerators = [6, 8];
+            int[2] divisors = [2, 0];
+            int[2] result;
+            result[] = numerators[] / divisors[];
+            return result[0];
+        }
+    }])[0];
+    auto backend = new Ctfe(Program([module_]));
+    int result;
+
+    backend.call(module_.findFunction("quotients"), &result, [])
+        .shouldThrowWithMessage!SnakebiteException(
+            "divide by 0\ncannot cast `__error` to `int` at compile time");
 }
 
 
