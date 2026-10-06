@@ -765,7 +765,7 @@ private Activation* handleException(
                     active.cleanup(frames);
             });
         } catch (Throwable chained) {
-            throwable = chained;
+            throwable = vm._halt is null ? chained : vm._halt;
         }
         ExceptionCandidate[handlerBufferLength] handlerBuffer;
         const plan = isHalt(throwable)
@@ -799,7 +799,7 @@ private Activation* handleException(
                         handler.cleanupEnd);
                 });
             } catch (Throwable chained) {
-                throwable = chained;
+                throwable = vm._halt is null ? chained : vm._halt;
             }
             firstHandler = handler - active.exceptionHandlers.ptr + 1;
             continue;

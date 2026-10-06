@@ -67,7 +67,7 @@ public struct FullExpressionScope {
         return _depth != 0;
     }
 
-    public const(void)* root() const {
+    public const(void)* root() const @safe @nogc nothrow pure {
         return _root;
     }
 

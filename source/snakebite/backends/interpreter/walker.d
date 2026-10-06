@@ -492,6 +492,7 @@ private struct CallShape {
 // state, and reads every per-function answer from the `Shared` tables
 // the program's evaluators fill together.
 extern(C++) private final class Evaluator: LoweringVisitor {
+    import snakebite.faultsignal: HardwareFault;
     import snakebite.backends.aggregateinit: InitStep, NewPlan;
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.backend: Program;
@@ -696,6 +697,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // the way up. A halt ends the thread that halts, so another thread of
     // the program keeps its cleanups.
     private bool _halted;
+    private Throwable _fault;
+    private FuncDeclaration _faultFunction;
+    private Loc _faultLocation;
     // `extern(D)`: only `Visitor`'s `visit` overloads need the C++
     // linkage.
     extern(D) public this(Shared* shared_) {
@@ -784,6 +788,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         void* variadicCursor = null,
         const(void)* variadicTypes = null,
     ) {
+        if (_fault !is null)
+            throw _fault;
+
+        // A re-entry on this execution state already has the correct native
+        // stack and its controlled owner. Other Fibers have other evaluators.
+        if (_frames.backendEntry !is null) {
+            executeHostToGuest(function_, returnPlace, args,
+                variadicCursor, variadicTypes);
+            return;
+        }
+
         runOnInterpreterStack({
             runHostToGuestOnDedicatedStack(
                 function_, returnPlace, args, variadicCursor, variadicTypes);
@@ -923,6 +938,97 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     extern(D) private void runHostToGuestOnDedicatedStack(
+        FuncDeclaration function_,
+        void* returnPlace,
+        scope const(void*)[] args,
+        void* variadicCursor,
+        const(void)* variadicTypes,
+    ) {
+        import snakebite.faultsignal: HardwareFault, runGuest;
+
+        auto entry = GuestEntry(this, function_, returnPlace, args,
+            variadicCursor, variadicTypes);
+        auto parent = _frames.backendEntry; // Restored as a mutable entry link.
+        const frameMark = _frames.mark;
+        const guard = CallStateGuard(this);
+        scope(exit) {
+            _frames.backendEntry = parent;
+            if (_frames.mark > frameMark)
+                _frames.release(frameMark);
+        }
+        _frames.backendEntry = &entry;
+        try {
+            runGuest(&entry, &invokeGuestEntry, &entry, &haltBeforeUnwind);
+            if (_fault !is null)
+                throw _fault;
+        } catch (HardwareFault fault) {
+            reportHardwareFault(fault);
+        } catch (Throwable thrown) {
+            if (auto fault = cast(HardwareFault) _fault)
+                reportHardwareFault(fault);
+            if (_fault !is null)
+                throw _fault;
+            if (isHalt(thrown)) {
+                _halted = true;
+                _fault = thrown;
+            }
+            throw thrown;
+        }
+    }
+
+    private static struct GuestEntry {
+        Evaluator evaluator;
+        FuncDeclaration function_;
+        void* returnPlace;
+        const(void*)[] arguments;
+        void* variadicCursor;
+        const(void)* variadicTypes;
+    }
+
+    extern(C) private static void invokeGuestEntry(void* context) {
+        auto entry = cast(GuestEntry*) context;
+        entry.evaluator.executeHostToGuest(entry.function_, entry.returnPlace,
+            entry.arguments, entry.variadicCursor, entry.variadicTypes);
+    }
+
+    // Native cleanup can call back before the entry's catch runs. Save the
+    // source and stop guest execution before any host frame is unwound.
+    extern(D) private static void haltBeforeUnwind(
+        void* context, HardwareFault fault,
+    ) nothrow @nogc {
+        auto entry = cast(GuestEntry*) context;
+        auto evaluator = entry.evaluator;
+        evaluator._halted = true;
+        evaluator._fault = fault;
+        evaluator._faultFunction = evaluator._function is null
+            ? entry.function_ : evaluator._function;
+        const root = evaluator._temporaries.root;
+        evaluator._faultLocation = root is null
+            ? evaluator._faultFunction.loc : root.loc;
+    }
+
+    extern(D) private noreturn reportHardwareFault(
+        HardwareFault fault,
+    ) {
+        import snakebite.faultsignal: takeFault;
+        import snakebite.backends.guestfault: GuestFault;
+        import std.string: fromStringz;
+
+        takeFault(fault);
+        const file = fromStringz(_faultLocation.filename);
+        const name = fromStringz(_faultFunction.toPrettyChars);
+        scope GuestFault.Stack stack = (scope GuestFault.FrameSink sink) {
+            sink(GuestFault.Frame(name, file, _faultLocation.linnum));
+        };
+        try
+            _program.fault(fault.kind, file, _faultLocation.linnum, stack);
+        catch (Throwable reported) {
+            _fault = reported;
+            throw reported;
+        }
+    }
+
+    extern(D) private void executeHostToGuest(
         FuncDeclaration function_,
         void* returnPlace,
         scope const(void*)[] args,
@@ -1440,15 +1546,24 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // What native code throws reaches the guest as a `GuestException`,
     // except what is not an error of the guest: the interpreter's own
     // refusal, an exception that already is one, and a halt.
+    pragma(inline, true)
     extern(D) private void crossNative(scope void delegate() call) {
-        try
+        try {
             call();
-        catch (SnakebiteException exception)
-            throw exception;
-        catch (GuestException exception)
-            throw exception;
-        catch (Throwable thrown) {
-            if (isHalt(thrown))
+            if (_fault !is null)
+                throw _fault;
+        } catch (Throwable thrown) {
+            // Native unwinding can retain an ordinary exception as primary.
+            // Stop at the barrier, before a guest handler can see that chain.
+            if (_fault !is null)
+                throw _fault;
+            if (isHalt(thrown)) {
+                _halted = true;
+                _fault = thrown;
+                throw thrown;
+            }
+            if (cast(SnakebiteException) thrown !is null
+                    || cast(GuestException) thrown !is null)
                 throw thrown;
 
             throw GuestException.make(thrown);
@@ -2177,6 +2292,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     throw exception.take;
             });
         } catch (Throwable exception) {
+            // Native unwinding can keep the original exception as primary.
+            // The before-unwind owner still holds the Halt that ends this run.
+            if (_fault !is null)
+                throw _fault;
             if (isHalt(exception))
                 throw exception;
 
@@ -5433,6 +5552,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "`: it is null"),
             );
 
+        if (isHalt(guest)) {
+            _halted = true;
+            _fault = guest;
+            throw guest;
+        }
         throw GuestException.make(guest);
     }
 
@@ -6541,8 +6665,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             values[i + hasContext] = frame.base + parameter.offset;
         return CallAdapter.ofType(type).invoke(returnPlace, values,
             (place, arguments) {
-                _plans.signatureOf(type, hasContext).callAt(
-                    address, place, arguments);
+                crossNative({
+                    _plans.signatureOf(type, hasContext).callAt(
+                        address, place, arguments);
+                });
             });
     }
 
@@ -6568,7 +6694,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             (i) => frame.base + layout.parameters[i].offset,
             &evaluateBarrierArgument,
         );
-        plan.callAt(address, returnPlace, slots.values);
+        crossNative({ plan.callAt(address, returnPlace, slots.values); });
         return CallResult.init;
     }
 
