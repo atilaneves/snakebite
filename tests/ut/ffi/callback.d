@@ -141,14 +141,14 @@ unittest {
     auto function_ = declarationOf(q{ extern(C) int twice(int x); }, "twice");
     Recorded recorded;
     auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
-    int word;
-    bridge.register(&word, function_);
+    int[5] words;
+    bridge.register(&words[2], function_);
 
-    auto entry = cast(IntOfInt) bridge.entryOf(&word);
+    auto entry = cast(IntOfInt) bridge.entryOf(&words[2]);
     (entry !is null).should == true;
     // The same word always maps to the same entry, and back.
-    (bridge.entryOf(&word) is cast(const(void)*) entry).should == true;
-    (bridge.wordOf(entry) is cast(const(void)*) &word).should == true;
+    (bridge.entryOf(&words[2]) is cast(const(void)*) entry).should == true;
+    (bridge.wordOf(entry) is cast(const(void)*) &words[2]).should == true;
     (bridge.entryOf(&recorded) is null).should == true;
 
     entry(20).should == 41;
@@ -157,6 +157,17 @@ unittest {
     recorded.calls.should == 2;
     recorded.integers.should == [20, -3];
     recorded.hasContext.should == false;
+
+    foreach (index; [4, 0]) {
+        (bridge.entryOf(&words[index]) is null).should == true;
+        bridge.register(&words[index], function_);
+        auto added = cast(IntOfInt) bridge.entryOf(&words[index]);
+        (added !is null).should == true;
+        added(10).should == 21;
+        (bridge.wordOf(added) is cast(const(void)*) &words[index]).should == true;
+    }
+    (bridge.entryOf(&words[1]) is null).should == true;
+    (bridge.entryOf(&words[3]) is null).should == true;
 }
 
 

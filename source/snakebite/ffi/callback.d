@@ -500,6 +500,8 @@ public struct CallbackBridge {
     }
 
     private SharedTable!(const(void)*, Registered) _words;
+    private shared(size_t) _firstWord = size_t.max;
+    private shared(size_t) _lastWord;
     // Read without a lock the same way as `_words` (ADR-0006); an
     // adjusted entry is reserved once, under this bridge's lock, the
     // same as an unadjusted one.
@@ -531,7 +533,30 @@ public struct CallbackBridge {
     ) {
         if (word is null || word in _words)
             return;
+        includeWord(cast(size_t) word);
         _words.insert(word, Registered(declaration, null));
+    }
+
+    // Publish a wider range before publishing its new word. Concurrent
+    // registrations can only widen it, so a reader never excludes a word
+    // whose registration it can already observe.
+    private void includeWord(in size_t word) @safe @nogc nothrow {
+        import core.atomic: atomicLoad, cas, MemoryOrder;
+
+        auto first = atomicLoad!(MemoryOrder.acq)(_firstWord);
+        while (word < first) {
+            if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
+                    &_firstWord, first, word))
+                break;
+            first = atomicLoad!(MemoryOrder.acq)(_firstWord);
+        }
+        auto last = atomicLoad!(MemoryOrder.acq)(_lastWord);
+        while (word > last) {
+            if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
+                    &_lastWord, last, word))
+                break;
+            last = atomicLoad!(MemoryOrder.acq)(_lastWord);
+        }
     }
 
     // The pool entry for `word`, reserved on first use, or null when
@@ -539,6 +564,13 @@ public struct CallbackBridge {
     // address, or already an entry - and so crosses the barrier as it is.
     public const(void)* entryOf(const(void)* word) {
         import core.atomic: atomicLoad, atomicStore, MemoryOrder;
+
+        // Most pointer arguments are data, not functions. Do not pay for
+        // address-dependent hash collisions when the word cannot be present.
+        const address = cast(size_t) word;
+        if (address < atomicLoad!(MemoryOrder.acq)(_firstWord)
+                || address > atomicLoad!(MemoryOrder.acq)(_lastWord))
+            return null;
 
         auto registered = word in _words;
         if (registered is null)
