@@ -57,7 +57,7 @@ public final class HardwareFault: Halted {
 // even in a caller when it proves that the callee cannot throw. The assembly
 // call keeps a real throwing call site here, including with LTO. Each entry
 // releases only its own mark: other Fibers can have suspended entries on
-// this thread. Use nested entries, not `GuestRun` locals, inside `body`.
+// this thread. Nested entries are allowed inside `body`.
 // This does not restore other host state owned inside `body`.
 // Backends must discard halted execution state, as required by #523.
 public void runGuest(scope void delegate() body) @system {
@@ -126,46 +126,6 @@ static if (supported) {
             *link = next;
         }
     }
-}
-
-
-// A low-level mark, not a recovery entry: use `runGuest` around faulting
-// work. A mark alone cannot preserve cleanup in its owning frame. It
-// makes the state of the thread (an alternate signal stack, so that a
-// fault of the stack itself can be handled, and the object to throw) the
-// first time. Runs nest.
-public struct GuestRun {
-    @disable this(this);
-
-    private static GuestRun begin() @trusted {
-        GuestRun run;
-        static if (supported) {
-            if (_state.prepared is null)
-                prepareThread;
-            import core.stdc.stdlib: malloc;
-
-            // This legacy mark can move on return. Its linked record cannot.
-            run._owner = cast(RunOwner*) malloc(RunOwner.sizeof);
-            assert(run._owner !is null);
-            *run._owner = RunOwner.init;
-            run._owner.enter;
-        }
-        return run;
-    }
-
-    public ~this() @trusted @nogc nothrow {
-        static if (supported) {
-            import core.stdc.stdlib: free;
-
-            if (_owner !is null) {
-                _owner.leave;
-                free(_owner);
-            }
-        }
-    }
-
-    static if (supported)
-        private RunOwner* _owner;
 }
 
 

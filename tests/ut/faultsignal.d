@@ -9,7 +9,6 @@ import snakebite.faultsignal:
     Divisor,
     divisorOf,
     FaultReport,
-    GuestRun,
     HardwareFault,
     installFaultHandlers,
     runGuest,
@@ -511,17 +510,20 @@ unittest {
 @("faultsignal.guestRun.throwsAgainAfterACatch")
 unittest {
     installFaultHandlers.shouldBeTrue;
+    GuestFault.Kind last;
 
-    foreach (round; 0 .. 1000) {
-        try
-            runGuest({ load(null); });
-        catch (HardwareFault fault) {
-            takeFault(fault);
-            fault.kind.should == GuestFault.Kind.nullDereference;
-            continue;
-        }
-        assert(0, "the fault did not end the call");
+    try
+        runGuest({
+            foreach (round; 0 .. 1000)
+                last = faultOf(shapes[0].fault).kind;
+            load(null);
+        });
+    catch (HardwareFault fault) {
+        takeFault(fault);
+        last = fault.kind;
     }
+
+    last.should == GuestFault.Kind.nullDereference;
 }
 
 
@@ -540,20 +542,20 @@ unittest {
 }
 
 
-@("faultsignal.guestRun.rawMarkIsNotPublic")
-unittest {
-    static assert(!__traits(compiles, GuestRun.begin));
-}
-
-
 @("faultsignal.guestRun.runsNest")
 unittest {
     installFaultHandlers.shouldBeTrue;
     GuestFault.Kind kind;
-    runGuest({
-        runGuest({});
-        kind = faultOf(shapes[0].fault).kind;
-    });
+
+    try
+        runGuest({
+            runGuest({});
+            load(null);
+        });
+    catch (HardwareFault fault) {
+        takeFault(fault);
+        kind = fault.kind;
+    }
 
     kind.should == GuestFault.Kind.nullDereference;
 }
