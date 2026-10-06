@@ -819,6 +819,8 @@ static void rejected_info(int sig, siginfo_t *info, void *context) {
     rejected(sig);
 }
 static void unused_restorer(void) { _exit(98); }
+static void failure(int sig) { write(1, "failure\n", 8); }
+static void replacement_failure(int sig) { write(1, "replacement\n", 12); }
 int main(int argc, char **argv) {
     prctl(PR_SET_DUMPABLE, 0);
     setenv("SNAKEBITE_NO_FAULT_HANDLER", "1", 1);
@@ -826,6 +828,11 @@ int main(int argc, char **argv) {
     unsetenv("SNAKEBITE_NO_FAULT_HANDLER");
     int installed = atoi(argv[1]), alt = atoi(argv[2]);
     int onstack = atoi(argv[3]), information = atoi(argv[4]);
+    int sig = argc > 7 ? atoi(argv[7]) : SIGSEGV;
+    if (sig != SIGSEGV) {
+        struct sigaction segv = {.sa_handler=failure};
+        if (sigaction(SIGSEGV, &segv, 0)) return 96;
+    }
     if (alt) {
         stack_t stack = {.ss_sp=alternate, .ss_size=sizeof alternate};
         if (sigaltstack(&stack, 0)) return 91;
@@ -840,10 +847,20 @@ int main(int argc, char **argv) {
         .flags = (onstack ? SA_ONSTACK : 0) | (information ? SA_SIGINFO : 0),
         .restorer = atoi(argv[5]) ? unused_restorer : 0,
     };
-    if (syscall(SYS_rt_sigaction, SIGSEGV, &action, 0, 8)) return 92;
+    if (syscall(SYS_rt_sigaction, sig, &action, 0, 8)) return 92;
     if (installed) {
         if (!install_saved_action()) return 93;
         if (!guest_fault()) return 94;
+    }
+    if (sig != SIGSEGV) {
+        if (argc > 8 && atoi(argv[8])) {
+            struct sigaction segv = {.sa_handler=replacement_failure};
+            if (sigaction(SIGSEGV, &segv, 0)) return 96;
+        }
+        sigset_t blocked;
+        sigemptyset(&blocked);
+        sigaddset(&blocked, SIGSEGV);
+        if (sigprocmask(SIG_BLOCK, &blocked, 0)) return 96;
     }
     if (atoi(argv[6])) {
         // Native failed delivery needs no new disposition or mask syscall.
@@ -862,7 +879,7 @@ int main(int argc, char **argv) {
         if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) ||
             prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &filter)) return 95;
     }
-    syscall(SYS_tgkill, getpid(), syscall(SYS_gettid), SIGSEGV);
+    syscall(SYS_tgkill, getpid(), syscall(SYS_gettid), sig);
     return 97;
 }
 """
@@ -885,6 +902,27 @@ def test_absent_segv_restorer(absent_restorer_host, alternate, onstack,
             [str(absent_restorer_host), str(int(installed)), str(int(alternate)),
              str(int(onstack)), str(int(information)), str(int(pointer)),
              str(int(restricted))],
+            capture_output=True, timeout=5,
+        )
+        assert result.returncode == -signal.SIGSEGV, result
+        assert result.stdout == b"", result
+
+
+@pytest.mark.parametrize("sig", [signal.SIGFPE, signal.SIGBUS])
+@pytest.mark.parametrize("alternate", [False, True])
+@pytest.mark.parametrize("onstack", [False, True])
+@pytest.mark.parametrize("information", [False, True])
+@pytest.mark.parametrize("pointer", [False, True])
+@pytest.mark.parametrize("restricted", [False, True])
+@pytest.mark.parametrize("replacement", [False, True])
+def test_absent_restorer_blocked_failure(absent_restorer_host, sig, alternate,
+                                        onstack, information, pointer,
+                                        restricted, replacement):
+    for installed in (False, True):
+        result = subprocess.run(
+            [str(absent_restorer_host), str(int(installed)), str(int(alternate)),
+             str(int(onstack)), str(int(information)), str(int(pointer)),
+             str(int(restricted)), str(sig.value), str(int(replacement))],
             capture_output=True, timeout=5,
         )
         assert result.returncode == -signal.SIGSEGV, result
