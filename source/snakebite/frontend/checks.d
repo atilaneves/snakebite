@@ -26,6 +26,9 @@ public struct Checks {
     public CHECKENABLE invariants = CHECKENABLE.on;
     public CHECKENABLE arrayBounds = CHECKENABLE.on;
     public CHECKENABLE switchError = CHECKENABLE.on;
+    // Off unless `-check=nullderef` asks: no flag, not even `-unittest`,
+    // turns it on.
+    public CHECKENABLE nullDeref = CHECKENABLE.off;
     public CHECKACTION action = CHECKACTION.D;
     // Imported template declarations use the root compilation's versions,
     // while ordinary dependency functions keep their library's flags.
@@ -38,6 +41,7 @@ public struct Checks {
         invariants,
         arrayBounds,
         switchError,
+        nullDeref,
     }
 
     private bool _release;
@@ -153,8 +157,7 @@ public struct Checks {
             case "invariant": _requested[Category.invariants] = enable; return true;
             case "out": _requested[Category.postconditions] = enable; return true;
             case "switch": _requested[Category.switchError] = enable; return true;
-            // dmd accepts it; neither backend has a separate null check.
-            case "nullderef": return true;
+            case "nullderef": _requested[Category.nullDeref] = enable; return true;
             default: return false;
         }
     }
@@ -179,6 +182,7 @@ public struct Checks {
             case invariants: return this.invariants;
             case arrayBounds: return this.arrayBounds;
             case switchError: return this.switchError;
+            case nullDeref: return this.nullDeref;
         }
     }
 
@@ -192,6 +196,8 @@ public struct Checks {
                 if (_boundscheck != CHECKENABLE._default)
                     return _boundscheck;
                 return _release ? CHECKENABLE.safeonly : CHECKENABLE.on;
+            case nullDeref:
+                return CHECKENABLE.off;
             case preconditions:
             case postconditions:
             case invariants:
@@ -207,6 +213,7 @@ public struct Checks {
         params.useInvariants = invariants;
         params.useArrayBounds = arrayBounds;
         params.useSwitchError = switchError;
+        params.useNullCheck = nullDeref;
         params.checkAction = action;
         params.betterC = betterC;
         params.useModuleInfo = !betterC;
@@ -258,6 +265,10 @@ public struct Checks {
     }
 
     private bool isNamed(in Category category) const @safe pure nothrow @nogc {
+        // LDC has no flag for it.
+        if (category == Category.nullDeref)
+            return false;
+
         return _requested[category] != CHECKENABLE._default
             || (category == Category.arrayBounds
                 && _boundscheck != CHECKENABLE._default);
@@ -277,6 +288,8 @@ public struct Checks {
                 return "--enable-switch-errors=" ~ ldcBool(this.switchError);
             case arrayBounds:
                 return "--boundscheck=" ~ ldcBounds;
+            case nullDeref:
+                assert(0, "LDC has no null dereference check");
         }
     }
 

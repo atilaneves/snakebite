@@ -21,6 +21,7 @@ public enum DruntimeHook {
     indexBounds,
     sliceBounds,
     rangeError,
+    nullPointer,
     classInvariant,
     gcMalloc,
     callFinalizer,
@@ -54,7 +55,8 @@ private immutable Register[5] _sliceBoundsRegisters = [
 
 // `_d_arrayboundsp(immutable(char*) file, uint line)`: the `RangeError` of
 // a check that has no index or bounds to report, such as a slice copy.
-private immutable Register[2] _rangeErrorRegisters = [
+// `_d_nullpointerp(immutable(char*) file, uint line)` takes the same two.
+private immutable Register[2] _fileLineRegisters = [
     Register(Register.Kind.pointer, 8),
     Register(Register.Kind.unsigned, 4),
 ];
@@ -141,7 +143,10 @@ public DruntimeHookSpec specOf(in DruntimeHook hook) @safe @nogc nothrow pure {
                 "_d_arraybounds_slicep", _sliceBoundsRegisters);
         case rangeError:
             return DruntimeHookSpec(
-                "_d_arrayboundsp", _rangeErrorRegisters);
+                "_d_arrayboundsp", _fileLineRegisters);
+        case nullPointer:
+            return DruntimeHookSpec(
+                "_d_nullpointerp", _fileLineRegisters);
         case classInvariant:
             return DruntimeHookSpec(
                 _classInvariantSymbol, _pointerOnlyRegisters);

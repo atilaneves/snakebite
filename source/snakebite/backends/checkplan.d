@@ -24,6 +24,25 @@ public FailurePlan assertPlanOf(in Checks checks) @safe pure nothrow @nogc {
     return planFor(checks.assertion, checks);
 }
 
+public FailurePlan nullDerefPlanOf(in Checks checks) @safe pure nothrow @nogc {
+    return planFor(checks.nullDeref, checks);
+}
+
+// What `-checkaction=C` passes to the C runtime for a null dereference.
+public enum nullDerefCMessage = "null pointer dereference";
+
+// A call that reads the vtable of its receiver: dmd's glue layer checks the
+// receiver there, after it evaluates the arguments. A `final` method, a
+// `super` call and a constructor are direct calls with no such read.
+public bool readsVtable(
+    in imported!"dmd.expression".CallExp call,
+    imported!"dmd.func".FuncDeclaration callee,
+) {
+    import dmd.funcsem: isVirtualMethod;
+
+    return !call.directcall && callee.isVirtualMethod;
+}
+
 // `function_` is the function whose code holds the check:
 // `-release` checks bounds only in `@safe` code, and code in a C module is
 // never checked, as dmd's glue layer decides (`IRState.arrayBoundsCheck`).

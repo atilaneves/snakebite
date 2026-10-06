@@ -69,6 +69,7 @@ private enum indexError = "core.exception.ArrayIndexError";
 private enum sliceError = "core.exception.ArraySliceError";
 private enum rangeError = "core.exception.RangeError";
 private enum switchError = "core.exception.SwitchError";
+private enum nullPointerError = "core.exception.NullPointerError";
 private enum failure = "Assertion failure";
 
 private enum haltFlags = ["-checkaction=halt"];
@@ -317,6 +318,196 @@ static foreach (backend; Compiled) {
                 Expect.halted),
         ])
             shouldRun!backend(row);
+    }
+}
+
+
+// A null dereference is only checked when the flag asks for it; then it
+// raises where an unchecked one faults.
+static foreach (backend; Guests) {
+    @("flags.nullDerefField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        enum program = q{
+            struct S { int x; }
+            @system unittest {
+                S* p;
+                int y = p.x;
+            }
+        };
+
+        foreach (row; [
+            Row(["-check=nullderef"], program,
+                Expect.raised(nullPointerError), Expect.same),
+            Row(["-check=nullderef=on"], program,
+                Expect.raised(nullPointerError), Expect.same),
+            Row(["-check=nullderef", "-checkaction=halt"], program,
+                Expect.halted, Expect.raised),
+            Row(["-check=nullderef=off"], program,
+                Expect.halted, Expect.raised),
+            Row([], program, Expect.halted, Expect.raised),
+        ])
+            shouldRun!backend(row);
+    }
+}
+
+
+static foreach (backend; Guests) {
+    @("flags.nullDerefPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        enum program = q{
+            @system unittest {
+                int* p;
+                int y = *p;
+            }
+        };
+
+        foreach (row; [
+            Row(["-check=nullderef"], program,
+                Expect.raised(nullPointerError), Expect.same),
+            Row(["-check=nullderef=on"], program,
+                Expect.raised(nullPointerError), Expect.same),
+            Row(["-check=nullderef", "-checkaction=halt"], program,
+                Expect.halted, Expect.raised),
+            Row(["-check=nullderef=off"], program,
+                Expect.halted, Expect.raised),
+            Row([], program, Expect.halted, Expect.raised),
+        ])
+            shouldRun!backend(row);
+    }
+}
+
+
+static foreach (backend; Guests) {
+    @("flags.nullDerefVirtualCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        enum program = q{
+            class C { int f() { return 1; } }
+            @system unittest {
+                C c;
+                c.f();
+            }
+        };
+
+        foreach (row; [
+            Row(["-check=nullderef"], program,
+                Expect.raised(nullPointerError), Expect.same),
+            Row(["-check=nullderef=on"], program,
+                Expect.raised(nullPointerError), Expect.same),
+            Row(["-check=nullderef", "-checkaction=halt"], program,
+                Expect.halted, Expect.raised),
+        ])
+            shouldRun!backend(row);
+    }
+}
+
+
+static foreach (backend; Guests) {
+    @("flags.nullDerefDelegate." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        enum program = q{
+            class C { int f() { return 1; } }
+            @system unittest {
+                C c;
+                auto dg = &c.f;
+            }
+        };
+
+        foreach (row; [
+            Row(["-check=nullderef"], program,
+                Expect.raised(nullPointerError), Expect.same),
+            Row(["-check=nullderef=on"], program,
+                Expect.raised(nullPointerError), Expect.same),
+            Row(["-check=nullderef", "-checkaction=halt"], program,
+                Expect.halted, Expect.raised),
+            Row(["-check=nullderef=off"], program,
+                Expect.halted, Expect.raised),
+            Row([], program, Expect.halted, Expect.raised),
+        ])
+            shouldRun!backend(row);
+    }
+}
+
+
+static foreach (backend; Guests) {
+    @("flags.nullDerefClassFieldRead." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shouldRun!backend(Row(["-check=nullderef"], q{
+            class C { int x; }
+            @system unittest {
+                C c;
+                int y = c.x;
+            }
+        }, Expect.raised(nullPointerError), Expect.same));
+    }
+}
+
+
+static foreach (backend; Guests) {
+    @("flags.nullDerefClassFieldWrite." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shouldRun!backend(Row(["-check=nullderef"], q{
+            class C { int x; }
+            @system unittest {
+                C c;
+                c.x = 1;
+            }
+        }, Expect.raised(nullPointerError), Expect.same));
+    }
+}
+
+
+static foreach (backend; Guests) {
+    @("flags.nullDerefDelegateCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shouldRun!backend(Row(["-check=nullderef"], q{
+            @system unittest {
+                int delegate() dg;
+                dg();
+            }
+        }, Expect.raised(nullPointerError), Expect.same));
+    }
+}
+
+
+static foreach (backend; Guests) {
+    @("flags.nullDerefFunctionPointerCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shouldRun!backend(Row(["-check=nullderef"], q{
+            @system unittest {
+                int function() fp;
+                fp();
+            }
+        }, Expect.raised(nullPointerError), Expect.same));
+    }
+}
+
+
+// Native code reads the vtable of the receiver after it evaluates the
+// arguments, and the check is at that read.
+static foreach (backend; Guests) {
+    @("flags.nullDerefVirtualCallArguments." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shouldRun!backend(Row(["-check=nullderef"], q{
+            class C { int f(int a) { return a; } }
+            int evaluated;
+            int argument() { evaluated = 1; return 1; }
+            @system unittest {
+                C c;
+                try c.f(argument());
+                catch (Error) {}
+                assert(evaluated == 1);
+            }
+        }, Expect.returned, Expect.diagnosed(
+            "function call through null class reference `null`")));
     }
 }
 
