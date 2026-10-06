@@ -69,6 +69,7 @@ private enum indexError = "core.exception.ArrayIndexError";
 private enum sliceError = "core.exception.ArraySliceError";
 private enum rangeError = "core.exception.RangeError";
 private enum switchError = "core.exception.SwitchError";
+private enum nullPointerError = "core.exception.NullPointerError";
 private enum failure = "Assertion failure";
 
 private enum haltFlags = ["-checkaction=halt"];
@@ -323,9 +324,6 @@ static foreach (backend; Compiled) {
 
 // A null dereference is only checked when the flag asks for it; then it
 // raises where an unchecked one faults.
-private enum nullPointerError = "core.exception.NullPointerError";
-
-
 static foreach (backend; Guests) {
     @("flags.nullDerefField." ~ backend.stringof)
     @Tags(backend.stringof)
