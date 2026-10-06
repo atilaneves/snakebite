@@ -7,7 +7,7 @@ import dmd.dclass: ClassDeclaration;
 import dmd.declaration: Declaration, VarDeclaration;
 import dmd.expression:
     AddAssignExp, AddExp, AssignExp, CallExp, CmpExp, DeclarationExp,
-    DelegateExp, DeleteExp, DotVarExp, EqualExp, Expression, FuncExp, IndexExp, IntegerExp,
+    DelegateExp, DeleteExp, DotVarExp, EqualExp, Expression, FuncExp, IndexExp,
     MinAssignExp, MinExp, NewExp, PostExp, SliceExp, StringExp, StructLiteralExp,
     SymOffExp, ThisExp, TypeidExp, VarExp;
 import dmd.func: FuncDeclaration;
@@ -209,12 +209,6 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
 
         if (auto type = isType(expression.obj))
             _preparation.typeInfo(type);
-    }
-
-    // The encoding of a struct whose default value is all zero bytes.
-    private extern(D) void handle(IntegerExp expression) {
-        if (expression.type !is null)
-            _preparation.zeroInitialized(expression.type);
     }
 
     // Execution of each of these asks for the size of the element or the
