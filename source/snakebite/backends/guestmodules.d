@@ -58,35 +58,39 @@ public struct GuestModules {
     public Duration preparation;
     public Duration constructors;
 
+    // While it lives, the explicit runtime start and end of a program with
+    // a C entry run the module phases of `program`.
     public struct Entry {
         private EntryRun* _entry;
 
-        public static Entry prepare(Backend backend, Program program) {
-            import core.memory: GC;
+        @disable this(this);
+
+        public this(Backend backend, Program program) {
             import std.conv: text;
             import std.string: toStringz;
-            import core.sys.posix.dlfcn: dlclose;
+            import snakebite.runtimeentry: RuntimeEntry;
 
-            if (program.dependencyImage is null
-                    || program.dependencyImage.deferredModules.length == 0)
-                return Entry.init;
-            auto entry = new EntryRun;
-            GC.addRoot(entry);
-            entry.backend = backend;
-            entry.program = program;
-            entry.token = Image.open;
-            dlclose(entry.token._handle);
-            entry.token._handle = null;
-            --_images;
-            entry.tokenPath = text("/proc/self/fd/", entry.token._file).toStringz;
-            program.dependencyImage.bindEntry(
-                entry, &startEntry, &finishEntry, entry.tokenPath);
-            return Entry(entry);
+            if (!program.hasCEntryPoint || program.checks.betterC)
+                return;
+
+            _entry = new EntryRun;
+            _entry.backend = backend;
+            _entry.program = program;
+            _entry.file = Image.newFile;
+            _entry.token = text("/proc/self/fd/", _entry.file).toStringz;
+            RuntimeEntry.bind(_entry, &startEntry, &finishEntry, _entry.token);
         }
 
-        public void returned() {
-            if (_entry !is null)
-                _entry.modules.finish;
+        public ~this() {
+            import core.sys.posix.unistd: close;
+            import snakebite.runtimeentry: RuntimeEntry;
+
+            if (_entry is null)
+                return;
+
+            RuntimeEntry.unbind;
+            _entry.modules.finish;
+            close(_entry.file);
         }
     }
 
@@ -217,8 +221,8 @@ private struct EntryRun {
     Backend backend;
     Program program;
     GuestModules modules;
-    Image token;
-    const(char)* tokenPath;
+    int file;
+    const(char)* token;
 }
 
 private extern(C) int startEntry(void* owner) {
@@ -232,9 +236,13 @@ private extern(C) void thread_joinAll();
 
 private extern(C) int finishEntry(void* owner) {
     auto entry = cast(EntryRun*) owner;
-    auto run = entry.modules._run;
-    if (run is null || entry.modules.failed)
+    if (entry.modules.failed)
         return 0;
+
+    auto run = entry.modules._run;
+    if (run is null)
+        return 1;
+
     int status = 1;
     try {
         auto group = registeredGroup(*run.image.slot); // Runtime methods mutate their group.
@@ -784,17 +792,25 @@ private ModuleInfo*[] nativeRecordsOf(Run* run) {
         auto record = cast(ModuleInfo*) storage.ptr;
         record._index = 0;
         auto slot = cast(void**) (storage.ptr + ModuleInfo.sizeof);
-        static foreach (i, flag; [MItlsctor, MItlsdtor, MIctor, MIdtor, MIictor, MIunitTest]) {
-            if (record._flags & flag) {
+        // The order of the fields in the record. `xgetMembers` is a field
+        // that druntime never calls.
+        foreach (flag; [MItlsctor, MItlsdtor, MIctor, MIdtor, MIxgetMembers,
+                MIictor, MIunitTest]) {
+            if (!(record._flags & flag))
+                continue;
+
+            if (flag != MIxgetMembers) {
                 auto phase = new Phase;
                 phase.run = run;
-                phase.kind = [Phase.Kind.threadConstructor, Phase.Kind.destructor,
-                    Phase.Kind.constructor, Phase.Kind.destructor,
-                    Phase.Kind.constructor, Phase.Kind.unitTests][i];
+                phase.kind = flag == MItlsctor ? Phase.Kind.threadConstructor
+                    : flag == MIctor || flag == MIictor ? Phase.Kind.constructor
+                    : flag == MIunitTest ? Phase.Kind.unitTests
+                    : Phase.Kind.destructor;
                 phase.nativeFunction = cast(void function()) *slot;
                 run.bridge.register(phase, run.nativeDeclaration);
-                *slot++ = cast(void*) run.entryOf(phase);
+                *slot = cast(void*) run.entryOf(phase);
             }
+            ++slot;
         }
         copies[original] = record;
         records ~= record;
@@ -1015,11 +1031,37 @@ private struct Image {
     // long as the image does: its descriptor number is the file name the
     // loader sees, so no two images that are alive have the same name.
     public static Image open() {
+        import core.sys.posix.unistd: close;
+        import std.conv: text;
+        import std.string: fromStringz, toStringz;
+
+        const file = newFile;
+        scope(failure) close(file);
+        Image image;
+        image._file = file;
+        image._handle = dlopen(
+            text("/proc/self/fd/", file).toStringz, RTLD_NOW | RTLD_LOCAL);
+        if (image._handle is null)
+            throw new SnakebiteException(text(
+                "cannot load the registry image: ", dlerror.fromStringz));
+
+        alias Slot = extern(C) void** function();
+        auto slot = cast(Slot) dlsym(image._handle, "snakebite_registry_slot");
+        if (slot is null)
+            assert(0, "the registry image exports its slot");
+
+        image._slot = slot();
+        ++_images;
+        return image;
+    }
+
+    // An open anonymous memory file with the bytes of the image.
+    public static int newFile() {
         import core.stdc.errno: errno;
         import core.stdc.string: strerror;
         import core.sys.posix.unistd: close, write;
         import std.conv: text;
-        import std.string: fromStringz, toStringz;
+        import std.string: fromStringz;
 
         enum MFD_CLOEXEC = 1;
         const file = memfd_create("snakebite-registry", MFD_CLOEXEC);
@@ -1042,22 +1084,7 @@ private struct Image {
             written += count;
         }
 
-        Image image;
-        image._file = file;
-        image._handle = dlopen(
-            text("/proc/self/fd/", file).toStringz, RTLD_NOW | RTLD_LOCAL);
-        if (image._handle is null)
-            throw new SnakebiteException(text(
-                "cannot load the registry image: ", dlerror.fromStringz));
-
-        alias Slot = extern(C) void** function();
-        auto slot = cast(Slot) dlsym(image._handle, "snakebite_registry_slot");
-        if (slot is null)
-            assert(0, "the registry image exports its slot");
-
-        image._slot = slot();
-        ++_images;
-        return image;
+        return file;
     }
 
     public void register(ModuleInfo*[] records) {

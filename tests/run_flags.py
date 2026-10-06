@@ -755,7 +755,7 @@ extern(C) int next() {{ return 7; }}
 
 
 @pytest.mark.parametrize("backend", ["native", *BACKENDS, "native-ldc"])
-@pytest.mark.parametrize("case", ["nested", "alias", "ctor-failure", "dtor-failure", "ctor-child-init", "descendant", "override", "roots", "tls-start", "daemon", "pointer", "exit-active", "tls-dtor-release", "tls-dtor-failure"])
+@pytest.mark.parametrize("case", ["nested", "alias", "ctor-failure", "dtor-failure", "ctor-child-init", "descendant", "override", "roots", "tls-start", "daemon", "pointer", "exit-active", "tls-dtor-release", "tls-dtor-failure", "runtime-api"])
 def test_dependency_explicit_lifecycle(tmp_path: Path, backend: str, case: str) -> None:
     if backend == "ctfe":
         pytest.skip("Verified CTFE limit: native fputs has no compile-time body")
@@ -800,6 +800,8 @@ int fullDBody() { try { throw new Exception("full D"); } catch (Exception error)
         body += 'assert(dependencyInit()); assert(rt_term()); fputs("ONE_TERM\\n", stderr); assert(rt_term()); assert(rt_term() == 0);'
     elif case == "alias":
         body = 'auto initialize = &requestInit; assert(initialize()); assert(status() == 11); assert(rt_term());'
+    elif case == "runtime-api":
+        body = 'assert(Runtime.initialize()); assert(status() == 11); assert(Runtime.terminate());'
     elif case == "ctor-failure":
         constructor += 'throw new Exception("CTOR_FAILURE");'
         body = 'assert(rt_init() == 0); assert(rt_term() == 0);'
@@ -845,6 +847,7 @@ import core.thread : Thread;
 import core.sync.semaphore : Semaphore;
 import core.memory : GC;
 import core.time : msecs;
+import core.runtime : Runtime;
 __gshared Semaphore entered, release;
 __gshared bool blockChild;
 __gshared Thread owner;
@@ -900,6 +903,55 @@ extern(C) int main() {
             assert lines.index("ONE_TERM") < lines.index("ROOT_DTOR"), output
         if case == "tls-dtor-release":
             assert lines.index("TERM_REQUEST") < lines.index("OWNER_TLS_DTOR") < lines.index("CHILD_END") < lines.index("ROOT_DTOR") < lines.index("TERM_RETURN"), output
+
+
+@pytest.mark.parametrize("backend", ["native", *BACKENDS, "native-ldc"])
+def test_explicit_lifecycle_without_dependency(tmp_path: Path, backend: str) -> None:
+    if backend == "ctfe":
+        pytest.skip("Verified CTFE limit: native fputs has no compile-time body")
+    (tmp_path / "source").mkdir()
+    (tmp_path / "dub.json").write_text(json.dumps({
+        "name": "app", "targetType": "executable",
+        "libs-dmd": ["phobos2"], "dflags-ldc": ["-link-defaultlib-shared"],
+        "mainSourceFile": "source/app.d",
+        "configurations": [{"name": "unittest", "targetType": "executable", "mainSourceFile": "source/app.d"}],
+    }), encoding="utf-8")
+    (tmp_path / "source" / "app.d").write_text("""module app;
+import core.stdc.stdio;
+extern(C) int rt_init();
+extern(C) int rt_term();
+shared static this() { fputs("ROOT_CTOR\\n", stderr); }
+static this() { fputs("ROOT_TLS_CTOR\\n", stderr); }
+shared static ~this() { fputs("ROOT_DTOR\\n", stderr); }
+static ~this() { fputs("ROOT_TLS_DTOR\\n", stderr); }
+extern(C) int main() {
+    fputs("INIT\\n", stderr);
+    if (!rt_init()) return 3;
+    fputs("STARTED\\n", stderr);
+    if (!rt_term()) return 4;
+    fputs("MAIN\\n", stderr);
+    return 0;
+}
+""", encoding="utf-8")
+    if backend in ["native", "native-ldc"]:
+        compiler = shutil.which("dmd" if backend == "native" else "ldc2")
+        if compiler is None:
+            pytest.skip("ldc2 is not on PATH")
+        command = ["dub", "test", f"--compiler={compiler}"]
+    else:
+        command = [sb_path(), f"--backend={backend}", "--no-optimise-image", str(tmp_path)]
+    result = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True,
+                            timeout=TIMEOUT)
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    markers = [line for line in output.splitlines() if line in {
+        "INIT", "ROOT_CTOR", "ROOT_TLS_CTOR", "STARTED", "ROOT_TLS_DTOR",
+        "ROOT_DTOR", "MAIN",
+    }]
+    assert markers == [
+        "INIT", "ROOT_CTOR", "ROOT_TLS_CTOR", "STARTED", "ROOT_TLS_DTOR",
+        "ROOT_DTOR", "MAIN",
+    ], output
 
 
 # The tests can run in parallel (see build/pytest-workers.sh) because the

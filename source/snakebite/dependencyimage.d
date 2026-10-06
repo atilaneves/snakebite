@@ -85,8 +85,11 @@ public struct DependencyImage {
     private string _path;
     private alias Modules = extern(C) const(ModuleInfo*)* function(size_t*);
     private Modules _modules;
-    private void* _entryInit;
-    private void* _entryTerm;
+    import snakebite.runtimeentry: RuntimeEntry;
+    // The image's own function for each function of `RuntimeEntry`, or null.
+    // Code in the image calls it and takes its address, so a guest
+    // reference must give the same address.
+    private void*[RuntimeEntry.symbols.length] _wrappers;
     public TestHooks testHooks;
 
     // The image exports its function registry under this name. The frontend
@@ -106,20 +109,6 @@ public struct DependencyImage {
         return records[0 .. count];
     }
 
-    public alias EntryPhase = extern(C) int function(void*);
-
-    public void bindEntry(
-        void* owner, EntryPhase start, EntryPhase finish, const(char)* token,
-    ) const {
-        import core.sys.posix.dlfcn: dlsym;
-        alias Bind = extern(C) void function(void*, EntryPhase, EntryPhase,
-            const(char)*, void*, void*);
-        const bind = cast(Bind) dlsym(cast(void*) _handle,
-            "snakebite_dependency_entry_bind_v1");
-        assert(bind !is null);
-        bind(owner, start, finish, token, cast(void*) &rt_init, cast(void*) &rt_term);
-    }
-
     public void* resolve(in char[] name) const {
         import core.sys.posix.dlfcn: dlerror, dlsym;
         import std.string: toStringz;
@@ -130,10 +119,9 @@ public struct DependencyImage {
         // const qualifies this description, not the loader's opaque handle.
         const address = dlsym(cast(void*) _handle, name.toStringz);
         if (dlerror is null) {
-            if (_entryInit !is null && address == cast(void*) &rt_init)
-                return cast(void*) _entryInit;
-            if (_entryTerm !is null && address == cast(void*) &rt_term)
-                return cast(void*) _entryTerm;
+            foreach (i, function_; RuntimeEntry.druntime)
+                if (_wrappers[i] !is null && address == function_)
+                    return cast(void*) _wrappers[i];
             return cast(void*) address;
         }
 
@@ -214,8 +202,10 @@ public DependencyImage prepareImage(
     // Keep the same runtime choice for compilation and linking.
     const runtimeFlags = checks.betterC ? ["-betterC"] : null;
     const startupFlags = deferStartup
-        ? ["-L--wrap=_d_dso_registry", "-L--wrap=rt_init", "-L--wrap=rt_term",
-            "-L-Bsymbolic-functions"] : null;
+        ? ["-L--wrap=_d_dso_registry", "-L-Bsymbolic-functions"]
+            ~ DependencyImage.RuntimeEntry.symbols
+                .map!(symbol => "-L--wrap=" ~ symbol).array
+        : null;
 
     // The image must emit transitive template bodies too, including runtime
     // helpers introduced by assertion lowering. No guest object supplies them.
@@ -376,8 +366,19 @@ private DependencyImage loadImageLocked(in string path) {
     image._modules = cast(DependencyImage.Modules) dlsym(image._handle,
         "snakebite_dependency_image_modules_v1");
     if (image._modules !is null) {
-        image._entryInit = dlsym(image._handle, "__wrap_rt_init");
-        image._entryTerm = dlsym(image._handle, "__wrap_rt_term");
+        import std.string: toStringz;
+        import snakebite.runtimeentry: RuntimeEntry;
+
+        foreach (i, symbol; RuntimeEntry.symbols)
+            image._wrappers[i] = dlsym(
+                image._handle, text("__wrap_", symbol).toStringz);
+        alias Bind = extern(C) void function(
+            const(void)*, const(void)*, const(void)*, const(void)*);
+        const bind = cast(Bind) dlsym(image._handle,
+            "snakebite_dependency_entry_bind_v1");
+        const entries = RuntimeEntry.entries;
+        const druntime = RuntimeEntry.druntime;
+        bind(entries[0], entries[1], druntime[0], druntime[1]);
     }
     // Shared constructors run only on the first load. Retain their hooks
     // even if later preparation fails, since the loaded image stays open.
@@ -394,8 +395,6 @@ private DependencyImage loadImageLocked(in string path) {
 // An empty module range preserves actual image GC/TLS registration without
 // starting a full-D static dependency before its C entry requests startup.
 private enum deferredRegistrySource = q{
-    import core.sys.posix.dlfcn;
-    import core.atomic : cas, atomicStore, atomicLoad;
     private struct SnakebiteDeferredDSO {
         size_t version_;
         void** slot;
@@ -416,65 +415,40 @@ private enum deferredRegistrySource = q{
         *count = snakebiteDeferredModules.length;
         return snakebiteDeferredModules.ptr;
     }
-    alias SnakebiteEntryPhase = extern(C) int function(void*);
-    private __gshared void* snakebiteEntryOwner;
-    private __gshared SnakebiteEntryPhase snakebiteEntryStart;
-    private __gshared SnakebiteEntryPhase snakebiteEntryFinish;
-    private __gshared const(char)* snakebiteEntryToken;
+    alias SnakebiteRuntimePhase = extern(C) int function();
+    private __gshared SnakebiteRuntimePhase snakebiteEntryInit;
+    private __gshared SnakebiteRuntimePhase snakebiteEntryTerm;
     private __gshared void* snakebiteHostInit;
     private __gshared void* snakebiteHostTerm;
-    private shared bool snakebiteEntryPending;
-    private shared bool snakebiteEntrySucceeded;
     extern(C) int __real_rt_init();
     extern(C) int __real_rt_term();
     export extern(C) void snakebite_dependency_entry_bind_v1(
-        void* owner, SnakebiteEntryPhase start, SnakebiteEntryPhase finish,
-        const(char)* token, void* initialize, void* terminate,
+        SnakebiteRuntimePhase initialize, SnakebiteRuntimePhase terminate,
+        void* hostInitialize, void* hostTerminate,
     ) {
-        snakebiteEntryOwner = owner;
-        snakebiteEntryStart = start;
-        snakebiteEntryFinish = finish;
-        snakebiteEntryToken = token;
-        snakebiteHostInit = initialize;
-        snakebiteHostTerm = terminate;
-        atomicStore(snakebiteEntrySucceeded, true);
-        atomicStore(snakebiteEntryPending, true);
+        snakebiteEntryInit = initialize;
+        snakebiteEntryTerm = terminate;
+        snakebiteHostInit = hostInitialize;
+        snakebiteHostTerm = hostTerminate;
     }
+    // A dependency that defines one of these functions keeps its definition.
     export extern(C) int __wrap_rt_init() {
-        if (snakebiteEntryOwner is null
-                || cast(void*) &__real_rt_init != snakebiteHostInit)
-            return __real_rt_init();
-        if (!__real_rt_init()) return 0;
-        scope(exit) __real_rt_term();
-        auto handle = dlopen(snakebiteEntryToken, RTLD_NOW);
-        if (handle is null) return 0;
-        if (cas(&snakebiteEntryPending, true, false))
-            atomicStore(snakebiteEntrySucceeded,
-                snakebiteEntryStart(snakebiteEntryOwner) != 0);
-        if (atomicLoad(snakebiteEntrySucceeded)) return 1;
-        dlclose(handle);
-        return 0;
+        return cast(void*) &__real_rt_init == snakebiteHostInit
+            ? snakebiteEntryInit() : __real_rt_init();
     }
     export extern(C) int __wrap_rt_term() {
-        if (snakebiteEntryOwner is null
-                || cast(void*) &__real_rt_term != snakebiteHostTerm)
-            return __real_rt_term();
-        auto handle = dlopen(snakebiteEntryToken, RTLD_NOW | RTLD_NOLOAD);
-        if (handle is null) return 0;
-        if (dlclose(handle) || dlclose(handle)) return 0;
-        auto remaining = dlopen(snakebiteEntryToken, RTLD_NOW | RTLD_NOLOAD);
-        if (remaining !is null) {
-            dlclose(remaining);
-            return 1;
-        }
-        const result = snakebiteEntryFinish(snakebiteEntryOwner);
-        atomicStore(snakebiteEntryPending, true);
-        return result;
+        return cast(void*) &__real_rt_term == snakebiteHostTerm
+            ? snakebiteEntryTerm() : __real_rt_term();
+    }
+    pragma(mangle, "__wrap_" ~ imported!"core.runtime".Runtime.initialize.mangleof)
+    export bool snakebiteRuntimeInitialize() {
+        return __wrap_rt_init() != 0;
+    }
+    pragma(mangle, "__wrap_" ~ imported!"core.runtime".Runtime.terminate.mangleof)
+    export bool snakebiteRuntimeTerminate() {
+        return __wrap_rt_term() != 0;
     }
 };
-
-private extern(C) int rt_init();
-private extern(C) int rt_term();
 
 
 private __gshared TestHooks[void*] _imageTestHooks;

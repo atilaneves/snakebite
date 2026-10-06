@@ -10,6 +10,7 @@ private:
 // lock (ADR-0006); a symbol is looked up once, on its first use.
 public struct Resolver {
     import snakebite.dependencyimage: DependencyImage;
+    import snakebite.runtimeentry: RuntimeEntry;
     import snakebite.sharedtable: SharedTable;
 
     private const(DependencyImage)* _image;
@@ -37,7 +38,7 @@ public struct Resolver {
         auto address = _image is null ? null : _image.resolve(name);
         if (address is null)
             address = symbolAddress(name);
-        return *_addresses.insert(name.idup, address);
+        return *_addresses.insert(name.idup, RuntimeEntry.route(address));
     }
 
     // `name`'s address, but only when a genuine, independent native copy
