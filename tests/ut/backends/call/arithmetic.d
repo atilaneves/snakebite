@@ -1,6 +1,11 @@
 module ut.backends.call.arithmetic;
 
 
+import snakebite.backends.backend: Program;
+import snakebite.backends.guestfault: GuestFault, GuestFaultException;
+import snakebite.frontend.compiler: parseSnippet;
+import snakebite.frontend.dmd.functions: findFunction;
+import std.format: format;
 import ut.backends;
 
 
@@ -300,41 +305,35 @@ private alias ByZero = Matrix!(
         ~ "raises no GuestFaultException"),
 );
 
-private void shouldFaultOnZeroDivisor(BackendType)(
-    in string type,
-    in string op,
-    in string function_,
-) {
-    import snakebite.backends.backend: Program;
-    import snakebite.backends.guestfault: GuestFault, GuestFaultException;
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
-    import std.format: format;
-
-    auto module_ = parseSnippet(format(q{
-        %1$s seven() { return 7; }
-        %1$s zero() { return 0; }
-        %1$s %3$s() { return seven() %2$s zero(); }
-    }, type, op, function_));
-
-    GuestFaultException fault;
-    long result;
-    try
-        new BackendType(Program([module_])).call(
-            module_.findFunction(function_), &result, []);
-    catch (GuestFaultException caught)
-        fault = caught;
-
-    fault.shouldNotBeNull;
-    fault.kind.should == GuestFault.Kind.divisionByZero;
-}
-
 static foreach (backend; ByZero) {
     @("arithmetic.divide.byZero." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         shouldFaultOnZeroDivisor!backend("int", "/", "quotient");
     }
+}
+
+private void shouldFaultOnZeroDivisor(BackendType)(
+    in string type,
+    in string op,
+    in string name,
+) {
+    auto module_ = parseSnippet(format(q{
+        %1$s seven() { return 7; }
+        %1$s zero() { return 0; }
+        %1$s %3$s() { return seven() %2$s zero(); }
+    }, type, op, name));
+
+    GuestFaultException fault;
+    long result;
+    try
+        new BackendType(Program([module_])).call(
+            module_.findFunction(name), &result, []);
+    catch (GuestFaultException caught)
+        fault = caught;
+
+    fault.shouldNotBeNull;
+    fault.kind.should == GuestFault.Kind.divisionByZero;
 }
 
 static foreach (backend; ByZero) {
@@ -345,8 +344,6 @@ static foreach (backend; ByZero) {
     }
 }
 
-// The zero-divisor check sits above the signedness question, so unsigned
-// division and modulo fault the same way.
 static foreach (backend; ByZero) {
     @("arithmetic.divide.byZero.unsigned." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -360,6 +357,60 @@ static foreach (backend; ByZero) {
     @Tags(backend.stringof)
     unittest {
         shouldFaultOnZeroDivisor!backend("uint", "%", "remainder");
+    }
+}
+
+static foreach (backend; ByZero) {
+    @("arithmetic.divide.byZero.arrayOperation." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        auto module_ = parseSnippet(q{
+            int zero() { return 0; }
+            int quotients() {
+                int[] a = new int[2];
+                int[] b = [7, 8];
+                int[] c = [1, zero()];
+                a[] = b[] / c[];
+                return a[0];
+            }
+        });
+
+        GuestFaultException fault;
+        int result;
+        try
+            new backend(Program([module_])).call(
+                module_.findFunction("quotients"), &result, []);
+        catch (GuestFaultException caught)
+            fault = caught;
+
+        fault.shouldNotBeNull;
+        fault.kind.should == GuestFault.Kind.divisionByZero;
+    }
+}
+
+static foreach (backend; ByZero) {
+    @("arithmetic.divideAssign.byZero.arrayOperation." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        auto module_ = parseSnippet(q{
+            int zero() { return 0; }
+            int quotients() {
+                int[] a = [7, 8];
+                a[] /= zero();
+                return a[0];
+            }
+        });
+
+        GuestFaultException fault;
+        int result;
+        try
+            new backend(Program([module_])).call(
+                module_.findFunction("quotients"), &result, []);
+        catch (GuestFaultException caught)
+            fault = caught;
+
+        fault.shouldNotBeNull;
+        fault.kind.should == GuestFault.Kind.divisionByZero;
     }
 }
 
