@@ -584,8 +584,7 @@ static foreach (backend; Matrix!(
         scope(exit) directory.rmdirRecurse;
         buildPath(directory, "probe.d").write(q{
             int forever(int n) { return forever(n + 1) + 1; }
-            unittest { forever(0); }
-            void main() {}
+            int main() { return forever(0); }
         });
         static if (is(backend == Interpreter)) enum name = "interpreter";
         else enum name = "bytecode";
