@@ -1012,11 +1012,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     ) {
         import snakebite.faultsignal: takeFault;
         import snakebite.backends.guestfault: GuestFault;
+        import snakebite.frontend.compiler: withCompilerLock;
         import std.string: fromStringz;
 
         takeFault(fault);
         const file = fromStringz(_faultLocation.filename);
-        const name = fromStringz(_faultFunction.toPrettyChars);
+        // `toPrettyChars` is dmd work: it allocates and reads symbol state.
+        const(char)[] name;
+        withCompilerLock({
+            name = fromStringz(_faultFunction.toPrettyChars);
+        });
         scope GuestFault.Stack stack = (scope GuestFault.FrameSink sink) {
             sink(GuestFault.Frame(name, file, _faultLocation.linnum));
         };

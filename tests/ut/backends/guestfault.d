@@ -14,10 +14,8 @@ import core.sys.posix.stdio: flockfile, funlockfile;
 import core.thread: Thread;
 import core.time: msecs, seconds, MonoTime;
 import ut;
-import snakebite.backends.bytecode: Bytecode;
-import snakebite.backends.interpreter: Interpreter;
+import ut.backends;
 import snakebite.frontend.dmd.functions: findFunction;
-import std.meta: AliasSeq;
 
 
 private string rendered(
@@ -34,9 +32,18 @@ private string rendered(
 }
 
 
-static foreach (BackendType; AliasSeq!(Bytecode, Interpreter)) {
-@("guestFault." ~ BackendType.stringof ~ ".discardsHaltedStateAndPreservesCallerCleanup")
-unittest {
+private alias NoNative = Omit!(Native, Because.inexpressible,
+    "the test enters a backend object again after the fault, and the "
+    ~ "Native arm is code compiled into bin/ut with no such object");
+
+private alias NoCtfe = Omit!(Ctfe, Because.inexpressible,
+    "dmd's interpreter reports a null dereference as a diagnostic and "
+    ~ "raises no GuestFaultException");
+
+private alias Guests = Matrix!(NoNative, NoCtfe);
+
+
+private void discardsHaltedState(BackendType)(in string functionName) {
     auto module_ = parseSnippets([q{
         module recovery;
         int fail() { int* pointer; return *pointer; }
@@ -49,7 +56,6 @@ unittest {
     const program = Program([module_]);
     size_t cleaned;
     foreach (round; 0 .. 40) {
-        const functionName = round % 2 == 0 ? "fail" : "failCleanup";
         auto backend = new BackendType(program);
         GuestFaultException saved;
         int result;
@@ -77,6 +83,23 @@ unittest {
     }
     cleaned.should == 40;
 }
+
+
+static foreach (BackendType; Guests) {
+    @Tags(BackendType.stringof)
+    @("guestFault." ~ BackendType.stringof ~ ".faultInAFunctionBody")
+    unittest {
+        discardsHaltedState!BackendType("fail");
+    }
+}
+
+
+static foreach (BackendType; Guests) {
+    @Tags(BackendType.stringof)
+    @("guestFault." ~ BackendType.stringof ~ ".faultInAFinallyWithAnExceptionPending")
+    unittest {
+        discardsHaltedState!BackendType("failCleanup");
+    }
 }
 
 

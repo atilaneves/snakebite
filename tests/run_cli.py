@@ -289,6 +289,11 @@ def test_native_fault_unwind_keeps_host_cleanup_but_skips_guest_callback(
     if backend in ("bytecode", "interpreter"):
         assert result.returncode == 1, output(result)
         assert result.stdout.count("host released\n") == 1, output(result)
+        # Bytecode defect, not the intended behaviour: when the native code
+        # has an ordinary exception pending, Bytecode does not report the
+        # fault as a halt. bin/sb then prints its timing report on stdout,
+        # and stderr has the raw message of the hardware fault, with no
+        # `fatal:` and no guest source position.
         if backend == "interpreter" or not pending_exception:
             assert result.stdout == "host released\n", output(result)
         assert "null pointer dereference" in result.stderr
