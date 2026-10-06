@@ -12,6 +12,7 @@ import snakebite.faultsignal:
     GuestRun,
     HardwareFault,
     installFaultHandlers,
+    runGuest,
     takeFault;
 import ut;
 
@@ -467,9 +468,8 @@ private immutable Shape[] shapes = [
 ];
 
 private HardwareFault faultOf(void function() fault) {
-    auto run = GuestRun.begin;
     try
-        fault();
+        runGuest({ fault(); });
     catch (HardwareFault caught) {
         takeFault(caught);
         return caught;
@@ -511,11 +511,10 @@ unittest {
 @("faultsignal.guestRun.throwsAgainAfterACatch")
 unittest {
     installFaultHandlers.shouldBeTrue;
-    auto run = GuestRun.begin;
 
     foreach (round; 0 .. 1000) {
         try
-            load(null);
+            runGuest({ load(null); });
         catch (HardwareFault fault) {
             takeFault(fault);
             fault.kind.should == GuestFault.Kind.nullDereference;
@@ -529,11 +528,10 @@ unittest {
 @("faultsignal.guestRun.unwindsThroughTheCleanupOfCallerFrames")
 unittest {
     installFaultHandlers.shouldBeTrue;
-    auto run = GuestRun.begin;
     cleanups = null;
 
     try
-        loadThroughAFrameWithCleanup(null);
+        runGuest({ loadThroughAFrameWithCleanup(null); });
     catch (HardwareFault fault) {
         takeFault(fault);
     }
@@ -542,15 +540,22 @@ unittest {
 }
 
 
+@("faultsignal.guestRun.rawMarkIsNotPublic")
+unittest {
+    static assert(!__traits(compiles, GuestRun.begin));
+}
+
+
 @("faultsignal.guestRun.runsNest")
 unittest {
     installFaultHandlers.shouldBeTrue;
-    auto outer = GuestRun.begin;
-    {
-        auto inner = GuestRun.begin;
-    }
+    GuestFault.Kind kind;
+    runGuest({
+        runGuest({});
+        kind = faultOf(shapes[0].fault).kind;
+    });
 
-    faultOf(shapes[0].fault).kind.should == GuestFault.Kind.nullDereference;
+    kind.should == GuestFault.Kind.nullDereference;
 }
 
 
@@ -570,12 +575,11 @@ unittest {
         guest.ss_size = memory.length;
         sigaltstack(&guest, null);
 
-        {
-            auto run = GuestRun.begin;
+        runGuest({
             stack_t after;
             sigaltstack(null, &after);
             current = after.ss_sp;
-        }
+        });
 
         stack_t disabled;
         disabled.ss_flags = SS_DISABLE;
@@ -614,11 +618,10 @@ unittest {
         threads ~= new Thread({
             import core.atomic: atomicOp;
 
-            auto run = GuestRun.begin;
             foreach (round; 0 .. rounds) {
                 const shape = shapes[(index + round) % shapes.length];
                 try
-                    shape.fault();
+                    runGuest({ shape.fault(); });
                 catch (HardwareFault fault) {
                     takeFault(fault);
                     if (fault.kind != shape.kind)
@@ -651,15 +654,16 @@ unittest {
 
     // A foreign thread must release its stack without druntime attachment.
     static extern(C) void* enter(void* result) {
-        auto run = GuestRun.begin;
-        stack_t current;
-        sigaltstack(null, &current);
-        // Address reuse by another test must not look like a leaked stack.
-        enum setVma = 0x53564d41;
-        enum setAnonymousName = 0;
-        *cast(int*) result = prctl(setVma, setAnonymousName,
-            cast(size_t) current.ss_sp, current.ss_size,
-            cast(size_t) (name ~ "\0").ptr);
+        runGuest({
+            stack_t current;
+            sigaltstack(null, &current);
+            // Address reuse by another test must not look like a leaked stack.
+            enum setVma = 0x53564d41;
+            enum setAnonymousName = 0;
+            *cast(int*) result = prctl(setVma, setAnonymousName,
+                cast(size_t) current.ss_sp, current.ss_size,
+                cast(size_t) (name ~ "\0").ptr);
+        });
         return null;
     }
 

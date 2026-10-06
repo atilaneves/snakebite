@@ -137,7 +137,7 @@ static if (supported) {
 public struct GuestRun {
     @disable this(this);
 
-    public static GuestRun begin() @trusted {
+    private static GuestRun begin() @trusted {
         GuestRun run;
         static if (supported) {
             if (_state.prepared is null)

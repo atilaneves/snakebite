@@ -197,7 +197,7 @@ int main(int argc, char **argv) {
 BRIDGE = """
 module previous_action_bridge;
 import snakebite.faultsignal:
-    GuestRun, HardwareFault, installFaultHandlers, takeFault;
+    HardwareFault, installFaultHandlers, runGuest, takeFault;
 
 extern(C) void native_fault();
 
@@ -207,8 +207,7 @@ extern(C) int install_saved_action() {
 
 extern(C) int guest_fault() {
     try {
-        auto run = GuestRun.begin;
-        native_fault();
+        runGuest({ native_fault(); });
     } catch (HardwareFault fault) {
         takeFault(fault);
         return 1;
