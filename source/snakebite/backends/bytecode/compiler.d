@@ -4278,10 +4278,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 size_t.sizeof);
 
         if (target.virtualDispatch) {
-            const method = compileClassVtableSlot(
-                expression, context, target.function_);
-            emit(&opCopy, _destination + delegateFunctionOffset,
-                method, size_t.sizeof);
+            compileClassVtableSlot(
+                expression, context, target.function_,
+                _destination + delegateFunctionOffset);
             return;
         }
 
@@ -6501,9 +6500,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // needing its own check.
     private bool isVirtualCall(CallExp expression, FuncDeclaration callee) {
         import dmd.astenums: Tclass;
-        import dmd.funcsem: isVirtualMethod;
+        import snakebite.backends.checkplan: readsVtable;
 
-        if (expression.directcall || !callee.isVirtualMethod)
+        if (!expression.readsVtable(callee))
             return false;
 
         auto dot = expression.e1.isDotVarExp;
@@ -6547,10 +6546,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const objectOffset = reserveTemp(pointerFacts);
         evalInto(dot.e1, objectOffset, size_t.sizeof);
-        compileNullCheck(objectOffset, expression.loc);
 
-        const calleeSlotOffset =
-            compileClassVtableSlot(expression, objectOffset, callee);
+        const calleeSlotOffset = reserveTemp(pointerFacts);
         auto calleeLayout = FrameLayout.ofParameters(calleeType, true);
         Arg[] args;
         args ~= Arg(
@@ -6562,6 +6559,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             calleeType, expression.arguments, calleeLayout, args,
             calleeSlotOffset, isVoidCallee ? 0 : returnFacts.size,
             /* hasContext */ true);
+        compileNullCheck(objectOffset, expression.loc);
+        compileClassVtableSlot(
+            expression, objectOffset, callee, calleeSlotOffset);
         const siteIndex = _callSites.length;
         _callSites ~= site;
         emit(&opCall, destOffset, siteIndex, 0);
@@ -6579,8 +6579,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // arithmetic `compileFieldAddress` already does for a field's own
     // offset, just through the object's vptr instead of the object
     // itself.
-    private size_t compileClassVtableSlot(
+    private void compileClassVtableSlot(
         Expression expression, in size_t objectOffset, FuncDeclaration callee,
+        in size_t calleeOffset,
     ) {
         const index = callee.vtblIndex;
         if (index < 0)
@@ -6595,9 +6596,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             addConstant(cast(long) (index * size_t.sizeof)), size_t.sizeof);
         emit(&opAdd, slotOffset, vptrOffset, size_t.sizeof);
 
-        const calleeOffset = reserveTemp(pointerFacts);
         emit(&opLoadIndirect, calleeOffset, slotOffset, size_t.sizeof);
-        return calleeOffset;
     }
 
     // Compiles a call to `expression.f`: every argument evaluated into a
@@ -7220,6 +7219,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             evalInto(expression.e1, delegateOffset, delegateValueSize);
             contextOffset = delegateOffset + delegateContextOffset;
             calleeOffset = delegateOffset + delegateFunctionOffset;
+            compileNullCheck(calleeOffset, expression.loc);
         } else {
             functionType = deref is null ? null : deref.type.isTypeFunction;
             if (functionType is null)
@@ -7228,6 +7228,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             calleeOffset = reserveTemp(pointerFacts);
             evalInto(deref.e1, calleeOffset, size_t.sizeof);
+            compileNullCheck(calleeOffset, expression.loc);
         }
 
         auto valueCall = ValueCall.of(functionType, isDelegateCall);
@@ -7367,7 +7368,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             }
             case raise:
                 compileUnlessHolds(inBoundsOffset, 1, false, () =>
-                    compileBoundsHookCall(check, extraArgs, loc));
+                    compileFileLineHookCall(hookOf(check), extraArgs, loc));
                 break;
         }
     }
@@ -7376,8 +7377,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `_d_nullpointerp` the same way, on the pointer itself, which is
     // nonzero when it is not null. Without the flag nothing is emitted.
     private void compileNullCheck(in size_t pointerOffset, in Loc loc) {
-        import snakebite.backends.checkplan: nullDerefPlanOf, FailurePlan;
-        import snakebite.backends.druntimehooks: DruntimeHook;
+        import snakebite.backends.checkplan:
+            FailurePlan, nullDerefCMessage, nullDerefPlanOf;
         import snakebite.backends.exceptions: cAssertCallOf;
 
         final switch (nullDerefPlanOf(_bytecode.checks).kind) with (FailurePlan.Kind) {
@@ -7388,7 +7389,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 break;
             case cAssert: {
                 const call = cAssertCallOf(
-                    "null pointer dereference".ptr, loc, _function);
+                    nullDerefCMessage.ptr, loc, _function);
                 compileUnlessHolds(pointerOffset, size_t.sizeof, false, () =>
                     compileCAssertCall(call, constantArgument(
                         cast(size_t) call.assertion, size_t.sizeof)));
@@ -7396,39 +7397,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             }
             case raise:
                 compileUnlessHolds(pointerOffset, size_t.sizeof, false, () =>
-                    compileNullPointerCall(loc));
+                    compileFileLineHookCall(DruntimeHook.nullPointer, [], loc));
                 break;
         }
     }
 
-    private void compileNullPointerCall(in Loc loc) {
-        import snakebite.backends.druntimehooks: DruntimeHook;
-
-        auto plan = planOf(_bytecode._plans, DruntimeHook.nullPointer);
-
-        const fileOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, fileOffset,
-            addConstant(cast(long) cast(size_t) loc.filename),
-            size_t.sizeof);
-
-        const lineOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, lineOffset, addConstant(cast(long) loc.linnum),
-            uint.sizeof);
-
-        Arg[] args = [
-            Arg(fileOffset, 0, size_t.sizeof),
-            Arg(lineOffset, 0, uint.sizeof),
-        ];
-        _callSites ~= CallSite.native(cast(const(void)*) plan, args, 0);
-        emit(&opCall, discardResult, _callSites.length - 1, 0);
-    }
-
-    private void compileBoundsHookCall(
-        in BoundsCheck check,
+    // A druntime hook that takes the file and line of the failed check, then
+    // the `extraArgs`.
+    private void compileFileLineHookCall(
+        in DruntimeHook hook,
         Arg[] extraArgs,
         in Loc loc,
     ) {
-        auto plan = planOf(_bytecode._plans, hookOf(check));
+        auto plan = planOf(_bytecode._plans, hook);
 
         const fileOffset = reserveTemp(pointerFacts);
         emit(&opConstant, fileOffset,

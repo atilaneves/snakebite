@@ -23,7 +23,12 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     // Each native stack needs independent execution state: a suspended Fiber
     // must not leave its active frame or expression state in another Fiber.
     // Entries are owned and released by their host thread (ADR-0006).
-    private PerThread!(Evaluator, true) _evaluators;
+    private PerThread!(Evaluator!false, true) _evaluators;
+    private PerThread!(Evaluator!true, true) _checkedEvaluators;
+    // `-check=nullderef` is the one flag that the evaluator reads at its
+    // dereference sites; the checked evaluator is a separate type so that
+    // an unchecked one runs no code for it.
+    private bool _checksNullDeref;
 
     public this(const Program program) {
         super(program);
@@ -34,14 +39,21 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
                 cast(void*) this,
                 &prepareCallback,
             ));
-        _evaluators = PerThread!(Evaluator, true)(
-            () => heapNew!Evaluator(_shared));
+        import snakebite.backends.checkplan: FailurePlan, nullDerefPlanOf;
+
+        _checksNullDeref = nullDerefPlanOf(program.checks).kind
+            != FailurePlan.Kind.ignore;
+        _evaluators = PerThread!(Evaluator!false, true)(
+            () => heapNew!(Evaluator!false)(_shared));
+        _checkedEvaluators = PerThread!(Evaluator!true, true)(
+            () => heapNew!(Evaluator!true)(_shared));
         _shared.prepare = (function_) {
-            evaluator.prepareCallback(function_);
+            prepareOnEvaluator(function_);
         };
     }
 
     protected override void release() {
+        _checkedEvaluators.release;
         _evaluators.release;
         _shared.nativeData.release;
     }
@@ -51,7 +63,8 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         void* returnPlace,
         void*[] args,
     ) {
-        evaluator.call(function_, returnPlace, args);
+        onEvaluator!((evaluator) =>
+            evaluator.call(function_, returnPlace, args));
     }
 
     public override void[] staticStorage(
@@ -62,8 +75,14 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
 
     // The evaluator of the calling thread: made on its first entry, and
     // kept until it ends.
-    private Evaluator evaluator() {
-        return _evaluators.current;
+    private auto onEvaluator(alias action)() {
+        if (_checksNullDeref)
+            return action(_checkedEvaluators.current);
+        return action(_evaluators.current);
+    }
+
+    private void prepareOnEvaluator(FuncDeclaration function_) {
+        onEvaluator!((evaluator) => evaluator.prepareCallback(function_));
     }
 
     // The re-entry a pool entry (ADR-0003) reaches when host code calls
@@ -77,7 +96,8 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
             auto preparedExecution = PreparedExecution(
                 isFinalizerCallback(call.declaration));
         auto interpreter = cast(Interpreter) context;
-        interpreter.evaluator.callGuestFromHost(call);
+        interpreter.onEvaluator!((evaluator) =>
+            evaluator.callGuestFromHost(call));
     }
 
     version(unittest)
@@ -93,7 +113,7 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         FuncDeclaration function_,
     ) {
         auto interpreter = cast(Interpreter) context;
-        interpreter.evaluator.prepareCallback(function_);
+        interpreter.prepareOnEvaluator(function_);
     }
 
     public override string eval(FuncDeclaration function_) {
@@ -107,17 +127,17 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     // same thread that made the calls being counted.
     version(unittest)
     public size_t nameLookups() {
-        return _evaluators.current.nameLookups();
+        return onEvaluator!((evaluator) => evaluator.nameLookups());
     }
 
     version(unittest)
     public size_t typeLookups() {
-        return _evaluators.current.typeLookups();
+        return onEvaluator!((evaluator) => evaluator.typeLookups());
     }
 
     version(unittest)
     public size_t symbolLookups() {
-        return _evaluators.current.symbolLookups();
+        return onEvaluator!((evaluator) => evaluator.symbolLookups());
     }
 
     // Frame layouts built on this thread - by this evaluator or by any
@@ -176,7 +196,7 @@ private final class GuestException: Exception {
 import snakebite.nativelayout: bitfieldAccess;
 import snakebite.nativevalue: BitfieldAccess;
 import snakebite.backends.checkplan:
-    BoundsCheck, hookOf, isUnanalysed;
+    BoundsCheck, FailurePlan, hookOf, isUnanalysed, readsVtable;
 import snakebite.backends.calls: ValueCall;
 import snakebite.backends.haltprocess: isHalt;
 import snakebite.backends.exceptions: CAssertCall;
@@ -496,7 +516,7 @@ private struct CallShape {
 // thread (ADR-0006): it owns that thread's frame stack and execution
 // state, and reads every per-function answer from the `Shared` tables
 // the program's evaluators fill together.
-extern(C++) private final class Evaluator: LoweringVisitor {
+extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     import snakebite.faultsignal: HardwareFault;
     import snakebite.backends.aggregateinit: InitStep, NewPlan;
     import snakebite.backends.calls: CallSelection;
@@ -1597,25 +1617,37 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         in Loc loc,
         scope const(void*)[] extraArguments,
     ) {
-        import snakebite.backends.checkplan:
-            boundsPlanOf, cMessageOf, FailurePlan;
+        import snakebite.backends.checkplan: boundsPlanOf, cMessageOf;
+
+        failWithHook(
+            boundsPlanOf(_program.checks, _function), cMessageOf(check),
+            hookOf(check), loc, extraArguments);
+    }
+
+    // What every check that ends in a druntime hook does once it failed:
+    // the hook of `-checkaction=D`, or the halt, or the C assert.
+    extern(D) private void failWithHook(
+        in FailurePlan failure,
+        in string cMessage,
+        in DruntimeHook hook,
+        in Loc loc,
+        scope const(void*)[] extraArguments,
+    ) {
         import snakebite.backends.druntimehooks: planOf;
         import snakebite.backends.exceptions: cAssertCallOf;
 
-        const failure = boundsPlanOf(_program.checks, _function);
         final switch (failure.kind) with (FailurePlan.Kind) {
             case ignore:
                 return;
             case halt:
                 haltRun;
             case cAssert:
-                callCAssert(cAssertCallOf(
-                    cMessageOf(check).ptr, loc, _function));
+                callCAssert(cAssertCallOf(cMessage.ptr, loc, _function));
             case raise:
                 break;
         }
 
-        auto plan = planOf(*_plans, hookOf(check));
+        auto plan = planOf(*_plans, hook);
 
         const file = cast(const(char)*) loc.filename;
         const line = cast(uint) loc.linnum;
@@ -1626,36 +1658,22 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         callPlan(plan, null, arguments);
     }
 
-    // What dereferencing `pointer` does under `-check=nullderef`: the
-    // druntime hook that dmd's glue layer calls raises `NullPointerError`.
-    // Without the flag, or for a pointer that is not null, it returns.
-    private void checkNotNull(in void* pointer, in Loc loc) {
-        if (pointer is null)
-            failNullDeref(loc);
-    }
-
-    extern(D) private void failNullDeref(in Loc loc) {
-        import snakebite.backends.checkplan: nullDerefPlanOf, FailurePlan;
-        import snakebite.backends.druntimehooks: DruntimeHook, planOf;
-        import snakebite.backends.exceptions: cAssertCallOf;
-
-        final switch (nullDerefPlanOf(_program.checks).kind) with (FailurePlan.Kind) {
-            case ignore:
-                return;
-            case halt:
-                haltRun;
-            case cAssert:
-                callCAssert(cAssertCallOf(
-                    "null pointer dereference".ptr, loc, _function));
-            case raise:
-                break;
+    // Only the evaluator of a program with `-check=nullderef` has the
+    // check; the others do not run a line of it at a dereference.
+    static if (nullChecks) {
+        private void checkNotNull(in void* pointer, in Loc loc) {
+            if (pointer is null)
+                failNullDeref(loc);
         }
 
-        const file = cast(const(char)*) loc.filename;
-        const line = cast(uint) loc.linnum;
-        const(void*)[] arguments =
-            [cast(const(void)*) &file, cast(const(void)*) &line];
-        callPlan(planOf(*_plans, DruntimeHook.nullPointer), null, arguments);
+        private void failNullDeref(in Loc loc) {
+            import snakebite.backends.checkplan:
+                nullDerefCMessage, nullDerefPlanOf;
+
+            failWithHook(
+                nullDerefPlanOf(_program.checks), nullDerefCMessage,
+                DruntimeHook.nullPointer, loc, []);
+        }
     }
 
     // What `-checkaction=halt` does. A halt unwinds to the program's halt
@@ -3088,7 +3106,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             else {
                 evaluate(target.receiver, target.receiver.type,
                     factsOf(target.receiver.type), &context);
-                checkNotNull(cast(void*) context, loc);
+                static if (nullChecks)
+                    checkNotNull(cast(void*) context, loc);
             }
         } else if (target.needsContext) {
             context = cast(size_t) tryContextOf(target.contextOwner);
@@ -3658,9 +3677,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         public void* storagePointer(PtrExp expression) {
-            auto pointer = evaluator.asPointer(expression.e1);
-            evaluator.checkNotNull(pointer, expression.loc);
-            return pointer;
+            static if (nullChecks) {
+                // `auto`: the type of what `asPointer` returns.
+                auto pointer = evaluator.asPointer(expression.e1);
+                evaluator.checkNotNull(pointer, expression.loc);
+                return pointer;
+            } else
+                return evaluator.asPointer(expression.e1);
         }
 
         public void storageEffect(Expression expression) {
@@ -5283,9 +5306,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     override void visit(PtrExp expression) {
         import core.stdc.string: memcpy;
 
-        auto source = asPointer(expression.e1);
-        checkNotNull(source, expression.loc);
-        memcpy(_place, source, _facts.size);
+        static if (nullChecks) {
+            const source = asPointer(expression.e1);
+            checkNotNull(source, expression.loc);
+            memcpy(_place, source, _facts.size);
+        } else
+            memcpy(_place, asPointer(expression.e1), _facts.size);
     }
 
     // `info.base`: an aggregate field read. The field's own byte offset is
@@ -5323,7 +5349,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             "a class reference or a pointer is not one word on this target");
         void* object;
         evaluate(aggregate, aggregate.type, facts, &object);
-        checkNotNull(object, aggregate.loc);
+        static if (nullChecks)
+            checkNotNull(object, aggregate.loc);
         return object;
     }
 
@@ -6534,20 +6561,28 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             auto dot = expression.e1.isDotVarExp;
             auto receiver = dot is null ? expression.e1 : dot.e1;
             classReceiver = classReferenceOf(receiver);
-            if (classReceiver is null && !expression.directcall
-                    && function_.isVirtualMethod)
-                failNullDeref(expression.loc);
-            if (classReceiver is null)
+            if (classReceiver is null) {
+                static if (nullChecks)
+                    if (expression.readsVtable(function_)) {
+                        // The check is at the vtable read, after the
+                        // arguments.
+                        const layout = layoutOf(function_);
+                        auto frame = bindFrame(expression, function_, layout);
+                        bindArguments(function_, expression.arguments,
+                            expression.loc, frame.base, layout);
+                        failNullDeref(expression.loc);
+                    }
                 throw new SnakebiteException(
                     text("interpreter cannot call `", expression.toString,
                         "`: its class receiver is null"),
                 );
+            }
 
             // `super.f()` is statically bound. Every other virtual class
             // call uses the declaration of the object held by the receiver,
             // not the declaration dmd selected from its static type.
-            if (!expression.directcall && receiver.isSuperExp is null
-                    && function_.isVirtualMethod) {
+            if (expression.readsVtable(function_)
+                    && receiver.isSuperExp is null) {
                 const address = _virtualAddress(function_, classReceiver);
                 const target = _plans.guestTarget(address);
                 if (target.word is null)
@@ -6796,11 +6831,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     ~ "`PtrExp`");
 
             auto function_ = cast(FuncDeclaration) asPointer(deref.e1);
-            if (function_ is null)
+            if (function_ is null) {
+                static if (nullChecks)
+                    failNullDeref(expression.loc);
                 throw new SnakebiteException(
                     text("interpreter cannot call `", expression.toString,
                         "`: the function pointer is null"),
                 );
+            }
 
             auto type = deref.type.isTypeFunction;
             if (auto declaration =
@@ -6824,11 +6862,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         auto function_ = cast(FuncDeclaration) cast(void*) loadIntegral(
             value.ptr + delegateFunctionOffset, size_t.sizeof, false);
-        if (function_ is null)
+        if (function_ is null) {
+            static if (nullChecks)
+                failNullDeref(expression.loc);
             throw new SnakebiteException(
                 text("interpreter cannot call `", expression.toString,
                     "`: the delegate is null"),
             );
+        }
 
         auto type = callee.type.nextOf.isTypeFunction;
         if (auto declaration =
@@ -7353,5 +7394,5 @@ private struct Cache(Key, Value) {
 // that imports it.
 private void assertEveryNodeHandled() {
     static assert(
-        imported!"snakebite.backends.nodecoverage".AssertEveryNodeHandled!Evaluator);
+        imported!"snakebite.backends.nodecoverage".AssertEveryNodeHandled!(Evaluator!false));
 }
