@@ -626,12 +626,16 @@ private extern(C) void invokeDispatch(void* context) {
 private void haltBeforeUnwind(
     void* context, imported!"snakebite.faultsignal".HardwareFault fault,
 ) nothrow @nogc {
-    auto vm = cast(Vm*) context;
+    haltDispatches(cast(Vm*) context, fault);
+}
+
+private void haltDispatches(Vm* vm, Throwable fault) nothrow @nogc {
     vm._halt = fault;
     auto state = cast(DispatchState*) vm._frames.backendEntry;
-    // Native code can suppress the throwable. The existing call transition
-    // must then enter a host-only Halt continuation, not another guest opcode.
-    state.pending = cast(Activation*) &haltedNativeReturn;
+    // Each suspended native caller can suppress its callback's throwable.
+    // Its existing call transition must resume Halt, not guest instructions.
+    for (; state !is null; state = state.parent)
+        state.pending = cast(Activation*) &haltedNativeReturn;
 }
 
 private immutable Instruction nativeHaltInstruction = Instruction(&opNativeHalt);
@@ -779,7 +783,7 @@ private Activation* handleException(
         // temporary's destructor, `catch` or `finally` sees it.
         const halting = isHalt(throwable);
         if (halting)
-            vm._halt = throwable;
+            haltDispatches(vm, throwable);
         try {
             unwindFinally(throwable, () {
                 if (halting)

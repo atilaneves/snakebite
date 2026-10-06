@@ -111,7 +111,10 @@ def test_hardware_fault_recovery_uses_fresh_cell_state(
 
 @pytest.mark.parametrize("backend", ["bytecode", "interpreter"])
 @pytest.mark.parametrize("shape", ["chained", "swallowed"])
-@pytest.mark.parametrize("entry", ["body", "cleanup", "callback"])
+@pytest.mark.parametrize("entry", [
+    "body", "cleanup", "callback", "swallow-callback",
+    "nested-swallow-callback", "cleanup-swallow-callback", "swallow-guest-fault",
+])
 def test_native_fault_recovery_keeps_host_cleanup(
     tmp_path: Path, backend: str, shape: str, entry: str,
 ) -> None:
@@ -124,7 +127,12 @@ def test_native_fault_recovery_keeps_host_cleanup(
         + (' try { throw new Exception("ordinary"); }\n'
            ' finally { nativeTrap(); }\n' if shape == "chained" else
            ' try { nativeTrap(); } catch(Throwable) {}\n')
-        + '}\n', encoding="utf-8",
+        + '}\n'
+        'alias Callback = extern(C) void function();\n'
+        'extern(C) void swallow(Callback callback) {\n'
+        ' scope(exit) write(1, "host released\\n".ptr, 14);\n'
+        ' try { callback(); } catch(Throwable) {}\n'
+        '}\n', encoding="utf-8",
     )
     trap = tmp_path / "trap.S"
     trap.write_text(
@@ -153,18 +161,33 @@ def test_native_fault_recovery_keeps_host_cleanup(
                        'finally { nativeFault(); }',
             "callback": 'int[2] items = [2, 1]; '
                         'qsort(items.ptr, 2, int.sizeof, &compare);',
+            "swallow-callback": "nativeSwallow(&callbackFault);",
+            "nested-swallow-callback": "nativeSwallow(&nestedCallback);",
+            "cleanup-swallow-callback":
+                'try { throw new Exception("ordinary guest"); } '
+                'finally { nativeSwallow(&callbackFault); }',
+            "swallow-guest-fault": "nativeSwallow(&guestFault);",
         }[entry]
         for declaration in (
             "import core.sys.posix.dlfcn",
             "import core.sys.posix.unistd: write",
             "import core.stdc.stdlib: qsort",
             "alias Fn = extern(C) void function();",
+            "alias Callback = extern(C) void function();",
+            "alias Swallow = extern(C) void function(Callback);",
             'void nativeFault() { auto h = dlopen("' + str(library)
             + '".ptr, RTLD_NOW); assert(h !is null); '
             'auto f = cast(Fn) dlsym(h, "fault".ptr); assert(f !is null); '
             'f(); }',
             'extern(C) int compare(const void* a, const void* b) { '
             'nativeFault(); return 0; }',
+            'void nativeSwallow(Callback callback) { auto h = dlopen("'
+            + str(library) + '".ptr, RTLD_NOW); assert(h !is null); '
+            'auto f = cast(Swallow) dlsym(h, "swallow".ptr); '
+            'assert(f !is null); f(callback); }',
+            'extern(C) void callbackFault() { nativeFault(); }',
+            'extern(C) void nestedCallback() { nativeSwallow(&callbackFault); }',
+            'extern(C) void guestFault() { int* p; *p = 1; }',
             'int fault() { '
             'scope(exit) write(1, "guest scope\\n".ptr, 12); '
             'try { ' + call + ' } catch(Throwable) { '
@@ -179,9 +202,13 @@ def test_native_fault_recovery_keeps_host_cleanup(
             child.sendline("fault()")
             child.expect(r"\[\s+\d+\.\d ms\] > ")
             fault = clean(child.before)
-            assert fault.count("host released\n") == 1, fault
+            releases = {
+                "swallow-callback": 2, "nested-swallow-callback": 3,
+                "cleanup-swallow-callback": 2,
+            }.get(entry, 1)
+            assert fault.count("host released\n") == releases, fault
             assert "guest " not in fault, fault
-            assert "fatal: null pointer dereference" in fault, fault
+            assert fault.count("fatal: null pointer dereference") == 1, fault
             child.sendline("40 + 2")
             child.expect(r"\[\s+\d+\.\d ms\] > ")
             assert "42\n" in clean(child.before)

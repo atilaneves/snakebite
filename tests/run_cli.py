@@ -215,7 +215,9 @@ def test_hardware_fault_in_thread_or_gc_finalizer(
 
 @pytest.mark.parametrize("backend", ["native", *BACKENDS])
 @pytest.mark.parametrize("shape", ["direct", "pointer", "variadic-pointer"])
-@pytest.mark.parametrize("native_behavior", ["direct", "chained", "swallowed"])
+@pytest.mark.parametrize("native_behavior", [
+    "direct", "chained", "swallowed", "callback-native", "callback-guest",
+])
 def test_native_fault_unwind_keeps_host_cleanup_but_skips_guest_callback(
     tmp_path: Path, backend: str, shape: str, native_behavior: str,
 ) -> None:
@@ -224,17 +226,23 @@ def test_native_fault_unwind_keeps_host_cleanup_but_skips_guest_callback(
           + 'sourceFiles "../fixture.o" "../trap.o"\n')
     declaration = ('extern(C) void nativeFault(void function(), ...);\n'
                    if shape == "variadic-pointer" else
-                   'extern(C) void nativeFault(void function());\n')
+                    'extern(C) void nativeFault(void function());\n')
+    callback_fault = native_behavior.startswith("callback-")
+    callback = "callbackFault" if callback_fault else "cleanup"
     call = {
-        "direct": "nativeFault(&cleanup);",
-        "pointer": "auto call = &nativeFault; call(&cleanup);",
-        "variadic-pointer": "auto call = &nativeFault; call(&cleanup, 7);",
+        "direct": f"nativeFault(&{callback});",
+        "pointer": f"auto call = &nativeFault; call(&{callback});",
+        "variadic-pointer": f"auto call = &nativeFault; call(&{callback}, 7);",
     }[shape]
     write(
         app / "source" / "main.d",
         'module main;\nimport core.sys.posix.unistd: write;\n'
         + declaration
         + 'extern(C) void cleanup() { write(1, "guest cleanup\\n".ptr, 14); }\n'
+        + ('extern(C) void nativeCallbackFault();\n'
+           'extern(C) void callbackFault() { '
+           + ('nativeCallbackFault();' if native_behavior == "callback-native"
+              else 'int* p; *p = 1;') + ' }\n' if callback_fault else '')
         + 'int main() {\n'
         + ' scope(exit) write(1, "guest scope exit\\n".ptr, 17);\n'
         + ' try { ' + call + ' }\n'
@@ -248,12 +256,14 @@ def test_native_fault_unwind_keeps_host_cleanup_but_skips_guest_callback(
         'extern(C) void nativeTrap();\n'
         'extern(C) void nativeFault(void function() cleanup) {\n'
         ' scope(exit) write(1, "host released\\n".ptr, 14);\n'
-        + (' scope(exit) cleanup();\n' if native_behavior != "swallowed" else '')
-        + (' try { throw new Exception("ordinary"); }\n'
+        + (' scope(exit) cleanup();\n'
+           if native_behavior in ("direct", "chained") else '')
+        + (' try { cleanup(); } catch(Throwable) {}\n' if callback_fault else
+           ' try { throw new Exception("ordinary"); }\n'
            ' finally { nativeTrap(); }\n' if native_behavior == "chained" else
            ' try { nativeTrap(); } catch(Throwable) {}\n'
            if native_behavior == "swallowed" else ' nativeTrap();\n')
-        + '}\n',
+        + '}\nextern(C) void nativeCallbackFault() { nativeTrap(); }\n',
     )
     write(
         tmp_path / "trap.S",
@@ -289,14 +299,22 @@ def test_native_fault_unwind_keeps_host_cleanup_but_skips_guest_callback(
     assert "guest continued" not in output(result), output(result)
     if backend in ("bytecode", "interpreter"):
         assert result.returncode == 1, output(result)
-        assert result.stdout.count("host released\n") == 1, output(result)
-        assert result.stdout == "host released\n", output(result)
+        # The CLI ends the process at the inner VM report. The repeated REPL
+        # matrix checks the suspended native owner's cleanup during recovery.
+        expected_stdout = ("" if callback_fault and backend == "bytecode"
+                           else "host released\n")
+        assert result.stdout == expected_stdout, output(result)
         assert "fatal: null pointer dereference" in result.stderr
         if backend == "bytecode":
-            assert result.stderr == (
+            expected = (
+                "source/main.d(6): fatal: null pointer dereference\n"
+                "    in main.callbackFault (source/main.d(6))\n"
+                "    in D main (source/main.d(9))\n"
+            ) if callback_fault else (
                 "source/main.d(7): fatal: null pointer dereference\n"
                 "    in D main (source/main.d(7))\n"
             )
+            assert result.stderr == expected
         else:
             assert "main.d" in result.stderr
     elif backend == "ctfe":
