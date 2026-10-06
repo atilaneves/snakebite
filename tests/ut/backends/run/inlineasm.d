@@ -2,7 +2,8 @@ module ut.backends.run.inlineasm;
 
 
 import ut.backends;
-import snakebite.frontend.compiler: newInFrontend, parseSnippet;
+import snakebite.frontend.compiler:
+    FrontendFlags, newInFrontend, parseRootModules, parseSnippet;
 import std.conv: text;
 import std.file: mkdirRecurse, rmdirRecurse, tempDir, write;
 import std.path: buildPath;
@@ -307,4 +308,129 @@ unittest {
             ~ "not define",
         ),
     );
+}
+
+
+// Guest code that refers to C `setjmp`/`longjmp` is a stated exception,
+// like inline assembler (see docs/adr/0014). The check runs in the same
+// load-time walk as the `asm` check above, before any backend is chosen,
+// so `parseSnippet` alone pins the diagnostic for every backend.
+private enum jumpError(string name) =
+    "`" ~ name ~ "` is not supported in guest code: a backend cannot "
+    ~ "jump back to a stack frame it has already left";
+
+@("setjmp.loadDiagnostic.directCallFailsLoad")
+unittest {
+    parseSnippet(q{
+        import core.sys.posix.setjmp: jmp_buf, longjmp, setjmp;
+        int jumper() {
+            jmp_buf buffer;
+            if (setjmp(buffer) == 0)
+                longjmp(buffer, 1);
+            return 0;
+        }
+    }).shouldThrowWithMessage(
+        jumpError!"setjmp" ~ "\n" ~ jumpError!"longjmp",
+    );
+}
+
+@("setjmp.loadDiagnostic.functionPointerFailsLoad")
+unittest {
+    parseSnippet(q{
+        import core.sys.posix.setjmp: jmp_buf, longjmp;
+        void jumper(ref jmp_buf buffer) {
+            auto pointer = &longjmp;
+            pointer(buffer, 1);
+        }
+    }).shouldThrowWithMessage(jumpError!"longjmp");
+}
+
+// A function pointer stored at module scope is called from any function
+// later, so the initializer itself is the use.
+@("setjmp.loadDiagnostic.moduleScopeInitializerFailsLoad")
+unittest {
+    parseSnippet(q{
+        import core.sys.posix.setjmp: jmp_buf, longjmp;
+        alias Jump = extern(C) void function(ref jmp_buf, int) nothrow @nogc;
+        __gshared Jump jump = &longjmp;
+        void jumper(ref jmp_buf buffer) { jump(buffer, 1); }
+    }).shouldThrowWithMessage(jumpError!"longjmp");
+}
+
+// `sigsetjmp` is `__sigsetjmp` in glibc; the error names what the guest
+// wrote.
+@("setjmp.loadDiagnostic.sigsetjmpNamesTheLibcFunction")
+unittest {
+    parseSnippet(q{
+        import core.sys.posix.setjmp: sigjmp_buf, sigsetjmp;
+        int jumper(ref sigjmp_buf buffer) { return sigsetjmp(buffer, 1); }
+    }).shouldThrowWithMessage(jumpError!"sigsetjmp");
+}
+
+// `pragma(mangle)` decides the name the linker sees, so the function
+// below is `longjmp` whatever it is called in D.
+@("setjmp.loadDiagnostic.mangledNameFailsLoad")
+unittest {
+    parseSnippet(q{
+        import core.sys.posix.setjmp: jmp_buf;
+        pragma(mangle, "longjmp") extern(C) void leave(ref jmp_buf, int);
+        void jumper(ref jmp_buf buffer) { leave(buffer, 1); }
+    }).shouldThrowWithMessage(jumpError!"longjmp");
+}
+
+// A template body is walked once for each instance, at one location.
+@("setjmp.loadDiagnostic.templateInstancesReportOnce")
+unittest {
+    parseSnippet(q{
+        import core.sys.posix.setjmp: jmp_buf, longjmp;
+        void jumper(T)(ref jmp_buf buffer, T value) { longjmp(buffer, 1); }
+        unittest {
+            jmp_buf buffer;
+            jumper(buffer, 1);
+            jumper(buffer, "a");
+        }
+    }).shouldThrowWithMessage(jumpError!"longjmp");
+}
+
+// The guest defines a function that is not the libc one, so there is
+// no saved stack context to jump back to.
+@("setjmp.loadDiagnostic.guestDefinitionWithTheSameNameLoads")
+unittest {
+    parseSnippet(q{
+        extern(C) int siglongjmp(int x) { return x + 1; }
+        int result() { return siglongjmp(1); }
+    });
+}
+
+// Only the C linkage name is the libc function.
+@("setjmp.loadDiagnostic.dLinkageNameLoads")
+unittest {
+    parseSnippet(q{
+        int setjmp(int x);
+        int result() { return setjmp(1); }
+    });
+}
+
+// A reported error names the guest file, line and column of the use.
+@("setjmp.loadDiagnostic.reportsTheLocationOfTheUse")
+unittest {
+    const directory = buildPath(
+        tempDir, text("setjmp_location_", thisProcessID),
+    );
+    mkdirRecurse(directory);
+    scope(exit) rmdirRecurse(directory);
+    const path = buildPath(directory, "jumper.d");
+    write(
+        path,
+        "module jumper;\n"
+        ~ "import core.sys.posix.setjmp: jmp_buf, longjmp;\n"
+        ~ "void jumper(ref jmp_buf buffer) {\n"
+        ~ "    longjmp(buffer, 1);\n"
+        ~ "}\n",
+    );
+
+    parseRootModules([path], [], FrontendFlags())
+        .shouldThrowWithMessage(
+            text(path, "(4,5): ", jumpError!"longjmp"),
+        );
 }
