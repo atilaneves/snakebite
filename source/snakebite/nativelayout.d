@@ -1252,13 +1252,7 @@ private void storeValue(
         // DMD encodes a zero-initialized struct as an IntegerExp. Resolve
         // that encoding here, not from the destination's byte count.
         assert(value.toInteger == 0);
-        if (nativeData !is null) {
-            memcpy(place, nativeData.initialValue(type, value.loc).ptr,
-                facts.size);
-            return;
-        }
-        storeValue(type, facts, initialExpression(type, value.loc), place,
-            symbolAddress, nativeData);
+        memset(place, 0, facts.size);
         return;
     }
 

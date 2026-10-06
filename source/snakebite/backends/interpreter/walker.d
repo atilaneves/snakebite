@@ -1928,9 +1928,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             _typeFacts.build(type, () => facts);
     }
 
-    // The bytes of a struct whose default value is all zero, or of the
-    // struct that a static array repeats: `storeValue` reads them when it
-    // stores that encoding. A struct that is larger than
+    // The default bytes of a struct, or of the struct that a static array
+    // repeats: execution copies them when it stores the initializer symbol
+    // of the struct. A struct that is larger than
     // `preparedBytesLimit` stays for execution, which is the one that knows
     // whether the value is needed.
     extern(D) private void prepareZeroInitialized(Type type) {

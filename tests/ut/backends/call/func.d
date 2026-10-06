@@ -923,3 +923,36 @@ static foreach (backend; Matrix!(
         }, "answer");
     }
 }
+
+
+// Compiled D keeps a struct that a function returns by value on the stack.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot run the GC"),
+    Omit!(Bytecode, Because.unconfirmed,
+        "the compiler keeps the zero value of the struct as a constant"),
+)) {
+    @("ret.largeStruct.allocatesNoGCMemory." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(backend, q{
+            import core.memory: GC;
+
+            struct Large {
+                ubyte[1 << 20] bytes;
+            }
+
+            Large large(ubyte first) {
+                Large result;
+                result.bytes[0] = first;
+                return result;
+            }
+
+            bool staysOnStack() {
+                const before = GC.allocatedInCurrentThread;
+                const value = large(3);
+                const allocated = GC.allocatedInCurrentThread - before;
+                return value.bytes[0] == 3 && allocated < Large.sizeof;
+            }
+        }, "staysOnStack");
+    }
+}
