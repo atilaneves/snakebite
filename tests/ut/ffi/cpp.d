@@ -176,7 +176,6 @@ private alias CallWithNonPodCallbackFn =
 static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
     "CTFE cannot call a function in a loaded native image"))) {
     @("cpp.freeFunctions." ~ backend.stringof)
-    @Serial
     unittest {
         static if (is(backend == Native)) {
             auto image = cppImage;
@@ -243,7 +242,6 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
 static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
     "CTFE cannot call a function in a loaded native image"))) {
     @("cpp.methods." ~ backend.stringof)
-    @Serial
     unittest {
         static if (is(backend == Native)) {
             class DBase {
@@ -348,7 +346,6 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
 static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
     "CTFE cannot call a function in a loaded native image"))) {
     @("cpp.methods.structReturnThroughHiddenPointer." ~ backend.stringof)
-    @Serial
     unittest {
         static if (is(backend == Native)) {
             auto image = cppImage;
@@ -403,7 +400,6 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
 static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
     "CTFE cannot call a function in a loaded native image"))) {
     @("cpp.structMethod." ~ backend.stringof)
-    @Serial
     unittest {
         static if (is(backend == Native)) {
             auto image = cppImage;
@@ -435,7 +431,6 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
 static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
     "CTFE cannot call a function in a loaded native image"))) {
     @("cpp.nonPod.passedAndReturnedByValue." ~ backend.stringof)
-    @Serial
     unittest {
         static if (is(backend == Native)) {
             auto image = cppImage;
@@ -520,7 +515,6 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
 static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
     "CTFE cannot call a function in a loaded native image"))) {
     @("cpp.callback.nonPodArgument." ~ backend.stringof)
-    @Serial
     unittest {
         static if (is(backend == Native)) {
             extern(C++) int handler(NonPod n) { return n.value * 2; }
@@ -553,7 +547,6 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
 static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
     "CTFE cannot call a function in a loaded native image"))) {
     @("cpp.uninstantiatedTemplate.refusedByName." ~ backend.stringof)
-    @Serial
     unittest {
         static if (is(backend == Native)) {
             // Compiled D never reaches this call either: the linker
@@ -606,7 +599,6 @@ private extern(C++) class NativeMine {
 static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
     "CTFE cannot call a function in a loaded native image"))) {
     @("cpp.guestClass.hostCallsVirtuals." ~ backend.stringof)
-    @Serial
     unittest {
         static if (is(backend == Native)) {
             auto image = cppImage;

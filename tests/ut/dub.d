@@ -8,7 +8,6 @@ import snakebite.project: projectStateDirectory;
 import std.json: JSONValue, parseJSON;
 import std.file: write, remove, rename, readText, dirEntries, SpanMode;
 import std.path: absolutePath, baseName, buildPath, dirName, relativePath;
-import std.process: environment;
 import std.string: replace;
 import ut;
 
@@ -30,7 +29,6 @@ private JSONValue recordedDescription(in Sandbox sandbox, in string fixture) {
 }
 
 @("cache.reusesDescriptionsAndRefreshesBuildInputs")
-@Serial
 unittest {
     const sandbox = Sandbox();
     auto recorded = recordedDescription(sandbox, "cached-app");
@@ -76,16 +74,15 @@ unittest {
     load;
     calls.should == 8;
 
-    const oldMode = environment.get("SNAKEBITE_DUB_CACHE", "on");
-    scope(exit) environment["SNAKEBITE_DUB_CACHE"] = oldMode;
-    environment["SNAKEBITE_DUB_CACHE"] = "off";
-    load;
+    void loadWithMode(in string mode) {
+        cachedDubDescription(
+            directory, defaultCompiler, null, &describe, mode: mode);
+    }
+    loadWithMode("off");
     calls.should == 9;
-    environment["SNAKEBITE_DUB_CACHE"] = "refresh";
-    load;
+    loadWithMode("refresh");
     calls.should == 10;
-    environment["SNAKEBITE_DUB_CACHE"] = "on";
-    load;
+    loadWithMode("on");
     calls.should == 10;
     sandbox.writeFile("app/dub.settings.json", "{}\n");
     load;
@@ -94,7 +91,6 @@ unittest {
 }
 
 @("cache.reusesLibraryDescriptions")
-@Serial
 unittest {
     const sandbox = Sandbox();
     auto recorded = recordedDescription(sandbox, "cached-library");
@@ -114,7 +110,6 @@ unittest {
 }
 
 @("cache.reusesDependencyDescriptions")
-@Serial
 unittest {
     const sandbox = Sandbox();
     auto recorded = recordedDescription(sandbox, "cached-app-with-dependency");
@@ -181,7 +176,6 @@ unittest {
 // so a record is only as good as the snakebite build that made it. Two
 // builds that take turns on one project each keep their record.
 @("cache.keepsGeneratorsApart")
-@Serial
 unittest {
     const sandbox = Sandbox();
     auto recorded = recordedDescription(sandbox, "cached-library");

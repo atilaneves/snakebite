@@ -57,12 +57,9 @@ unittest {
 
 
 // The GC never scans the arena, so a GC block that only the arena points
-// to would be freed while the AST still uses it. Serial: ordered
-// against reportsAPointerIntoTheGCHeap below, so it never reads the
-// report while that test's planted pointer is still in the arena.
+// to would be freed while the AST still uses it.
 debug
 @("arenaHoldsNoGCPointers.largeImport")
-@Serial
 unittest {
     parseSnippet(q{
         module arenaHoldsNoGCPointersLargeImport;
@@ -83,11 +80,9 @@ unittest {
 // `std.regex.regex`, which the import path search of the frontend's own
 // initialization also uses) with the frontend's setup. That setup must not
 // leave a cache's storage in the arena: the host then stores GC data in
-// it, and no collection looks there. Serial: the report is of the whole
-// arena.
+// it, and no collection looks there.
 debug
 @("arenaHoldsNoGCPointers.hostLibraryCacheAfterInitialization")
-@Serial
 unittest {
     import std.regex: matchFirst, regex;
 
@@ -100,14 +95,12 @@ unittest {
 }
 
 
-// The report finds a GC pointer stored in the arena. Serial: every other
-// test that reads the report expects an empty one. `--lowmem` puts the
+// The report finds a GC pointer stored in the arena. `--lowmem` puts the
 // identifier itself on the GC heap, so the planted word never lands in
 // the arena and the report stays empty; the report only ever names GC
 // pointers that the arena holds.
 debug
 @("arenaHoldsNoGCPointers.reportsAPointerIntoTheGCHeap")
-@Serial
 unittest {
     import dmd.identifier: Identifier;
     import snakebite.frontend.compiler: newInFrontend;
@@ -193,7 +186,6 @@ unittest {
 static foreach (backend; Matrix!()) {
     @("astSurvivesCollection." ~ backend.stringof)
     @Tags(backend.stringof)
-    @Serial
     unittest {
         collectAndOverwriteFreedMemory;
 
@@ -244,7 +236,6 @@ static foreach (backend; Matrix!(
 )) {
     @("guestObjectsAreCollected." ~ backend.stringof)
     @Tags(backend.stringof)
-    @Serial
     unittest {
         0.shouldBeStatusOf!(backend, q{
             import core.memory: GC;

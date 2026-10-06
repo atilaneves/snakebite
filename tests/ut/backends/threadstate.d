@@ -20,7 +20,6 @@ static foreach (backend; Matrix!(
 )) {
     @("finalizerOfGuestObjectRunsAfterBackendOwnerEnded." ~ backend.stringof)
     @Tags(backend.stringof)
-    @Serial
     unittest {
         // Lives as long as the process: a finalizer that a later collection
         // runs must not write into the frame of a test that ended.
@@ -39,7 +38,6 @@ static foreach (backend; Matrix!(
 )) {
     @("threadLocalOfGuestOutlivesBackendOwner." ~ backend.stringof)
     @Tags(backend.stringof)
-    @Serial
     unittest {
         static __gshared int[2] probe;
         probe = [-1, 0];
@@ -52,18 +50,19 @@ static foreach (backend; Matrix!(
 
 // The table of thread-local variables that a program did not touch is empty:
 // no pointer can point into it, so the owner releases it with the rest of
-// the state. No collection runs here, so no finalizer makes a state meanwhile.
+// the state.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE has no execution state"),
 )) {
     @("emptyThreadLocalTableIsReleasedWithOwner." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        GC.disable;
-        scope(exit) GC.enable;
-
+        // The objects keep this address after the test returns.
+        static __gshared int[2] probe;
+        // The first use of a backend on a thread makes a state that stays
+        // until the thread ends.
+        makeResources!(backend, Touches.nothing)(probe);
         const before = heapObjectsOfThisThread;
-        int[2] probe;
         makeResources!(backend, Touches.nothing)(probe);
         heapObjectsOfThisThread.should == before;
     }
@@ -174,21 +173,17 @@ private void clobberStack() {
 
 // Running programs one after another in one process must not pile up
 // execution state, with its frame stacks that the GC scans, on the thread
-// that ran them. The count is per thread. A collection on this thread
-// would finalize guest objects that other tests left, and the finalizers
-// would make states here, so the GC stays off meanwhile. `GC.disable` is
-// for the whole process: tests that run at the same time allocate without
-// automatic collections for the length of this test, which is short, and
-// their own explicit `GC.collect` calls still run, on their threads.
+// that ran them.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE has no execution state"),
 )) {
     @("executionsDoNotAccumulateThreadState." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        GC.disable;
-        scope(exit) GC.enable;
-
+        // The first use of a backend on a thread makes a state that stays
+        // until the thread ends.
+        1.shouldBeRetOf!(
+            backend, q{ int answer() { return 1; } }, "answer");
         const before = heapObjectsOfThisThread;
         foreach (run; 0 .. 5)
             1.shouldBeRetOf!(

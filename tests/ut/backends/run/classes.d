@@ -67,7 +67,6 @@ static foreach (backend; Matrix!(
 )) {
     @("firstDestructorCallFromGc." ~ backend.stringof)
     @Tags(backend.stringof)
-    @Serial
     unittest {
         0.shouldBeStatusOf!(backend, q{
             import core.memory: GC;
@@ -91,7 +90,6 @@ static foreach (backend; Matrix!(
     // code that was already prepared before the finalizer started.
     @("firstDestructorHelperCallFromGc." ~ backend.stringof)
     @Tags(backend.stringof)
-    @Serial
     unittest {
         0.shouldBeStatusOf!(backend, q{
             import core.memory: GC;
@@ -114,7 +112,6 @@ static foreach (backend; Matrix!(
     // a collection whose conservative roots can keep the object alive.
     @("firstDestructorCompoundFieldsFromGc." ~ backend.stringof)
     @Tags(backend.stringof)
-    @Serial
     unittest {
         0.shouldBeStatusOf!(backend, q{
             import core.memory: GC;
@@ -146,7 +143,6 @@ static foreach (backend; Matrix!(
 
     @("firstDestructorInheritedClassContractsFromGc." ~ backend.stringof)
     @Tags(backend.stringof)
-    @Serial
     unittest {
         0.shouldBeStatusOf!(backend, q{
             import core.memory: GC;
@@ -186,7 +182,6 @@ static foreach (backend; Matrix!(
 
     @("firstDestructorInheritedInterfaceContractsFromGc." ~ backend.stringof)
     @Tags(backend.stringof)
-    @Serial
     unittest {
         0.shouldBeStatusOf!(backend, q{
             import core.memory: GC;

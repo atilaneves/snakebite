@@ -2,7 +2,8 @@ module ut.project;
 
 
 import core.atomic: atomicLoad;
-import core.runtime: Runtime, UnitTestResult;
+import core.runtime: UnitTestResult;
+import core.sync.mutex: Mutex;
 import snakebite.backends: BackendName, backendIdentity;
 import snakebite.backends.backend: Program;
 import snakebite.dependencyimage: TestHooks;
@@ -88,40 +89,47 @@ private UnitTestResult successfulOuterRunner() {
     return UnitTestResult(1, 1, false, false);
 }
 
-// A handled inner runner failure must not terminate the outer runtime.
+private __gshared Mutex _initDepthLock;
+
+shared static this() {
+    _initDepthLock = new Mutex;
+}
+
+// A handled inner runner failure must not terminate the outer runtime. The
+// variants of this test change druntime's nesting depth, so they take turns.
 static foreach (backend; Matrix!()) {
     @("runtime.nestedRunnerKeepsInitDepth." ~ backend.stringof)
-    @Serial
     unittest {
-        static if (is(backend == Native)) {
-            rt_init;
-            const depth = atomicLoad(runtimeInitDepth);
-            rt_init;
-            rt_term;
-            atomicLoad(runtimeInitDepth).should == depth;
-            rt_term;
-        } else {
-            const saved = TestHooks.current;
-            scope(exit) saved.install;
-            const sandbox = Sandbox();
-            sandbox.writeFile("outer/outer.d", "module outer; int main() { return 0; }");
-            sandbox.writeFile("inner/inner.d", "module inner; int main() { return 0; }");
-            auto outer = prepareProject(sandbox.inSandboxPath("outer")).project.program; // Hooks are set below.
-            _innerProgram = prepareProject(sandbox.inSandboxPath("inner")).project.program;
-            _nestedBackend = backendIdentity!backend;
-            Runtime.extendedModuleUnitTester = &throwingInnerRunner;
-            _innerProgram.testHooks = TestHooks.current;
-            Runtime.extendedModuleUnitTester = &successfulOuterRunner;
-            outer.testHooks = TestHooks.current;
-            rt_init;
-            const depth = atomicLoad(runtimeInitDepth);
-            scope(exit) {
-                while (atomicLoad(runtimeInitDepth) < depth)
-                    rt_init;
+        {
+            _initDepthLock.lock;
+            scope(exit) _initDepthLock.unlock;
+
+            static if (is(backend == Native)) {
+                rt_init;
+                const depth = atomicLoad(runtimeInitDepth);
+                rt_init;
                 rt_term;
+                atomicLoad(runtimeInitDepth).should == depth;
+                rt_term;
+            } else {
+                const sandbox = Sandbox();
+                sandbox.writeFile("outer/outer.d", "module outer; int main() { return 0; }");
+                sandbox.writeFile("inner/inner.d", "module inner; int main() { return 0; }");
+                auto outer = prepareProject(sandbox.inSandboxPath("outer")).project.program;
+                _innerProgram = prepareProject(sandbox.inSandboxPath("inner")).project.program;
+                _nestedBackend = backendIdentity!backend;
+                _innerProgram.testHooks = TestHooks.of(null, &throwingInnerRunner);
+                outer.testHooks = TestHooks.of(null, &successfulOuterRunner);
+                rt_init;
+                const depth = atomicLoad(runtimeInitDepth);
+                scope(exit) {
+                    while (atomicLoad(runtimeInitDepth) < depth)
+                        rt_init;
+                    rt_term;
+                }
+                executeBackend(_nestedBackend, outer, null, false).status.should == 0;
+                atomicLoad(runtimeInitDepth).should == depth;
             }
-            executeBackend(_nestedBackend, outer, null, false).status.should == 0;
-            atomicLoad(runtimeInitDepth).should == depth;
         }
     }
 }

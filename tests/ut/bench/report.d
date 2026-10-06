@@ -5,12 +5,28 @@ import bench.capture: captureStdout;
 import bench.report:
     BackendReport, TimingStatistics, milliseconds, orderByMedianRunTime,
     timingStatistics, updateTestCounts;
+import core.sync.mutex: Mutex;
 import core.sys.posix.unistd: systemWrite = write, STDOUT_FILENO;
 import core.time: dur, hnsecs, msecs;
 import std.algorithm.iteration: map;
 import std.algorithm.searching: canFind;
 import std.stdio: File, stdout;
 import ut;
+
+
+// `captureStdout` redirects file descriptor 1 of the whole process. Two
+// captures at the same time would restore each other's saved descriptor.
+private __gshared Mutex captureLock;
+
+shared static this() {
+    captureLock = new Mutex;
+}
+
+private auto captured(scope int delegate() run) {
+    captureLock.lock;
+    scope(exit) captureLock.unlock;
+    return captureStdout(run);
+}
 
 
 @("inProcessSummary.providesCounts")
@@ -65,7 +81,7 @@ unittest {
 @("inProcessSummary.capturesNativeStdout")
 unittest {
     enum summary = "22 test(s) run, 0 failed.\n";
-    const result = captureStdout({
+    const result = captured({
         return cast(int) systemWrite(
             STDOUT_FILENO, summary.ptr, summary.length,
         );
@@ -76,12 +92,11 @@ unittest {
 }
 
 @("inProcessSummary.restoresReassignedStdout")
-@Serial
 unittest {
     auto original = stdout;
     scope(exit) stdout = original;
     auto redirected = File.tmpfile;
-    captureStdout({
+    captured({
         stdout = redirected;
         return 0;
     });
