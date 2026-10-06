@@ -1031,6 +1031,29 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         const root = evaluator._temporaries.root;
         evaluator._faultLocation = root is null
             ? evaluator._faultFunction.loc : root.loc;
+        // The action ends the process or returns; it does not throw.
+        alias Ends = void delegate(HardwareFault) nothrow @nogc;
+        (cast(Ends) &evaluator.endProcessInFinalizer)(fault);
+    }
+
+    // The collector must not unwind, so a fault in a finalizer is reported
+    // where it happens and not at the outermost entry.
+    extern(D) private void endProcessInFinalizer(
+        HardwareFault fault,
+    ) {
+        import core.memory: GC;
+        import snakebite.backends.guestfault: GuestFault;
+        import std.string: fromStringz;
+
+        if (!GC.inFinalizer)
+            return;
+        const file = fromStringz(_faultLocation.filename);
+        const name = *(_faultFunction in _shared.names);
+        scope GuestFault.Stack stack = (scope GuestFault.FrameSink sink) {
+            sink(GuestFault.Frame(name, file, _faultLocation.linnum));
+        };
+        GuestFault.endProcessInFinalizer(
+            fault.kind, file, _faultLocation.linnum, stack);
     }
 
     extern(D) private noreturn reportHardwareFault(

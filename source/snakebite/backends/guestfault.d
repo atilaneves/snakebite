@@ -80,12 +80,28 @@ public struct GuestFault {
     public static noreturn throwFault(
         in Kind kind, in const(char)[] file, in size_t line, scope Stack stack,
     ) {
+        endProcessInFinalizer(kind, file, line, stack);
+
         const(Frame)[] frames;
         stack((in frame) {
             frames ~= Frame(
                 frame.function_.idup, frame.file.idup, frame.line);
         });
         throw new GuestFaultException(kind, file.idup, line, frames);
+    }
+
+    // A fault in a destructor that the garbage collector runs cannot end one
+    // call: an exception that leaves the collector leaves it broken. The
+    // process ends whatever the host chose, as compiled D dies of the
+    // signal there. A backend that reaches its report only after the
+    // collector has unwound asks this where the fault happens.
+    public static void endProcessInFinalizer(
+        in Kind kind, in const(char)[] file, in size_t line, scope Stack stack,
+    ) {
+        import core.memory: GC;
+
+        if (GC.inFinalizer)
+            endProcess(kind, file, line, stack);
     }
 
     public alias Sink = void delegate(in const(char)[]);
