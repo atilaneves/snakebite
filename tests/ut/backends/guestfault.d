@@ -14,6 +14,8 @@ import core.sys.posix.stdio: flockfile, funlockfile;
 import core.thread: Thread;
 import core.time: msecs, seconds, MonoTime;
 import ut;
+import snakebite.backends.bytecode: Bytecode;
+import snakebite.frontend.dmd.functions: findFunction;
 
 
 private string rendered(
@@ -27,6 +29,45 @@ private string rendered(
         (scope sink) { foreach (frame; frames) sink(frame); },
         (in piece) { text ~= piece; });
     return text[];
+}
+
+
+@("guestFault.bytecode.discardsHaltedStateAndPreservesCallerCleanup")
+unittest {
+    auto module_ = parseSnippets([q{
+        module recovery;
+        int fail() { int* pointer; return *pointer; }
+        int good() { return 42; }
+    }])[0];
+    const program = Program([module_]);
+    size_t cleaned;
+    foreach (_; 0 .. 20) {
+        auto backend = new Bytecode(program);
+        GuestFaultException saved;
+        int result;
+        try {
+            scope(exit) ++cleaned;
+            backend.call(module_.findFunction("fail"), &result, []);
+        } catch (GuestFaultException fault) {
+            saved = fault;
+        }
+        saved.shouldNotBeNull;
+        saved.kind.should == GuestFault.Kind.nullDereference;
+        saved.stack.length.should == 1;
+        saved.stack[0].function_.should == "recovery.fail";
+        // A later entry must not execute guest code on this halted VM.
+        GuestFaultException later;
+        try
+            backend.call(module_.findFunction("good"), &result, []);
+        catch (GuestFaultException fault)
+            later = fault;
+        (later is saved).shouldBeTrue;
+        result.should == 0;
+        auto fresh = new Bytecode(program);
+        fresh.call(module_.findFunction("good"), &result, []);
+        result.should == 42;
+    }
+    cleaned.should == 20;
 }
 
 
