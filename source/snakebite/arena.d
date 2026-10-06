@@ -157,6 +157,39 @@ public void walkArenaWords(scope void delegate(const(void*)* word) nothrow @nogc
 }
 
 
+// Every word handed out since `mark` (the start of the arena when it is
+// null), then moves `mark` to the end of what is handed out. Only the
+// thread that holds the frontend lock calls this.
+public void walkArenaWordsSince(
+    ref const(ubyte)* mark,
+    scope void delegate(const(void*)* word) nothrow @nogc visit)
+    nothrow @nogc
+{
+    import core.atomic: atomicLoad, MemoryOrder;
+
+    auto list = cast(RegionList*) atomicLoad!(MemoryOrder.acq)(_regions);
+    if (list is null)
+        return;
+
+    size_t first;
+    if (mark !is null)
+        foreach (i, region; list.regions[0 .. list.length])
+            if (mark >= region.base && mark < region.base + region.reserved)
+                first = i;
+
+    foreach (i, region; list.regions[0 .. list.length]) {
+        if (i < first)
+            continue;
+        const end = i + 1 == list.length ? _top : region.base + region.used;
+        auto start = i == first && mark !is null ? mark : region.base;
+        for (auto word = cast(const(void*)*) start;
+                cast(const(ubyte)*) word < end; ++word)
+            visit(word);
+    }
+    mark = _top;
+}
+
+
 // Bytes of arena memory handed out so far, across every region.
 public size_t arenaUsed() nothrow @nogc {
     import core.atomic: atomicLoad, MemoryOrder;

@@ -115,6 +115,52 @@ unittest {
 }
 
 
+// dmd's closure frames keep the address of the stack objects they
+// capture, and the arena never frees them. A stack that the GC heap
+// later reuses must not make those words count: here the thread's stack
+// is a GC block, as the memory of an exited thread's stack can be.
+debug
+@("arenaHoldsNoGCPointers.stackAddressesOfTheFrontendThread")
+unittest {
+    import core.sys.posix.pthread: pthread_attr_init, pthread_attr_setstack,
+        pthread_attr_t, pthread_create, pthread_join, pthread_t;
+    import core.thread: thread_attachThis, thread_detachThis;
+    import snakebite.frontend.compiler: newInFrontend, withCompilerLock;
+    import snakebite.gc: enterFrontend, leaveFrontend;
+
+    __gshared void delegate() onStack;
+
+    enum stackSize = 1 << 20;
+    auto memory = new ubyte[stackSize + 4096];
+    auto aligned = cast(void*) ((cast(size_t) memory.ptr + 4095) & ~size_t(4095));
+
+    onStack = {
+        withCompilerLock({
+            enterFrontend;
+            scope(exit) leaveFrontend;
+            int local;
+            auto closureFrame = new void*[1];
+            closureFrame[0] = &local;
+        });
+    };
+    static extern(C) void* run(void*) {
+        thread_attachThis;
+        scope(exit) thread_detachThis;
+        onStack();
+        return null;
+    }
+
+    pthread_attr_t attributes;
+    pthread_attr_init(&attributes);
+    pthread_attr_setstack(&attributes, aligned, stackSize).should == 0;
+    pthread_t thread;
+    pthread_create(&thread, &attributes, &run, null).should == 0;
+    pthread_join(thread, null).should == 0;
+
+    arenaReport.should == "";
+}
+
+
 // A collection frees nothing the AST uses, and marks none of it: code
 // dmd compiled before the collection runs correctly after it.
 static foreach (backend; Matrix!()) {
