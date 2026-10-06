@@ -161,6 +161,41 @@ def test_checkaction_c_final_switch_on_non_member_aborts(
     assert_aborts_after_start(outcome, "Assertion `0' failed")
 
 
+# An unchecked null dereference ends the process with SIGSEGV, not SIGILL.
+@pytest.mark.parametrize("backend", ENDS_PROCESS)
+def test_checkaction_halt_null_dereference_halts_the_process(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(
+        tmp_path, backend, ["-check=nullderef", "-checkaction=halt"], """
+        unittest {
+            int* p;
+            log("start\\n");
+            int x = *p;
+            log("after\\n");
+        }
+    """)
+    assert outcome.status == -SIGILL, outcome.output
+    assert "start" in outcome.output
+    assert "after" not in outcome.output
+
+
+@pytest.mark.parametrize("backend", ENDS_PROCESS)
+def test_checkaction_c_null_dereference_aborts_with_the_c_message(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(
+        tmp_path, backend, ["-check=nullderef", "-checkaction=C"], """
+        unittest {
+            int* p;
+            log("start\\n");
+            int x = *p;
+            log("after\\n");
+        }
+    """)
+    assert_aborts_after_start(outcome, "null pointer dereference")
+
+
 # The message of a failed bounds check is not the one of a failed assert.
 @pytest.mark.parametrize("backend", ENDS_PROCESS)
 def test_checkaction_c_index_out_of_bounds_aborts_with_the_c_message(

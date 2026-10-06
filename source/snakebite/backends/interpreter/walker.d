@@ -63,7 +63,7 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         void* returnPlace,
         void*[] args,
     ) {
-        onEvaluator!((evaluator) =>
+        this.onEvaluator!((evaluator) =>
             evaluator.call(function_, returnPlace, args));
     }
 
@@ -73,16 +73,8 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         return _shared.nativeData.storageOf(variable);
     }
 
-    // The evaluator of the calling thread: made on its first entry, and
-    // kept until it ends.
-    private auto onEvaluator(alias action)() {
-        if (_checksNullDeref)
-            return action(_checkedEvaluators.current);
-        return action(_evaluators.current);
-    }
-
     private void prepareOnEvaluator(FuncDeclaration function_) {
-        onEvaluator!((evaluator) => evaluator.prepareCallback(function_));
+        this.onEvaluator!((evaluator) => evaluator.prepareCallback(function_));
     }
 
     // The re-entry a pool entry (ADR-0003) reaches when host code calls
@@ -127,17 +119,17 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     // same thread that made the calls being counted.
     version(unittest)
     public size_t nameLookups() {
-        return onEvaluator!((evaluator) => evaluator.nameLookups());
+        return this.onEvaluator!((evaluator) => evaluator.nameLookups());
     }
 
     version(unittest)
     public size_t typeLookups() {
-        return onEvaluator!((evaluator) => evaluator.typeLookups());
+        return this.onEvaluator!((evaluator) => evaluator.typeLookups());
     }
 
     version(unittest)
     public size_t symbolLookups() {
-        return onEvaluator!((evaluator) => evaluator.symbolLookups());
+        return this.onEvaluator!((evaluator) => evaluator.symbolLookups());
     }
 
     // Frame layouts built on this thread - by this evaluator or by any
@@ -153,6 +145,15 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
 }
 
 import snakebite.exception: SnakebiteException;
+
+// Runs `action` on the evaluator of the calling thread: made on its first
+// entry, and kept until it ends. A free function, because a member that
+// takes a closure as an alias parameter needs two contexts.
+private auto onEvaluator(alias action)(Interpreter interpreter) {
+    if (interpreter._checksNullDeref)
+        return action(interpreter._checkedEvaluators.current);
+    return action(interpreter._evaluators.current);
+}
 
 // A guest throw must remain distinguishable from a refusal to interpret a
 // guest construct. The runner catches this wrapper, while interpreter
