@@ -434,6 +434,86 @@ static foreach (backend; Guests) {
 }
 
 
+static foreach (backend; Guests) {
+    @("flags.nullDerefClassFieldRead." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shouldRun!backend(Row(["-check=nullderef"], q{
+            class C { int x; }
+            @system unittest {
+                C c;
+                int y = c.x;
+            }
+        }, Expect.raised(nullPointerError), Expect.same));
+    }
+}
+
+
+static foreach (backend; Guests) {
+    @("flags.nullDerefClassFieldWrite." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shouldRun!backend(Row(["-check=nullderef"], q{
+            class C { int x; }
+            @system unittest {
+                C c;
+                c.x = 1;
+            }
+        }, Expect.raised(nullPointerError), Expect.same));
+    }
+}
+
+
+static foreach (backend; Guests) {
+    @("flags.nullDerefDelegateCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shouldRun!backend(Row(["-check=nullderef"], q{
+            @system unittest {
+                int delegate() dg;
+                dg();
+            }
+        }, Expect.raised(nullPointerError), Expect.same));
+    }
+}
+
+
+static foreach (backend; Guests) {
+    @("flags.nullDerefFunctionPointerCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shouldRun!backend(Row(["-check=nullderef"], q{
+            @system unittest {
+                int function() fp;
+                fp();
+            }
+        }, Expect.raised(nullPointerError), Expect.same));
+    }
+}
+
+
+// Native code reads the vtable of the receiver after it evaluates the
+// arguments, and the check is at that read.
+static foreach (backend; Guests) {
+    @("flags.nullDerefVirtualCallArguments." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shouldRun!backend(Row(["-check=nullderef"], q{
+            class C { int f(int a) { return a; } }
+            int evaluated;
+            int argument() { evaluated = 1; return 1; }
+            @system unittest {
+                C c;
+                try c.f(argument());
+                catch (Error) {}
+                assert(evaluated == 1);
+            }
+        }, Expect.returned, Expect.diagnosed(
+            "function call through null class reference `null`")));
+    }
+}
+
+
 // The context action puts the operands of the failed comparison in the
 // message.
 static foreach (backend; Guests) {
