@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pexpect
 import pytest
+from dubname import dub_name
 
 _ANSI_ESCAPE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
@@ -129,7 +130,7 @@ def test_halting_cell_does_not_end_the_session(
     tmp_path: Path, backend: str,
 ) -> None:
     (tmp_path / "dub.sdl").write_text(
-        'name "repl-halt-test"\n'
+        f'name "{dub_name("repl-halt-test")}"\n'
         'dflags "-checkaction=halt"\n',
         encoding="utf-8",
     )
@@ -171,7 +172,7 @@ def test_halting_cell_does_not_end_the_session(
 @pytest.mark.parametrize("backend", ["interpreter", "bytecode", "ctfe"])
 def test_project_import_without_semicolon(tmp_path: Path, backend: str) -> None:
     (tmp_path / "dub.sdl").write_text(
-        'name "repl-import-test"\n', encoding="utf-8",
+        f'name "{dub_name("repl-import-test")}"\n', encoding="utf-8",
     )
     source = tmp_path / "source"
     source.mkdir()
@@ -209,7 +210,7 @@ def test_project_import_without_semicolon(tmp_path: Path, backend: str) -> None:
 
 def write_versioned_project(directory: Path) -> None:
     (directory / "dub.sdl").write_text(
-        'name "repl-lazy-project"\n'
+        f'name "{dub_name("repl-lazy-project")}"\n'
         'versions "ReplProjectVersion"\n'
         'stringImportPaths "views"\n',
         encoding="utf-8",
@@ -355,7 +356,7 @@ def test_project_import_sees_project_versions(
 
 def write_versioned_package(directory: Path) -> None:
     (directory / "dub.sdl").write_text(
-        'name "repl-versioned-package"\nversions "ProjV"\n',
+        f'name "{dub_name("repl-versioned-package")}"\nversions "ProjV"\n',
         encoding="utf-8",
     )
     package = directory / "source" / "pkg"
@@ -394,7 +395,7 @@ def test_package_module_sees_project_versions(
 
 def write_nested_import_project(directory: Path) -> None:
     (directory / "dub.sdl").write_text(
-        'name "repl-nested-import"\nversions "ProjV"\n', encoding="utf-8",
+        f'name "{dub_name("repl-nested-import")}"\nversions "ProjV"\n', encoding="utf-8",
     )
     source = directory / "source"
     source.mkdir()
@@ -452,7 +453,7 @@ def test_project_session_is_the_same_on_a_cold_and_a_warm_image_cache(
     source = project / "source"
     source.mkdir(parents=True)
     (tmp_path / "elsewhere").mkdir()
-    (project / "dub.sdl").write_text('name "good"\n', encoding="utf-8")
+    (project / "dub.sdl").write_text(f'name "{dub_name("good")}"\n', encoding="utf-8")
     (source / "good.d").write_text(
         "module good;\n"
         "string file() { return __FILE__; }\n"
@@ -489,7 +490,7 @@ def test_project_session_resolves_arguments_from_its_start_directory(
     source = tmp_path / "project" / "source"
     source.mkdir(parents=True)
     (tmp_path / "project" / "dub.sdl").write_text(
-        'name "arguments"\n', encoding="utf-8",
+        f'name "{dub_name("arguments")}"\n', encoding="utf-8",
     )
     (source / "arguments.d").write_text(
         "module arguments;\nint fromProject() { return 1; }\n",
