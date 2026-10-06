@@ -626,7 +626,22 @@ private extern(C) void invokeDispatch(void* context) {
 private void haltBeforeUnwind(
     void* context, imported!"snakebite.faultsignal".HardwareFault fault,
 ) nothrow @nogc {
-    (cast(Vm*) context)._halt = fault;
+    auto vm = cast(Vm*) context;
+    vm._halt = fault;
+    auto state = cast(DispatchState*) vm._frames.backendEntry;
+    // Native code can suppress the throwable. The existing call transition
+    // must then enter a host-only Halt continuation, not another guest opcode.
+    state.pending = cast(Activation*) &haltedNativeReturn;
+}
+
+private immutable Instruction nativeHaltInstruction = Instruction(&opNativeHalt);
+private immutable Activation haltedNativeReturn =
+    immutable(Activation)(&nativeHaltInstruction);
+
+private const(Instruction)* opNativeHalt(
+    const(Instruction)*, Activation*, DispatchState* state,
+) {
+    throw state.vm._halt;
 }
 
 pragma(inline, true)
@@ -665,9 +680,17 @@ private void dispatchLoop(
             } else
                 pc = handler(instruction, active, state);
         } catch (Throwable throwable) {
+            if (active is &haltedNativeReturn) {
+                active = state.current;
+                pc = active.pc;
+            }
             active.pc = pc;
             import snakebite.faultsignal: HardwareFault;
 
+            // Native cleanup can retain an ordinary primary exception.
+            // The saved Halt must win before any guest handler runs.
+            if (state.vm._halt !is null)
+                throwable = state.vm._halt;
             if (auto hardware = cast(HardwareFault) throwable)
                 throwable = reportHardwareFault(hardware, active, state);
             active = handleException(active, frames, throwable, state.vm);

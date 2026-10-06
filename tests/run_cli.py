@@ -215,9 +215,9 @@ def test_hardware_fault_in_thread_or_gc_finalizer(
 
 @pytest.mark.parametrize("backend", ["native", *BACKENDS])
 @pytest.mark.parametrize("shape", ["direct", "pointer", "variadic-pointer"])
-@pytest.mark.parametrize("pending_exception", [False, True])
+@pytest.mark.parametrize("native_behavior", ["direct", "chained", "swallowed"])
 def test_native_fault_unwind_keeps_host_cleanup_but_skips_guest_callback(
-    tmp_path: Path, backend: str, shape: str, pending_exception: bool,
+    tmp_path: Path, backend: str, shape: str, native_behavior: str,
 ) -> None:
     app = tmp_path / "app"
     write(app / "dub.sdl", dub_project_recipe("fault-unwind")
@@ -248,10 +248,11 @@ def test_native_fault_unwind_keeps_host_cleanup_but_skips_guest_callback(
         'extern(C) void nativeTrap();\n'
         'extern(C) void nativeFault(void function() cleanup) {\n'
         ' scope(exit) write(1, "host released\\n".ptr, 14);\n'
-        ' scope(exit) cleanup();\n'
+        + (' scope(exit) cleanup();\n' if native_behavior != "swallowed" else '')
         + (' try { throw new Exception("ordinary"); }\n'
-           ' finally { nativeTrap(); }\n' if pending_exception else
-           ' nativeTrap();\n')
+           ' finally { nativeTrap(); }\n' if native_behavior == "chained" else
+           ' try { nativeTrap(); } catch(Throwable) {}\n'
+           if native_behavior == "swallowed" else ' nativeTrap();\n')
         + '}\n',
     )
     write(
@@ -289,16 +290,14 @@ def test_native_fault_unwind_keeps_host_cleanup_but_skips_guest_callback(
     if backend in ("bytecode", "interpreter"):
         assert result.returncode == 1, output(result)
         assert result.stdout.count("host released\n") == 1, output(result)
-        # Bytecode defect, not the intended behaviour: when the native code
-        # has an ordinary exception pending, Bytecode does not report the
-        # fault as a halt. bin/sb then prints its timing report on stdout,
-        # and stderr has the raw message of the hardware fault, with no
-        # `fatal:` and no guest source position.
-        if backend == "interpreter" or not pending_exception:
-            assert result.stdout == "host released\n", output(result)
-        assert "null pointer dereference" in result.stderr
-        if backend == "interpreter":
-            assert "fatal: null pointer dereference" in result.stderr
+        assert result.stdout == "host released\n", output(result)
+        assert "fatal: null pointer dereference" in result.stderr
+        if backend == "bytecode":
+            assert result.stderr == (
+                "source/main.d(7): fatal: null pointer dereference\n"
+                "    in D main (source/main.d(7))\n"
+            )
+        else:
             assert "main.d" in result.stderr
     elif backend == "ctfe":
         assert result.returncode == 1, output(result)

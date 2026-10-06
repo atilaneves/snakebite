@@ -109,6 +109,89 @@ def test_hardware_fault_recovery_uses_fresh_cell_state(
     assert child.exitstatus == 0
 
 
+@pytest.mark.parametrize("backend", ["bytecode", "interpreter"])
+@pytest.mark.parametrize("shape", ["chained", "swallowed"])
+@pytest.mark.parametrize("entry", ["body", "cleanup", "callback"])
+def test_native_fault_recovery_keeps_host_cleanup(
+    tmp_path: Path, backend: str, shape: str, entry: str,
+) -> None:
+    native = tmp_path / "native.d"
+    native.write_text(
+        'module native_fixture;\nimport core.sys.posix.unistd: write;\n'
+        'extern(C) void nativeTrap();\n'
+        'extern(C) void fault() {\n'
+        ' scope(exit) write(1, "host released\\n".ptr, 14);\n'
+        + (' try { throw new Exception("ordinary"); }\n'
+           ' finally { nativeTrap(); }\n' if shape == "chained" else
+           ' try { nativeTrap(); } catch(Throwable) {}\n')
+        + '}\n', encoding="utf-8",
+    )
+    trap = tmp_path / "trap.S"
+    trap.write_text(
+        '.text\n.globl nativeTrap\n.type nativeTrap,@function\n'
+        'nativeTrap:\n.cfi_startproc\nxor %eax,%eax\n'
+        'mov (%rax),%rax\nret\n.cfi_endproc\n'
+        '.section .note.GNU-stack,"",@progbits\n', encoding="utf-8",
+    )
+    library = tmp_path / "libfault.so"
+    for command in (
+        ["cc", "-c", "-fPIC", str(trap), "-o", str(tmp_path / "trap.o")],
+        ["ldc2", "-shared", "-link-defaultlib-shared", "-relocation-model=pic",
+         "-O", "-release", f"-of={library}", str(native),
+         str(tmp_path / "trap.o")],
+    ):
+        built = subprocess.run(command, capture_output=True, text=True)
+        assert built.returncode == 0, built.stdout + built.stderr
+    child = pexpect.spawn(
+        sb_path(), ["-b", backend], timeout=TIMEOUT, encoding="utf-8",
+    )
+    try:
+        child.expect_exact("[   0.0 ms] > ")
+        call = {
+            "body": "nativeFault();",
+            "cleanup": 'try { throw new Exception("ordinary guest"); } '
+                       'finally { nativeFault(); }',
+            "callback": 'int[2] items = [2, 1]; '
+                        'qsort(items.ptr, 2, int.sizeof, &compare);',
+        }[entry]
+        for declaration in (
+            "import core.sys.posix.dlfcn",
+            "import core.sys.posix.unistd: write",
+            "import core.stdc.stdlib: qsort",
+            "alias Fn = extern(C) void function();",
+            'void nativeFault() { auto h = dlopen("' + str(library)
+            + '".ptr, RTLD_NOW); assert(h !is null); '
+            'auto f = cast(Fn) dlsym(h, "fault".ptr); assert(f !is null); '
+            'f(); }',
+            'extern(C) int compare(const void* a, const void* b) { '
+            'nativeFault(); return 0; }',
+            'int fault() { '
+            'scope(exit) write(1, "guest scope\\n".ptr, 12); '
+            'try { ' + call + ' } catch(Throwable) { '
+            'write(1, "guest catch\\n".ptr, 12); } finally { '
+            'write(1, "guest finally\\n".ptr, 14); } '
+            'write(1, "guest continued\\n".ptr, 16); return 0; }',
+        ):
+            child.sendline(declaration)
+            child.expect(r"\[\s+\d+\.\d ms\] > ")
+            assert "Error" not in clean(child.before)
+        for _ in range(3):
+            child.sendline("fault()")
+            child.expect(r"\[\s+\d+\.\d ms\] > ")
+            fault = clean(child.before)
+            assert fault.count("host released\n") == 1, fault
+            assert "guest " not in fault, fault
+            assert "fatal: null pointer dereference" in fault, fault
+            child.sendline("40 + 2")
+            child.expect(r"\[\s+\d+\.\d ms\] > ")
+            assert "42\n" in clean(child.before)
+        child.sendline(":q")
+        child.expect(pexpect.EOF)
+    finally:
+        child.close(force=True)
+    assert child.exitstatus == 0
+
+
 def test_repl() -> None:
     repl = sb_path()
     child = spawn(repl, timeout=TIMEOUT, encoding="utf-8")
