@@ -798,6 +798,99 @@ int main(int argc, char **argv) {
 """
 
 
+ABSENT_RESTORER_HOST = r"""
+#define _GNU_SOURCE
+#include <stddef.h>
+#include <errno.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+#include <sys/prctl.h>
+extern int rt_init(void);
+extern int install_saved_action(void);
+extern int guest_fault(void);
+void native_fault(void) { *(volatile int *)0 = 42; }
+static char alternate[128 * 1024] __attribute__((aligned(16)));
+static void rejected(int sig) { write(1, "rejected\n", 9); }
+static void rejected_info(int sig, siginfo_t *info, void *context) {
+    rejected(sig);
+}
+static void unused_restorer(void) { _exit(98); }
+int main(int argc, char **argv) {
+    prctl(PR_SET_DUMPABLE, 0);
+    setenv("SNAKEBITE_NO_FAULT_HANDLER", "1", 1);
+    if (!rt_init()) return 90;
+    unsetenv("SNAKEBITE_NO_FAULT_HANDLER");
+    int installed = atoi(argv[1]), alt = atoi(argv[2]);
+    int onstack = atoi(argv[3]), information = atoi(argv[4]);
+    if (alt) {
+        stack_t stack = {.ss_sp=alternate, .ss_size=sizeof alternate};
+        if (sigaltstack(&stack, 0)) return 91;
+    }
+    struct {
+        void *handler;
+        unsigned long flags;
+        void (*restorer)(void);
+        unsigned long mask;
+    } action = {
+        .handler = information ? (void *)rejected_info : (void *)rejected,
+        .flags = (onstack ? SA_ONSTACK : 0) | (information ? SA_SIGINFO : 0),
+        .restorer = atoi(argv[5]) ? unused_restorer : 0,
+    };
+    if (syscall(SYS_rt_sigaction, SIGSEGV, &action, 0, 8)) return 92;
+    if (installed) {
+        if (!install_saved_action()) return 93;
+        if (!guest_fault()) return 94;
+    }
+    if (atoi(argv[6])) {
+        // Native failed delivery needs no new disposition or mask syscall.
+        struct sock_filter instructions[] = {
+            BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_rt_sigaction, 3, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_rt_sigprocmask, 2, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_rt_tgsigqueueinfo, 1, 0),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+        };
+        struct sock_fprog filter = {
+            .len = sizeof instructions / sizeof instructions[0],
+            .filter = instructions,
+        };
+        if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) ||
+            prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &filter)) return 95;
+    }
+    syscall(SYS_tgkill, getpid(), syscall(SYS_gettid), SIGSEGV);
+    return 97;
+}
+"""
+
+
+@pytest.fixture(scope="module", params=PROFILES)
+def absent_restorer_host(request, tmp_path_factory):
+    return build_host(request, tmp_path_factory, ABSENT_RESTORER_HOST)
+
+
+@pytest.mark.parametrize("alternate", [False, True])
+@pytest.mark.parametrize("onstack", [False, True])
+@pytest.mark.parametrize("information", [False, True])
+@pytest.mark.parametrize("pointer", [False, True])
+@pytest.mark.parametrize("restricted", [False, True])
+def test_absent_segv_restorer(absent_restorer_host, alternate, onstack,
+                              information, pointer, restricted):
+    for installed in (False, True):
+        result = subprocess.run(
+            [str(absent_restorer_host), str(int(installed)), str(int(alternate)),
+             str(int(onstack)), str(int(information)), str(int(pointer)),
+             str(int(restricted))],
+            capture_output=True, timeout=5,
+        )
+        assert result.returncode == -signal.SIGSEGV, result
+        assert result.stdout == b"", result
+
+
 @pytest.fixture(scope="module", params=PROFILES)
 def restorer_host(request, tmp_path_factory):
     return build_host(request, tmp_path_factory, RESTORER_HOST)
