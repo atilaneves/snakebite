@@ -495,8 +495,15 @@ private final class SnakebiteGC : GC {
         return _gc.rangeIter;
     }
 
+    // druntime's search reads the first word of every finalizable block,
+    // and a block that another thread got from `malloc` and did not
+    // initialise yet holds no object there. No finalizer lies in an empty
+    // segment, so that search has no result to find. The linker can give
+    // the registry image of `snakebite.backends.guestmodules` such a
+    // segment.
     void runFinalizers(const scope void[] segment) nothrow {
-        _gc.runFinalizers(segment);
+        if (segment.length != 0)
+            _gc.runFinalizers(segment);
     }
 
     bool inFinalizer() nothrow @nogc @safe {

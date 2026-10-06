@@ -6,6 +6,9 @@ module ut.backends.run.declarations;
 // `Matrix` when it agrees.
 
 
+import core.atomic: atomicLoad, atomicStore;
+import core.sys.linux.elf: Elf64_Ehdr, Elf64_Phdr, PF_X, PT_LOAD;
+import core.thread: Thread;
 import ut.backends;
 import snakebite.backends.backend: Program, run;
 import snakebite.frontend.compiler: parseSnippet;
@@ -221,6 +224,66 @@ static foreach (backend; Matrix!(
         }).should == 1;
         sandbox.shouldEqualContent("trace", "main;last declared;");
     }
+}
+
+
+// The end of a program with a module destructor is safe while another
+// thread makes objects of a class with a destructor: such an object exists
+// for a time before it has its virtual table.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the mixin runs module constructors and destructors when `bin/ut` starts and ends, not around the guest `main`"),
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot run module destructors"),
+)) {
+    @("programWithModuleDestructorEndsWhileAnotherThreadMakesObjects." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shared bool making;
+        shared bool done;
+        auto maker = new Thread({
+            while (!atomicLoad(done)) {
+                0.shouldBeStatusOf!(backend, q{
+                    class Resource { ~this() {} }
+                    void main() {
+                        foreach (_; 0 .. 250)
+                            new Resource;
+                    }
+                });
+                atomicStore(making, true);
+            }
+        }).start;
+        scope(exit) {
+            atomicStore(done, true);
+            maker.join;
+        }
+
+        while (!atomicLoad(making))
+            Thread.yield;
+        foreach (_; 0 .. 150)
+            0.shouldBeStatusOf!(backend, q{
+                shared static ~this() {}
+                void main() {}
+            });
+    }
+}
+
+
+extern(C) extern __gshared const ubyte snakebite_registry_image_start;
+extern(C) extern __gshared const ubyte snakebite_registry_image_end;
+
+
+// The test above passes only if the linker did not give the registry image
+// code: `gold` does, and then every program that ends makes the search.
+@("registryImageHasNoCode")
+unittest {
+    const image = (&snakebite_registry_image_start)[
+        0 .. &snakebite_registry_image_end - &snakebite_registry_image_start];
+    const header = cast(const(Elf64_Ehdr)*) image.ptr;
+    const segments = (cast(const(Elf64_Phdr)*) &image[header.e_phoff])[
+        0 .. header.e_phnum];
+    foreach (segment; segments)
+        if (segment.p_type == PT_LOAD && (segment.p_flags & PF_X))
+            segment.p_filesz.shouldEqual(0);
 }
 
 
