@@ -90,6 +90,85 @@ debug private __gshared bool _frontendStarted;
 public void leaveFrontend() nothrow @nogc {
     assert(_frontendDepth != 0);
     --_frontendDepth;
+    debug if (_frontendDepth == 0)
+        recordStackWords;
+}
+
+
+// dmd's closure frames (`_d_allocmemory`) hold the addresses of the
+// stack objects they capture, such as a visitor's `this`, and the arena
+// never frees a frame. The stack of a thread that has exited can later
+// be GC heap, and the report would take those addresses for pointers.
+// The word held an address of the stack of the writing thread when the
+// frontend left. The report assumes that such a word is not a GC pointer,
+// for as long as it keeps that value. This covers only pthread stacks
+// (not fiber or interpreter stacks) and only words in blocks handed out
+// since the last record.
+debug private struct StackWord {
+    const(void*)* word;
+    const(void)* value;
+}
+
+debug private __gshared StackWord[] _stackWords;
+debug private __gshared size_t _stackWordCount;
+debug private __gshared const(ubyte)* _recordedUpTo;
+debug private size_t _stackLow, _stackHigh;
+
+
+// Call with the frontend lock held: walks what the frontend allocated
+// since the last call.
+debug private void recordStackWords() nothrow @nogc {
+    import snakebite.arena: walkArenaWordsSince;
+
+    if (_stackHigh == 0)
+        findStack;
+    walkArenaWordsSince(_recordedUpTo, (const(void*)* word) nothrow @nogc {
+        const address = cast(size_t) *word;
+        if (address >= _stackLow && address < _stackHigh)
+            addStackWord(StackWord(word, *word));
+    });
+}
+
+
+debug private void findStack() nothrow @nogc {
+    import core.sys.posix.pthread: pthread_attr_destroy, pthread_attr_getstack,
+        pthread_attr_t, pthread_self;
+
+    pthread_attr_t attributes;
+    void* low;
+    size_t size;
+    if (pthread_getattr_np(pthread_self, &attributes) != 0)
+        assert(0, "no stack bounds");
+    pthread_attr_getstack(&attributes, &low, &size);
+    pthread_attr_destroy(&attributes);
+    _stackLow = cast(size_t) low;
+    _stackHigh = _stackLow + size;
+}
+
+
+debug private extern(C) int pthread_getattr_np(size_t thread, void* attributes)
+    nothrow @nogc;
+
+
+debug private void addStackWord(in StackWord entry) nothrow @nogc {
+    import core.stdc.stdlib: realloc;
+
+    if (_stackWordCount == _stackWords.length) {
+        const length = _stackWords.length == 0 ? 1024 : 2 * _stackWords.length;
+        auto grown = cast(StackWord*) realloc(_stackWords.ptr, length * StackWord.sizeof);
+        if (grown is null)
+            assert(0, "out of memory");
+        _stackWords = grown[0 .. length];
+    }
+    _stackWords[_stackWordCount++] = entry;
+}
+
+
+debug private bool isRecordedStackWord(in void** word) nothrow @nogc {
+    foreach (entry; _stackWords[0 .. _stackWordCount])
+        if (entry.word is word && entry.value is *word)
+            return true;
+    return false;
 }
 
 
@@ -208,7 +287,7 @@ debug public string arenaPointersIntoGC() {
         if (!plausiblePointer(value) || isArenaMemory(value))
             return;
         auto block = _instance._gc.addrOf(cast(void*) value);
-        if (block is null)
+        if (block is null || isRecordedStackWord(word))
             return;
         if (count < shown.length)
             shown[count] = Found(word, block, _instance._gc.sizeOf(block));
