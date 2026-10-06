@@ -24,6 +24,10 @@
 
 #if defined(__x86_64__) && defined(__linux__)
 
+#define __ASSEMBLY__ 1
+#include <asm/signal.h>
+#include <asm/unistd.h>
+
     .text
 
     /* The compiler must not infer nounwind from the guest body, even with
@@ -75,6 +79,100 @@ snakebite_fault_trampoline_call:
     .cfi_endproc
     .size   snakebite_fault_trampoline_call, . - snakebite_fault_trampoline_call
 
-#endif
+    /* Every saved callback uses this tail entry. Only a stack change needs
+     * placement of the kernel frame. Tail entry keeps the
+     * kernel restorer as the callback's return address; rt_sigreturn consumes
+     * frame only once, including any callback context edits.
+     */
+    .globl snakebite_fault_signal_entry
+    .type snakebite_fault_signal_entry,@function
+snakebite_fault_signal_entry:
+    .cfi_startproc
+    mov %rsp,%rcx
+    push %rbp
+    .cfi_def_cfa_offset 16
+    .cfi_offset %rbp,-16
+    mov %rsp,%rbp
+    .cfi_def_cfa_register %rbp
+    mov %rsi,%r13
+    mov %rdx,%r14
+    mov %edi,%r15d
+    cld
+    call snakebite_fault_dispatch@PLT
+    leave
+    .cfi_def_cfa %rsp,8
+    .cfi_restore %rbp
+    test %rax,%rax
+    jz .Lsignal_return
+    mov %rax,%rbx
+    mov 0(%rax),%r10
+    mov 8(%rax),%r12
+    mov 176(%rax),%rcx
+    mov %r10,%rsp
+    test %rcx,%rcx
+    jz .Lsignal_unmoved
+    mov 16(%rax),%r13
+    mov 24(%rax),%r14
+    mov 168(%rax),%rsi
+    mov %r10,%rdi
+    /* Use the normal stack before the first write. A legitimate growing
+     * stack gets ordinary user page faults, without a remote-write syscall
+     * or permission. All signals remain blocked through placement. A write
+     * to an inaccessible stack therefore terminates on its forced hardware
+     * fault rather than recursively entering our signal handler.
+     * The configured alternate range may share a mapping with this stack,
+     * so the two frames can overlap: use memmove order, not memcpy order.
+     */
+    cmp %rsi,%rdi
+    jbe .Lsignal_copy_forward
+    mov %rdi,%rax
+    sub %rsi,%rax
+    cmp %rcx,%rax
+    jae .Lsignal_copy_forward
+    lea -1(%rsi,%rcx),%rsi
+    lea -1(%rdi,%rcx),%rdi
+    std
+    rep movsb
+    cld
+    jmp .Lsignal_copy_done
+.Lsignal_copy_forward:
+    rep movsb
+.Lsignal_copy_done:
+    mov 184(%rbx),%rax
+    mov %rax,224(%r14)
+    /* Do not write this slot before the copy: it can overlap the source. */
+    mov %r12,-8(%rsp)
+.Lsignal_unmask:
+    lea 40(%rbx),%rsi
+    mov $SIG_SETMASK,%edi
+    xor %edx,%edx
+    mov $8,%r10d
+    mov $__NR_rt_sigprocmask,%eax
+    syscall
+    test %rax,%rax
+    jnz .Lsignal_failure
+.Lsignal_callback:
+    mov %r15d,%edi
+    mov %r13,%rsi
+    mov %r14,%rdx
+    xor %eax,%eax
+    jmp *-8(%rsp)
+.Lsignal_unmoved:
+    mov %r12,-8(%rsp)
+    cmpb $0,32(%rbx)
+    je .Lsignal_callback
+    jmp .Lsignal_unmask
+.Lsignal_return:
+    ret
+.Lsignal_failure:
+    /* Unmasking failed: do not run the callback under the wrong mask. */
+    mov $(128 + SIGSEGV),%edi
+    mov $__NR_exit_group,%eax
+    syscall
+    ud2
+    .cfi_endproc
+    .size snakebite_fault_signal_entry,.-snakebite_fault_signal_entry
 
     .section .note.GNU-stack,"",@progbits
+
+#endif
