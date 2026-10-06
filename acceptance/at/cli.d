@@ -481,8 +481,6 @@ static foreach (backend; Matrix!(
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read the native Fiber page size"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "Recursive evaluation exhausts the default Fiber stack"),
 )) {
     @("fiberDeepRecursion." ~ backend.stringof)
     @Tags(backend.stringof)
