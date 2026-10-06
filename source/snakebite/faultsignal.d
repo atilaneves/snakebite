@@ -33,6 +33,14 @@ static if (!is(typeof(supported)))
 // (`installFaultHandlers`). A guest that installs a handler of its own for
 // one of these signals replaces ours, as it does in compiled D.
 //
+// Other code must not take the kernel action away from us: druntime's
+// `runModuleUnitTests` installs a one-shot handler for `SIGSEGV` and
+// `SIGBUS` and a guest fault on another thread would then kill the
+// process. This executable therefore defines `sigaction` itself
+// (`interposedSigaction`), and a request for one of these signals from a
+// thread that does not run guest code never reaches the kernel. Calls that
+// bypass the symbol (`signal`, a system call) are not covered.
+//
 // Linux on x86-64 only. On any other target nothing is installed and a
 // fault crashes the process.
 
@@ -145,74 +153,38 @@ public void takeFault(in HardwareFault) @trusted @nogc nothrow {
 // that a maintainer can get the crash and the core dump of the guest.
 public bool installFaultHandlers() @trusted nothrow @nogc {
     static if (supported) {
-        import core.atomic: atomicLoad, atomicStore, cas;
+        import core.atomic: atomicLoad, atomicStore;
         import core.stdc.stdlib: getenv;
-        import core.sys.posix.signal: SIG_SETMASK, sigprocmask, sigset_t;
 
         if (getenv("SNAKEBITE_NO_FAULT_HANDLER") !is null)
             return false;
 
-        // A handler on this thread must not wait for its own installation.
-        // Block the collector too: a handler on another thread can be
-        // waiting on its alternate stack until the saved action is complete.
-        sigset_t blocked, savedMask;
-        sigfillset(&blocked);
-        if (sigprocmask(SIG_SETMASK, &blocked, &savedMask) != 0)
-            assert(0, "cannot block signals during fault-handler installation");
-        scope(exit)
-            if (sigprocmask(SIG_SETMASK, &savedMask, null) != 0)
-                assert(0, "cannot restore signals after fault-handler installation");
-
-        if (!cas(&_installation, Installation.absent, Installation.inProgress)) {
-            while (atomicLoad(_installation) == Installation.inProgress) {}
+        const kernel = kernelSigaction;
+        auto held = SignalTableLock.acquire;
+        if (atomicLoad(_installed))
             return true;
-        }
 
         auto action = faultAction;
         foreach (signal; handledSignals) {
-            const index = cast(size_t) signal;
-            if (sigaction(signal, &action, &_previous[index].action) != 0)
+            sigaction_t previous;
+            if (kernel(signal, &action, &previous) != 0)
                 assert(0, "sigaction failed for a fault signal");
-            // sigaction publishes the kernel action before libc can finish
-            // copying the old action to this array. Readers wait for that
-            // copy, not merely for the kernel to accept the new action.
-            atomicStore(_previous[index].ready, true);
+            publishPrevious(cast(size_t) signal, previous);
         }
-        atomicStore(_installation, Installation.complete);
+        // The kernel needs a restorer to return from a handler, and libc
+        // adds its own to each action it installs. A request that the
+        // interposer records gets the same one, because the handler
+        // forwards to the recorded action.
+        sigaction_t installed;
+        if (kernel(SIGSEGV, null, &installed) != 0)
+            assert(0, "sigaction failed to read the fault action");
+        if (installed.sa_flags & saRestorer)
+            _restorer = installed.sa_restorer;
+        atomicStore(_installed, true);
 
         return true;
     } else
         return false;
-}
-
-
-// druntime's `runModuleUnitTests` takes the actions of SIGSEGV and SIGBUS
-// for its own backtrace handler, which resets itself on the first signal.
-// While it runs, a guest fault on any thread would kill the process. Call
-// this where druntime hands control to the test runner to put our actions
-// back. It does nothing when `installFaultHandlers` did not install them.
-public void reinstallFaultHandlers() @trusted nothrow @nogc {
-    static if (supported) {
-        import core.atomic: atomicLoad;
-
-        if (atomicLoad(_installation) != Installation.complete)
-            return;
-        const action = faultAction;
-        foreach (signal; handledSignals)
-            if (sigaction(signal, &action, null) != 0)
-                assert(0, "sigaction failed for a fault signal");
-    }
-}
-
-
-// Puts our actions back when it goes out of scope. Hold it in a `scope`
-// variable around a call that can leave druntime's actions in place.
-public struct FaultHandlersOwner {
-    @disable this(this);
-
-    public ~this() @safe nothrow @nogc {
-        reinstallFaultHandlers;
-    }
 }
 
 
@@ -390,7 +362,6 @@ static if (supported) {
         SIGFPE,
         SIGSEGV,
         siginfo_t,
-        sigaction,
         sigaction_t,
         sigaltstack,
         sigfillset,
@@ -455,25 +426,145 @@ static if (supported) {
     }
 
     private ThreadState _state;
-    private enum Installation {
-        absent,
-        inProgress,
-        complete,
-    }
-    private shared Installation _installation;
-    // What the signals did before this module: a fault of the host goes to
-    // it (a sanitizer, a host that embeds snakebite).
-    // Direct signal indices avoid a search on each forwarded delivery.
+    private shared bool _installed;
+    private enum saRestorer = 0x04000000;
+    // Written once under the lock before `_installed` is set.
+    private __gshared typeof(sigaction_t.sa_restorer) _restorer;
+    // What the signals did before this module, or what the last caller of
+    // `interposedSigaction` asked for: a fault of the host goes to it (a
+    // sanitizer, a host that embeds snakebite, druntime's backtrace
+    // handler). Direct signal indices avoid a search on each forwarded
+    // delivery.
     private enum signalCapacity = SIGSEGV + 1;
     static assert(SIGFPE < signalCapacity && SIGBUS < signalCapacity);
+
+    // `sequence` guards `action` for readers in a signal handler, which
+    // cannot take the lock. Bit 0: a write is in progress. Bit 1: the
+    // action has `SA_RESETHAND` and a handler already claimed its one
+    // delivery. The remaining bits count the writes, and zero means that
+    // nothing has been written. A write clears bit 1.
+    private enum writing = 1UL;
+    private enum claimed = 2UL;
+    private enum step = 4UL;
     private struct PreviousAction {
         sigaction_t action;
-        shared bool ready;
-        // The action stays unchanged while other threads read it. Resetting
-        // the kernel action would also disable guest recovery.
-        shared bool reset;
+        shared size_t sequence;
     }
     private __gshared PreviousAction[signalCapacity] _previous;
+    private shared bool _tableLock;
+
+    // Holds the lock of `_previous` and the kernel action of the fault
+    // signals with every signal blocked. A handler on this thread waits for
+    // a write to finish, so the thread must not receive one in the
+    // meantime. The collector is blocked too, as in the handler itself.
+    private struct SignalTableLock {
+        import core.sys.posix.signal: sigset_t;
+
+        sigset_t saved;
+
+        @disable this(this);
+
+        static SignalTableLock acquire() @trusted nothrow @nogc {
+            import core.atomic: cas;
+            import core.sys.posix.signal: SIG_SETMASK, sigprocmask;
+
+            SignalTableLock held;
+            sigset_t blocked;
+            sigfillset(&blocked);
+            if (sigprocmask(SIG_SETMASK, &blocked, &held.saved) != 0)
+                assert(0, "cannot block signals for the fault action table");
+            while (!cas(&_tableLock, false, true)) {}
+            return held;
+        }
+
+        ~this() @trusted nothrow @nogc {
+            import core.atomic: atomicStore;
+            import core.sys.posix.signal: SIG_SETMASK, sigprocmask;
+
+            atomicStore(_tableLock, false);
+            if (sigprocmask(SIG_SETMASK, &saved, null) != 0)
+                assert(0, "cannot restore signals after the fault action table");
+        }
+    }
+
+    // The caller holds the lock.
+    private void publishPrevious(size_t index, ref const sigaction_t action)
+        @trusted nothrow @nogc {
+        import core.atomic: atomicFence, atomicLoad, atomicStore;
+
+        auto slot = &_previous[index];
+        const current = atomicLoad(slot.sequence);
+        atomicStore(slot.sequence, (current | writing));
+        atomicFence;
+        slot.action = action;
+        atomicFence;
+        atomicStore(slot.sequence, ((current & ~(writing | claimed)) + step));
+    }
+
+    // The kernel's own `sigaction`. This executable defines the symbol, so
+    // a call by name from here would reach `interposedSigaction`.
+    private alias KernelSigaction = extern(C) int function(
+        int, const(sigaction_t)*, sigaction_t*) nothrow @nogc;
+    private __gshared KernelSigaction _kernelSigaction;
+
+    private KernelSigaction kernelSigaction() @trusted nothrow @nogc {
+        import core.sys.posix.dlfcn: dlsym;
+
+        // Not in druntime's declarations, which lack `_GNU_SOURCE`.
+        enum RTLD_NEXT = cast(void*) -1;
+
+        if (auto known = _kernelSigaction)
+            return known;
+        auto found = cast(KernelSigaction) dlsym(RTLD_NEXT, "sigaction");
+        if (found is null)
+            assert(0, "cannot find the next sigaction");
+        _kernelSigaction = found;
+        return found;
+    }
+
+    // The definition that every other caller of `sigaction` gets, in the
+    // executable and in a shared druntime: the dynamic linker binds the
+    // shared library to the executable's symbol first. Once the fault
+    // handlers are installed, a request to change the action of a fault
+    // signal does not reach the kernel. It becomes what the handlers
+    // forward a fault to when it is not a guest fault, and the caller sees
+    // it as the action in force. `runModuleUnitTests` saves and restores
+    // actions this way, and nothing in between can change what the kernel
+    // delivers. A thread that runs guest code keeps the real call: a guest
+    // that installs a handler of its own replaces ours, as in compiled D.
+    pragma(mangle, "sigaction")
+    public extern(C) int interposedSigaction(
+        int signal, const(sigaction_t)* action, sigaction_t* old)
+        @trusted nothrow @nogc {
+        import core.atomic: atomicLoad;
+        import core.sys.posix.signal: SIG_DFL;
+
+        const kernel = kernelSigaction;
+        if (signal != SIGSEGV && signal != SIGFPE && signal != SIGBUS)
+            return kernel(signal, action, old);
+
+        auto held = SignalTableLock.acquire;
+        if (!atomicLoad(_installed) || _state.runs !is null)
+            return kernel(signal, action, old);
+
+        sigaction_t requested = action is null ? sigaction_t.init : *action;
+        if (_restorer !is null && !(requested.sa_flags & saRestorer)) {
+            requested.sa_flags |= saRestorer;
+            requested.sa_restorer = _restorer;
+        }
+        auto slot = &_previous[cast(size_t) signal];
+        if (old !is null) {
+            *old = slot.action;
+            // The handler that ran its one delivery has reset the action.
+            if (atomicLoad(slot.sequence) & claimed) {
+                *old = sigaction_t.init;
+                old.sa_handler = SIG_DFL;
+            }
+        }
+        if (action !is null)
+            publishPrevious(cast(size_t) signal, requested);
+        return 0;
+    }
 
     // The trace of a thrown object is made by druntime from the stack. The
     // fault has no use for it, and making it allocates.
@@ -681,6 +772,29 @@ static if (supported) {
             cast(const(ubyte)*) (*registers)[REG_RIP], byNumber);
     }
 
+    // This thread's copy of the previous action. `_forward.previous` points
+    // here until the assembly has entered the handler.
+    private sigaction_t _snapshot;
+
+    // A consistent copy of the action, and the sequence it was read at.
+    private size_t snapshotPrevious(size_t index, ref sigaction_t copy)
+        nothrow @nogc {
+        import core.atomic: atomicFence, atomicLoad;
+
+        auto slot = &_previous[index];
+        for (;;) {
+            const before = atomicLoad(slot.sequence);
+            // Zero: the installation has not published the action yet.
+            if (before == 0 || (before & writing))
+                continue;
+            atomicFence;
+            copy = slot.action;
+            atomicFence;
+            if (atomicLoad(slot.sequence) == before)
+                return before;
+        }
+    }
+
     // A fault that is not a guest fault: the previous action of the signal
     // if there was one, else the default action. Returning from the
     // handler runs the faulting instruction again, and that ends the
@@ -692,21 +806,39 @@ static if (supported) {
         import core.sys.posix.signal: SA_RESETHAND, SIG_IGN;
 
         const index = cast(size_t) signal;
-        while (!atomicLoad(_previous[index].ready)) {}
-        const previous = &_previous[index].action;
-        const handler = previous.sa_flags & SA_SIGINFO
-            ? cast(void*) previous.sa_sigaction
-            : cast(void*) previous.sa_handler;
-        const callable = handler !is cast(void*) SIG_DFL
-            && handler !is cast(void*) SIG_IGN;
-        if (callable && (!(previous.sa_flags & SA_RESETHAND)
-            || cas(&_previous[index].reset, false, true))) {
+        const previous = &_snapshot;
+        bool forward;
+        for (;;) {
+            const version_ = snapshotPrevious(index, _snapshot);
+            const handler = previous.sa_flags & SA_SIGINFO
+                ? cast(void*) previous.sa_sigaction
+                : cast(void*) previous.sa_handler;
+            const callable = handler !is cast(void*) SIG_DFL
+                && handler !is cast(void*) SIG_IGN;
+            if (!callable)
+                break;
+            if (!(previous.sa_flags & SA_RESETHAND)) {
+                forward = true;
+                break;
+            }
+            if (version_ & claimed)
+                break;
+            // The one-shot claim fails when the action changed meanwhile.
+            if (cas(&_previous[index].sequence, version_, version_ | claimed)) {
+                forward = true;
+                break;
+            }
+        }
+        if (forward) {
             // The one-shot claim must precede any change of mask. On the
             // normal stack the collector can suspend this thread safely.
             // On an alternate stack it must stay blocked, as at signal entry.
             return forwardPreviousAction(signal, info, cast(ucontext_t*) context,
                 frame, previous);
         }
+        const handler = previous.sa_flags & SA_SIGINFO
+            ? cast(void*) previous.sa_sigaction
+            : cast(void*) previous.sa_handler;
 
         // A program that ignored the signal and a program that sent it get
         // what they asked for.
@@ -717,7 +849,7 @@ static if (supported) {
             reportUnhandledGuestFault(signal, info, context);
         sigaction_t default_;
         default_.sa_handler = SIG_DFL;
-        sigaction(signal, &default_, null);
+        kernelSigaction()(signal, &default_, null);
         // A signal that was sent is not raised again by returning.
         if (info.si_code <= 0)
             raise(signal);
@@ -863,7 +995,7 @@ static if (supported) {
 
         sigaction_t action;
         action.sa_handler = SIG_DFL;
-        sigaction(SIGSEGV, &action, null);
+        kernelSigaction()(SIGSEGV, &action, null);
         sigset_t allowed;
         sigemptyset(&allowed);
         sigaddset(&allowed, SIGSEGV);

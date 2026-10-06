@@ -3,7 +3,10 @@ module ut.project;
 
 import core.atomic: atomicLoad;
 import core.runtime: UnitTestResult;
+import core.atomic: atomicOp;
+import core.sync.barrier: Barrier;
 import core.sync.mutex: Mutex;
+import core.sys.posix.signal: SA_RESETHAND, SIGBUS, SIGFPE, SIGSEGV;
 import snakebite.backends: BackendName, backendIdentity;
 import core.thread: Thread;
 import snakebite.backends.backend: Program;
@@ -12,6 +15,7 @@ import snakebite.frontend.compiler: parseSnippets;
 import snakebite.frontend.dmd.functions: findFunction;
 import snakebite.dependencyimage: TestHooks;
 import snakebite.execution: prepareProject, executeBackend;
+import snakebite.guestrunlock: guestRunLock;
 import snakebite.dub: DubDescription;
 import snakebite.project: dubSourceSetFromDescription, projectStateDirectory;
 import std.algorithm.searching: endsWith;
@@ -173,29 +177,9 @@ static foreach (backend; Matrix!()) {
 }
 
 
-// While a project runs its test runner, druntime owns the actions of the
-// fault signals. A guest fault on another thread must still reach us.
-private template RunnerProbe(BackendType) {
-    __gshared bool reported;
-
-    UnitTestResult runner() {
-        auto module_ = parseSnippets([q{
-            module runnerFault;
-            int fail() { int* pointer; return *pointer; }
-        }])[0];
-        auto backend = new BackendType(Program([module_]));
-        auto faulter = new Thread({
-            int result;
-            try
-                backend.call(module_.findFunction("fail"), &result, []);
-            catch (GuestFaultException fault)
-                reported = fault.kind == GuestFault.Kind.nullDereference;
-        }).start;
-        faulter.join;
-        return UnitTestResult(1, 1, false, false);
-    }
-}
-
+// While druntime runs the tests of a program, it swaps the actions of the
+// fault signals for its own. The kernel must go on delivering guest faults
+// to us, on every thread, with a runner hook and with several runs at once.
 private alias FaultingGuests = Matrix!(
     Omit!(Native, Because.inexpressible,
         "the test catches the fault of a call on a backend object, and the "
@@ -205,8 +189,40 @@ private alias FaultingGuests = Matrix!(
         ~ "raises no GuestFaultException"),
 );
 
-// The runner starts the guest project through `_d_run_main`, which changes
-// druntime's nesting depth, so this test takes turns with the one above.
+// Calls a guest function that dereferences null on this thread, and
+// returns whether the fault came back as a `GuestFaultException`.
+private bool guestFaultReported(BackendType)() {
+    auto module_ = parseSnippets([q{
+        module runnerFault;
+        int fail() { int* pointer; return *pointer; }
+    }])[0];
+    auto backend = new BackendType(Program([module_]));
+    int result;
+    try
+        backend.call(module_.findFunction("fail"), &result, []);
+    catch (GuestFaultException fault)
+        return fault.kind == GuestFault.Kind.nullDereference;
+    return false;
+}
+
+private bool guestFaultReportedOnAnotherThread(BackendType)() {
+    bool reported;
+    auto faulter = new Thread({ reported = guestFaultReported!BackendType; }).start;
+    faulter.join;
+    return reported;
+}
+
+private template RunnerProbe(BackendType) {
+    __gshared bool reported;
+
+    UnitTestResult runner() {
+        reported = guestFaultReportedOnAnotherThread!BackendType;
+        return UnitTestResult(1, 1, false, false);
+    }
+}
+
+// The runs below change druntime's nesting depth, so they take turns with
+// the test above and with each other.
 static foreach (BackendType; FaultingGuests) {
     @Tags(BackendType.stringof)
     @("runtime.guestFaultOnAnotherThreadWhileARunnerIsActive." ~ BackendType.stringof)
@@ -222,5 +238,133 @@ static foreach (BackendType; FaultingGuests) {
         executeBackend(backendIdentity!BackendType, program, null, false).status.should == 0;
 
         RunnerProbe!BackendType.reported.shouldBeTrue;
+    }
+}
+
+
+// What the kernel delivers for a signal, not what `sigaction` reports: a
+// program can intercept that call.
+private struct KernelAction {
+    ulong handler;
+    ulong flags;
+    ulong restorer;
+    ulong mask;
+}
+
+private extern(C) long syscall(long number, ...) nothrow @nogc;
+
+private KernelAction kernelAction(int signal) {
+    enum rtSigaction = 13;
+    enum kernelMaskSize = 8;
+    KernelAction action;
+    syscall(rtSigaction, signal, null, &action, kernelMaskSize).should == 0;
+    return action;
+}
+
+private immutable int[3] faultSignals = [SIGSEGV, SIGBUS, SIGFPE];
+
+private __gshared KernelAction[3] _actionsInsideRunner;
+
+private UnitTestResult recordingRunner() {
+    foreach (index, signal; faultSignals)
+        _actionsInsideRunner[index] = kernelAction(signal);
+    return UnitTestResult(1, 1, false, false);
+}
+
+// The first code that a runner hook runs is the earliest point at which a
+// test can look. The default loop of druntime has no hook to look from, and
+// it runs after the same `sigaction` calls.
+static foreach (backend; Matrix!()) {
+    @("runtime.faultSignalActionsAreUnchangedWhileDruntimeRunsTests." ~ backend.stringof)
+    unittest {
+        _initDepthLock.lock;
+        scope(exit) _initDepthLock.unlock;
+
+        const sandbox = Sandbox();
+        sandbox.writeFile("app/app.d", "module app; int main() { return 0; }");
+        auto program = prepareProject(sandbox.inSandboxPath("app")).project.program;
+        program.testHooks = TestHooks.of(null, &recordingRunner);
+        KernelAction[3] before;
+        foreach (index, signal; faultSignals)
+            before[index] = kernelAction(signal);
+
+        executeBackend(backendIdentity!backend, program, null, false).status.should == 0;
+
+        foreach (index; 0 .. faultSignals.length) {
+            _actionsInsideRunner[index].should == before[index];
+            (_actionsInsideRunner[index].flags & SA_RESETHAND).should == 0;
+        }
+        _actionsInsideRunner[0].handler.should.not == 0;
+    }
+}
+
+
+pragma(mangle, "_D2rt6dmain27_d_argsAAya")
+private extern __gshared string[] _runtimeArgs;
+pragma(mangle, "_D2rt6dmain26_cArgsSQsQr5CArgs")
+private extern __gshared imported!"core.runtime".CArgs _runtimeCArgs;
+private alias MainFunction = extern(C) int function(char[][]);
+private extern(C) int _d_run_main(int argc, char** argv, MainFunction main);
+private extern(C) int noMain(char[][]) { return 0; }
+
+private template OverlapProbe(BackendType) {
+    __gshared Barrier barrier;
+    shared size_t reported;
+
+    UnitTestResult runner() {
+        // Both threads are now inside `runModuleUnitTests`, after the
+        // `sigaction` calls of both.
+        barrier.wait;
+        if (guestFaultReported!BackendType)
+            atomicOp!"+="(reported, 1);
+        return UnitTestResult(1, 1, false, false);
+    }
+
+    // The arguments outlive the runs: druntime keeps the pointer in its
+    // own state, and another thread that loads a library reads it.
+    __gshared char*[2] argv;
+
+    void runMain() {
+        _d_run_main(1, argv.ptr, &noMain);
+    }
+}
+
+// `_d_run_main` called on two threads at once: each saves the action that
+// is in force when it starts, and restores it when it ends.
+static foreach (BackendType; FaultingGuests) {
+    @Tags(BackendType.stringof)
+    @("runtime.guestFaultsAreRecoveredWhileTwoDruntimeRunsOverlap." ~ BackendType.stringof)
+    unittest {
+        _initDepthLock.lock;
+        scope(exit) _initDepthLock.unlock;
+        // The hooks and the arguments of druntime belong to one run at a
+        // time, as in `executeBackend`.
+        guestRunLock.lock;
+        scope(exit) guestRunLock.unlock;
+
+        const savedHooks = TestHooks.current;
+        auto savedArgs = _runtimeArgs;
+        auto savedCArgs = _runtimeCArgs;
+        scope(exit) {
+            savedHooks.install;
+            _runtimeArgs = savedArgs;
+            _runtimeCArgs = savedCArgs;
+        }
+        alias Probe = OverlapProbe!BackendType;
+        Probe.barrier = new Barrier(2);
+        Probe.reported = 0;
+        Probe.argv[0] = cast(char*) "overlap\0".ptr;
+        TestHooks.of(null, &Probe.runner).install;
+        const before = kernelAction(SIGSEGV);
+
+        auto first = new Thread(&Probe.runMain).start;
+        auto second = new Thread(&Probe.runMain).start;
+        first.join;
+        second.join;
+
+        // One fault on each thread, while both runs were active.
+        atomicLoad(Probe.reported).should == 2;
+        kernelAction(SIGSEGV).should == before;
+        guestFaultReportedOnAnotherThread!BackendType.shouldBeTrue;
     }
 }
