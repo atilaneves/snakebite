@@ -2,10 +2,11 @@ module ut.backends.guestfault;
 
 
 import snakebite.backends.backend: Program;
+import snakebite.exception: SnakebiteException;
 import snakebite.backends.guestfault: GuestFault, GuestFaultException;
 import snakebite.backends.haltprocess: Halted, haltProcess, HostActions, isHalt;
 import snakebite.frontend.checks: Checks;
-import snakebite.frontend.compiler: parseSnippets;
+import snakebite.frontend.compiler: parseSnippets, withCompilerLock;
 import std.algorithm.iteration: map;
 import std.array: appender, array;
 import core.atomic: atomicLoad, atomicStore;
@@ -33,12 +34,14 @@ private string rendered(
 
 
 private alias NoNative = Omit!(Native, Because.inexpressible,
-    "the test enters a backend object again after the fault, and the "
+    "the test catches the fault of a call on a backend object, and the "
     ~ "Native arm is code compiled into bin/ut with no such object");
 
-private alias NoCtfe = Omit!(Ctfe, Because.inexpressible,
+private alias NoCtfe = Omit!(Ctfe, Because.diverges,
     "dmd's interpreter reports a null dereference as a diagnostic and "
-    ~ "raises no GuestFaultException");
+    ~ "raises no GuestFaultException; "
+    ~ "ut.backends.guestfault.guestFault.Ctfe.nullDereferenceIsADiagnostic "
+    ~ "states what it does");
 
 private alias Guests = Matrix!(NoNative, NoCtfe);
 
@@ -87,7 +90,7 @@ private void discardsHaltedState(BackendType)(in string functionName) {
 
 static foreach (BackendType; Guests) {
     @Tags(BackendType.stringof)
-    @("guestFault." ~ BackendType.stringof ~ ".faultInAFunctionBody")
+    @("guestFault." ~ BackendType.stringof ~ ".discardsHaltedState.afterAFaultInAFunctionBody")
     unittest {
         discardsHaltedState!BackendType("fail");
     }
@@ -96,10 +99,78 @@ static foreach (BackendType; Guests) {
 
 static foreach (BackendType; Guests) {
     @Tags(BackendType.stringof)
-    @("guestFault." ~ BackendType.stringof ~ ".faultInAFinallyWithAnExceptionPending")
+    @("guestFault." ~ BackendType.stringof
+        ~ ".discardsHaltedState.afterAFaultInAFinallyWithAnExceptionPending")
     unittest {
         discardsHaltedState!BackendType("failCleanup");
     }
+}
+
+
+static foreach (BackendType; Guests) {
+    @Tags(BackendType.stringof)
+    @("guestFault." ~ BackendType.stringof ~ ".reportDoesNotWaitForTheCompilerLock")
+    unittest {
+        auto module_ = parseSnippets([q{
+            module lockedReport;
+            int read(int* pointer) { return *pointer; }
+        }])[0];
+        const program = Program([module_]);
+        auto backend = new BackendType(program);
+        auto read = module_.findFunction("read");
+
+        shared bool warm, holding, release, reported;
+        auto caller = new Thread({
+            int value, result;
+            auto pointer = &value;
+            // The first call of a function can take the compiler lock.
+            backend.call(read, &result, [cast(void*) &pointer]);
+            atomicStore(warm, true);
+            while (!atomicLoad(holding))
+                Thread.sleep(1.msecs);
+            pointer = null;
+            try
+                backend.call(read, &result, [cast(void*) &pointer]);
+            catch (GuestFaultException fault)
+                atomicStore(reported,
+                    fault.stack[0].function_ == "lockedReport.read");
+        }).start;
+        while (!atomicLoad(warm))
+            Thread.sleep(1.msecs);
+
+        auto holder = new Thread({
+            withCompilerLock({
+                atomicStore(holding, true);
+                while (!atomicLoad(release))
+                    Thread.sleep(1.msecs);
+            });
+        }).start;
+        const deadline = MonoTime.currTime + 5.seconds;
+        while (!atomicLoad(reported) && MonoTime.currTime < deadline)
+            Thread.sleep(1.msecs);
+        const finished = atomicLoad(reported);
+
+        atomicStore(release, true);
+        holder.join;
+        caller.join;
+        finished.shouldBeTrue;
+    }
+}
+
+
+@Tags("Ctfe")
+@("guestFault.Ctfe.nullDereferenceIsADiagnostic")
+unittest {
+    auto module_ = parseSnippets([q{
+        module diagnosed;
+        int fail() { int* pointer; return *pointer; }
+    }])[0];
+    auto backend = new Ctfe(Program([module_]));
+    int result;
+
+    backend.call(module_.findFunction("fail"), &result, [])
+        .shouldThrowWithMessage!SnakebiteException(
+            "dereference of null pointer `pointer`");
 }
 
 

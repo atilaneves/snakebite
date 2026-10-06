@@ -258,6 +258,11 @@ private struct Shared {
     // Each guest function's frame layout, computed on that function's
     // first call and reused by every call after it.
     SharedTable!(FuncDeclaration, FrameLayout) layouts;
+    // Each guest function's name for a fault report, made with its frame
+    // layout: the report can run in a destructor that the GC finalizer
+    // runs, where it cannot wait for the compiler lock that dmd needs
+    // to make the name.
+    SharedTable!(FuncDeclaration, const(char)[]) names;
     // The FFI call adapter for a guest callee's own signature: whether it
     // returns by `ref`, and whether each declared parameter passes an
     // address or a value. `FrameLayout` describes storage, not the
@@ -1012,16 +1017,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     ) {
         import snakebite.faultsignal: takeFault;
         import snakebite.backends.guestfault: GuestFault;
-        import snakebite.frontend.compiler: withCompilerLock;
         import std.string: fromStringz;
 
         takeFault(fault);
         const file = fromStringz(_faultLocation.filename);
-        // `toPrettyChars` is dmd work: it allocates and reads symbol state.
-        const(char)[] name;
-        withCompilerLock({
-            name = fromStringz(_faultFunction.toPrettyChars);
-        });
+        const name = *(_faultFunction in _shared.names);
         scope GuestFault.Stack stack = (scope GuestFault.FrameSink sink) {
             sink(GuestFault.Frame(name, file, _faultLocation.linnum));
         };
@@ -1208,7 +1208,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import core.atomic: atomicLoad, MemoryOrder;
         import dmd.dsymbol: PASS;
         import dmd.funcsem: functionSemantic3;
-        import snakebite.frontend.compiler: forceIfNeeded;
+        import snakebite.frontend.compiler: forceIfNeeded, withCompilerLock;
+        import std.string: fromStringz;
 
         // Acquire load - see `forceIfNeeded`'s own doc
         // (`snakebite.frontend.compiler`) for why the unlocked check
@@ -1218,6 +1219,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 >= PASS.semantic3done,
             function_,
         );
+        // `toPrettyChars` is dmd work: it allocates and reads symbol state.
+        withCompilerLock({
+            _shared.names.insert(
+                function_, fromStringz(function_.toPrettyChars));
+        });
 
         return FrameLayout.of(function_);
     }
