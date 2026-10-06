@@ -3,14 +3,15 @@
 # dependencies = ["pytest==8.4.1", "pytest-xdist==3.8.0"]
 # ///
 
-# Compiler flags change what a whole program means, and a halt ends the
-# process, so these tests run whole programs: `native` is the same unittest
-# compiled with the same flags by dmd, the reference compiler, and the other
-# backends are `bin/sb` on a dub project whose recipe names the flags.
+# What a flag selects is tested in `bin/ut` (tests/ut/backends/flags.d and
+# tests/ut/frontend/checks.d): there a program runs in the test process, with
+# no compiler, linker or dub. A test is here only when its assertion needs a
+# process: the signal that ends the process, the exit status of `bin/sb`, or
+# dub, the dependency image, the build hooks and the root compiler wrapper
+# that `bin/sb` starts to get the flags into the program.
 
 import json
 import os
-import shutil
 import signal
 import subprocess
 from dataclasses import dataclass
@@ -21,16 +22,12 @@ from dubname import dub_name
 
 TIMEOUT = 120
 
-BACKENDS = ["native", "bytecode", "interpreter", "ctfe"]
+BACKENDS = ["bytecode", "interpreter", "ctfe"]
 
-# CTFE cannot halt: it reports a failed check as a compile-time error.
-NO_CTFE_HALT = ["native", "bytecode", "interpreter"]
-
-# CTFE always checks bounds, whatever the function's safety.
-NO_CTFE_UNCHECKED = ["native", "bytecode", "interpreter"]
-
-# The abort and its message come from the C runtime, which CTFE cannot call.
-NO_CTFE_ABORT = ["native", "bytecode", "interpreter"]
+# CTFE has no process of its own to end: it reports a failed check as a
+# compile-time error. The abort and its message come from the C runtime,
+# which CTFE cannot call.
+ENDS_PROCESS = ["bytecode", "interpreter"]
 
 # The program logs through the native `fputs`, which CTFE cannot call, so
 # `log` does nothing at compile time and a CTFE run only has an exit status.
@@ -54,9 +51,6 @@ def run_unittests(
     directory: Path, backend: str, flags: list[str], source: str,
 ) -> Outcome:
     code = PRELUDE + source
-    if backend == "native":
-        return run_native(directory, flags, code)
-
     recipe = f'name "{dub_name("app")}"\ntargetType "library"\n'
     for flag in flags:
         recipe += f'dflags "{flag}"\n'
@@ -76,48 +70,8 @@ def run_unittests(
     )
 
 
-def run_native(directory: Path, flags: list[str], code: str) -> Outcome:
-    return run_compiled(directory, native_compiler(), flags, code)
-
-
-def run_compiled(
-    directory: Path, compiler: str, flags: list[str], code: str,
-) -> Outcome:
-    (directory / "app.d").write_text(code, encoding="utf-8")
-    compiled = subprocess.run(
-        [compiler, "-unittest", "-main",
-         f"-of={directory / 'app'}", *flags, str(directory / "app.d")],
-        capture_output=True,
-        check=False,
-        text=True,
-        timeout=TIMEOUT,
-    )
-    assert compiled.returncode == 0, compiled.stdout + compiled.stderr
-    assert (directory / "app").is_file(), compiled.stdout + compiled.stderr
-
-    return outcome_of(
-        subprocess.run(
-            [str(directory / "app")],
-            capture_output=True,
-            check=False,
-            text=True,
-            timeout=TIMEOUT,
-        ),
-    )
-
-
 def outcome_of(result: subprocess.CompletedProcess[str]) -> Outcome:
     return Outcome(result.returncode, result.stdout + result.stderr)
-
-
-# dmd is the reference: snakebite takes its frontend and its glue layer
-# decisions from it, and ldc2 differs from it in some of the cases here.
-def native_compiler() -> str:
-    dmd = shutil.which("dmd")
-    if dmd is None:
-        pytest.skip("dmd, the reference compiler, is not on PATH")
-
-    return dmd
 
 
 def sb_path() -> str:
@@ -128,12 +82,130 @@ def sb_path() -> str:
     return sb
 
 
+def assert_aborts_after_start(outcome: Outcome, message: str) -> None:
+    assert outcome.status == -SIGABRT, outcome.output
+    assert message in outcome.output, outcome.output
+    assert "start" in outcome.output, outcome.output
+    assert "after" not in outcome.output, outcome.output
+
+
 # A halt kills the process with SIGILL (`ud2`), so the log ends where the
 # halt happened.
-def assert_halts_after_start(backend: str, outcome: Outcome) -> None:
+@pytest.mark.parametrize("backend", ENDS_PROCESS)
+def test_checkaction_halt_failed_assert_halts_the_process(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, ["-checkaction=halt"], """
+        unittest {
+            int x = 1;
+            log("start\\n");
+            assert(x == 2);
+            log("after\\n");
+        }
+    """)
     assert outcome.status == -SIGILL, outcome.output
     assert "start" in outcome.output
     assert "after" not in outcome.output
+
+
+# The C runtime aborts the process and prints the failed condition.
+@pytest.mark.parametrize("backend", ENDS_PROCESS)
+def test_checkaction_c_failed_assert_aborts_with_the_c_message(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, ["-checkaction=C"], """
+        unittest {
+            int x = 1;
+            log("start\\n");
+            assert(x == 2);
+            log("after\\n");
+        }
+    """)
+    assert_aborts_after_start(outcome, "Assertion `x == 2' failed")
+
+
+# The C runtime gets the message of `assert(e, message)` instead of the
+# text of `e`.
+@pytest.mark.parametrize("backend", ENDS_PROCESS)
+def test_checkaction_c_failed_assert_aborts_with_its_message_expression(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, ["-checkaction=C"], """
+        string message() { return "dynamic"; }
+        unittest {
+            int x = 1;
+            log("start\\n");
+            assert(x == 2, message());
+            log("after\\n");
+        }
+    """)
+    assert_aborts_after_start(outcome, "dynamic")
+
+
+# Under `-checkaction=C` the default of a `final switch` is an `assert(0)`
+# that dmd does not analyse, so the expression has no type.
+@pytest.mark.parametrize("backend", ENDS_PROCESS)
+def test_checkaction_c_final_switch_on_non_member_aborts(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, ["-checkaction=C"], """
+        enum E { a, b }
+        unittest {
+            E e = cast(E) 7;
+            log("start\\n");
+            final switch (e) { case E.a: break; case E.b: break; }
+            log("after\\n");
+        }
+    """)
+    assert_aborts_after_start(outcome, "Assertion `0' failed")
+
+
+# The message of a failed bounds check is not the one of a failed assert.
+@pytest.mark.parametrize("backend", ENDS_PROCESS)
+def test_checkaction_c_index_out_of_bounds_aborts_with_the_c_message(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, ["-checkaction=C"], """
+        unittest {
+            int[4] storage = [1, 2, 3, 4];
+            int[] slice = storage[0 .. 2];
+            log("start\\n");
+            auto value = slice[3];
+            log("after\\n");
+        }
+    """)
+    assert_aborts_after_start(
+        outcome, "Assertion `array index out of bounds' failed",
+    )
+
+
+# `dmd` refuses a `-checkaction=` value that it does not know, and so does
+# every backend, before it runs anything. The exit status is the process's.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_unknown_check_flag_value_is_an_error(
+    tmp_path: Path, backend: str,
+) -> None:
+    flag = "-checkaction=bogus"
+    (tmp_path / "dub.sdl").write_text(
+        f'name "{dub_name("app")}"\ntargetType "library"\ndflags "{flag}"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "source").mkdir()
+    (tmp_path / "source" / "app.d").write_text(
+        "module app;\nunittest {}\n", encoding="utf-8",
+    )
+    result = subprocess.run(
+        [sb_path(), f"--backend={backend}", "--no-optimise-image",
+         str(tmp_path)],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=TIMEOUT,
+    )
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    assert f"switch `{flag}` is invalid" in output
 
 
 def assert_passes_after_start(backend: str, outcome: Outcome) -> None:
@@ -153,1253 +225,6 @@ def assert_raises_after_start(
         assert "after" not in outcome.output
 
 
-@pytest.mark.parametrize("backend", NO_CTFE_HALT)
-def test_checkaction_halt_failed_assert_halts_the_process(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-checkaction=halt"], """
-        unittest {
-            int x = 1;
-            log("start\\n");
-            assert(x == 2);
-            log("after\\n");
-        }
-    """)
-    assert_halts_after_start(backend, outcome)
-
-
-# The halt form of `assert(e)` is `e || halt`: it never reaches the
-# invariant call that the default form makes after the test passes.
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_checkaction_halt_failed_assert_on_class_skips_its_invariant(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-checkaction=halt"], """
-        class C {
-            int x = 1;
-            invariant { assert(x > 0); }
-        }
-        unittest {
-            auto c = new C;
-            c.x = -1;
-            log("start\\n");
-            assert(c);
-            log("after\\n");
-        }
-    """)
-    assert_passes_after_start(backend, outcome)
-
-
-@pytest.mark.parametrize("backend", NO_CTFE_HALT)
-def test_checkaction_halt_final_switch_on_non_member_halts(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-checkaction=halt"], """
-        enum E { a, b }
-        unittest {
-            E e = cast(E) 7;
-            log("start\\n");
-            final switch (e) { case E.a: break; case E.b: break; }
-            log("after\\n");
-        }
-    """)
-    assert_halts_after_start(backend, outcome)
-
-
-@pytest.mark.parametrize("backend", NO_CTFE_HALT)
-def test_checkaction_halt_index_out_of_bounds_halts(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-checkaction=halt"], """
-        unittest {
-            int[4] storage = [1, 2, 3, 4];
-            int[] slice = storage[0 .. 2];
-            log("start\\n");
-            auto value = slice[3];
-            log("after\\n");
-        }
-    """)
-    assert_halts_after_start(backend, outcome)
-
-
-@pytest.mark.parametrize("backend", NO_CTFE_HALT)
-def test_checkaction_halt_slice_out_of_bounds_halts(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-checkaction=halt"], """
-        unittest {
-            int[4] storage = [1, 2, 3, 4];
-            int[] slice = storage[0 .. 2];
-            log("start\\n");
-            auto value = slice[0 .. 3];
-            log("after\\n");
-        }
-    """)
-    assert_halts_after_start(backend, outcome)
-
-
-# A slice copy with different lengths is a bounds failure: compiled code
-# halts as it does for an index.
-@pytest.mark.parametrize("backend", NO_CTFE_HALT)
-def test_checkaction_halt_slice_copy_length_mismatch_halts(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-checkaction=halt"], """
-        unittest {
-            int[4] target;
-            int[4] source = [1, 2, 3, 4];
-            int[] to = target[0 .. 3];
-            int[] from = source[0 .. 2];
-            log("start\\n");
-            to[] = from[];
-            log("after\\n");
-        }
-    """)
-    assert_halts_after_start(backend, outcome)
-
-
-# `dmd -unittest -release` keeps `assert`: unittest mode turns assertions
-# on before `-release` turns them off.
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_release_assert_stays_on_in_unittests(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-release"], """
-        unittest {
-            int x = 1;
-            log("start\\n");
-            assert(x == 2);
-            log("after\\n");
-        }
-    """)
-    assert_raises_after_start(backend, outcome, "AssertError")
-
-
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_release_precondition_is_not_checked(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-release"], """
-        int positive(int x) in (x > 0) { return x; }
-        unittest {
-            log("start\\n");
-            positive(-1);
-            log("after\\n");
-        }
-    """)
-    assert_passes_after_start(backend, outcome)
-
-
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_release_postcondition_is_not_checked(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-release"], """
-        int positive(int x) out (result; result > 0) { return x; }
-        unittest {
-            log("start\\n");
-            positive(-1);
-            log("after\\n");
-        }
-    """)
-    assert_passes_after_start(backend, outcome)
-
-
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_release_invariant_is_not_checked(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-release"], """
-        class C {
-            int x = 1;
-            invariant { assert(x > 0); }
-            void set(int value) { x = value; }
-        }
-        unittest {
-            auto c = new C;
-            log("start\\n");
-            c.set(-1);
-            log("after\\n");
-        }
-    """)
-    assert_passes_after_start(backend, outcome)
-
-
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_release_assert_on_class_does_not_check_its_invariant(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-release"], """
-        class C {
-            int x = 1;
-            invariant { assert(x > 0); }
-        }
-        unittest {
-            auto c = new C;
-            c.x = -1;
-            log("start\\n");
-            assert(c);
-            log("after\\n");
-        }
-    """)
-    assert_passes_after_start(backend, outcome)
-
-
-# The guest asserts the identifiers instead of logging them, so that a
-# CTFE run, which has no log, checks the same thing.
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_release_contract_versions_are_undefined(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-release"], """
-        unittest {
-            version (D_PreConditions) assert(0, "D_PreConditions is defined");
-            version (D_PostConditions) assert(0, "D_PostConditions is defined");
-            version (D_Invariants) assert(0, "D_Invariants is defined");
-            version (assert) {} else assert(0, "assert is not defined");
-        }
-    """)
-    assert outcome.status == 0, outcome.output
-
-
-@pytest.mark.parametrize("backend", NO_CTFE_HALT)
-def test_release_final_switch_on_non_member_halts(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-release"], """
-        enum E { a, b }
-        @system unittest {
-            E e = cast(E) 7;
-            log("start\\n");
-            final switch (e) { case E.a: break; case E.b: break; }
-            log("after\\n");
-        }
-    """)
-    assert_halts_after_start(backend, outcome)
-
-
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_release_index_out_of_bounds_in_safe_code_is_checked(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-release"], """
-        @safe unittest {
-            int[4] storage = [1, 2, 3, 4];
-            int[] slice = storage[0 .. 2];
-            log("start\\n");
-            auto value = slice[3];
-            log("after\\n");
-        }
-    """)
-    assert_raises_after_start(backend, outcome, "ArrayIndexError")
-
-
-# The slice stops at 2 but the storage behind it has a fourth element, so
-# the unchecked read is well defined.
-@pytest.mark.parametrize("backend", NO_CTFE_UNCHECKED)
-def test_release_index_out_of_bounds_in_system_code_is_not_checked(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-release"], """
-        @system unittest {
-            int[4] storage = [1, 2, 3, 4];
-            int[] slice = storage[0 .. 2];
-            log("start\\n");
-            if (slice[3] == 4)
-                log("after\\n");
-        }
-    """)
-    assert_passes_after_start(backend, outcome)
-
-
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_release_slice_out_of_bounds_in_safe_code_is_checked(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-release"], """
-        @safe unittest {
-            int[4] storage = [1, 2, 3, 4];
-            int[] slice = storage[0 .. 2];
-            log("start\\n");
-            auto value = slice[0 .. 3];
-            log("after\\n");
-        }
-    """)
-    assert_raises_after_start(backend, outcome, "ArraySliceError")
-
-
-@pytest.mark.parametrize("backend", NO_CTFE_UNCHECKED)
-def test_release_slice_out_of_bounds_in_system_code_is_not_checked(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-release"], """
-        @system unittest {
-            int[4] storage = [1, 2, 3, 4];
-            int[] slice = storage[0 .. 2];
-            log("start\\n");
-            if (slice[0 .. 3].length == 3)
-                log("after\\n");
-        }
-    """)
-    assert_passes_after_start(backend, outcome)
-
-
-@pytest.mark.parametrize("backend", NO_CTFE_ABORT)
-def test_checkaction_c_failed_assert_aborts_with_the_c_message(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-checkaction=C"], """
-        unittest {
-            int x = 1;
-            log("start\\n");
-            assert(x == 2);
-            log("after\\n");
-        }
-    """)
-    assert outcome.status == -SIGABRT, outcome.output
-    assert "Assertion `x == 2' failed" in outcome.output
-    assert "after" not in outcome.output
-
-
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_checkaction_context_failed_assert_prints_the_operands(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-checkaction=context"], """
-        unittest {
-            int x = 1;
-            log("start\\n");
-            assert(x == 2);
-            log("after\\n");
-        }
-    """)
-    assert_raises_after_start(backend, outcome, "1 != 2")
-
-
-# The message of a failed assert is an expression: it runs when the
-# assert fails.
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_failed_assert_evaluates_its_message_expression(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, [], """
-        string message() { return "dynamic"; }
-        unittest {
-            log("start\\n");
-            assert(false, message());
-            log("after\\n");
-        }
-    """)
-    assert_raises_after_start(backend, outcome, "dynamic")
-
-
-# The C runtime's abort is what `assert` becomes under `-checkaction=C`, and
-# so is `assert(0)` in the default of a `final switch`.
-@pytest.mark.parametrize("backend", NO_CTFE_ABORT)
-def test_checkaction_c_final_switch_on_non_member_aborts(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-checkaction=C"], """
-        enum E { a, b }
-        unittest {
-            E e = cast(E) 7;
-            log("start\\n");
-            final switch (e) { case E.a: break; case E.b: break; }
-            log("after\\n");
-        }
-    """)
-    assert outcome.status == -SIGABRT, outcome.output
-    assert "Assertion `0' failed" in outcome.output
-    assert "after" not in outcome.output
-
-
-# The slices have different lengths, but the storage behind the source has
-# a third element, so the unchecked copy of `to.length` elements is well
-# defined.
-@pytest.mark.parametrize("backend", NO_CTFE_UNCHECKED)
-def test_release_slice_copy_length_mismatch_in_system_code_is_not_checked(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-release"], """
-        @system unittest {
-            int[4] target;
-            int[4] source = [1, 2, 3, 4];
-            int[] to = target[0 .. 3];
-            int[] from = source[0 .. 2];
-            log("start\\n");
-            to[] = from[];
-            if (target == [1, 2, 3, 0])
-                log("after\\n");
-        }
-    """)
-    assert_passes_after_start(backend, outcome)
-
-
-# A slice copy onto an overlapping slice is a bounds failure, as a length
-# mismatch is.
-@pytest.mark.parametrize("backend", NO_CTFE_HALT)
-def test_checkaction_halt_overlapping_slice_copy_halts(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-checkaction=halt"], """
-        unittest {
-            int[5] storage;
-            int[] to = storage[0 .. 3];
-            int[] from = storage[1 .. 4];
-            log("start\\n");
-            to[] = from[];
-            log("after\\n");
-        }
-    """)
-    assert_halts_after_start(backend, outcome)
-
-
-def assert_aborts_after_start(outcome: Outcome, message: str) -> None:
-    assert outcome.status == -SIGABRT, outcome.output
-    assert f"Assertion `{message}' failed" in outcome.output
-    assert "start" in outcome.output
-    assert "after" not in outcome.output
-
-
-@pytest.mark.parametrize("backend", NO_CTFE_ABORT)
-def test_checkaction_c_index_out_of_bounds_aborts_with_the_c_message(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-checkaction=C"], """
-        unittest {
-            int[4] storage = [1, 2, 3, 4];
-            int[] slice = storage[0 .. 2];
-            log("start\\n");
-            auto value = slice[3];
-            log("after\\n");
-        }
-    """)
-    assert_aborts_after_start(outcome, "array index out of bounds")
-
-
-@pytest.mark.parametrize("backend", NO_CTFE_ABORT)
-def test_checkaction_c_slice_out_of_bounds_aborts_with_the_c_message(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-checkaction=C"], """
-        unittest {
-            int[4] storage = [1, 2, 3, 4];
-            int[] slice = storage[0 .. 2];
-            log("start\\n");
-            auto value = slice[0 .. 3];
-            log("after\\n");
-        }
-    """)
-    assert_aborts_after_start(outcome, "array slice out of bounds")
-
-
-@pytest.mark.parametrize("backend", NO_CTFE_ABORT)
-def test_checkaction_c_slice_copy_length_mismatch_aborts_with_the_c_message(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-checkaction=C"], """
-        unittest {
-            int[4] target;
-            int[4] source = [1, 2, 3, 4];
-            int[] to = target[0 .. 3];
-            int[] from = source[0 .. 2];
-            log("start\\n");
-            to[] = from[];
-            log("after\\n");
-        }
-    """)
-    assert_aborts_after_start(outcome, "array overflow")
-
-
-# The C runtime gets the message of `assert(e, message)` instead of the
-# text of `e`.
-@pytest.mark.parametrize("backend", NO_CTFE_ABORT)
-def test_checkaction_c_failed_assert_aborts_with_its_message_expression(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-checkaction=C"], """
-        string message() { return "dynamic"; }
-        unittest {
-            int x = 1;
-            log("start\\n");
-            assert(x == 2, message());
-            log("after\\n");
-        }
-    """)
-    assert_aborts_after_start(outcome, "dynamic")
-
-
-# A failed `assert` in a `unittest` block has its own default message.
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_failed_assert_in_a_unittest_says_unittest_failure(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, [], """
-        unittest {
-            int x = 1;
-            log("start\\n");
-            assert(x == 2);
-            log("after\\n");
-        }
-    """)
-    assert_raises_after_start(backend, outcome, "unittest failure")
-
-
-# Outside a `unittest` block the default message is druntime's.
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_failed_assert_in_a_function_says_assertion_failure(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, [], """
-        void check(int x) { assert(x == 2); }
-        unittest {
-            log("start\\n");
-            check(1);
-            log("after\\n");
-        }
-    """)
-    assert_raises_after_start(backend, outcome, "Assertion failure")
-
-
-# A slice copy that fails its check is a `RangeError`, as any bounds
-# failure is.
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_slice_copy_length_mismatch_raises_a_range_error(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, [], """
-        unittest {
-            int[4] target;
-            int[4] source = [1, 2, 3, 4];
-            int[] to = target[0 .. 3];
-            int[] from = source[0 .. 2];
-            log("start\\n");
-            to[] = from[];
-            log("after\\n");
-        }
-    """)
-    assert_raises_after_start(backend, outcome, "RangeError")
-
-
-# `-release` keeps the check in `@safe` code.
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_release_slice_copy_length_mismatch_in_safe_code_raises(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-release"], """
-        @safe unittest {
-            int[4] target;
-            int[4] source = [1, 2, 3, 4];
-            int[] to = target[0 .. 3];
-            int[] from = source[0 .. 2];
-            log("start\\n");
-            to[] = from[];
-            log("after\\n");
-        }
-    """)
-    assert_raises_after_start(backend, outcome, "RangeError")
-
-
-# A static array target has a length that the source must match, however
-# the copy is written.
-STATIC_COPIES = [
-    "target[] = from[];",
-    "target = from;",
-    "int[4] copy = from;",
-]
-
-
-@pytest.mark.parametrize("statement", STATIC_COPIES)
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_static_array_copy_from_a_shorter_slice_raises(
-    tmp_path: Path, backend: str, statement: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, [], f"""
-        unittest {{
-            int[4] target;
-            int[] from = [1, 2, 3];
-            log("start\\n");
-            {statement}
-            log("after\\n");
-        }}
-    """)
-    assert_raises_after_start(backend, outcome, "RangeError")
-
-
-@pytest.mark.parametrize("statement", STATIC_COPIES)
-@pytest.mark.parametrize("backend", NO_CTFE_HALT)
-def test_checkaction_halt_static_array_copy_from_a_shorter_slice_halts(
-    tmp_path: Path, backend: str, statement: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-checkaction=halt"], f"""
-        unittest {{
-            int[4] target;
-            int[] from = [1, 2, 3];
-            log("start\\n");
-            {statement}
-            log("after\\n");
-        }}
-    """)
-    assert_halts_after_start(backend, outcome)
-
-
-@pytest.mark.parametrize("statement", STATIC_COPIES)
-@pytest.mark.parametrize("backend", NO_CTFE_ABORT)
-def test_checkaction_c_static_array_copy_from_a_shorter_slice_aborts(
-    tmp_path: Path, backend: str, statement: str,
-) -> None:
-    outcome = run_unittests(tmp_path, backend, ["-checkaction=C"], f"""
-        unittest {{
-            int[4] target;
-            int[] from = [1, 2, 3];
-            log("start\\n");
-            {statement}
-            log("after\\n");
-        }}
-    """)
-    assert_aborts_after_start(outcome, "array overflow")
-
-
-# `dmd` refuses a `-checkaction=` value that it does not know, and so does
-# every backend, before it runs anything.
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_unknown_checkaction_value_is_an_error(
-    tmp_path: Path, backend: str,
-) -> None:
-    if backend == "native":
-        result = subprocess.run(
-            [native_compiler(), "-checkaction=bogus", "-o-", "-"],
-            input="void main() {}",
-            capture_output=True,
-            check=False,
-            text=True,
-            timeout=TIMEOUT,
-        )
-    else:
-        (tmp_path / "dub.sdl").write_text(
-            f'name "{dub_name("app")}"\ntargetType "library"\ndflags "-checkaction=bogus"\n',
-            encoding="utf-8",
-        )
-        (tmp_path / "source").mkdir()
-        (tmp_path / "source" / "app.d").write_text(
-            "module app;\nunittest {}\n", encoding="utf-8",
-        )
-        result = subprocess.run(
-            [sb_path(), f"--backend={backend}", "--no-optimise-image",
-             str(tmp_path)],
-            capture_output=True,
-            check=False,
-            text=True,
-            timeout=TIMEOUT,
-        )
-
-    output = result.stdout + result.stderr
-    assert result.returncode == 1, output
-    assert "switch `-checkaction=bogus` is invalid" in output
-
-
-# What a program does when a check is on and fails, or off and does not.
-PASSES = ("pass", "")
-HALTS = ("halt", "")
-
-# CTFE evaluates every `assert` that dmd's interpreter reaches, whatever the
-# assert check says: a row marked with it does not run there.
-EVALUATES_ASSERTS = "evaluates asserts"
-
-
-def raises(message: str) -> tuple[str, str]:
-    return ("raise", message)
-
-
-def aborts(message: str) -> tuple[str, str]:
-    return ("abort", message)
-
-
-def assert_outcome(
-    backend: str, outcome: Outcome, expected: tuple[str, str],
-) -> None:
-    kind, message = expected
-    if kind == "pass":
-        assert_passes_after_start(backend, outcome)
-    elif kind == "halt":
-        assert_halts_after_start(backend, outcome)
-    elif kind == "raise":
-        assert_raises_after_start(backend, outcome, message)
-    else:
-        assert_aborts_after_start(outcome, message)
-
-
-# CTFE has no halt and no abort, and always checks bounds.
-def backends_for(expected: tuple[str, str], unchecked: bool = False) -> list[str]:
-    if expected[0] in ("halt", "abort") or unchecked:
-        return [b for b in BACKENDS if b != "ctfe"]
-
-    return BACKENDS
-
-
-def cases(table: list[tuple], ctfe: bool = True) -> list:
-    return [
-        pytest.param(
-            backend, row[0], row[1],
-            id=f"{backend}-{' '.join(row[0]) or 'none'}",
-        )
-        for row in table
-        for backend in backends_for(row[1], len(row) > 2 or not ctfe)
-    ]
-
-
-def run_program(
-    tmp_path: Path, backend: str, flags: list[str], program: str,
-    expected: tuple[str, str],
-) -> None:
-    assert_outcome(
-        backend, run_unittests(tmp_path, backend, flags, program), expected,
-    )
-
-
-ASSERT_PROGRAM = """
-    unittest {
-        int x = 1;
-        log("start\\n");
-        assert(x == 2);
-        log("after\\n");
-    }
-"""
-
-ASSERT_CASES = [
-    ([], raises("unittest failure")),
-    (["-check=assert"], raises("unittest failure")),
-    (["-check=assert=on"], raises("unittest failure")),
-    (["-check=assert=off"], PASSES, EVALUATES_ASSERTS),
-    (["-check=off"], PASSES, EVALUATES_ASSERTS),
-    (["-check=on"], raises("unittest failure")),
-    (["-check=assert=off", "-check=assert=on"], raises("unittest failure")),
-    (["-check=assert=on", "-check=assert=off"], PASSES, EVALUATES_ASSERTS),
-    (["-check=on", "-check=assert=off"], PASSES, EVALUATES_ASSERTS),
-    (["-check=assert=off", "-check=on"], raises("unittest failure")),
-    (["-check=off", "-check=assert=on"], raises("unittest failure")),
-    (["-release", "-check=assert=off"], PASSES, EVALUATES_ASSERTS),
-    (["-release", "-check=assert=on"], raises("unittest failure")),
-    (["-check=bounds=off"], raises("unittest failure")),
-    (["-check=assert=on", "-checkaction=halt"], HALTS),
-    (["-check=assert=off", "-checkaction=halt"], PASSES, EVALUATES_ASSERTS),
-    (["-check=assert=on", "-checkaction=C"], aborts("x == 2")),
-    (["-check=assert=off", "-checkaction=C"], PASSES, EVALUATES_ASSERTS),
-]
-
-
-@pytest.mark.parametrize("backend,flags,expected", cases(ASSERT_CASES))
-def test_check_assert(
-    tmp_path: Path, backend: str, flags: list[str], expected: tuple[str, str],
-) -> None:
-    run_program(tmp_path, backend, flags, ASSERT_PROGRAM, expected)
-
-
-# The operands of an assert that is off are not evaluated.
-@pytest.mark.parametrize("backend", NO_CTFE_UNCHECKED)
-def test_check_assert_off_does_not_evaluate_the_condition(
-    tmp_path: Path, backend: str,
-) -> None:
-    run_program(tmp_path, backend, ["-check=assert=off"], """
-        int fail() { assert(0, "evaluated"); return 0; }
-        unittest {
-            log("start\\n");
-            assert(fail() == 1);
-            log("after\\n");
-        }
-    """, PASSES)
-
-
-IN_PROGRAM = """
-    int positive(int x) in (x > 0) { return x; }
-    unittest {
-        log("start\\n");
-        positive(-1);
-        log("after\\n");
-    }
-"""
-
-IN_CASES = [
-    ([], raises("AssertError")),
-    (["-check=in"], raises("AssertError")),
-    (["-check=in=on"], raises("AssertError")),
-    (["-check=in=off"], PASSES),
-    (["-check=off"], PASSES),
-    (["-check=on"], raises("AssertError")),
-    (["-check=out=off"], raises("AssertError")),
-    (["-check=assert=off"], PASSES, EVALUATES_ASSERTS),
-    (["-release"], PASSES),
-    (["-release", "-check=in=on"], raises("AssertError")),
-    (["-release", "-check=in"], raises("AssertError")),
-    (["-check=in=off", "-check=in=on"], raises("AssertError")),
-    (["-check=in=on", "-check=in=off"], PASSES),
-    # A contract is an assert: with the assert check off, nothing is left
-    # of it.
-    (["-check=off", "-check=in=on"], PASSES, EVALUATES_ASSERTS),
-    (["-check=in=off", "-check=on"], raises("AssertError")),
-    (["-check=in=on", "-checkaction=halt"], HALTS),
-    (["-check=in=off", "-checkaction=halt"], PASSES),
-    (["-check=in=on", "-checkaction=C"], aborts("x > 0")),
-]
-
-
-@pytest.mark.parametrize("backend,flags,expected", cases(IN_CASES))
-def test_check_in(
-    tmp_path: Path, backend: str, flags: list[str], expected: tuple[str, str],
-) -> None:
-    run_program(tmp_path, backend, flags, IN_PROGRAM, expected)
-
-
-OUT_PROGRAM = """
-    int positive(int x) out (result; result > 0) { return x; }
-    unittest {
-        log("start\\n");
-        positive(-1);
-        log("after\\n");
-    }
-"""
-
-OUT_CASES = [
-    ([], raises("AssertError")),
-    (["-check=out"], raises("AssertError")),
-    (["-check=out=on"], raises("AssertError")),
-    (["-check=out=off"], PASSES),
-    (["-check=off"], PASSES),
-    (["-check=on"], raises("AssertError")),
-    (["-check=in=off"], raises("AssertError")),
-    (["-check=assert=off"], PASSES, EVALUATES_ASSERTS),
-    (["-release"], PASSES),
-    (["-release", "-check=out=on"], raises("AssertError")),
-    (["-check=out=off", "-check=out=on"], raises("AssertError")),
-    (["-check=out=on", "-check=out=off"], PASSES),
-    (["-check=off", "-check=out=on"], PASSES, EVALUATES_ASSERTS),
-    (["-check=out=off", "-check=on"], raises("AssertError")),
-    (["-check=out=on", "-checkaction=halt"], HALTS),
-    (["-check=out=off", "-checkaction=halt"], PASSES),
-]
-
-
-@pytest.mark.parametrize("backend,flags,expected", cases(OUT_CASES))
-def test_check_out(
-    tmp_path: Path, backend: str, flags: list[str], expected: tuple[str, str],
-) -> None:
-    run_program(tmp_path, backend, flags, OUT_PROGRAM, expected)
-
-
-INVARIANT_PROGRAM = """
-    class C {
-        int x = 1;
-        invariant { assert(x > 0); }
-        void set(int value) { x = value; }
-    }
-    unittest {
-        auto c = new C;
-        log("start\\n");
-        c.set(-1);
-        log("after\\n");
-    }
-"""
-
-INVARIANT_CASES = [
-    ([], raises("AssertError")),
-    (["-check=invariant"], raises("AssertError")),
-    (["-check=invariant=on"], raises("AssertError")),
-    (["-check=invariant=off"], PASSES),
-    (["-check=off"], PASSES),
-    (["-check=on"], raises("AssertError")),
-    (["-check=in=off", "-check=out=off"], raises("AssertError")),
-    (["-release"], PASSES),
-    (["-release", "-check=invariant=on"], raises("AssertError")),
-    (["-check=invariant=off", "-check=invariant=on"], raises("AssertError")),
-    (["-check=invariant=on", "-check=invariant=off"], PASSES),
-    (["-check=off", "-check=invariant=on"], PASSES, EVALUATES_ASSERTS),
-    (["-check=invariant=off", "-check=on"], raises("AssertError")),
-    (["-check=invariant=on", "-checkaction=halt"], HALTS),
-    (["-check=invariant=off", "-checkaction=halt"], PASSES),
-]
-
-
-@pytest.mark.parametrize("backend,flags,expected", cases(INVARIANT_CASES))
-def test_check_invariant(
-    tmp_path: Path, backend: str, flags: list[str], expected: tuple[str, str],
-) -> None:
-    run_program(tmp_path, backend, flags, INVARIANT_PROGRAM, expected)
-
-
-# `assert(c)` on a class reference calls its invariant: that is the
-# invariant check, not the assert check.
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_check_invariant_off_skips_the_invariant_of_assert_on_a_class(
-    tmp_path: Path, backend: str,
-) -> None:
-    run_program(tmp_path, backend, ["-check=invariant=off"], """
-        class C {
-            int x = 1;
-            invariant { assert(x > 0); }
-        }
-        unittest {
-            auto c = new C;
-            c.x = -1;
-            log("start\\n");
-            assert(c);
-            log("after\\n");
-        }
-    """, PASSES)
-
-
-# No member of the enum matches, so a `final switch` has nothing to run.
-SWITCH_PROGRAM = """
-    enum E { a, b }
-    @system unittest {
-        E e = cast(E) 7;
-        log("start\\n");
-        final switch (e) { case E.a: break; case E.b: break; }
-        log("after\\n");
-    }
-"""
-
-SWITCH_CASES = [
-    ([], raises("SwitchError")),
-    (["-check=switch"], raises("SwitchError")),
-    (["-check=switch=on"], raises("SwitchError")),
-    (["-check=switch=off"], HALTS),
-    (["-check=off"], HALTS),
-    (["-check=on"], raises("SwitchError")),
-    (["-release"], HALTS),
-    (["-release", "-check=switch=on"], raises("SwitchError")),
-    (["-check=switch=off", "-check=switch=on"], raises("SwitchError")),
-    (["-check=switch=on", "-check=switch=off"], HALTS),
-    (["-check=off", "-check=switch=on"], raises("SwitchError")),
-    (["-check=switch=off", "-check=on"], raises("SwitchError")),
-    (["-check=assert=off"], raises("SwitchError")),
-    (["-check=switch=on", "-checkaction=halt"], HALTS),
-    (["-check=switch=on", "-checkaction=C"], aborts("0")),
-    (["-check=switch=off", "-checkaction=C"], HALTS),
-    (["-check=assert=off", "-check=switch=off"], HALTS),
-]
-
-
-# A `final switch` that no case matches ends the process in dmd's own CTFE
-# interpreter, so CTFE runs none of the rows that raise.
-@pytest.mark.parametrize(
-    "backend,flags,expected", cases(SWITCH_CASES, ctfe=False),
-)
-def test_check_switch(
-    tmp_path: Path, backend: str, flags: list[str], expected: tuple[str, str],
-) -> None:
-    run_program(tmp_path, backend, flags, SWITCH_PROGRAM, expected)
-
-
-# The bounds check that a flag set ends up with.
-ON = "on"
-OFF = "off"
-SAFEONLY = "safeonly"
-
-# dub turns `-boundscheck=off` into its `noBoundsCheck` option and puts the
-# option after the other flags, so no row here has two `-boundscheck=` flags
-# where the order of an `off` among them matters.
-BOUNDS_FLAGS = [
-    (["-check=bounds"], ON),
-    (["-check=bounds=on"], ON),
-    (["-check=bounds=off"], OFF),
-    (["-boundscheck=on"], ON),
-    (["-boundscheck=safeonly"], SAFEONLY),
-    (["-boundscheck=off"], OFF),
-    (["-noboundscheck"], OFF),
-    (["-release"], SAFEONLY),
-    (["-release", "-check=bounds=on"], ON),
-    (["-release", "-check=bounds=off"], OFF),
-    (["-release", "-boundscheck=on"], ON),
-    (["-release", "-boundscheck=off"], OFF),
-    (["-release", "-boundscheck=safeonly"], SAFEONLY),
-    # `-check=bounds` is the specific flag: it wins over `-boundscheck=`
-    # whichever comes first.
-    (["-check=bounds=on", "-boundscheck=off"], ON),
-    (["-boundscheck=off", "-check=bounds=on"], ON),
-    (["-check=bounds=off", "-boundscheck=on"], OFF),
-    (["-check=bounds=off", "-check=bounds=on"], ON),
-    (["-check=bounds=on", "-check=bounds=off"], OFF),
-    (["-check=off"], OFF),
-    (["-check=on"], ON),
-    (["-check=off", "-boundscheck=on"], OFF),
-    (["-boundscheck=on", "-check=off"], OFF),
-    (["-check=off", "-check=on"], ON),
-    (["-check=off", "-release"], OFF),
-    (["-boundscheck=safeonly", "-check=on"], ON),
-]
-
-ATTRIBUTES = ["@safe", "@trusted", "@system"]
-
-BOUNDS_PROGRAMS = {
-    "index": ("""
-        int[4] storage = [1, 2, 3, 4];
-        int[] slice = storage[0 .. 2];
-        log("start\\n");
-        auto value = slice[3];
-        log("after\\n");
-    """, "ArrayIndexError"),
-    "slice": ("""
-        int[4] storage = [1, 2, 3, 4];
-        int[] slice = storage[0 .. 2];
-        log("start\\n");
-        auto value = slice[0 .. 3];
-        log("after\\n");
-    """, "ArraySliceError"),
-    "slice copy": ("""
-        int[4] target;
-        int[4] source = [1, 2, 3, 4];
-        int[] to = target[0 .. 3];
-        int[] from = source[0 .. 2];
-        log("start\\n");
-        to[] = from[];
-        log("after\\n");
-    """, "RangeError"),
-}
-
-
-def bounds_expectation(
-    effective: str, attribute: str, message: str,
-) -> tuple[tuple[str, str], bool]:
-    checked = effective == ON or (effective == SAFEONLY and attribute == "@safe")
-
-    return (raises(message), False) if checked else (PASSES, True)
-
-
-def bounds_cases(
-    flag_table: list[tuple[list[str], str]],
-    program_names: list[str],
-) -> list:
-    result = []
-    for flags, effective in flag_table:
-        for name in program_names:
-            _, message = BOUNDS_PROGRAMS[name]
-            for attribute in ATTRIBUTES:
-                expected, unchecked = bounds_expectation(
-                    effective, attribute, message,
-                )
-                for backend in backends_for(expected, unchecked):
-                    result.append(pytest.param(
-                        backend, flags, name, attribute, expected,
-                        id=f"{backend}-{' '.join(flags)}-{name}-{attribute}",
-                    ))
-    return result
-
-
-@pytest.mark.parametrize(
-    "backend,flags,name,attribute,expected",
-    bounds_cases(BOUNDS_FLAGS, ["index"]),
-)
-def test_check_bounds_index(
-    tmp_path: Path, backend: str, flags: list[str], name: str,
-    attribute: str, expected: tuple[str, str],
-) -> None:
-    body, _ = BOUNDS_PROGRAMS[name]
-    run_program(
-        tmp_path, backend, flags, f"{attribute} unittest {{ {body} }}", expected,
-    )
-
-
-# The slice and the slice copy are bounds checks that dmd's glue layer
-# emits separately from the index.
-@pytest.mark.parametrize(
-    "backend,flags,name,attribute,expected",
-    bounds_cases(
-        [
-            (["-check=bounds=on"], ON),
-            (["-check=bounds=off"], OFF),
-            (["-boundscheck=safeonly"], SAFEONLY),
-            (["-release"], SAFEONLY),
-        ],
-        ["slice", "slice copy"],
-    ),
-)
-def test_check_bounds_slice_and_copy(
-    tmp_path: Path, backend: str, flags: list[str], name: str,
-    attribute: str, expected: tuple[str, str],
-) -> None:
-    body, _ = BOUNDS_PROGRAMS[name]
-    run_program(
-        tmp_path, backend, flags, f"{attribute} unittest {{ {body} }}", expected,
-    )
-
-
-# A pointer has no length to check an upper bound against, and its slice
-# is never `@safe`; the order of its bounds is checked as any bounds are.
-POINTER_SLICE = """
-    {attribute} unittest {{
-        int[4] storage = [1, 2, 3, 4];
-        int* pointer = storage.ptr;
-        size_t lower = {lower};
-        size_t upper = {upper};
-        log("start\\n");
-        auto value = pointer[lower .. upper];
-        log("after\\n");
-    }}
-"""
-
-
-@pytest.mark.parametrize("attribute", ["@trusted", "@system"])
-@pytest.mark.parametrize("flags", [
-    ["-check=bounds=on"], ["-check=bounds=off"], ["-release"],
-])
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_check_bounds_pointer_slice_has_no_upper_limit(
-    tmp_path: Path, backend: str, flags: list[str], attribute: str,
-) -> None:
-    run_program(
-        tmp_path, backend, flags,
-        POINTER_SLICE.format(attribute=attribute, lower=1, upper=3), PASSES,
-    )
-
-
-@pytest.mark.parametrize("attribute", ["@trusted", "@system"])
-@pytest.mark.parametrize("flags,effective", [
-    (["-check=bounds=on"], ON),
-    (["-check=bounds=off"], OFF),
-    (["-boundscheck=safeonly"], SAFEONLY),
-    (["-release"], SAFEONLY),
-])
-@pytest.mark.parametrize("backend", NO_CTFE_UNCHECKED)
-def test_check_bounds_reversed_pointer_slice(
-    tmp_path: Path, backend: str, flags: list[str], effective: str,
-    attribute: str,
-) -> None:
-    expected = raises("ArraySliceError") if effective == ON else PASSES
-    run_program(
-        tmp_path, backend, flags,
-        POINTER_SLICE.format(attribute=attribute, lower=2, upper=1), expected,
-    )
-
-
-# The two checks are independent: a bounds failure with the assert check
-# off still fails, and a failed assert with the bounds check off too.
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_check_assert_off_still_checks_bounds(
-    tmp_path: Path, backend: str,
-) -> None:
-    body, message = BOUNDS_PROGRAMS["index"]
-    run_program(
-        tmp_path, backend, ["-check=assert=off"],
-        f"@safe unittest {{ {body} }}", raises(message),
-    )
-
-
-@pytest.mark.parametrize("backend", NO_CTFE_HALT)
-def test_check_bounds_on_halts_with_checkaction_halt(
-    tmp_path: Path, backend: str,
-) -> None:
-    body, _ = BOUNDS_PROGRAMS["index"]
-    run_program(
-        tmp_path, backend, ["-check=bounds=on", "-checkaction=halt"],
-        f"@system unittest {{ {body} }}", HALTS,
-    )
-
-
-@pytest.mark.parametrize("backend", NO_CTFE_UNCHECKED)
-def test_check_bounds_off_does_not_halt_with_checkaction_halt(
-    tmp_path: Path, backend: str,
-) -> None:
-    body, _ = BOUNDS_PROGRAMS["index"]
-    run_program(
-        tmp_path, backend, ["-check=bounds=off", "-checkaction=halt"],
-        f"@system unittest {{ {body} }}", PASSES,
-    )
-
-
-@pytest.mark.parametrize("backend", NO_CTFE_ABORT)
-def test_check_bounds_on_aborts_with_checkaction_c(
-    tmp_path: Path, backend: str,
-) -> None:
-    body, _ = BOUNDS_PROGRAMS["index"]
-    run_program(
-        tmp_path, backend, ["-boundscheck=on", "-checkaction=C"],
-        f"@system unittest {{ {body} }}", aborts("array index out of bounds"),
-    )
-
-
-# `dmd` refuses a value of `-check=` or `-boundscheck=` that it does not
-# know, and so does every backend, before it runs anything.
-@pytest.mark.parametrize("flag", [
-    "-check=bogus",
-    "-check=bounds=maybe",
-    "-check=bounds=ON",
-    "-check=assertx",
-    "-check=",
-    "-check",
-    "-boundscheck=bogus",
-    "-boundscheck",
-])
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_unknown_check_flag_value_is_an_error(
-    tmp_path: Path, backend: str, flag: str,
-) -> None:
-    if backend == "native":
-        result = subprocess.run(
-            [native_compiler(), flag, "-o-", "-"],
-            input="void main() {}",
-            capture_output=True,
-            check=False,
-            text=True,
-            timeout=TIMEOUT,
-        )
-    else:
-        (tmp_path / "dub.sdl").write_text(
-            f'name "{dub_name("app")}"\ntargetType "library"\ndflags "{flag}"\n',
-            encoding="utf-8",
-        )
-        (tmp_path / "source").mkdir()
-        (tmp_path / "source" / "app.d").write_text(
-            "module app;\nunittest {}\n", encoding="utf-8",
-        )
-        result = subprocess.run(
-            [sb_path(), f"--backend={backend}", "--no-optimise-image",
-             str(tmp_path)],
-            capture_output=True,
-            check=False,
-            text=True,
-            timeout=TIMEOUT,
-        )
-
-    output = result.stdout + result.stderr
-    assert result.returncode == 1, output
-    assert flag in output
-
-
-# dmd defines `D_NoBoundsChecks` when the bounds check is off for all code.
-@pytest.mark.parametrize("flags", [
-    ["-check=bounds=off"], ["-boundscheck=off"], ["-noboundscheck"],
-])
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_check_bounds_off_defines_d_noboundschecks(
-    tmp_path: Path, backend: str, flags: list[str],
-) -> None:
-    run_program(tmp_path, backend, flags, """
-        unittest {
-            log("start\\n");
-            version (D_NoBoundsChecks) {} else
-                assert(0, "D_NoBoundsChecks is not defined");
-            log("after\\n");
-        }
-    """, PASSES)
-
-
-@pytest.mark.parametrize("flags", [
-    [], ["-release"], ["-boundscheck=safeonly"], ["-check=bounds=on"],
-])
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_check_bounds_not_off_does_not_define_d_noboundschecks(
-    tmp_path: Path, backend: str, flags: list[str],
-) -> None:
-    run_program(tmp_path, backend, flags, """
-        unittest {
-            log("start\\n");
-            version (D_NoBoundsChecks)
-                assert(0, "D_NoBoundsChecks is defined");
-            log("after\\n");
-        }
-    """, PASSES)
-
-
 # A template of a dub dependency that the project instantiates has the
 # checks of the project's flags, as it has in a native build.
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -1412,7 +237,8 @@ def test_check_flag_applies_to_a_dependency_template(
     (app / "source").mkdir(parents=True)
     (dependency / "source").mkdir(parents=True)
     (app / "dub.sdl").write_text(
-        f'name "{dub_name("app")}"\ntargetType "library"\ndflags "-check=in=off"\n'
+        f'name "{dub_name("app")}"\ntargetType "library"\n'
+        'dflags "-check=in=off"\n'
         + "".join(f'dflags "{flag}"\n' for flag in extra_flags)
         + f'dependency "{dub_name("dep")}" path="../dependency"\n',
         encoding="utf-8",
@@ -1429,12 +255,9 @@ def test_check_flag_applies_to_a_dependency_template(
         "T positive(T)(T value) in (value > 0) { return value; }\n",
         encoding="utf-8",
     )
-    command = (
-        ["dub", "test", f"--compiler={native_compiler()}"]
-        if backend == "native"
-        else [sb_path(), f"--backend={backend}", "--no-optimise-image",
-              str(app)]
-    )
+    command = [
+        sb_path(), f"--backend={backend}", "--no-optimise-image", str(app),
+    ]
 
     result = subprocess.run(
         command, cwd=app, capture_output=True, check=False, text=True,
@@ -1444,61 +267,35 @@ def test_check_flag_applies_to_a_dependency_template(
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("backend", [*BACKENDS, "native-ldc"])
-@pytest.mark.parametrize("ldc_flags,enabled", [
-    (["--enable-preconditions=false"], False),
-    (["-enable-preconditions=0"], False),
-    (["--enable-preconditions=False"], False),
-    (["--enable-preconditions=FALSE"], False),
-    (["--disable-preconditions"], False),
-    (["-disable-preconditions="], False),
-    (["--disable-preconditions=1"], False),
-    (["--disable-contracts"], False),
-    (["--enable-preconditions=false", "-enable-preconditions"], True),
-    (["-enable-preconditions", "--enable-preconditions=false"], False),
-    (["--disable-contracts", "--enable-preconditions=True"], True),
-    (["--enable-preconditions=TRUE", "--disable-contracts"], False),
-    (["--disable-preconditions=false"], True),
-    (["--release", "--enable-preconditions=true"], True),
-    (["--enable-preconditions=true", "--release"], True),
-])
-def test_compiler_specific_precondition_flags_apply_to_guest_tests(
-    tmp_path: Path, backend: str, ldc_flags: list[str], enabled: bool,
+# `bin/sb` asks dub to describe the project for ldc2, so the flags of
+# `dflags-ldc` apply to the guest and the ones of `dflags-dmd` do not.
+@pytest.mark.parametrize("backend", ["bytecode"])
+def test_compiler_specific_flags_apply_to_guest_tests(
+    tmp_path: Path, backend: str,
 ) -> None:
     app_source = PRELUDE + """\
 int positive(int value)
 in { assert(value > 0, "precondition checked"); }
 body { return value; }
 """
-    test_body = """\
+    test_source = """\
+module app_test;
+import app: log, positive;
+
 unittest {
     log("start\\n");
     assert(positive(-1) == -1);
     log("after\\n");
+    version (D_NoBoundsChecks) {} else assert(0, "bounds are checked");
 }
 """
-    test_source = (
-        "module app_test;\nimport app: log, positive;\n\n" + test_body
+    outcome = run_compiler_specific_project(
+        tmp_path, backend, ["-check=in=on", "-check=bounds=on"],
+        ["--disable-contracts", "--boundscheck=off"], app_source,
+        test_source,
     )
-    dmd_flags = [f"-check=in={'on' if enabled else 'off'}"]
-    if backend in ["native", "native-ldc"]:
-        compiler = native_compiler() if backend == "native" else shutil.which("ldc2")
-        if compiler is None:
-            pytest.skip("ldc2 is not on PATH")
-        outcome = run_compiled(
-            tmp_path, compiler,
-            dmd_flags if backend == "native" else ldc_flags,
-            app_source + test_body,
-        )
-    else:
-        outcome = run_compiler_specific_project(
-            tmp_path, backend, dmd_flags, ldc_flags, app_source, test_source,
-        )
 
-    if enabled:
-        assert_raises_after_start(backend, outcome, "precondition checked")
-    else:
-        assert_passes_after_start(backend, outcome)
+    assert_passes_after_start(backend, outcome)
 
 
 def run_compiler_specific_project(
@@ -1529,76 +326,34 @@ def run_compiler_specific_project(
     ))
 
 
-@pytest.mark.parametrize("backend", [*BACKENDS, "native-ldc"])
-@pytest.mark.parametrize("ldc_flags,unchecked", [
-    (["--boundscheck=off"], True),
-    (["--boundscheck=off", "--boundscheck=on"], False),
-    (["--boundscheck=on", "--boundscheck=off"], True),
-    (["--boundscheck", "off"], True),
-    (["-boundscheck", "safeonly"], False),
-    (["--boundscheck=off", "--boundscheck", "on"], False),
-])
-def test_compiler_specific_bounds_flags_define_d_noboundschecks(
-    tmp_path: Path, backend: str, ldc_flags: list[str], unchecked: bool,
-) -> None:
-    test_body = f"""\
-unittest {{
-    log("start\\n");
-    version (D_NoBoundsChecks) enum unchecked = true;
-    else enum unchecked = false;
-    assert(unchecked == {str(unchecked).lower()});
-    log("after\\n");
-}}
-"""
-    dmd_flags = [f"-boundscheck={'off' if unchecked else 'on'}"]
-    if backend in ["native", "native-ldc"]:
-        compiler = native_compiler() if backend == "native" else shutil.which("ldc2")
-        if compiler is None:
-            pytest.skip("ldc2 is not on PATH")
-        outcome = run_compiled(
-            tmp_path, compiler,
-            dmd_flags if backend == "native" else ldc_flags,
-            PRELUDE + test_body,
-        )
-    else:
-        outcome = run_compiler_specific_project(
-            tmp_path, backend, dmd_flags, ldc_flags, PRELUDE,
-            "module app_test;\nimport app: log;\n" + test_body,
-        )
-    assert_passes_after_start(backend, outcome)
-
-
-# A dependency that does not build is a failure with the compiler's message,
-# whatever dmd-only flags the root recipe has.
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_dependency_that_fails_to_build_is_reported(
-    tmp_path: Path, backend: str,
-) -> None:
+# A dependency that does not build is a failure with the compiler's message.
+# The root does not import it, so only the dub build of the dependency can
+# report it. CTFE does not build native dependencies, and the build does not
+# depend on the backend that runs afterwards.
+def test_dependency_that_fails_to_build_is_reported(tmp_path: Path) -> None:
     app = tmp_path / "app"
     dependency = tmp_path / "dependency"
     (app / "source").mkdir(parents=True)
     (dependency / "source").mkdir(parents=True)
     (app / "dub.sdl").write_text(
-        f'name "{dub_name("app")}"\ntargetType "library"\ndflags "-check=in=off"\n'
+        f'name "{dub_name("app")}"\ntargetType "library"\n'
         f'dependency "{dub_name("dep")}" path="../dependency"\n',
         encoding="utf-8",
     )
     (app / "source" / "app.d").write_text(
-        "module app;\nimport dep;\nunittest {}\n", encoding="utf-8",
+        "module app;\nunittest {}\n", encoding="utf-8",
     )
     (dependency / "dub.sdl").write_text(
-        f'name "{dub_name("dep")}"\ntargetType "library"\n', encoding="utf-8",
+        f'name "{dub_name("dep")}"\ntargetType "library"\n',
+        encoding="utf-8",
     )
     (dependency / "source" / "dep.d").write_text(
         'module dep;\nstatic assert(false, "dependency does not build");\n',
         encoding="utf-8",
     )
-    command = (
-        ["dub", "test", f"--compiler={native_compiler()}"]
-        if backend == "native"
-        else [sb_path(), f"--backend={backend}", "--no-optimise-image",
-              str(app)]
-    )
+    command = [
+        sb_path(), "--backend=bytecode", "--no-optimise-image", str(app),
+    ]
 
     result = subprocess.run(
         command, cwd=app, capture_output=True, check=False, text=True,
@@ -1610,21 +365,15 @@ def test_dependency_that_fails_to_build_is_reported(
     assert "dependency does not build" in output, output
 
 
-# CTFE does not build native dependencies or run dub build hooks.
-@pytest.mark.parametrize("backend", ["native", "bytecode", "interpreter", "native-ldc"])
-@pytest.mark.parametrize("stage,flags,flag_form", [
-    ("preBuildCommands", [], "plain"),
-    ("postBuildCommands", [], "plain"),
-    ("postBuildCommands", ["--enable-preconditions=false"], "plain"),
-    ("preBuildCommands", ["-check=in=off"], "plain"),
-    ("postBuildCommands", ["-check=in=off"], "plain"),
-    *[(stage, ["-noboundscheck"], flag_form)
-      for stage in ["preBuildCommands", "postBuildCommands"]
-      for flag_form in ["plain", "response", "nested"]],
+# CTFE does not build native dependencies or run dub build hooks, and the
+# build does not depend on the backend that runs afterwards. The hook runs
+# before the guest, so no guest runs here.
+@pytest.mark.parametrize("stage,flags", [
+    ("preBuildCommands", []),
+    ("postBuildCommands", ["-noboundscheck"]),
 ])
 def test_root_build_command_failure_is_reported(
-    tmp_path: Path, backend: str, stage: str, flags: list[str],
-    flag_form: str,
+    tmp_path: Path, stage: str, flags: list[str],
 ) -> None:
     marker = "root-build-command-failed"
     dependency = tmp_path / "dependency"
@@ -1636,20 +385,11 @@ def test_root_build_command_failure_is_reported(
         "module dep; int value() { return 1; }\n", encoding="utf-8",
     )
     (tmp_path / "source").mkdir()
-    compiler_flags = [
-        "-check=in=off" if backend == "native" and flag == "--enable-preconditions=false"
-        else "--enable-preconditions=false" if backend == "native-ldc" and flag == "-check=in=off"
-        else "--boundscheck=off" if backend == "native-ldc" and flag == "-noboundscheck"
-        else flag for flag in flags
-    ]
-    if flag_form != "plain":
+    compiler_flags = list(flags)
+    if flags:
         response = tmp_path / "checks.rsp"
-        response.write_text("\n".join(json.dumps(flag) for flag in compiler_flags)
+        response.write_text("\n".join(json.dumps(flag) for flag in flags)
                             + "\n", encoding="utf-8")
-        if flag_form == "nested":
-            outer = tmp_path / "outer.rsp"
-            outer.write_text(f"@{response}\n", encoding="utf-8")
-            response = outer
         compiler_flags = [f"@{response}"]
     (tmp_path / "dub.json").write_text(json.dumps({
         "name": dub_name("app"), "targetType": "library",
@@ -1661,14 +401,8 @@ def test_root_build_command_failure_is_reported(
         "module app; import dep;\nunittest { assert(value() == 1); }\n",
         encoding="utf-8",
     )
-    if backend in ["native", "native-ldc"]:
-        compiler = native_compiler() if backend == "native" else shutil.which("ldc2")
-        if compiler is None:
-            pytest.skip("ldc2 is not on PATH")
-        command = ["dub", "build", f"--compiler={compiler}"]
-    else:
-        command = [sb_path(), f"--backend={backend}", "--no-optimise-image",
-                   str(tmp_path)]
+    command = [sb_path(), "--backend=bytecode", "--no-optimise-image",
+               str(tmp_path)]
     result = subprocess.run(
         command, cwd=tmp_path, capture_output=True, check=False, text=True,
         timeout=TIMEOUT,
@@ -1680,9 +414,8 @@ def test_root_build_command_failure_is_reported(
     assert not list((tmp_path / ".snakebite").rglob("dub-dependencies"))
 
 
-@pytest.mark.parametrize("backend", ["native", "bytecode", "interpreter", "native-ldc"])
 def test_unrelated_root_compiler_flag_failure_is_reported(
-    tmp_path: Path, backend: str,
+    tmp_path: Path,
 ) -> None:
     dependency = tmp_path / "dependency"
     (dependency / "source").mkdir(parents=True)
@@ -1694,46 +427,45 @@ def test_unrelated_root_compiler_flag_failure_is_reported(
     (tmp_path / "source" / "app.d").write_text(
         "module app; unittest {}\n", encoding="utf-8",
     )
-    check_flag = (
-        "--enable-preconditions=false" if backend == "native-ldc"
-        else "-check=in=off"
-    )
+    check_flag = "-check=in=off"
     (tmp_path / "dub.json").write_text(json.dumps({
         "name": dub_name("app"), "targetType": "library",
         "dependencies": {dub_name("dep"): {"path": "dependency"}},
         "dflags": [check_flag, "--not-a-real-compiler-option"],
     }), encoding="utf-8")
-    if backend in ["native", "native-ldc"]:
-        compiler = native_compiler() if backend == "native" else shutil.which("ldc2")
-        if compiler is None:
-            pytest.skip("ldc2 is not on PATH")
-        command = ["dub", "build", f"--compiler={compiler}"]
-    else:
-        command = [sb_path(), f"--backend={backend}", "--no-optimise-image", str(tmp_path)]
+    command = [sb_path(), "--backend=bytecode", "--no-optimise-image",
+               str(tmp_path)]
     result = subprocess.run(
         command, cwd=tmp_path, capture_output=True, check=False, text=True,
         timeout=TIMEOUT,
     )
     output = result.stdout + result.stderr
     assert result.returncode != 0, output
-    if backend not in ["native", "native-ldc"]:
-        assert "Dub dependency build failed" in output, output
+    assert "Dub dependency build failed" in output, output
     assert not list((tmp_path / ".snakebite").rglob("dub-dependencies"))
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-@pytest.mark.parametrize("path_kind", ["plain", "absolute", "relative", "nested"])
+PRECONDITION_PROGRAM = """
+    int positive(int x) in (x > 0) { return x; }
+    unittest {
+        log("start\\n");
+        positive(-1);
+        log("after\\n");
+    }
+"""
+
+
+# `bin/sb` runs with the project as its working directory, so the response
+# file is found by its relative name.
+@pytest.mark.parametrize("backend", ["bytecode"])
 @pytest.mark.parametrize("with_dependency", [False, True])
 @pytest.mark.parametrize("flags,unchecked", [
     pytest.param(["-check=in=off"], None, id="preconditions"),
     pytest.param(["-noboundscheck"], True, id="noboundscheck"),
-    pytest.param(["-boundscheck=off"], True, id="boundscheck-off"),
-    pytest.param(["-boundscheck=safeonly"], False, id="boundscheck-safeonly"),
-    pytest.param(["-noboundscheck", "-check=bounds=on"], False, id="check-bounds-last"),
     pytest.param(["-check=bounds=on", "-noboundscheck"], False, id="check-bounds-first"),
 ])
 def test_response_file_check_flags_apply_to_guest_and_image(
-    tmp_path: Path, backend: str, path_kind: str, with_dependency: bool,
+    tmp_path: Path, backend: str, with_dependency: bool,
     flags: list[str], unchecked: bool | None,
 ) -> None:
     response = tmp_path / "flags.rsp"
@@ -1744,15 +476,9 @@ def test_response_file_check_flags_apply_to_guest_and_image(
     response.write_text("# check selection\n" + "\n".join(
         json.dumps(flag) for flag in [import_flag, *flags]
     ) + "\n", encoding="utf-8")
-    if path_kind == "nested":
-        outer = tmp_path / "outer.rsp"
-        outer.write_text(f'@{response}\n', encoding="utf-8")
-        response = outer
-    response_argument = "@" + (
-        response.name if path_kind == "relative" else str(response)
-    )
+    response_argument = "@" + response.name
     (tmp_path / "source").mkdir()
-    program = IN_PROGRAM if unchecked is None else f"""\
+    program = PRECONDITION_PROGRAM if unchecked is None else f"""\
 unittest {{
     log("start\\n");
     version (D_NoBoundsChecks) enum unchecked = true;
@@ -1768,7 +494,7 @@ unittest {{
     recipe = {
         "name": dub_name("app"), "targetType": "library",
         "dflags": (["-check=in=on"] if unchecked is None else [])
-        + ([import_flag, *flags] if path_kind == "plain" else [response_argument]),
+        + [response_argument],
     }
     if with_dependency:
         dependency = tmp_path / "dependency"
@@ -1781,11 +507,8 @@ unittest {{
         )
         recipe["dependencies"] = {dub_name("dep"): {"path": "dependency"}}
     (tmp_path / "dub.json").write_text(json.dumps(recipe), encoding="utf-8")
-    command = (
-        ["dub", "test", f"--compiler={native_compiler()}"]
-        if backend == "native" else
-        [sb_path(), f"--backend={backend}", "--no-optimise-image", str(tmp_path)]
-    )
+    command = [sb_path(), f"--backend={backend}", "--no-optimise-image",
+               str(tmp_path)]
     result = subprocess.run(
         command, cwd=tmp_path, capture_output=True, check=False, text=True,
         timeout=TIMEOUT,
@@ -1800,7 +523,7 @@ def test_changed_response_file_changes_checks_on_cached_runs(
     response = tmp_path / "checks.rsp"
     (tmp_path / "source").mkdir()
     (tmp_path / "source" / "app.d").write_text(
-        PRELUDE + IN_PROGRAM, encoding="utf-8",
+        PRELUDE + PRECONDITION_PROGRAM, encoding="utf-8",
     )
     (tmp_path / "dub.json").write_text(json.dumps({
         "name": dub_name("app"), "targetType": "library", "dflags": [f"@{response}"],
@@ -1809,16 +532,12 @@ def test_changed_response_file_changes_checks_on_cached_runs(
         response.write_text(
             f"-check=in={'on' if enabled else 'off'}\n", encoding="utf-8",
         )
-        if backend == "native":
-            run_directory = tmp_path / f"native-{index}"
-            run_directory.mkdir()
-            outcome = run_native(run_directory, [f"@{response}"], PRELUDE + IN_PROGRAM)
-        else:
-            outcome = outcome_of(subprocess.run(
-                [sb_path(), f"--backend={backend}", "--no-optimise-image", str(tmp_path)],
-                cwd=tmp_path, capture_output=True, check=False, text=True,
-                timeout=TIMEOUT,
-            ))
+        outcome = outcome_of(subprocess.run(
+            [sb_path(), f"--backend={backend}", "--no-optimise-image",
+             str(tmp_path)],
+            cwd=tmp_path, capture_output=True, check=False, text=True,
+            timeout=TIMEOUT,
+        ))
         if enabled:
             assert_raises_after_start(backend, outcome, "AssertError")
         else:
@@ -1869,13 +588,9 @@ T positive(T)(T value) in (value > 0) { return value; }
 """
 
 
-@pytest.mark.parametrize("backend", [*BACKENDS, "native-ldc"])
-@pytest.mark.parametrize("shape", [
-    "body", "conditional", "imported", "mixin", "phobos", "druntime",
-])
-def test_betterc_dependency_versions(
-    tmp_path: Path, backend: str, shape: str,
-) -> None:
+# One program asserts each way a dependency template sees `D_BetterC`.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_betterc_dependency_versions(tmp_path: Path, backend: str) -> None:
     dependency = tmp_path / "dependency"
     (dependency / "source").mkdir(parents=True)
     (dependency / "dub.sdl").write_text(
@@ -1905,7 +620,6 @@ bool helperBody(T)() {
             "mainSourceFile": "source/app.d",
         }],
     }), encoding="utf-8")
-    expression = "mixed" if shape == "mixin" else f"{shape}!int()"
     (root / "source" / "app.d").write_text(PRELUDE + f"""
 import dep;
 mixin Mixed!int;
@@ -1916,7 +630,12 @@ version (D_TypeInfo) static assert(false);
 version (D_Exceptions) static assert(false);
 unittest {{
     log("start\\n");
-    assert({expression});
+    assert(body!int());
+    assert(conditional!int());
+    assert(imported!int());
+    assert(mixed);
+    assert(phobos!int());
+    assert(druntime!int());
     if (!__ctfe) assert(!nativeBody());
     assert(positive(-1) == -1);
     log("after\\n");
@@ -1926,13 +645,8 @@ extern(C) int main() {{
     return 0;
 }}
 """, encoding="utf-8")
-    if backend in ["native", "native-ldc"]:
-        compiler = native_compiler() if backend == "native" else shutil.which("ldc2")
-        if compiler is None:
-            pytest.skip("ldc2 is not on PATH")
-        command = ["dub", "test", f"--compiler={compiler}"]
-    else:
-        command = [sb_path(), f"--backend={backend}", "--no-optimise-image", str(root)]
+    command = [sb_path(), f"--backend={backend}", "--no-optimise-image",
+               str(root)]
     result = subprocess.run(
         command, cwd=root, capture_output=True, check=False, text=True,
         timeout=TIMEOUT,

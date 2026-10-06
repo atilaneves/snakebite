@@ -8,7 +8,7 @@ module ut.frontend.checks;
 
 import dmd.astenums: CHECKACTION, CHECKENABLE;
 import snakebite.frontend.checks: Checks, ldcArguments;
-import snakebite.frontend.compiler: FrontendFlags, parseSnippet;
+import snakebite.frontend.compiler: checksOf, FrontendFlags, parseSnippet;
 import ut;
 
 
@@ -86,6 +86,18 @@ unittest {
     ]) {
         Checks checks;
         checks.accept(flag).should == false;
+    }
+}
+
+
+// The program is refused before it runs anything, as dmd refuses the flag.
+@("checks.invalid.isAnError")
+unittest {
+    foreach (flag; ["-check=bogus", "-boundscheck=bogus", "-checkaction=bogus"]) {
+        checksOf(FrontendFlags([flag])).shouldThrowWithMessage(
+            "switch `" ~ flag ~ "` is invalid");
+        parseSnippet("", null, FrontendFlags([flag])).shouldThrowWithMessage(
+            "switch `" ~ flag ~ "` is invalid");
     }
 }
 

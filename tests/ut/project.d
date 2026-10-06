@@ -71,6 +71,40 @@ unittest {
 }
 
 
+// dub turns `-release`, `-noboundscheck` and `-betterC` into options of the
+// package and takes them out of `dflags`, so the flags reach the program from
+// the options.
+@("sourceSet.dubOptionsBecomeFlags")
+unittest {
+    import std.json: parseJSON;
+
+    const directory = buildPath(__FILE__.dirName,
+        "../fixtures/dub-package-settings").absolutePath;
+    auto description = DubDescription(parseJSON(`{
+        "rootPackage": "root",
+        "configuration": "unittest",
+        "targets": [],
+        "packages": [
+            {
+                "name": "root", "configuration": "unittest",
+                "active": true, "path": "` ~ directory ~ `",
+                "files": [{"role": "source", "path": "tests/main.d"}],
+                "importPaths": ["source"], "stringImportPaths": [],
+                "linkerFiles": [], "dflags": [], "debugVersions": [],
+                "options": ["releaseMode", "noBoundsCheck", "betterC"],
+                "versions": [], "lflags": [], "libs": []
+            }
+        ]
+    }`));
+
+    const sources = dubSourceSetFromDescription(directory, description);
+
+    sources.flags.compilerArguments.should == [
+        "-release", "-noboundscheck", "-betterC",
+    ];
+}
+
+
 // druntime's own `rt_init`/`rt_term` nesting depth.
 pragma(mangle, "_D2rt6dmain210_initCountOm")
 private extern shared size_t runtimeInitDepth;

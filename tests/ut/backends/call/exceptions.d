@@ -542,6 +542,35 @@ static foreach (backend; Matrix!(
     }
 }
 
+// The message of `assert(cond, message)` is an expression: it runs when the
+// assertion fails, and its value is the message of the `AssertError`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns a failing assertion into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("assert.fails.message.isTheExpressionEvaluated." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        "dynamic".shouldBeRetOf!(backend, q{
+            string message() {
+                return "dynamic";
+            }
+
+            string result() {
+                import core.exception: AssertError;
+
+                try
+                    assert(false, message());
+                catch (AssertError error)
+                    return error.msg;
+
+                return "";
+            }
+        }, "result");
+    }
+}
+
 // A wrong host-to-guest argument count used to be an `assert` on
 // bytecode - `AssertError`, and gone entirely in a `-release` build,
 // which would read past `args` instead. `Backend.call` now throws
