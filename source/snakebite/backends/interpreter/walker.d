@@ -492,6 +492,7 @@ private struct CallShape {
 // state, and reads every per-function answer from the `Shared` tables
 // the program's evaluators fill together.
 extern(C++) private final class Evaluator: LoweringVisitor {
+    import snakebite.faultsignal: HardwareFault;
     import snakebite.backends.aggregateinit: InitStep, NewPlan;
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.backend: Program;
@@ -958,9 +959,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _frames.backendEntry = &entry;
         try {
             runGuest(&entry, &invokeGuestEntry, &entry, &haltBeforeUnwind);
+            if (_fault !is null)
+                throw _fault;
         } catch (HardwareFault fault) {
             reportHardwareFault(fault);
         } catch (Throwable thrown) {
+            if (auto fault = cast(HardwareFault) _fault)
+                reportHardwareFault(fault);
+            if (_fault !is null)
+                throw _fault;
             if (isHalt(thrown)) {
                 _halted = true;
                 _fault = thrown;
@@ -987,7 +994,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // Native cleanup can call back before the entry's catch runs. Save the
     // source and stop guest execution before any host frame is unwound.
     extern(D) private static void haltBeforeUnwind(
-        void* context, imported!"snakebite.faultsignal".HardwareFault fault,
+        void* context, HardwareFault fault,
     ) nothrow @nogc {
         auto entry = cast(GuestEntry*) context;
         auto evaluator = entry.evaluator;
@@ -1001,7 +1008,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     extern(D) private noreturn reportHardwareFault(
-        imported!"snakebite.faultsignal".HardwareFault fault,
+        HardwareFault fault,
     ) {
         import snakebite.faultsignal: takeFault;
         import snakebite.backends.guestfault: GuestFault;
@@ -1541,18 +1548,23 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // refusal, an exception that already is one, and a halt.
     pragma(inline, true)
     extern(D) private void crossNative(scope void delegate() call) {
-        try
+        try {
             call();
-        catch (SnakebiteException exception)
-            throw exception;
-        catch (GuestException exception)
-            throw exception;
-        catch (Throwable thrown) {
+            if (_fault !is null)
+                throw _fault;
+        } catch (Throwable thrown) {
+            // Native unwinding can retain an ordinary exception as primary.
+            // Stop at the barrier, before a guest handler can see that chain.
+            if (_fault !is null)
+                throw _fault;
             if (isHalt(thrown)) {
                 _halted = true;
                 _fault = thrown;
                 throw thrown;
             }
+            if (cast(SnakebiteException) thrown !is null
+                    || cast(GuestException) thrown !is null)
+                throw thrown;
 
             throw GuestException.make(thrown);
         }

@@ -215,8 +215,9 @@ def test_hardware_fault_in_thread_or_gc_finalizer(
 
 @pytest.mark.parametrize("backend", ["native", *BACKENDS])
 @pytest.mark.parametrize("shape", ["direct", "pointer", "variadic-pointer"])
+@pytest.mark.parametrize("pending_exception", [False, True])
 def test_native_fault_unwind_keeps_host_cleanup_but_skips_guest_callback(
-    tmp_path: Path, backend: str, shape: str,
+    tmp_path: Path, backend: str, shape: str, pending_exception: bool,
 ) -> None:
     app = tmp_path / "app"
     write(app / "dub.sdl", dub_project_recipe("fault-unwind")
@@ -234,7 +235,12 @@ def test_native_fault_unwind_keeps_host_cleanup_but_skips_guest_callback(
         'module main;\nimport core.sys.posix.unistd: write;\n'
         + declaration
         + 'extern(C) void cleanup() { write(1, "guest cleanup\\n".ptr, 14); }\n'
-        + 'int main() { ' + call + ' return 0; }\n',
+        + 'int main() {\n'
+        + ' scope(exit) write(1, "guest scope exit\\n".ptr, 17);\n'
+        + ' try { ' + call + ' }\n'
+        + ' catch (Throwable) { write(1, "guest catch\\n".ptr, 12); }\n'
+        + ' finally { write(1, "guest finally\\n".ptr, 14); }\n'
+        + ' write(1, "guest continued\\n".ptr, 16); return 0; }\n',
     )
     write(
         tmp_path / "native.d",
@@ -242,7 +248,11 @@ def test_native_fault_unwind_keeps_host_cleanup_but_skips_guest_callback(
         'extern(C) void nativeTrap();\n'
         'extern(C) void nativeFault(void function() cleanup) {\n'
         ' scope(exit) write(1, "host released\\n".ptr, 14);\n'
-        ' scope(exit) cleanup();\n nativeTrap();\n}\n',
+        ' scope(exit) cleanup();\n'
+        + (' try { throw new Exception("ordinary"); }\n'
+           ' finally { nativeTrap(); }\n' if pending_exception else
+           ' nativeTrap();\n')
+        + '}\n',
     )
     write(
         tmp_path / "trap.S",
@@ -272,10 +282,19 @@ def test_native_fault_unwind_keeps_host_cleanup_but_skips_guest_callback(
     else:
         result = run_app(tmp_path, backend)
     assert "guest cleanup" not in output(result), output(result)
+    assert "guest catch" not in output(result), output(result)
+    assert "guest finally" not in output(result), output(result)
+    assert "guest scope exit" not in output(result), output(result)
+    assert "guest continued" not in output(result), output(result)
     if backend in ("bytecode", "interpreter"):
         assert result.returncode == 1, output(result)
-        assert result.stdout == "host released\n", output(result)
-        assert "fatal: null pointer dereference" in result.stderr
+        assert result.stdout.count("host released\n") == 1, output(result)
+        if backend == "interpreter" or not pending_exception:
+            assert result.stdout == "host released\n", output(result)
+        assert "null pointer dereference" in result.stderr
+        if backend == "interpreter":
+            assert "fatal: null pointer dereference" in result.stderr
+            assert "main.d" in result.stderr
     elif backend == "ctfe":
         assert result.returncode == 1, output(result)
     else:
