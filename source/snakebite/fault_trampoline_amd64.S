@@ -30,6 +30,18 @@
 
     .text
 
+    /* The saved action may have work to do before rt_sigreturn. Consume its
+     * callback and restorer before unmasking permits nested delivery.
+     */
+    .macro prepare_saved_action
+    testl $SA_RESTORER,136(%r12)
+    jz 1f
+    mov 144(%r12),%rax
+    mov %rax,(%rsp)
+1:
+    mov (%r12),%r12
+    .endm
+
     /* The compiler must not infer nounwind from the guest body, even with
      * LTO. A tail jump keeps the entry's real call site on the stack without
      * adding an unwind frame or a check to a guest instruction.
@@ -81,7 +93,7 @@ snakebite_fault_trampoline_call:
 
     /* Every saved callback uses this tail entry. Only a stack change needs
      * placement of the kernel frame. Tail entry keeps the
-     * kernel restorer as the callback's return address; rt_sigreturn consumes
+     * saved restorer as the callback's return address; rt_sigreturn consumes
      * frame only once, including any callback context edits.
      */
     .globl snakebite_fault_signal_entry
@@ -140,8 +152,7 @@ snakebite_fault_signal_entry:
 .Lsignal_copy_done:
     mov 184(%rbx),%rax
     mov %rax,224(%r14)
-    /* Do not write this slot before the copy: it can overlap the source. */
-    mov %r12,-8(%rsp)
+    prepare_saved_action
 .Lsignal_unmask:
     lea 40(%rbx),%rsi
     mov $SIG_SETMASK,%edi
@@ -156,9 +167,9 @@ snakebite_fault_signal_entry:
     mov %r13,%rsi
     mov %r14,%rdx
     xor %eax,%eax
-    jmp *-8(%rsp)
+    jmp *%r12
 .Lsignal_unmoved:
-    mov %r12,-8(%rsp)
+    prepare_saved_action
     cmpb $0,32(%rbx)
     je .Lsignal_callback
     jmp .Lsignal_unmask

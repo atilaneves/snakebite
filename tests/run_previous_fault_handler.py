@@ -729,6 +729,97 @@ def test_onstack_callback_context_and_mask_edits(normal_host, sig, autodisarm):
         assert result.returncode == 0, result
 
 
+RESTORER_HOST = r"""
+#define _GNU_SOURCE
+#include <signal.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+#include <sys/prctl.h>
+#include <ucontext.h>
+extern int rt_init(void);
+extern int install_saved_action(void);
+void native_fault(void) {}
+static char alternate[128 * 1024] __attribute__((aligned(16)));
+static volatile sig_atomic_t calls, returns;
+static int nested;
+extern void saved_restorer(void);
+__asm__(".text\n"
+        ".globl saved_restorer\n"
+        "saved_restorer:\n"
+        "lock incl returns(%rip)\n"
+        "mov $15,%eax\n"
+        "syscall\n"
+        "ud2\n");
+static void previous(int sig) {
+    ++calls;
+    if (nested && calls == 1) raise(sig);
+}
+static void previous_info(int sig, siginfo_t *info, void *opaque) {
+    if (!info || info->si_signo != sig || !opaque) _exit(80);
+    sigaddset(&((ucontext_t *)opaque)->uc_sigmask, SIGUSR2);
+    previous(sig);
+}
+int main(int argc, char **argv) {
+    prctl(PR_SET_DUMPABLE, 0);
+    setenv("SNAKEBITE_NO_FAULT_HANDLER", "1", 1);
+    if (!rt_init()) return 90;
+    unsetenv("SNAKEBITE_NO_FAULT_HANDLER");
+    int sig = atoi(argv[1]), installed = atoi(argv[2]);
+    int alt = atoi(argv[3]), onstack = atoi(argv[4]), information = atoi(argv[5]);
+    nested = atoi(argv[6]);
+    if (alt) {
+        stack_t stack = {.ss_sp=alternate, .ss_size=sizeof alternate};
+        if (sigaltstack(&stack, 0)) return 91;
+    }
+    // libc supplies its own restorer on installation. Use the kernel API
+    // so that the saved native action has actual return-time work to do.
+    struct {
+        void *handler;
+        unsigned long flags;
+        void (*restorer)(void);
+        unsigned long mask;
+    } action = {
+        .handler = information ? (void *)previous_info : (void *)previous,
+        .flags = 0x04000000 | (onstack ? SA_ONSTACK : 0) |
+                 (information ? SA_SIGINFO : 0) | (nested ? SA_NODEFER : 0),
+        .restorer = saved_restorer,
+    };
+    if (syscall(SYS_rt_sigaction, sig, &action, 0, 8)) return 92;
+    struct sigaction query;
+    if (sigaction(sig, 0, &query) || query.sa_restorer != saved_restorer) return 93;
+    if (installed && !install_saved_action()) return 94;
+    raise(sig);
+    sigset_t mask;
+    if (sigprocmask(SIG_SETMASK, 0, &mask)) return 95;
+    if (sigismember(&mask, SIGUSR2) != information) return 96;
+    return calls == 1 + nested && returns == 1 + nested ? 0 : 97;
+}
+"""
+
+
+@pytest.fixture(scope="module", params=PROFILES)
+def restorer_host(request, tmp_path_factory):
+    return build_host(request, tmp_path_factory, RESTORER_HOST)
+
+
+@pytest.mark.parametrize("sig", [signal.SIGSEGV, signal.SIGFPE, signal.SIGBUS])
+@pytest.mark.parametrize("alternate", [False, True])
+@pytest.mark.parametrize("onstack", [False, True])
+@pytest.mark.parametrize("information", [False, True])
+@pytest.mark.parametrize("nested", [False, True])
+def test_saved_action_return_function(restorer_host, sig, alternate, onstack,
+                                    information, nested):
+    for installed in (False, True):
+        result = subprocess.run(
+            [str(restorer_host), str(sig.value), str(int(installed)),
+             str(int(alternate)), str(int(onstack)), str(int(information)),
+             str(int(nested))],
+            capture_output=True, timeout=5,
+        )
+        assert result.returncode == 0, result
+
+
 PLACEMENT_HOST = r"""
 #define _GNU_SOURCE
 #include <signal.h>
