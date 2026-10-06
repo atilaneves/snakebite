@@ -749,6 +749,11 @@ static if (supported) {
             _forward.stack = cast(void*) frame;
             _forward.length = 0;
         }
+        // The saved action may have return-time work before rt_sigreturn.
+        // Keep its restorer in the original frame, including when moved.
+        enum saRestorer = 0x04000000;
+        if (previous.sa_flags & saRestorer)
+            *cast(void**) frame = cast(void*) previous.sa_restorer;
         _forward.handler = cast(void*) handler;
         _forward.setMask = !onAlternate || relocate;
         if (_forward.setMask) {
