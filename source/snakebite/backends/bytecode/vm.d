@@ -626,7 +626,26 @@ private extern(C) void invokeDispatch(void* context) {
 private void haltBeforeUnwind(
     void* context, imported!"snakebite.faultsignal".HardwareFault fault,
 ) nothrow @nogc {
-    (cast(Vm*) context)._halt = fault;
+    haltDispatches(cast(Vm*) context, fault);
+}
+
+private void haltDispatches(Vm* vm, Throwable fault) nothrow @nogc {
+    vm._halt = fault;
+    auto state = cast(DispatchState*) vm._frames.backendEntry;
+    // Each suspended native caller can suppress its callback's throwable.
+    // Its existing call transition must resume Halt, not guest instructions.
+    for (; state !is null; state = state.parent)
+        state.pending = cast(Activation*) &haltedNativeReturn;
+}
+
+private immutable Instruction nativeHaltInstruction = Instruction(&opNativeHalt);
+private immutable Activation haltedNativeReturn =
+    immutable(Activation)(&nativeHaltInstruction);
+
+private const(Instruction)* opNativeHalt(
+    const(Instruction)*, Activation*, DispatchState* state,
+) {
+    throw state.vm._halt;
 }
 
 pragma(inline, true)
@@ -665,9 +684,17 @@ private void dispatchLoop(
             } else
                 pc = handler(instruction, active, state);
         } catch (Throwable throwable) {
+            if (active is &haltedNativeReturn) {
+                active = state.current;
+                pc = active.pc;
+            }
             active.pc = pc;
             import snakebite.faultsignal: HardwareFault;
 
+            // Native cleanup can retain an ordinary primary exception.
+            // The saved Halt must win before any guest handler runs.
+            if (state.vm._halt !is null)
+                throwable = state.vm._halt;
             if (auto hardware = cast(HardwareFault) throwable)
                 throwable = reportHardwareFault(hardware, active, state);
             active = handleException(active, frames, throwable, state.vm);
@@ -756,7 +783,7 @@ private Activation* handleException(
         // temporary's destructor, `catch` or `finally` sees it.
         const halting = isHalt(throwable);
         if (halting)
-            vm._halt = throwable;
+            haltDispatches(vm, throwable);
         try {
             unwindFinally(throwable, () {
                 if (halting)
