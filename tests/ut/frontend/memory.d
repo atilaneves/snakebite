@@ -11,6 +11,12 @@ import snakebite.frontend.compiler: arenaReport, parseSnippet;
 import ut.backends;
 
 
+// Held by each test that plants a word in the arena or reads its report
+// (`arenaReport` covers the whole arena), so none of them reads another's
+// planted word.
+private __gshared Object reportLock = new Object;
+
+
 // Fresh declarations and template instances, so dmd does real work
 // however much of the frontend earlier tests already filled.
 private string manyInstances(in string moduleName) {
@@ -63,7 +69,8 @@ unittest {
         }
     });
 
-    arenaReport.should == "";
+    synchronized(reportLock)
+        arenaReport.should == "";
 }
 
 
@@ -82,7 +89,8 @@ unittest {
     const match = matchFirst("snippet_42", regex(`hostCacheProbe\d+|snippet_\d+`));
     match.empty.should == false;
 
-    arenaReport.should == "";
+    synchronized(reportLock)
+        arenaReport.should == "";
 }
 
 
@@ -99,36 +107,42 @@ unittest {
     import snakebite.frontend.compiler: newInFrontend;
     import snakebite.gc: lowmem;
 
-    // An identifier's name is arena memory the test can write a word to.
-    auto identifier = newInFrontend!(Identifier.idPool)(
-        "reportsAPointerIntoTheGCHeapWithRoomForAWord");
-    auto word = cast(void**) identifier.toChars;
-    auto block = new ubyte[64];
-    auto saved = *word;
-    *word = block.ptr;
-    scope(exit) *word = saved;
+    synchronized(reportLock) {
+        // An identifier's name is arena memory the test can write a word to.
+        auto identifier = newInFrontend!(Identifier.idPool)(
+            "reportsAPointerIntoTheGCHeapWithRoomForAWord");
+        auto word = cast(void**) identifier.toChars;
+        auto block = new ubyte[64];
+        auto saved = *word;
+        *word = block.ptr;
+        scope(exit) *word = saved;
 
-    if (lowmem)
-        arenaReport.should == "";
-    else
-        "1 arena words point into the GC heap".should.be in arenaReport;
+        if (lowmem)
+            arenaReport.should == "";
+        else
+            "1 arena words point into the GC heap".should.be in arenaReport;
+    }
 }
 
 
 // dmd's closure frames keep the address of the stack objects they
-// capture, and the arena never frees them. A stack that the GC heap
-// later reuses must not make those words count: here the thread's stack
-// is a GC block, as the memory of an exited thread's stack can be.
+// capture, and the arena never frees them. The report skips a word that
+// was a stack address when the frontend left. The GC heap covering a
+// stack that no longer exists cannot be made to happen on demand, so the
+// stack of the thread here is a GC block: the word does point into a live
+// GC block while the report is read, and the report skips it only because
+// of what the word was when the frontend left.
 debug
 @("arenaHoldsNoGCPointers.stackAddressesOfTheFrontendThread")
 unittest {
     import core.sys.posix.pthread: pthread_attr_init, pthread_attr_setstack,
         pthread_attr_t, pthread_create, pthread_join, pthread_t;
     import core.thread: thread_attachThis, thread_detachThis;
-    import snakebite.frontend.compiler: newInFrontend, withCompilerLock;
+    import snakebite.frontend.compiler: withCompilerLock;
     import snakebite.gc: enterFrontend, leaveFrontend;
 
     __gshared void delegate() onStack;
+    __gshared void** closureFrame;
 
     enum stackSize = 1 << 20;
     auto memory = new ubyte[stackSize + 4096];
@@ -139,7 +153,7 @@ unittest {
             enterFrontend;
             scope(exit) leaveFrontend;
             int local;
-            auto closureFrame = new void*[1];
+            closureFrame = (new void*[1]).ptr;
             closureFrame[0] = &local;
         });
     };
@@ -150,14 +164,17 @@ unittest {
         return null;
     }
 
-    pthread_attr_t attributes;
-    pthread_attr_init(&attributes);
-    pthread_attr_setstack(&attributes, aligned, stackSize).should == 0;
-    pthread_t thread;
-    pthread_create(&thread, &attributes, &run, null).should == 0;
-    pthread_join(thread, null).should == 0;
+    synchronized(reportLock) {
+        pthread_attr_t attributes;
+        pthread_attr_init(&attributes);
+        pthread_attr_setstack(&attributes, aligned, stackSize).should == 0;
+        pthread_t thread;
+        pthread_create(&thread, &attributes, &run, null).should == 0;
+        pthread_join(thread, null).should == 0;
+        scope(exit) closureFrame[0] = null;
 
-    arenaReport.should == "";
+        arenaReport.should == "";
+    }
 }
 
 

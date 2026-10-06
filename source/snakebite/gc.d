@@ -99,10 +99,11 @@ public void leaveFrontend() nothrow @nogc {
 // stack objects they capture, such as a visitor's `this`, and the arena
 // never frees a frame. The stack of a thread that has exited can later
 // be GC heap, and the report would take those addresses for pointers.
-// Such a word is a stack address by what it was when the frontend left:
-// it pointed into the stack of the thread that wrote it, and the GC does
-// not own live stacks. The report skips it for as long as it holds that
-// value.
+// The word held an address of the stack of the writing thread when the
+// frontend left. The report assumes that such a word is not a GC pointer,
+// for as long as it keeps that value. This covers only pthread stacks
+// (not fiber or interpreter stacks) and only words in blocks handed out
+// since the last record.
 debug private struct StackWord {
     const(void*)* word;
     const(void)* value;
