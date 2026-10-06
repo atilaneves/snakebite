@@ -85,6 +85,13 @@ public struct Resolver {
 // executable itself may still have its own copy, which only
 // `symbolAddress` below, never this, will find.
 private void* sharedObjectAddress(in char[] name) {
+    import snakebite.faultsignal: interposedAddress;
+
+    // The executable preempts these names for every other caller, which
+    // is how the fault signal actions stay ours. A guest is no exception.
+    if (auto own = interposedAddress(name))
+        return own;
+
     version (Posix) {
         import core.sys.posix.dlfcn: dlerror, dlsym;
         import std.string: toStringz;
