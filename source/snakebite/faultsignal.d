@@ -217,13 +217,14 @@ public bool installFaultHandlers() @trusted nothrow @nogc {
         // that is not mapped. With every signal blocked, the suspension
         // waits until the thread is back on its own stack.
         sigfillset(&action.sa_mask);
-        foreach (index, signal; handledSignals) {
-            if (sigaction(signal, &action, &_previous[index]) != 0)
+        foreach (signal; handledSignals) {
+            const index = cast(size_t) signal;
+            if (sigaction(signal, &action, &_previous[index].action) != 0)
                 assert(0, "sigaction failed for a fault signal");
             // sigaction publishes the kernel action before libc can finish
             // copying the old action to this array. Readers wait for that
             // copy, not merely for the kernel to accept the new action.
-            atomicStore(_previousReady[index], true);
+            atomicStore(_previous[index].ready, true);
         }
         atomicStore(_installation, Installation.complete);
 
@@ -466,12 +467,17 @@ static if (supported) {
     private shared Installation _installation;
     // What the signals did before this module: a fault of the host goes to
     // it (a sanitizer, a host that embeds snakebite).
-    private __gshared sigaction_t[3] _previous;
-    private shared bool[3] _previousReady;
-    // The saved action stays unchanged while handlers on other threads read
-    // it. A one-shot action is consumed before its call, not after it returns.
-    // Resetting the installed action here would also disable guest recovery.
-    private shared bool[3] _previousReset;
+    // Direct signal indices avoid a search on each forwarded delivery.
+    private enum signalCapacity = SIGSEGV + 1;
+    static assert(SIGFPE < signalCapacity && SIGBUS < signalCapacity);
+    private struct PreviousAction {
+        sigaction_t action;
+        shared bool ready;
+        // The action stays unchanged while other threads read it. Resetting
+        // the kernel action would also disable guest recovery.
+        shared bool reset;
+    }
+    private __gshared PreviousAction[signalCapacity] _previous;
 
     // The trace of a thrown object is made by druntime from the stack. The
     // fault has no use for it, and making it allocates.
@@ -689,25 +695,21 @@ static if (supported) {
         import core.stdc.signal: raise;
         import core.sys.posix.signal: SA_RESETHAND, SIG_IGN;
 
-        size_t index;
-        foreach (candidate, handled; handledSignals)
-            if (handled == signal)
-                index = candidate;
-
-        while (!atomicLoad(_previousReady[index])) {}
-        const previous = &_previous[index];
+        const index = cast(size_t) signal;
+        while (!atomicLoad(_previous[index].ready)) {}
+        const previous = &_previous[index].action;
         const handler = previous.sa_flags & SA_SIGINFO
             ? cast(void*) previous.sa_sigaction
             : cast(void*) previous.sa_handler;
         const callable = handler !is cast(void*) SIG_DFL
             && handler !is cast(void*) SIG_IGN;
         if (callable && (!(previous.sa_flags & SA_RESETHAND)
-            || cas(&_previousReset[index], false, true))) {
+            || cas(&_previous[index].reset, false, true))) {
             // The one-shot claim must precede any change of mask. On the
             // normal stack the collector can suspend this thread safely.
             // On an alternate stack it must stay blocked, as at signal entry.
             return forwardPreviousAction(signal, info, cast(ucontext_t*) context,
-                frame, handler, previous);
+                frame, previous);
         }
 
         // A program that ignored the signal and a program that sent it get
@@ -729,7 +731,7 @@ static if (supported) {
     pragma(inline, true) private Forward* forwardPreviousAction(int signal,
         imported!"core.sys.posix.signal".siginfo_t* info,
         imported!"core.sys.posix.ucontext".ucontext_t* context,
-        size_t frame, const(void)* handler,
+        size_t frame,
         const(imported!"core.sys.posix.signal".sigaction_t)* previous) nothrow @nogc {
         import core.sys.posix.signal: SA_NODEFER, sigdelset, sigismember;
 
@@ -749,12 +751,7 @@ static if (supported) {
             _forward.stack = cast(void*) frame;
             _forward.length = 0;
         }
-        // The saved action may have return-time work before rt_sigreturn.
-        // Keep its restorer in the original frame, including when moved.
-        enum saRestorer = 0x04000000;
-        if (previous.sa_flags & saRestorer)
-            *cast(void**) frame = cast(void*) previous.sa_restorer;
-        _forward.handler = cast(void*) handler;
+        _forward.previous = previous;
         _forward.setMask = !onAlternate || relocate;
         if (_forward.setMask) {
             previousHandlerMask(_forward.mask, previous.sa_mask,
@@ -771,7 +768,7 @@ static if (supported) {
 
     private struct Forward {
         void* stack;
-        void* handler;
+        const(sigaction_t)* previous;
         siginfo_t* info;
         ucontext_t* context;
         bool setMask;
@@ -784,7 +781,11 @@ static if (supported) {
     // delivery can then reuse this thread's packet, not the moved frame.
     private Forward _forward;
     static assert(Forward.stack.offsetof == 0);
-    static assert(Forward.handler.offsetof == 8);
+    static assert(Forward.previous.offsetof == 8);
+    static assert(sigaction_t.sa_handler.offsetof == 0);
+    static assert(sigaction_t.sa_sigaction.offsetof == 0);
+    static assert(sigaction_t.sa_flags.offsetof == 136);
+    static assert(sigaction_t.sa_restorer.offsetof == 144);
     static assert(Forward.info.offsetof == 16);
     static assert(Forward.context.offsetof == 24);
     static assert(Forward.mask.offsetof == 40);
