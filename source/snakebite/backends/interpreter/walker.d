@@ -4206,7 +4206,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     const result = shifted(current, step, shift);
                 else
                     const result = combine!op(
-                        current, step, arithmeticFacts, stepFacts, expression);
+                        current, step, arithmeticFacts, stepFacts);
                 storeBitfieldAt(field, unit, result);
                 storeIntegral(_place, bitfieldValueAtPlace(field, unit),
                     _facts.size);
@@ -4221,7 +4221,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             const result = shifted(current, step, shift);
         else
             const result = combine!op(
-                current, step, arithmeticFacts, stepFacts, expression);
+                current, step, arithmeticFacts, stepFacts);
 
         storeIntegral(target, result, targetFacts.size);
         storeIntegral(
@@ -4344,7 +4344,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     const x = loadIntegral(a, laneSize, signed);
                     const y = loadIntegral(b, laneSize, signed);
                     storeIntegral(lane, combine!op(x, y, plan.laneFacts,
-                        plan.laneFacts, expression), laneSize);
+                        plan.laneFacts), laneSize);
                     break;
                 }
                 case floating:
@@ -4767,7 +4767,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 static if (op == "<<" || op == ">>" || op == ">>>")
                     const result = shifted(a, b, shiftPlan(expression));
                 else
-                    const result = combine!op(a, b, aFacts, bFacts, expression);
+                    const result = combine!op(a, b, aFacts, bFacts);
                 storeIntegral(_place, result, _facts.size);
                 return;
             }
@@ -7137,14 +7137,12 @@ private ulong combine(string op)(
     in long b,
     in imported!"snakebite.nativelayout".TypeFacts aFacts,
     in imported!"snakebite.nativelayout".TypeFacts bFacts,
-    imported!"dmd.expression".Expression expression,
 ) {
     static if (op == "<<" || op == ">>" || op == ">>>")
         // dmd rejects a vector shift and a shift has its own `ShiftPlan`.
         assert(0);
     else static if (op == "/" || op == "%")
-        return divided!op(
-            a, b, sharedSignedness(aFacts, bFacts), aFacts.size, expression);
+        return divided!op(a, b, sharedSignedness(aFacts, bFacts), aFacts.size);
     else
         // `+`, `-`, `*`, `&`, `|` and `^` leave the same low bits
         // whichever way the operands were widened, so no signedness
@@ -7166,26 +7164,15 @@ private bool sharedSignedness(
     return a.isUnsigned;
 }
 
-// D leaves a division by zero undefined, and the host's own divide
-// instruction raises SIGFPE on it, which would take the host process
-// down on guest input. The guest asked for something with no answer, so
-// this reports that to the host the same way a failed guest assertion
-// is reported: an exception the host survives, naming the expression.
+// D leaves a division by zero undefined. It is not checked here: the host's
+// divide instruction raises SIGFPE, which the fault handler reports as the
+// guest's `GuestFault.Kind.divisionByZero`, as it does a null dereference.
 private ulong divided(string op)(
     in long a,
     in long b,
     in bool unsigned,
     in size_t width,
-    imported!"dmd.expression".Expression expression,
 ) {
-    import std.conv: text;
-
-    if (b == 0)
-        throw new SnakebiteException(
-            text("interpreter: division by zero in `",
-                expression.toString, "`"),
-        );
-
     // A signed operand arrives sign-extended to 64 bits, which is not its
     // value as an operand of the operation's own unsigned type.
     if (unsigned) {
