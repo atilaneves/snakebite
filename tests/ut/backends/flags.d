@@ -321,6 +321,119 @@ static foreach (backend; Compiled) {
 }
 
 
+// A null dereference is only checked when the flag asks for it; then it
+// raises where an unchecked one faults.
+private enum nullPointerError = "core.exception.NullPointerError";
+
+
+static foreach (backend; Guests) {
+    @("flags.nullDerefField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        enum program = q{
+            struct S { int x; }
+            @system unittest {
+                S* p;
+                int y = p.x;
+            }
+        };
+
+        foreach (row; [
+            Row(["-check=nullderef"], program,
+                Expect.raised(nullPointerError), Expect.same),
+            Row(["-check=nullderef=on"], program,
+                Expect.raised(nullPointerError), Expect.same),
+            Row(["-check=nullderef", "-checkaction=halt"], program,
+                Expect.halted, Expect.raised),
+            Row(["-check=nullderef=off"], program,
+                Expect.halted, Expect.raised),
+            Row([], program, Expect.halted, Expect.raised),
+        ])
+            shouldRun!backend(row);
+    }
+}
+
+
+static foreach (backend; Guests) {
+    @("flags.nullDerefPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        enum program = q{
+            @system unittest {
+                int* p;
+                int y = *p;
+            }
+        };
+
+        foreach (row; [
+            Row(["-check=nullderef"], program,
+                Expect.raised(nullPointerError), Expect.same),
+            Row(["-check=nullderef=on"], program,
+                Expect.raised(nullPointerError), Expect.same),
+            Row(["-check=nullderef", "-checkaction=halt"], program,
+                Expect.halted, Expect.raised),
+            Row(["-check=nullderef=off"], program,
+                Expect.halted, Expect.raised),
+            Row([], program, Expect.halted, Expect.raised),
+        ])
+            shouldRun!backend(row);
+    }
+}
+
+
+static foreach (backend; Guests) {
+    @("flags.nullDerefVirtualCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        enum program = q{
+            class C { int f() { return 1; } }
+            @system unittest {
+                C c;
+                c.f();
+            }
+        };
+
+        foreach (row; [
+            Row(["-check=nullderef"], program,
+                Expect.raised(nullPointerError), Expect.same),
+            Row(["-check=nullderef=on"], program,
+                Expect.raised(nullPointerError), Expect.same),
+            Row(["-check=nullderef", "-checkaction=halt"], program,
+                Expect.halted, Expect.raised),
+        ])
+            shouldRun!backend(row);
+    }
+}
+
+
+static foreach (backend; Guests) {
+    @("flags.nullDerefDelegate." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        enum program = q{
+            class C { int f() { return 1; } }
+            @system unittest {
+                C c;
+                auto dg = &c.f;
+            }
+        };
+
+        foreach (row; [
+            Row(["-check=nullderef"], program,
+                Expect.raised(nullPointerError), Expect.same),
+            Row(["-check=nullderef=on"], program,
+                Expect.raised(nullPointerError), Expect.same),
+            Row(["-check=nullderef", "-checkaction=halt"], program,
+                Expect.halted, Expect.raised),
+            Row(["-check=nullderef=off"], program,
+                Expect.halted, Expect.raised),
+            Row([], program, Expect.halted, Expect.raised),
+        ])
+            shouldRun!backend(row);
+    }
+}
+
+
 // The context action puts the operands of the failed comparison in the
 // message.
 static foreach (backend; Guests) {

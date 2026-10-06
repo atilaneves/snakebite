@@ -24,6 +24,10 @@ public FailurePlan assertPlanOf(in Checks checks) @safe pure nothrow @nogc {
     return planFor(checks.assertion, checks);
 }
 
+public FailurePlan nullDerefPlanOf(in Checks checks) @safe pure nothrow @nogc {
+    return planFor(checks.nullDeref, checks);
+}
+
 // `function_` is the function whose code holds the check:
 // `-release` checks bounds only in `@safe` code, and code in a C module is
 // never checked, as dmd's glue layer decides (`IRState.arrayBoundsCheck`).

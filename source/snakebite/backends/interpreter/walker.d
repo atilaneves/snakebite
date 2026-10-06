@@ -1626,6 +1626,38 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         callPlan(plan, null, arguments);
     }
 
+    // What dereferencing `pointer` does under `-check=nullderef`: the
+    // druntime hook that dmd's glue layer calls raises `NullPointerError`.
+    // Without the flag, or for a pointer that is not null, it returns.
+    private void checkNotNull(in void* pointer, in Loc loc) {
+        if (pointer is null)
+            failNullDeref(loc);
+    }
+
+    extern(D) private void failNullDeref(in Loc loc) {
+        import snakebite.backends.checkplan: nullDerefPlanOf, FailurePlan;
+        import snakebite.backends.druntimehooks: DruntimeHook, planOf;
+        import snakebite.backends.exceptions: cAssertCallOf;
+
+        final switch (nullDerefPlanOf(_program.checks).kind) with (FailurePlan.Kind) {
+            case ignore:
+                return;
+            case halt:
+                haltRun;
+            case cAssert:
+                callCAssert(cAssertCallOf(
+                    "null pointer dereference".ptr, loc, _function));
+            case raise:
+                break;
+        }
+
+        const file = cast(const(char)*) loc.filename;
+        const line = cast(uint) loc.linnum;
+        const(void*)[] arguments =
+            [cast(const(void)*) &file, cast(const(void)*) &line];
+        callPlan(planOf(*_plans, DruntimeHook.nullPointer), null, arguments);
+    }
+
     // What `-checkaction=halt` does. A halt unwinds to the program's halt
     // action's owner as a `Halted`, and `_halted` tells the cleanup
     // that runs on the way up, which holds no `catch` to tell it by, to
@@ -3020,7 +3052,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
-        storeDelegateValue(delegateTargetOf(literal, _type), _place);
+        storeDelegateValue(delegateTargetOf(literal, _type), _place, literal.loc);
     }
 
     // `&nested` is lowered by dmd to a DelegateExp whose expression is the
@@ -3032,7 +3064,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         storeDelegateValue(
             delegateTargetOf(expression.func, _type, expression.e1,
                 expression.vthis2),
-            _place);
+            _place, expression.loc);
     }
 
     // A delegate keeps its native context word so compiled code can pass
@@ -3040,6 +3072,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private void storeDelegateValue(
         DelegateTarget target,
         void* place,
+        in Loc loc,
     ) {
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, storeIntegral;
@@ -3052,10 +3085,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (target.receiver !is null) {
             if (target.receiverIsAddress)
                 context = cast(size_t) addressOf(target.receiver);
-            else
+            else {
                 evaluate(target.receiver, target.receiver.type,
                     factsOf(target.receiver.type), &context);
-
+                checkNotNull(cast(void*) context, loc);
+            }
         } else if (target.needsContext) {
             context = cast(size_t) tryContextOf(target.contextOwner);
         }
@@ -3624,7 +3658,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         public void* storagePointer(PtrExp expression) {
-            return evaluator.asPointer(expression.e1);
+            auto pointer = evaluator.asPointer(expression.e1);
+            evaluator.checkNotNull(pointer, expression.loc);
+            return pointer;
         }
 
         public void storageEffect(Expression expression) {
@@ -5247,7 +5283,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     override void visit(PtrExp expression) {
         import core.stdc.string: memcpy;
 
-        memcpy(_place, asPointer(expression.e1), _facts.size);
+        auto source = asPointer(expression.e1);
+        checkNotNull(source, expression.loc);
+        memcpy(_place, source, _facts.size);
     }
 
     // `info.base`: an aggregate field read. The field's own byte offset is
@@ -5285,6 +5323,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             "a class reference or a pointer is not one word on this target");
         void* object;
         evaluate(aggregate, aggregate.type, facts, &object);
+        checkNotNull(object, aggregate.loc);
         return object;
     }
 
@@ -6495,6 +6534,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             auto dot = expression.e1.isDotVarExp;
             auto receiver = dot is null ? expression.e1 : dot.e1;
             classReceiver = classReferenceOf(receiver);
+            if (classReceiver is null && !expression.directcall
+                    && function_.isVirtualMethod)
+                failNullDeref(expression.loc);
             if (classReceiver is null)
                 throw new SnakebiteException(
                     text("interpreter cannot call `", expression.toString,

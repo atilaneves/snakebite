@@ -121,6 +121,18 @@ unittest {
 }
 
 
+@("checks.nullderef.resolved")
+unittest {
+    with (CHECKENABLE) {
+        resolved([]).nullDeref.should == off;
+        resolved(["-release"]).nullDeref.should == off;
+        resolved(["-check=nullderef"]).nullDeref.should == on;
+        resolved(["-check=on"]).nullDeref.should == on;
+        resolved(["-check=on", "-check=nullderef=off"]).nullDeref.should == off;
+    }
+}
+
+
 @("checks.noBoundsChecksDefinition")
 unittest {
     resolved(["-check=bounds=off"]).definitions.should == ["D_NoBoundsChecks"];

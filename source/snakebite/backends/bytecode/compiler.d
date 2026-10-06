@@ -3217,6 +3217,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (aggregateType.ty == Tclass || aggregateType.ty == Tpointer) {
             addressOffset = reserveTemp(pointerFacts);
             evalInto(expression.e1, addressOffset, size_t.sizeof);
+            compileNullCheck(addressOffset, expression.e1.loc);
         } else {
             assert(aggregateType.isTypeStruct !is null,
                 "a struct field has a struct or class receiver");
@@ -4257,8 +4258,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             if (target.receiverIsAddress) {
                 const address = compileAddress(target.receiver);
                 emit(&opCopy, context, address, size_t.sizeof);
-            } else
+            } else {
                 evalInto(target.receiver, context, size_t.sizeof);
+                compileNullCheck(context, expression.loc);
+            }
         } else if (target.needsContext) {
             const contextOffset = contextAddressOf(target.contextOwner);
             emit(&opCopy, _destination + delegateContextOffset,
@@ -4426,6 +4429,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const facts = TypeFacts.of(field.type);
             const objectOffset = reserveTemp(pointerFacts);
             evalInto(expression.e1, objectOffset, size_t.sizeof);
+            compileNullCheck(objectOffset, expression.e1.loc);
             const fieldOffset = reserveTemp(pointerFacts);
             emit(&opConstant, fieldOffset,
                 addConstant(cast(long) field.offset), size_t.sizeof);
@@ -6543,6 +6547,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const objectOffset = reserveTemp(pointerFacts);
         evalInto(dot.e1, objectOffset, size_t.sizeof);
+        compileNullCheck(objectOffset, expression.loc);
 
         const calleeSlotOffset =
             compileClassVtableSlot(expression, objectOffset, callee);
@@ -7367,6 +7372,57 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
+    // `-check=nullderef`: dmd's glue layer branches around druntime's
+    // `_d_nullpointerp` the same way, on the pointer itself, which is
+    // nonzero when it is not null. Without the flag nothing is emitted.
+    private void compileNullCheck(in size_t pointerOffset, in Loc loc) {
+        import snakebite.backends.checkplan: nullDerefPlanOf, FailurePlan;
+        import snakebite.backends.druntimehooks: DruntimeHook;
+        import snakebite.backends.exceptions: cAssertCallOf;
+
+        final switch (nullDerefPlanOf(_bytecode.checks).kind) with (FailurePlan.Kind) {
+            case ignore:
+                break;
+            case halt:
+                emit(&opAssert, pointerOffset, haltSite, size_t.sizeof);
+                break;
+            case cAssert: {
+                const call = cAssertCallOf(
+                    "null pointer dereference".ptr, loc, _function);
+                compileUnlessHolds(pointerOffset, size_t.sizeof, false, () =>
+                    compileCAssertCall(call, constantArgument(
+                        cast(size_t) call.assertion, size_t.sizeof)));
+                break;
+            }
+            case raise:
+                compileUnlessHolds(pointerOffset, size_t.sizeof, false, () =>
+                    compileNullPointerCall(loc));
+                break;
+        }
+    }
+
+    private void compileNullPointerCall(in Loc loc) {
+        import snakebite.backends.druntimehooks: DruntimeHook;
+
+        auto plan = planOf(_bytecode._plans, DruntimeHook.nullPointer);
+
+        const fileOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, fileOffset,
+            addConstant(cast(long) cast(size_t) loc.filename),
+            size_t.sizeof);
+
+        const lineOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, lineOffset, addConstant(cast(long) loc.linnum),
+            uint.sizeof);
+
+        Arg[] args = [
+            Arg(fileOffset, 0, size_t.sizeof),
+            Arg(lineOffset, 0, uint.sizeof),
+        ];
+        _callSites ~= CallSite.native(cast(const(void)*) plan, args, 0);
+        emit(&opCall, discardResult, _callSites.length - 1, 0);
+    }
+
     private void compileBoundsHookCall(
         in BoundsCheck check,
         Arg[] extraArgs,
@@ -7442,6 +7498,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         public size_t storagePointer(PtrExp expression) {
             const result = compiler.reserveTemp(compiler.pointerFacts);
             compiler.evalInto(expression.e1, result, size_t.sizeof);
+            compiler.compileNullCheck(result, expression.loc);
             return result;
         }
 
