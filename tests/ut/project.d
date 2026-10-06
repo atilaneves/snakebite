@@ -1,22 +1,21 @@
 module ut.project;
 
 
-import core.atomic: atomicLoad;
+import core.atomic: atomicLoad, atomicOp;
 import core.runtime: UnitTestResult;
-import core.atomic: atomicOp;
 import core.sync.barrier: Barrier;
 import core.sync.mutex: Mutex;
 import core.sys.posix.signal: SA_RESETHAND, SIGBUS, SIGFPE, SIGSEGV;
-import snakebite.backends: BackendName, backendIdentity;
 import core.thread: Thread;
+import snakebite.backends: BackendName, backendIdentity;
 import snakebite.backends.backend: Program;
 import snakebite.backends.guestfault: GuestFault, GuestFaultException;
-import snakebite.frontend.compiler: parseSnippets;
-import snakebite.frontend.dmd.functions: findFunction;
 import snakebite.dependencyimage: TestHooks;
 import snakebite.execution: prepareProject, executeBackend;
-import snakebite.guestrunlock: guestRunLock;
 import snakebite.dub: DubDescription;
+import snakebite.frontend.compiler: parseSnippets;
+import snakebite.frontend.dmd.functions: findFunction;
+import snakebite.guestrunlock: guestRunLock;
 import snakebite.project: dubSourceSetFromDescription, projectStateDirectory;
 import std.algorithm.searching: endsWith;
 import std.digest.sha: sha256Of;
@@ -365,6 +364,163 @@ static foreach (BackendType; FaultingGuests) {
         // One fault on each thread, while both runs were active.
         atomicLoad(Probe.reported).should == 2;
         kernelAction(SIGSEGV).should == before;
+        guestFaultReportedOnAnotherThread!BackendType.shouldBeTrue;
+    }
+}
+
+
+// A guest that leaves a Fiber suspended leaves its mark on the thread. The
+// host that runs on that thread afterwards is not the guest, and druntime
+// must not take the kernel action from us for it.
+static foreach (BackendType; FaultingGuests) {
+    @Tags(BackendType.stringof)
+    @("runtime.faultSignalActionsAreUnchangedAfterAGuestLeavesAFiberSuspended." ~ BackendType.stringof)
+    unittest {
+        _initDepthLock.lock;
+        scope(exit) _initDepthLock.unlock;
+
+        const sandbox = Sandbox();
+        sandbox.writeFile("app/app.d", "module app; int main() { return 0; }");
+        auto program = prepareProject(sandbox.inSandboxPath("app")).project.program;
+        program.testHooks = TestHooks.of(null, &recordingRunner);
+        KernelAction[3] before;
+        foreach (index, signal; faultSignals)
+            before[index] = kernelAction(signal);
+
+        // A thread of its own: the mark stays on it until the Fiber ends.
+        auto worker = new Thread({
+            auto module_ = parseSnippets([q{
+                module suspended;
+                import core.thread.fiber: Fiber;
+                __gshared Fiber kept;
+                int leave() { kept = new Fiber({ Fiber.yield(); }); kept.call; return 1; }
+                int finish() { kept.call; return 2; }
+            }])[0];
+            auto backend = new BackendType(Program([module_]));
+            int result;
+            backend.call(module_.findFunction("leave"), &result, []);
+
+            executeBackend(backendIdentity!BackendType, program, null, false).status.should == 0;
+
+            foreach (index; 0 .. faultSignals.length)
+                _actionsInsideRunner[index].should == before[index];
+            guestFaultReported!BackendType.shouldBeTrue;
+            backend.call(module_.findFunction("finish"), &result, []);
+        }).start;
+        worker.join;
+    }
+}
+
+
+// A guest can install a handler of its own and read it back, and it never
+// reaches the kernel: a fault of the guest on another thread, while the
+// action of the guest is in force, must still come back as an exception.
+static foreach (BackendType; FaultingGuests) {
+    @Tags(BackendType.stringof)
+    @("runtime.guestSigactionIsRecordedAndNeverReachesTheKernel." ~ BackendType.stringof)
+    unittest {
+        auto module_ = parseSnippets([q{
+            module installer;
+            import core.sys.posix.signal;
+            int install() {
+                sigaction_t action;
+                action.sa_flags = SA_RESETHAND;
+                if (sigaction(SIGSEGV, &action, null) != 0)
+                    return -1;
+                sigaction_t current;
+                if (sigaction(SIGSEGV, null, &current) != 0)
+                    return -2;
+                return (current.sa_flags & SA_RESETHAND) != 0 ? 1 : 0;
+            }
+        }])[0];
+        auto backend = new BackendType(Program([module_]));
+        const before = kernelAction(SIGSEGV);
+        int result;
+
+        backend.call(module_.findFunction("install"), &result, []);
+
+        result.should == 1;
+        kernelAction(SIGSEGV).should == before;
+        guestFaultReportedOnAnotherThread!BackendType.shouldBeTrue;
+        guestFaultReported!BackendType.shouldBeTrue;
+    }
+}
+
+
+private alias HandlerSetter = extern(C) void* function(int, void*) nothrow @nogc;
+private alias Ignorer = extern(C) int function(int) nothrow @nogc;
+private alias Interrupter = extern(C) int function(int, int) nothrow @nogc;
+private alias VectorSetter = extern(C) int function(int, const(SigVec)*, SigVec*) nothrow @nogc;
+
+private struct SigVec {
+    void* handler;
+    int mask;
+    int flags;
+}
+
+// By name at run time, as a native library that a guest loads would: the
+// linker does not offer every one of these.
+private auto symbolNamed(Function)(in string name) {
+    import core.sys.posix.dlfcn: dlsym;
+    import std.string: toStringz;
+
+    auto address = dlsym(null, name.toStringz);
+    address.shouldNotBeNull;
+    return cast(Function) address;
+}
+
+// Puts back the action that `sigaction` reports, so that a test that
+// changes it does not leave its request to the host faults of other tests.
+private struct ReportedActions {
+    import core.sys.posix.signal: sigaction, sigaction_t;
+
+    sigaction_t[3] saved;
+
+    @disable this(this);
+
+    this(int) {
+        foreach (index, signal; faultSignals)
+            sigaction(signal, null, &saved[index]);
+    }
+
+    ~this() {
+        foreach (index, signal; faultSignals)
+            sigaction(signal, &saved[index], null);
+    }
+}
+
+// `signal` and the other functions that glibc has for the same job call an
+// internal `sigaction`, not the symbol, so they need their own definitions.
+static foreach (BackendType; FaultingGuests) {
+    @Tags(BackendType.stringof)
+    @("runtime.signalFunctionsNeverChangeTheKernelActionOfTheFaultSignals." ~ BackendType.stringof)
+    unittest {
+        auto module_ = parseSnippets([q{
+            module signaller;
+            import core.sys.posix.signal: SIG_DFL, SIGSEGV;
+            extern(C) void* signal(int, void*);
+            int reset() { signal(SIGSEGV, null); return 1; }
+        }])[0];
+        auto backend = new BackendType(Program([module_]));
+        const restore = ReportedActions(0);
+        KernelAction[3] before;
+        foreach (index, signal; faultSignals)
+            before[index] = kernelAction(signal);
+
+        foreach (signal; faultSignals) {
+            foreach (name; ["signal", "bsd_signal", "__sysv_signal", "sysv_signal",
+                            "ssignal", "sigset"])
+                symbolNamed!HandlerSetter(name)(signal, null);
+            symbolNamed!Ignorer("sigignore")(signal);
+            symbolNamed!Interrupter("siginterrupt")(signal, 1);
+            const SigVec vector = {null, 0, 4};
+            symbolNamed!VectorSetter("sigvec")(signal, &vector, null);
+        }
+        int result;
+        backend.call(module_.findFunction("reset"), &result, []);
+
+        foreach (index, signal; faultSignals)
+            kernelAction(signal).should == before[index];
         guestFaultReportedOnAnotherThread!BackendType.shouldBeTrue;
     }
 }
