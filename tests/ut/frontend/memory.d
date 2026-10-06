@@ -7,14 +7,18 @@ module ut.frontend.memory;
 
 
 import core.memory: GC;
+import core.sync.mutex: Mutex;
 import snakebite.frontend.compiler: arenaReport, parseSnippet;
 import ut.backends;
 
 
-// Held by each test that plants a word in the arena or reads its report
-// (`arenaReport` covers the whole arena), so none of them reads another's
-// planted word.
-private __gshared Object reportLock = new Object;
+// The arena report covers the whole arena, and one test plants a GC
+// pointer in it. A test that reads the report, or plants, holds this lock.
+private __gshared Mutex arenaReportLock;
+
+shared static this() {
+    arenaReportLock = new Mutex;
+}
 
 
 // Fresh declarations and template instances, so dmd does real work
@@ -69,7 +73,7 @@ unittest {
         }
     });
 
-    synchronized(reportLock)
+    synchronized (arenaReportLock)
         arenaReport.should == "";
 }
 
@@ -89,7 +93,7 @@ unittest {
     const match = matchFirst("snippet_42", regex(`hostCacheProbe\d+|snippet_\d+`));
     match.empty.should == false;
 
-    synchronized(reportLock)
+    synchronized (arenaReportLock)
         arenaReport.should == "";
 }
 
@@ -107,7 +111,7 @@ unittest {
     import snakebite.frontend.compiler: newInFrontend;
     import snakebite.gc: lowmem;
 
-    synchronized(reportLock) {
+    synchronized (arenaReportLock) {
         // An identifier's name is arena memory the test can write a word to.
         auto identifier = newInFrontend!(Identifier.idPool)(
             "reportsAPointerIntoTheGCHeapWithRoomForAWord");
@@ -164,7 +168,7 @@ unittest {
         return null;
     }
 
-    synchronized(reportLock) {
+    synchronized (arenaReportLock) {
         pthread_attr_t attributes;
         pthread_attr_init(&attributes);
         pthread_attr_setstack(&attributes, aligned, stackSize).should == 0;
