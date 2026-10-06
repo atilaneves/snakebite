@@ -2661,6 +2661,10 @@ FINALIZER_SHAPES: dict[str, tuple[str | None, ...]] = {
         "int pick(bool b, lazy int v) { return b ? v : 0; }",
         "total += pick(true, dead + 1);",
     ),
+    "membercall": (
+        "class B { void bump() { total += 1; } ~this() { bump; ++dead; } }",
+        None,
+    ),
     "memberdtor": (
         "struct M { int v = 3; ~this() { total += v; } } class H { M "
         "m; ~this() { total += 1; } } __gshared int made; void mk() { "
