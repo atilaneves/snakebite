@@ -659,6 +659,8 @@ extern(C) int main() {{
 def test_dependency_entry_startup(
     tmp_path: Path, backend: str, entry: str,
 ) -> None:
+    if backend == "ctfe":
+        pytest.skip("Verified CTFE limit: native fputs has no compile-time body")
     dependency = tmp_path / "dependency"
     (dependency / "source").mkdir(parents=True)
     (dependency / "dub.sdl").write_text(
@@ -747,7 +749,135 @@ extern(C) int next() {{ return 7; }}
             assert "MAIN" not in markers, output
         else:
             assert markers[0] == "INIT", output
+            assert "UNITTEST" not in markers, output
             assert markers[-1] == "MAIN", output
+
+
+@pytest.mark.parametrize("backend", [*BACKENDS, "native-ldc"])
+@pytest.mark.parametrize("case", ["nested", "alias", "ctor-failure", "dtor-failure", "ctor-child-init", "descendant", "override", "roots", "tls-start", "daemon", "pointer", "exit-active"])
+def test_dependency_explicit_lifecycle(tmp_path: Path, backend: str, case: str) -> None:
+    if backend == "ctfe":
+        pytest.skip("Verified CTFE limit: native fputs has no compile-time body")
+    dependency = tmp_path / "dependency"
+    (dependency / "source").mkdir(parents=True)
+    (dependency / "dub.sdl").write_text('name "dep"\ntargetType "library"\n', encoding="utf-8")
+    override = 'extern(C) int rt_init() { fputs("USER_INIT\\n", stderr); return 7; }' if case == "override" else "extern(C) int rt_init();"
+    (dependency / "source" / "dep.d").write_text("""module dep;
+import core.stdc.stdio;
+import core.memory : GC;
+__gshared int sharedStarted;
+int threadStarted;
+__gshared void* sharedRoot;
+void* threadRoot;
+shared static this() { sharedStarted = 1; fputs("DEP_CTOR\\n", stderr); }
+static this() { threadStarted = 1; fputs("DEP_TLS_CTOR\\n", stderr); }
+shared static ~this() { fputs("DEP_DTOR\\n", stderr); }
+static ~this() { fputs("DEP_TLS_DTOR\\n", stderr); }
+int status() { return sharedStarted * 10 + threadStarted; }
+extern(C) int dependencyInit() { return rt_init(); }
+extern(C) void* dependencyInitAddress() { return cast(void*) &rt_init; }
+void holdRoots() { sharedRoot = GC.malloc(64); threadRoot = GC.malloc(64); }
+bool rootsAlive() { return GC.query(sharedRoot).size == 64 && GC.query(threadRoot).size == 64; }
+extern(C) const(void)* dependencyIntType() { return cast(const(void)*) typeid(int); }
+int fullDBody() { try { throw new Exception("full D"); } catch (Exception error) { return error.msg == "full D" ? 2 : 0; } }
+""" + override, encoding="utf-8")
+    root = tmp_path / "root"
+    (root / "source").mkdir(parents=True)
+    (root / "dub.json").write_text(json.dumps({
+        "name": "app", "targetType": "executable",
+        "dependencies": {"dep": {"path": "../dependency"}},
+        "libs-dmd": ["phobos2"], "dflags-ldc": ["-link-defaultlib-shared"],
+        "mainSourceFile": "source/app.d",
+        "configurations": [{"name": "unittest", "targetType": "executable", "mainSourceFile": "source/app.d"}],
+    }), encoding="utf-8")
+    constructor = 'fputs("ROOT_CTOR\\n", stderr);'
+    destructor = 'fputs("ROOT_DTOR\\n", stderr);'
+    thread_constructor = 'fputs("ROOT_TLS_CTOR\\n", stderr);'
+    body = "assert(rt_term() == 0); assert(rt_init()); assert(status() == 11);"
+    if case == "nested":
+        body += 'assert(dependencyInit()); assert(rt_term()); fputs("ONE_TERM\\n", stderr); assert(rt_term()); assert(rt_term() == 0);'
+    elif case == "alias":
+        body = 'auto initialize = &requestInit; assert(initialize()); assert(status() == 11); assert(rt_term());'
+    elif case == "ctor-failure":
+        constructor += 'throw new Exception("CTOR_FAILURE");'
+        body = 'assert(rt_init() == 0); assert(rt_term() == 0);'
+    elif case == "dtor-failure":
+        destructor += 'throw new Exception("DTOR_FAILURE");'
+        body += 'assert(rt_term() == 0); assert(rt_term() == 0);'
+    elif case == "ctor-child-init":
+        constructor += 'auto t = new Thread({ assert(rt_init()); assert(rt_term()); fputs("CHILD_END\\n", stderr); }); t.start; t.join;'
+        body += "assert(rt_term());"
+    elif case == "descendant":
+        body += 'auto t = new Thread({ Thread.sleep(20.msecs); auto child = new Thread({ Thread.sleep(20.msecs); fputs("CHILD_END\\n", stderr); }); child.start; }); t.start; assert(rt_term());'
+    elif case == "override":
+        body = "assert(dependencyInit() == 7);"
+    elif case == "roots":
+        body += 'holdRoots(); GC.collect; assert(rootsAlive()); assert(dependencyIntType() == cast(const(void)*) typeid(int)); assert(fullDBody() == 2); assert(rt_term());'
+    elif case == "pointer":
+        body += 'assert(dependencyInitAddress() == cast(void*) &requestInit); assert(rt_term());'
+    elif case == "exit-active":
+        body += 'exit(0);'
+    elif case == "tls-start":
+        constructor += 'entered = new Semaphore; release = new Semaphore;'
+        thread_constructor += 'if (blockChild && !Thread.getThis.isDaemon) { entered.notify; release.wait; fputs("TLS_RELEASED\\n", stderr); }'
+        body += 'blockChild = true; auto t = new Thread({ fputs("CHILD_END\\n", stderr); }); t.start; entered.wait; auto helper = new Thread({ Thread.sleep(20.msecs); release.notify; }); helper.isDaemon = true; helper.start; assert(rt_term());'
+    elif case == "daemon":
+        constructor += 'entered = new Semaphore; release = new Semaphore;'
+        body += 'auto t = new Thread({ entered.notify; release.wait; fputs("CHILD_END\\n", stderr); }); t.isDaemon = true; t.start; entered.wait; assert(rt_term());'
+    (root / "source" / "app.d").write_text("""module app;
+import dep;
+import core.stdc.stdio;
+import core.stdc.stdlib : exit;
+import core.thread : Thread;
+import core.sync.semaphore : Semaphore;
+import core.memory : GC;
+import core.time : msecs;
+__gshared Semaphore entered, release;
+__gshared bool blockChild;
+extern(C) int rt_term();
+extern(C) pragma(mangle, "rt_init") int requestInit();
+shared static this() { """ + constructor + """ }
+static this() { """ + thread_constructor + """ }
+shared static ~this() { """ + destructor + """ }
+static ~this() { fputs("ROOT_TLS_DTOR\\n", stderr); }
+extern(C) int main() {
+    fputs("INIT\\n", stderr);
+    """ + body + """
+    fputs("MAIN\\n", stderr);
+    return 0;
+}
+""", encoding="utf-8")
+    if backend in ["native", "native-ldc"]:
+        compiler = native_compiler() if backend == "native" else shutil.which("ldc2")
+        if compiler is None:
+            pytest.skip("ldc2 is not on PATH")
+        command = ["dub", "test", f"--compiler={compiler}"]
+    else:
+        command = [sb_path(), f"--backend={backend}", "--no-optimise-image", str(root)]
+    result = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=TIMEOUT)
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    lines = output.splitlines()
+    if case == "override":
+        assert lines.count("USER_INIT") == 1, output
+        assert "DEP_CTOR" not in lines and "ROOT_CTOR" not in lines, output
+    else:
+        assert lines.count("DEP_CTOR") == 1 and lines.count("ROOT_CTOR") == 1, output
+        assert lines.index("DEP_CTOR") < lines.index("ROOT_CTOR"), output
+        if case == "ctor-failure":
+            assert "CTOR_FAILURE" in output and "DEP_DTOR" not in lines and "ROOT_DTOR" not in lines, output
+        else:
+            assert lines.count("ROOT_DTOR") == 1, output
+            if case == "dtor-failure":
+                assert "DTOR_FAILURE" in output and "DEP_DTOR" not in lines, output
+            else:
+                assert lines.count("DEP_DTOR") == 1, output
+        if case in ["descendant", "tls-start"]:
+            assert lines.index("CHILD_END") < lines.index("ROOT_DTOR"), output
+        if case == "daemon":
+            assert "CHILD_END" not in lines, output
+        if case == "nested":
+            assert lines.index("ONE_TERM") < lines.index("ROOT_DTOR"), output
 
 
 # The tests can run in parallel (see build/pytest-workers.sh) because the
