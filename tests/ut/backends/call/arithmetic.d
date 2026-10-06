@@ -1,6 +1,11 @@
 module ut.backends.call.arithmetic;
 
 
+import snakebite.backends.backend: Program;
+import snakebite.backends.guestfault: GuestFault, GuestFaultException;
+import snakebite.frontend.compiler: parseSnippet;
+import snakebite.frontend.dmd.functions: findFunction;
+import std.format: format;
 import ut.backends;
 
 
@@ -288,87 +293,125 @@ static foreach (backend; Matrix!()) {
 }
 
 // A zero divisor has no answer in D, and the host's divide instruction
-// raises SIGFPE on it - which would end the host process rather than the
-// guest call. The interpreter reports it instead, naming the expression, so
-// this is pinned for the interpreter alone: compiled D really does die.
-@("arithmetic.divide.byZero.Interpreter")
-@Tags("Interpreter")
-unittest {
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
+// raises SIGFPE on it. Both backends report that as the guest's fault
+// rather than ending the host process; compiled D really does die, and
+// dmd's interpreter reports a diagnostic, so those arms are omitted.
+private alias ByZero = Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the test catches the fault of a call on a backend object, and the "
+        ~ "Native arm is code compiled into bin/ut with no such object"),
+    Omit!(Ctfe, Because.diverges,
+        "dmd's interpreter reports a division by zero as a diagnostic and "
+        ~ "raises no GuestFaultException"),
+);
 
-    auto module_ = parseSnippet(q{
-        int seven() { return 7; }
-        int zero() { return 0; }
-        int quotient() { return seven() / zero(); }
-    });
-    auto function_ = findFunction(module_, "quotient");
-
-    int result;
-    interpreter(module_).call(function_, &result, [])
-        .shouldThrowWithMessage(
-            "interpreter: division by zero in `seven() / zero()`");
+static foreach (backend; ByZero) {
+    @("arithmetic.divide.byZero." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shouldFaultOnZeroDivisor!backend("int", "/", "quotient");
+    }
 }
 
-@("arithmetic.modulo.byZero.Interpreter")
-@Tags("Interpreter")
-unittest {
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
+private void shouldFaultOnZeroDivisor(BackendType)(
+    in string type,
+    in string op,
+    in string name,
+) {
+    auto module_ = parseSnippet(format(q{
+        %1$s seven() { return 7; }
+        %1$s zero() { return 0; }
+        %1$s %3$s() { return seven() %2$s zero(); }
+    }, type, op, name));
 
-    auto module_ = parseSnippet(q{
-        int seven() { return 7; }
-        int zero() { return 0; }
-        int remainder() { return seven() % zero(); }
-    });
-    auto function_ = findFunction(module_, "remainder");
+    GuestFaultException fault;
+    long result;
+    try
+        new BackendType(Program([module_])).call(
+            module_.findFunction(name), &result, []);
+    catch (GuestFaultException caught)
+        fault = caught;
 
-    int result;
-    interpreter(module_).call(function_, &result, [])
-        .shouldThrowWithMessage(
-            "interpreter: division by zero in `seven() % zero()`");
+    fault.shouldNotBeNull;
+    fault.kind.should == GuestFault.Kind.divisionByZero;
 }
 
-// The zero-divisor guard sits above the signedness question, so unsigned
-// division and modulo are refused the same way. Without these, a guard
-// moved below the unsigned path would still leave the signed pair passing
-// while the host died on `uint / 0u`.
-@("arithmetic.divide.byZero.unsigned.Interpreter")
-@Tags("Interpreter")
-unittest {
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
-
-    auto module_ = parseSnippet(q{
-        uint seven() { return 7u; }
-        uint zero() { return 0u; }
-        uint quotient() { return seven() / zero(); }
-    });
-    auto function_ = findFunction(module_, "quotient");
-
-    uint result;
-    interpreter(module_).call(function_, &result, [])
-        .shouldThrowWithMessage(
-            "interpreter: division by zero in `seven() / zero()`");
+static foreach (backend; ByZero) {
+    @("arithmetic.modulo.byZero." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shouldFaultOnZeroDivisor!backend("int", "%", "remainder");
+    }
 }
 
-@("arithmetic.modulo.byZero.unsigned.Interpreter")
-@Tags("Interpreter")
-unittest {
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
+static foreach (backend; ByZero) {
+    @("arithmetic.divide.byZero.unsigned." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shouldFaultOnZeroDivisor!backend("uint", "/", "quotient");
+    }
+}
 
-    auto module_ = parseSnippet(q{
-        uint seven() { return 7u; }
-        uint zero() { return 0u; }
-        uint remainder() { return seven() % zero(); }
-    });
-    auto function_ = findFunction(module_, "remainder");
+static foreach (backend; ByZero) {
+    @("arithmetic.modulo.byZero.unsigned." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shouldFaultOnZeroDivisor!backend("uint", "%", "remainder");
+    }
+}
 
-    uint result;
-    interpreter(module_).call(function_, &result, [])
-        .shouldThrowWithMessage(
-            "interpreter: division by zero in `seven() % zero()`");
+static foreach (backend; ByZero) {
+    @("arithmetic.divide.byZero.arrayOperation." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        auto module_ = parseSnippet(q{
+            int zero() { return 0; }
+            int quotients() {
+                int[] a = new int[2];
+                int[] b = [7, 8];
+                int[] c = [1, zero()];
+                a[] = b[] / c[];
+                return a[0];
+            }
+        });
+
+        GuestFaultException fault;
+        int result;
+        try
+            new backend(Program([module_])).call(
+                module_.findFunction("quotients"), &result, []);
+        catch (GuestFaultException caught)
+            fault = caught;
+
+        fault.shouldNotBeNull;
+        fault.kind.should == GuestFault.Kind.divisionByZero;
+    }
+}
+
+static foreach (backend; ByZero) {
+    @("arithmetic.divideAssign.byZero.arrayOperation." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        auto module_ = parseSnippet(q{
+            int zero() { return 0; }
+            int quotients() {
+                int[] a = [7, 8];
+                a[] /= zero();
+                return a[0];
+            }
+        });
+
+        GuestFaultException fault;
+        int result;
+        try
+            new backend(Program([module_])).call(
+                module_.findFunction("quotients"), &result, []);
+        catch (GuestFaultException caught)
+            fault = caught;
+
+        fault.shouldNotBeNull;
+        fault.kind.should == GuestFault.Kind.divisionByZero;
+    }
 }
 
 // `long.min / -1L` has no representable quotient, and the host's divide
