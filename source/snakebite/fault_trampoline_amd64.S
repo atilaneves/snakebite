@@ -35,11 +35,25 @@
      */
     .macro prepare_saved_action
     testl $SA_RESTORER,136(%r12)
-    jz 1f
+    jz .Lsignal_no_restorer\@
     mov 144(%r12),%rax
     mov %rax,(%rsp)
-1:
+.Lsignal_action_ready\@:
     mov (%r12),%r12
+    .pushsection .text.unlikely,"ax",@progbits
+.Lsignal_no_restorer\@:
+    cmpl $SIGSEGV,%r15d
+    jne .Lsignal_action_ready\@
+    /* Failed SIGSEGV delivery is always fatal. The return mask cannot decide
+     * that for another signal: sigsuspend can have a different active mask.
+     * A forced fault while SIGSEGV is still blocked gives the kernel the
+     * default-fatal path without another disposition or mask syscall. This
+     * address is noncanonical with both four- and five-level paging.
+     */
+    movabs $0x8000000000000000,%rax
+    mov (%rax),%rax
+    ud2
+    .popsection
     .endm
 
     /* The compiler must not infer nounwind from the guest body, even with
