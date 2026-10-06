@@ -30,6 +30,350 @@ FILE_BACKENDS = ["bytecode", "interpreter"]
 PROGRAM_BACKENDS = ["native", *FILE_BACKENDS]
 
 
+# Native execution dies of the signal. Interpreter entry is step 4 of #523;
+# CTFE diagnoses the null read before native execution. Keep these arms so
+# the same source also pins those limits, without crashing the unit runner.
+@pytest.mark.parametrize("backend", ["native", *BACKENDS])
+def test_hardware_fault_position_and_guest_halt(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    write(
+        app / "main.d",
+        "module main;\n"
+        "import core.sys.posix.unistd: write;\n"
+        "struct Local { ~this() { write(1, \"destructor ran\\n\".ptr, 15); } }\n"
+        "int leaf(int* p) {\n"
+        "    Local local;\n"
+        "    try { return *p; }\n"
+        "    catch (Throwable) { write(1, \"catch ran\\n\".ptr, 10); return 0; }\n"
+        "    finally { write(1, \"finally ran\\n\".ptr, 12); }\n"
+        "}\n"
+        "int main() { return leaf(null); }\n",
+    )
+    if backend == "native":
+        binary = tmp_path / "native"
+        built = subprocess.run(
+            ["dmd", f"-of={binary}", str(app / "main.d")],
+            capture_output=True, text=True, check=False,
+        )
+        assert built.returncode == 0, output(built)
+        result = subprocess.run(
+            [str(binary)], capture_output=True, text=True, timeout=30,
+        )
+    else:
+        result = run_sb(f"--backend={backend}", str(app), cwd=tmp_path)
+    assert "catch ran" not in output(result)
+    assert "finally ran" not in output(result)
+    assert "destructor ran" not in output(result)
+    if backend == "bytecode":
+        assert result.returncode == 1, output(result)
+        assert "main.d(6): fatal: null pointer dereference" in result.stderr
+        assert "in main.leaf (main.d(6))" in result.stderr
+        assert "in D main (main.d(10))" in result.stderr
+    elif backend == "ctfe":
+        assert result.returncode == 1, output(result)
+        assert "dereference of null pointer" in result.stderr
+    else:
+        assert result.returncode == -signal.SIGSEGV, output(result)
+
+
+@pytest.mark.parametrize("backend", ["native", *BACKENDS])
+@pytest.mark.parametrize("source,frames", [
+    ("module main;\n"
+     "void inner() {\n"
+     "    try {\n"
+     "        throw new Exception(\"ordinary\");\n"
+     "    } finally {\n"
+     "        int* p;\n"
+     "        *p = 1;\n"
+     "    }\n"
+     "}\n"
+     "int main() {\n"
+     "    inner();\n"
+     "    return 0;\n"
+     "}\n", [("main.inner", 7), ("D main", 11)]),
+    ("module main;\n"
+     "void inner(int n) {\n"
+     "    try {\n"
+     "        if (n) inner(n - 1);\n"
+     "        else throw new Exception(\"ordinary\");\n"
+     "    } finally {\n"
+     "        if (n == 0) {\n"
+     "            int* p;\n"
+     "            *p = 1;\n"
+     "        }\n"
+     "    }\n"
+     "}\n"
+     "int main() { inner(2); return 0; }\n",
+     [("main.inner", 9), ("main.inner", 4), ("main.inner", 4), ("D main", 13)]),
+    ("module main;\n"
+     "void inner() {\n"
+     "    try { throw new Exception(\"first\"); }\n"
+     "    finally {\n"
+     "        try { throw new Exception(\"second\"); }\n"
+     "        finally { int* p; *p = 1; }\n"
+     "    }\n"
+     "}\n"
+     "int main() { inner(); return 0; }\n",
+     [("main.inner", 6), ("D main", 9)]),
+    ("module main;\n"
+     "import core.stdc.stdlib: qsort;\n"
+     "int depth;\n"
+     "extern(C) int compare(const void* a, const void* b) {\n"
+     "    try {\n"
+     "        if (depth++ == 0) { int[2] n = [2, 1]; "
+     "qsort(n.ptr, 2, int.sizeof, &compare); }\n"
+     "        else throw new Exception(\"ordinary\");\n"
+     "    } finally {\n"
+     "        if (depth == 2) { int* p; *p = 1; }\n"
+     "    }\n"
+     "    return 0;\n"
+     "}\n"
+     "int main() { int[2] a = [2, 1]; "
+     "qsort(a.ptr, 2, int.sizeof, &compare); return 0; }\n",
+     [("main.compare", 9), ("main.compare", 6), ("D main", 13)]),
+    ("module main;\n"
+     "struct S { ~this() { int* p; *p = 1; } }\n"
+     "void inner() { S s; throw new Exception(\"ordinary\"); }\n"
+     "int main() { inner(); return 0; }\n",
+     [("main.S.~this", 2), ("main.inner", 3), ("D main", 4)]),
+], ids=["finally", "recursive", "nested-finally", "callback", "destructor"])
+def test_hardware_fault_cleanup_reports_real_invocations(
+    tmp_path: Path, backend: str, source: str, frames: list[tuple[str, int]],
+) -> None:
+    app = tmp_path / "app"
+    write(app / "main.d", source)
+    if backend == "native":
+        binary = tmp_path / "native"
+        built = subprocess.run(
+            ["dmd", f"-of={binary}", str(app / "main.d")],
+            capture_output=True, text=True,
+        )
+        assert built.returncode == 0, output(built)
+        result = subprocess.run(
+            [str(binary)], capture_output=True, text=True, timeout=30,
+        )
+    else:
+        result = run_sb(f"--backend={backend}", str(app), cwd=tmp_path)
+    if backend == "bytecode":
+        expected = f"main.d({frames[0][1]}): fatal: null pointer dereference\n"
+        expected += "".join(f"    in {name} (main.d({line}))\n"
+                            for name, line in frames)
+        assert result.returncode == 1, output(result)
+        assert result.stderr == expected, output(result)
+    elif backend == "ctfe":
+        assert result.returncode == 1, output(result)
+    else:
+        assert result.returncode == -signal.SIGSEGV, output(result)
+
+
+@pytest.mark.parametrize("backend", ["native", *BACKENDS])
+@pytest.mark.parametrize("shape", ["thread", "finalizer"])
+def test_hardware_fault_in_thread_or_gc_finalizer(
+    tmp_path: Path, backend: str, shape: str,
+) -> None:
+    app = tmp_path / "app"
+    if shape == "thread":
+        source = (
+            'module main;\nimport core.thread: Thread;\n'
+            'void leaf() { int* p; *p = 1; }\n'
+            'int main() { auto t = new Thread(&leaf); '
+            't.start(); t.join(); return 0; }\n'
+        )
+    else:
+        source = (
+            'module main;\nimport core.memory: GC;\n'
+            'class C { ~this() { int* p; *p = 1; } }\n'
+            'int main() { auto c = new C; '
+            'GC.runFinalizers((cast(const void*) typeid(C).destructor)[0 .. 1]); '
+            'return 0; }\n'
+        )
+    write(app / "main.d", source)
+    if backend == "native":
+        binary = tmp_path / "native"
+        built = subprocess.run(
+            ["ldc2", "-link-defaultlib-shared", f"-of={binary}",
+             str(app / "main.d")], capture_output=True, text=True,
+        )
+        assert built.returncode == 0, output(built)
+        result = subprocess.run([str(binary)], capture_output=True, text=True)
+    else:
+        result = run_sb(f"--backend={backend}", str(app), cwd=tmp_path)
+    if backend == "bytecode":
+        assert result.returncode == 1, output(result)
+        assert "main.d(3): fatal: null pointer dereference" in result.stderr
+        assert "in main." in result.stderr
+    elif backend == "ctfe":
+        assert result.returncode == 1, output(result)
+    else:
+        assert result.returncode == -signal.SIGSEGV, output(result)
+
+
+@pytest.mark.parametrize("backend", ["native", *BACKENDS])
+def test_native_fault_unwind_keeps_host_cleanup_but_skips_guest_callback(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    write(app / "dub.sdl", dub_project_recipe("fault-unwind")
+          + 'sourceFiles "../fixture.o" "../trap.o"\n')
+    write(
+        app / "source" / "main.d",
+        'module main;\nimport core.sys.posix.unistd: write;\n'
+        'extern(C) void nativeFault(void function());\n'
+        'extern(C) void cleanup() { write(1, "guest cleanup\\n".ptr, 14); }\n'
+        'int main() { nativeFault(&cleanup); return 0; }\n',
+    )
+    write(
+        tmp_path / "native.d",
+        'module native_fixture;\nimport core.sys.posix.unistd: write;\n'
+        'extern(C) void nativeTrap();\n'
+        'extern(C) void nativeFault(void function() cleanup) {\n'
+        ' scope(exit) write(1, "host released\\n".ptr, 14);\n'
+        ' scope(exit) cleanup();\n nativeTrap();\n}\n',
+    )
+    write(
+        tmp_path / "trap.S",
+        '.text\n.globl nativeTrap\n.type nativeTrap,@function\n'
+        'nativeTrap:\n.cfi_startproc\nxor %eax,%eax\n'
+        'mov (%rax),%rax\nret\n.cfi_endproc\n'
+        '.section .note.GNU-stack,"",@progbits\n',
+    )
+    for command in (
+        ["ldc2", "-c", "-relocation-model=pic", "-O", "-release",
+         f"-of={tmp_path / 'fixture.o'}", str(tmp_path / "native.d")],
+        ["cc", "-c", "-fPIC", str(tmp_path / "trap.S"),
+         "-o", str(tmp_path / "trap.o")],
+    ):
+        built = subprocess.run(command, capture_output=True, text=True)
+        assert built.returncode == 0, output(built)
+    if backend == "native":
+        binary = tmp_path / "native"
+        built = subprocess.run(
+            ["ldc2", "-link-defaultlib-shared", f"-of={binary}",
+             str(app / "source" / "main.d"),
+             str(tmp_path / "fixture.o"), str(tmp_path / "trap.o")],
+            capture_output=True, text=True,
+        )
+        assert built.returncode == 0, output(built)
+        result = subprocess.run([str(binary)], capture_output=True, text=True)
+    else:
+        result = run_app(tmp_path, backend)
+    assert "guest cleanup" not in output(result), output(result)
+    if backend == "bytecode":
+        assert result.returncode == 1, output(result)
+        assert result.stdout == "host released\n", output(result)
+        assert "fatal: null pointer dereference" in result.stderr
+    elif backend == "ctfe":
+        assert result.returncode == 1, output(result)
+    else:
+        assert result.returncode == -signal.SIGSEGV, output(result)
+
+
+# The full source matrix was also checked before limiting the report checks
+# to Bytecode: Native gets SIGFPE/SIGSEGV; CTFE diagnoses these expressions;
+# Interpreter overflow and null-call/throw handling belong to #523 step 4.
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ("int f(int a, int b) { return a / b; } "
+         "int main() { return f(int.min, -1); }",
+         "integer overflow in division"),
+        ("int f(int a, int b) { return a % b; } "
+         "int main() { return f(int.min, -1); }",
+         "integer overflow in division"),
+        ("long f(long a, long b) { return a / b; } "
+         "int main() { return cast(int) f(long.min, -1); }",
+         "integer overflow in division"),
+        ("int main() { int function() f; return f(); }",
+         "call of a null function pointer"),
+        ("int main() { Throwable t; throw t; }",
+         "throw of a null reference"),
+        ("int main() { return *cast(int*) 0x10000; }",
+         "invalid memory access"),
+    ],
+)
+def test_bytecode_hardware_fault_messages(
+    tmp_path: Path, body: str, message: str,
+) -> None:
+    app = tmp_path / "app"
+    write(app / "main.d", "module main;\n" + body + "\n")
+    result = run_sb("--backend=bytecode", str(app), cwd=tmp_path)
+    assert result.returncode == 1, output(result)
+    assert f"main.d(2): fatal: {message}" in result.stderr
+
+
+# Keep all backends on the same source. Only Bytecode currently reports
+# a guest stack for a null throw; the others keep their existing failure.
+@pytest.mark.parametrize("backend", ["native", *BACKENDS])
+@pytest.mark.parametrize("source,frames", [
+    ("module main;\n"
+     "void fail() {\n"
+     "    Throwable t;\n"
+     "    throw t;\n"
+     "}\n"
+     "int main() { fail(); return 0; }\n",
+     [("main.fail", 4), ("D main", 6)]),
+    ("module main;\n"
+     "void owner(int n) {\n"
+     "    try {\n"
+     "        if (n) owner(n - 1);\n"
+     "        else throw new Exception(\"ordinary\");\n"
+     "    } finally {\n"
+     "        if (!n) {\n"
+     "            Throwable t;\n"
+     "            throw t;\n"
+     "        }\n"
+     "    }\n"
+     "}\n"
+     "int main() { owner(2); return 0; }\n",
+     [("main.owner", 9), ("main.owner", 4), ("main.owner", 4),
+      ("D main", 13)]),
+    ("module main;\n"
+     "int fail(bool yes) {\n"
+     "    Throwable t;\n"
+     "    return yes\n"
+     "        ? 0\n"
+     "        : throw t;\n"
+     "}\n"
+     "int main() { return fail(false); }\n",
+     [("main.fail", 6), ("D main", 8)]),
+], ids=["statement", "recursive-finally", "expression"])
+def test_null_throw_reports_throw_position(
+    tmp_path: Path, backend: str, source: str, frames: list[tuple[str, int]],
+) -> None:
+    app = tmp_path / "app"
+    write(app / "main.d", source)
+    if backend == "native":
+        binary = tmp_path / "native"
+        built = subprocess.run(
+            ["dmd", f"-of={binary}", str(app / "main.d")],
+            capture_output=True, text=True,
+        )
+        assert built.returncode == 0, output(built)
+        result = subprocess.run(
+            [str(binary)], capture_output=True, text=True, timeout=30,
+        )
+    else:
+        result = run_sb(f"--backend={backend}", str(app), cwd=tmp_path)
+    if backend == "bytecode":
+        expected = f"main.d({frames[0][1]}): fatal: throw of a null reference\n"
+        expected += "".join(f"    in {name} (main.d({line}))\n"
+                            for name, line in frames)
+        assert result.returncode == 1, output(result)
+        assert result.stderr == expected, output(result)
+    elif backend == "native":
+        assert result.returncode == -signal.SIGSEGV, output(result)
+    elif backend == "interpreter" and len(frames) == 4:
+        # Interpreter currently preserves the original exception instead
+        # of the null throw from finally. This is separate #523 scope.
+        assert result.returncode == 1, output(result)
+        assert result.stderr == "ordinary\nat main.d:5\n", output(result)
+    else:
+        assert result.returncode == 1, output(result)
+        assert "null" in result.stderr, output(result)
+
+
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
 def test_module_constructor_uses_project_directory(
     tmp_path: Path, backend: str,
@@ -1667,10 +2011,9 @@ def write_faulting_project(app: Path, main: str) -> None:
     write(app / "source" / "main.d", main)
 
 
-# A guest that dereferences null or divides by zero dies of the signal, as
-# compiled D does: the fault handlers must not change the exit status.
+# Bytecode reports through its controlled entry. Interpreter entry is step 4.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
-def test_guest_null_dereference_dies_of_sigsegv(
+def test_guest_null_dereference_ends_the_program(
     tmp_path: Path, backend: str,
 ) -> None:
     write_faulting_project(tmp_path / "app", NULL_DEREFERENCE_MAIN)
@@ -1680,13 +2023,17 @@ def test_guest_null_dereference_dies_of_sigsegv(
         cwd=tmp_path,
     )
 
-    assert result.returncode == -signal.SIGSEGV, output(result)
+    if backend == "bytecode":
+        assert result.returncode == 1, output(result)
+        assert "source/main.d(3): fatal: null pointer dereference" in result.stderr
+    else:
+        assert result.returncode == -signal.SIGSEGV, output(result)
 
 
 # The interpreter checks the divisor in its walker, so for now it ends with a
 # message of its own and not with the signal.
 @pytest.mark.parametrize("backend", ["bytecode"])
-def test_guest_division_by_zero_dies_of_sigfpe(
+def test_guest_division_by_zero_reports_its_position(
     tmp_path: Path, backend: str,
 ) -> None:
     write_faulting_project(tmp_path / "app", DIVISION_BY_ZERO_MAIN)
@@ -1696,7 +2043,8 @@ def test_guest_division_by_zero_dies_of_sigfpe(
         cwd=tmp_path,
     )
 
-    assert result.returncode == -signal.SIGFPE, output(result)
+    assert result.returncode == 1, output(result)
+    assert "source/main.d(3): fatal: integer division by zero" in result.stderr
 
 
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
@@ -1710,7 +2058,11 @@ def test_fault_handlers_do_not_blame_the_host_for_an_unclassified_guest_fault(
         cwd=tmp_path,
     )
 
-    assert result.returncode == -signal.SIGSEGV, output(result)
+    if backend == "bytecode":
+        assert result.returncode == 1, output(result)
+        assert "fatal: null pointer dereference" in result.stderr
+    else:
+        assert result.returncode == -signal.SIGSEGV, output(result)
     assert "snakebite:" not in result.stderr
 
 

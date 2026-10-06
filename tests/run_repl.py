@@ -32,6 +32,71 @@ def history_file(
 UP_ARROW = "\x1b[A"
 
 
+@pytest.mark.parametrize(
+    "shape", ["direct", "deep", "callback", "reentrant", "fiber", "thread"],
+)
+def test_bytecode_hardware_fault_recovery_uses_fresh_cell_state(shape: str) -> None:
+    declarations = {
+        "direct": ["int fault() { int* p; return *p; }"],
+        "deep": [
+            "int descend(int n) { if (n) return descend(n - 1); "
+            "int* p; return *p; }",
+            "int fault() { return descend(200); }",
+        ],
+        "callback": [
+            "import core.stdc.stdlib: qsort",
+            "extern(C) int compare(const void* a, const void* b) { "
+            "int* p; return *p; }",
+            "int fault() { int[2] a = [2, 1]; "
+            "qsort(a.ptr, 2, int.sizeof, &compare); return 0; }",
+        ],
+        "fiber": [
+            "import core.thread: Fiber",
+            "void fiberFault() { int* p; int value = *p; }",
+            "int fault() { auto f = new Fiber(&fiberFault); "
+            "f.call(); return 0; }",
+        ],
+        "thread": [
+            "import core.thread: Thread",
+            "void threadFault() { int* p; int value = *p; }",
+            "int fault() { auto t = new Thread(&threadFault); "
+            "t.start(); t.join(); return 0; }",
+        ],
+        "reentrant": [
+            "import core.stdc.stdlib: qsort",
+            "extern(C) int innerCompare(const void* a, const void* b) { "
+            "int* p; return *p; }",
+            "extern(C) int outerCompare(const void* a, const void* b) { "
+            "int[2] nested = [2, 1]; qsort(nested.ptr, 2, int.sizeof, "
+            "&innerCompare); return 0; }",
+            "int fault() { int[2] a = [2, 1]; "
+            "qsort(a.ptr, 2, int.sizeof, &outerCompare); return 0; }",
+        ],
+    }
+    child = pexpect.spawn(
+        sb_path(), ["-b", "bytecode"], timeout=TIMEOUT, encoding="utf-8",
+    )
+    try:
+        child.expect_exact("Snakebite REPL")
+        child.expect_exact("[   0.0 ms] > ")
+        for declaration in declarations[shape]:
+            child.sendline(declaration)
+            child.expect(r"\[\s+\d+\.\d ms\] > ")
+            assert "Error" not in clean(child.before)
+        for _ in range(3):
+            child.sendline("fault()")
+            child.expect(r"\[\s+\d+\.\d ms\] > ")
+            assert "null pointer dereference" in clean(child.before)
+            child.sendline("40 + 2")
+            child.expect(r"\[\s+\d+\.\d ms\] > ")
+            assert "42\n" in clean(child.before)
+        child.sendline(":q")
+        child.expect(pexpect.EOF)
+    finally:
+        child.close(force=True)
+    assert child.exitstatus == 0
+
+
 def test_repl() -> None:
     repl = sb_path()
     child = spawn(repl, timeout=TIMEOUT, encoding="utf-8")

@@ -35,6 +35,10 @@ public struct FrameStack {
     // at some earlier point.
     public alias Mark = size_t;
 
+    // A backend's controlled entry owns this non-owning link. It restores
+    // the previous entry before releasing the host frame that holds it.
+    public void* backendEntry;
+
     // The reservation never moves. Only pages below `_committed` become
     // readable, so a large reservation costs address space, not physical
     // memory, until a guest call needs it.

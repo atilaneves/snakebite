@@ -402,6 +402,8 @@ NORMAL_HOST = r"""
 extern int rt_init(void);
 extern int install_saved_action(void);
 extern void start_collector(void);
+extern void suspend_guest_entry(void);
+extern void resume_guest_entry(void);
 static void *alternate, *replacement;
 enum { stack_size = 128 * 1024 };
 static int mode, target, stack_flags;
@@ -455,7 +457,7 @@ static void previous(int sig, siginfo_t *info, void *opaque) {
         ++depth;
         raise(sig);
         --depth;
-    } else if (mode == 3) {
+    } else if (mode == 3 || mode == 11) {
         context->uc_mcontext.gregs[REG_RIP] = context->uc_mcontext.gregs[REG_R12];
         context->uc_mcontext.gregs[REG_RAX] = 137;
     } else if (mode == 4) {
@@ -513,6 +515,33 @@ __attribute__((target("avx"))) static int vector_signal(void) {
            out_first[3] != 4 || out_last[0] != 11 || out_last[1] != 12 ||
            out_last[2] != 13 || out_last[3] != 439;
 }
+static long host_fault_result(int sig) {
+    long result;
+    if (sig == SIGFPE) {
+        __asm__ volatile("lea 1f(%%rip),%%r12\n\t"
+                         "mov $1,%%eax\n\t"
+                         "xor %%edx,%%edx\n\t"
+                         "xor %%ecx,%%ecx\n\t"
+                         "idiv %%ecx\n\t1:"
+                         : "=a"(result) : : "rcx", "rdx", "r12", "memory");
+    } else if (sig == SIGBUS) {
+        long page = sysconf(_SC_PAGESIZE);
+        int fd = memfd_create("host-fault", 0);
+        if (fd < 0 || ftruncate(fd, page)) _exit(89);
+        void *mapping = mmap(0, page, PROT_READ, MAP_SHARED, fd, 0);
+        if (mapping == MAP_FAILED || ftruncate(fd, 0)) _exit(88);
+        __asm__ volatile("lea 1f(%%rip),%%r12\n\t"
+                         "mov (%[mapping]),%%rax\n\t1:"
+                         : "=a"(result) : [mapping]"r"(mapping) : "r12", "memory");
+        if (munmap(mapping, page) || close(fd)) _exit(87);
+    } else {
+        __asm__ volatile("lea 1f(%%rip),%%r12\n\t"
+                         "xor %%eax,%%eax\n\t"
+                         "mov (%%rax),%%rax\n\t1:"
+                         : "=a"(result) : : "r12", "memory");
+    }
+    return result;
+}
 int main(int argc, char **argv) {
     prctl(PR_SET_DUMPABLE, 0);
     setenv("SNAKEBITE_NO_FAULT_HANDLER", "1", 1);
@@ -541,7 +570,11 @@ int main(int argc, char **argv) {
     if (sigaction(target, &action, 0)) return 94;
     if (atoi(argv[4]) && !install_saved_action()) return 93;
     if (mode == 7) start_collector();
-    if (mode == 3) {
+    if (mode == 11) {
+        suspend_guest_entry();
+        if (host_fault_result(target) != 137) ++failures;
+        resume_guest_entry();
+    } else if (mode == 3) {
         long value;
         __asm__ volatile("lea 1f(%%rip),%%r12\n\t"
                          "xor %%eax,%%eax\n\t"
@@ -592,7 +625,19 @@ int main(int argc, char **argv) {
 
 NORMAL_BRIDGE = BRIDGE + r"""
 import core.thread: Thread;
+import core.thread.fiber: Fiber;
 import core.memory: GC;
+import snakebite.faultsignal: runGuest;
+private Fiber _suspended;
+extern(C) void suspend_guest_entry() {
+    _suspended = new Fiber({ runGuest({ Fiber.yield; }); });
+    _suspended.call;
+}
+extern(C) void resume_guest_entry() {
+    _suspended.call;
+    assert(_suspended.state == Fiber.State.TERM);
+    _suspended = null;
+}
 extern(C) void wait_for_handler();
 extern(C) void finish_gc();
 extern(C) void start_collector() {
@@ -629,6 +674,16 @@ def test_normal_stack_callback_can_edit_fault_pc_and_result(normal_host):
         result = subprocess.run(
             [str(normal_host), str(signal.SIGSEGV.value), "3", "1",
              str(int(installed))], capture_output=True, timeout=5,
+        )
+        assert result.returncode == 0, result
+
+
+@pytest.mark.parametrize("sig", [signal.SIGSEGV, signal.SIGFPE, signal.SIGBUS])
+def test_suspended_guest_fiber_does_not_own_host_fault(normal_host, sig):
+    for installed in (False, True):
+        result = subprocess.run(
+            [str(normal_host), str(sig.value), "11", "1", str(int(installed))],
+            capture_output=True, timeout=5,
         )
         assert result.returncode == 0, result
 

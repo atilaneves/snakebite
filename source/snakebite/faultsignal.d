@@ -61,23 +61,70 @@ public final class HardwareFault: Halted {
 // This does not restore other host state owned inside `body`.
 // Backends must discard halted execution state, as required by #523.
 public void runGuest(scope void delegate() body) @system {
-    static if (supported) {
-        if (_state.prepared is null)
-            prepareThread;
-        ++_state.runs;
-        scope(exit) --_state.runs;
-        snakebite_fault_invoke(&body, &invokeGuestBody);
-    } else
+    static if (supported)
+        runGuest(&body, &invokeGuestBody);
+    else
         body();
 }
 
 
+public alias GuestBody = extern(C) void function(void*);
+public alias BeforeFault = void function(void*, HardwareFault) nothrow @nogc;
+
+// A backend already has an entry record. Calling its entry directly avoids
+// a second delegate entry and keeps the same protected cleanup owner.
+public void runGuest(void* context, GuestBody body) @system {
+    runGuest(context, body, null, null);
+}
+
+// Runs outside signal context, before throwing starts native unwinding.
+// The hook only marks owned host state. It must not run guest code: native
+// cleanup can call back before the backend's first catch receives the fault.
+public void runGuest(
+    void* context, GuestBody body, void* faultContext, BeforeFault beforeFault,
+) @system {
+    static if (supported) {
+        if (_state.prepared is null)
+            prepareThread;
+        RunOwner owner;
+        owner.faultContext = faultContext;
+        owner.beforeFault = beforeFault;
+        owner.enter;
+        scope(exit) owner.leave;
+        snakebite_fault_invoke(context, body);
+    } else
+        body(context);
+}
+
+
 static if (supported) {
-    private alias GuestBody = extern(C) void function(void*);
     private extern(C) void snakebite_fault_invoke(void* context, GuestBody body);
 
     private extern(C) void invokeGuestBody(void* context) {
         (*cast(void delegate()*) context)();
+    }
+
+    private struct RunOwner {
+        import core.thread.fiber: Fiber;
+
+        Fiber fiber;
+        RunOwner* next;
+        void* faultContext;
+        BeforeFault beforeFault;
+
+        void enter() nothrow @nogc {
+            // Resolve druntime's TLS accessor before a signal can use it.
+            fiber = Fiber.getThis;
+            next = _state.runs;
+            _state.runs = &this;
+        }
+
+        void leave() nothrow @nogc {
+            auto link = &_state.runs;
+            while (*link !is &this)
+                link = &(*link).next;
+            *link = next;
+        }
     }
 }
 
@@ -95,19 +142,30 @@ public struct GuestRun {
         static if (supported) {
             if (_state.prepared is null)
                 prepareThread;
-            ++_state.runs;
-            run._active = true;
+            import core.stdc.stdlib: malloc;
+
+            // This legacy mark can move on return. Its linked record cannot.
+            run._owner = cast(RunOwner*) malloc(RunOwner.sizeof);
+            assert(run._owner !is null);
+            *run._owner = RunOwner.init;
+            run._owner.enter;
         }
         return run;
     }
 
     public ~this() @trusted @nogc nothrow {
-        static if (supported)
-            if (_active)
-                --_state.runs;
+        static if (supported) {
+            import core.stdc.stdlib: free;
+
+            if (_owner !is null) {
+                _owner.leave;
+                free(_owner);
+            }
+        }
     }
 
-    private bool _active;
+    static if (supported)
+        private RunOwner* _owner;
 }
 
 
@@ -366,9 +424,23 @@ static if (supported) {
 
     // What each thread knows. In the executable, so that the handler
     // reaches it with one instruction that is relative to `fs`.
+    private bool ownsCurrentFiber() nothrow @nogc {
+        import core.thread.fiber: Fiber;
+
+        if (_state.runs is null)
+            return false;
+        const fiber = Fiber.getThis;
+        auto owner = _state.runs;
+        while (owner !is null) {
+            if (owner.fiber is fiber)
+                return true;
+            owner = owner.next;
+        }
+        return false;
+    }
+
     private struct ThreadState {
-        // How many guest runs this thread is in.
-        size_t runs;
+        RunOwner* runs;
         // A fault was recorded and no catcher has taken it yet (`takeFault`).
         // A fault of the thread in that time happens while the first one
         // unwinds, and is a defect of the host.
@@ -523,6 +595,15 @@ static if (supported) {
         fault.hostPc = record.pc;
         fault.kind = classify(record);
         fault.msg = GuestFault.message(fault.kind);
+        import core.thread.fiber: Fiber;
+
+        const fiber = Fiber.getThis;
+        auto owner = _state.runs;
+        while (owner !is null) {
+            if (owner.fiber is fiber && owner.beforeFault !is null)
+                owner.beforeFault(owner.faultContext, fault);
+            owner = owner.next;
+        }
         throw fault;
     }
 
@@ -539,7 +620,7 @@ static if (supported) {
         const reportable = signal != SIGFPE
             || info.si_code == fpeIntegerDivide
             || info.si_code == fpeIntegerOverflow;
-        if (!hardware || !reportable || _state.runs == 0 || _state.pending)
+        if (!hardware || !reportable || _state.pending || !ownsCurrentFiber)
             return hostDefect(signal, info, context, frame);
 
         auto registers = &(cast(ucontext_t*) context).uc_mcontext.gregs;
@@ -634,7 +715,7 @@ static if (supported) {
         if (info.si_code <= 0 && handler is cast(void*) SIG_IGN)
             return null;
 
-        if (info.si_code > 0 && _state.runs != 0)
+        if (info.si_code > 0 && ownsCurrentFiber)
             reportUnhandledGuestFault(signal, info, context);
         sigaction_t default_;
         default_.sa_handler = SIG_DFL;
