@@ -12,6 +12,7 @@
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 from dataclasses import dataclass
@@ -654,7 +655,7 @@ extern(C) int main() {{
     assert_passes_after_start(backend, outcome_of(result))
 
 
-@pytest.mark.parametrize("backend", [*BACKENDS, "native-ldc"])
+@pytest.mark.parametrize("backend", ["native", *BACKENDS, "native-ldc"])
 @pytest.mark.parametrize("entry", ["c", "d", "betterc", "explicit"])
 def test_dependency_entry_startup(
     tmp_path: Path, backend: str, entry: str,
@@ -717,7 +718,7 @@ extern(C) int next() {{ return 7; }}
 }}
 """, encoding="utf-8")
     if backend in ["native", "native-ldc"]:
-        compiler = native_compiler() if backend == "native" else shutil.which("ldc2")
+        compiler = shutil.which("dmd" if backend == "native" else "ldc2")
         if compiler is None:
             pytest.skip("ldc2 is not on PATH")
         command = ["dub", "test", f"--compiler={compiler}"]
@@ -753,8 +754,8 @@ extern(C) int next() {{ return 7; }}
             assert markers[-1] == "MAIN", output
 
 
-@pytest.mark.parametrize("backend", [*BACKENDS, "native-ldc"])
-@pytest.mark.parametrize("case", ["nested", "alias", "ctor-failure", "dtor-failure", "ctor-child-init", "descendant", "override", "roots", "tls-start", "daemon", "pointer", "exit-active"])
+@pytest.mark.parametrize("backend", ["native", *BACKENDS, "native-ldc"])
+@pytest.mark.parametrize("case", ["nested", "alias", "ctor-failure", "dtor-failure", "ctor-child-init", "descendant", "override", "roots", "tls-start", "daemon", "pointer", "exit-active", "tls-dtor-release", "tls-dtor-failure"])
 def test_dependency_explicit_lifecycle(tmp_path: Path, backend: str, case: str) -> None:
     if backend == "ctfe":
         pytest.skip("Verified CTFE limit: native fputs has no compile-time body")
@@ -793,6 +794,7 @@ int fullDBody() { try { throw new Exception("full D"); } catch (Exception error)
     constructor = 'fputs("ROOT_CTOR\\n", stderr);'
     destructor = 'fputs("ROOT_DTOR\\n", stderr);'
     thread_constructor = 'fputs("ROOT_TLS_CTOR\\n", stderr);'
+    thread_destructor = 'fputs("ROOT_TLS_DTOR\\n", stderr);'
     body = "assert(rt_term() == 0); assert(rt_init()); assert(status() == 11);"
     if case == "nested":
         body += 'assert(dependencyInit()); assert(rt_term()); fputs("ONE_TERM\\n", stderr); assert(rt_term()); assert(rt_term() == 0);'
@@ -824,6 +826,17 @@ int fullDBody() { try { throw new Exception("full D"); } catch (Exception error)
     elif case == "daemon":
         constructor += 'entered = new Semaphore; release = new Semaphore;'
         body += 'auto t = new Thread({ entered.notify; release.wait; fputs("CHILD_END\\n", stderr); }); t.isDaemon = true; t.start; entered.wait; assert(rt_term());'
+    elif case in ["tls-dtor-release", "tls-dtor-failure"]:
+        constructor += 'entered = new Semaphore; release = new Semaphore;'
+        action = 'release.notify;' if case == "tls-dtor-release" else 'throw new Exception("TLS_DTOR_FAILURE");'
+        thread_destructor += 'if (Thread.getThis is owner) { fputs("OWNER_TLS_DTOR\\n", stderr); ' + action + ' }'
+        body += 'owner = Thread.getThis; auto t = new Thread({ entered.notify; release.wait; fputs("CHILD_END\\n", stderr); }); t.start; entered.wait; fputs("TERM_REQUEST\\n", stderr);'
+        expected = 1 if case == "tls-dtor-release" else 0
+        body += f'assert(rt_term() == {expected}); fputs("TERM_RETURN\\n", stderr);'
+        if case == "tls-dtor-failure":
+            # The native runtime is terminated. Only C operations are safe;
+            # exit also leaves the blocked child as proof that join was skipped.
+            body += 'exit(0);'
     (root / "source" / "app.d").write_text("""module app;
 import dep;
 import core.stdc.stdio;
@@ -834,12 +847,13 @@ import core.memory : GC;
 import core.time : msecs;
 __gshared Semaphore entered, release;
 __gshared bool blockChild;
+__gshared Thread owner;
 extern(C) int rt_term();
 extern(C) pragma(mangle, "rt_init") int requestInit();
 shared static this() { """ + constructor + """ }
 static this() { """ + thread_constructor + """ }
 shared static ~this() { """ + destructor + """ }
-static ~this() { fputs("ROOT_TLS_DTOR\\n", stderr); }
+static ~this() { """ + thread_destructor + """ }
 extern(C) int main() {
     fputs("INIT\\n", stderr);
     """ + body + """
@@ -848,13 +862,14 @@ extern(C) int main() {
 }
 """, encoding="utf-8")
     if backend in ["native", "native-ldc"]:
-        compiler = native_compiler() if backend == "native" else shutil.which("ldc2")
+        compiler = shutil.which("dmd" if backend == "native" else "ldc2")
         if compiler is None:
             pytest.skip("ldc2 is not on PATH")
         command = ["dub", "test", f"--compiler={compiler}"]
     else:
         command = [sb_path(), f"--backend={backend}", "--no-optimise-image", str(root)]
-    result = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=TIMEOUT)
+    result = subprocess.run(command, cwd=root, capture_output=True, text=True,
+                            timeout=25 if case.startswith("tls-dtor-") else TIMEOUT)
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
     lines = output.splitlines()
@@ -866,6 +881,11 @@ extern(C) int main() {
         assert lines.index("DEP_CTOR") < lines.index("ROOT_CTOR"), output
         if case == "ctor-failure":
             assert "CTOR_FAILURE" in output and "DEP_DTOR" not in lines and "ROOT_DTOR" not in lines, output
+        elif case == "tls-dtor-failure":
+            assert "TLS_DTOR_FAILURE" in output, output
+            assert "CHILD_END" not in lines and "ROOT_DTOR" not in lines and "DEP_DTOR" not in lines, output
+            assert "DEP_TLS_DTOR" not in lines, output
+            assert lines.index("TERM_REQUEST") < lines.index("OWNER_TLS_DTOR") < lines.index("TERM_RETURN"), output
         else:
             assert lines.count("ROOT_DTOR") == 1, output
             if case == "dtor-failure":
@@ -878,6 +898,8 @@ extern(C) int main() {
             assert "CHILD_END" not in lines, output
         if case == "nested":
             assert lines.index("ONE_TERM") < lines.index("ROOT_DTOR"), output
+        if case == "tls-dtor-release":
+            assert lines.index("TERM_REQUEST") < lines.index("OWNER_TLS_DTOR") < lines.index("CHILD_END") < lines.index("ROOT_DTOR") < lines.index("TERM_RETURN"), output
 
 
 # The tests can run in parallel (see build/pytest-workers.sh) because the

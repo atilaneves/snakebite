@@ -214,8 +214,8 @@ public struct GuestModules {
 
 
 private struct EntryRun {
-    imported!"snakebite.backends.backend".Backend backend;
-    imported!"snakebite.backends.backend".Program program;
+    Backend backend;
+    Program program;
     GuestModules modules;
     Image token;
     const(char)* tokenPath;
@@ -237,9 +237,9 @@ private extern(C) int finishEntry(void* owner) {
         return 0;
     int status = 1;
     try {
-        thread_joinAll;
         auto group = registeredGroup(*run.image.slot); // Runtime methods mutate their group.
         group.runTlsDtors;
+        thread_joinAll;
         group.runDtors;
     } catch (Throwable throwable) {
         print(throwable);
@@ -437,6 +437,7 @@ private void print(Throwable throwable) {
 
 // What one registration holds and what the entries of its records reach.
 private struct Run {
+    import dmd.func: FuncDeclaration;
     import core.sys.posix.pthread: pthread_t;
 
     // `running` until the program ends, then `finished`, when an entry that
@@ -453,7 +454,7 @@ private struct Run {
     ModuleInfo*[] records;
     Image image;
     CallbackBridge* bridge;
-    imported!"dmd.func".FuncDeclaration nativeDeclaration;
+    FuncDeclaration nativeDeclaration;
     const(ModuleInfo*)[] dependencyModules;
     ExitRecord* exit;
     // The thread that registered, and the modules with destructors in the
@@ -615,7 +616,7 @@ private void execute(Phase* phase) {
 private void call(Phase* phase) {
     try
         if (phase.nativeFunction !is null)
-            phase.nativeFunction();
+            phase.nativeFunction(); // A function pointer needs explicit call syntax.
         else
         foreach (function_; phase.functions)
             phase.run.backend.call(function_, null, []);
