@@ -13,7 +13,8 @@ private:
 // way every other frontend error does. So the caller's own
 // `global.errors` check formats this failure like any other semantic
 // error. See docs/adr/0012 for why only a root-owned function is
-// reported.
+// reported. The same walk also rejects a reference to a C `setjmp` or
+// `longjmp` function (see docs/adr/0014).
 public void reportInlineAsmDiagnostics(
     imported!"dmd.dmodule".Module[] rootModules,
 ) {
@@ -57,10 +58,12 @@ private extern(C++) class InlineAsmCollector
     import dmd.dsymbolsem: include;
     import dmd.dtemplate: TemplateMixin;
     import dmd.errors: error;
+    import dmd.expression: SymbolExp;
     import dmd.func: FuncDeclaration;
 
     private bool[Module] _rootModules;
     private bool[FuncDeclaration] _visited;
+    private FuncDeclaration _enclosing;
 
     private extern(D) this(Module[] rootModules) {
         foreach (module_; rootModules)
@@ -124,6 +127,9 @@ private extern(C++) class InlineAsmCollector
         if (function_ in _visited)
             return;
         _visited[function_] = true;
+        auto outer = _enclosing;
+        _enclosing = function_;
+        scope(exit) _enclosing = outer;
         if (function_.hasInlineAsm && isRootOwned(function_))
             error(
                 function_.loc,
@@ -135,6 +141,45 @@ private extern(C++) class InlineAsmCollector
         if (function_.fbody !is null)
             function_.fbody.accept(this);
     }
+
+    // Any reference to a `setjmp`/`longjmp` function from a root-owned
+    // function body, not only a direct call: `VarExp.var` is the resolved
+    // declaration, so an alias is already seen through, and taking the
+    // address (`&longjmp`) reaches a `SymOffExp` or a `VarExp` too.
+    override void visit(SymbolExp expression) {
+        if (_enclosing is null || !isRootOwned(_enclosing))
+            return;
+        auto function_ = expression.var.isFuncDeclaration;
+        if (function_ is null || !isNonLocalJump(function_))
+            return;
+        error(
+            expression.loc,
+            "`%s` is not supported in guest code: a backend cannot "
+            ~ "jump back to a stack frame it has already left",
+            function_.ident.toChars,
+        );
+    }
+}
+
+// The C functions that save and restore a stack context, by the name the
+// linker sees: `pragma(mangle)` wins over the D name, as it does there.
+// Matching on C linkage and name, not on the declaring module, also
+// covers a guest's own redeclaration of the function.
+private bool isNonLocalJump(imported!"dmd.func".FuncDeclaration function_) {
+    import dmd.astenums: LINK;
+    import std.algorithm: canFind;
+
+    static immutable names = [
+        "_setjmp", "setjmp", "__sigsetjmp", "sigsetjmp",
+        "longjmp", "_longjmp", "siglongjmp",
+    ];
+
+    if (function_.resolvedLinkage != LINK.c)
+        return false;
+    const name = function_.mangleOverride.length
+        ? function_.mangleOverride
+        : function_.ident.toString;
+    return names.canFind(name);
 }
 
 // Named distinctly from `InlineAsmCollector` above and `imagesource.d`'s

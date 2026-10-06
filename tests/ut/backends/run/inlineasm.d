@@ -2,7 +2,11 @@ module ut.backends.run.inlineasm;
 
 
 import ut.backends;
+import ut;
+import snakebite.backends.backend: Program;
+import snakebite.dependencyimage: loadImage;
 import snakebite.frontend.compiler: newInFrontend, parseSnippet;
+import snakebite.frontend.dmd.functions: findFunction;
 import std.conv: text;
 import std.file: mkdirRecurse, rmdirRecurse, tempDir, write;
 import std.path: buildPath;
@@ -307,4 +311,78 @@ unittest {
             ~ "not define",
         ),
     );
+}
+
+
+// Guest code that calls C `setjmp`/`longjmp` is a stated exception, like
+// inline assembler (see docs/adr/0014). The check runs in the same
+// load-time walk as the `asm` check above, before any backend is chosen,
+// so `parseSnippet` alone pins the diagnostic for every backend.
+@("setjmp.loadDiagnostic.directCallFailsLoad")
+unittest {
+    parseSnippet(q{
+        import core.sys.posix.setjmp: jmp_buf, longjmp, setjmp;
+        int jumper() {
+            jmp_buf buffer;
+            if (setjmp(buffer) == 0)
+                longjmp(buffer, 1);
+            return 0;
+        }
+    }).shouldThrow.msg.withoutSnippetCounter.should ==
+        "`_setjmp` is not supported in guest code: a "
+        ~ "backend cannot jump back to a stack frame it has already left\n"
+        ~ "`longjmp` is not supported in guest code: a "
+        ~ "backend cannot jump back to a stack frame it has already left";
+}
+
+@("setjmp.loadDiagnostic.aliasFailsLoad")
+unittest {
+    parseSnippet(q{
+        import core.sys.posix.setjmp: jmp_buf, longjmp;
+        alias jump = longjmp;
+        void jumper(ref jmp_buf buffer) { jump(buffer, 1); }
+    }).shouldThrow.msg.withoutSnippetCounter.should ==
+        "`longjmp` is not supported in guest code: a "
+        ~ "backend cannot jump back to a stack frame it has already left";
+}
+
+@("setjmp.loadDiagnostic.functionPointerFailsLoad")
+unittest {
+    parseSnippet(q{
+        import core.sys.posix.setjmp: jmp_buf, longjmp;
+        void jumper(ref jmp_buf buffer) {
+            auto pointer = &longjmp;
+            pointer(buffer, 1);
+        }
+    }).shouldThrow.msg.withoutSnippetCounter.should ==
+        "`longjmp` is not supported in guest code: a "
+        ~ "backend cannot jump back to a stack frame it has already left";
+}
+
+// A native library whose own C code uses `setjmp`/`longjmp` is called
+// across the barrier and keeps working: only guest code is refused.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call a function in a loaded native image"),
+)) {
+    @("setjmp.nativeLibraryInternalUseStillWorks." ~ backend.stringof)
+    unittest {
+        auto image = loadImage(nativeFixture("symbols.so"));
+        static if (is(backend == Native)) {
+            alias Fn = extern(C) int function();
+            (cast(Fn) image.resolve("snakebite_internal_setjmp_test"))()
+                .should == 42;
+        } else {
+            auto module_ = parseSnippet(q{
+                extern(C) int snakebite_internal_setjmp_test();
+                int caller() { return snakebite_internal_setjmp_test(); }
+            });
+            auto program = Program([module_]);
+            program.dependencyImage = &image;
+            auto instance = Owned!backend(program);
+            int result;
+            instance.call(findFunction(module_, "caller"), &result, []);
+            result.should == 42;
+        }
+    }
 }
