@@ -58,6 +58,42 @@ public struct GuestModules {
     public Duration preparation;
     public Duration constructors;
 
+    // While it lives, the explicit runtime start and end of a program with
+    // a C entry run the module phases of `program`.
+    public struct Entry {
+        private EntryRun* _entry;
+
+        @disable this(this);
+
+        public this(Backend backend, Program program) {
+            import std.conv: text;
+            import std.string: toStringz;
+            import snakebite.runtimeentry: RuntimeEntry;
+
+            if (!program.hasCEntryPoint || program.checks.betterC)
+                return;
+
+            _entry = new EntryRun;
+            _entry.backend = backend;
+            _entry.program = program;
+            _entry.file = Image.newFile;
+            _entry.token = text("/proc/self/fd/", _entry.file).toStringz;
+            RuntimeEntry.bind(_entry, &startEntry, &finishEntry, _entry.token);
+        }
+
+        public ~this() {
+            import core.sys.posix.unistd: close;
+            import snakebite.runtimeentry: RuntimeEntry;
+
+            if (_entry is null)
+                return;
+
+            RuntimeEntry.unbind;
+            _entry.modules.finish;
+            close(_entry.file);
+        }
+    }
+
     // Registers the root modules of `program`. A startup that fails ends
     // the way druntime's `rt_init` ends: the throwable is printed and
     // `failed` is true. A program with no constructor, no destructor and,
@@ -179,6 +215,61 @@ public struct GuestModules {
         return status;
     }
 }
+
+
+private struct EntryRun {
+    Backend backend;
+    Program program;
+    GuestModules modules;
+    int file;
+    const(char)* token;
+}
+
+private extern(C) int startEntry(void* owner) {
+    auto entry = cast(EntryRun*) owner;
+    entry.modules = GuestModules.start(entry.backend, entry.program,
+        GuestModules.Tests.no, GuestModules.Ends.process);
+    return !entry.modules.failed;
+}
+
+private extern(C) void thread_joinAll();
+
+private extern(C) int finishEntry(void* owner) {
+    auto entry = cast(EntryRun*) owner;
+    if (entry.modules.failed)
+        return 0;
+
+    auto run = entry.modules._run;
+    if (run is null)
+        return 1;
+
+    int status = 1;
+    try {
+        auto group = registeredGroup(*run.image.slot); // Runtime methods mutate their group.
+        group.runTlsDtors;
+        thread_joinAll;
+        group.runDtors;
+    } catch (Throwable throwable) {
+        print(throwable);
+        status = 0;
+    }
+    atomicStore(run.state, Run.State.finished);
+    entry.modules.finish;
+    run.end;
+    return status;
+}
+
+// Native declarations for the actual shared runtime's registered module group.
+private struct RuntimeGroup {
+    immutable(ModuleInfo*)[] modules;
+    immutable(ModuleInfo)*[] constructors;
+    immutable(ModuleInfo)*[] threadConstructors;
+    pragma(mangle, "_D2rt5minfo11ModuleGroup11runTlsDtorsMFZv") void runTlsDtors();
+    pragma(mangle, "_D2rt5minfo11ModuleGroup8runDtorsMFZv") void runDtors();
+}
+
+pragma(mangle, "_D2rt19sections_elf_shared3DSO11moduleGroupMNgFNbNcNdNiNjZNgSQCh5minfo11ModuleGroup")
+private extern(C) RuntimeGroup* registeredGroup(void* dso);
 
 
 private import core.atomic: atomicLoad, atomicStore, cas;
@@ -354,6 +445,7 @@ private void print(Throwable throwable) {
 
 // What one registration holds and what the entries of its records reach.
 private struct Run {
+    import dmd.func: FuncDeclaration;
     import core.sys.posix.pthread: pthread_t;
 
     // `running` until the program ends, then `finished`, when an entry that
@@ -370,6 +462,8 @@ private struct Run {
     ModuleInfo*[] records;
     Image image;
     CallbackBridge* bridge;
+    FuncDeclaration nativeDeclaration;
+    const(ModuleInfo*)[] dependencyModules;
     ExitRecord* exit;
     // The thread that registered, and the modules with destructors in the
     // order druntime ran their constructors on it: `finish` runs the
@@ -470,6 +564,7 @@ private struct Phase {
     VarDeclaration[] gates;
     // For a constructor phase, the destructor phase of the same module.
     Phase* destructor;
+    void function() nativeFunction;
 }
 
 
@@ -528,6 +623,9 @@ private void execute(Phase* phase) {
 
 private void call(Phase* phase) {
     try
+        if (phase.nativeFunction !is null)
+            phase.nativeFunction(); // A function pointer needs explicit call syntax.
+        else
         foreach (function_; phase.functions)
             phase.run.backend.call(function_, null, []);
     catch (SnakebiteException failure)
@@ -547,6 +645,9 @@ private Run* newRun(
     ModuleSpec[] specs;
     bool needed = tests == GuestModules.Tests.yes
         && program.rootModules.length != 0;
+    const dependencies = program.dependencyImage is null
+        ? null : program.dependencyImage.deferredModules;
+    needed = needed || dependencies.length != 0;
     foreach (module_; program.rootModules) {
         auto spec = ModuleSpec(module_, findModuleFunctions(module_));
         needed = needed || spec.hasFunctions;
@@ -561,6 +662,21 @@ private Run* newRun(
     GC.addRoot(cast(void*) run);
     run.backend = backend;
     run.bridge = new CallbackBridge(&callPhase, cast(void*) run);
+    run.dependencyModules = dependencies;
+    if (dependencies.length) {
+        import dmd.astenums: LINK, STC;
+        import dmd.func: FuncDeclaration;
+        import dmd.identifier: Identifier;
+        import dmd.location: Loc;
+        import dmd.mtype: Type, TypeFunction, ParameterList;
+        import snakebite.frontend.compiler: newInFrontend;
+        auto identifier = newInFrontend!(Identifier.idPool)( // DMD takes a mutable identifier.
+            "snakebite_module_phase");
+        auto type = newInFrontend!TypeFunction( // DMD declarations take a mutable type.
+            ParameterList.init, Type.tvoid, LINK.d);
+        run.nativeDeclaration = newInFrontend!FuncDeclaration(
+            Loc.initial, Loc.initial, identifier, cast(STC) 0, type);
+    }
     run.records = recordsOf(run, specs, tests);
     return run;
 }
@@ -599,6 +715,18 @@ private ModuleInfo*[] recordsOf(
     import snakebite.frontend.dmd.functions: findUnittests;
 
     auto records = new ModuleInfo*[specs.length];
+    auto nativeRecords = nativeRecordsOf(run); // Imports refer to these mutable copies.
+    ModuleInfo*[string] nativeByName;
+    foreach (record; nativeRecords)
+        nativeByName[record.name] = record;
+    auto nativeImports = new ModuleInfo*[][specs.length];
+    if (nativeRecords.length)
+        foreach (i, spec; specs)
+            foreach (module_; spec.module_.aimports) {
+                const name = module_.toPrettyChars.fromStringz;
+                if (auto record = name in nativeByName)
+                    nativeImports[i] ~= *record;
+            }
     auto crtRecord = crtRecordOf(run, specs);
     auto importSlots = new ModuleInfo**[specs.length];
     const imports = importsOf(specs);
@@ -609,7 +737,7 @@ private ModuleInfo*[] recordsOf(
         // druntime orders no module that has nothing to construct or
         // destruct, and no import of one: dmd marks it the same way.
         fields.standalone = !spec.module_.needmoduleinfo;
-        fields.importCount = imports[i].length;
+        fields.importCount = imports[i].length + nativeImports[i].length;
         // Every module with a destructor also gets a constructor entry, so
         // that `finish` learns where druntime put it in the order.
         auto sharedDestructor = run.phaseOf(
@@ -639,10 +767,59 @@ private ModuleInfo*[] recordsOf(
         records[i] = newRecord(fields, importSlots[i]);
     }
 
-    foreach (i, slots; importSlots)
+    foreach (i, slots; importSlots) {
         foreach (j, index; imports[i])
             slots[j] = records[index];
-    return crtRecord is null ? records : crtRecord ~ records;
+        foreach (j, record; nativeImports[i])
+            slots[imports[i].length + j] = record;
+    }
+    auto roots = crtRecord is null ? records : crtRecord ~ records; // Registration takes mutable records.
+    return nativeRecords.length ? roots ~ nativeRecords : roots;
+}
+
+
+private ModuleInfo*[] nativeRecordsOf(Run* run) {
+    import core.stdc.string: memcpy;
+
+    ModuleInfo*[] records;
+    ModuleInfo*[const(ModuleInfo)*] copies;
+    foreach (original; run.dependencyModules) {
+        const name = original.name;
+        const size = cast(const(ubyte)*) name.ptr + name.length + 1
+            - cast(const(ubyte)*) original;
+        auto storage = new void[size];
+        memcpy(storage.ptr, original, size);
+        auto record = cast(ModuleInfo*) storage.ptr;
+        record._index = 0;
+        auto slot = cast(void**) (storage.ptr + ModuleInfo.sizeof);
+        // The order of the fields in the record. `xgetMembers` is a field
+        // that druntime never calls.
+        foreach (flag; [MItlsctor, MItlsdtor, MIctor, MIdtor, MIxgetMembers,
+                MIictor, MIunitTest]) {
+            if (!(record._flags & flag))
+                continue;
+
+            if (flag != MIxgetMembers) {
+                auto phase = new Phase;
+                phase.run = run;
+                phase.kind = flag == MItlsctor ? Phase.Kind.threadConstructor
+                    : flag == MIctor || flag == MIictor ? Phase.Kind.constructor
+                    : flag == MIunitTest ? Phase.Kind.unitTests
+                    : Phase.Kind.destructor;
+                phase.nativeFunction = cast(void function()) *slot;
+                run.bridge.register(phase, run.nativeDeclaration);
+                *slot = cast(void*) run.entryOf(phase);
+            }
+            ++slot;
+        }
+        copies[original] = record;
+        records ~= record;
+    }
+    foreach (record; records)
+        foreach (ref dependency; cast(ModuleInfo*[]) record.importedModules)
+            if (auto replacement = dependency in copies)
+                dependency = *replacement;
+    return records;
 }
 
 
@@ -854,11 +1031,37 @@ private struct Image {
     // long as the image does: its descriptor number is the file name the
     // loader sees, so no two images that are alive have the same name.
     public static Image open() {
+        import core.sys.posix.unistd: close;
+        import std.conv: text;
+        import std.string: fromStringz, toStringz;
+
+        const file = newFile;
+        scope(failure) close(file);
+        Image image;
+        image._file = file;
+        image._handle = dlopen(
+            text("/proc/self/fd/", file).toStringz, RTLD_NOW | RTLD_LOCAL);
+        if (image._handle is null)
+            throw new SnakebiteException(text(
+                "cannot load the registry image: ", dlerror.fromStringz));
+
+        alias Slot = extern(C) void** function();
+        auto slot = cast(Slot) dlsym(image._handle, "snakebite_registry_slot");
+        if (slot is null)
+            assert(0, "the registry image exports its slot");
+
+        image._slot = slot();
+        ++_images;
+        return image;
+    }
+
+    // An open anonymous memory file with the bytes of the image.
+    public static int newFile() {
         import core.stdc.errno: errno;
         import core.stdc.string: strerror;
         import core.sys.posix.unistd: close, write;
         import std.conv: text;
-        import std.string: fromStringz, toStringz;
+        import std.string: fromStringz;
 
         enum MFD_CLOEXEC = 1;
         const file = memfd_create("snakebite-registry", MFD_CLOEXEC);
@@ -881,22 +1084,7 @@ private struct Image {
             written += count;
         }
 
-        Image image;
-        image._file = file;
-        image._handle = dlopen(
-            text("/proc/self/fd/", file).toStringz, RTLD_NOW | RTLD_LOCAL);
-        if (image._handle is null)
-            throw new SnakebiteException(text(
-                "cannot load the registry image: ", dlerror.fromStringz));
-
-        alias Slot = extern(C) void** function();
-        auto slot = cast(Slot) dlsym(image._handle, "snakebite_registry_slot");
-        if (slot is null)
-            assert(0, "the registry image exports its slot");
-
-        image._slot = slot();
-        ++_images;
-        return image;
+        return file;
     }
 
     public void register(ModuleInfo*[] records) {

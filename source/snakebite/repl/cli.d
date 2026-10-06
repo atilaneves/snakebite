@@ -83,6 +83,7 @@ public int run(string[] args) {
                 () => prepareDependencies(
                     projectDirectory, projectSources,
                     () => loadProject(projectDirectory, projectSources).program,
+                    projectEntry: false,
                 ),
             );
             const inProject = (string path) => compilerPath(path, projectDirectory);

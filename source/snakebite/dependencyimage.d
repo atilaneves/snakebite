@@ -83,14 +83,30 @@ private __gshared TestHooks.Watch* _watch;
 public struct DependencyImage {
     private void* _handle;
     private string _path;
+    private alias Modules = extern(C) const(ModuleInfo*)* function(size_t*);
+    private Modules _modules;
+    import snakebite.runtimeentry: RuntimeEntry;
+    // The image's own function for each function of `RuntimeEntry`, or null.
+    // Code in the image calls it and takes its address, so a guest
+    // reference must give the same address.
+    private void*[RuntimeEntry.symbols.length] _wrappers;
     public TestHooks testHooks;
 
     // The image exports its function registry under this name. The frontend
     // generator writes the definition and `resolve` looks it up.
     public enum registrySymbol = "snakebite_dependency_image_symbols_v1";
+    public enum entryStartupSettings = deferredRegistrySource;
 
     public string path() @safe @nogc nothrow pure const return scope {
         return _path;
+    }
+
+    public const(ModuleInfo*)[] deferredModules() const {
+        if (_modules is null)
+            return null;
+        size_t count;
+        const records = _modules(&count);
+        return records[0 .. count];
     }
 
     public void* resolve(in char[] name) const {
@@ -102,8 +118,12 @@ public struct DependencyImage {
         dlerror;
         // const qualifies this description, not the loader's opaque handle.
         const address = dlsym(cast(void*) _handle, name.toStringz);
-        if (dlerror is null)
+        if (dlerror is null) {
+            foreach (i, function_; RuntimeEntry.druntime)
+                if (_wrappers[i] !is null && address == function_)
+                    return cast(void*) _wrappers[i];
             return cast(void*) address;
+        }
 
         alias Registry = extern(C) void* function(const(char)[]);
         dlerror;
@@ -132,6 +152,7 @@ public DependencyImage prepareImage(
     in string[] linkerFiles = null,
     in string[] linkerArguments = null,
     in Optimise optimise = Optimise.yes,
+    in bool deferStartup = false,
 ) {
     import std.conv: text;
     import std.digest.sha: sha256Of;
@@ -180,20 +201,25 @@ public DependencyImage prepareImage(
     // A BetterC object has no ModuleInfo section for the DSO startup object.
     // Keep the same runtime choice for compilation and linking.
     const runtimeFlags = checks.betterC ? ["-betterC"] : null;
+    const startupFlags = deferStartup
+        ? ["-L--wrap=_d_dso_registry", "-L-Bsymbolic-functions"]
+            ~ DependencyImage.RuntimeEntry.symbols
+                .map!(symbol => "-L--wrap=" ~ symbol).array
+        : null;
 
     // The image must emit transitive template bodies too, including runtime
     // helpers introduced by assertion lowering. No guest object supplies them.
     version (DigitalMars) {
         const compileFlags = ["-c", "-fPIC", "-allinst"] ~ optimiseFlags;
         const linkFlags = ["-shared", "-defaultlib=libphobos2.so",
-            "-L--no-undefined"] ~ runtimeFlags;
+            "-L--no-undefined"] ~ runtimeFlags ~ startupFlags;
     } else version (LDC) {
         // -allinst also analyzes unused template members, which can fail
         // under the project's compiler options. Emit referenced bodies instead.
         const compileFlags = ["-c", "-relocation-model=pic",
             "-linkonce-templates"] ~ optimiseFlags;
         const linkFlags = ["-shared", "-link-defaultlib-shared",
-            "-L--no-undefined"] ~ runtimeFlags;
+            "-L--no-undefined"] ~ runtimeFlags ~ startupFlags;
     } else {
         static assert(false, "Dependency images require DMD or LDC");
     }
@@ -226,7 +252,8 @@ public DependencyImage prepareImage(
         __VERSION__, "\n", compileFlags, "\n", linkFlags, "\n", importFlags,
         "\n", dependencyFlags, "\n", linkerArguments, "\n",
         inputs.map!(input => input.absolutePath).array, "\n",
-        source.length, ":", source);
+        source.length, ":", source,
+        deferStartup ? deferredRegistrySource : "");
     auto stamps = ProjectImageCache(
         directory.buildPath(sourceDigest(settings) ~ ".json"), settings, null,
         executable);
@@ -239,7 +266,8 @@ public DependencyImage prepareImage(
         fileDigest(executable),
         "\n", __VERSION__, "\n", compileFlags, "\n", linkFlags,
         "\n", importFlags, "\n", dependencyFlags, "\n", linkerArguments,
-        "\n", source.length, ":", source);
+        "\n", source.length, ":", source,
+        deferStartup ? deferredRegistrySource : "");
     foreach (input; inputs ~ linkerFiles)
         fingerprint ~= text("\n", input.absolutePath.length, ":",
             input.absolutePath, ":", fileDigest(input));
@@ -253,7 +281,8 @@ public DependencyImage prepareImage(
         const sourcePath = staging.buildPath("image.d");
         const objectPath = staging.buildPath("image.o");
         const imagePath = staging.buildPath("image.so");
-        sourcePath.write(source ~ text("\nstatic assert(__VERSION__ == ",
+        sourcePath.write(source ~ (deferStartup ? deferredRegistrySource : "")
+            ~ text("\nstatic assert(__VERSION__ == ",
             __VERSION__, ", \"Image compiler must match the host compiler version\");\n"));
         runCompiler("compilation", [executable] ~ compileFlags ~ importFlags
             ~ [sourcePath, "-of=" ~ objectPath]);
@@ -333,6 +362,24 @@ private DependencyImage loadImageLocked(in string path) {
     if (image._handle is null)
         require(false, text("Cannot load dependency image ", path,
             ": ", dlerror.fromStringz));
+    import core.sys.posix.dlfcn: dlsym;
+    image._modules = cast(DependencyImage.Modules) dlsym(image._handle,
+        "snakebite_dependency_image_modules_v1");
+    if (image._modules !is null) {
+        import std.string: toStringz;
+        import snakebite.runtimeentry: RuntimeEntry;
+
+        foreach (i, symbol; RuntimeEntry.symbols)
+            image._wrappers[i] = dlsym(
+                image._handle, text("__wrap_", symbol).toStringz);
+        alias Bind = extern(C) void function(
+            const(void)*, const(void)*, const(void)*, const(void)*);
+        const bind = cast(Bind) dlsym(image._handle,
+            "snakebite_dependency_entry_bind_v1");
+        const entries = RuntimeEntry.entries;
+        const druntime = RuntimeEntry.druntime;
+        bind(entries[0], entries[1], druntime[0], druntime[1]);
+    }
     // Shared constructors run only on the first load. Retain their hooks
     // even if later preparation fails, since the loaded image stays open.
     if (auto hooks = image._handle in _imageTestHooks)
@@ -343,6 +390,65 @@ private DependencyImage loadImageLocked(in string path) {
     }
     return image;
 }
+
+
+// An empty module range preserves actual image GC/TLS registration without
+// starting a full-D static dependency before its C entry requests startup.
+private enum deferredRegistrySource = q{
+    private struct SnakebiteDeferredDSO {
+        size_t version_;
+        void** slot;
+        const(ModuleInfo*)* begin;
+        const(ModuleInfo*)* end;
+    }
+    private __gshared const(ModuleInfo*)[] snakebiteDeferredModules;
+    extern(C) void __real__d_dso_registry(void*);
+    extern(C) void __wrap__d_dso_registry(SnakebiteDeferredDSO* data) {
+        auto ranges = *data;
+        if (*data.slot is null) {
+            snakebiteDeferredModules = data.begin[0 .. data.end - data.begin];
+            ranges.begin = ranges.end = null;
+        }
+        __real__d_dso_registry(&ranges);
+    }
+    export extern(C) const(ModuleInfo*)* snakebite_dependency_image_modules_v1(size_t* count) {
+        *count = snakebiteDeferredModules.length;
+        return snakebiteDeferredModules.ptr;
+    }
+    alias SnakebiteRuntimePhase = extern(C) int function();
+    private __gshared SnakebiteRuntimePhase snakebiteEntryInit;
+    private __gshared SnakebiteRuntimePhase snakebiteEntryTerm;
+    private __gshared void* snakebiteHostInit;
+    private __gshared void* snakebiteHostTerm;
+    extern(C) int __real_rt_init();
+    extern(C) int __real_rt_term();
+    export extern(C) void snakebite_dependency_entry_bind_v1(
+        SnakebiteRuntimePhase initialize, SnakebiteRuntimePhase terminate,
+        void* hostInitialize, void* hostTerminate,
+    ) {
+        snakebiteEntryInit = initialize;
+        snakebiteEntryTerm = terminate;
+        snakebiteHostInit = hostInitialize;
+        snakebiteHostTerm = hostTerminate;
+    }
+    // A dependency that defines one of these functions keeps its definition.
+    export extern(C) int __wrap_rt_init() {
+        return cast(void*) &__real_rt_init == snakebiteHostInit
+            ? snakebiteEntryInit() : __real_rt_init();
+    }
+    export extern(C) int __wrap_rt_term() {
+        return cast(void*) &__real_rt_term == snakebiteHostTerm
+            ? snakebiteEntryTerm() : __real_rt_term();
+    }
+    pragma(mangle, "__wrap_" ~ imported!"core.runtime".Runtime.initialize.mangleof)
+    export bool snakebiteRuntimeInitialize() {
+        return __wrap_rt_init() != 0;
+    }
+    pragma(mangle, "__wrap_" ~ imported!"core.runtime".Runtime.terminate.mangleof)
+    export bool snakebiteRuntimeTerminate() {
+        return __wrap_rt_term() != 0;
+    }
+};
 
 
 private __gshared TestHooks[void*] _imageTestHooks;

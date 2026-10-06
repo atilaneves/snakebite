@@ -342,6 +342,7 @@ public const(imported!"snakebite.dependencyimage".DependencyImage)* prepareDepen
     scope imported!"snakebite.backends".Program delegate() program,
     in imported!"snakebite.dependencyimage".Optimise optimise
         = imported!"snakebite.dependencyimage".Optimise.yes,
+    in bool projectEntry = true,
 ) {
     import snakebite.backends: Program;
     import snakebite.frontend.imagesource: imageSource, imageInputs;
@@ -369,7 +370,9 @@ public const(imported!"snakebite.dependencyimage".DependencyImage)* prepareDepen
         sources.stringImportPaths, sources.linkerFlags,
         sources.linkerFiles, JSONValue(sources.sourceOverrides),
         sources.dubDescription.value, environment.get("DFLAGS", ""),
-        environment.get("LFLAGS", ""), "\noptimise:", optimise);
+        environment.get("LFLAGS", ""), "\noptimise:", optimise,
+        "\nprojectEntry:", projectEntry,
+        projectEntry ? DependencyImage.entryStartupSettings : "");
     auto cache = ProjectImageCache(buildPath(imageDirectory, "project.json"),
         settings, sources.files);
     auto image = new DependencyImage;
@@ -400,7 +403,9 @@ public const(imported!"snakebite.dependencyimage".DependencyImage)* prepareDepen
             sources.stringImportPaths,
             sources.flags.compilerArguments,
             sources.linkerFiles, sources.linkerFlags,
-            optimise: optimise),
+            optimise: optimise,
+            deferStartup: projectEntry && analysedProgram.hasCEntryPoint
+                && !analysedProgram.checks.betterC),
         sources.linkerFiles.length != 0,
         () {
             import snakebite.dub: dubInputs;

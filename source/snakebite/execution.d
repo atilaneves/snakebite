@@ -107,6 +107,8 @@ public ExecutionReport executeBackend(
 
     auto stopWatch = StopWatch(AutoStart.yes);
     auto backend = makeBackend(name, program);
+    import snakebite.backends.guestmodules: GuestModules;
+    const entry = GuestModules.Entry(backend, program);
     TestStartupReport startup;
     int status;
     // Snippet callers construct Programs that do not start as a project,
