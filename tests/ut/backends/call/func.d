@@ -928,10 +928,8 @@ static foreach (backend; Matrix!(
 // Compiled D keeps a struct that a function returns by value on the stack.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot run the GC"),
-    Omit!(Bytecode, Because.unconfirmed,
-        "the compiler keeps the zero value of the struct as a constant"),
 )) {
-    @("ret.largeStruct.allocatesNoGCMemory." ~ backend.stringof)
+    @("ret.largeStruct.firstCallAllocatesLessThanStructSize." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         true.shouldBeRetOf!(backend, q{

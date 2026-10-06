@@ -4045,6 +4045,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(IntegerExp expression) {
+        if (_valueType !is null && _valueType.isTypeStruct !is null) {
+            // DMD encodes a zero-initialized struct as an IntegerExp.
+            requireDestination(expression);
+            emit(&opZero, _destination, 0, _width);
+            return;
+        }
         compileConstant(expression);
     }
 
