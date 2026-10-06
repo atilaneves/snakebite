@@ -1539,6 +1539,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // What native code throws reaches the guest as a `GuestException`,
     // except what is not an error of the guest: the interpreter's own
     // refusal, an exception that already is one, and a halt.
+    pragma(inline, true)
     extern(D) private void crossNative(scope void delegate() call) {
         try
             call();
