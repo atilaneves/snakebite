@@ -43,16 +43,12 @@
     .pushsection .text.unlikely,"ax",@progbits
 .Lsignal_no_restorer\@:
     cmpl $SIGSEGV,%r15d
-    je .Lsignal_fatal_delivery\@
-    testq $(1 << (SIGSEGV - 1)),296(%r14)
-    jz .Lsignal_action_ready\@
-.Lsignal_fatal_delivery\@:
-    /* Failed delivery is fatal for SIGSEGV itself, or when the interrupted
-     * mask blocks the forced SIGSEGV. Even a current callable disposition
-     * cannot override the latter kernel rule. A forced fault while SIGSEGV
-     * is still blocked gives the kernel that default-fatal path without
-     * another disposition or mask syscall. This address is noncanonical
-     * with both four- and five-level paging.
+    jne .Lsignal_action_ready\@
+    /* Failed SIGSEGV delivery is always fatal. The return mask cannot decide
+     * that for another signal: sigsuspend can have a different active mask.
+     * A forced fault while SIGSEGV is still blocked gives the kernel the
+     * default-fatal path without another disposition or mask syscall. This
+     * address is noncanonical with both four- and five-level paging.
      */
     movabs $0x8000000000000000,%rax
     mov (%rax),%rax

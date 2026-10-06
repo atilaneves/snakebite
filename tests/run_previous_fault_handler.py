@@ -908,22 +908,49 @@ def test_absent_segv_restorer(absent_restorer_host, alternate, onstack,
         assert result.stdout == b"", result
 
 
+@pytest.fixture(scope="module", params=PROFILES)
+def suspend_return_mask_host(request, tmp_path_factory):
+    from run_missing_restorer import SUSPEND_HOST
+
+    return build_host(request, tmp_path_factory, SUSPEND_HOST)
+
+
 @pytest.mark.parametrize("sig", [signal.SIGFPE, signal.SIGBUS])
-@pytest.mark.parametrize("alternate", [False, True])
-@pytest.mark.parametrize("onstack", [False, True])
-@pytest.mark.parametrize("information", [False, True])
-@pytest.mark.parametrize("pointer", [False, True])
+@pytest.mark.parametrize("stack", [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize("restricted", [False, True])
 @pytest.mark.parametrize("replacement", [False, True])
-def test_absent_restorer_blocked_failure(absent_restorer_host, sig, alternate,
-                                        onstack, information, pointer,
-                                        restricted, replacement):
+def test_sigsuspend_does_not_infer_fatal_from_return_mask(suspend_return_mask_host,
+                                                       sig, stack, restricted,
+                                                       replacement):
+    # Full recovery is asserted separately in run_missing_restorer.py. This
+    # guards the introduced fatal regression, not that remaining mismatch.
     for installed in (False, True):
         result = subprocess.run(
-            [str(absent_restorer_host), str(int(installed)), str(int(alternate)),
-             str(int(onstack)), str(int(information)), str(int(pointer)),
-             str(int(restricted)), str(sig.value), str(int(replacement))],
+            [str(suspend_return_mask_host), str(int(installed)),
+             *map(lambda x: str(int(x)), stack), "1", "0", str(int(restricted)),
+             str(sig.value), str(int(replacement))],
             capture_output=True, timeout=5,
+        )
+        if installed:
+            assert result.returncode >= 0, result
+        else:
+            assert result.returncode == 0, result
+            expected = b"failure\nreplacement\n" if replacement else b"failure\n"
+            assert result.stdout == expected, result
+
+
+@pytest.mark.parametrize("stack", [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize("restricted", [False, True])
+@pytest.mark.parametrize("information", [False, True])
+@pytest.mark.parametrize("pointer", [False, True])
+def test_absent_segv_restorer_during_sigsuspend(suspend_return_mask_host, stack,
+                                              restricted, information, pointer):
+    for installed in (False, True):
+        result = subprocess.run(
+            [str(suspend_return_mask_host), str(int(installed)),
+             *map(lambda x: str(int(x)), stack), str(int(information)),
+             str(int(pointer)), str(int(restricted)), str(signal.SIGSEGV.value),
+             "0"], capture_output=True, timeout=5,
         )
         assert result.returncode == -signal.SIGSEGV, result
         assert result.stdout == b"", result

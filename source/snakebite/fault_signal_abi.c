@@ -10,7 +10,6 @@
 _Static_assert(sizeof(sigset_t) == 8, "kernel signal mask size");
 _Static_assert(SA_RESTORER == 0x04000000, "signal restorer flag");
 _Static_assert(offsetof(struct ucontext, uc_mcontext) == 40, "machine context offset");
-_Static_assert(offsetof(struct ucontext, uc_sigmask) == 296, "signal mask offset");
 _Static_assert(offsetof(struct sigcontext, fpstate) == 184, "FP pointer offset");
 _Static_assert(sizeof(struct _fpstate_64) == 512, "legacy FP image size");
 _Static_assert(offsetof(struct _fpstate_64, sw_reserved) == 464, "XSAVE header offset");
