@@ -59,11 +59,15 @@ private extern(C++) class InlineAsmCollector
     import dmd.dtemplate: TemplateMixin;
     import dmd.errors: error;
     import dmd.expression: SymbolExp;
+    import dmd.declaration: VarDeclaration;
+    import dmd.dsymbol: Dsymbol;
     import dmd.func: FuncDeclaration;
+    import dmd.location: Loc;
 
     private bool[Module] _rootModules;
     private bool[FuncDeclaration] _visited;
-    private FuncDeclaration _enclosing;
+    private bool[Loc] _reported;
+    private Dsymbol _owner;
 
     private extern(D) this(Module[] rootModules) {
         foreach (module_; rootModules)
@@ -73,7 +77,7 @@ private extern(C++) class InlineAsmCollector
     // The same question `Program.isRootOwned` (backend.d) answers, so the
     // predicate itself lives once, in `snakebite.frontend.dmd.functions`;
     // both forward to it (docs/adr/0009: one root-owned predicate).
-    private extern(D) bool isRootOwned(FuncDeclaration function_) const {
+    private extern(D) bool isRootOwned(Dsymbol function_) const {
         import snakebite.frontend.dmd.functions:
             frontendIsRootOwned = isRootOwned;
 
@@ -127,9 +131,9 @@ private extern(C++) class InlineAsmCollector
         if (function_ in _visited)
             return;
         _visited[function_] = true;
-        auto outer = _enclosing;
-        _enclosing = function_;
-        scope(exit) _enclosing = outer;
+        auto outer = _owner;
+        _owner = function_;
+        scope(exit) _owner = outer;
         if (function_.hasInlineAsm && isRootOwned(function_))
             error(
                 function_.loc,
@@ -142,21 +146,38 @@ private extern(C++) class InlineAsmCollector
             function_.fbody.accept(this);
     }
 
+    // The initializer of a module-scope variable or of an aggregate field
+    // is guest code too: a function pointer stored there is called later.
+    override void visit(VarDeclaration variable) {
+        auto outer = _owner;
+        if (_owner is null)
+            _owner = variable;
+        scope(exit) _owner = outer;
+        super.visit(variable);
+    }
+
     // Any reference to a `setjmp`/`longjmp` function from a root-owned
-    // function body, not only a direct call: `VarExp.var` is the resolved
+    // declaration, not only a direct call: `VarExp.var` is the resolved
     // declaration, so an alias is already seen through, and taking the
-    // address (`&longjmp`) reaches a `SymOffExp` or a `VarExp` too.
+    // address (`&longjmp`) reaches a `SymOffExp` or a `VarExp` too. A
+    // template body is reached once for each instance at the same
+    // location, so the error is reported once for each location.
     override void visit(SymbolExp expression) {
-        if (_enclosing is null || !isRootOwned(_enclosing))
+        import std.string: toStringz;
+
+        if (_owner is null || !isRootOwned(_owner))
             return;
         auto function_ = expression.var.isFuncDeclaration;
         if (function_ is null || !isNonLocalJump(function_))
             return;
+        if (expression.loc in _reported)
+            return;
+        _reported[expression.loc] = true;
         error(
             expression.loc,
             "`%s` is not supported in guest code: a backend cannot "
             ~ "jump back to a stack frame it has already left",
-            function_.ident.toChars,
+            nonLocalJumpName(function_).toStringz,
         );
     }
 }
@@ -164,7 +185,8 @@ private extern(C++) class InlineAsmCollector
 // The C functions that save and restore a stack context, by the name the
 // linker sees: `pragma(mangle)` wins over the D name, as it does there.
 // Matching on C linkage and name, not on the declaring module, also
-// covers a guest's own redeclaration of the function.
+// covers a guest's own redeclaration of the function. A function with a
+// body is guest code that backends can run, not the libc function.
 private bool isNonLocalJump(imported!"dmd.func".FuncDeclaration function_) {
     import dmd.astenums: LINK;
     import std.algorithm: canFind;
@@ -174,12 +196,28 @@ private bool isNonLocalJump(imported!"dmd.func".FuncDeclaration function_) {
         "longjmp", "_longjmp", "siglongjmp",
     ];
 
-    if (function_.resolvedLinkage != LINK.c)
-        return false;
-    const name = function_.mangleOverride.length
-        ? function_.mangleOverride
-        : function_.ident.toString;
-    return names.canFind(name);
+    return function_.fbody is null
+        && function_.resolvedLinkage == LINK.c
+        && names.canFind(linkName(function_));
+}
+
+// The name in the diagnostic is the libc function the guest called, not
+// the glibc symbol behind it: druntime aliases `setjmp` to `_setjmp` and
+// `sigsetjmp` to `__sigsetjmp`.
+private string nonLocalJumpName(
+    imported!"dmd.func".FuncDeclaration function_,
+) {
+    switch (linkName(function_)) {
+        case "_setjmp": return "setjmp";
+        case "__sigsetjmp": return "sigsetjmp";
+        default: return linkName(function_);
+    }
+}
+
+private string linkName(imported!"dmd.func".FuncDeclaration function_) {
+    return function_.mangleOverride.length
+        ? function_.mangleOverride.idup
+        : function_.ident.toString.idup;
 }
 
 // Named distinctly from `InlineAsmCollector` above and `imagesource.d`'s
