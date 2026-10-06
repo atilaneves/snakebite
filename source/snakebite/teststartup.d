@@ -29,6 +29,7 @@ public TestStartupReport runTestsAndMain(
     import snakebite.guestrunlock: guestRunLock;
     import snakebite.backends.guestmodules: GuestModules;
     import snakebite.dependencyimage: TestHooks;
+    import snakebite.faultsignal: FaultHandlersOwner;
     import std.algorithm.iteration: map;
     import std.array: array;
     import std.string: toStringz;
@@ -84,6 +85,10 @@ public TestStartupReport runTestsAndMain(
     TestHooks.Watch watch;
     watch.install(TestHooks.current);
     scope(exit) watch.restore;
+    // `runModuleUnitTests` swaps the fault actions for its own. The watched
+    // hooks put ours back before the runner starts, and this owner puts
+    // them back after the call.
+    scope FaultHandlersOwner handlers;
     report.status = _d_run_main(_runtimeCArgs.argc, cArguments.ptr, &callMain);
     if (modules.finish && report.status == 0)
         report.status = 1;

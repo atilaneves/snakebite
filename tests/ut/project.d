@@ -5,7 +5,11 @@ import core.atomic: atomicLoad;
 import core.runtime: UnitTestResult;
 import core.sync.mutex: Mutex;
 import snakebite.backends: BackendName, backendIdentity;
+import core.thread: Thread;
 import snakebite.backends.backend: Program;
+import snakebite.backends.guestfault: GuestFault, GuestFaultException;
+import snakebite.frontend.compiler: parseSnippets;
+import snakebite.frontend.dmd.functions: findFunction;
 import snakebite.dependencyimage: TestHooks;
 import snakebite.execution: prepareProject, executeBackend;
 import snakebite.dub: DubDescription;
@@ -165,5 +169,58 @@ static foreach (backend; Matrix!()) {
                 atomicLoad(runtimeInitDepth).should == depth;
             }
         }
+    }
+}
+
+
+// While a project runs its test runner, druntime owns the actions of the
+// fault signals. A guest fault on another thread must still reach us.
+private template RunnerProbe(BackendType) {
+    __gshared bool reported;
+
+    UnitTestResult runner() {
+        auto module_ = parseSnippets([q{
+            module runnerFault;
+            int fail() { int* pointer; return *pointer; }
+        }])[0];
+        auto backend = new BackendType(Program([module_]));
+        auto faulter = new Thread({
+            int result;
+            try
+                backend.call(module_.findFunction("fail"), &result, []);
+            catch (GuestFaultException fault)
+                reported = fault.kind == GuestFault.Kind.nullDereference;
+        }).start;
+        faulter.join;
+        return UnitTestResult(1, 1, false, false);
+    }
+}
+
+private alias FaultingGuests = Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the test catches the fault of a call on a backend object, and the "
+        ~ "Native arm is code compiled into bin/ut with no such object"),
+    Omit!(Ctfe, Because.diverges,
+        "dmd's interpreter reports a null dereference as a diagnostic and "
+        ~ "raises no GuestFaultException"),
+);
+
+// The runner starts the guest project through `_d_run_main`, which changes
+// druntime's nesting depth, so this test takes turns with the one above.
+static foreach (BackendType; FaultingGuests) {
+    @Tags(BackendType.stringof)
+    @("runtime.guestFaultOnAnotherThreadWhileARunnerIsActive." ~ BackendType.stringof)
+    unittest {
+        _initDepthLock.lock;
+        scope(exit) _initDepthLock.unlock;
+
+        const sandbox = Sandbox();
+        sandbox.writeFile("app/app.d", "module app; int main() { return 0; }");
+        auto program = prepareProject(sandbox.inSandboxPath("app")).project.program;
+        program.testHooks = TestHooks.of(null, &RunnerProbe!BackendType.runner);
+
+        executeBackend(backendIdentity!BackendType, program, null, false).status.should == 0;
+
+        RunnerProbe!BackendType.reported.shouldBeTrue;
     }
 }

@@ -57,6 +57,9 @@ public struct TestHooks {
     }
 
     private static bool watchedLegacy() {
+        import snakebite.faultsignal: reinstallFaultHandlers;
+
+        reinstallFaultHandlers;
         try
             return _watch._hooks._legacy();
         catch (Throwable throwable) {
@@ -66,6 +69,9 @@ public struct TestHooks {
     }
 
     private static typeof(Runtime.extendedModuleUnitTester()()) watchedExtended() {
+        import snakebite.faultsignal: reinstallFaultHandlers;
+
+        reinstallFaultHandlers;
         try
             return _watch._hooks._extended();
         catch (Throwable throwable) {

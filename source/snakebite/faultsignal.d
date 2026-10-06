@@ -168,15 +168,7 @@ public bool installFaultHandlers() @trusted nothrow @nogc {
             return true;
         }
 
-        sigaction_t action;
-        action.sa_sigaction = &snakebite_fault_signal_entry;
-        action.sa_flags = SA_SIGINFO | SA_ONSTACK;
-        // The collector suspends threads with a signal. While the handler
-        // runs on the alternate stack, the collector would take the pointer
-        // into it as the top of the stack of the thread, and scan memory
-        // that is not mapped. With every signal blocked, the suspension
-        // waits until the thread is back on its own stack.
-        sigfillset(&action.sa_mask);
+        auto action = faultAction;
         foreach (signal; handledSignals) {
             const index = cast(size_t) signal;
             if (sigaction(signal, &action, &_previous[index].action) != 0)
@@ -191,6 +183,36 @@ public bool installFaultHandlers() @trusted nothrow @nogc {
         return true;
     } else
         return false;
+}
+
+
+// druntime's `runModuleUnitTests` takes the actions of SIGSEGV and SIGBUS
+// for its own backtrace handler, which resets itself on the first signal.
+// While it runs, a guest fault on any thread would kill the process. Call
+// this where druntime hands control to the test runner to put our actions
+// back. It does nothing when `installFaultHandlers` did not install them.
+public void reinstallFaultHandlers() @trusted nothrow @nogc {
+    static if (supported) {
+        import core.atomic: atomicLoad;
+
+        if (atomicLoad(_installation) != Installation.complete)
+            return;
+        const action = faultAction;
+        foreach (signal; handledSignals)
+            if (sigaction(signal, &action, null) != 0)
+                assert(0, "sigaction failed for a fault signal");
+    }
+}
+
+
+// Puts our actions back when it goes out of scope. Hold it in a `scope`
+// variable around a call that can leave druntime's actions in place.
+public struct FaultHandlersOwner {
+    @disable this(this);
+
+    public ~this() @safe nothrow @nogc {
+        reinstallFaultHandlers;
+    }
 }
 
 
@@ -375,6 +397,20 @@ static if (supported) {
         sigset_t,
         stack_t;
     import core.sys.posix.ucontext: REG_RIP, REG_RSP, ucontext_t;
+
+    // The action that reports a guest fault.
+    private sigaction_t faultAction() @trusted nothrow @nogc {
+        sigaction_t action;
+        action.sa_sigaction = &snakebite_fault_signal_entry;
+        action.sa_flags = SA_SIGINFO | SA_ONSTACK;
+        // The collector suspends threads with a signal. While the handler
+        // runs on the alternate stack, the collector would take the pointer
+        // into it as the top of the stack of the thread, and scan memory
+        // that is not mapped. With every signal blocked, the suspension
+        // waits until the thread is back on its own stack.
+        sigfillset(&action.sa_mask);
+        return action;
+    }
 
     private extern(C) void snakebite_fault_trampoline() nothrow @nogc;
     private extern(C) void snakebite_fault_trampoline_call() nothrow @nogc;

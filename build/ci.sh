@@ -6,6 +6,9 @@ build/reggae.sh
 ninja
 # One worker keeps the full-suite time stable under strace.
 build/ut-without-build-tools.sh -j 1
+# The default thread count runs tests on several threads at once, which
+# the single-worker run above never does.
+build/ut-without-build-tools.sh
 # The tests tagged `@Tags("alone")` need a process in which no other
 # test runs: they gate on measured times, or they count what the process
 # holds while no other thread starts. Run them on their own,
