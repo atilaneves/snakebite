@@ -73,8 +73,9 @@ unittest {
         }
     });
 
-    synchronized (arenaReportLock)
-        arenaReport.should == "";
+    arenaReportLock.lock;
+    scope(exit) arenaReportLock.unlock;
+    arenaReport.should == "";
 }
 
 
@@ -93,8 +94,9 @@ unittest {
     const match = matchFirst("snippet_42", regex(`hostCacheProbe\d+|snippet_\d+`));
     match.empty.should == false;
 
-    synchronized (arenaReportLock)
-        arenaReport.should == "";
+    arenaReportLock.lock;
+    scope(exit) arenaReportLock.unlock;
+    arenaReport.should == "";
 }
 
 
@@ -111,7 +113,9 @@ unittest {
     import snakebite.frontend.compiler: newInFrontend;
     import snakebite.gc: lowmem;
 
-    synchronized (arenaReportLock) {
+    {
+        arenaReportLock.lock;
+        scope(exit) arenaReportLock.unlock;
         // An identifier's name is arena memory the test can write a word to.
         auto identifier = newInFrontend!(Identifier.idPool)(
             "reportsAPointerIntoTheGCHeapWithRoomForAWord");
@@ -168,7 +172,9 @@ unittest {
         return null;
     }
 
-    synchronized (arenaReportLock) {
+    {
+        arenaReportLock.lock;
+        scope(exit) arenaReportLock.unlock;
         pthread_attr_t attributes;
         pthread_attr_init(&attributes);
         pthread_attr_setstack(&attributes, aligned, stackSize).should == 0;
