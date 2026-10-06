@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import pytest
+from dubname import dub_name
 
 BACKENDS = ["interpreter", "bytecode", "ctfe"]
 
@@ -697,19 +698,19 @@ def test_dependency_constructor_uses_project_directory(
     write(tmp_path / "outside" / ".keep")
     write(
         tmp_path / "app" / "dub.json",
-        """
-        {
-            "name": "cwd-app",
+        f"""
+        {{
+            "name": "{dub_name("cwd-app")}",
             "targetType": "executable",
             "sourcePaths": ["source"],
             "importPaths": ["source"],
-            "dependencies": {
-                "cwd-dep": {"path": "../dependency"}
-            },
+            "dependencies": {{
+                "{dub_name("cwd-dep")}": {{"path": "../dependency"}}
+            }},
             "configurations": [
-                {"name": "unittest", "targetType": "executable"}
+                {{"name": "unittest", "targetType": "executable"}}
             ]
-        }
+        }}
         """,
     )
     write(
@@ -727,13 +728,13 @@ def test_dependency_constructor_uses_project_directory(
     )
     write(
         tmp_path / "dependency" / "dub.json",
-        """
-        {
-            "name": "cwd-dep",
+        f"""
+        {{
+            "name": "{dub_name("cwd-dep")}",
             "targetType": "library",
             "sourcePaths": ["source"],
             "importPaths": ["source"]
-        }
+        }}
         """,
     )
     write(
@@ -1270,10 +1271,10 @@ def test_thread_destructor_runs_before_that_of_a_dependency(
 ) -> None:
     write(
         tmp_path / "app" / "dub.sdl",
-        """
-        name "app"
+        f"""
+        name "{dub_name("app")}"
         targetType "library"
-        dependency "dep" path="../dep"
+        dependency "{dub_name("dep")}" path="../dep"
         """,
     )
     write(
@@ -1295,8 +1296,8 @@ def test_thread_destructor_runs_before_that_of_a_dependency(
     )
     write(
         tmp_path / "dep" / "dub.sdl",
-        """
-        name "dep"
+        f"""
+        name "{dub_name("dep")}"
         targetType "library"
         """,
     )
@@ -3035,7 +3036,7 @@ def test_destructor_shape_runs_in_finalizer(
 # own `main` first, and a program takes the first root `main` it finds.
 def dub_project_recipe(name: str) -> str:
     return (
-        f'name "{name}"\ntargetType "library"\n'
+        f'name "{dub_name(name)}"\ntargetType "library"\n'
         'configuration "unittest" {\n    targetType "executable"\n}\n'
     )
 
@@ -3066,7 +3067,8 @@ def write_cpp_exception_project(tmp_path: Path) -> None:
     write(
         tmp_path / "app" / "dub.sdl",
         dub_project_recipe("cpp-exception")
-        + 'dependency "cpp-exception-dep" path="../dependency"\n',
+        + f'dependency "{dub_name("cpp-exception-dep")}"'
+        + ' path="../dependency"\n',
     )
     write(
         tmp_path / "app" / "source" / "main.d",
@@ -3089,7 +3091,8 @@ def write_cpp_exception_project(tmp_path: Path) -> None:
     )
     write(
         tmp_path / "dependency" / "dub.sdl",
-        'name "cpp-exception-dep"\ntargetType "staticLibrary"\n'
+        f'name "{dub_name("cpp-exception-dep")}"\n'
+        'targetType "staticLibrary"\n'
         'preBuildCommands "c++ -c -fPIC $PACKAGE_DIR/throws.cpp'
         ' -o $PACKAGE_DIR/throws.o"\n'
         'sourceFiles "throws.o"\nlibs "stdc++"\n',

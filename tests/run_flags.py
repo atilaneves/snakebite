@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from dubname import dub_name
 
 TIMEOUT = 120
 
@@ -56,7 +57,7 @@ def run_unittests(
     if backend == "native":
         return run_native(directory, flags, code)
 
-    recipe = 'name "app"\ntargetType "library"\n'
+    recipe = f'name "{dub_name("app")}"\ntargetType "library"\n'
     for flag in flags:
         recipe += f'dflags "{flag}"\n'
     (directory / "dub.sdl").write_text(recipe, encoding="utf-8")
@@ -776,7 +777,7 @@ def test_unknown_checkaction_value_is_an_error(
         )
     else:
         (tmp_path / "dub.sdl").write_text(
-            'name "app"\ntargetType "library"\ndflags "-checkaction=bogus"\n',
+            f'name "{dub_name("app")}"\ntargetType "library"\ndflags "-checkaction=bogus"\n',
             encoding="utf-8",
         )
         (tmp_path / "source").mkdir()
@@ -1343,7 +1344,7 @@ def test_unknown_check_flag_value_is_an_error(
         )
     else:
         (tmp_path / "dub.sdl").write_text(
-            f'name "app"\ntargetType "library"\ndflags "{flag}"\n',
+            f'name "{dub_name("app")}"\ntargetType "library"\ndflags "{flag}"\n',
             encoding="utf-8",
         )
         (tmp_path / "source").mkdir()
@@ -1411,9 +1412,9 @@ def test_check_flag_applies_to_a_dependency_template(
     (app / "source").mkdir(parents=True)
     (dependency / "source").mkdir(parents=True)
     (app / "dub.sdl").write_text(
-        'name "app"\ntargetType "library"\ndflags "-check=in=off"\n'
+        f'name "{dub_name("app")}"\ntargetType "library"\ndflags "-check=in=off"\n'
         + "".join(f'dflags "{flag}"\n' for flag in extra_flags)
-        + 'dependency "dep" path="../dependency"\n',
+        + f'dependency "{dub_name("dep")}" path="../dependency"\n',
         encoding="utf-8",
     )
     (app / "source" / "app.d").write_text(
@@ -1421,7 +1422,7 @@ def test_check_flag_applies_to_a_dependency_template(
         encoding="utf-8",
     )
     (dependency / "dub.sdl").write_text(
-        'name "dep"\ntargetType "library"\n', encoding="utf-8",
+        f'name "{dub_name("dep")}"\ntargetType "library"\n', encoding="utf-8",
     )
     (dependency / "source" / "dep.d").write_text(
         "module dep;\n"
@@ -1508,7 +1509,7 @@ def run_compiler_specific_project(
     (project / "source").mkdir(parents=True)
     (project / "dub.json").write_text(
         json.dumps({
-            "name": "app", "targetType": "library",
+            "name": dub_name("app"), "targetType": "library",
             "dflags-dmd": dmd_flags, "dflags-ldc": ldc_flags,
         }),
         encoding="utf-8",
@@ -1578,15 +1579,15 @@ def test_dependency_that_fails_to_build_is_reported(
     (app / "source").mkdir(parents=True)
     (dependency / "source").mkdir(parents=True)
     (app / "dub.sdl").write_text(
-        'name "app"\ntargetType "library"\ndflags "-check=in=off"\n'
-        'dependency "dep" path="../dependency"\n',
+        f'name "{dub_name("app")}"\ntargetType "library"\ndflags "-check=in=off"\n'
+        f'dependency "{dub_name("dep")}" path="../dependency"\n',
         encoding="utf-8",
     )
     (app / "source" / "app.d").write_text(
         "module app;\nimport dep;\nunittest {}\n", encoding="utf-8",
     )
     (dependency / "dub.sdl").write_text(
-        'name "dep"\ntargetType "library"\n', encoding="utf-8",
+        f'name "{dub_name("dep")}"\ntargetType "library"\n', encoding="utf-8",
     )
     (dependency / "source" / "dep.d").write_text(
         'module dep;\nstatic assert(false, "dependency does not build");\n',
@@ -1629,7 +1630,7 @@ def test_root_build_command_failure_is_reported(
     dependency = tmp_path / "dependency"
     (dependency / "source").mkdir(parents=True)
     (dependency / "dub.sdl").write_text(
-        'name "dep"\ntargetType "library"\n', encoding="utf-8",
+        f'name "{dub_name("dep")}"\ntargetType "library"\n', encoding="utf-8",
     )
     (dependency / "source" / "dep.d").write_text(
         "module dep; int value() { return 1; }\n", encoding="utf-8",
@@ -1651,8 +1652,8 @@ def test_root_build_command_failure_is_reported(
             response = outer
         compiler_flags = [f"@{response}"]
     (tmp_path / "dub.json").write_text(json.dumps({
-        "name": "app", "targetType": "library",
-        "dependencies": {"dep": {"path": "dependency"}},
+        "name": dub_name("app"), "targetType": "library",
+        "dependencies": {dub_name("dep"): {"path": "dependency"}},
         "dflags": compiler_flags,
         stage: [f"echo {marker} >&2; exit 27"],
     }), encoding="utf-8")
@@ -1686,7 +1687,7 @@ def test_unrelated_root_compiler_flag_failure_is_reported(
     dependency = tmp_path / "dependency"
     (dependency / "source").mkdir(parents=True)
     (dependency / "dub.sdl").write_text(
-        'name "dep"\ntargetType "library"\n', encoding="utf-8",
+        f'name "{dub_name("dep")}"\ntargetType "library"\n', encoding="utf-8",
     )
     (dependency / "source" / "dep.d").write_text("module dep;\n", encoding="utf-8")
     (tmp_path / "source").mkdir()
@@ -1698,8 +1699,8 @@ def test_unrelated_root_compiler_flag_failure_is_reported(
         else "-check=in=off"
     )
     (tmp_path / "dub.json").write_text(json.dumps({
-        "name": "app", "targetType": "library",
-        "dependencies": {"dep": {"path": "dependency"}},
+        "name": dub_name("app"), "targetType": "library",
+        "dependencies": {dub_name("dep"): {"path": "dependency"}},
         "dflags": [check_flag, "--not-a-real-compiler-option"],
     }), encoding="utf-8")
     if backend in ["native", "native-ldc"]:
@@ -1765,7 +1766,7 @@ unittest {{
         + program, encoding="utf-8",
     )
     recipe = {
-        "name": "app", "targetType": "library",
+        "name": dub_name("app"), "targetType": "library",
         "dflags": (["-check=in=on"] if unchecked is None else [])
         + ([import_flag, *flags] if path_kind == "plain" else [response_argument]),
     }
@@ -1773,12 +1774,12 @@ unittest {{
         dependency = tmp_path / "dependency"
         (dependency / "source").mkdir(parents=True)
         (dependency / "dub.sdl").write_text(
-            'name "dep"\ntargetType "library"\n', encoding="utf-8",
+            f'name "{dub_name("dep")}"\ntargetType "library"\n', encoding="utf-8",
         )
         (dependency / "source" / "dep.d").write_text(
             "module dep;\n", encoding="utf-8",
         )
-        recipe["dependencies"] = {"dep": {"path": "dependency"}}
+        recipe["dependencies"] = {dub_name("dep"): {"path": "dependency"}}
     (tmp_path / "dub.json").write_text(json.dumps(recipe), encoding="utf-8")
     command = (
         ["dub", "test", f"--compiler={native_compiler()}"]
@@ -1802,7 +1803,7 @@ def test_changed_response_file_changes_checks_on_cached_runs(
         PRELUDE + IN_PROGRAM, encoding="utf-8",
     )
     (tmp_path / "dub.json").write_text(json.dumps({
-        "name": "app", "targetType": "library", "dflags": [f"@{response}"],
+        "name": dub_name("app"), "targetType": "library", "dflags": [f"@{response}"],
     }), encoding="utf-8")
     for index, enabled in enumerate([False, True, False]):
         response.write_text(
@@ -1878,7 +1879,7 @@ def test_betterc_dependency_versions(
     dependency = tmp_path / "dependency"
     (dependency / "source").mkdir(parents=True)
     (dependency / "dub.sdl").write_text(
-        'name "dep"\ntargetType "library"\n', encoding="utf-8",
+        f'name "{dub_name("dep")}"\ntargetType "library"\n', encoding="utf-8",
     )
     (dependency / "source" / "dep.d").write_text(
         BETTERC_DEPENDENCY, encoding="utf-8",
@@ -1893,8 +1894,8 @@ bool helperBody(T)() {
     root = tmp_path / "root"
     (root / "source").mkdir(parents=True)
     (root / "dub.json").write_text(json.dumps({
-        "name": "app", "targetType": "library",
-        "dependencies": {"dep": {"path": "../dependency"}},
+        "name": dub_name("app"), "targetType": "library",
+        "dependencies": {dub_name("dep"): {"path": "../dependency"}},
         "dflags": ["-betterC"],
         "dflags-dmd": ["-check=in=off"],
         "dflags-ldc": ["--enable-preconditions=false"],
