@@ -5922,3 +5922,27 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+// The address of a struct's initializer symbol is its image in memory, which
+// `.ptr` of the `void[]` that `__traits(initSymbol)` gives names directly.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot take the address of an initializer symbol"),
+)) {
+    @("initSymbolPointerOfStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S {
+                int x = 5;
+                long y = 7;
+            }
+
+            void main() {
+                auto image = __traits(initSymbol, S).ptr;
+                assert((cast(const(int)*) image)[0] == 5);
+            }
+        });
+    }
+}
