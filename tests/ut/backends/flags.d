@@ -863,3 +863,56 @@ unittest {
     cMessageOf(BoundsCheck.slice).should == "array slice out of bounds";
     cMessageOf(BoundsCheck.sliceCopy).should == "array overflow";
 }
+
+
+// Under `-release` a `final switch` over an enum has no `default`: a value of
+// the enum takes its case. A failed check throws, since `assert` is off.
+static foreach (backend; Compiled) {
+    @("flags.finalSwitchHasNoDefaultInRelease." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shouldRun!backend(Row(["-release"], q{
+            enum E { a, b }
+            int pick(E e) @system {
+                final switch (e) {
+                    case E.a: return 1;
+                    case E.b: return 2;
+                }
+            }
+            unittest {
+                if (pick(E.a) != 1 || pick(E.b) != 2)
+                    throw new Exception("wrong case");
+            }
+        }, Expect.returned));
+    }
+}
+
+
+// With `-preview=dip1000` an array literal passed to a `scope` parameter lives
+// on the stack. The collector scans the stack, so the objects that only the
+// literal refers to stay alive.
+static foreach (backend; Compiled) {
+    @("flags.scopeArrayLiteralOfClassReferencesIsScanned." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shouldRun!backend(Row(["-preview=dip1000"], q{
+            import core.memory: GC;
+            __gshared int dead, current;
+            class C {
+                int tag;
+                this() { tag = current; }
+                ~this() { if (tag == current) ++dead; }
+            }
+            int use(scope C[] a) {
+                GC.collect;
+                return a.length == 2 && dead == 0 ? 7 : 8;
+            }
+            unittest {
+                foreach (i; 0 .. 100) {
+                    current = i + 1;
+                    assert(use([new C, new C]) == 7);
+                }
+            }
+        }, Expect.returned));
+    }
+}
