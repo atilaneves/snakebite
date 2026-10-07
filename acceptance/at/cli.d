@@ -312,6 +312,59 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `core.thread.Fiber` has more fields when LDC compiles druntime than when
+// the frontend reads its source as DigitalMars. A guest class derived from
+// it must put its own fields after the fields of the compiled base.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the native Fiber page size"),
+)) {
+    @("fiberSubclassKeepsNativeLayout." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-fibersub-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            import core.thread: Fiber;
+            class Tagged : Fiber {
+                int tag = 42;
+                bool seen;
+                this() { super(&run); }
+                void run() {
+                    auto current = cast(Tagged) Fiber.getThis();
+                    assert(current is this);
+                    assert(current.tag == 42);
+                    seen = true;
+                }
+            }
+            unittest {
+                auto fiber = new Tagged;
+                fiber.call();
+                assert(fiber.seen);
+                assert(fiber.state == Fiber.State.TERM);
+            }
+            void main() {}
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
+            const result = execute([
+                "timeout", "10", buildPath(getcwd, "bin", "sb"),
+                "-b", name, directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read the native Fiber page size"),
