@@ -341,6 +341,106 @@ unittest {
 }
 
 
+// The image source of a program with one root module. The walk of its AST
+// reads frontend state that the parse of another test, running beside this
+// one, can reset, so it parses and walks under the frontend lock.
+private string snippetImageSource(in string code) {
+    import snakebite.frontend.compiler: withCompilerLock;
+
+    string source;
+    withCompilerLock({
+        // Program requires a mutable AST.
+        source = imageSource(Program([parseSnippet(code)]));
+    });
+    return source;
+}
+
+
+// `atomicLoad` has inline assembler, so only its native instance runs. The
+// image compiles it over a stand-in for the root type `Pair`, which the image
+// cannot name, and still registers it under the guest's name, which holds
+// `Pair`.
+@("image.opaqueInstance.pointee")
+unittest {
+    const source = snippetImageSource(q{
+        import core.atomic: atomicLoad;
+        struct Pair { int first, second; }
+        shared Pair pair;
+        int answer() { shared(Pair*) pointer = &pair; return atomicLoad(pointer).first; }
+    });
+    "struct SnakebiteOpaque0;".should.be in source;
+    "atomicLoad!(MemoryOrder.seq, shared(SnakebiteOpaque0)*)".should.be in source;
+    "4Pair".should.be in source;
+    "shared(Pair".should.not.be in source;
+}
+
+
+@("image.opaqueInstance.classReference")
+unittest {
+    const source = snippetImageSource(q{
+        import core.atomic: atomicLoad;
+        class Node { int value; }
+        int answer() { shared Node node; return atomicLoad(node).value; }
+    });
+    // A class stand-in has a member list: it has a size.
+    "class SnakebiteOpaque0 {}".should.be in source;
+}
+
+
+@("image.opaqueInstance.interfaceReference")
+unittest {
+    const source = snippetImageSource(q{
+        import core.atomic: atomicLoad;
+        interface Face {}
+        int answer() { shared Face face; return atomicLoad(face) is null; }
+    });
+    "interface SnakebiteOpaque0;".should.be in source;
+}
+
+
+@("image.opaqueInstance.enumValue")
+unittest {
+    const source = snippetImageSource(q{
+        import core.atomic: atomicLoad, atomicStore;
+        enum Color : ubyte { red, green }
+        int answer() { shared Color color; atomicStore(color, Color.green); return atomicLoad(color); }
+    });
+    "atomicLoad!(MemoryOrder.seq, ubyte)".should.be in source;
+    "SnakebiteOpaque".should.not.be in source;
+}
+
+
+@("image.opaqueInstance.oneStandInPerRootType")
+unittest {
+    const source = snippetImageSource(q{
+        import core.atomic: atomicLoad, atomicStore;
+        struct Pair { int first, second; }
+        shared Pair pair;
+        shared(Pair*) pointer;
+        void answer() {
+            atomicLoad(pointer);
+            atomicStore(pointer, &pair);
+        }
+    });
+    "atomicExchange!(MemoryOrder.seq, false, shared(SnakebiteOpaque0)*)".should.be in source;
+    "atomicLoad!(MemoryOrder.seq, shared(SnakebiteOpaque0)*)".should.be in source;
+    "SnakebiteOpaque1".should.not.be in source;
+}
+
+
+// An instance without inline assembler keeps its guest body: the template
+// decides from the enum at compile time, which a stand-in would change.
+@("image.rootTypedInstanceStaysInGuest")
+unittest {
+    const source = snippetImageSource(q{
+        import std.conv: text;
+        enum Color : ubyte { red, green }
+        int answer() { return cast(int) text(Color.green).length; }
+    });
+    "Color".should.not.be in source;
+}
+
+
 static foreach (backend; Matrix!()) {
     @("image.hashWithCtfeHelper." ~ backend.stringof)
     unittest {
@@ -659,3 +759,4 @@ unittest {
     prepare(generatorB);
     builds.should == 2;
 }
+
