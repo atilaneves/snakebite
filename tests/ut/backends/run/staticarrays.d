@@ -1309,12 +1309,11 @@ static foreach (backend; Matrix!()) {
 }
 
 
-// Compiled D checks the lengths of a static array's sub-slice and its
-// source before it copies anything, so a mismatch is a `RangeError`.
+// Compiled D raises a `RangeError` when the lengths of a static array's
+// sub-slice and its source differ, and leaves the array unchanged.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
-        "CTFE turns a length mismatch into a compile-time error, so " ~
-        "it cannot be expressed the same way as a runtime throw"),
+        "CTFE reports an array length mismatch as a compile-time error"),
 )) {
     @("staticArray.subSliceCopyLengthMismatchIsRangeError." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -1332,6 +1331,7 @@ static foreach (backend; Matrix!(
                     caught = true;
                 }
                 assert(caught);
+                assert(a == [0, 0, 0, 0]);
             }
         });
     }
@@ -1339,8 +1339,7 @@ static foreach (backend; Matrix!(
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
-        "CTFE turns a length mismatch into a compile-time error, so " ~
-        "it cannot be expressed the same way as a runtime throw"),
+        "CTFE reports an array length mismatch as a compile-time error"),
 )) {
     @("staticArray.wholeSliceCopyLengthMismatchIsRangeError." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -1358,6 +1357,7 @@ static foreach (backend; Matrix!(
                     caught = true;
                 }
                 assert(caught);
+                assert(a == [0, 0, 0, 0]);
             }
         });
     }

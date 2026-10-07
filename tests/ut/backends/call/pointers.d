@@ -1537,11 +1537,15 @@ static foreach (backend; Matrix!(
 // an ordinary forward copy would silently corrupt the already-written
 // overlap region.
 static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE reports the overlapping slice assignment as a compile-time error"),
 )) {
     @("pointers.slice.overlappingAssignRaises." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        1.shouldBeStatusOf!(backend, q{
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+
             void main() {
                 int a = 1;
                 int b = 2;
@@ -1550,9 +1554,14 @@ static foreach (backend; Matrix!(
                 int** p = storage.ptr;
                 int*[] src = p[0 .. 2];
                 int*[] dst = p[1 .. 3];
-                dst[] = src[];
-                assert(*storage[1] == 1);
-                assert(*storage[2] == 2);
+                bool caught;
+                try {
+                    dst[] = src[];
+                } catch (RangeError) {
+                    caught = true;
+                }
+                assert(caught);
+                assert(storage[0] == &a && storage[1] == &b && storage[2] == &c);
             }
         });
     }

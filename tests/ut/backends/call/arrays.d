@@ -1120,19 +1120,28 @@ static foreach (backend; Matrix!()) {
 // corrupt the already-written overlap region. Not a pointer-element-only
 // case: an integral element must be checked the same way.
 static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE reports the overlapping slice assignment as a compile-time error"),
 )) {
     @("arrays.slice.overlappingAssignRaises." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        1.shouldBeStatusOf!(backend, q{
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+
             void main() {
                 int[3] storage = [1, 2, 3];
                 int* p = storage.ptr;
                 int[] src = p[0 .. 2];
                 int[] dst = p[1 .. 3];
-                dst[] = src[];
-                assert(storage[1] == 1);
-                assert(storage[2] == 2);
+                bool caught;
+                try {
+                    dst[] = src[];
+                } catch (RangeError) {
+                    caught = true;
+                }
+                assert(caught);
+                assert(storage == [1, 2, 3]);
             }
         });
     }
