@@ -19,17 +19,18 @@ guest-local types, or a captured context cannot be compiled in the image and
 keep the normal backend fallback.
 
 An instance of a dependency template can have root types as arguments, because
-the image source cannot import a root module. The image compiles it over
-stand-ins when the instance holds the root type only as a pointee, a class
-reference, or an enum value. A root struct, union, or class that is a pointee or
-a class reference becomes an aggregate with no fields, declared in the image
-source (a class has an empty body). A root enum becomes its base type. The
-registry returns the compiled instance under the mangled name of the guest's
-instance, so a call reaches native code that moves the same bits. The instance
-keeps its guest body when it uses a root struct or union by value, reads a
-member that the root declares, or allocates, casts, or asks for the type
-information of a class. Nothing in the image describes the layout of a root
-type.
+the image source cannot import a root module. Such an instance keeps its guest
+body, except when its own body has inline assembler: no backend runs that body
+(ADR-0012), so only the native instance can. The image then compiles it over
+stand-ins when it holds the root type only as a pointee, a class reference, or
+an enum value. A root struct, union, or class that is a pointee or a class
+reference becomes an aggregate with no fields, declared in the image source (a
+class has an empty body). A root enum becomes its base type. The registry
+returns the compiled instance under the mangled name of the guest's instance,
+so a call reaches native code that moves the same bits. The instance keeps its
+guest body when it uses a root struct or union by value, reads a member that
+the root declares, or allocates, casts, or asks for the type information of a
+class. Nothing in the image describes the layout of a root type.
 
 For dub projects, the same `dub describe` call supplies root sources and the
 full dependency description. Snakebite uses the host compiler with `dub build

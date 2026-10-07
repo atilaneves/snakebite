@@ -65,7 +65,6 @@ private extern(C++) class Collector
     private FuncDeclaration[][FuncDeclaration] _callees;
     private bool[FuncDeclaration] _needsRoot;
     private bool[FuncDeclaration] _rootTyped;
-    private Instance[FuncDeclaration] _opaque;
     private Type[Dsymbol] _opaqueTypes;
     private string _opaqueDeclarations;
     private bool[string] _imports;
@@ -73,6 +72,7 @@ private extern(C++) class Collector
     private struct Reference {
         FuncDeclaration[] functions;
     }
+    private Reference[string] _references;
 
     // What the image compiles for an instance whose root types it names with
     // opaque stand-ins: the template spelling and the stand-in signature.
@@ -80,7 +80,13 @@ private extern(C++) class Collector
         string key;
         imported!"dmd.mtype".TypeFunction type;
     }
-    private Reference[string] _references;
+    private Instance[FuncDeclaration] _opaque;
+
+    private enum Aggregate: string {
+        struct_ = "struct",
+        class_ = "class",
+        interface_ = "interface",
+    }
 
     this(Program program) {
         _program = program;
@@ -108,14 +114,14 @@ private extern(C++) class Collector
         import std.array: array;
         import snakebite.dependencyimage: DependencyImage;
         import snakebite.frontend.dmd.mangle: completeFunctionType, mangledNameOf;
-        // A dependency template can import a root module internally, even
-        // when its template arguments contain no root-owned declarations.
-        // Propagate through cycles before deciding which bodies can be linked.
         foreach (key; _references.keys.sort)
             foreach (function_; _references[key].functions)
                 if (function_ in _rootTyped && function_ !in _needsRoot
                         && !opaqueInstance(function_))
                     _needsRoot[function_] = true;
+        // A dependency template can import a root module internally, even
+        // when its template arguments contain no root-owned declarations.
+        // Propagate through cycles before deciding which bodies can be linked.
         bool changed = true;
         while (changed) {
             changed = false;
@@ -207,12 +213,18 @@ private extern(C++) class Collector
         return eachTemplateArgumentSymbol(type, visited, &isRootSymbol);
     }
 
-    // An instance over a root type is native code that the dependency's
-    // compiler can build over a stand-in whenever it handles that type only
-    // as a pointer, a class reference or an enum value: the generated code
-    // moves the same bits whichever type it is told. The stand-in is an
-    // opaque aggregate for a pointee or a class, and the base type for an
-    // enum. The result is the instance's own template spelling, its
+    // A backend cannot run an instance whose own body has inline assembler
+    // (docs/adr/0012), so it needs the native one even when a template
+    // argument is a root type, which the image source cannot name. Any other
+    // instance keeps its guest body: a template decides at compile time from
+    // its type argument, and a stand-in answers differently. For the
+    // instance with `asm`, the image compiles the template over stand-ins
+    // whenever the instance handles a root type only as a pointer, a class
+    // reference or an enum value. The stand-in is an opaque aggregate for a
+    // pointee or a class, and the base type for an enum. `core.internal.atomic`
+    // is the template that decides from the type (`T.sizeof`, `is(T == class)`,
+    // `__traits(isScalar, T)`), and each stand-in answers those as the root
+    // type does. The result is the instance's own template spelling, its
     // signature and body over stand-ins, or false when the instance needs the
     // root type itself.
     private extern(D) bool opaqueInstance(FuncDeclaration function_) {
@@ -221,6 +233,8 @@ private extern(C++) class Collector
         import snakebite.frontend.compiler: newInFrontend;
         import snakebite.frontend.dmd.mangle: completeFunctionType;
 
+        if (!function_.hasInlineAsm)
+            return false;
         completeFunctionType(function_);
         auto instance = function_.parent.isTemplateInstance;
         auto original = function_.type.isTypeFunction;
@@ -312,12 +326,12 @@ private extern(C++) class Collector
             standIn = opaqueType(enumType.sym.memtype, false);
         } else if (auto structType = type.isTypeStruct) {
             if (pointee && isRootSymbol(structType.sym))
-                standIn = opaqueAggregate(structType.sym, "struct");
+                standIn = opaqueAggregate(structType.sym, Aggregate.struct_);
         } else if (auto classType = type.isTypeClass) {
             import dmd.aggregate: ClassKind;
             if (classType.sym.classKind == ClassKind.d && isRootSymbol(classType.sym))
                 standIn = opaqueAggregate(classType.sym,
-                    classType.sym.isInterfaceDeclaration ? "interface" : "class");
+                    classType.sym.isInterfaceDeclaration ? Aggregate.interface_ : Aggregate.class_);
         } else if (auto pointerType = type.isTypePointer) {
             if (auto next = opaqueType(pointerType.next, true))
                 standIn = newInFrontend!pointerTo(next);
@@ -329,7 +343,7 @@ private extern(C++) class Collector
 
     // One aggregate without members per root symbol, named after the order in
     // which the sorted references first use it.
-    private extern(D) Type opaqueAggregate(Dsymbol symbol, in string keyword) {
+    private extern(D) Type opaqueAggregate(Dsymbol symbol, in Aggregate kind) {
         import dmd.dclass: ClassDeclaration, InterfaceDeclaration;
         import dmd.dstruct: StructDeclaration;
         import dmd.identifier: Identifier;
@@ -342,20 +356,21 @@ private extern(C++) class Collector
         auto identifier = newInFrontend!(Identifier.idPool)(name); // DMD takes a mutable identifier.
         Type type;
         string body_ = ";";
-        switch (keyword) {
-            case "struct":
+        final switch (kind) {
+            case Aggregate.struct_:
                 type = newInFrontend!StructDeclaration(Loc.initial, identifier, false).type;
                 break;
-            case "interface":
+            case Aggregate.interface_:
                 type = newInFrontend!InterfaceDeclaration(Loc.initial, identifier, null).type;
                 break;
-            default:
+            case Aggregate.class_:
                 // A class without members still has a size, which
                 // `core.atomic` reads when it exchanges a class reference.
                 type = newInFrontend!ClassDeclaration(Loc.initial, identifier, null, null, false).type;
                 body_ = " {}";
+                break;
         }
-        _opaqueDeclarations ~= text(keyword, " ", name, body_, "\n");
+        _opaqueDeclarations ~= text(cast(string) kind, " ", name, body_, "\n");
         _opaqueTypes[symbol] = type;
         return type;
     }
