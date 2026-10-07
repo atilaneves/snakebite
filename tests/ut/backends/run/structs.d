@@ -6083,3 +6083,162 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// A native `extern(C)` function that has an `out` parameter writes it itself.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe cannot call native functions"),
+)) {
+    @("outArgument.nativeCalleeWritesIt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C) pragma(mangle, "frexp") double frexp(double, out int);
+            void main() {
+                int exponent = 99;
+                const mantissa = frexp(8.0, exponent);
+                assert(mantissa == 0.5);
+                assert(exponent == 4);
+            }
+        });
+    }
+}
+
+// A guest function with an `out` parameter, called from native code.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe cannot call native functions"),
+)) {
+    @("outArgument.nativeCallerOfGuestCallee." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.stdlib: qsort;
+            extern(C) int compare(out int a, out int b) {
+                return 0;
+            }
+            void main() {
+                int[2] values = [2, 1];
+                alias Compare = extern(C) int function(const void*, const void*);
+                qsort(values.ptr, 2, int.sizeof, cast(Compare) &compare);
+                assert(values[0] == 0 || values[1] == 0);
+            }
+        });
+    }
+}
+
+// A callee that never writes an `out` parameter still leaves the default.
+static foreach (backend; Matrix!()) {
+    @("outArgument.neverWrittenHasDefault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a = 7; }
+            void f(out int a, out S s) {}
+            void main() {
+                int x = 5;
+                S s = S(1);
+                f(x, s);
+                assert(x == 0);
+                assert(s.a == 7);
+            }
+        });
+    }
+}
+
+// An `out` parameter does not destroy or copy the old value.
+static foreach (backend; Matrix!()) {
+    @("outArgument.oldValueIsNotDestroyedOrCopied." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S {
+                int id;
+                int* events;
+                this(this) { if (events) ++*events; }
+                ~this() { if (events) ++*events; }
+            }
+            void f(out S s) {}
+            void main() {
+                int events;
+                S x = S(5, &events);
+                f(x);
+                assert(x.id == 0);
+                assert(events == 0);
+            }
+        });
+    }
+}
+
+// An `out` argument of a virtual call reads the old value in a later argument.
+static foreach (backend; Matrix!()) {
+    @("outArgument.virtualCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class A { int f(out int a, int b) { return b; } }
+            class B : A { override int f(out int a, int b) { return b + 1; } }
+            void main() {
+                A o = new B;
+                int x = 5;
+                assert(o.f(x, x) == 6);
+                assert(x == 0);
+            }
+        });
+    }
+}
+
+// An `out` argument of a delegate call reads the old value in a later argument.
+static foreach (backend; Matrix!()) {
+    @("outArgument.delegateCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int offset = 1;
+                int f(out int a, int b) { return b + offset; }
+                auto dg = &f;
+                int x = 5;
+                assert(dg(x, x) == 6);
+                assert(x == 0);
+            }
+        });
+    }
+}
+
+// An `out` argument of a constructor reads the old value in a later argument.
+static foreach (backend; Matrix!()) {
+    @("outArgument.constructorCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int v; this(out int a, int b) { v = b; } }
+            class C { int v; this(out int a, int b) { v = b; } }
+            void main() {
+                int x = 5;
+                assert(S(x, x).v == 5);
+                assert(x == 0);
+                x = 6;
+                assert((new C(x, x)).v == 6);
+                assert(x == 0);
+            }
+        });
+    }
+}
+
+// A default argument of a later parameter reads the variable before the call.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a static variable at compile time"),
+)) {
+    @("outArgument.defaultArgumentReadsOldValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int global = 5;
+            int f(out int a, int b = global) { return b; }
+            void main() {
+                assert(f(global) == 5);
+                assert(global == 0);
+            }
+        });
+    }
+}
