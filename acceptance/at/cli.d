@@ -369,6 +369,91 @@ static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read the native Fiber page size"),
 )) {
+    @("threadSubclassKeepsNativeLayout." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-threadsub-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            import core.thread: Thread;
+            class Tagged : Thread {
+                int tag = 42;
+                int seen;
+                this() { super(&run); }
+                void run() { seen = tag; }
+            }
+            unittest {
+                auto thread = new Tagged;
+                thread.start();
+                thread.join();
+                assert(thread.seen == 42);
+                assert(thread.tag == 42);
+            }
+            void main() {}
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
+            const result = execute([
+                "timeout", "10", buildPath(getcwd, "bin", "sb"),
+                "-b", name, directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the native Fiber page size"),
+)) {
+    @("hostClassSizeIsNativeSize." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-hostsize-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            import core.thread: Fiber, Thread;
+            unittest {
+                assert(__traits(classInstanceSize, Fiber)
+                    == typeid(Fiber).initializer.length);
+                assert(__traits(classInstanceSize, Thread)
+                    == typeid(Thread).initializer.length);
+            }
+            void main() {}
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
+            const result = execute([
+                "timeout", "10", buildPath(getcwd, "bin", "sb"),
+                "-b", name, directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the native Fiber page size"),
+)) {
     @("fiberCapturedDelegate." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
