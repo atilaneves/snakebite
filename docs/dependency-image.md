@@ -28,7 +28,8 @@ registry returns the compiled instance under the mangled name of the guest's
 instance, so a call reaches native code that moves the same bits. The instance
 keeps its guest body when it uses a root struct or union by value, reads a
 member that the root declares, or allocates, casts, or asks for the type
-information of a class. Nothing in the image describes the layout of a root type.
+information of a class. Nothing in the image describes the layout of a root
+type.
 
 For dub projects, the same `dub describe` call supplies root sources and the
 full dependency description. Snakebite uses the host compiler with `dub build
