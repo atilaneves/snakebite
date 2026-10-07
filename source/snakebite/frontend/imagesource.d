@@ -215,20 +215,15 @@ private extern(C++) class Collector
 
     // A backend cannot run an instance whose own body has inline assembler
     // (docs/adr/0012), so it needs the native one even when a template
-    // argument is a root type, which the image source cannot name. Any other
-    // instance keeps its guest body: a template decides at compile time from
-    // its type argument, and a stand-in answers differently. For the
-    // instance with `asm`, the image compiles the template over stand-ins
-    // whenever the instance handles a root type only as a pointer, a class
-    // reference or an enum value. The stand-in is an opaque aggregate for a
-    // pointee or a class, and the base type for an enum. `core.internal.atomic`
-    // is the template that decides from the type (`T.sizeof`, `is(T == class)`,
-    // `__traits(isScalar, T)`), and each stand-in answers those as the root
-    // type does. The result is the instance's own template spelling, its
-    // signature and body over stand-ins, or false when the instance needs the
-    // root type itself.
+    // argument is a root type, which the image source cannot name. For such
+    // an instance the image compiles the template over stand-ins whenever it
+    // handles a root type only as a pointer, a class reference or an enum
+    // value: an opaque aggregate for a pointee or a class, and the base type
+    // for an enum. Any other instance keeps its guest body: a template
+    // decides at compile time from its type argument, and a stand-in answers
+    // differently. Returns false when the instance needs the root type itself.
     private extern(D) bool opaqueInstance(FuncDeclaration function_) {
-        import dmd.dtemplate: isDsymbol, isExpression, isType;
+        import dmd.dtemplate: isType;
         import dmd.mtype: Parameter, ParameterList, TypeFunction;
         import snakebite.frontend.compiler: newInFrontend;
         import snakebite.frontend.dmd.mangle: completeFunctionType;
@@ -238,10 +233,6 @@ private extern(C++) class Collector
         completeFunctionType(function_);
         auto instance = function_.parent.isTemplateInstance;
         auto original = function_.type.isTypeFunction;
-        if (instance is null || original is null || instance.tiargs is null
-                || original.next is null
-                || instance.tempdecl.parent.isModule is null)
-            return false;
 
         // dmd prints an instance from its own template arguments, so print
         // it with the stand-ins in place of the root types.
@@ -257,15 +248,6 @@ private extern(C++) class Collector
                     if (standIn is null)
                         return false;
                     (*instance.tiargs)[i] = standIn;
-                } else if (auto expression = isExpression(argument)) {
-                    if (expression.type is null || mentionsRoot(expression.type))
-                        return false;
-                } else if (isDsymbol(argument) !is null) {
-                    bool[Type] visited;
-                    if (eachTemplateArgument(argument, visited, &isRootSymbol))
-                        return false;
-                } else {
-                    return false;
                 }
             }
             spelling = sourceSpelling(instance.toPrettyChars(true).fromStringz);
@@ -274,38 +256,19 @@ private extern(C++) class Collector
         auto next = opaqueType(original.next, false);
         if (next is null)
             return false;
-        auto parameters = original.parameterList.parameters is null
-            ? null
-            : newInFrontend!(Parameter.arraySyntaxCopy)(original.parameterList.parameters);
-        const count = original.parameterList.length;
-        if (parameters !is null && parameters.length != count)
-            return false;
-        foreach (i; 0 .. count) {
+        auto parameters = newInFrontend!(Parameter.arraySyntaxCopy)(original.parameterList.parameters);
+        foreach (i; 0 .. original.parameterList.length) {
             auto parameter = (*parameters)[i]; // DMD declarations take mutable parameters.
             auto standIn = opaqueType(parameter.type, false);
             if (standIn is null)
                 return false;
             parameter.type = standIn;
         }
-        if (!bodyNeedsOnlyStandIns(function_))
-            return false;
 
         auto type = newInFrontend!TypeFunction(
             ParameterList(parameters, original.parameterList.varargs, original.parameterList.stc),
             next, original.linkage,
         );
-        type.mod = original.mod;
-        type.isNothrow = original.isNothrow;
-        type.isNogc = original.isNogc;
-        type.isLive = original.isLive;
-        type.purity = original.purity;
-        type.isProperty = original.isProperty;
-        type.isRef = original.isRef;
-        type.isReturn = original.isReturn;
-        type.isReturnScope = original.isReturnScope;
-        type.isScopeQual = original.isScopeQual;
-        type.isRvalue = original.isRvalue;
-        type.trust = original.trust;
         _opaque[function_] = Instance(spelling, type);
         return true;
     }
@@ -373,63 +336,6 @@ private extern(C++) class Collector
         _opaqueDeclarations ~= text(cast(string) kind, " ", name, body_, "\n");
         _opaqueTypes[symbol] = type;
         return type;
-    }
-
-    // Whether the body of `function_` moves root values only as pointers,
-    // class references and enums: no expression or variable has a root
-    // struct, union or other aggregate type, and none reads a member that the
-    // root declares.
-    private extern(D) bool bodyNeedsOnlyStandIns(FuncDeclaration function_) {
-        import dmd.declaration: VarDeclaration;
-        import dmd.expression: Expression;
-        import dmd.visitor: StoppableVisitor;
-        import dmd.visitor.foreachvar: foreachExpAndVar;
-        import dmd.visitor.postorder: walkPostorder;
-
-        extern(C++) static final class Finder: StoppableVisitor {
-            alias visit = StoppableVisitor.visit;
-            Collector collector;
-
-            this(Collector collector) {
-                this.collector = collector;
-            }
-
-            // A stand-in answers none of what a real class or root symbol
-            // answers at run time: its identity, its allocation and what
-            // the root declares.
-            override void visit(Expression expression) {
-                import dmd.astenums: Tclass;
-                import dmd.typesem: toBasetype;
-
-                if (expression.type !is null
-                        && collector.opaqueType(expression.type, false) is null)
-                    stop = true;
-                if (expression.isNewExp || expression.isTypeidExp)
-                    stop = true;
-                if (auto conversion = expression.isCastExp)
-                    if (conversion.to.toBasetype.ty == Tclass
-                            || conversion.e1.type.toBasetype.ty == Tclass)
-                        stop = true;
-                if (auto member = expression.isDotVarExp)
-                    if (collector._program.isRootOwned(member.var))
-                        stop = true;
-                if (auto offset = expression.isSymOffExp)
-                    if (collector._program.isRootOwned(offset.var))
-                        stop = true;
-            }
-        }
-
-        scope finder = new Finder(this);
-        if (function_.fbody is null)
-            return true;
-        function_.fbody.foreachExpAndVar(
-            (expression) { walkPostorder(expression, finder); },
-            (variable) {
-                if (opaqueType(variable.type, false) is null)
-                    finder.stop = true;
-            },
-        );
-        return !finder.stop;
     }
 
     // `mixin(q{&key})` takes the address of a diagnostic instantiation
