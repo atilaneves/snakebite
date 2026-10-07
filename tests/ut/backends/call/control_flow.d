@@ -1282,3 +1282,219 @@ static foreach (backend; Matrix!()) {
         }, "result");
     }
 }
+
+
+// A `scope(exit)` before a `return` and a `scope(failure)` after it, in one
+// function.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.scopeExitThenReturnThenScopeFailure." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        51.shouldBeRetOf!(backend, q{
+            int result(ref int trace, bool early) {
+                scope(exit) trace += 1;
+                if (early)
+                    return 5;
+                scope(failure) trace += 10;
+                return 6;
+            }
+
+            int check() {
+                int trace;
+                const returned = result(trace, true);
+                return returned * 10 + trace;
+            }
+        }, "check");
+    }
+}
+
+
+// A `finally` that throws replaces the value a `return` in its `try` body
+// carried out.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.finallyThrowsAfterReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            int inner() {
+                try {
+                    return 1;
+                } finally {
+                    throw new Exception("from finally");
+                }
+            }
+
+            int check() {
+                try {
+                    return inner();
+                } catch (Exception e) {
+                    return 42;
+                }
+            }
+        }, "check");
+    }
+}
+
+
+// A `throw` caught inside the `try` body does not count as an exit of the
+// `finally`'s statement.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.caughtThrowInBodyThenReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        31.shouldBeRetOf!(backend, q{
+            int result(ref int trace) {
+                try {
+                    try {
+                        throw new Exception("inner");
+                    } catch (Exception e) {
+                        return 3;
+                    }
+                } finally {
+                    ++trace;
+                }
+            }
+
+            int check() {
+                int trace;
+                const returned = result(trace);
+                return returned * 10 + trace;
+            }
+        }, "check");
+    }
+}
+
+
+// `break`s of a `switch` inside a `finally`, one of them in an `if` with no
+// `else`.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.switchBreakInFinallyIfWithoutElse." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        21.shouldBeRetOf!(backend, q{
+            int result() {
+                int n;
+                for (int i; i < 2; ++i) {
+                    try {
+                        n += 10;
+                    } finally {
+                        switch (i) {
+                            case 0:
+                                if (n > 0)
+                                    break;
+                                n += 100;
+                                break;
+                            default:
+                                n += 1;
+                        }
+                    }
+                }
+                return n;
+            }
+        }, "result");
+    }
+}
+
+
+// A `scope(exit)` guard runs on a normal return from a function with an
+// `out` contract.
+static foreach (backend; Matrix!()) {
+    @("scopeGuard.exitRunsOnReturnWithOutContract." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int fine() { log ~= "fine,"; return 3; }
+                int f() out (r; r > 0) {
+                    scope(exit) log ~= "E,";
+                    return fine();
+                }
+                if (f() != 3) return 2;
+                return log == "fine,E," ? 0 : log == "fine," ? 3 : 5;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("scopeGuard.successRunsOnReturnWithOutContract." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int fine() { log ~= "fine,"; return 3; }
+                int f() out (r; r > 0) {
+                    scope(success) log ~= "S,";
+                    return fine();
+                }
+                if (f() != 3) return 2;
+                return log == "fine,S," ? 0 : log == "fine," ? 3 : 5;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("scopeGuard.exitRunsOnReturnWithInvariant." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C {
+                string log;
+                int x = 1;
+                invariant { assert(x > 0); }
+                int fine() { log ~= "fine,"; return 3; }
+                int f() {
+                    scope(exit) log ~= "E,";
+                    return fine();
+                }
+            }
+
+            int main() {
+                auto c = new C;
+                if (c.f() != 3) return 2;
+                return c.log == "fine,E," ? 0 : c.log == "fine," ? 3 : 5;
+            }
+        });
+    }
+}
+
+
+// A virtual method that fails an `assert`: the `AssertError` reaches the
+// caller's `catch`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns a failing assertion into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("virtualMethodAssertReachesCatch." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            import core.exception: AssertError;
+
+            class Counter {
+                int value;
+                void bump() {
+                    assert(value >= 0);
+                    value += 1;
+                }
+            }
+
+            int result() {
+                auto counter = new Counter;
+                counter.value = -1;
+                try {
+                    counter.bump();
+                } catch (AssertError) {
+                    return 42;
+                }
+                return 0;
+            }
+        }, "result");
+    }
+}

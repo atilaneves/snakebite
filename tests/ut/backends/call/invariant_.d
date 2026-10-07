@@ -218,11 +218,6 @@ static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE turns a failing assertion into a compile-time error, so " ~
         "it cannot be expressed the same way as a runtime throw"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "crashes: a virtual call's thrown AssertError does not propagate " ~
-        "out of the interpreter's indirect-call FFI adapter into the " ~
-        "guest's own try/catch - pre-existing and unrelated to " ~
-        "invariants, see https://github.com/atilaneves/snakebite/issues/407"),
 )) {
     @("invariant_.classMemberCall.violationThrowsAssertError." ~ backend.stringof)
     @Tags(backend.stringof)
