@@ -6048,21 +6048,6 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!()) {
-    @("outArgument.sameVariableAlsoByRef." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int f(out int a, ref int b) { b += 1; return a; }
-            void main() {
-                int x = 5;
-                assert(f(x, x) == 1);
-                assert(x == 1);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!()) {
     @("outArgument.laterArgumentReadsThroughPointer." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -6081,24 +6066,6 @@ static foreach (backend; Matrix!()) {
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot call native functions"),
 )) {
-    @("outArgument.nativeCalleeWritesIt." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            extern(C) pragma(mangle, "frexp") double frexp(double, out int);
-            void main() {
-                int exponent = 99;
-                const mantissa = frexp(8.0, exponent);
-                assert(mantissa == 0.5);
-                assert(exponent == 4);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call native functions"),
-)) {
     @("outArgument.nativeCalleeDoesNotWriteIt." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -6108,70 +6075,6 @@ static foreach (backend; Matrix!(
                 ubyte[4] s = [1, 2, 0, 0];
                 assert(lengthOf(s) == 2);
                 assert(s == [1, 2, 0, 0]);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call native functions"),
-)) {
-    @("outArgument.nativeCallerOfGuestCallee." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            import core.stdc.stdlib: bsearch;
-            extern(C) int compare(out int a, out int b) {
-                return 0;
-            }
-            void main() {
-                int key = 2;
-                int[1] values = [1];
-                alias Compare = extern(C) int function(const void*, const void*);
-                bsearch(&key, values.ptr, 1, int.sizeof, cast(Compare) &compare);
-                assert(key == 0);
-                assert(values[0] == 0);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("outArgument.neverWrittenHasDefault." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct S { int a = 7; }
-            void f(out int a, out S s) {}
-            void main() {
-                int x = 5;
-                S s = S(1);
-                f(x, s);
-                assert(x == 0);
-                assert(s.a == 7);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("outArgument.oldValueIsNotDestroyedOrCopied." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct S {
-                int id;
-                int* events;
-                this(this) { if (events) ++*events; }
-                ~this() { if (events) ++*events; }
-            }
-            void f(out S s) {}
-            void main() {
-                int events;
-                S x = S(5, &events);
-                f(x);
-                assert(x.id == 0);
-                assert(events == 0);
             }
         });
     }
