@@ -170,7 +170,6 @@ public struct CallAdapter {
             public Type parameterType;
             public Type evaluationType;
             public bool isReference;
-            public bool isOut;
             public bool isLazy;
 
             public void store(
@@ -229,7 +228,6 @@ public struct CallAdapter {
             auto parameter = _type.parameterList[i]; // Frontend types remain mutable.
             const reference = Argument.of(parameter).isReference
                 || i == _destination;
-            const isOut = (parameter.storageClass & STC.out_) != 0;
             const isLazy = (parameter.storageClass & STC.lazy_) != 0;
             auto parameterType = parameter.type; // Frontend types remain mutable.
             auto evaluationType = isLazy // Frontend types remain mutable.
@@ -239,7 +237,7 @@ public struct CallAdapter {
                 i == _destination
                     ? memoryOperand(_expressions[_declaredOffset + i])
                     : _expressions[_declaredOffset + i],
-                parameterType, evaluationType, reference, isOut, isLazy,
+                parameterType, evaluationType, reference, isLazy,
             );
         }
 

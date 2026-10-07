@@ -5968,11 +5968,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             const parameter = layout.parameters[i];
             auto slot = frameBase + parameter.offset; // Evaluation writes the slot.
 
-            void* address;
-
             void* argumentAddress() {
-                address = addressOf(argument);
-                return address;
+                return addressOf(argument);
             }
 
             void evaluateArgument(void* place) {
@@ -5987,14 +5984,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 &argumentAddress,
                 &evaluateArgument,
             );
-
-            if (value.isOut)
-                initializeDefault(
-                    value.parameterType,
-                    factsOf(value.parameterType),
-                    cast(ubyte*) address,
-                    loc,
-                );
         });
     }
 
