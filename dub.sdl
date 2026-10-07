@@ -63,6 +63,7 @@ configuration "acceptance-test" {
     sourcePaths "acceptance"
     sourceFiles "tests/ut/process.d"
     sourceFiles "tests/ut/package.d" "tests/ut/backends/package.d"
+    sourceFiles "tests/ut/backends/call/intrinsics.d"
     sourcePaths "bench"
     excludedSourceFiles "bench/main.d"
     importPaths "acceptance"

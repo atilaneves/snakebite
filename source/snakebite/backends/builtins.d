@@ -70,17 +70,17 @@ private BuiltinCall widthEntryOf(T)(in string name)
     switch (name) {
         static foreach (oneArgumentName; oneArgumentNames)
             case oneArgumentName:
-                return &entry!(oneArgumentName, T);
+                return &entry!(oneArgumentName, T, T);
         static foreach (twoArgumentName; sameTypeTwoArgumentNames)
             case twoArgumentName:
-                return &entry!(twoArgumentName, T, T);
+                return &entry!(twoArgumentName, T, T, T);
         case "ldexp":
             // `ldexp`'s second argument is always `int`, never the
             // call's own floating point type - the one intrinsic here
             // whose arguments do not all share one type.
-            return &entry!("ldexp", T, int);
+            return &entry!("ldexp", T, T, int);
         case "rndtol":
-            return &entry!("rndtol", T);
+            return &entry!("rndtol", long, T);
         default:
             return null;
     }
@@ -101,8 +101,8 @@ private enum sameTypeTwoArgumentNames = ["yl2x", "yl2xp1"];
 private BuiltinCall volatileEntryOf(T)(in string name)
 @safe pure nothrow @nogc {
     switch (name) {
-        case "volatileLoad": return &entry!("volatileLoad", T*);
-        case "volatileStore": return &entry!("volatileStore", T*, T);
+        case "volatileLoad": return &entry!("volatileLoad", T, T*);
+        case "volatileStore": return &entry!("volatileStore", void, T*, T);
         default: return null;
     }
 }
@@ -148,12 +148,12 @@ private BuiltinCall integerEntryOf(T)(in string name)
                 typeof(mixin("core.bitop." ~ integerName ~ "(T.init)")) == T
             ))
                 case integerName:
-                    return &entry!(integerName, T);
+                    return &entry!(integerName, T, T);
         static foreach (integerName; ownReturnTypeIntegerNames)
             static if (__traits(compiles,
                 mixin("core.bitop." ~ integerName ~ "(T.init)")))
                 case integerName:
-                    return &entry!(integerName, T);
+                    return &entry!(integerName, int, T);
         default:
             return null;
     }
@@ -174,18 +174,17 @@ private enum ownReturnTypeIntegerNames = ["_popcnt"];
 
 // Every entry this table serves is one concept: read each argument at
 // its own parameter type from the argument pointers, call the named
-// `core.math`/`core.bitop` intrinsic with those values, and write the
-// result at whatever type the call itself returns - `Result` comes from
-// `typeof(call(values))`, not from `Params`, so this one template covers
-// a same-type result (`fabs`, `bswap`), a mixed-type argument list
-// (`ldexp`'s trailing `int`) and a result narrower than the argument
-// (`_popcnt(uint)` returns `int`) without a separate template per shape.
+// intrinsic with those values, and write the result at the type the
+// guest's own declaration returns. `Result` comes from that declaration,
+// never from what the host's intrinsic happens to return: LDC declares
+// only the `real` overload of `yl2x`, and writing its `real` into a
+// `float` result place would write bytes the place does not have.
 // `core.math` and `core.bitop` declare no name in common, so importing
 // both here and looking `name` up unqualified never collides.
-private extern(C) void entry(string name, Params...)(
+private extern(C) void entry(string name, Result, Params...)(
     void* returnPlace, scope const(void*)* arguments, size_t argumentCount,
 ) @trusted nothrow @nogc {
-    import core.math;
+    import snakebite.backends.dmdintrinsics;
     import core.bitop;
     import core.volatile;
 
@@ -194,9 +193,8 @@ private extern(C) void entry(string name, Params...)(
     static foreach (i, P; Params)
         values[i] = *cast(P*) arguments[i];
     alias call = mixin(name);
-    alias Result = typeof(call(values));
     static if (is(Result == void))
         call(values);
     else
-        *cast(Result*) returnPlace = call(values);
+        *cast(Result*) returnPlace = cast(Result) call(values);
 }
