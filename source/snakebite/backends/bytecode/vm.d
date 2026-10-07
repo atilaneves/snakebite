@@ -430,7 +430,7 @@ import snakebite.framestack: FrameStack;
 public struct Vm {
     private FrameStack _frames;
     private Throwable _halt;
-    private const(Function)* delegate(const(Instruction)*) _functionOf;
+    private const(Function)* delegate(const(Instruction)*) nothrow @nogc _functionOf;
     private GuestFault.Action _fault;
 
     @disable this();
@@ -443,7 +443,7 @@ public struct Vm {
     }
 
     public void faultReporting(
-        const(Function)* delegate(const(Instruction)*) functionOf,
+        const(Function)* delegate(const(Instruction)*) nothrow @nogc functionOf,
         GuestFault.Action fault,
     ) {
         _functionOf = functionOf;
@@ -763,7 +763,8 @@ private Throwable reportGuestFault(
     };
     stack((in GuestFault.Frame) {});
     try {
-        state.vm._fault(kind, position.file, position.line, stack);
+        GuestFault.report(
+            state.vm._fault, kind, position.file, position.line, stack);
     } catch (Throwable reported) {
         return reported;
     }

@@ -72,6 +72,7 @@ SCENARIOS = [
     ("guestFaultWithTheHandlersOff", -signal.SIGSEGV),
     ("guestHandler", 42),
     ("halt", -signal.SIGILL),
+    ("finalizerFaultWithAHostAction", 1),
 ]
 
 
@@ -98,6 +99,9 @@ def test_process_action(binaries, tmp_path, scenario, expected):
     assert b"internal error" not in result.stderr, result
     if scenario == "faultInCleanup":
         assert b"fault of the guest program: signal 11" in result.stderr, result
+    elif scenario == "finalizerFaultWithAHostAction":
+        assert b"doomed.d(7): fatal: null pointer dereference" \
+            in result.stderr, result
     elif scenario in ("hostNullRead", "guestFaultWithTheHandlersOff"):
         assert result.stderr == b"", result
 

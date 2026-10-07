@@ -25,11 +25,16 @@ private string rendered(
     in size_t line,
     in GuestFault.Frame[] frames,
 ) {
-    auto text = appender!string;
+    char[4096] text = void;
+    size_t used;
+    scope sink = (in const(char)[] piece) nothrow @nogc {
+        text[used .. used + piece.length] = piece[];
+        used += piece.length;
+    };
     GuestFault.render(kind, file, line,
-        (scope sink) { foreach (frame; frames) sink(frame); },
-        (in piece) { text ~= piece; });
-    return text[];
+        (scope sink) nothrow @nogc { foreach (frame; frames) sink(frame); },
+        sink);
+    return text[0 .. used].idup;
 }
 
 
