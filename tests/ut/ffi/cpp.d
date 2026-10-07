@@ -7,6 +7,7 @@ import snakebite.backends.backend: Program;
 import snakebite.dependencyimage: DependencyImage, loadImage;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
+import ut.ffi.cpp_oracle: Counts, bind, handlers, nativeShape;
 
 
 // The C++ test library (tests/fixtures/native/cpp_image.cpp) is compiled
@@ -83,6 +84,41 @@ private enum cppBindings = q{
 
     alias NonPodCallback = extern(C++) int function(NonPod);
     extern(C++) int call_non_pod_callback(NonPodCallback callback, int v);
+
+    extern(C++) int copied_count();
+    extern(C++) void count_copy();
+
+    extern(C++) struct DtorOnly {
+        int value;
+        ~this();
+    }
+    extern(C++) int read_dtor_only(DtorOnly d);
+    extern(C++) DtorOnly make_dtor_only(int v);
+
+    extern(C++) struct CopyOnly {
+        int value;
+        this(ref const(CopyOnly) other);
+    }
+    extern(C++) int read_copy_only(CopyOnly c);
+    extern(C++) CopyOnly make_copy_only(int v);
+
+    extern(C++) struct PostBlit {
+        int value;
+        this(this) { count_copy(); }
+        ~this();
+    }
+    extern(C++) int read_post_blit(PostBlit p);
+    extern(C++) PostBlit make_post_blit(int v);
+
+    extern(C++) struct NonPodMaker {
+        int base;
+        NonPod make(int v);
+        int read(NonPod n);
+    }
+
+    alias NonPodMakerCallback = extern(C++) NonPod function(int);
+    extern(C++) int call_non_pod_maker_callback(
+        NonPodMakerCallback callback, int v);
 
     extern(C++) T uninstantiated_template(T)(T value);
 };
@@ -504,6 +540,245 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
                 &destructionResult, [cast(void*) &v]);
             destructionResult.should == 1;
         }
+    }
+}
+
+
+// Runs `body_` as the inside of one function, once on compiled D and once
+// on `backend`, and reports the result it leaves in `r` together with how
+// many destructions and copies the C++ library or the oracle counted.
+private Counts runShape(backend, string body_)(int v) {
+    auto image = cppImage;
+    static if (is(backend == Native)) {
+        bind(image);
+        return nativeShape!body_(v);
+    } else {
+        auto module_ = parseSnippet(cppBindings ~ handlers ~ q{
+            struct Counts { int result; int destroyed; int copied; }
+        } ~ "
+            Counts shape(int v) {
+                const destroyedBefore = destroyed_count();
+                const copiedBefore = copied_count();
+                int r;
+                {
+                    " ~ body_ ~ "
+                }
+                return Counts(r, destroyed_count() - destroyedBefore,
+                    copied_count() - copiedBefore);
+            }
+        ");
+        auto program = Program([module_]);
+        program.dependencyImage = &image;
+        auto instance = Owned!backend(program);
+
+        Counts counts;
+        instance.call(findFunction(module_, "shape"), &counts,
+            [cast(void*) &v]);
+        return counts;
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.namedLocalArgument." ~ backend.stringof)
+    unittest {
+        runShape!(backend, q{
+            auto s = make_non_pod(v);
+            r = read_non_pod(s);
+        })(17).should == Counts(17, 2, 1);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.temporaryArgument." ~ backend.stringof)
+    unittest {
+        runShape!(backend, q{
+            r = read_non_pod(make_non_pod(v));
+        })(17).should == Counts(17, 1, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.fieldArgument." ~ backend.stringof)
+    unittest {
+        runShape!(backend, q{
+            struct Holder { NonPod n; }
+            auto h = Holder(make_non_pod(v));
+            r = read_non_pod(h.n);
+        })(17).should == Counts(17, 2, 1);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.arrayElementArgument." ~ backend.stringof)
+    unittest {
+        runShape!(backend, q{
+            NonPod[1] a = [make_non_pod(v)];
+            r = read_non_pod(a[0]);
+        })(17).should == Counts(17, 2, 1);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.refParameterArgument." ~ backend.stringof)
+    unittest {
+        runShape!(backend, q{
+            int viaRef(ref NonPod n) { return read_non_pod(n); }
+            auto s = make_non_pod(v);
+            r = viaRef(s);
+        })(17).should == Counts(17, 2, 1);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.returnedIntoAssignment." ~ backend.stringof)
+    unittest {
+        runShape!(backend, q{
+            NonPod s;
+            s = make_non_pod(v);
+            r = s.value;
+        })(17).should == Counts(17, 2, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.returnedAndDiscarded." ~ backend.stringof)
+    unittest {
+        runShape!(backend, q{
+            make_non_pod(v);
+            r = v;
+        })(17).should == Counts(17, 1, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.receivedByCallback." ~ backend.stringof)
+    unittest {
+        runShape!(backend, q{
+            r = call_non_pod_callback(&receiveHandler, v);
+        })(17).should == Counts(34, 1, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.returnedByCallback." ~ backend.stringof)
+    unittest {
+        runShape!(backend, q{
+            r = call_non_pod_maker_callback(&returnHandler, v);
+        })(17).should == Counts(51, 1, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.methodNamedLocal." ~ backend.stringof)
+    unittest {
+        runShape!(backend, q{
+            NonPodMaker m;
+            m.base = 5;
+            auto s = m.make(v);
+            r = m.read(s);
+        })(17).should == Counts(27, 2, 1);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.methodTemporary." ~ backend.stringof)
+    unittest {
+        runShape!(backend, q{
+            NonPodMaker m;
+            m.base = 5;
+            r = m.read(m.make(v));
+        })(17).should == Counts(27, 1, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.destructorOnlyNamedLocal." ~ backend.stringof)
+    unittest {
+        runShape!(backend, q{
+            auto s = make_dtor_only(v);
+            r = read_dtor_only(s);
+        })(17).should == Counts(17, 2, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.destructorOnlyTemporary." ~ backend.stringof)
+    unittest {
+        runShape!(backend, q{
+            r = read_dtor_only(make_dtor_only(v));
+        })(17).should == Counts(17, 1, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.copyConstructorOnlyNamedLocal." ~ backend.stringof)
+    unittest {
+        runShape!(backend, q{
+            auto s = make_copy_only(v);
+            r = read_copy_only(s);
+        })(17).should == Counts(17, 0, 1);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.copyConstructorOnlyTemporary." ~ backend.stringof)
+    unittest {
+        runShape!(backend, q{
+            r = read_copy_only(make_copy_only(v));
+        })(17).should == Counts(17, 0, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.postblitNamedLocal." ~ backend.stringof)
+    unittest {
+        runShape!(backend, q{
+            auto s = make_post_blit(v);
+            r = read_post_blit(s);
+        })(17).should == Counts(17, 2, 1);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.postblitTemporary." ~ backend.stringof)
+    unittest {
+        runShape!(backend, q{
+            r = read_post_blit(make_post_blit(v));
+        })(17).should == Counts(17, 1, 0);
     }
 }
 
