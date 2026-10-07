@@ -3348,6 +3348,471 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
         },
         backends=("native", "interpreter", "bytecode"),
     ),
+    # `core.atomic` instances have `asm` bodies, which no backend runs: each
+    # instance below has a type argument that the program declares, and gives the
+    # result of compiled D.
+    "atomic_class_ref": ImageShape(
+        {
+            "app/root.d": """
+                module root;
+                import core.atomic;
+                class Node { int value; }
+
+                void loads() {
+                    Node na = new Node;
+                    shared(Node) v = cast(shared) na;
+                    assert(atomicLoad(v) is cast(shared) na);
+                }
+
+                void stores() {
+                    Node na = new Node, nb = new Node;
+                    shared(Node) v = cast(shared) na;
+                    atomicStore(v, cast(shared) nb);
+                    assert(atomicLoad(v) is cast(shared) nb);
+                }
+
+                void swaps() {
+                    Node na = new Node, nb = new Node;
+                    shared(Node) v = cast(shared) na;
+                    assert(cas(&v, cast(shared) na, cast(shared) nb));
+                    assert(!cas(&v, cast(shared) na, cast(shared) na));
+                    assert(atomicLoad(v) is cast(shared) nb);
+                }
+
+                void exchanges() {
+                    Node na = new Node, nb = new Node;
+                    shared(Node) v = cast(shared) na;
+                    auto old = atomicExchange(&v, cast(shared) nb);
+                    assert(old is cast(shared) na);
+                    assert(atomicLoad(v) is cast(shared) nb);
+                }
+
+                void main() {
+                    loads();
+                    stores();
+                    swaps();
+                    exchanges();
+                }
+                """,
+        },
+        backends=("native", "interpreter", "bytecode"),
+    ),
+    "atomic_root_struct_ptr": ImageShape(
+        {
+            "app/root.d": """
+                module root;
+                import core.atomic;
+                struct Pair { int a; int b; }
+
+                void loads() {
+                    Pair pa = Pair(1, 2);
+                    shared(Pair*) v = cast(shared) &pa;
+                    assert(atomicLoad(v) is cast(shared) &pa);
+                }
+
+                void stores() {
+                    Pair pa = Pair(1, 2), pb = Pair(3, 4);
+                    shared(Pair*) v = cast(shared) &pa;
+                    atomicStore(v, cast(shared) &pb);
+                    assert(atomicLoad(v) is cast(shared) &pb);
+                }
+
+                void swaps() {
+                    Pair pa = Pair(1, 2), pb = Pair(3, 4);
+                    shared(Pair*) v = cast(shared) &pa;
+                    assert(cas(&v, cast(shared) &pa, cast(shared) &pb));
+                    assert(!cas(&v, cast(shared) &pa, cast(shared) &pa));
+                    assert(atomicLoad(v) is cast(shared) &pb);
+                }
+
+                void exchanges() {
+                    Pair pa = Pair(1, 2), pb = Pair(3, 4);
+                    shared(Pair*) v = cast(shared) &pa;
+                    auto old = atomicExchange(&v, cast(shared) &pb);
+                    assert(old is cast(shared) &pa);
+                    assert(atomicLoad(v) is cast(shared) &pb);
+                }
+
+                void main() {
+                    loads();
+                    stores();
+                    swaps();
+                    exchanges();
+                }
+                """,
+        },
+        backends=("native", "interpreter", "bytecode"),
+    ),
+    "atomic_root_struct_ptr_immutable": ImageShape(
+        {
+            "app/root.d": """
+                module root;
+                import core.atomic;
+                struct Pair { int a; int b; }
+
+                void loads() {
+                    immutable Pair ipa = Pair(1, 2);
+                    shared(immutable(Pair)*) v = cast(shared) &ipa;
+                    assert(atomicLoad(v) is cast(shared) &ipa);
+                }
+
+                void stores() {
+                    immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
+                    shared(immutable(Pair)*) v = cast(shared) &ipa;
+                    atomicStore(v, cast(shared) &ipb);
+                    assert(atomicLoad(v) is cast(shared) &ipb);
+                }
+
+                void swaps() {
+                    immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
+                    shared(immutable(Pair)*) v = cast(shared) &ipa;
+                    assert(cas(&v, cast(shared) &ipa, cast(shared) &ipb));
+                    assert(!cas(&v, cast(shared) &ipa, cast(shared) &ipa));
+                    assert(atomicLoad(v) is cast(shared) &ipb);
+                }
+
+                void exchanges() {
+                    immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
+                    shared(immutable(Pair)*) v = cast(shared) &ipa;
+                    auto old = atomicExchange(&v, cast(shared) &ipb);
+                    assert(old is cast(shared) &ipa);
+                    assert(atomicLoad(v) is cast(shared) &ipb);
+                }
+
+                void main() {
+                    loads();
+                    stores();
+                    swaps();
+                    exchanges();
+                }
+                """,
+        },
+        backends=("native", "interpreter", "bytecode"),
+    ),
+    "atomic_root_struct": ImageShape(
+        {
+            "app/root.d": """
+                module root;
+                import core.atomic;
+                struct Pair { int a; int b; }
+
+                void loads() {
+                    shared(Pair) v = Pair(3, 4);
+                    assert(atomicLoad(v) == Pair(3, 4));
+                }
+
+                void stores() {
+                    shared(Pair) v = Pair(3, 4);
+                    atomicStore(v, Pair(5, 6));
+                    assert(atomicLoad(v) == Pair(5, 6));
+                }
+
+                void swaps() {
+                    shared(Pair) v = Pair(3, 4);
+                    assert(cas(&v, Pair(3, 4), Pair(5, 6)));
+                    assert(!cas(&v, Pair(3, 4), Pair(3, 4)));
+                    assert(atomicLoad(v) == Pair(5, 6));
+                }
+
+                void exchanges() {
+                    shared(Pair) v = Pair(3, 4);
+                    auto old = atomicExchange(&v, Pair(5, 6));
+                    assert(old == Pair(3, 4));
+                    assert(atomicLoad(v) == Pair(5, 6));
+                }
+
+                void main() {
+                    loads();
+                    stores();
+                    swaps();
+                    exchanges();
+                }
+                """,
+        },
+        backends=("native", "interpreter", "bytecode"),
+    ),
+    "atomic_op_root_enum": ImageShape(
+        {
+            "app/root.d": """
+                module root;
+                import core.atomic;
+                enum Level : int { low = 1, high = 2, both = 3 }
+
+                void main() {
+                    shared Level level = Level.low;
+                    atomicOp!"|="(level, Level.high);
+                    assert(atomicLoad(level) == Level.both);
+                }
+                """,
+        },
+        backends=("native", "interpreter", "bytecode"),
+    ),
+    "atomic_op_root_struct_wrapping_int": ImageShape(
+        {
+            "app/root.d": """
+                module root;
+                import core.atomic;
+                struct Counter {
+                    int value;
+                    void opOpAssign(string op: "+")(int amount) shared { value += amount; }
+                    void opOpAssign(string op: "+")(int amount) { value += amount; }
+                }
+
+                void main() {
+                    shared Counter counter = Counter(1);
+                    atomicOp!"+="(counter, 4);
+                    assert(atomicLoad(counter).value == 5);
+                }
+                """,
+        },
+        backends=("native", "interpreter", "bytecode"),
+    ),
+    "cas_root_struct16_bytes": ImageShape(
+        {
+            "app/root.d": """
+                module root;
+                import core.atomic;
+                align(16) struct Wide { long low; long high; }
+
+                void main() {
+                    shared Wide value = Wide(1, 2);
+                    assert(cas(&value, Wide(1, 2), Wide(3, 4)));
+                    assert(!cas(&value, Wide(1, 2), Wide(5, 6)));
+                    const seen = atomicLoad(value);
+                    assert(seen.low == 3 && seen.high == 4);
+                }
+                """,
+        },
+        backends=("native", "interpreter", "bytecode"),
+    ),
+    "atomic_load_shared_class_with_root_struct_field": ImageShape(
+        {
+            "app/root.d": """
+                module root;
+                import core.atomic;
+                struct Pair { int a; int b; }
+                shared class Holder { Pair pair; shared(Holder) next; }
+
+                void main() {
+                    auto first = new shared Holder;
+                    auto second = new shared Holder;
+                    first.next = second;
+                    shared(Holder) slot = first;
+                    assert(atomicLoad(slot) is first);
+                    assert(atomicLoad(first.next) is second);
+                }
+                """,
+        },
+        backends=("native", "interpreter", "bytecode"),
+    ),
+    "atomic_load_root_template_instantiation": ImageShape(
+        {
+            "app/root.d": """
+                module root;
+                import core.atomic;
+                struct Pair { int a; int b; }
+
+                T loaded(T)(ref shared T slot) { return atomicLoad(slot); }
+
+                struct Box(T) {
+                    shared(T*) pointer;
+                    shared(T*) get() { return atomicLoad(pointer); }
+                }
+
+                void main() {
+                    Pair pair = Pair(1, 2);
+                    shared(Pair*) slot = cast(shared) &pair;
+                    assert(loaded(slot) is cast(shared) &pair);
+                    Box!Pair box;
+                    box.pointer = slot;
+                    assert(box.get is slot);
+                    shared(Box!Pair*) boxed = cast(shared) &box;
+                    assert(atomicLoad(boxed) is cast(shared) &box);
+                }
+                """,
+        },
+        backends=("native", "interpreter", "bytecode"),
+    ),
+    "atomic_load_root_struct_in_root_struct": ImageShape(
+        {
+            "app/root.d": """
+                module root;
+                import core.atomic;
+                struct Inner { int a; }
+                struct Outer { Inner inner; int tail; }
+
+                void main() {
+                    Outer outer;
+                    shared(Outer*) slot = cast(shared) &outer;
+                    assert(atomicLoad(slot) is cast(shared) &outer);
+                    shared Outer value;
+                    atomicStore(value, Outer(Inner(3), 4));
+                    const seen = atomicLoad(value);
+                    assert(seen.inner.a == 3 && seen.tail == 4);
+                }
+                """,
+        },
+        backends=("native", "interpreter", "bytecode"),
+    ),
+    "atomic_load_root_struct_nested_in_function": ImageShape(
+        {
+            "app/root.d": """
+                module root;
+                import core.atomic;
+
+                void main() {
+                    struct Local { int a; int b; }
+                    Local local = Local(1, 2);
+                    shared(Local*) slot = cast(shared) &local;
+                    assert(atomicLoad(slot) is cast(shared) &local);
+                }
+                """,
+        },
+        backends=("native", "interpreter", "bytecode"),
+    ),
+    "atomic_load_guest_thread": ImageShape(
+        {
+            "app/root.d": """
+                module root;
+                import core.atomic;
+                import core.thread: Thread;
+                struct Pair { int a; int b; }
+
+                void main() {
+                    Pair pair = Pair(1, 2);
+                    shared(Pair*) slot = cast(shared) &pair;
+                    shared(Pair*) seen;
+                    auto thread = new Thread({ atomicStore(seen, atomicLoad(slot)); });
+                    thread.start;
+                    thread.join;
+                    assert(atomicLoad(seen) is cast(shared) &pair);
+                }
+                """,
+        },
+        backends=("native", "interpreter", "bytecode"),
+    ),
+    # A pointer to a root struct needs no more of the struct than its size, so a
+    # destructor does not matter to the instance.
+    "atomic_load_root_struct_with_destructor_ptr": ImageShape(
+        {
+            "app/root.d": """
+                module root;
+                import core.atomic;
+                struct Guard { int a; ~this() pure nothrow @nogc {} }
+
+                void main() {
+                    Guard guard;
+                    shared(Guard*) slot = cast(shared) &guard;
+                    assert(atomicLoad(slot) is cast(shared) &guard);
+                }
+                """,
+        },
+        backends=("native", "interpreter", "bytecode"),
+    ),
+    # A field initializer can name another type of the program; the instance
+    # does not depend on it.
+    "atomic_load_root_struct_with_field_initializers": ImageShape(
+        {
+            "app/root.d": """
+                module root;
+                import core.atomic;
+                enum Color { red, green }
+                struct Inner { int a; int b; }
+                struct S { int n = 3; Color c = Color.green; Inner inner = Inner(3, 4); int x; }
+
+                void main() {
+                    S s;
+                    shared(S*) v = cast(shared) &s;
+                    assert(atomicLoad(v) is cast(shared) &s);
+                }
+                """,
+        },
+        backends=("native", "interpreter", "bytecode"),
+    ),
+    "atomic_load_root_struct_with_bit_field_ptr": ImageShape(
+        {
+            "app/root.d": """
+                module root;
+                import core.atomic;
+                struct Flags { int a : 3; int b : 5; }
+
+                void main() {
+                    Flags flags;
+                    shared(Flags*) v = cast(shared) &flags;
+                    assert(atomicLoad(v) is cast(shared) &flags);
+                }
+                """,
+        },
+        backends=("native", "interpreter", "bytecode"),
+    ),
+    # By value, the instance depends on the layout of the bit fields.
+    "atomic_load_root_struct_with_bit_field": ImageShape(
+        {
+            "app/root.d": """
+                module root;
+                import core.atomic;
+                struct Flags { int a : 3; int b : 5; ubyte c; }
+
+                void main() {
+                    shared Flags v;
+                    v.a = 3;
+                    auto loaded = atomicLoad(v);
+                    assert(loaded.a == 3);
+                }
+                """,
+        },
+        backends=("native", "interpreter", "bytecode"),
+    ),
+    "atomic_load_function_local_class": ImageShape(
+        {
+            "app/root.d": """
+                module root;
+                import core.atomic;
+                void main() {
+                    class Node { int value; }
+                    Node n = new Node;
+                    shared(Node) v = cast(shared) n;
+                    assert(atomicLoad(v) is cast(shared) n);
+                }
+                """,
+        },
+        backends=("native", "interpreter", "bytecode"),
+    ),
+    "atomic_load_function_local_struct_with_context_ptr": ImageShape(
+        {
+            "app/root.d": """
+                module root;
+                import core.atomic;
+                void main() {
+                    int local = 5;
+                    struct L { int get() { return local; } }
+                    L l;
+                    shared(L*) v = cast(shared) &l;
+                    assert(atomicLoad(v) is cast(shared) &l);
+                }
+                """,
+        },
+        backends=("native", "interpreter", "bytecode"),
+    ),
+    # An instance that the program never calls does not stop the program.
+    "atomic_load_never_called": ImageShape(
+        {
+            "app/root.d": """
+                module root;
+                import core.atomic;
+                struct Flags { int a : 3; int b : 5; }
+
+                void never() {
+                    Flags flags;
+                    shared(Flags*) v = cast(shared) &flags;
+                    atomicLoad(v);
+                }
+
+                void main() {}
+                """,
+        },
+        backends=("native", "interpreter", "bytecode"),
+    ),
     "thread_object_from_a_druntime_template": snippet_shape("""
         import core.thread: Thread;
         int answer() {
