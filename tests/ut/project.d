@@ -5,7 +5,11 @@ import core.atomic: atomicLoad, atomicOp;
 import core.runtime: UnitTestResult;
 import core.sync.barrier: Barrier;
 import core.sync.mutex: Mutex;
-import core.sys.posix.signal: SA_RESETHAND, SIGBUS, SIGFPE, SIGSEGV;
+import core.stdc.errno: EINVAL, errno;
+import core.stdc.signal: raise;
+import core.sys.posix.signal:
+    SA_RESETHAND, SIG_BLOCK, SIG_DFL, SIG_IGN, SIGBUS, SIGFPE, SIGSEGV,
+    sigaction, sigaction_t, sigismember, sigprocmask, sigset_t;
 import core.thread: Thread;
 import snakebite.backends: BackendName, backendIdentity;
 import snakebite.backends.backend: Program;
@@ -523,4 +527,210 @@ static foreach (BackendType; FaultingGuests) {
             kernelAction(signal).should == before[index];
         guestFaultReportedOnAnotherThread!BackendType.shouldBeTrue;
     }
+}
+
+
+// Runs `body` on a thread that is not running guest code, with the actions
+// that `sigaction` reports put back at the end.
+private void onHostThread(in void delegate() body_) {
+    _initDepthLock.lock;
+    scope(exit) _initDepthLock.unlock;
+
+    const restore = ReportedActions(0);
+    auto thread = new Thread({ body_(); }).start;
+    thread.join;
+}
+
+// Each user of a handler counts on its own, because tests run in parallel.
+private template Counting(string owner) {
+    shared int delivered;
+
+    extern(C) void handler(int) nothrow @nogc {
+        atomicOp!"+="(delivered, 1);
+    }
+}
+
+private alias countingHandler = Counting!"host".handler;
+
+private sigaction_t handledBy(void* handler, int flags) {
+    sigaction_t action;
+    action.sa_handler = cast(typeof(action.sa_handler)) handler;
+    action.sa_flags = flags;
+    return action;
+}
+
+// A signal that the program sent (`raise`) has no instruction to run again,
+// so it is delivered to the action that the program recorded.
+@("runtime.hostSignalGoesToTheRecordedAction")
+unittest {
+    onHostThread({
+        const action = handledBy(&countingHandler, 0);
+        sigaction(SIGSEGV, &action, null);
+        const kernel = kernelAction(SIGSEGV);
+        const before = atomicLoad(Counting!"host".delivered);
+
+        raise(SIGSEGV);
+
+        atomicLoad(Counting!"host".delivered).should == before + 1;
+        kernelAction(SIGSEGV).should == kernel;
+    });
+}
+
+@("runtime.hostOneShotActionRunsOnceThenReadsBackAsDefault")
+unittest {
+    onHostThread({
+        const action = handledBy(&countingHandler, SA_RESETHAND);
+        sigaction(SIGSEGV, &action, null);
+        const before = atomicLoad(Counting!"host".delivered);
+
+        raise(SIGSEGV);
+
+        atomicLoad(Counting!"host".delivered).should == before + 1;
+        sigaction_t reported;
+        sigaction(SIGSEGV, null, &reported);
+        (cast(void*) reported.sa_handler).should == cast(void*) SIG_DFL;
+    });
+}
+
+@("runtime.hostSignalIsIgnoredWhenTheRecordedActionIgnoresIt")
+unittest {
+    onHostThread({
+        const action = handledBy(cast(void*) SIG_IGN, 0);
+        sigaction(SIGSEGV, &action, null);
+
+        raise(SIGSEGV);
+    });
+}
+
+// The one delivery of a one-shot action of a guest is used up by the first
+// fault. The fault that the handler returns to is the guest's own error.
+static foreach (BackendType; FaultingGuests) {
+    @Tags(BackendType.stringof)
+    @("runtime.guestOneShotHandlerRunsOnceThenTheFaultIsRecovered." ~ BackendType.stringof)
+    unittest {
+        auto module_ = parseSnippets([q{
+            module oneShot;
+            import core.sys.posix.signal;
+            int run(void* handler) {
+                sigaction_t action;
+                action.sa_handler = cast(typeof(action.sa_handler)) handler;
+                action.sa_flags = SA_RESETHAND;
+                sigaction(SIGSEGV, &action, null);
+                int* pointer;
+                return *pointer;
+            }
+        }])[0];
+        auto backend = new BackendType(Program([module_]));
+        void* handler = &Counting!(BackendType.stringof).handler;
+        const before = atomicLoad(Counting!(BackendType.stringof).delivered);
+        int result;
+        GuestFault.Kind kind;
+
+        try
+            backend.call(module_.findFunction("run"), &result, [&handler]);
+        catch (GuestFaultException fault)
+            kind = fault.kind;
+
+        atomicLoad(Counting!(BackendType.stringof).delivered).should == before + 1;
+        kind.should == GuestFault.Kind.nullDereference;
+    }
+}
+
+
+private alias RawSigaction = extern(C) int function(int, const(sigaction_t)*, sigaction_t*) nothrow @nogc;
+
+@("runtime.underscoreSigactionRecordsLikeSigaction")
+unittest {
+    onHostThread({
+        const action = handledBy(&countingHandler, 0);
+        symbolNamed!RawSigaction("__sigaction")(SIGSEGV, &action, null).should == 0;
+        sigaction_t reported;
+
+        sigaction(SIGSEGV, null, &reported).should == 0;
+
+        (cast(void*) reported.sa_handler).should == cast(void*) &countingHandler;
+    });
+}
+
+@("runtime.signalFunctionsFailForASignalNumberThatDoesNotExist")
+unittest {
+    enum noSuchSignal = 1000;
+    enum sigError = cast(void*) -1;
+    onHostThread({
+        foreach (name; ["signal", "bsd_signal", "__sysv_signal", "sysv_signal",
+                        "ssignal", "sigset"]) {
+            errno = 0;
+            symbolNamed!HandlerSetter(name)(noSuchSignal, null).should == sigError;
+            errno.should == EINVAL;
+        }
+        symbolNamed!Ignorer("sigignore")(noSuchSignal).should == -1;
+        symbolNamed!Interrupter("siginterrupt")(noSuchSignal, 1).should == -1;
+        const SigVec vector = {null, 0, 0};
+        symbolNamed!VectorSetter("sigvec")(noSuchSignal, &vector, null).should == -1;
+        // `SIG_HOLD` reads the action first.
+        enum sigHold = cast(void*) 2;
+        symbolNamed!HandlerSetter("sigset")(noSuchSignal, sigHold).should == sigError;
+    });
+}
+
+@("runtime.signalFunctionsRejectTheErrorValueAsAHandler")
+unittest {
+    enum sigError = cast(void*) -1;
+    onHostThread({
+        errno = 0;
+        symbolNamed!HandlerSetter("signal")(SIGSEGV, sigError).should == sigError;
+        errno.should == EINVAL;
+    });
+}
+
+@("runtime.sigsetHoldBlocksTheSignalAndReportsIt")
+unittest {
+    enum sigHold = cast(void*) 2;
+    onHostThread({
+        auto sigset = symbolNamed!HandlerSetter("sigset");
+        sigset(SIGFPE, cast(void*) &countingHandler);
+        scope(exit) sigset(SIGFPE, cast(void*) SIG_DFL);
+
+        sigset(SIGFPE, sigHold).should == cast(void*) &countingHandler;
+        sigset_t mask;
+        sigprocmask(SIG_BLOCK, null, &mask);
+        sigismember(&mask, SIGFPE).should == 1;
+        sigset(SIGFPE, sigHold).should == sigHold;
+        sigset(SIGFPE, cast(void*) &countingHandler).should == sigHold;
+        sigprocmask(SIG_BLOCK, null, &mask);
+        sigismember(&mask, SIGFPE).should == 0;
+    });
+}
+
+@("runtime.siginterruptSwitchesRestartOfTheRecordedAction")
+unittest {
+    import core.sys.posix.signal: SA_RESTART;
+    onHostThread({
+        const action = handledBy(&countingHandler, 0);
+        sigaction(SIGSEGV, &action, null);
+        sigaction_t reported;
+
+        symbolNamed!Interrupter("siginterrupt")(SIGSEGV, 0).should == 0;
+        sigaction(SIGSEGV, null, &reported);
+        (reported.sa_flags & SA_RESTART).should.not == 0;
+
+        symbolNamed!Interrupter("siginterrupt")(SIGSEGV, 1).should == 0;
+        sigaction(SIGSEGV, null, &reported);
+        (reported.sa_flags & SA_RESTART).should == 0;
+    });
+}
+
+@("runtime.sigvecReportsTheRecordedAction")
+unittest {
+    enum interrupt = 2, resetHand = 4;
+    onHostThread({
+        const SigVec vector = {cast(void*) &countingHandler, 0, resetHand | interrupt};
+        SigVec reported;
+
+        symbolNamed!VectorSetter("sigvec")(SIGSEGV, &vector, null).should == 0;
+        symbolNamed!VectorSetter("sigvec")(SIGSEGV, null, &reported).should == 0;
+
+        reported.handler.should == cast(void*) &countingHandler;
+        reported.flags.should == (resetHand | interrupt);
+    });
 }

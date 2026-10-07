@@ -693,12 +693,14 @@ static if (supported) {
             sigaction_t old;
             if (interposedSigaction(signal, null, &old) != 0)
                 return sigError;
-            return sigismember(&before, signal) ? cast(void*) sigHold : cast(void*) old.sa_handler;
+            return sigismember(&before, signal) == 1 ? cast(void*) sigHold : cast(void*) old.sa_handler;
         }
         sigset_t before;
         sigprocmask(SIG_UNBLOCK, &one, &before);
         void* old = setHandler(signal, handler, 0, false);
-        return sigismember(&before, signal) ? cast(void*) sigHold : old;
+        if (old is sigError)
+            return old;
+        return sigismember(&before, signal) == 1 ? cast(void*) sigHold : old;
     }
 
     pragma(mangle, "sigignore")
