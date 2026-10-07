@@ -126,38 +126,30 @@ unittest {
 }
 
 
-// dmd's line tables are `uint[]` in the arena: two neighbouring line
-// starts read as one word can have the value of an address in the GC
-// heap. `locFileTable` is private to dmd; the test reads it by name. Data
-// that druntime allocated NO_SCAN cannot hold a pointer, so the report
-// does not read it. `--lowmem` puts the table on the GC heap instead, so
-// the report is empty there whatever the report skips, and the test then
-// checks nothing.
+// A block that druntime allocates NO_SCAN while the frontend runs is arena
+// memory that cannot hold a pointer: a word in it that has the value of a
+// GC address is data, so the report does not read it. dmd's own line
+// tables are such blocks (`uint[]`). `--lowmem` puts the block on the GC
+// heap instead, so the report is empty there whatever the report skips,
+// and the test then checks nothing.
 debug
 @("arenaHoldsNoGCPointers.skipsMemoryThatHoldsNoPointers")
 unittest {
-    import location = dmd.location;
     import snakebite.frontend.compiler: withCompilerLock;
-    import std.algorithm.searching: startsWith;
-
-    enum header = "module arenaSkipsMemoryThatHoldsNoPointers;\n";
-    parseSnippet(header ~ "int a;\nint b;\nint c;\nint d;\n");
+    import snakebite.gc: enterFrontend, leaveFrontend;
 
     arenaReportLock.lock;
     scope(exit) arenaReportLock.unlock;
     withCompilerLock({
-        uint[] lines;
-        foreach (table; __traits(getMember, location, "locFileTable"))
-            if (table.fileContents.startsWith(header))
-                lines = table.lines;
-        (lines.length >= 4).should == true;
-
-        // Two line starts together are the address of a live GC block.
+        void* data;
+        {
+            enterFrontend;
+            scope(exit) leaveFrontend;
+            data = GC.malloc(64, GC.BlkAttr.NO_SCAN);
+        }
         auto block = new ubyte[64];
-        auto word = cast(size_t*) lines.ptr;
-        auto saved = *word;
-        *word = cast(size_t) block.ptr;
-        scope(exit) *word = saved;
+        auto word = cast(void**) data;
+        *word = block.ptr;
 
         arenaReport.should == "";
     });
