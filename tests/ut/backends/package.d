@@ -188,28 +188,23 @@ public void shouldBeStatusOfOnImage(
 
 // One directory for every image that a `bin/ut` run builds: the image cache
 // keys on content, so equal sources share an image. Removed at exit.
-private string imageCacheDirectory() {
+private __gshared string imageCacheDirectory;
+
+shared static this() {
     import std.file: mkdirRecurse, tempDir;
     import std.path: buildPath;
     import std.uuid: randomUUID;
 
-    synchronized {
-        if (_imageCacheDirectory is null) {
-            _imageCacheDirectory = buildPath(tempDir,
-                "snakebite-ut-images-" ~ randomUUID.toString);
-            mkdirRecurse(_imageCacheDirectory);
-        }
-        return _imageCacheDirectory;
-    }
+    imageCacheDirectory = buildPath(tempDir,
+        "snakebite-ut-images-" ~ randomUUID.toString);
+    mkdirRecurse(imageCacheDirectory);
 }
-
-private __gshared string _imageCacheDirectory;
 
 shared static ~this() {
     import std.file: exists, rmdirRecurse;
 
-    if (_imageCacheDirectory !is null && _imageCacheDirectory.exists)
-        rmdirRecurse(_imageCacheDirectory);
+    if (imageCacheDirectory !is null && imageCacheDirectory.exists)
+        rmdirRecurse(imageCacheDirectory);
 }
 
 // `main`'s exit status, run natively, mirroring the backend-side semantics

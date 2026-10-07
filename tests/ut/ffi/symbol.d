@@ -662,12 +662,9 @@ unittest {
 
 
 // `core.atomic` forwards to `core.internal.atomic`, whose x86-64 bodies are
-// `asm` blocks. No backend runs `asm` (ADR-0012), so such an instance must be
-// compiled natively. An instance whose type argument is declared by the
-// root package has no spelling in the dependency image's own module, so the
-// image does not hold it (`imagesource.d` marks it as needing the root). It
-// then runs on a backend, which reaches the `asm` block. Compiled D runs the
-// same program and gives the native result.
+// `asm` blocks, and no backend runs `asm` (ADR-0012). Each instance below has
+// a type argument that the program itself declares, and gives the result that
+// compiled D gives.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot interpret `asm` statements"),
@@ -677,15 +674,10 @@ static foreach (backend; Matrix!(
     unittest {
         0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
-            struct Pair { int a; int b; }
             class Node { int value; }
 
-
             void main() {
-                int ia = 1, ib = 2;
-                Node na = new Node, nb = new Node;
-                Pair pa = Pair(1, 2), pb = Pair(3, 4);
-                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
+                Node na = new Node;
                 shared(Node) v = cast(shared) na;
                 assert(atomicLoad(v) is cast(shared) na);
             }
@@ -702,15 +694,10 @@ static foreach (backend; Matrix!(
     unittest {
         0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
-            struct Pair { int a; int b; }
             class Node { int value; }
 
-
             void main() {
-                int ia = 1, ib = 2;
                 Node na = new Node, nb = new Node;
-                Pair pa = Pair(1, 2), pb = Pair(3, 4);
-                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
                 shared(Node) v = cast(shared) na;
                 atomicStore(v, cast(shared) nb);
                 assert(atomicLoad(v) is cast(shared) nb);
@@ -728,15 +715,10 @@ static foreach (backend; Matrix!(
     unittest {
         0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
-            struct Pair { int a; int b; }
             class Node { int value; }
 
-
             void main() {
-                int ia = 1, ib = 2;
                 Node na = new Node, nb = new Node;
-                Pair pa = Pair(1, 2), pb = Pair(3, 4);
-                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
                 shared(Node) v = cast(shared) na;
                 assert(cas(&v, cast(shared) na, cast(shared) nb));
                 assert(!cas(&v, cast(shared) na, cast(shared) na));
@@ -755,15 +737,10 @@ static foreach (backend; Matrix!(
     unittest {
         0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
-            struct Pair { int a; int b; }
             class Node { int value; }
 
-
             void main() {
-                int ia = 1, ib = 2;
                 Node na = new Node, nb = new Node;
-                Pair pa = Pair(1, 2), pb = Pair(3, 4);
-                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
                 shared(Node) v = cast(shared) na;
                 auto old = atomicExchange(&v, cast(shared) nb);
                 assert(old is cast(shared) na);
@@ -783,14 +760,9 @@ static foreach (backend; Matrix!(
         0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
-            class Node { int value; }
-
 
             void main() {
-                int ia = 1, ib = 2;
-                Node na = new Node, nb = new Node;
-                Pair pa = Pair(1, 2), pb = Pair(3, 4);
-                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
+                Pair pa = Pair(1, 2);
                 shared(Pair*) v = cast(shared) &pa;
                 assert(atomicLoad(v) is cast(shared) &pa);
             }
@@ -808,14 +780,9 @@ static foreach (backend; Matrix!(
         0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
-            class Node { int value; }
-
 
             void main() {
-                int ia = 1, ib = 2;
-                Node na = new Node, nb = new Node;
                 Pair pa = Pair(1, 2), pb = Pair(3, 4);
-                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
                 shared(Pair*) v = cast(shared) &pa;
                 atomicStore(v, cast(shared) &pb);
                 assert(atomicLoad(v) is cast(shared) &pb);
@@ -834,14 +801,9 @@ static foreach (backend; Matrix!(
         0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
-            class Node { int value; }
-
 
             void main() {
-                int ia = 1, ib = 2;
-                Node na = new Node, nb = new Node;
                 Pair pa = Pair(1, 2), pb = Pair(3, 4);
-                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
                 shared(Pair*) v = cast(shared) &pa;
                 assert(cas(&v, cast(shared) &pa, cast(shared) &pb));
                 assert(!cas(&v, cast(shared) &pa, cast(shared) &pa));
@@ -861,14 +823,9 @@ static foreach (backend; Matrix!(
         0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
-            class Node { int value; }
-
 
             void main() {
-                int ia = 1, ib = 2;
-                Node na = new Node, nb = new Node;
                 Pair pa = Pair(1, 2), pb = Pair(3, 4);
-                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
                 shared(Pair*) v = cast(shared) &pa;
                 auto old = atomicExchange(&v, cast(shared) &pb);
                 assert(old is cast(shared) &pa);
@@ -888,14 +845,9 @@ static foreach (backend; Matrix!(
         0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
-            class Node { int value; }
-
 
             void main() {
-                int ia = 1, ib = 2;
-                Node na = new Node, nb = new Node;
-                Pair pa = Pair(1, 2), pb = Pair(3, 4);
-                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
+                immutable Pair ipa = Pair(1, 2);
                 shared(immutable(Pair)*) v = cast(shared) &ipa;
                 assert(atomicLoad(v) is cast(shared) &ipa);
             }
@@ -913,13 +865,8 @@ static foreach (backend; Matrix!(
         0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
-            class Node { int value; }
-
 
             void main() {
-                int ia = 1, ib = 2;
-                Node na = new Node, nb = new Node;
-                Pair pa = Pair(1, 2), pb = Pair(3, 4);
                 immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
                 shared(immutable(Pair)*) v = cast(shared) &ipa;
                 atomicStore(v, cast(shared) &ipb);
@@ -939,13 +886,8 @@ static foreach (backend; Matrix!(
         0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
-            class Node { int value; }
-
 
             void main() {
-                int ia = 1, ib = 2;
-                Node na = new Node, nb = new Node;
-                Pair pa = Pair(1, 2), pb = Pair(3, 4);
                 immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
                 shared(immutable(Pair)*) v = cast(shared) &ipa;
                 assert(cas(&v, cast(shared) &ipa, cast(shared) &ipb));
@@ -966,13 +908,8 @@ static foreach (backend; Matrix!(
         0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
-            class Node { int value; }
-
 
             void main() {
-                int ia = 1, ib = 2;
-                Node na = new Node, nb = new Node;
-                Pair pa = Pair(1, 2), pb = Pair(3, 4);
                 immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
                 shared(immutable(Pair)*) v = cast(shared) &ipa;
                 auto old = atomicExchange(&v, cast(shared) &ipb);
@@ -993,14 +930,8 @@ static foreach (backend; Matrix!(
         0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
-            class Node { int value; }
-
 
             void main() {
-                int ia = 1, ib = 2;
-                Node na = new Node, nb = new Node;
-                Pair pa = Pair(1, 2), pb = Pair(3, 4);
-                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
                 shared(Pair) v = Pair(3, 4);
                 assert(atomicLoad(v) == Pair(3, 4));
             }
@@ -1018,14 +949,8 @@ static foreach (backend; Matrix!(
         0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
-            class Node { int value; }
-
 
             void main() {
-                int ia = 1, ib = 2;
-                Node na = new Node, nb = new Node;
-                Pair pa = Pair(1, 2), pb = Pair(3, 4);
-                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
                 shared(Pair) v = Pair(3, 4);
                 atomicStore(v, Pair(5, 6));
                 assert(atomicLoad(v) == Pair(5, 6));
@@ -1044,14 +969,8 @@ static foreach (backend; Matrix!(
         0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
-            class Node { int value; }
-
 
             void main() {
-                int ia = 1, ib = 2;
-                Node na = new Node, nb = new Node;
-                Pair pa = Pair(1, 2), pb = Pair(3, 4);
-                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
                 shared(Pair) v = Pair(3, 4);
                 assert(cas(&v, Pair(3, 4), Pair(5, 6)));
                 assert(!cas(&v, Pair(3, 4), Pair(3, 4)));
@@ -1071,14 +990,8 @@ static foreach (backend; Matrix!(
         0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
-            class Node { int value; }
-
 
             void main() {
-                int ia = 1, ib = 2;
-                Node na = new Node, nb = new Node;
-                Pair pa = Pair(1, 2), pb = Pair(3, 4);
-                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
                 shared(Pair) v = Pair(3, 4);
                 auto old = atomicExchange(&v, Pair(5, 6));
                 assert(old == Pair(3, 4));
@@ -1332,56 +1245,172 @@ static foreach (backend; Matrix!(
 }
 
 
+// A field initializer can name another type of the program; the instance
+// does not depend on it.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicLoad.rootStructWithFieldInitializers." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfOnImage!(backend, q{
+            import core.atomic;
+            enum Color { red, green }
+            struct Inner { int a; int b; }
+            struct S { int n = 3; Color c = Color.green; Inner inner = Inner(3, 4); int x; }
+
+            void main() {
+                S s;
+                shared(S*) v = cast(shared) &s;
+                assert(atomicLoad(v) is cast(shared) &s);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicLoad.rootStructWithBitFieldPtr." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfOnImage!(backend, q{
+            import core.atomic;
+            struct Flags { int a : 3; int b : 5; }
+
+            void main() {
+                Flags flags;
+                shared(Flags*) v = cast(shared) &flags;
+                assert(atomicLoad(v) is cast(shared) &flags);
+            }
+        });
+    }
+}
+
+// By value, the instance depends on the layout of the bit fields.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicLoad.rootStructWithBitField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfOnImage!(backend, q{
+            import core.atomic;
+            struct Flags { int a : 3; int b : 5; ubyte c; }
+
+            void main() {
+                shared Flags v;
+                v.a = 3;
+                auto loaded = atomicLoad(v);
+                assert(loaded.a == 3);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicLoad.functionLocalClass." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfOnImage!(backend, q{
+            import core.atomic;
+            void main() {
+                class Node { int value; }
+                Node n = new Node;
+                shared(Node) v = cast(shared) n;
+                assert(atomicLoad(v) is cast(shared) n);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicLoad.functionLocalStructWithContextPtr." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfOnImage!(backend, q{
+            import core.atomic;
+            void main() {
+                int local = 5;
+                struct L { int get() { return local; } }
+                L l;
+                shared(L*) v = cast(shared) &l;
+                assert(atomicLoad(v) is cast(shared) &l);
+            }
+        });
+    }
+}
+
+// An instance that the program never calls does not stop the program.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicLoad.neverCalled." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfOnImage!(backend, q{
+            import core.atomic;
+            struct Flags { int a : 3; int b : 5; }
+
+            void never() {
+                Flags flags;
+                shared(Flags*) v = cast(shared) &flags;
+                atomicLoad(v);
+            }
+
+            void main() {}
+        });
+    }
+}
+
 // A dependency template with an `asm` body runs only from the image. When the
 // image cannot hold an instance, the load fails and names the instance and
 // the reason, instead of the run failing at the assembler.
-private string unplaceableMessage(in string name, in string root) {
+private auto unplaceableProgram(in string name, in string root) {
     const sandbox = Sandbox();
     // One frontend serves every test: module names stay apart.
     sandbox.writeFile("deps/asm_" ~ name ~ ".d", "module asm_" ~ name ~ ";\n" ~ q{
         T identity(T)(T value) { asm { nop; } return value; }
-        void touch(T)(T* value) { asm { nop; } }
         void callWith(alias f)() { asm { nop; } f(); }
     });
     sandbox.writeFile("app/root_" ~ name ~ ".d",
         "module root_" ~ name ~ ";\nimport asm_" ~ name ~ ";\n" ~ root);
     const imports = [sandbox.inSandboxPath("deps")];
-    auto project = prepareProject(sandbox.inSandboxPath("app"), imports, null, false,
-        optimise: Optimise.no).project;
-    try
-        imageSource(project.program);
-    catch (Exception exception)
-        return exception.msg;
-    return "";
+    return prepareProject(sandbox.inSandboxPath("app"), imports, null, false,
+        optimise: Optimise.no).project.program;
 }
 
 // The instance destroys its parameter: that is the destructor of the root.
 @("image.unplaceable.rootStructPassedWithDestructor")
 unittest {
-    const message = unplaceableMessage("destructor", q{
+    auto program = unplaceableProgram("destructor", q{
         struct Guard { int a; ~this() {} }
         void run() { identity(Guard(1)); }
     });
-    "asm_destructor.identity!(root_destructor.Guard)".should.be in message;
-    "uses code or state of the root package".should.be in message;
-}
-
-@("image.unplaceable.rootStructWithBitField")
-unittest {
-    const message = unplaceableMessage("bitfield", q{
-        struct Flags { int a : 3; int b : 5; }
-        void run() { Flags flags; touch(&flags); }
-    });
-    "asm_bitfield.touch!(root_bitfield.Flags)".should.be in message;
-    "bit field".should.be in message;
+    imageSource(program).shouldThrowWithMessage!Exception(
+        "cannot place the instance `asm_destructor.identity!(root_destructor.Guard)` "
+        ~ "in the dependency image: its body uses code or state of the root package. "
+        ~ "It contains inline assembler, which no backend runs (ADR-0012)");
 }
 
 @("image.unplaceable.rootFunctionAlias")
 unittest {
-    const message = unplaceableMessage("alias", q{
+    auto program = unplaceableProgram("alias", q{
         void callback() {}
         void run() { callWith!callback(); }
     });
-    "asm_alias.callWith!".should.be in message;
-    "is root code, not a type".should.be in message;
+    imageSource(program).shouldThrowWithMessage!Exception(
+        "cannot place the instance `asm_alias.callWith!(callback)` "
+        ~ "in the dependency image: template argument `root_alias.callback` is root code, not a type. "
+        ~ "It contains inline assembler, which no backend runs (ADR-0012)");
 }

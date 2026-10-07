@@ -79,6 +79,7 @@ private extern(C++) class Collector
     private string[] _standInSource;
     private string[] _standInChecks;
     private string[Dsymbol] _standInFailed;
+    private bool[Dsymbol] _byValue;
     private bool[string] _imports;
     private bool[Module] _modules;
     private struct Reference {
@@ -326,6 +327,13 @@ private extern(C++) class Collector
             return *failure;
         const prettyName = symbol.toPrettyChars(true).fromStringz.idup;
         string fail(in string reason) {
+            // Behind a pointer, a class reference or an array, the pointee's
+            // layout is not part of the instance.
+            if (symbol !in _byValue && (symbol.isStructDeclaration || symbol.isClassDeclaration)) {
+                _standInSource ~= text(symbol.isStructDeclaration ? "struct " : "abstract class ", _standInOf[symbol], " {}\n");
+                _standInChecks ~= "true";
+                return "";
+            }
             _standInFailed[symbol] = text("root type `", prettyName, "` has no stand-in: ", reason);
             return _standInFailed[symbol];
         }
@@ -381,29 +389,29 @@ private extern(C++) class Collector
         string reason;
         void fields(AggregateDeclaration aggregate) {
             foreach (field; aggregate.fields) {
-                if (field.isBitFieldDeclaration) {
-                    reason = "it has a bit field";
-                    return;
-                }
                 if (field.toParent !is aggregate)
                     continue;
-                const ident = field.ident.toString.idup;
+                const named = field.ident !is null;
+                // The context pointer of a nested struct is a field named `this`.
+                const ident = !named ? text("unnamedField", declaration.length)
+                    : field is aggregate.vthis ? "contextPointer" : field.ident.toString.idup;
                 if (ident == "__vptr" || ident == "__monitor")
                     continue;
                 const type = typeSpelling(field.type, reason);
                 if (reason.length)
                     return;
                 declaration ~= text("    ", alignment(field.alignment), type, " ", ident);
-                if (field._init !is null && !field._init.isVoidInitializer)
-                    declaration ~= text(" = ", field._init.toChars.fromStringz);
+                // A bit field has no `offsetof`: the aggregate's size and the
+                // offsets of its other fields pin its position.
+                if (auto bitField = field.isBitFieldDeclaration)
+                    declaration ~= text(" : ", bitField.fieldWidth);
+                else
+                    checks ~= text(" && ", name, ".", ident, ".offsetof == ", field.offset);
                 declaration ~= ";\n";
-                checks ~= text(" && ", name, ".", ident, ".offsetof == ", field.offset);
             }
         }
 
         if (auto struct_ = symbol.isStructDeclaration) {
-            if (struct_.isNested)
-                return fail("it has a context pointer");
             fields(struct_);
             if (reason.length)
                 return fail(reason);
@@ -672,6 +680,12 @@ private extern(C++) class Collector
                     // Pointer, array, delegate parameter, associative array
                     // key, tuple element, and nested template instance
                     // arguments can all also name dependency types.
+                    if (instance.tiargs !is null)
+                        foreach (argument; *instance.tiargs)
+                            if (auto type = imported!"dmd.dtemplate".getType(argument)) {
+                                bool[Type] seen;
+                                eachByValueSymbol(type, seen, (symbol) { _byValue[symbol] = true; });
+                            }
                     eachTemplateArgument(instance, visited, (symbol) {
                         auto module_ = symbol.getModule; // DMD symbol queries are mutable.
                         if (module_ !is null) {
@@ -801,6 +815,43 @@ private bool hasDependencyLocalType(
                 return true;
         return false;
     });
+}
+
+
+// The structs that a value of `type` holds in its own memory or passes by
+// value: not those behind a pointer, a class reference, or an array's
+// elements. Only these need their layout in the image.
+private void eachByValueSymbol(
+    imported!"dmd.mtype".Type type,
+    ref bool[imported!"dmd.mtype".Type] visited,
+    scope void delegate(imported!"dmd.dsymbol".Dsymbol) each,
+) {
+    import dmd.typesem: toBasetype;
+
+    if (type is null || type in visited)
+        return;
+    visited[type] = true;
+    type = type.toBasetype;
+    if (auto array = type.isTypeSArray)
+        eachByValueSymbol(array.next, visited, each);
+    else if (auto struct_ = type.isTypeStruct) {
+        each(struct_.sym);
+        foreach (field; struct_.sym.fields)
+            eachByValueSymbol(field.type, visited, each);
+    } else if (auto delegate_ = type.isTypeDelegate)
+        eachByValueSymbol(delegate_.next, visited, each);
+    else if (auto pointer = type.isTypePointer) {
+        if (pointer.next.isTypeFunction)
+            eachByValueSymbol(pointer.next, visited, each);
+    } else if (auto function_ = type.isTypeFunction) {
+        eachByValueSymbol(function_.next, visited, each);
+        foreach (i; 0 .. function_.parameterList.length)
+            eachByValueSymbol(function_.parameterList[i].type, visited, each);
+    } else if (auto tuple = type.isTypeTuple) {
+        if (tuple.arguments !is null)
+            foreach (parameter; *tuple.arguments)
+                eachByValueSymbol(parameter.type, visited, each);
+    }
 }
 
 

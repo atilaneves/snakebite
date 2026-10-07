@@ -71,7 +71,7 @@ only from the image, because no backend runs the assembler. When a
 template argument of such an instance is a type of the root package, the
 image source declares a stand-in for that type: a type of the image with
 the layout of the root type and nothing else. A struct or union stand-in
-has the same field types, initializers, alignments, size and alignment. A
+has the same field types, bit fields, alignments, size and alignment. A
 class stand-in has the same base classes, interfaces and fields. An enum
 stand-in has the same base type and values. The image compiles the
 instance over the stand-ins, and the registry returns it under the
@@ -83,9 +83,11 @@ An instance is placed this way when its body needs only the layout of the
 root types. It needs more when it uses code or state of the root package:
 a function of a root type (a postblit, a destructor, `opEquals`, an
 `opAssign`), a root function or variable, or `typeid` of a root type. It
-also needs more when a root type has no stand-in: a type with a context
-pointer, a bit field, or a template alias argument that names root code.
-Such an instance fails when the image source is made, with a message that
+also needs more when a template argument is an alias that names root code.
+A root class or struct that the instance reaches only through a pointer, a
+class reference or an array needs no layout: if its layout cannot be copied
+(a class with a context pointer), its stand-in is empty. Such an instance
+fails when the image source is made, with a message that
 names the instance and the reason.
 
 An instance without inline assembler that names a root type stays in the

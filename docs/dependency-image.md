@@ -21,7 +21,7 @@ templates that name a root type, with one exception: an instance with inline
 assembler cannot run on a backend (ADR-0012), so the image holds it, compiled
 over stand-ins for the root types (ADR-0007, amendment). A stand-in has the
 layout of the root type and no functions, `TypeInfo`, or static data. If the
-instance needs more than the layout, or a root type has no stand-in, making the
+instance needs more than the layout, making the
 image source fails and the message names the instance and the reason.
 
 For dub projects, the same `dub describe` call supplies root sources and the
