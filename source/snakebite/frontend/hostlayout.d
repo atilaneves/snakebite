@@ -19,6 +19,7 @@ public void reconcileHostClassLayouts(
     in bool correct,
 ) {
     import dmd.dmodule: Module;
+    import dmd.dsymbol: PASS;
     import dmd.dsymbolsem: dsymbolSemantic;
 
     bool[Module] roots;
@@ -32,7 +33,8 @@ public void reconcileHostClassLayouts(
             continue;
         // A class only resolves its base and its field types once the
         // scope of its module has been through semantic.
-        if (correct)
+        if (correct && module_.semanticRun == PASS.initial
+                && module_._scope !is null)
             module_.dsymbolSemantic(null);
         reconcileMembers(module_.members, correct);
     }
