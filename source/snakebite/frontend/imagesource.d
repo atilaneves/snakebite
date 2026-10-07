@@ -52,7 +52,9 @@ private extern(C++) class Collector
 
     import dmd.func: FuncDeclaration;
     import dmd.dmodule: Module;
+    import dmd.dsymbol: Dsymbol;
     import dmd.expression: CallExp, VarExp, DelegateExp;
+    import dmd.mtype: Type;
     import snakebite.backends.backend: Program;
     import std.string: fromStringz;
     import std.conv: text;
@@ -62,10 +64,21 @@ private extern(C++) class Collector
     private FuncDeclaration _current;
     private FuncDeclaration[][FuncDeclaration] _callees;
     private bool[FuncDeclaration] _needsRoot;
+    private bool[FuncDeclaration] _rootTyped;
+    private Instance[FuncDeclaration] _opaque;
+    private Type[Dsymbol] _opaqueTypes;
+    private string _opaqueDeclarations;
     private bool[string] _imports;
     private bool[Module] _modules;
     private struct Reference {
         FuncDeclaration[] functions;
+    }
+
+    // What the image compiles for an instance whose root types it names with
+    // opaque stand-ins: the template spelling and the stand-in signature.
+    private struct Instance {
+        string key;
+        imported!"dmd.mtype".TypeFunction type;
     }
     private Reference[string] _references;
 
@@ -98,6 +111,11 @@ private extern(C++) class Collector
         // A dependency template can import a root module internally, even
         // when its template arguments contain no root-owned declarations.
         // Propagate through cycles before deciding which bodies can be linked.
+        foreach (key; _references.keys.sort)
+            foreach (function_; _references[key].functions)
+                if (function_ in _rootTyped && function_ !in _needsRoot
+                        && !opaqueInstance(function_))
+                    _needsRoot[function_] = true;
         bool changed = true;
         while (changed) {
             changed = false;
@@ -116,13 +134,16 @@ private extern(C++) class Collector
         string result = "module snakebite_dependency_image;\n";
         foreach (name; _imports.keys.sort)
             result ~= "import " ~ name ~ ";\n";
+        result ~= _opaqueDeclarations;
         string registry = "export extern(C) void* "
             ~ DependencyImage.registrySymbol ~ "(const(char)[] name) {\n";
-        foreach (i, key; _references.keys.sort.array) {
-            auto reference = _references[key]; // Function identities are mutable AST nodes.
+        foreach (i, guestKey; _references.keys.sort.array) {
+            auto reference = _references[guestKey]; // Function identities are mutable AST nodes.
             import std.algorithm: canFind;
             if (reference.functions.canFind!(function_ => function_ in _needsRoot))
                 continue;
+            const key = reference.functions[0] in _opaque
+                ? _opaque[reference.functions[0]].key : guestKey;
             // `addressGuard` below prints each function's own declared
             // signature (its pointer type's `toChars`), so its type must
             // already be complete the same way `mangledNameOf` needs it -
@@ -163,6 +184,239 @@ private extern(C++) class Collector
         return result;
     }
 
+    // The signature that the image source spells: the stand-in one for an
+    // instance that the image compiles over opaque types.
+    private extern(D) imported!"dmd.mtype".TypeFunction signatureOf(
+        FuncDeclaration function_,
+    ) {
+        if (auto instance = function_ in _opaque)
+            return instance.type;
+        return function_.type.isTypeFunction; // DMD printers use mutable types.
+    }
+
+    // dmd can home another program's instances on a root module. Their
+    // types are not dependencies of the program being compiled into an image.
+    private extern(D) bool isRootSymbol(Dsymbol symbol) {
+        auto module_ = symbol.getModule; // DMD symbol queries are mutable.
+        return module_ !is null
+            && (_program.isRootOwned(module_) || module_ !in _modules);
+    }
+
+    private extern(D) bool mentionsRoot(Type type) {
+        bool[Type] visited;
+        return eachTemplateArgumentSymbol(type, visited, &isRootSymbol);
+    }
+
+    // An instance over a root type is native code that the dependency's
+    // compiler can build over a stand-in whenever it handles that type only
+    // as a pointer, a class reference or an enum value: the generated code
+    // moves the same bits whichever type it is told. The stand-in is an
+    // opaque aggregate for a pointee or a class, and the base type for an
+    // enum. The result is the instance's own template spelling, its
+    // signature and body over stand-ins, or false when the instance needs the
+    // root type itself.
+    private extern(D) bool opaqueInstance(FuncDeclaration function_) {
+        import dmd.dtemplate: isDsymbol, isExpression, isType;
+        import dmd.mtype: Parameter, ParameterList, TypeFunction;
+        import snakebite.frontend.compiler: newInFrontend;
+        import snakebite.frontend.dmd.mangle: completeFunctionType;
+
+        completeFunctionType(function_);
+        auto instance = function_.parent.isTemplateInstance;
+        auto original = function_.type.isTypeFunction;
+        if (instance is null || original is null || instance.tiargs is null
+                || original.next is null
+                || instance.tempdecl.parent.isModule is null)
+            return false;
+
+        // dmd prints an instance from its own template arguments, so print
+        // it with the stand-ins in place of the root types.
+        string spelling;
+        {
+            auto originalArguments = (*instance.tiargs)[].dup; // The AST keeps its own arguments.
+            scope(exit)
+                foreach (i, argument; originalArguments)
+                    (*instance.tiargs)[i] = argument;
+            foreach (i, argument; originalArguments) {
+                if (auto type = isType(argument)) {
+                    auto standIn = opaqueType(type, false);
+                    if (standIn is null)
+                        return false;
+                    (*instance.tiargs)[i] = standIn;
+                } else if (auto expression = isExpression(argument)) {
+                    if (expression.type is null || mentionsRoot(expression.type))
+                        return false;
+                } else if (isDsymbol(argument) !is null) {
+                    bool[Type] visited;
+                    if (eachTemplateArgument(argument, visited, &isRootSymbol))
+                        return false;
+                } else {
+                    return false;
+                }
+            }
+            spelling = sourceSpelling(instance.toPrettyChars(true).fromStringz);
+        }
+
+        auto next = opaqueType(original.next, false);
+        if (next is null)
+            return false;
+        auto parameters = original.parameterList.parameters is null
+            ? null
+            : newInFrontend!(Parameter.arraySyntaxCopy)(original.parameterList.parameters);
+        const count = original.parameterList.length;
+        if (parameters !is null && parameters.length != count)
+            return false;
+        foreach (i; 0 .. count) {
+            auto parameter = (*parameters)[i]; // DMD declarations take mutable parameters.
+            auto standIn = opaqueType(parameter.type, false);
+            if (standIn is null)
+                return false;
+            parameter.type = standIn;
+        }
+        if (!bodyNeedsOnlyStandIns(function_))
+            return false;
+
+        auto type = newInFrontend!TypeFunction(
+            ParameterList(parameters, original.parameterList.varargs, original.parameterList.stc),
+            next, original.linkage,
+        );
+        type.mod = original.mod;
+        type.isNothrow = original.isNothrow;
+        type.isNogc = original.isNogc;
+        type.isLive = original.isLive;
+        type.purity = original.purity;
+        type.isProperty = original.isProperty;
+        type.isRef = original.isRef;
+        type.isReturn = original.isReturn;
+        type.isReturnScope = original.isReturnScope;
+        type.isScopeQual = original.isScopeQual;
+        type.isRvalue = original.isRvalue;
+        type.trust = original.trust;
+        _opaque[function_] = Instance(spelling, type);
+        return true;
+    }
+
+    // The stand-in for `type`, with the qualifiers of `type`, or null when
+    // `type` holds a root type in any way but as a pointee, a class reference
+    // or an enum.
+    private extern(D) Type opaqueType(Type type, in bool pointee) {
+        import dmd.typesem: addMod, pointerTo;
+        import snakebite.frontend.compiler: newInFrontend;
+
+        if (!mentionsRoot(type))
+            return type;
+        Type standIn;
+        if (auto enumType = type.isTypeEnum) {
+            if (!isRootSymbol(enumType.sym) || enumType.sym.memtype is null)
+                return null;
+            standIn = opaqueType(enumType.sym.memtype, false);
+        } else if (auto structType = type.isTypeStruct) {
+            if (pointee && isRootSymbol(structType.sym))
+                standIn = opaqueAggregate(structType.sym, "struct");
+        } else if (auto classType = type.isTypeClass) {
+            import dmd.aggregate: ClassKind;
+            if (classType.sym.classKind == ClassKind.d && isRootSymbol(classType.sym))
+                standIn = opaqueAggregate(classType.sym,
+                    classType.sym.isInterfaceDeclaration ? "interface" : "class");
+        } else if (auto pointerType = type.isTypePointer) {
+            if (auto next = opaqueType(pointerType.next, true))
+                standIn = newInFrontend!pointerTo(next);
+        }
+        if (standIn is null)
+            return null;
+        return type.mod ? newInFrontend!addMod(standIn, type.mod) : standIn;
+    }
+
+    // One aggregate without members per root symbol, named after the order in
+    // which the sorted references first use it.
+    private extern(D) Type opaqueAggregate(Dsymbol symbol, in string keyword) {
+        import dmd.dclass: ClassDeclaration, InterfaceDeclaration;
+        import dmd.dstruct: StructDeclaration;
+        import dmd.identifier: Identifier;
+        import dmd.location: Loc;
+        import snakebite.frontend.compiler: newInFrontend;
+
+        if (auto known = symbol in _opaqueTypes)
+            return *known;
+        const name = text("SnakebiteOpaque", _opaqueTypes.length);
+        auto identifier = newInFrontend!(Identifier.idPool)(name); // DMD takes a mutable identifier.
+        Type type;
+        string body_ = ";";
+        switch (keyword) {
+            case "struct":
+                type = newInFrontend!StructDeclaration(Loc.initial, identifier, false).type;
+                break;
+            case "interface":
+                type = newInFrontend!InterfaceDeclaration(Loc.initial, identifier, null).type;
+                break;
+            default:
+                // A class without members still has a size, which
+                // `core.atomic` reads when it exchanges a class reference.
+                type = newInFrontend!ClassDeclaration(Loc.initial, identifier, null, null, false).type;
+                body_ = " {}";
+        }
+        _opaqueDeclarations ~= text(keyword, " ", name, body_, "\n");
+        _opaqueTypes[symbol] = type;
+        return type;
+    }
+
+    // Whether the body of `function_` moves root values only as pointers,
+    // class references and enums: no expression or variable has a root
+    // struct, union or other aggregate type, and none reads a member that the
+    // root declares.
+    private extern(D) bool bodyNeedsOnlyStandIns(FuncDeclaration function_) {
+        import dmd.declaration: VarDeclaration;
+        import dmd.expression: Expression;
+        import dmd.visitor: StoppableVisitor;
+        import dmd.visitor.foreachvar: foreachExpAndVar;
+        import dmd.visitor.postorder: walkPostorder;
+
+        extern(C++) static final class Finder: StoppableVisitor {
+            alias visit = StoppableVisitor.visit;
+            Collector collector;
+
+            this(Collector collector) {
+                this.collector = collector;
+            }
+
+            // A stand-in answers none of what a real class or root symbol
+            // answers at run time: its identity, its allocation and what
+            // the root declares.
+            override void visit(Expression expression) {
+                import dmd.astenums: Tclass;
+                import dmd.typesem: toBasetype;
+
+                if (expression.type !is null
+                        && collector.opaqueType(expression.type, false) is null)
+                    stop = true;
+                if (expression.isNewExp || expression.isTypeidExp)
+                    stop = true;
+                if (auto conversion = expression.isCastExp)
+                    if (conversion.to.toBasetype.ty == Tclass
+                            || conversion.e1.type.toBasetype.ty == Tclass)
+                        stop = true;
+                if (auto member = expression.isDotVarExp)
+                    if (collector._program.isRootOwned(member.var))
+                        stop = true;
+                if (auto offset = expression.isSymOffExp)
+                    if (collector._program.isRootOwned(offset.var))
+                        stop = true;
+            }
+        }
+
+        scope finder = new Finder(this);
+        if (function_.fbody is null)
+            return true;
+        function_.fbody.foreachExpAndVar(
+            (expression) { walkPostorder(expression, finder); },
+            (variable) {
+                if (opaqueType(variable.type, false) is null)
+                    finder.stop = true;
+            },
+        );
+        return !finder.stop;
+    }
+
     // `mixin(q{&key})` takes the address of a diagnostic instantiation
     // spelling, not of a specific `FuncDeclaration`: when `key` names one
     // member of an eponymous template, two sibling overloads share the
@@ -191,9 +445,10 @@ private extern(C++) class Collector
         const untyped = text("mixin(q{&", key, "})");
         string guard = text("__traits(compiles, { auto pointer = ", untyped, "; })");
         foreach (function_; reference.functions) {
-            if (function_.type.isTypeFunction is null)
+            auto type = signatureOf(function_);
+            if (type is null)
                 continue;
-            auto pointerType = newInFrontend!pointerTo(function_.type);
+            auto pointerType = newInFrontend!pointerTo(type);
             const declaration = text(sourceSpelling(pointerType.toChars.fromStringz),
                 " matched = pointer;");
             guard ~= text(" && __traits(compiles, { auto pointer = ", untyped,
@@ -209,14 +464,15 @@ private extern(C++) class Collector
         import snakebite.frontend.compiler: newInFrontend;
         import snakebite.frontend.dmd.mangle: mangledNameOf;
 
-        if (function_.type.isTypeFunction is null)
+        auto type = signatureOf(function_);
+        if (type is null)
             return "";
         // Forces `function_`'s type complete first (`mangledNameOf`'s own
         // doc): `pointerTo`/`toChars` below print its declared signature,
         // an inferred return type or attribute set dmd has not resolved
         // yet would otherwise print incomplete.
         const mangled = mangledNameOf(function_);
-        auto pointerType = newInFrontend!pointerTo(function_.type);
+        auto pointerType = newInFrontend!pointerTo(type);
         const pointer = text(sourceSpelling(pointerType.toChars.fromStringz),
             " pointer = &", key, ";");
         const result = text("{\nstatic if (__traits(compiles, { mixin(q{", pointer,
@@ -288,7 +544,7 @@ private extern(C++) class Collector
         import dmd.astenums: STC;
 
         // Speculative template instances can retain an error type.
-        auto type = function_.type.isTypeFunction; // DMD printers use mutable types.
+        auto type = signatureOf(function_);
         if (type is null)
             return "";
         string parameters;
@@ -338,19 +594,16 @@ private extern(C++) class Collector
                 // Pointer, array, delegate parameter, associative array
                 // key, tuple element, and nested template instance
                 // arguments can all also name dependency types.
+                bool rooted;
                 eachTemplateArgument(instance, visited, (symbol) {
-                    auto module_ = symbol.getModule; // DMD symbol queries are mutable.
-                    if (module_ !is null) {
-                        // DMD can home another program's instances on
-                        // this root. Their types are not dependencies
-                        // of the program being compiled into an image.
-                        if (_program.isRootOwned(module_) || module_ !in _modules)
-                            _needsRoot[function_] = true;
-                        else
-                            _imports[module_.toPrettyChars.fromStringz.idup] = true;
-                    }
+                    if (isRootSymbol(symbol))
+                        rooted = true;
+                    else if (auto module_ = symbol.getModule) // DMD symbol queries are mutable.
+                        _imports[module_.toPrettyChars.fromStringz.idup] = true;
                     return false;
                 });
+                if (rooted)
+                    _rootTyped[function_] = true;
                 const key = sourceSpelling(instance.toPrettyChars(true).fromStringz);
                 if (key !in _references)
                     _references[key] = Reference.init;

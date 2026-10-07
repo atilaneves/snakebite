@@ -334,7 +334,9 @@ unittest {
     const imports = [sandbox.inSandboxPath("deps")];
     auto project = prepareProject(sandbox.inSandboxPath("app"), imports, null, false, optimise: Optimise.no).project;
     const source = imageSource(project.program);
-    "Thing".should.not.be in source;
+    // The registry holds the guest mangle of `pick!Thing`'s members, so the
+    // name `Thing` appears. The alias argument must not.
+    "apply!(__T4pickTC".should.not.be in source;
     "apply!".should.be in source;
 }
 

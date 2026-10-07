@@ -3426,6 +3426,25 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
             return atomicLoad(cast(int*) pointer);
         }
         """, 42, NATIVE_AND_FILE_BACKENDS),
+    # The root package defines every type that `atomicLoad` and `atomicStore`
+    # use here. Their native bodies only move a pointer, a class reference or
+    # an enum's base value, so they do not need the type itself.
+    "atomic_over_root_types": snippet_shape("""
+        import core.atomic: atomicLoad, atomicStore;
+        struct Pair { int first, second; }
+        class Node { int value; this(int value) { this.value = value; } }
+        enum Color : ubyte { red, green }
+        shared Pair pair = Pair(3, 4);
+        int answer() {
+            shared(Pair*) pointer = &pair;
+            shared Node node = cast(shared) new Node(7);
+            shared Color color = Color.red;
+            atomicStore(color, Color.green);
+            return atomicLoad(pointer).first * 100
+                + atomicLoad(node).value * 10
+                + (atomicLoad(color) == Color.green ? 1 : 0);
+        }
+        """, 371, NATIVE_AND_FILE_BACKENDS),
 }
 
 
