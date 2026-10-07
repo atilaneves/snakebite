@@ -5330,7 +5330,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.nativelayout: arrayValueSize;
 
         align(size_t.sizeof) ubyte[arrayValueSize] buffer = void;
-        evaluate(message, message.type, buffer.ptr);
+        fullExpression(FullExpressionScope.Position.assertMessage, message, {
+            evaluate(message, message.type, buffer.ptr);
+        });
 
         return (*cast(const(char)[]*) buffer.ptr).idup;
     }

@@ -2114,7 +2114,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t compileMessage(Expression message) {
         const facts = TypeFacts.of(message.type);
         const offset = reserveTemp(facts);
-        evalInto(message, offset, facts.size);
+        compileValue(FullExpressionScope.Position.assertMessage,
+            message, offset, facts.size);
         return offset;
     }
 
@@ -2543,12 +2544,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t destination,
         in size_t width,
     ) {
-        if (_emittingCleanup)
-            return evalInto(expression, destination, width);
-
-        fullExpression(position, expression,
+        inFullExpression(position, expression,
             { evalInto(expression, destination, width); },
         );
+    }
+
+    // A destructor expression compiled into a cleanup runs inside the full
+    // expression that registered it, and has no lifetime of its own.
+    private void inFullExpression(
+        in FullExpressionScope.Position position,
+        Expression expression,
+        scope void delegate() compile,
+    ) {
+        if (_emittingCleanup)
+            return compile();
+
+        fullExpression(position, expression, compile);
     }
 
     extern(D) protected override void withFullExpression(
@@ -6152,7 +6163,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const needsValue = destOffset != discardResult && plan.hasValue;
         if (plan.right == LogicalPlan.Right.effect
                 || destOffset == discardResult) {
-            fullExpression(FullExpressionScope.Position.logicalOperand,
+            inFullExpression(FullExpressionScope.Position.logicalOperand,
                 expression.e2, { compileEffect(expression.e2); });
             // The operand can end in a throw, but the branch skips it.
             _finished = false;
@@ -6169,7 +6180,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // truthiness does.
         size_t rightOffset;
         size_t rightWidth;
-        fullExpression(FullExpressionScope.Position.logicalOperand,
+        inFullExpression(FullExpressionScope.Position.logicalOperand,
             expression.e2, {
             rightOffset = compileCondition(expression.e2);
             rightWidth = conditionWidth(expression.e2);

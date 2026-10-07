@@ -6174,6 +6174,31 @@ static foreach (backend; Matrix!(
     }
 }
 
+// The message of a failed `assert` is a full expression: its temporaries die
+// before the assertion error is made, so a destructor that throws wins.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `log` cannot be read at compile time"),
+)) {
+    @("fullExpression.assertMessage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            string log;
+            struct X { string s; ~this() {
+                log ~= "x";
+                throw new Exception("dtor");
+            } }
+            X mkx() { return X("m"); }
+            void main() {
+                try { assert(false, mkx().s); }
+                catch (Throwable e) { log ~= "<"; log ~= e.msg; log ~= ">"; }
+                assert(log == "x<dtor>", log);
+            }
+        });
+    }
+}
+
 // The temporaries of a call whose argument throws die during unwinding, last constructed first.
 
 
