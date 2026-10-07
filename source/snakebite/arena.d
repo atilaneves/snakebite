@@ -136,10 +136,12 @@ private size_t bytesBefore(in void* pointer, in ubyte* end) nothrow @nogc {
 }
 
 
-// Every word of arena memory handed out so far, in address order. Only
-// the thread that holds the frontend lock calls this, so the arena does
-// not grow during the walk.
-public void walkArenaWords(scope void delegate(const(void*)* word) nothrow @nogc visit)
+// Every word of arena memory that can hold a pointer: all arena words
+// except the blocks that `recordPointerFreeBlock` named. Regions come in
+// the order they were made, not in address order. Only the thread that
+// holds the frontend lock calls this, so the arena does not grow during
+// the walk.
+debug public void walkArenaPointerWords(scope void delegate(const(void*)* word) nothrow @nogc visit)
     nothrow @nogc
 {
     import core.atomic: atomicLoad, MemoryOrder;
@@ -148,11 +150,37 @@ public void walkArenaWords(scope void delegate(const(void*)* word) nothrow @nogc
     if (list is null)
         return;
 
+    const skip = _pointerFree[0 .. _pointerFreeCount];
+    size_t next;
     foreach (i, region; list.regions[0 .. list.length]) {
         const end = i + 1 == list.length ? _top : region.base + region.used;
-        for (auto word = cast(const(void*)*) region.base;
-                cast(const(ubyte)*) word < end; ++word)
+        walkSpanPointerWords(region.base[0 .. end - region.base], skip, next, visit);
+    }
+}
+
+
+// The words of `span` that are not in `skip`. `skip` is sorted by address
+// within a span and holds the ranges of the spans in the order the spans
+// are walked; `next` is the first range not passed yet. No range crosses
+// the end of a span.
+debug public void walkSpanPointerWords(
+    in ubyte[] span,
+    in PointerFreeRange[] skip,
+    ref size_t next,
+    scope void delegate(const(void*)* word) nothrow @nogc visit)
+    nothrow @nogc
+{
+    const end = span.ptr + span.length;
+    auto word = cast(const(void*)*) span.ptr;
+    while (cast(const(ubyte)*) word < end) {
+        const skipsHere = next < skip.length
+            && skip[next].start >= cast(const(ubyte)*) word
+            && skip[next].start < end;
+        const stop = skipsHere ? skip[next].start : end;
+        for (; cast(const(ubyte)*) word < stop; ++word)
             visit(word);
+        if (skipsHere)
+            word = cast(const(void*)*) skip[next++].end;
     }
 }
 
@@ -271,6 +299,57 @@ private void growArraySlots() nothrow @nogc {
             grown[findArraySlot(grown, slot.start)] = slot;
     free(_arraySlots.ptr);
     _arraySlots = grown;
+}
+
+
+// Blocks that druntime allocated NO_SCAN: they hold no pointer, so a word
+// in one is data whatever its value. In C heap memory, which neither the GC
+// nor the arena report scans. Only the thread that holds the frontend lock
+// reads or changes it.
+debug public struct PointerFreeRange {
+    const(ubyte)* start;
+    const(ubyte)* end;
+}
+
+debug private __gshared PointerFreeRange* _pointerFree;
+debug private __gshared size_t _pointerFreeCount;
+debug private __gshared size_t _pointerFreeCapacity;
+
+
+// The `size` bytes at `start`, a block just handed out by `arenaAllocate`,
+// rounded up to `arenaAlignment`. A block that follows the one before it
+// extends that range, unless it starts a region.
+debug public void recordPointerFreeBlock(in void* start, in size_t size) nothrow @nogc {
+    import core.stdc.stdlib: realloc;
+
+    const first = cast(const(ubyte)*) start;
+    const end = first + size;
+    if (_pointerFreeCount != 0 && _pointerFree[_pointerFreeCount - 1].end is first
+            && !startsRegion(first)) {
+        _pointerFree[_pointerFreeCount - 1].end = end;
+        return;
+    }
+    if (_pointerFreeCount == _pointerFreeCapacity) {
+        const capacity = _pointerFreeCapacity == 0 ? 4096 : 2 * _pointerFreeCapacity;
+        auto grown = cast(PointerFreeRange*) realloc(
+            _pointerFree, capacity * PointerFreeRange.sizeof);
+        if (grown is null)
+            outOfMemory;
+        _pointerFree = grown;
+        _pointerFreeCapacity = capacity;
+    }
+    _pointerFree[_pointerFreeCount++] = PointerFreeRange(first, end);
+}
+
+
+debug private bool startsRegion(in ubyte* pointer) nothrow @nogc {
+    import core.atomic: atomicLoad, MemoryOrder;
+
+    auto list = cast(RegionList*) atomicLoad!(MemoryOrder.acq)(_regions);
+    foreach (region; list.regions[0 .. list.length])
+        if (region.base is pointer)
+            return true;
+    return false;
 }
 
 

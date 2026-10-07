@@ -58,7 +58,6 @@ unittest {
 
 // The GC never scans the arena, so a GC block that only the arena points
 // to would be freed while the AST still uses it.
-debug
 @("arenaHoldsNoGCPointers.largeImport")
 unittest {
     parseSnippet(q{
@@ -81,7 +80,6 @@ unittest {
 // initialization also uses) with the frontend's setup. That setup must not
 // leave a cache's storage in the arena: the host then stores GC data in
 // it, and no collection looks there.
-debug
 @("arenaHoldsNoGCPointers.hostLibraryCacheAfterInitialization")
 unittest {
     import std.regex: matchFirst, regex;
@@ -99,7 +97,6 @@ unittest {
 // identifier itself on the GC heap, so the planted word never lands in
 // the arena and the report stays empty; the report only ever names GC
 // pointers that the arena holds.
-debug
 @("arenaHoldsNoGCPointers.reportsAPointerIntoTheGCHeap")
 unittest {
     import dmd.identifier: Identifier;
@@ -126,6 +123,61 @@ unittest {
 }
 
 
+// A block that druntime allocates NO_SCAN while the frontend runs is arena
+// memory that cannot hold a pointer: a word in it that has the value of a
+// GC address is data, so the report does not read it. dmd's own line
+// tables are such blocks (`uint[]`). `--lowmem` puts the block on the GC
+// heap instead, so the report is empty there whatever the report skips,
+// and the test then checks nothing.
+@("arenaHoldsNoGCPointers.skipsMemoryThatHoldsNoPointers")
+unittest {
+    import snakebite.frontend.compiler: withCompilerLock;
+    import snakebite.gc: enterFrontend, leaveFrontend;
+
+    arenaReportLock.lock;
+    scope(exit) arenaReportLock.unlock;
+    withCompilerLock({
+        void* data;
+        {
+            enterFrontend;
+            scope(exit) leaveFrontend;
+            data = GC.malloc(64, GC.BlkAttr.NO_SCAN);
+        }
+        auto block = new ubyte[64];
+        auto word = cast(void**) data;
+        *word = block.ptr;
+
+        arenaReport.should == "";
+    });
+}
+
+
+// Regions are walked in the order they were made, and a later region can
+// be at a lower address. Each range to skip is in the region it is in.
+@("arenaWalk.skipsRangesInRegionsAtDescendingAddresses")
+unittest {
+    import snakebite.arena: PointerFreeRange, walkSpanPointerWords;
+
+    align(16) static ubyte[128] low;
+    align(16) static ubyte[128] high;
+    const(ubyte)[][2] spans = [high[], low[]];
+    const PointerFreeRange[2] skip = [
+        PointerFreeRange(&high[32], &high[64]),
+        PointerFreeRange(&low[16], &low[48]),
+    ];
+
+    size_t visited;
+    size_t next;
+    foreach (span; spans)
+        walkSpanPointerWords(span, skip[], next, (const(void*)* word) nothrow @nogc {
+            ++visited;
+        });
+
+    // 32 words in all, 8 of them in the ranges.
+    visited.should == 24;
+}
+
+
 // dmd's closure frames keep the address of the stack objects they
 // capture, and the arena never frees them. The report skips a word that
 // was a stack address when the frontend left. The GC heap covering a
@@ -133,7 +185,6 @@ unittest {
 // stack of the thread here is a GC block: the word does point into a live
 // GC block while the report is read, and the report skips it only because
 // of what the word was when the frontend left.
-debug
 @("arenaHoldsNoGCPointers.stackAddressesOfTheFrontendThread")
 unittest {
     import core.sys.posix.pthread: pthread_attr_init, pthread_attr_setstack,
