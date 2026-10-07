@@ -4,11 +4,11 @@ module ut.ffi.cpp_oracle;
 // What compiled D does with non-trivially-copyable values that cross into
 // the C++ test library (tests/fixtures/native/cpp_image.cpp). The types
 // below have the C++ library's own layout, but their copy constructors,
-// postblit and destructors are D code that count into this module, because
-// `bin/ut` does not link the C++ object: the library's own members are never
-// called from here, only its free functions and methods, through pointers.
-// The namespace keeps the D-defined members' symbols apart from the
-// library's.
+// postblit, destructors and class methods are D code, because `bin/ut` does
+// not link the C++ object. The library is called through pointers: its free
+// functions, its methods and the constructor of `Base`, which the D `Base`
+// runs on its own object. The namespace keeps the D-defined members'
+// symbols apart from the library's.
 //
 // A shape body is the same text a guest program runs. `nativeShape` mixes it
 // into a function here, where the names it uses (`make_non_pod`, ...) are
@@ -30,7 +30,6 @@ private int _copied;
 extern(C++, ut_oracle) {
     struct NonPod {
         int value;
-        this(int v) { value = v; }
         this(ref const(NonPod) other) { value = other.value; ++_copied; }
         ~this() { ++_destroyed; }
     }
@@ -56,6 +55,25 @@ extern(C++, ut_oracle) {
         NonPod make(int v) { return makeFn(&this, v); }
         int read(NonPod n) { return readFn(&this, n); }
     }
+
+    // The constructor runs the library's own, which writes the library's
+    // vtable into the object; the D object keeps its own.
+    class Base {
+        int tag_;
+        this(int tag) {
+            auto vtable = *cast(void**) cast(void*) this;
+            libraryBaseConstructor(cast(void*) this, tag);
+            *cast(void**) cast(void*) this = vtable;
+        }
+        final int tag_value() { return tag_; }
+        int first() { return tag_ * 10; }
+        int second() { return tag_ * 100; }
+    }
+
+    class Derived : Base {
+        this(int tag) { super(tag); }
+        override int first() { return tag_ * 10 + 1; }
+    }
 }
 
 extern(C++) {
@@ -74,6 +92,7 @@ extern(C++) {
     alias NonPodCallback = int function(NonPod);
     alias NonPodMakerCallback = NonPod function(int);
     alias CountFn = int function();
+    alias BaseConstructorFn = void function(void*, int);
     alias CallNonPodCallbackFn = int function(NonPodCallback, int);
     alias CallNonPodMakerCallbackFn = int function(NonPodMakerCallback, int);
 }
@@ -92,6 +111,7 @@ private CountFn libraryDestroyed;
 private CountFn libraryCopied;
 private MakerMakeFn makeFn;
 private MakerReadFn readFn;
+private BaseConstructorFn libraryBaseConstructor;
 
 // Callbacks the guest hands to the library. Mixed in here and into each
 // guest program, so both define them with the same text.
@@ -125,18 +145,19 @@ void bind(in DependencyImage image) {
     libraryCopied = symbol!CountFn(image, "_Z12copied_countv");
     makeFn = symbol!MakerMakeFn(image, "_ZN11NonPodMaker4makeEi");
     readFn = symbol!MakerReadFn(image, "_ZN11NonPodMaker4readE6NonPod");
+    libraryBaseConstructor = symbol!BaseConstructorFn(image, "_ZN4BaseC1Ei");
     call_non_pod_callback = symbol!CallNonPodCallbackFn(
         image, "_Z21call_non_pod_callbackPFi6NonPodEi");
     call_non_pod_maker_callback = symbol!CallNonPodMakerCallbackFn(
         image, "_Z27call_non_pod_maker_callbackPF6NonPodiEi");
 }
 
-Counts nativeShape(string body_)(int v) {
+Counts nativeShape(Shape)(int v) {
     const destroyedBefore = _destroyed + libraryDestroyed();
     const copiedBefore = _copied + libraryCopied();
     int r;
     {
-        mixin(body_);
+        mixin(Shape.body_);
     }
     return Counts(r, _destroyed + libraryDestroyed() - destroyedBefore,
         _copied + libraryCopied() - copiedBefore);
