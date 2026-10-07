@@ -1335,16 +1335,16 @@ static foreach (backend; Matrix!(
 // A dependency template with an `asm` body runs only from the image. When the
 // image cannot hold an instance, the load fails and names the instance and
 // the reason, instead of the run failing at the assembler.
-private string unplaceableMessage(in string root) {
+private string unplaceableMessage(in string name, in string root) {
     const sandbox = Sandbox();
-    sandbox.writeFile("deps/asm_dependency.d", q{
-        module asm_dependency;
+    // One frontend serves every test: module names stay apart.
+    sandbox.writeFile("deps/asm_" ~ name ~ ".d", "module asm_" ~ name ~ ";\n" ~ q{
         T identity(T)(T value) { asm { nop; } return value; }
         void touch(T)(T* value) { asm { nop; } }
         void callWith(alias f)() { asm { nop; } f(); }
     });
-    sandbox.writeFile("app/root_unplaceable.d",
-        "module root_unplaceable;\nimport asm_dependency;\n" ~ root);
+    sandbox.writeFile("app/root_" ~ name ~ ".d",
+        "module root_" ~ name ~ ";\nimport asm_" ~ name ~ ";\n" ~ root);
     const imports = [sandbox.inSandboxPath("deps")];
     auto project = prepareProject(sandbox.inSandboxPath("app"), imports, null, false,
         optimise: Optimise.no).project;
@@ -1358,30 +1358,30 @@ private string unplaceableMessage(in string root) {
 // The instance destroys its parameter: that is the destructor of the root.
 @("image.unplaceable.rootStructPassedWithDestructor")
 unittest {
-    const message = unplaceableMessage(q{
+    const message = unplaceableMessage("destructor", q{
         struct Guard { int a; ~this() {} }
         void run() { identity(Guard(1)); }
     });
-    "asm_dependency.identity!(root_unplaceable.Guard)".should.be in message;
+    "asm_destructor.identity!(root_destructor.Guard)".should.be in message;
     "uses code or state of the root package".should.be in message;
 }
 
 @("image.unplaceable.rootStructWithBitField")
 unittest {
-    const message = unplaceableMessage(q{
+    const message = unplaceableMessage("bitfield", q{
         struct Flags { int a : 3; int b : 5; }
         void run() { Flags flags; touch(&flags); }
     });
-    "asm_dependency.touch!(root_unplaceable.Flags)".should.be in message;
+    "asm_bitfield.touch!(root_bitfield.Flags)".should.be in message;
     "bit field".should.be in message;
 }
 
 @("image.unplaceable.rootFunctionAlias")
 unittest {
-    const message = unplaceableMessage(q{
+    const message = unplaceableMessage("alias", q{
         void callback() {}
         void run() { callWith!callback(); }
     });
-    "asm_dependency.callWith!".should.be in message;
+    "asm_alias.callWith!".should.be in message;
     "is root code, not a type".should.be in message;
 }
