@@ -8,7 +8,7 @@ import dmd.expression: DeclarationExp, Expression, StructLiteralExp;
 import snakebite.backends.temporary: TemporaryPlan;
 import snakebite.backends.temporarystack: TemporaryStack;
 import snakebite.backends.fullexpression:
-    FullExpressionKind, FullExpressionScope;
+    FullExpressionScope;
 import snakebite.framestack: FrameStack, defaultFrameCapacity;
 import snakebite.cstack: CStack;
 import snakebite.nativelayout: TypeFacts;
@@ -104,11 +104,11 @@ public struct TemporaryLifetime {
     }
 
     public void withExpression(
-        FullExpressionKind kind,
+        in FullExpressionScope.Position position,
         Expression root,
         scope Action action,
     ) {
-        _expressions.run(kind, cast(const(void)*) root,
+        _expressions.run(position, cast(const(void)*) root,
             { beginExpression; }, action, { endExpression; });
     }
 

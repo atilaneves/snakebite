@@ -8,11 +8,12 @@ import object: TypeInfo_Class;
 import snakebite.backends.argumentflow: Shape;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
+import snakebite.backends.logical: LogicalPlan;
 import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
 import snakebite.backends.switchplan:
     switchPlan, gotoCaseTarget, gotoDefaultTarget;
 import snakebite.backends.fullexpression:
-    FullExpressionKind, FullExpressionScope;
+    FullExpressionScope;
 import snakebite.backends.controlflow:
     ScopeFrame, ScopePaths, scopePathsOf;
 import snakebite.backends.exceptionplan:
@@ -2551,11 +2552,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     extern(D) protected override void withFullExpression(
-        in FullExpressionKind kind,
+        in FullExpressionScope.Position position,
         Expression root,
         scope void delegate() evaluate,
     ) {
-        _expressions.run(kind, cast(const(void)*) root,
+        _expressions.run(position, cast(const(void)*) root,
             { beginLifetime; }, evaluate, { endLifetime; });
     }
 
@@ -5272,8 +5273,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         widenBoolean;
     }
 
-    override void visit(LogicalExp expression) {
-        compileLogical(expression, _destination, _width);
+    protected override void visitLogical(
+        LogicalExp expression, in LogicalPlan plan,
+    ) {
+        compileLogical(expression, plan, _destination, _width);
         widenBoolean;
     }
 
@@ -6136,26 +6139,41 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // already true - and whichever operand actually decided the answer is
     // then reduced to a proper `bool` and copied out to `destOffset`.
     private void compileLogical(
-        LogicalExp expression, in size_t destOffset, in size_t width,
+        LogicalExp expression, in LogicalPlan plan,
+        in size_t destOffset, in size_t width,
     ) {
         const leftOffset = compileCondition(expression.e1);
         const leftWidth = conditionWidth(expression.e1);
 
         const branchIndex = _instructions.length;
-        auto shortCircuit = expression.op == EXP.andAnd
-            ? &opBranchFalse : &opBranchTrue;
+        auto shortCircuit = plan.andAnd ? &opBranchFalse : &opBranchTrue;
         emit(shortCircuit, leftOffset, 0, leftWidth);
 
-        if (destOffset == discardResult) {
-            compileEffect(expression.e2);
+        const needsValue = destOffset != discardResult && plan.hasValue;
+        if (plan.right == LogicalPlan.Right.effect
+                || destOffset == discardResult) {
+            fullExpression(FullExpressionScope.Position.logicalOperand,
+                expression.e2, { compileEffect(expression.e2); });
+            // The operand can end in a throw, but the branch skips it.
+            _finished = false;
             _instructions[branchIndex].source = _instructions.length;
+            if (needsValue) {
+                emit(&opCastToBool, leftOffset, 0, leftWidth);
+                if (destOffset != leftOffset)
+                    emit(&opCopy, destOffset, leftOffset, 1);
+            }
             return;
         }
 
         // The left side did not decide the answer: the right side's own
         // truthiness does.
-        const rightOffset = compileCondition(expression.e2);
-        const rightWidth = conditionWidth(expression.e2);
+        size_t rightOffset;
+        size_t rightWidth;
+        fullExpression(FullExpressionScope.Position.logicalOperand,
+            expression.e2, {
+            rightOffset = compileCondition(expression.e2);
+            rightWidth = conditionWidth(expression.e2);
+        });
         emit(&opCastToBool, rightOffset, 0, rightWidth);
         if (destOffset != rightOffset)
             emit(&opCopy, destOffset, rightOffset, 1);

@@ -348,6 +348,26 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// A `throw` expression has type `noreturn`, so as the right operand of `||`
+// used as a statement it is the whole effect of the statement.
+static foreach (backend; Matrix!()) {
+    @("throwAsRightOperandOfOr." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void pick(Throwable thrown, int a) {
+                int unused = 1;
+                a || throw thrown;
+            }
+
+            int main() {
+                try pick(new Exception("x"), 0); catch (Exception e) return 0;
+                return 1;
+            }
+        });
+    }
+}
+
 // The non-throwing arm can be first. The compiler must keep its return path
 // while the other arm ends in a throw.
 static foreach (backend; Matrix!()) {

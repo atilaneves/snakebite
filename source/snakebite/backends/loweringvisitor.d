@@ -5,16 +5,16 @@ private:
 
 import dmd.expression:
     ArrayLiteralExp, AssocArrayLiteralExp, CastExp, CatAssignExp, CatExp,
-    CmpExp, EqualExp, HaltExp,
+    CmpExp, EqualExp, HaltExp, LogicalExp,
     CatElemAssignExp, CatDcharAssignExp,
     ConstructExp, Expression, IdentityExp, LoweredAssignExp, NewExp, ThrowExp,
     TupleExp;
 import dmd.statement:
     ExpStatement, ReturnStatement, SwitchErrorStatement, ThrowStatement,
     WithStatement;
-import snakebite.backends.fullexpression:
-    FullExpressionKind, FullExpressionScope;
+import snakebite.backends.fullexpression: FullExpressionScope;
 import snakebite.backends.identity: IdentityPlan, identityPlan;
+import snakebite.backends.logical: LogicalPlan, logicalPlan;
 import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
 import snakebite.backends.aggregateinit: NewPlan, planNew;
 import dmd.visitor: Visitor;
@@ -59,7 +59,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     // `fullExpression` too. `withFullExpression` is the backend's hook and
     // nothing else calls it.
     extern(D) protected abstract void withFullExpression(
-        in FullExpressionKind kind,
+        in FullExpressionScope.Position position,
         Expression root,
         scope void delegate() evaluate,
     );
@@ -69,7 +69,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
         Expression root,
         scope void delegate() evaluate,
     ) {
-        withFullExpression(FullExpressionScope.kindOf(position), root, evaluate);
+        withFullExpression(position, root, evaluate);
     }
 
     final override void visit(ExpStatement statement) {
@@ -185,6 +185,17 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     final override void visit(CmpExp expression) {
         visitComparison(expression, comparisonPlan(expression));
     }
+
+    // The right operand of `&&` and `||` is a full expression
+    // (`FullExpressionScope.Position.logicalOperand`): the backend opens it
+    // around the operand, because only the backend knows where the branch
+    // that skips it goes.
+    final override void visit(LogicalExp expression) {
+        visitLogical(expression, logicalPlan(expression));
+    }
+
+    protected abstract void visitLogical(
+        LogicalExp expression, in LogicalPlan plan);
 
     protected abstract void visitComparison(
         CmpExp expression, in ComparisonPlan plan);
