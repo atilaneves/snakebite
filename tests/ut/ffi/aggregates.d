@@ -335,3 +335,97 @@ static foreach (type; smallTypes) {
         }
     }
 }
+
+
+private struct VoidBlob {
+    void[8] bytes;
+}
+
+
+public extern(C) VoidBlob snakebite_ut_aggregates_void_blob_echo(
+    VoidBlob value,
+) {
+    return value;
+}
+
+
+public extern(C) void[8] snakebite_ut_aggregates_void_array_echo(
+    void[8] value,
+) {
+    return value;
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call an external function without source"),
+)) {
+    @("voidArrayField.echoedByValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(backend, q{
+            struct VoidBlob {
+                void[8] bytes;
+            }
+            pragma(mangle, "snakebite_ut_aggregates_void_blob_echo")
+            extern(C) VoidBlob nativeEcho(VoidBlob);
+            int answer() {
+                VoidBlob value = void;
+                auto bytes = cast(ubyte*) value.bytes.ptr;
+                foreach (i; 0 .. 8)
+                    bytes[i] = cast(ubyte) i;
+                auto echoed = nativeEcho(value);
+                return (cast(ubyte*) echoed.bytes.ptr)[7];
+            }
+        }, "answer");
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call an external function without source"),
+)) {
+    @("voidStaticArray.echoedByValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(backend, q{
+            pragma(mangle, "snakebite_ut_aggregates_void_array_echo")
+            extern(C) void[8] nativeEcho(void[8]);
+            int answer() {
+                void[8] value = void;
+                auto bytes = cast(ubyte*) value.ptr;
+                foreach (i; 0 .. 8)
+                    bytes[i] = cast(ubyte) i;
+                auto echoed = nativeEcho(value);
+                return (cast(ubyte*) echoed.ptr)[7];
+            }
+        }, "answer");
+    }
+}
+
+
+public extern(C) real[1] snakebite_ut_aggregates_real_array_echo(
+    real[1] value,
+) {
+    return value;
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call an external function without source"),
+)) {
+    @("realStaticArray.echoedByValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(backend, q{
+            pragma(mangle, "snakebite_ut_aggregates_real_array_echo")
+            extern(C) real[1] nativeEcho(real[1]);
+            int answer() {
+                real[1] value = [7.0L];
+                return cast(int) nativeEcho(value)[0];
+            }
+        }, "answer");
+    }
+}
