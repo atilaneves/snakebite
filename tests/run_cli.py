@@ -9,6 +9,7 @@
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import stat
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import pytest
-from dubname import dub_name
+from dubname import delete_plain_dub_names, dub_name, forget_dub_names
 
 BACKENDS = ["interpreter", "bytecode", "ctfe"]
 
@@ -3857,7 +3858,6 @@ def image_shape_cases() -> list[tuple[str, str]]:
     "name, backend", image_shape_cases(),
     ids=[f"{name}-{backend}" for name, backend in image_shape_cases()],
 )
-@pytest.mark.usefixtures("private_dub_cache")
 def test_guest_runs_against_a_native_dependency(
     tmp_path: Path, name: str, backend: str,
 ) -> None:
@@ -4082,7 +4082,6 @@ def test_unresolved_dependency_symbol_fails_the_image_link(
 # A runner hook that a dependency installs replaces the default unit test
 # runner: the app's failing unittest never runs. CTFE cannot call native code.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
-@pytest.mark.usefixtures("private_dub_cache")
 def test_dependency_runner_replaces_the_default_test_runner(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -4134,7 +4133,6 @@ def test_dependency_runner_replaces_the_default_test_runner(
 # after the thread has started, just before the throwable escapes, so no time
 # decides the result.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
-@pytest.mark.usefixtures("private_dub_cache")
 def test_throwable_escaping_a_unittest_runner_ends_the_program_cleanly(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -4304,7 +4302,6 @@ def test_transitive_dub_dependencies_reach_the_image(
 # The `preGenerateCommands` of a recipe run at each start: a cached
 # description of the project does not skip them.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
-@pytest.mark.usefixtures("private_dub_cache")
 def test_generation_hook_runs_at_every_start(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -4330,7 +4327,6 @@ def test_generation_hook_runs_at_every_start(
 # The test runner that dub generates for a library names the modules of
 # the package: a module renamed between two starts is run under its new name.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
-@pytest.mark.usefixtures("private_dub_cache")
 def test_generated_test_runner_follows_a_module_rename(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -4925,7 +4921,6 @@ C_PROJECTS: dict[str, CProject] = {
     [(name, backend) for name, case in C_PROJECTS.items()
      for backend in case.backends],
 )
-@pytest.mark.usefixtures("private_dub_cache")
 def test_c_module_is_imported_by_d(
     tmp_path: Path, name: str, backend: str,
 ) -> None:
@@ -5003,7 +4998,6 @@ def test_recorded_dub_describe_is_what_dub_gives(
 # start of a project: what dub finds in the project is not taken from an
 # earlier start.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
-@pytest.mark.usefixtures("private_dub_cache")
 def test_project_changes_are_in_the_next_start(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -5046,7 +5040,6 @@ def test_project_changes_are_in_the_next_start(
 # A unittest configuration of a project can name its own main source file,
 # source and import directories.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
-@pytest.mark.usefixtures("private_dub_cache")
 def test_unittest_configuration_settings_are_loaded(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -5117,14 +5110,6 @@ def output(result: subprocess.CompletedProcess[str]) -> str:
     return result.stdout + result.stderr
 
 
-# dub keeps the build directories of a project under `DPATH`, and nothing
-# removes them. A test that builds dub projects keeps them in its own
-# temporary directory.
-@pytest.fixture
-def private_dub_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DPATH", str(tmp_path / "dpath"))
-
-
 def run_sb(
     *args: str,
     cwd: Path,
@@ -5153,5 +5138,26 @@ def sb_path() -> str:
 # The tests can run in parallel (see build/pytest-workers.sh) because the
 # state that they share, the `.snakebite` directory and the dub package store,
 # is keyed by project path and published with an atomic rename.
+def test_plain_dub_name_with_a_cache_record_fails_the_test(
+    tmp_path: Path,
+) -> None:
+    plain = f"plain-name-check-{secrets.token_hex(6)}"
+    safe = dub_name("safe-name-check")
+    cache = Path.home() / ".dub" / "cache"
+    for name in (plain, safe):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "dub.sdl").write_text(f'name "{name}"\n')
+        (cache / name / "~master").mkdir(parents=True)
+    try:
+        messages = delete_plain_dub_names(tmp_path)
+        assert [plain in m and "dub_name()" in m for m in messages] == [True]
+        assert f"{plain}/dub.sdl" in messages[0]
+        assert not (cache / plain).exists()
+        forget_dub_names()
+        assert not (cache / safe).exists()
+    finally:
+        shutil.rmtree(cache / plain, ignore_errors=True)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
