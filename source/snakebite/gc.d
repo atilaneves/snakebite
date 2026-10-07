@@ -271,7 +271,7 @@ debug private extern(C) void backtrace_symbols_fd(void** buffer, int size, int f
 // walk. The report is plain text, so it adds no pointers to the arena it
 // is about.
 debug public string arenaPointersIntoGC() {
-    import snakebite.arena: isArenaMemory, walkArenaWords;
+    import snakebite.arena: isArenaMemory, walkArenaPointerWords;
     import std.format: format;
 
     static struct Found {
@@ -282,7 +282,7 @@ debug public string arenaPointersIntoGC() {
 
     Found[16] shown;
     size_t count;
-    walkArenaWords((const(void*)* word) nothrow @nogc {
+    walkArenaPointerWords((const(void*)* word) nothrow @nogc {
         const value = *word;
         if (!plausiblePointer(value) || isArenaMemory(value))
             return;
@@ -393,7 +393,8 @@ private final class SnakebiteGC : GC {
     // without that byte `strlen` would run on into the next arena block.
     private BlkInfo arenaBlock(in size_t size, in uint bits) nothrow {
         import core.memory: CoreGC = GC;
-        import snakebite.arena: ArenaArray, arenaAlignment, recordArenaArray;
+        import snakebite.arena: ArenaArray, arenaAlignment, recordArenaArray,
+            recordPointerFreeBlock;
 
         const appendable = bits & CoreGC.BlkAttr.APPENDABLE;
         const reserved = appendable ? size + 1 : size;
@@ -402,6 +403,8 @@ private final class SnakebiteGC : GC {
             return BlkInfo.init;
         const rounded = (reserved + arenaAlignment - 1) & ~(arenaAlignment - 1);
         const capacity = appendable ? rounded - 1 : rounded;
+        if (bits & CoreGC.BlkAttr.NO_SCAN)
+            recordPointerFreeBlock(base, reserved);
         if (appendable)
             recordArenaArray(base, ArenaArray(capacity, size));
         return BlkInfo(base, capacity, appendable);

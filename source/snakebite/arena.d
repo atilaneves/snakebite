@@ -157,6 +157,39 @@ public void walkArenaWords(scope void delegate(const(void*)* word) nothrow @nogc
 }
 
 
+// Every word of arena memory that can hold a pointer, in address order:
+// `walkArenaWords` without the blocks that `recordPointerFreeBlock` named.
+// Only the thread that holds the frontend lock calls this.
+public void walkArenaPointerWords(scope void delegate(const(void*)* word) nothrow @nogc visit)
+    nothrow @nogc
+{
+    import core.atomic: atomicLoad, MemoryOrder;
+
+    auto list = cast(RegionList*) atomicLoad!(MemoryOrder.acq)(_regions);
+    if (list is null)
+        return;
+
+    // Blocks are recorded in the order the arena hands them out, which is
+    // the order of this walk.
+    size_t next;
+    foreach (i, region; list.regions[0 .. list.length]) {
+        const end = i + 1 == list.length ? _top : region.base + region.used;
+        for (auto word = cast(const(void*)*) region.base;
+                cast(const(ubyte)*) word < end; ++word) {
+            while (next < _pointerFreeCount
+                    && _pointerFree[next].end <= cast(const(ubyte)*) word)
+                ++next;
+            if (next < _pointerFreeCount
+                    && _pointerFree[next].start <= cast(const(ubyte)*) word) {
+                word = cast(const(void*)*) _pointerFree[next].end - 1;
+                continue;
+            }
+            visit(word);
+        }
+    }
+}
+
+
 // Every word handed out since `mark` (the start of the arena when it is
 // null), then moves `mark` to the end of what is handed out. Only the
 // thread that holds the frontend lock calls this.
@@ -245,6 +278,43 @@ public ArenaArray* arenaArray(in void* start) nothrow @nogc {
         return null;
     auto slot = &_arraySlots[findArraySlot(_arraySlots, start)];
     return slot.start is null ? null : &slot.array;
+}
+
+
+// Blocks that druntime allocated NO_SCAN: they hold no pointer, so a word
+// in one is data whatever its value. In C heap memory, like the arrays
+// above, and merged when a block follows the one before it. Only the
+// thread that holds the frontend lock reads or changes it.
+private struct PointerFreeRange {
+    const(ubyte)* start;
+    const(ubyte)* end;
+}
+
+private __gshared PointerFreeRange* _pointerFree;
+private __gshared size_t _pointerFreeCount;
+private __gshared size_t _pointerFreeCapacity;
+
+
+// `size` bytes at `start`, a block just handed out by `arenaAllocate`.
+public void recordPointerFreeBlock(in void* start, in size_t size) nothrow @nogc {
+    import core.stdc.stdlib: realloc;
+
+    const first = cast(const(ubyte)*) start;
+    const end = first + ((size + arenaAlignment - 1) & ~(arenaAlignment - 1));
+    if (_pointerFreeCount != 0 && _pointerFree[_pointerFreeCount - 1].end is first) {
+        _pointerFree[_pointerFreeCount - 1].end = end;
+        return;
+    }
+    if (_pointerFreeCount == _pointerFreeCapacity) {
+        const capacity = _pointerFreeCapacity == 0 ? 4096 : 2 * _pointerFreeCapacity;
+        auto grown = cast(PointerFreeRange*) realloc(
+            _pointerFree, capacity * PointerFreeRange.sizeof);
+        if (grown is null)
+            outOfMemory;
+        _pointerFree = grown;
+        _pointerFreeCapacity = capacity;
+    }
+    _pointerFree[_pointerFreeCount++] = PointerFreeRange(first, end);
 }
 
 
