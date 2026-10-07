@@ -3310,6 +3310,44 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
         },
         imports=True,
     ),
+    # `core.atomic` instances have `asm` bodies, which no backend runs: both
+    # root modules use the one instance that the image holds for the type
+    # that a third root module defines.
+    "root_typed_atomic_instance_used_by_two_root_modules": ImageShape(
+        {
+            "app/types.d": """
+                module types;
+                struct Pair { int a; int b; }
+                """,
+            "app/first.d": """
+                module first;
+                import core.atomic;
+                import types;
+                shared(Pair*) loadFirst(ref shared(Pair*) slot) {
+                    return atomicLoad(slot);
+                }
+                """,
+            "app/second.d": """
+                module second;
+                import core.atomic;
+                import types;
+                shared(Pair*) loadSecond(ref shared(Pair*) slot) {
+                    return atomicLoad(slot);
+                }
+                """,
+            "app/main.d": """
+                module main;
+                import first, second, types;
+                int main() {
+                    Pair pair;
+                    shared(Pair*) slot = cast(shared) &pair;
+                    return loadFirst(slot) is slot && loadSecond(slot) is slot
+                        ? 0 : 1;
+                }
+                """,
+        },
+        backends=("native", "interpreter", "bytecode"),
+    ),
     "thread_object_from_a_druntime_template": snippet_shape("""
         import core.thread: Thread;
         int answer() {

@@ -8,7 +8,9 @@ import snakebite.dependencyimage:
 import core.thread: Thread;
 import snakebite.execution: prepareProject;
 import snakebite.dependencyimage: Optimise;
+import snakebite.backends: backendIdentity;
 import snakebite.backends.backend: Program;
+import snakebite.execution: executeBackend;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import snakebite.frontend.imagesource: imageSource;
@@ -1086,3 +1088,300 @@ static foreach (backend; Matrix!(
     }
 }
 
+
+
+// The instances of `core.atomic` above have `asm` bodies and root-defined
+// types among their template arguments. The tests below vary what the root
+// type is and how the instance is reached: each must run on the instance that
+// the image holds.
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicOp.rootEnum." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfOnImage!(backend, q{
+            import core.atomic;
+            enum Level : int { low = 1, high = 2, both = 3 }
+
+            void main() {
+                shared Level level = Level.low;
+                atomicOp!"|="(level, Level.high);
+                assert(atomicLoad(level) == Level.both);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicFetchAdd.rootEnum." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfOnImage!(backend, q{
+            import core.atomic;
+            enum Level : int { low = 1, high = 5 }
+
+            void main() {
+                shared Level level = Level.low;
+                const before = atomicFetchAdd(level, 4);
+                assert(before == Level.low);
+                assert(atomicLoad(level) == Level.high);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicOp.rootStructWrappingInt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfOnImage!(backend, q{
+            import core.atomic;
+            struct Counter {
+                int value;
+                void opOpAssign(string op: "+")(int amount) shared { value += amount; }
+                void opOpAssign(string op: "+")(int amount) { value += amount; }
+            }
+
+            void main() {
+                shared Counter counter = Counter(1);
+                atomicOp!"+="(counter, 4);
+                assert(atomicLoad(counter).value == 5);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.cas.rootStruct16Bytes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfOnImage!(backend, q{
+            import core.atomic;
+            align(16) struct Wide { long low; long high; }
+
+            void main() {
+                shared Wide value = Wide(1, 2);
+                assert(cas(&value, Wide(1, 2), Wide(3, 4)));
+                assert(!cas(&value, Wide(1, 2), Wide(5, 6)));
+                const seen = atomicLoad(value);
+                assert(seen.low == 3 && seen.high == 4);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicLoad.sharedClassWithRootStructField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfOnImage!(backend, q{
+            import core.atomic;
+            struct Pair { int a; int b; }
+            shared class Holder { Pair pair; shared(Holder) next; }
+
+            void main() {
+                auto first = new shared Holder;
+                auto second = new shared Holder;
+                first.next = second;
+                shared(Holder) slot = first;
+                assert(atomicLoad(slot) is first);
+                assert(atomicLoad(first.next) is second);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicLoad.rootTemplateInstantiation." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfOnImage!(backend, q{
+            import core.atomic;
+            struct Pair { int a; int b; }
+
+            T loaded(T)(ref shared T slot) { return atomicLoad(slot); }
+
+            struct Box(T) {
+                shared(T*) pointer;
+                shared(T*) get() { return atomicLoad(pointer); }
+            }
+
+            void main() {
+                Pair pair = Pair(1, 2);
+                shared(Pair*) slot = cast(shared) &pair;
+                assert(loaded(slot) is cast(shared) &pair);
+                Box!Pair box;
+                box.pointer = slot;
+                assert(box.get is slot);
+                shared(Box!Pair*) boxed = cast(shared) &box;
+                assert(atomicLoad(boxed) is cast(shared) &box);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicLoad.rootStructInRootStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfOnImage!(backend, q{
+            import core.atomic;
+            struct Inner { int a; }
+            struct Outer { Inner inner; int tail; }
+
+            void main() {
+                Outer outer;
+                shared(Outer*) slot = cast(shared) &outer;
+                assert(atomicLoad(slot) is cast(shared) &outer);
+                shared Outer value;
+                atomicStore(value, Outer(Inner(3), 4));
+                const seen = atomicLoad(value);
+                assert(seen.inner.a == 3 && seen.tail == 4);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicLoad.rootStructNestedInFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfOnImage!(backend, q{
+            import core.atomic;
+
+            void main() {
+                struct Local { int a; int b; }
+                Local local = Local(1, 2);
+                shared(Local*) slot = cast(shared) &local;
+                assert(atomicLoad(slot) is cast(shared) &local);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicLoad.guestThread." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfOnImage!(backend, q{
+            import core.atomic;
+            import core.thread: Thread;
+            struct Pair { int a; int b; }
+
+            void main() {
+                Pair pair = Pair(1, 2);
+                shared(Pair*) slot = cast(shared) &pair;
+                shared(Pair*) seen;
+                auto thread = new Thread({ atomicStore(seen, atomicLoad(slot)); });
+                thread.start;
+                thread.join;
+                assert(atomicLoad(seen) is cast(shared) &pair);
+            }
+        });
+    }
+}
+
+
+// A pointer to a root struct needs no more of the struct than its size, so a
+// destructor does not matter to the instance.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicLoad.rootStructWithDestructorPtr." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfOnImage!(backend, q{
+            import core.atomic;
+            struct Guard { int a; ~this() pure nothrow @nogc {} }
+
+            void main() {
+                Guard guard;
+                shared(Guard*) slot = cast(shared) &guard;
+                assert(atomicLoad(slot) is cast(shared) &guard);
+            }
+        });
+    }
+}
+
+
+// A dependency template with an `asm` body runs only from the image. When the
+// image cannot hold an instance, the load fails and names the instance and
+// the reason, instead of the run failing at the assembler.
+private string unplaceableMessage(in string root) {
+    const sandbox = Sandbox();
+    sandbox.writeFile("deps/asm_dependency.d", q{
+        module asm_dependency;
+        T identity(T)(T value) { asm { nop; } return value; }
+        void touch(T)(T* value) { asm { nop; } }
+        void callWith(alias f)() { asm { nop; } f(); }
+    });
+    sandbox.writeFile("app/root_unplaceable.d",
+        "module root_unplaceable;\nimport asm_dependency;\n" ~ root);
+    const imports = [sandbox.inSandboxPath("deps")];
+    auto project = prepareProject(sandbox.inSandboxPath("app"), imports, null, false,
+        optimise: Optimise.no).project;
+    try
+        imageSource(project.program);
+    catch (Exception exception)
+        return exception.msg;
+    return "";
+}
+
+// The instance destroys its parameter: that is the destructor of the root.
+@("image.unplaceable.rootStructPassedWithDestructor")
+unittest {
+    const message = unplaceableMessage(q{
+        struct Guard { int a; ~this() {} }
+        void run() { identity(Guard(1)); }
+    });
+    "asm_dependency.identity!(root_unplaceable.Guard)".should.be in message;
+    "uses code or state of the root package".should.be in message;
+}
+
+@("image.unplaceable.rootStructWithBitField")
+unittest {
+    const message = unplaceableMessage(q{
+        struct Flags { int a : 3; int b : 5; }
+        void run() { Flags flags; touch(&flags); }
+    });
+    "asm_dependency.touch!(root_unplaceable.Flags)".should.be in message;
+    "bit field".should.be in message;
+}
+
+@("image.unplaceable.rootFunctionAlias")
+unittest {
+    const message = unplaceableMessage(q{
+        void callback() {}
+        void run() { callWith!callback(); }
+    });
+    "asm_dependency.callWith!".should.be in message;
+    "is root code, not a type".should.be in message;
+}

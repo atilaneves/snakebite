@@ -305,8 +305,8 @@ private extern(C++) class Collector
         import dmd.declaration: VarDeclaration;
         import dmd.denum: EnumDeclaration;
         import dmd.dstruct: StructDeclaration;
-        import dmd.dsymbolsem: isPOD;
-        import dmd.typesem: size;
+        import dmd.typesem: size, isUnsigned;
+        import dmd.expressionsem: toInteger;
         import dmd.mtype: Type;
         import std.algorithm: canFind;
 
@@ -354,6 +354,14 @@ private extern(C++) class Collector
             return spell(qualified(type));
         }
 
+        string qualifiers(in ulong storage) {
+            import dmd.astenums: STC;
+
+            return text(storage & STC.shared_ ? "shared " : "",
+                storage & STC.immutable_ ? "immutable " : "",
+                storage & STC.const_ ? "const " : "");
+        }
+
         string alignment(in typeof(VarDeclaration.init.alignment) value) {
             return !value.isDefault && !value.isPack ? text("align(", value.get, ") ") : "";
         }
@@ -384,14 +392,13 @@ private extern(C++) class Collector
         }
 
         if (auto struct_ = symbol.isStructDeclaration) {
-            if (!isPOD(struct_))
-                return fail("it has a postblit, copy constructor, or destructor, so it is passed by reference");
             if (struct_.isNested)
                 return fail("it has a context pointer");
             fields(struct_);
             if (reason.length)
                 return fail(reason);
-            declaration = text(alignment(struct_.alignment), struct_.isUnionDeclaration ? "union " : "struct ",
+            declaration = text(alignment(struct_.alignment), qualifiers(cast(ulong) struct_.storage_class),
+                struct_.isUnionDeclaration ? "union " : "struct ",
                 name, " {\n", declaration, "}\n");
             checks = text(name, ".sizeof == ", struct_.structsize, " && ", name, ".alignof == ",
                 struct_.alignsize, checks);
@@ -425,7 +432,7 @@ private extern(C++) class Collector
             fields(class_);
             if (reason.length)
                 return fail(reason);
-            declaration = text("abstract class ", name, bases, " {\n", declaration, "}\n");
+            declaration = text(qualifiers(cast(ulong) class_.storage_class), "abstract class ", name, bases, " {\n", declaration, "}\n");
             checks = text("__traits(classInstanceSize, ", name, ") == ", class_.structsize, checks);
         } else if (auto enum_ = symbol.isEnumDeclaration) {
             const base = typeSpelling(enum_.memtype, reason);
@@ -436,8 +443,13 @@ private extern(C++) class Collector
                 auto enumMember = member.isEnumMember;
                 if (enumMember is null)
                     return fail("it has a member that is not an enumerator");
-                declaration ~= text("    ", enumMember.ident.toString, " = ",
-                    enumMember.value.toChars.fromStringz, ",\n");
+                // `toChars` of a typed enum value is a cast to the enum itself.
+                const value = enumMember.value.isIntegerExp
+                    ? (isUnsigned(enum_.memtype)
+                        ? text(enumMember.value.toInteger, "UL")
+                        : text(cast(long) enumMember.value.toInteger, "L"))
+                    : text(enumMember.value.toChars.fromStringz);
+                declaration ~= text("    ", enumMember.ident.toString, " = ", value, ",\n");
             }
             declaration ~= "}\n";
             checks = text(name, ".sizeof == ", size(enum_.memtype));
@@ -663,7 +675,7 @@ private extern(C++) class Collector
                                 else
                                     _blockers[function_] ~= text("template argument `",
                                         symbol.toPrettyChars.fromStringz,
-                                        "` is not a type");
+                                        "` is root code, not a type");
                             } else if (module_ !in _modules) {
                                 _needsRoot[function_] = true;
                                 _foreign[function_] = true;
