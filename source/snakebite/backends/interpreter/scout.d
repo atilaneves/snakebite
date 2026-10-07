@@ -15,9 +15,11 @@ import dmd.mtype: Type;
 import dmd.typesem: nextOf, toBasetype;
 import dmd.statement:
     ExpStatement, GotoCaseStatement, GotoDefaultStatement, GotoStatement,
-    Statement, SwitchStatement, TryCatchStatement, TryFinallyStatement;
+    Statement, TryCatchStatement, TryFinallyStatement;
 import dmd.visitor: SemanticTimeTransitiveVisitor;
+import snakebite.backends.controlflow: ScopePaths;
 import snakebite.backends.loweringvisitor: LoweredExpressionTypes;
+import snakebite.backends.switchplan: gotoCaseTarget, gotoDefaultTarget;
 import snakebite.frontend.dmd.functions: unresolvedCalleeOf;
 import std.meta: staticIndexOf;
 
@@ -75,8 +77,7 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
     alias visit = SemanticTimeTransitiveVisitor.visit;
 
     private Preparation _preparation;
-    private TryFinallyStatement[] _finallies;
-    private SwitchStatement[] _switches;
+    package ScopePaths* scopePaths;
 
     package extern(D) this(Preparation preparation) {
         _preparation = preparation;
@@ -278,38 +279,32 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
     }
 
     override void visit(TryFinallyStatement statement) {
-        _finallies ~= statement;
         super.visit(statement);
-        _finallies.length -= 1;
         _preparation.tryFinally(statement);
     }
 
-    override void visit(SwitchStatement statement) {
-        _switches ~= statement;
-        super.visit(statement);
-        _switches.length -= 1;
-    }
-
     // Whether a `finally` body runs when a `goto` leaves it depends on the
-    // scope that the jump goes to, so each `try` that encloses the jump is
-    // asked about that scope.
+    // statement that the jump lands on, so each `try` that encloses the jump
+    // is asked about that statement.
     override void visit(GotoStatement statement) {
         if (statement.label !is null && statement.label.statement !is null)
-            gotoTo(statement.label.statement.tryBody);
+            gotoTo(statement, statement.label.statement);
     }
 
     override void visit(GotoCaseStatement statement) {
-        if (_switches.length != 0)
-            gotoTo(_switches[$ - 1].tryBody);
+        if (auto target = gotoCaseTarget(statement))
+            gotoTo(statement, target);
     }
 
     override void visit(GotoDefaultStatement statement) {
-        if (statement.sw !is null)
-            gotoTo(statement.sw.tryBody);
+        if (auto target = gotoDefaultTarget(statement))
+            gotoTo(statement, target);
     }
 
-    private extern(D) void gotoTo(Statement destination) {
-        foreach (enclosing; _finallies)
-            _preparation.gotoOutOf(enclosing, destination);
+    private extern(D) void gotoTo(Statement jump, Statement destination) {
+        foreach (frame; scopePaths.enclosing(jump))
+            if (frame.cleanup)
+                _preparation.gotoOutOf(
+                    cast(TryFinallyStatement) frame.owner, destination);
     }
 }
