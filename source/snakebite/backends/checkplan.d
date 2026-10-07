@@ -28,6 +28,34 @@ public FailurePlan nullDerefPlanOf(in Checks checks) @safe pure nothrow @nogc {
     return planFor(checks.nullDeref, checks);
 }
 
+// The places where a null operand can be met, and whether `-check=nullderef`
+// tests it. dmd's glue layer emits `_d_nullpointerp` for a dereference, for
+// the vtable read of a virtual call and for the value of a function pointer
+// or delegate that is called. It emits nothing for a `throw` or for the base
+// of a pointer index: there the program does what compiled D does. A
+// `throw` of null faults in druntime, and `&p[i]` is pointer arithmetic.
+public enum NullOperand {
+    dereferenced,
+    vtableReceiver,
+    callee,
+    thrown,
+    indexed,
+}
+
+public FailurePlan nullCheckPlanOf(
+    in Checks checks, in NullOperand operand,
+) @safe pure nothrow @nogc {
+    final switch (operand) with (NullOperand) {
+        case dereferenced:
+        case vtableReceiver:
+        case callee:
+            return nullDerefPlanOf(checks);
+        case thrown:
+        case indexed:
+            return FailurePlan(FailurePlan.Kind.ignore);
+    }
+}
+
 // What `-checkaction=C` passes to the C runtime for a null dereference.
 public enum nullDerefCMessage = "null pointer dereference";
 

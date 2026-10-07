@@ -198,7 +198,8 @@ private final class GuestException: Exception {
 import snakebite.nativelayout: bitfieldAccess;
 import snakebite.nativevalue: BitfieldAccess;
 import snakebite.backends.checkplan:
-    BoundsCheck, FailurePlan, hookOf, isUnanalysed, readsVtable;
+    BoundsCheck, FailurePlan, NullOperand, hookOf, isUnanalysed,
+    readsVtable;
 import snakebite.backends.calls: ValueCall;
 import snakebite.backends.haltprocess: isHalt;
 import snakebite.backends.exceptions: CAssertCall;
@@ -1473,15 +1474,15 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     static if (nullChecks) {
         private void checkNotNull(in void* pointer, in Loc loc) {
             if (pointer is null)
-                failNullDeref(loc);
+                failNullDeref(loc, NullOperand.dereferenced);
         }
 
-        private void failNullDeref(in Loc loc) {
+        private void failNullDeref(in Loc loc, in NullOperand operand) {
             import snakebite.backends.checkplan:
-                nullDerefCMessage, nullDerefPlanOf;
+                nullCheckPlanOf, nullDerefCMessage;
 
             failWithHook(
-                nullDerefPlanOf(_program.checks), nullDerefCMessage,
+                nullCheckPlanOf(_program.checks, operand), nullDerefCMessage,
                 DruntimeHook.nullPointer, loc, []);
         }
     }
@@ -3662,13 +3663,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             const stride =
                 evaluator.factsOf(expression.e1.type.toBasetype.nextOf).size;
             const value = loadIntegral(index, size_t.sizeof, false);
-            auto elements = cast(ubyte*) pointer;
-            if (elements is null)
-                throw new SnakebiteException(
-                    text("interpreter cannot index through a null pointer in `",
-                        expression.toString, "` at ", value),
-                );
-            return elements + value * stride;
+            return cast(ubyte*) pointer + value * stride;
         }
 
         public void* storageField(DotVarExp expression) {
@@ -5389,12 +5384,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto guest = cast(Throwable) cast(void*) loadIntegral(
             value.ptr, facts.size, false,
         );
-        if (guest is null)
-            throw new SnakebiteException(
-                text("interpreter cannot throw `", operand.toString,
-                    "`: it is null"),
-            );
-
         return cast(size_t) cast(void*) guest;
     }
 
@@ -5402,6 +5391,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (_controlFlow.seeking)
             return;
 
+        // A null `thrown` faults in the constructor, which reads its message:
+        // compiled D faults in druntime when it reads the object.
         throw GuestException.make(cast(Throwable) cast(void*) thrown);
     }
 
@@ -6304,7 +6295,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto callee = resolved is null
             ? calleeOf(expression)
             : Callee(resolved, null, false);
-        if (callee.address !is null) {
+        // A function pointer or delegate that is null has neither: the call
+        // goes to address zero, as in compiled D.
+        if (callee.address !is null || callee.function_ is null) {
             const target = _plans.guestTarget(callee.address);
             if (target.word is null)
                 return _callIndirect(expression, callee.type,
@@ -6329,21 +6322,16 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             auto dot = expression.e1.isDotVarExp;
             auto receiver = dot is null ? expression.e1 : dot.e1;
             classReceiver = classReferenceOf(receiver);
-            if (classReceiver is null) {
+            if (classReceiver is null && expression.readsVtable(function_)) {
+                // The vtable read is where the null receiver is met, after
+                // the arguments.
+                const layout = layoutOf(function_);
+                auto frame = bindFrame(expression, function_, layout);
+                bindArguments(function_, expression.arguments,
+                    expression.loc, frame.base, layout);
                 static if (nullChecks)
-                    if (expression.readsVtable(function_)) {
-                        // The check is at the vtable read, after the
-                        // arguments.
-                        const layout = layoutOf(function_);
-                        auto frame = bindFrame(expression, function_, layout);
-                        bindArguments(function_, expression.arguments,
-                            expression.loc, frame.base, layout);
-                        failNullDeref(expression.loc);
-                    }
-                throw new SnakebiteException(
-                    text("interpreter cannot call `", expression.toString,
-                        "`: its class receiver is null"),
-                );
+                    failNullDeref(expression.loc, NullOperand.vtableReceiver);
+                faultOnNullReceiver(classReceiver);
             }
 
             // `super.f()` is statically bound. Every other virtual class
@@ -6493,6 +6481,15 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         return result;
     }
 
+    // The vtable read of a receiver that is null, which is the fault that
+    // compiled D has. The load is volatile so that it is not removed.
+    private noreturn faultOnNullReceiver(void* receiver) {
+        import core.volatile: volatileLoad;
+
+        volatileLoad(cast(size_t*) receiver);
+        assert(0, "a null receiver faults at the vtable read");
+    }
+
     private void* _virtualAddress(
         FuncDeclaration method, void* receiver,
     ) {
@@ -6599,16 +6596,13 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                     ~ "`PtrExp`");
 
             auto function_ = cast(FuncDeclaration) asPointer(deref.e1);
+            auto type = deref.type.isTypeFunction;
             if (function_ is null) {
                 static if (nullChecks)
-                    failNullDeref(expression.loc);
-                throw new SnakebiteException(
-                    text("interpreter cannot call `", expression.toString,
-                        "`: the function pointer is null"),
-                );
+                    failNullDeref(expression.loc, NullOperand.callee);
+                return Callee(null, null, false, null, type);
             }
 
-            auto type = deref.type.isTypeFunction;
             if (auto declaration =
                     cast(void*) function_ in _shared.callableDeclarations)
                 return Callee(*declaration, null, false, null, type);
@@ -6630,16 +6624,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         auto function_ = cast(FuncDeclaration) cast(void*) loadIntegral(
             value.ptr + delegateFunctionOffset, size_t.sizeof, false);
+        auto type = callee.type.nextOf.isTypeFunction;
         if (function_ is null) {
             static if (nullChecks)
-                failNullDeref(expression.loc);
-            throw new SnakebiteException(
-                text("interpreter cannot call `", expression.toString,
-                    "`: the delegate is null"),
-            );
+                failNullDeref(expression.loc, NullOperand.callee);
+            return Callee(null, cast(void*) context, true, null, type);
         }
-
-        auto type = callee.type.nextOf.isTypeFunction;
         if (auto declaration =
                 cast(void*) function_ in _shared.callableDeclarations)
             return Callee(*declaration, cast(void*) context, true, null, type);
