@@ -5383,6 +5383,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto guest = cast(Throwable) cast(void*) loadIntegral(
             value.ptr, facts.size, false,
         );
+        // The fault is here and not at the transfer: only the full expression
+        // of the operand has a guest line.
+        if (guest is null)
+            faultOnNullObject(cast(void*) guest);
+
         return cast(size_t) cast(void*) guest;
     }
 
@@ -5390,8 +5395,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (_controlFlow.seeking)
             return;
 
-        // A null `thrown` faults in the constructor, which reads its message:
-        // compiled D faults in druntime when it reads the object.
         throw GuestException.make(cast(Throwable) cast(void*) thrown);
     }
 
@@ -6330,7 +6333,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                     expression.loc, frame.base, layout);
                 static if (nullChecks)
                     failNullDeref(expression.loc);
-                faultOnNullReceiver(classReceiver);
+                faultOnNullObject(classReceiver);
             }
 
             // `super.f()` is statically bound. Every other virtual class
@@ -6480,13 +6483,14 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         return result;
     }
 
-    // The vtable read of a receiver that is null, which is the fault that
-    // compiled D has. The load is volatile so that it is not removed.
-    private noreturn faultOnNullReceiver(in void* receiver) {
+    // The read of the header of an object that is null, which is the fault
+    // that compiled D has at a virtual call and in druntime at a `throw`. The
+    // load is volatile so that it is not removed.
+    private noreturn faultOnNullObject(in void* object) {
         import core.volatile: volatileLoad;
 
-        volatileLoad(cast(size_t*) receiver);
-        assert(0, "a null receiver faults at the vtable read");
+        volatileLoad(cast(size_t*) object);
+        assert(0, "a null object faults at the header read");
     }
 
     private void* _virtualAddress(
