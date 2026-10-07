@@ -17,7 +17,7 @@ import snakebite.backends.controlflow:
     ScopeFrame, ScopePaths, scopePathsOf;
 import snakebite.backends.exceptionplan:
     UnwindPlan, catchPlanOf, unwindPlanOf;
-import snakebite.backends.checkplan: BoundsCheck, NullOperand, hookOf;
+import snakebite.backends.checkplan: BoundsCheck, hookOf;
 import snakebite.backends.druntimehooks: DruntimeHook, planOf;
 import snakebite.backends.sliceplan: planSlice;
 import snakebite.backends.exceptions: AssertFailure, CAssertCall;
@@ -3144,8 +3144,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (aggregateType.ty == Tclass || aggregateType.ty == Tpointer) {
             addressOffset = reserveTemp(pointerFacts);
             evalInto(expression.e1, addressOffset, size_t.sizeof);
-            compileNullCheck(
-                addressOffset, NullOperand.dereferenced, expression.e1.loc);
+            compileNullCheck(addressOffset, expression.e1.loc);
         } else {
             assert(aggregateType.isTypeStruct !is null,
                 "a struct field has a struct or class receiver");
@@ -4194,8 +4193,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 emit(&opCopy, context, address, size_t.sizeof);
             } else {
                 evalInto(target.receiver, context, size_t.sizeof);
-                compileNullCheck(
-                    context, NullOperand.dereferenced, expression.loc);
+                compileNullCheck(context, expression.loc);
             }
         } else if (target.needsContext) {
             const contextOffset = contextAddressOf(target.contextOwner);
@@ -4363,8 +4361,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const facts = TypeFacts.of(field.type);
             const objectOffset = reserveTemp(pointerFacts);
             evalInto(expression.e1, objectOffset, size_t.sizeof);
-            compileNullCheck(
-                objectOffset, NullOperand.dereferenced, expression.e1.loc);
+            compileNullCheck(objectOffset, expression.e1.loc);
             const fieldOffset = reserveTemp(pointerFacts);
             emit(&opConstant, fieldOffset,
                 addConstant(cast(long) field.offset), size_t.sizeof);
@@ -6495,8 +6492,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             calleeType, expression.arguments, calleeLayout, args,
             calleeSlotOffset, isVoidCallee ? 0 : returnFacts.size,
             /* hasContext */ true);
-        compileNullCheck(
-            objectOffset, NullOperand.vtableReceiver, expression.loc);
+        compileNullCheck(objectOffset, expression.loc);
         compileClassVtableSlot(
             expression, objectOffset, callee, calleeSlotOffset);
         const siteIndex = _callSites.length;
@@ -7176,7 +7172,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             evalInto(expression.e1, delegateOffset, delegateValueSize);
             contextOffset = delegateOffset + delegateContextOffset;
             calleeOffset = delegateOffset + delegateFunctionOffset;
-            compileNullCheck(calleeOffset, NullOperand.callee, expression.loc);
+            compileNullCheck(calleeOffset, expression.loc);
         } else {
             functionType = deref is null ? null : deref.type.isTypeFunction;
             if (functionType is null)
@@ -7185,7 +7181,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             calleeOffset = reserveTemp(pointerFacts);
             evalInto(deref.e1, calleeOffset, size_t.sizeof);
-            compileNullCheck(calleeOffset, NullOperand.callee, expression.loc);
+            compileNullCheck(calleeOffset, expression.loc);
         }
 
         auto valueCall = ValueCall.of(functionType, isDelegateCall);
@@ -7333,15 +7329,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `-check=nullderef`: dmd's glue layer branches around druntime's
     // `_d_nullpointerp` the same way, on the pointer itself, which is
     // nonzero when it is not null. Without the flag nothing is emitted.
-    private void compileNullCheck(
-        in size_t pointerOffset, in NullOperand operand, in Loc loc,
-    ) {
+    private void compileNullCheck(in size_t pointerOffset, in Loc loc) {
         import snakebite.backends.checkplan:
-            FailurePlan, nullCheckPlanOf, nullDerefCMessage;
+            FailurePlan, nullDerefCMessage, nullDerefPlanOf;
         import snakebite.backends.exceptions: cAssertCallOf;
 
-        const plan = nullCheckPlanOf(_bytecode.checks, operand);
-        final switch (plan.kind) with (FailurePlan.Kind) {
+        final switch (nullDerefPlanOf(_bytecode.checks).kind) with (FailurePlan.Kind) {
             case ignore:
                 break;
             case halt:
@@ -7437,8 +7430,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         public size_t storagePointer(PtrExp expression) {
             const result = compiler.reserveTemp(compiler.pointerFacts);
             compiler.evalInto(expression.e1, result, size_t.sizeof);
-            compiler.compileNullCheck(
-                result, NullOperand.dereferenced, expression.loc);
+            compiler.compileNullCheck(result, expression.loc);
             return result;
         }
 

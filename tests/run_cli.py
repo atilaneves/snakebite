@@ -1699,6 +1699,14 @@ FAULTS = [
      "}\n"
      "int main() { Throwable thrown; raise(thrown); return 0; }\n",
      -signal.SIGSEGV, "fatal: null pointer dereference", "main.raise"),
+    ("virtual call through a null class reference",
+     "module main; class C { int value() { return 1; } }\n"
+     "int call(C receiver) {\n"
+     "    int unused = 1;\n"
+     "    return receiver.value();\n"
+     "}\n"
+     "int main() { C receiver; return call(receiver); }\n",
+     -signal.SIGSEGV, "fatal: null pointer dereference", "main.call"),
 ]
 
 
@@ -1720,6 +1728,25 @@ def test_guest_fault_ends_the_process_with_the_signal(
     assert result.stderr == (
         position if backend == "interpreter" else message
     ) + "\n", output(result)
+
+
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_virtual_call_on_null_receiver_evaluates_arguments_first(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        "module main;\n"
+        "import core.stdc.stdio;\n"
+        "class C { int value(int a) { return a; } }\n"
+        "int side() { fprintf(stderr, \"side\\n\"); return 1; }\n"
+        "int main() { C receiver; return receiver.value(side()); }\n",
+    )
+
+    result = run_sb(f"--backend={backend}", str(tmp_path / "app"), cwd=tmp_path)
+
+    assert result.returncode == -signal.SIGSEGV, output(result)
+    assert result.stderr.startswith("side\n"), output(result)
 
 
 def write_unlisted_c_project(app: Path) -> None:

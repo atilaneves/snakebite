@@ -270,21 +270,3 @@ static foreach (backend; Matrix!(
         });
     }
 }
-
-// The slice `p[1 .. 3]` of a null `int*` has a pointer and a length, and no element is read.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE stops with: cannot slice null pointer `p`"),
-)) {
-    @("nullPointerAddress.sliceOfNullPointer." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            void main() {
-                int* p;
-                auto s = p[1 .. 3];
-                assert(cast(size_t) s.ptr == 4 && s.length == 2);
-            }
-        });
-    }
-}

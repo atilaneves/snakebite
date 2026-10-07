@@ -198,8 +198,7 @@ private final class GuestException: Exception {
 import snakebite.nativelayout: bitfieldAccess;
 import snakebite.nativevalue: BitfieldAccess;
 import snakebite.backends.checkplan:
-    BoundsCheck, FailurePlan, NullOperand, hookOf, isUnanalysed,
-    readsVtable;
+    BoundsCheck, FailurePlan, hookOf, isUnanalysed, readsVtable;
 import snakebite.backends.calls: ValueCall;
 import snakebite.backends.haltprocess: isHalt;
 import snakebite.backends.exceptions: CAssertCall;
@@ -1474,15 +1473,15 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     static if (nullChecks) {
         private void checkNotNull(in void* pointer, in Loc loc) {
             if (pointer is null)
-                failNullDeref(loc, NullOperand.dereferenced);
+                failNullDeref(loc);
         }
 
-        private void failNullDeref(in Loc loc, in NullOperand operand) {
+        private void failNullDeref(in Loc loc) {
             import snakebite.backends.checkplan:
-                nullCheckPlanOf, nullDerefCMessage;
+                nullDerefCMessage, nullDerefPlanOf;
 
             failWithHook(
-                nullCheckPlanOf(_program.checks, operand), nullDerefCMessage,
+                nullDerefPlanOf(_program.checks), nullDerefCMessage,
                 DruntimeHook.nullPointer, loc, []);
         }
     }
@@ -6330,7 +6329,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 bindArguments(function_, expression.arguments,
                     expression.loc, frame.base, layout);
                 static if (nullChecks)
-                    failNullDeref(expression.loc, NullOperand.vtableReceiver);
+                    failNullDeref(expression.loc);
                 faultOnNullReceiver(classReceiver);
             }
 
@@ -6483,7 +6482,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     // The vtable read of a receiver that is null, which is the fault that
     // compiled D has. The load is volatile so that it is not removed.
-    private noreturn faultOnNullReceiver(void* receiver) {
+    private noreturn faultOnNullReceiver(in void* receiver) {
         import core.volatile: volatileLoad;
 
         volatileLoad(cast(size_t*) receiver);
@@ -6599,7 +6598,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             auto type = deref.type.isTypeFunction;
             if (function_ is null) {
                 static if (nullChecks)
-                    failNullDeref(expression.loc, NullOperand.callee);
+                    failNullDeref(expression.loc);
                 return Callee(null, null, false, null, type);
             }
 
@@ -6627,7 +6626,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto type = callee.type.nextOf.isTypeFunction;
         if (function_ is null) {
             static if (nullChecks)
-                failNullDeref(expression.loc, NullOperand.callee);
+                failNullDeref(expression.loc);
             return Callee(null, cast(void*) context, true, null, type);
         }
         if (auto declaration =
