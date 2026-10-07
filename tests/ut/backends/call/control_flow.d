@@ -1621,3 +1621,148 @@ static foreach (backend; Matrix!(
         }, "result");
     }
 }
+
+// A value parameter's destructor runs once at the function end, however a `goto` moves within the body.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.userGotoRunsParameterDestructorOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int* count; ~this() { ++*count; } }
+            int loop(S s) {
+                int i;
+            again:
+                if (++i < 3) goto again;
+                return i;
+            }
+            int main() {
+                int count;
+                const r = loop(S(&count));
+                if (r != 3) return 1;
+                return count == 1 ? 0 : 10 + count;
+            }
+        });
+    }
+}
+
+// An `out` contract makes dmd send `return` through a label; the value parameter's destructor still runs once.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.returnWithOutContractRunsParameterDestructorOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int* count; ~this() { ++*count; } }
+            int f(S s) out (r; r > 0) { return 3; }
+            int main() {
+                int count;
+                if (f(S(&count)) != 3) return 1;
+                return count == 1 ? 0 : 10 + count;
+            }
+        });
+    }
+}
+
+// An invariant makes dmd send `return` through a label; the value parameter's destructor still runs once.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.returnWithInvariantRunsParameterDestructorOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int* count; ~this() { ++*count; } }
+            class C {
+                int x = 1;
+                invariant { assert(x > 0); }
+                int f(S s) { return 3; }
+            }
+            int main() {
+                int count;
+                auto c = new C;
+                if (c.f(S(&count)) != 3) return 1;
+                return count == 1 ? 0 : 10 + count;
+            }
+        });
+    }
+}
+
+// dmd replaces the cleanup of a returned local (NRVO) after it resolves jumps; a `goto` in its scope must not run that destructor.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.userGotoInNrvoScope." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int* count; int v; ~this() { ++*count; } }
+            S make(int* count) {
+                S s = S(count);
+                int i;
+            again:
+                if (++i < 3) goto again;
+                s.v = i;
+                return s;
+            }
+            int main() {
+                int count;
+                {
+                    auto s = make(&count);
+                    if (s.v != 3) return 1;
+                    if (count != 0) return 10 + count;
+                }
+                return count == 1 ? 0 : 20 + count;
+            }
+        });
+    }
+}
+
+// `goto case` and `goto default` do not run a value parameter's destructor early.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.gotoCaseRunsParameterDestructorOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int* count; ~this() { ++*count; } }
+            int pick(S s, int v) {
+                switch (v) {
+                    case 0: goto case 1;
+                    case 1: return 5;
+                    case 2: goto default;
+                    default: return 9;
+                }
+            }
+            int main() {
+                int count;
+                if (pick(S(&count), 0) != 5) return 1;
+                if (count != 1) return 10 + count;
+                if (pick(S(&count), 2) != 9) return 2;
+                return count == 2 ? 0 : 20 + count;
+            }
+        });
+    }
+}
+
+// `goto case` in the scope of a returned local (NRVO) must not run that local's destructor.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.gotoCaseInNrvoScope." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int* count; int v; ~this() { ++*count; } }
+            S make(int* count, int k) {
+                S s = S(count);
+                switch (k) {
+                    case 0: goto case 1;
+                    case 1: s.v = 5; break;
+                    default: s.v = 9;
+                }
+                return s;
+            }
+            int main() {
+                int count;
+                {
+                    auto s = make(&count, 0);
+                    if (s.v != 5) return 1;
+                    if (count != 0) return 10 + count;
+                }
+                return count == 1 ? 0 : 20 + count;
+            }
+        });
+    }
+}
