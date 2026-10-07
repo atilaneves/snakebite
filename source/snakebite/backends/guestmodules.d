@@ -134,8 +134,9 @@ public struct GuestModules {
                 run.runCrtDestructors;
             catch (Throwable destructorThrowable)
                 print(destructorThrowable);
-            // The process ends with `main` and `rt_term` frees the GC heap
-            // before `endAtExit` runs, which then must not read the run.
+            // The process ends with `main` and `rt_term` can free the GC heap
+            // (`--DRT-gcopt=profile:1`) before `endAtExit` runs, which then
+            // must not read the run.
             if (run.exit !is null) {
                 atomicStore(run.exit.returned, true);
                 atomicStore(run.exit.crtPending, false);
@@ -185,8 +186,7 @@ public struct GuestModules {
     // thread that removes it only. Otherwise the registration, the image
     // and the entries stay, and every entry does nothing, so a process that
     // runs many programs that leave threads alive grows with each of them.
-    // The end of the process removes what stayed: druntime aborts the process
-    // when an image is still registered at that time.
+    // The end of the process removes what stayed.
     public int finish() {
         if (_run is null || _failed)
             return 0;
@@ -279,7 +279,8 @@ private import snakebite.ffi.callback: CallbackBridge, CallbackCall;
 
 
 // What `endAtExit` needs, in memory that the GC does not own: after a normal
-// end druntime has freed the GC heap when `exit` runs the handler.
+// end druntime can have freed the GC heap (`--DRT-gcopt=profile:1`) when
+// `exit` runs the handler.
 private struct ExitRecord {
     // Whether `rt_term` runs the phases of the program: it ended with `main`
     // or never started.

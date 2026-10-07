@@ -335,10 +335,21 @@ private final class SnakebiteGC : GC {
     import core.thread.threadbase: ThreadBase;
     import snakebite.arena: ArenaArray, arenaAllocate, arenaBytesAfter, isArenaMemory;
 
-    private GC _gc;
-
+    // druntime prints the GC profile in the destructor of the heap, and that
+    // destructor also unmaps the pools. The heap is released only with
+    // `--DRT-gcopt=profile:1`, as in a compiled D program, and a thread that
+    // runs then can fault. Without that option nothing releases the heap, so
+    // a thread that is still alive keeps what it uses.
     ~this() {
-        destroy(_gc);
+        import core.gc.config: config;
+
+        if (config.profile)
+            destroy(_gc);
+    }
+
+    // @trusted: reads a variable that is set once, before any other thread.
+    private GC _gc() @trusted nothrow @nogc {
+        return _conservative;
     }
 
     void enable() {
@@ -588,12 +599,19 @@ private bool isArenaSlice(const void[] slice) @trusted nothrow @nogc {
 private __gshared SnakebiteGC _instance = new SnakebiteGC;
 
 
+// The GC that does the work lives outside `_instance`: `gc_term` destroys
+// `_instance`, which resets its fields and sets its class pointer to null, and
+// a thread that is still running calls the GC after that. Only calls through
+// the `GC` interface work then, not a virtual call through the class. Nothing
+// releases this GC unless the profile option is on (see `~this`).
+private __gshared GC _conservative;
+
+
 private GC createSnakebiteGC() {
     import core.gc.registry: createGCInstance;
 
-    auto conservative = createGCInstance("conservative");
-    assert(conservative !is null, "druntime registers the conservative GC");
-    _instance._gc = conservative;
+    _conservative = createGCInstance("conservative");
+    assert(_conservative !is null, "druntime registers the conservative GC");
     return _instance;
 }
 

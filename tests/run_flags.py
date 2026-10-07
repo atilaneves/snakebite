@@ -989,8 +989,79 @@ extern(C) int main() {
     ], output
 
 
+# A daemon thread allocates from the GC and calls a guest function until the
+# kernel ends the process. Two functions run after the program ended: an
+# `atexit` handler, and a `crt_destructor` function. Each returns only when
+# the thread did a thousand more iterations, so that each path of the end of
+# the process has a window in which nothing may release what the thread uses.
+# The thread sets the length of the window by itself: no sleep gives it. CTFE
+# has no process to end: it cannot start a thread, call `__cxa_atexit` or read
+# a static variable.
+DAEMON_ENDS = {
+    "return": "",
+    "exit": "exit(3);",
+    "throw": 'throw new Exception("BOOM");',
+}
+DAEMON_STATUS = {"return": 0, "exit": 3, "throw": 1}
+
+
+@pytest.mark.parametrize("backend", ENDS_PROCESS)
+@pytest.mark.parametrize("end", DAEMON_ENDS)
+def test_daemon_thread_runs_until_the_process_ends(
+    tmp_path: Path, backend: str, end: str,
+) -> None:
+    (tmp_path / "source").mkdir()
+    (tmp_path / "dub.json").write_text(json.dumps({
+        "name": dub_name("app"), "targetType": "executable",
+        "dflags-ldc": ["-link-defaultlib-shared"],
+        "mainSourceFile": "source/app.d",
+        "configurations": [{"name": "unittest", "targetType": "executable", "mainSourceFile": "source/app.d"}],
+    }), encoding="utf-8")
+    (tmp_path / "source" / "app.d").write_text("""module app;
+import core.atomic: atomicLoad, atomicOp, atomicStore;
+import core.stdc.stdio: fputs, stderr;
+import core.stdc.stdlib: exit;
+import core.thread: Thread;
+shared bool running;
+shared int iterations;
+int bump(int value) { return value + 1; }
+void waitForDaemon(string name) {
+    const target = atomicLoad(iterations) + 1000;
+    while (atomicLoad(iterations) < target) {}
+    fputs(name.ptr, stderr);
+}
+pragma(crt_destructor) extern(C) void crtDestructor() { waitForDaemon("CRT_WINDOW\\n\\0"); }
+extern(C) int __cxa_atexit(void function(void*), void*, void*);
+extern(C) void atexitHandler(void*) { waitForDaemon("ATEXIT_WINDOW\\n\\0"); }
+void main() {
+    __cxa_atexit(&atexitHandler, null, null);
+    auto daemon = new Thread({
+        auto kept = new int[](1024);
+        for (;;) {
+            auto fresh = new int[](16);
+            fresh[0] = bump(kept[1]);
+            kept[fresh[0] & 1023] = bump(fresh[1]);
+            atomicStore(running, true);
+            atomicOp!"+="(iterations, 1);
+        }
+    });
+    daemon.isDaemon = true;
+    daemon.start;
+    while (!atomicLoad(running)) {}
+    %s
+}
+""" % DAEMON_ENDS[end], encoding="utf-8")
+    command = [sb_path(), f"--backend={backend}", "--no-optimise-image", str(tmp_path)]
+    result = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True,
+                            timeout=TIMEOUT)
+    output = result.stdout + result.stderr
+    assert result.returncode == DAEMON_STATUS[end], output
+    assert "CRT_WINDOW" in output and "ATEXIT_WINDOW" in output, output
+
+
 # The tests can run in parallel (see build/pytest-workers.sh) because the
 # state that they share, the `.snakebite` directory and the dub package store,
 # is keyed by project path and published with an atomic rename.
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
