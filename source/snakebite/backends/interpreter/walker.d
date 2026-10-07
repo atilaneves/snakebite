@@ -551,7 +551,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         CallAdapter, CallbackCall, CallPlan, CallResult, PlanCache;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout:
-        initializerConstructsThroughSlice, initializerValueOf,
+        initializerRunsForEffect, initializerValueOf,
         isIntegralSize, TypeFacts;
     import object:
         Error, Exception, Throwable, TypeInfo, TypeInfo_Class,
@@ -3368,7 +3368,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         bool retains;
         auto slot = storageOf(variable, &retains);
 
-        if (initializerConstructsThroughSlice(expInitializer, variable)) {
+        if (initializerRunsForEffect(expInitializer, variable)) {
             initialize(variable, expression, slot, retains, {
                 runForEffect(expInitializer.exp);
             });

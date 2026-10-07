@@ -678,12 +678,7 @@ extern(C++) private final class LocalsCollector:
         if (variable._init is null)
             return;
         if (auto initializer = variable._init.isExpInitializer) {
-            auto value = initializer.exp;
-            if (auto construct = value.isConstructExp)
-                value = construct.e2;
-            else if (auto blit = value.isBlitExp)
-                value = blit.e2;
-            collectDeclarations(value);
+            collectDeclarations(initializer.exp);
         }
     }
 

@@ -716,7 +716,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.backends.temporary: TemporaryPlan, constructTemporary;
     import snakebite.exception: SnakebiteException;
     import snakebite.nativelayout:
-        alignUp, initializerConstructsThroughSlice, initializerValueOf,
+        alignUp, initializerRunsForEffect, initializerValueOf,
         isIntegralSize, isThreadLocalStorage, TypeFacts;
     import snakebite.nativevalue: CastKind;
 
@@ -2721,16 +2721,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         assert(expInitializer !is null,
             "a runtime variable initializer is an expression initializer");
 
-        if (initializerConstructsThroughSlice(expInitializer, variable))
+        if (initializerRunsForEffect(expInitializer, variable))
             return compileEffect(expInitializer.exp);
 
         const facts = TypeFacts.of(variable.type);
         auto initializer = initializerValueOf(expInitializer);
         import snakebite.nativelayout: isStoredLiteral;
 
-        auto construct = expInitializer.exp.isConstructExp;
-        const storedLiteral = isStoredLiteral(initializer)
-            && (construct is null || construct.lowering is null);
+        const storedLiteral = isStoredLiteral(initializer);
         if (isClosureVariable(variable)) {
             const slot = _closureLayout.slotOf(variable);
             const target = closureSlotAddress(slot.offset);
