@@ -30,8 +30,22 @@ static if (!is(typeof(supported)))
 // mark cannot establish that the host has a defect.
 //
 // A shared module constructor installs the handlers one time at start
-// (`installFaultHandlers`). A guest that installs a handler of its own for
-// one of these signals replaces ours, as it does in compiled D.
+// (`installFaultHandlers`). From then until the process ends, the kernel
+// action of these signals is ours, with no `SA_RESETHAND`: druntime's
+// `runModuleUnitTests` installs a one-shot handler for `SIGSEGV` and
+// `SIGBUS` and a guest fault on another thread would then kill the process.
+// This executable therefore defines `sigaction` (`interposedSigaction`) and
+// the functions of glibc that do the same job (`signal`, `sigset`, ...). A
+// request for one of these signals never reaches the kernel, from any
+// thread, and the guest is not an exception: its calls resolve to these
+// definitions too (`interposedAddress`). A guest that installs a handler of
+// its own for a fault signal gets it called for a fault on its thread, as in
+// compiled D, but the kernel keeps ours.
+//
+// What no symbol can stop is a system call: `rt_sigaction` made directly,
+// by assembly, by a library that does not use libc, or through glibc's
+// private `__libc_sigaction`, changes the kernel
+// action. That is the one exception.
 //
 // Linux on x86-64 only. On any other target nothing is installed and a
 // fault crashes the process.
@@ -124,6 +138,10 @@ static if (supported) {
             while (*link !is &this)
                 link = &(*link).next;
             *link = next;
+            // The actions that the guest set end with its outermost run.
+            if (_state.runs is null)
+                foreach (ref guest; _state.guest)
+                    guest.set = false;
         }
     }
 }
@@ -145,28 +163,16 @@ public void takeFault(in HardwareFault) @trusted @nogc nothrow {
 // that a maintainer can get the crash and the core dump of the guest.
 public bool installFaultHandlers() @trusted nothrow @nogc {
     static if (supported) {
-        import core.atomic: atomicLoad, atomicStore, cas;
+        import core.atomic: atomicLoad, atomicStore;
         import core.stdc.stdlib: getenv;
-        import core.sys.posix.signal: SIG_SETMASK, sigprocmask, sigset_t;
 
         if (getenv("SNAKEBITE_NO_FAULT_HANDLER") !is null)
             return false;
 
-        // A handler on this thread must not wait for its own installation.
-        // Block the collector too: a handler on another thread can be
-        // waiting on its alternate stack until the saved action is complete.
-        sigset_t blocked, savedMask;
-        sigfillset(&blocked);
-        if (sigprocmask(SIG_SETMASK, &blocked, &savedMask) != 0)
-            assert(0, "cannot block signals during fault-handler installation");
-        scope(exit)
-            if (sigprocmask(SIG_SETMASK, &savedMask, null) != 0)
-                assert(0, "cannot restore signals after fault-handler installation");
-
-        if (!cas(&_installation, Installation.absent, Installation.inProgress)) {
-            while (atomicLoad(_installation) == Installation.inProgress) {}
+        const next = nextSigaction;
+        auto held = SignalTableLock.acquire;
+        if (atomicLoad(_installed))
             return true;
-        }
 
         sigaction_t action;
         action.sa_sigaction = &snakebite_fault_signal_entry;
@@ -178,15 +184,21 @@ public bool installFaultHandlers() @trusted nothrow @nogc {
         // waits until the thread is back on its own stack.
         sigfillset(&action.sa_mask);
         foreach (signal; handledSignals) {
-            const index = cast(size_t) signal;
-            if (sigaction(signal, &action, &_previous[index].action) != 0)
+            sigaction_t previous;
+            if (next(signal, &action, &previous) != 0)
                 assert(0, "sigaction failed for a fault signal");
-            // sigaction publishes the kernel action before libc can finish
-            // copying the old action to this array. Readers wait for that
-            // copy, not merely for the kernel to accept the new action.
-            atomicStore(_previous[index].ready, true);
+            publishPrevious(cast(size_t) signal, previous);
         }
-        atomicStore(_installation, Installation.complete);
+        // The kernel needs a restorer to return from a handler, and libc
+        // adds its own to each action it installs. A request that the
+        // interposer records gets the same one, because the handler
+        // forwards to the recorded action.
+        sigaction_t installed;
+        if (next(SIGSEGV, null, &installed) != 0)
+            assert(0, "sigaction failed to read the fault action");
+        if (installed.sa_flags & saRestorer)
+            _restorer = installed.sa_restorer;
+        atomicStore(_installed, true);
 
         return true;
     } else
@@ -364,12 +376,13 @@ static if (supported) {
         SA_ONSTACK,
         SA_SIGINFO,
         SIG_DFL,
+        SIG_IGN,
         SIGBUS,
         SIGFPE,
         SIGSEGV,
         siginfo_t,
-        sigaction,
         sigaction_t,
+        SA_RESETHAND,
         sigaltstack,
         sigfillset,
         sigset_t,
@@ -400,8 +413,15 @@ static if (supported) {
         return false;
     }
 
+    // What a guest asked of `sigaction` on this thread (`interposedSigaction`).
+    private struct GuestAction {
+        bool set;
+        sigaction_t action;
+    }
+
     private struct ThreadState {
         RunOwner* runs;
+        GuestAction[signalCapacity] guest;
         // A fault was recorded and no catcher has taken it yet (`takeFault`).
         // A fault of the thread in that time happens while the first one
         // unwinds, and is a defect of the host.
@@ -419,25 +439,350 @@ static if (supported) {
     }
 
     private ThreadState _state;
-    private enum Installation {
-        absent,
-        inProgress,
-        complete,
-    }
-    private shared Installation _installation;
-    // What the signals did before this module: a fault of the host goes to
-    // it (a sanitizer, a host that embeds snakebite).
-    // Direct signal indices avoid a search on each forwarded delivery.
+    private shared bool _installed;
+    private enum saRestorer = 0x04000000;
+    // Written once under the lock before `_installed` is set.
+    private __gshared typeof(sigaction_t.sa_restorer) _restorer;
+    // What the signals did before this module, or what the last caller of
+    // `interposedSigaction` asked for: a fault of the host goes to it (a
+    // sanitizer, a host that embeds snakebite, druntime's backtrace
+    // handler). Direct signal indices avoid a search on each forwarded
+    // delivery.
     private enum signalCapacity = SIGSEGV + 1;
     static assert(SIGFPE < signalCapacity && SIGBUS < signalCapacity);
+
+    // `sequence` guards `action` for readers in a signal handler, which
+    // cannot take the lock. Bit 0: a write is in progress. Bit 1: the
+    // action has `SA_RESETHAND` and a handler already claimed its one
+    // delivery. The remaining bits count the writes, and zero means that
+    // nothing has been written. A write clears bit 1.
+    private enum writing = 1UL;
+    private enum claimed = 2UL;
+    private enum step = 4UL;
     private struct PreviousAction {
         sigaction_t action;
-        shared bool ready;
-        // The action stays unchanged while other threads read it. Resetting
-        // the kernel action would also disable guest recovery.
-        shared bool reset;
+        shared size_t sequence;
     }
     private __gshared PreviousAction[signalCapacity] _previous;
+    private shared bool _tableLock;
+
+    // Holds the lock of `_previous` and the kernel action of the fault
+    // signals with every signal blocked. A handler on this thread waits for
+    // a write to finish, so the thread must not receive one in the
+    // meantime. The collector is blocked too, as in the handler itself.
+    private struct SignalTableLock {
+        import core.sys.posix.signal: sigset_t;
+
+        sigset_t saved;
+
+        @disable this(this);
+
+        static SignalTableLock acquire() @trusted nothrow @nogc {
+            import core.atomic: cas;
+            import core.sys.posix.signal: SIG_SETMASK, sigprocmask;
+
+            SignalTableLock held;
+            sigset_t blocked;
+            sigfillset(&blocked);
+            if (sigprocmask(SIG_SETMASK, &blocked, &held.saved) != 0)
+                assert(0, "cannot block signals for the fault action table");
+            while (!cas(&_tableLock, false, true)) {}
+            return held;
+        }
+
+        ~this() @trusted nothrow @nogc {
+            import core.atomic: atomicStore;
+            import core.sys.posix.signal: SIG_SETMASK, sigprocmask;
+
+            atomicStore(_tableLock, false);
+            if (sigprocmask(SIG_SETMASK, &saved, null) != 0)
+                assert(0, "cannot restore signals after the fault action table");
+        }
+    }
+
+    // The caller holds the lock.
+    private void publishPrevious(size_t index, ref const sigaction_t action)
+        @trusted nothrow @nogc {
+        import core.atomic: atomicFence, atomicLoad, atomicStore;
+
+        auto slot = &_previous[index];
+        const current = atomicLoad(slot.sequence);
+        atomicStore(slot.sequence, (current | writing));
+        atomicFence;
+        slot.action = action;
+        atomicFence;
+        atomicStore(slot.sequence, ((current & ~(writing | claimed)) + step));
+    }
+
+    // The next definition of `sigaction` after the one of this executable:
+    // libc's, or a library that wraps it (a test can put one in between).
+    // A call by name from here would reach `interposedSigaction`.
+    private alias NextSigaction = extern(C) int function(
+        int, const(sigaction_t)*, sigaction_t*) nothrow @nogc;
+    private __gshared NextSigaction _nextSigaction;
+
+    private NextSigaction nextSigaction() @trusted nothrow @nogc {
+        import core.sys.posix.dlfcn: dlsym;
+
+        // Not in druntime's declarations, which lack `_GNU_SOURCE`.
+        enum RTLD_NEXT = cast(void*) -1;
+
+        if (auto known = _nextSigaction)
+            return known;
+        auto found = cast(NextSigaction) dlsym(RTLD_NEXT, "sigaction");
+        if (found is null)
+            assert(0, "cannot find the next sigaction");
+        _nextSigaction = found;
+        return found;
+    }
+
+    // The definition that every other caller of `sigaction` gets, in the
+    // executable and in a shared druntime: the dynamic linker binds the
+    // shared library to the executable's symbol first. Once the fault
+    // handlers are installed, a request to change the action of a fault
+    // signal never reaches the kernel, from any thread. `runModuleUnitTests`
+    // saves and restores actions this way, and nothing in between can change
+    // what the kernel delivers.
+    //
+    // The request of a thread that runs guest code is the action of the
+    // guest on that thread: a fault of the guest on that thread goes to it,
+    // and the guest reads it back, until the outermost run of the thread
+    // ends. Any other request becomes what the handlers forward a fault to
+    // when it is not a guest fault, and the caller sees it as the action in
+    // force. `SA_RESETHAND` is one delivery, then `SIG_DFL`. `SIG_DFL` and
+    // `SIG_IGN` of the guest leave a guest fault to the recovery.
+    //
+    // A system call that sets the action (`rt_sigaction`) does not use this
+    // symbol and still reaches the kernel.
+    pragma(mangle, "sigaction")
+    public extern(C) int interposedSigaction(
+        int signal, const(sigaction_t)* action, sigaction_t* old)
+        @trusted nothrow @nogc {
+        import core.atomic: atomicLoad;
+        import core.sys.posix.signal: SA_RESETHAND;
+
+        const next = nextSigaction;
+        if (signal != SIGSEGV && signal != SIGFPE && signal != SIGBUS)
+            return next(signal, action, old);
+
+        // Before the lock: a bad pointer of the caller is its own fault.
+        sigaction_t requested = action is null ? sigaction_t.init : *action;
+        sigaction_t reported;
+        {
+            auto held = SignalTableLock.acquire;
+            if (!atomicLoad(_installed))
+                return next(signal, action, old);
+
+            if (_restorer !is null && !(requested.sa_flags & saRestorer)) {
+                requested.sa_flags |= saRestorer;
+                requested.sa_restorer = _restorer;
+            }
+            const index = cast(size_t) signal;
+            auto slot = &_previous[index];
+            auto mine = &_state.guest[index];
+            const forGuest = ownsCurrentFiber;
+            if (forGuest && mine.set)
+                reported = mine.action;
+            else {
+                reported = slot.action;
+                // The handler that ran its one delivery has reset the action.
+                if (atomicLoad(slot.sequence) & claimed) {
+                    reported = sigaction_t.init;
+                    reported.sa_handler = SIG_DFL;
+                }
+            }
+            if (action !is null) {
+                if (forGuest) {
+                    mine.set = true;
+                    mine.action = requested;
+                } else
+                    publishPrevious(index, requested);
+            }
+        }
+        if (old !is null)
+            *old = reported;
+        return 0;
+    }
+
+    // glibc exports a second name for `sigaction`.
+    pragma(mangle, "__sigaction")
+    public extern(C) int interposedUnderscoreSigaction(
+        int signal, const(sigaction_t)* action, sigaction_t* old)
+        @trusted nothrow @nogc {
+        return interposedSigaction(signal, action, old);
+    }
+
+    // The other functions of glibc that change the action of a signal. They
+    // call an internal `sigaction` that no symbol can interpose, so each
+    // one is the same request made of `interposedSigaction`. A handler of
+    // `SIG_ERR` is `-1`.
+    private enum sigHold = cast(size_t) 2;
+    private enum sigError = cast(void*) -1;
+
+    private void* setHandler(
+        int signal, void* handler, int flags, bool blockSignal) @trusted nothrow @nogc {
+        import core.sys.posix.signal: sigaddset, sigemptyset;
+
+        if (handler is sigError)
+            return invalidSignal;
+        sigaction_t requested;
+        requested.sa_handler = cast(typeof(requested.sa_handler)) handler;
+        requested.sa_flags = flags;
+        sigemptyset(&requested.sa_mask);
+        if (blockSignal)
+            sigaddset(&requested.sa_mask, signal);
+        sigaction_t old;
+        if (interposedSigaction(signal, &requested, &old) != 0)
+            return sigError;
+        return cast(void*) old.sa_handler;
+    }
+
+    private void* invalidSignal() @trusted nothrow @nogc {
+        import core.stdc.errno: EINVAL, errno;
+
+        errno = EINVAL;
+        return sigError;
+    }
+
+    private enum bsdFlags = imported!"core.sys.posix.signal".SA_RESTART;
+    private enum sysvFlags = imported!"core.sys.posix.signal".SA_RESETHAND
+        | imported!"core.sys.posix.signal".SA_NODEFER;
+
+    pragma(mangle, "signal")
+    public extern(C) void* interposedSignal(int signal, void* handler)
+        @trusted nothrow @nogc {
+        return setHandler(signal, handler, bsdFlags, true);
+    }
+
+    pragma(mangle, "bsd_signal")
+    public extern(C) void* interposedBsdSignal(int signal, void* handler)
+        @trusted nothrow @nogc {
+        return setHandler(signal, handler, bsdFlags, true);
+    }
+
+    pragma(mangle, "ssignal")
+    public extern(C) void* interposedSsignal(int signal, void* handler)
+        @trusted nothrow @nogc {
+        return setHandler(signal, handler, bsdFlags, true);
+    }
+
+    pragma(mangle, "sysv_signal")
+    public extern(C) void* interposedSysvSignal(int signal, void* handler)
+        @trusted nothrow @nogc {
+        return setHandler(signal, handler, sysvFlags, false);
+    }
+
+    pragma(mangle, "__sysv_signal")
+    public extern(C) void* interposedUnderscoreSysvSignal(int signal, void* handler)
+        @trusted nothrow @nogc {
+        return setHandler(signal, handler, sysvFlags, false);
+    }
+
+    pragma(mangle, "sigset")
+    public extern(C) void* interposedSigset(int signal, void* handler)
+        @trusted nothrow @nogc {
+        import core.sys.posix.signal: SIG_BLOCK, SIG_UNBLOCK, sigaddset,
+            sigemptyset, sigismember, sigprocmask;
+
+        sigset_t one;
+        sigemptyset(&one);
+        sigaddset(&one, signal);
+        if (handler is cast(void*) sigHold) {
+            sigset_t before;
+            sigprocmask(SIG_BLOCK, &one, &before);
+            sigaction_t old;
+            if (interposedSigaction(signal, null, &old) != 0)
+                return sigError;
+            return sigismember(&before, signal) == 1 ? cast(void*) sigHold : cast(void*) old.sa_handler;
+        }
+        sigset_t before;
+        sigprocmask(SIG_UNBLOCK, &one, &before);
+        void* old = setHandler(signal, handler, 0, false);
+        if (old is sigError)
+            return old;
+        return sigismember(&before, signal) == 1 ? cast(void*) sigHold : old;
+    }
+
+    pragma(mangle, "sigignore")
+    public extern(C) int interposedSigignore(int signal) @trusted nothrow @nogc {
+        return setHandler(signal, cast(void*) SIG_IGN, 0, false) is sigError ? -1 : 0;
+    }
+
+    pragma(mangle, "siginterrupt")
+    public extern(C) int interposedSiginterrupt(int signal, int interrupt)
+        @trusted nothrow @nogc {
+        import core.sys.posix.signal: SA_RESTART;
+
+        sigaction_t action;
+        if (interposedSigaction(signal, null, &action) != 0)
+            return -1;
+        if (interrupt)
+            action.sa_flags &= ~SA_RESTART;
+        else
+            action.sa_flags |= SA_RESTART;
+        return interposedSigaction(signal, &action, null);
+    }
+
+    private struct SigVec {
+        void* sv_handler;
+        int sv_mask;
+        int sv_flags;
+    }
+
+    pragma(mangle, "sigvec")
+    public extern(C) int interposedSigvec(int signal, const(SigVec)* vector, SigVec* old)
+        @trusted nothrow @nogc {
+        import core.sys.posix.signal: SA_RESTART, sigemptyset;
+
+        // `SV_ONSTACK`, `SV_INTERRUPT` and `SV_RESETHAND` of the BSD API.
+        enum onStack = 1, interrupt = 2, resetHand = 4;
+
+        sigaction_t requested;
+        if (vector !is null) {
+            const vec = *vector;
+            requested.sa_handler = cast(typeof(requested.sa_handler)) vec.sv_handler;
+            sigemptyset(&requested.sa_mask);
+            requested.sa_mask.__val[0] = cast(uint) vec.sv_mask;
+            requested.sa_flags = ((vec.sv_flags & onStack) ? SA_ONSTACK : 0)
+                | ((vec.sv_flags & resetHand) ? SA_RESETHAND : 0)
+                | ((vec.sv_flags & interrupt) ? 0 : SA_RESTART);
+        }
+        sigaction_t previous;
+        if (interposedSigaction(signal, vector is null ? null : &requested, &previous) != 0)
+            return -1;
+        if (old !is null) {
+            SigVec reported;
+            reported.sv_handler = cast(void*) previous.sa_handler;
+            reported.sv_mask = cast(int) previous.sa_mask.__val[0];
+            reported.sv_flags = ((previous.sa_flags & SA_ONSTACK) ? onStack : 0)
+                | ((previous.sa_flags & SA_RESETHAND) ? resetHand : 0)
+                | ((previous.sa_flags & SA_RESTART) ? 0 : interrupt);
+            *old = reported;
+        }
+        return 0;
+    }
+
+    // The address of the definition here for a name that this executable
+    // takes from the libraries (see `interposedSigaction`), or null. dmd emits
+    // each function as a weak symbol, so the linker does not report another
+    // definition of one of these names: a test compares the symbol that the
+    // process binds with this address.
+    public void* interposedAddress(in char[] name) @trusted nothrow @nogc {
+        switch (name) {
+            case "sigaction": return &interposedSigaction;
+            case "__sigaction": return &interposedUnderscoreSigaction;
+            case "signal": return &interposedSignal;
+            case "bsd_signal": return &interposedBsdSignal;
+            case "ssignal": return &interposedSsignal;
+            case "sysv_signal": return &interposedSysvSignal;
+            case "__sysv_signal": return &interposedUnderscoreSysvSignal;
+            case "sigset": return &interposedSigset;
+            case "sigignore": return &interposedSigignore;
+            case "siginterrupt": return &interposedSiginterrupt;
+            case "sigvec": return &interposedSigvec;
+            default: return null;
+        }
+    }
 
     // The trace of a thrown object is made by druntime from the stack. The
     // fault has no use for it, and making it allocates.
@@ -580,6 +925,9 @@ static if (supported) {
     // can tail-enter a saved handler after moving off the alternate stack.
     private extern(C) Forward* snakebite_fault_dispatch(
         int signal, siginfo_t* info, void* context, size_t frame) nothrow @nogc {
+        if (guestHandlerTakes(signal))
+            return forwardToGuest(signal, info, context, frame);
+
         // A signal that a program sent (`kill`, `raise`) has no faulting
         // instruction to continue from.
         const hardware = info.si_code > 0;
@@ -624,6 +972,28 @@ static if (supported) {
         return null;
     }
 
+    private bool guestHandlerTakes(int signal) nothrow @nogc {
+        const mine = &_state.guest[cast(size_t) signal];
+        if (!mine.set || !ownsCurrentFiber)
+            return false;
+        const handler = mine.action.sa_flags & SA_SIGINFO
+            ? cast(void*) mine.action.sa_sigaction
+            : cast(void*) mine.action.sa_handler;
+        return handler !is cast(void*) SIG_DFL && handler !is cast(void*) SIG_IGN;
+    }
+
+    private Forward* forwardToGuest(
+        int signal, siginfo_t* info, void* context, size_t frame) nothrow @nogc {
+        auto mine = &_state.guest[cast(size_t) signal];
+        _snapshot = mine.action;
+        if (mine.action.sa_flags & SA_RESETHAND) {
+            mine.action = sigaction_t.init;
+            mine.action.sa_handler = SIG_DFL;
+        }
+        return forwardPreviousAction(
+            signal, info, cast(ucontext_t*) context, frame, &_snapshot);
+    }
+
     private Divisor divisorOfContext(ref const(ucontext_t) context) @system nothrow @nogc {
         import core.sys.posix.ucontext:
             REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15, REG_R8,
@@ -645,6 +1015,29 @@ static if (supported) {
             cast(const(ubyte)*) (*registers)[REG_RIP], byNumber);
     }
 
+    // This thread's copy of the previous action. `_forward.previous` points
+    // here until the assembly has entered the handler.
+    private sigaction_t _snapshot;
+
+    // A consistent copy of the action, and the sequence it was read at.
+    private size_t snapshotPrevious(size_t index, ref sigaction_t copy)
+        nothrow @nogc {
+        import core.atomic: atomicFence, atomicLoad;
+
+        auto slot = &_previous[index];
+        for (;;) {
+            const before = atomicLoad(slot.sequence);
+            // Zero: the installation has not published the action yet.
+            if (before == 0 || (before & writing))
+                continue;
+            atomicFence;
+            copy = slot.action;
+            atomicFence;
+            if (atomicLoad(slot.sequence) == before)
+                return before;
+        }
+    }
+
     // A fault that is not a guest fault: the previous action of the signal
     // if there was one, else the default action. Returning from the
     // handler runs the faulting instruction again, and that ends the
@@ -653,24 +1046,44 @@ static if (supported) {
         int signal, siginfo_t* info, void* context, size_t frame) nothrow @nogc {
         import core.atomic: atomicLoad, cas;
         import core.stdc.signal: raise;
-        import core.sys.posix.signal: SA_RESETHAND, SIG_IGN;
-
+        
         const index = cast(size_t) signal;
-        while (!atomicLoad(_previous[index].ready)) {}
-        const previous = &_previous[index].action;
-        const handler = previous.sa_flags & SA_SIGINFO
-            ? cast(void*) previous.sa_sigaction
-            : cast(void*) previous.sa_handler;
-        const callable = handler !is cast(void*) SIG_DFL
-            && handler !is cast(void*) SIG_IGN;
-        if (callable && (!(previous.sa_flags & SA_RESETHAND)
-            || cas(&_previous[index].reset, false, true))) {
+        const previous = &_snapshot;
+        bool forward;
+        const guest = &_state.guest[index];
+        if (guest.set && ownsCurrentFiber)
+            _snapshot = guest.action;
+        else for (;;) {
+            const version_ = snapshotPrevious(index, _snapshot);
+            const handler = previous.sa_flags & SA_SIGINFO
+                ? cast(void*) previous.sa_sigaction
+                : cast(void*) previous.sa_handler;
+            const callable = handler !is cast(void*) SIG_DFL
+                && handler !is cast(void*) SIG_IGN;
+            if (!callable)
+                break;
+            if (!(previous.sa_flags & SA_RESETHAND)) {
+                forward = true;
+                break;
+            }
+            if (version_ & claimed)
+                break;
+            // The one-shot claim fails when the action changed meanwhile.
+            if (cas(&_previous[index].sequence, version_, version_ | claimed)) {
+                forward = true;
+                break;
+            }
+        }
+        if (forward) {
             // The one-shot claim must precede any change of mask. On the
             // normal stack the collector can suspend this thread safely.
             // On an alternate stack it must stay blocked, as at signal entry.
             return forwardPreviousAction(signal, info, cast(ucontext_t*) context,
                 frame, previous);
         }
+        const handler = previous.sa_flags & SA_SIGINFO
+            ? cast(void*) previous.sa_sigaction
+            : cast(void*) previous.sa_handler;
 
         // A program that ignored the signal and a program that sent it get
         // what they asked for.
@@ -681,7 +1094,7 @@ static if (supported) {
             reportUnhandledGuestFault(signal, info, context);
         sigaction_t default_;
         default_.sa_handler = SIG_DFL;
-        sigaction(signal, &default_, null);
+        nextSigaction()(signal, &default_, null);
         // A signal that was sent is not raised again by returning.
         if (info.si_code <= 0)
             raise(signal);
@@ -827,7 +1240,7 @@ static if (supported) {
 
         sigaction_t action;
         action.sa_handler = SIG_DFL;
-        sigaction(SIGSEGV, &action, null);
+        nextSigaction()(SIGSEGV, &action, null);
         sigset_t allowed;
         sigemptyset(&allowed);
         sigaddset(&allowed, SIGSEGV);
@@ -869,3 +1282,8 @@ static if (supported) {
         write(2, line.ptr, length);
     }
 }
+
+static if (!supported)
+    public void* interposedAddress(in char[]) @safe @nogc nothrow pure {
+        return null;
+    }

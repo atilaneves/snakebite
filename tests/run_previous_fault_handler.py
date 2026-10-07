@@ -21,31 +21,19 @@ pytestmark = pytest.mark.skipif(
     reason="fault handlers support Linux x86-64 only",
 )
 
-HOST = r"""
+# The host executable defines `sigaction` itself (faultsignal.d), and the
+# call that reaches the kernel is the next definition in the lookup order.
+# This wrapper is that next definition: a shared library that the host links.
+WRAPPER = r"""
 #define _GNU_SOURCE
 #include <signal.h>
 #include <stdatomic.h>
-#include <stdlib.h>
-#include <pthread.h>
 #include <dlfcn.h>
 #include <sched.h>
-#include <sys/prctl.h>
 #include <unistd.h>
 
-extern int rt_init(void);
-extern int install_saved_action(void);
-extern int guest_fault(void);
-extern void thread_getGCSignals(int *, int *);
-static _Atomic int calls;
-static int mode, ready[2], wait_forever[2];
-static int suspend_signal, resume_signal;
-static char alternate[128 * 1024] __attribute__((aligned(16)));
-static _Atomic int delay_install, published, attempting, copied;
-static pthread_t installer;
+_Atomic int delay_install, published, attempting, copied;
 static int (*native_sigaction)(int, const struct sigaction *, struct sigaction *);
-_Static_assert(ATOMIC_INT_LOCK_FREE == 2, "signal counter must be lock-free");
-
-void native_fault(void) { *(volatile int *)0 = 42; }
 
 int sigaction(int sig, const struct sigaction *action, struct sigaction *old) {
     if (!native_sigaction)
@@ -67,6 +55,32 @@ int sigaction(int sig, const struct sigaction *action, struct sigaction *old) {
     }
     return native_sigaction(sig, action, old);
 }
+"""
+
+HOST = r"""
+#define _GNU_SOURCE
+#include <signal.h>
+#include <stdatomic.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <dlfcn.h>
+#include <sched.h>
+#include <sys/prctl.h>
+#include <unistd.h>
+
+extern int rt_init(void);
+extern int install_saved_action(void);
+extern int guest_fault(void);
+extern void thread_getGCSignals(int *, int *);
+static _Atomic int calls;
+static int mode, ready[2], wait_forever[2];
+static int suspend_signal, resume_signal;
+static char alternate[128 * 1024] __attribute__((aligned(16)));
+extern _Atomic int delay_install, published, attempting, copied;
+static pthread_t installer;
+_Static_assert(ATOMIC_INT_LOCK_FREE == 2, "signal counter must be lock-free");
+
+void native_fault(void) { *(volatile int *)0 = 42; }
 
 static void replacement(int sig) { write(1, "replacement\n", 12); }
 
@@ -229,10 +243,10 @@ PROFILES = ["dmd-debug", "dmd", "ldc2-debug", "ldc2-opt", "ldc2-full", "ldc2"]
 
 @pytest.fixture(scope="module", params=PROFILES)
 def host(request, tmp_path_factory):
-    return build_host(request, tmp_path_factory, HOST)
+    return build_host(request, tmp_path_factory, HOST, wrapper=WRAPPER)
 
 
-def build_host(request, tmp_path_factory, source, bridge=None):
+def build_host(request, tmp_path_factory, source, bridge=None, wrapper=None):
     compiler_name = request.param.split("-")[0]
     compiler = shutil.which(compiler_name)
     if compiler is None:
@@ -242,6 +256,13 @@ def build_host(request, tmp_path_factory, source, bridge=None):
     (directory / "bridge.d").write_text(BRIDGE if bridge is None else bridge)
     checked(["cc", "-std=c11", "-pthread", "-c", "host.c", "-o", "driver.o"],
             directory)
+    wrapper_libraries = []
+    if wrapper is not None:
+        (directory / "wrapper.c").write_text(wrapper)
+        checked(["cc", "-std=c11", "-fPIC", "-shared", "wrapper.c",
+                 "-o", "libwrapper.so", "-ldl"], directory)
+        wrapper_libraries = ["-L-L" + str(directory), "-L-lwrapper",
+                             "-L-rpath=" + str(directory)]
     checked(["cc", "-c", str(ROOT / "source/snakebite/fault_trampoline_amd64.S"),
              "-o", "trampoline.o"], directory)
     checked(["cc", "-c", str(ROOT / "source/snakebite/fault_signal_abi.c"),
@@ -262,7 +283,7 @@ def build_host(request, tmp_path_factory, source, bridge=None):
         shared = ["-link-defaultlib-shared"]
     checked([compiler, *flags, *shared, f"-I={ROOT / 'source'}", "bridge.d",
              *map(str, sources), "driver.o", "trampoline.o", "-L-lpthread",
-             "-of=host"], directory)
+             *wrapper_libraries, "-of=host"], directory)
     return directory / "host"
 
 

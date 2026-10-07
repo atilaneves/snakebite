@@ -11,6 +11,7 @@ import snakebite.faultsignal:
     FaultReport,
     HardwareFault,
     installFaultHandlers,
+    interposedAddress,
     runGuest,
     takeFault;
 import ut;
@@ -676,5 +677,24 @@ unittest {
         pthread_join(thread, null).should == 0;
         named.should == 0;
         name.should.not.be in readText("/proc/self/maps");
+    }
+}
+
+
+// dmd gives every function a weak symbol, so a strong definition of the same
+// name in another object of the link would replace ours without an error.
+// The name that every caller binds to must be ours.
+@("interposedSymbolsAreTheOnesTheProcessBinds")
+unittest {
+    import core.sys.posix.dlfcn: dlsym;
+    import std.string: toStringz;
+
+    foreach (name; [
+        "sigaction", "__sigaction", "signal", "bsd_signal", "ssignal",
+        "sysv_signal", "__sysv_signal", "sigset", "sigignore",
+        "siginterrupt", "sigvec",
+    ]) {
+        interposedAddress(name).should.not == null;
+        dlsym(null, name.toStringz).should == interposedAddress(name);
     }
 }
