@@ -5,6 +5,7 @@ import dmd.func: FuncDeclaration;
 import snakebite.backends.backend: Program;
 import snakebite.backends.bytecode: Bytecode;
 import snakebite.backends.ctfe: Ctfe;
+import snakebite.exception: SnakebiteException;
 import snakebite.frontend.compiler: parseSnippets;
 import snakebite.frontend.dmd.functions:
     findFunction,
@@ -43,6 +44,24 @@ unittest {
 
     statistics.hasCompiler.shouldBeFalse;
     statistics.cacheMisses.should == 0;
+}
+
+
+@("ctfe.nullDereferenceIsADiagnostic")
+@Tags(Ctfe.stringof)
+unittest {
+    auto module_ = parseSnippets([
+        q{
+            module diagnosed;
+            int fail() { int* pointer; return *pointer; }
+        },
+    ])[0];
+    auto backend = new Ctfe(Program([module_]));
+    int result;
+
+    backend.call(module_.findFunction("fail"), &result, [])
+        .shouldThrowWithMessage!SnakebiteException(
+            "dereference of null pointer `pointer`");
 }
 
 

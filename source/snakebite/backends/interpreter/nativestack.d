@@ -158,6 +158,10 @@ public struct InterpreterStack {
     public void* top() @nogc nothrow pure const {
         return cast(void*) (_base + _size);
     }
+
+    public const(void)* bottom() @nogc nothrow pure const {
+        return _base;
+    }
 }
 
 

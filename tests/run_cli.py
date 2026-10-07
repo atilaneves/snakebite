@@ -1655,18 +1655,23 @@ def test_c_preprocessor_flags_from_dflags(
 
 
 # A fault of the guest ends the process with the signal that compiled D dies
-# of, after one line on standard error. The Bytecode VM does not keep its
-# program counter where a signal handler can read it, so its line names the
-# kind only.
+# of, after one line on standard error. The faulting statement is not on the
+# first line of its function: the line names the statement.
 FAULTS = [
     ("null pointer read",
      "module main;\n"
-     "int load(int* pointer) { return *pointer; }\n"
+     "int load(int* pointer) {\n"
+     "    int unused = 1;\n"
+     "    return *pointer;\n"
+     "}\n"
      "int main() { int* pointer; return load(pointer); }\n",
      -signal.SIGSEGV, "fatal: null pointer dereference", "main.load"),
     ("integer division by zero",
      "module main;\n"
-     "int divide(int dividend, int divisor) { return dividend / divisor; }\n"
+     "int divide(int dividend, int divisor) {\n"
+     "    int unused = 1;\n"
+     "    return dividend / divisor;\n"
+     "}\n"
      "int main() { int zero; return divide(1, zero); }\n",
      -signal.SIGFPE, "fatal: integer division by zero or overflow",
      "main.divide"),
@@ -1687,7 +1692,7 @@ def test_guest_fault_ends_the_process_with_the_signal(
     result = run_sb(f"--backend={backend}", str(tmp_path / "app"), cwd=tmp_path)
 
     assert result.returncode == status, output(result)
-    position = f"main.d(2): {message}, in {function}"
+    position = f"main.d(4): {message}, in {function}"
     assert result.stderr == (
         position if backend == "interpreter" else message
     ) + "\n", output(result)

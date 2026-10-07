@@ -145,6 +145,7 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
 }
 
 import snakebite.exception: SnakebiteException;
+import snakebite.faulthandler: GuestPosition, GuestRun, register, unregister;
 
 // Runs `action` on the evaluator of the calling thread: made on its first
 // entry, and kept until it ends. A free function, because a member that
@@ -280,9 +281,8 @@ private struct Shared {
     // first call and reused by every call after it.
     SharedTable!(FuncDeclaration, FrameLayout) layouts;
     // Each guest function's name for a fault report, made with its frame
-    // layout: the report can run in a destructor that the GC finalizer
-    // runs, where it cannot wait for the compiler lock that dmd needs
-    // to make the name.
+    // layout: the signal handler reads it and can take no lock, which dmd
+    // needs to make the name.
     SharedTable!(FuncDeclaration, const(char)[]) names;
     // The FFI call adapter for a guest callee's own signature: whether it
     // returns by `ref`, and whether each declared parameter passes an
@@ -722,7 +722,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // the way up. A halt ends the thread that halts, so another thread of
     // the program keeps its cleanups.
     private bool _halted;
-    private Throwable _fault;
+    private GuestRun _guestRun;
     // `extern(D)`: only `Visitor`'s `visit` overloads need the C++
     // linkage.
     extern(D) public this(Shared* shared_) {
@@ -811,9 +811,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         void* variadicCursor = null,
         const(void)* variadicTypes = null,
     ) {
-        if (_fault !is null)
-            throw _fault;
-
         // A re-entry on this execution state already has the correct native
         // stack and its controlled owner. Other Fibers have other evaluators.
         if (_frames.backendEntry !is null) {
@@ -835,54 +832,45 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         void* variadicCursor,
         const(void)* variadicTypes,
     ) {
-        import snakebite.faulthandler: GuestRun, guestRun;
-
         ubyte entry; // Only its address matters: it marks an active entry.
         auto parent = _frames.backendEntry; // Restored as a mutable entry link.
         const frameMark = _frames.mark;
         const guard = CallStateGuard(this);
         scope(exit) {
-            guestRun = GuestRun.init;
+            unregister(&_guestRun);
             _frames.backendEntry = parent;
             if (_frames.mark > frameMark)
                 _frames.release(frameMark);
         }
         _frames.backendEntry = &entry;
-        guestRun = GuestRun(cast(void*) this, &guestPosition);
-        try {
-            executeHostToGuest(function_, returnPlace, args,
-                variadicCursor, variadicTypes);
-            if (_fault !is null)
-                throw _fault;
-        } catch (Throwable thrown) {
-            if (_fault !is null)
-                throw _fault;
-            if (isHalt(thrown)) {
-                _halted = true;
-                _fault = thrown;
-            }
-            throw thrown;
-        }
+        _guestRun = GuestRun(
+            cast(void*) this, &guestPosition,
+            _interpreterStack.bottom, _interpreterStack.top,
+        );
+        register(&_guestRun);
+        executeHostToGuest(function_, returnPlace, args,
+            variadicCursor, variadicTypes);
     }
 
     // What the fault handler reads: the function that runs, and the line of
-    // the full expression that runs in it.
-    extern(D) private static imported!"snakebite.faulthandler".GuestPosition
-    guestPosition(void* context) nothrow @nogc {
-        import snakebite.faulthandler: GuestPosition;
+    // the full expression that runs in it. Native code that the guest calls
+    // runs outside any expression of the guest, and then no line is known.
+    extern(D) private static GuestPosition guestPosition(void* context)
+    nothrow @nogc {
         import std.string: fromStringz;
 
         auto evaluator = cast(Evaluator) context;
         auto function_ = evaluator._function;
         if (function_ is null)
             return GuestPosition();
-        const root = evaluator._temporaries.root;
-        const location = root is null ? function_.loc : root.loc;
         const name = function_ in evaluator._shared.names;
+        const root = evaluator._temporaries.root;
+        if (root is null)
+            return GuestPosition(name is null ? null : *name);
         return GuestPosition(
             name is null ? null : *name,
-            fromStringz(location.filename),
-            location.linnum,
+            fromStringz(root.loc.filename),
+            root.loc.linnum,
         );
     }
 
@@ -1413,16 +1401,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     extern(D) private void crossNative(scope void delegate() call) {
         try {
             call();
-            if (_fault !is null)
-                throw _fault;
         } catch (Throwable thrown) {
-            // Native unwinding can retain an ordinary exception as primary.
-            // Stop at the barrier, before a guest handler can see that chain.
-            if (_fault !is null)
-                throw _fault;
             if (isHalt(thrown)) {
                 _halted = true;
-                _fault = thrown;
                 throw thrown;
             }
             if (cast(SnakebiteException) thrown !is null
@@ -2193,10 +2174,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                     throw exception.take;
             });
         } catch (Throwable exception) {
-            // Native unwinding can keep the original exception as primary.
-            // The saved Halt still ends this run.
-            if (_fault !is null)
-                throw _fault;
             if (isHalt(exception))
                 throw exception;
 
@@ -5453,11 +5430,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                     "`: it is null"),
             );
 
-        if (isHalt(guest)) {
-            _halted = true;
-            _fault = guest;
-            throw guest;
-        }
         throw GuestException.make(guest);
     }
 

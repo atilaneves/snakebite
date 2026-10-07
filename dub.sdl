@@ -21,15 +21,13 @@ subPackage {
 // (`snakebite_ffi_call_sysv_amd64`), the interpreter's native-stack-
 // switch object (`snakebite_interpreter_call_on_stack`), the object that
 // embeds the registry image of the guest module phases
-// (`snakebite_registry_image_start`) and the fault trampoline's
-// (`snakebite_fault_trampoline`), which only
+// (`snakebite_registry_image_start`), which only
 // `build/reggae.sh`'s ninja build produces, from
 // `source/snakebite/ffi/sysv_amd64.S`,
 // `source/snakebite/backends/interpreter/interpreter_stack_amd64.S`,
 // `source/snakebite/backends/registry_image_amd64.S` (with
-// `registry_slot.c`) and `source/snakebite/fault_trampoline_amd64.S` -
-// build through reggae (`build/*.sh`), not dub directly. A system C
-// compiler (`cc`) is required to build those files.
+// `registry_slot.c`) - build through reggae (`build/*.sh`), not dub
+// directly. A system C compiler (`cc`) is required to build those files.
 configuration "unittest" {
     targetType "executable"
     targetName "ut"

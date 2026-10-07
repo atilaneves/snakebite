@@ -245,6 +245,36 @@ static foreach (backend; EnumMembers!ReplBackendName) {
 }
 
 
+// The cell that halts inside a Fiber stops where compiled code stops: the
+// `finally` block of the code that resumed the Fiber does not run. CTFE
+// cannot run a Fiber.
+static foreach (backend; EnumMembers!ReplBackendName) {
+    static if (backend != ReplBackendName.ctfe)
+    @("submit.haltedCellDoesNotRunFinallyAroundAFiber." ~ backend.stringof)
+    unittest {
+        import snakebite.frontend.compiler: FrontendFlags;
+        import std.process: environment;
+
+        enum ran = "SNAKEBITE_HALT_FIBER_" ~ backend.stringof;
+        auto repl = Repl(
+            backend, [], [], FrontendFlags(["-checkaction=halt"]),
+        );
+        repl.submit(
+            "int check() {"
+            ~ " import core.thread: Fiber;"
+            ~ " import core.sys.posix.stdlib: setenv;"
+            ~ " auto fiber = new Fiber({ assert(false); });"
+            ~ " try fiber.call;"
+            ~ " finally setenv(\"" ~ ran ~ "\", \"1\", 1);"
+            ~ " return 0; }",
+        ).kind.should == SubmitResult.Kind.none;
+
+        repl.submit("check()").kind.should == SubmitResult.Kind.error;
+        environment.get(ran, "did not run").should == "did not run";
+    }
+}
+
+
 // A `foreach` over a string with a `dchar` variable calls druntime's
 // compiled `_aApplycd1` with the loop body as a delegate, so the halt
 // goes through a native frame before it reaches the `catch`. A halt is

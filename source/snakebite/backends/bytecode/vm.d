@@ -417,7 +417,6 @@ import snakebite.framestack: FrameStack;
 
 public struct Vm {
     private FrameStack _frames;
-    private Throwable _halt;
 
     @disable this();
     @disable this(this);
@@ -453,8 +452,6 @@ public struct Vm {
     ) {
         import core.stdc.string: memcpy;
 
-        if (_halt !is null)
-            throw _halt;
         assert(function_.instructions.length > 0);
         assert(function_.frameAlignment > 0);
 
@@ -582,27 +579,7 @@ private void dispatch(
     }
     scope(exit) frames.backendEntry = state.parent;
     frames.backendEntry = &state;
-    state.current = &root;
     dispatchLoop(root.pc, &root, &state);
-}
-
-private void haltDispatches(Vm* vm, Throwable fault) nothrow @nogc {
-    vm._halt = fault;
-    auto state = cast(DispatchState*) vm._frames.backendEntry;
-    // Each suspended native caller can suppress its callback's throwable.
-    // Its existing call transition must resume Halt, not guest instructions.
-    for (; state !is null; state = state.parent)
-        state.pending = cast(Activation*) &haltedNativeReturn;
-}
-
-private immutable Instruction nativeHaltInstruction = Instruction(&opNativeHalt);
-private immutable Activation haltedNativeReturn =
-    immutable(Activation)(&nativeHaltInstruction);
-
-private const(Instruction)* opNativeHalt(
-    const(Instruction)*, Activation*, DispatchState* state,
-) {
-    throw state.vm._halt;
 }
 
 pragma(inline, true)
@@ -641,15 +618,7 @@ private void dispatchLoop(
             } else
                 pc = handler(instruction, active, state);
         } catch (Throwable throwable) {
-            if (active is &haltedNativeReturn) {
-                active = state.current;
-                pc = active.pc;
-            }
             active.pc = pc;
-            // Native cleanup can retain an ordinary primary exception.
-            // The saved Halt must win before any guest handler runs.
-            if (state.vm._halt !is null)
-                throwable = state.vm._halt;
             active = handleException(active, frames, throwable, state.vm);
             pc = active.pc;
         }
@@ -669,8 +638,6 @@ private Activation* handleException(
         // A halt that ends a cell is not an error guest code handles: no
         // temporary's destructor, `catch` or `finally` sees it.
         const halting = isHalt(throwable);
-        if (halting)
-            haltDispatches(vm, throwable);
         try {
             unwindFinally(throwable, () {
                 if (halting)
@@ -679,7 +646,7 @@ private Activation* handleException(
                     active.cleanup(frames);
             });
         } catch (Throwable chained) {
-            throwable = vm._halt is null ? chained : vm._halt;
+            throwable = chained;
         }
         ExceptionCandidate[handlerBufferLength] handlerBuffer;
         const plan = isHalt(throwable)
@@ -713,7 +680,7 @@ private Activation* handleException(
                         handler.cleanupEnd);
                 });
             } catch (Throwable chained) {
-                throwable = vm._halt is null ? chained : vm._halt;
+                throwable = chained;
             }
             firstHandler = handler - active.exceptionHandlers.ptr + 1;
             continue;

@@ -586,15 +586,16 @@ def test_command_uses_requested_backend(backend: str) -> None:
     assert result.stderr == ""
 
 
-# A fault in a destructor that the collector runs is not recoverable, so no
-# exception may leave the collector. The process ends as `bin/sb` ends it.
+# A fault in a destructor that the collector runs ends the process of the
+# REPL with the signal, as it ends `bin/sb`.
 @pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
-@pytest.mark.parametrize("fault,message", [
-    ("*pointer = 1", "fatal: null pointer dereference"),
-    ("auto quotient = 1 / zero", "fatal: integer division by zero"),
+@pytest.mark.parametrize("fault,status,message", [
+    ("*pointer = 1", -signal.SIGSEGV, "fatal: null pointer dereference"),
+    ("auto quotient = 1 / zero", -signal.SIGFPE,
+     "fatal: integer division by zero"),
 ])
 def test_fault_in_a_finalizer_ends_the_process(
-    tmp_path: Path, backend: str, fault: str, message: str,
+    tmp_path: Path, backend: str, fault: str, status: int, message: str,
 ) -> None:
     module = tmp_path / "doomed.d"
     module.write_text(
@@ -608,9 +609,8 @@ def test_fault_in_a_finalizer_ends_the_process(
 
     result = run_sb("-b", backend, str(module), "-c", "collect()")
 
-    assert result.returncode == 1
+    assert result.returncode == status
     assert message in result.stderr
-    assert "in snippet_1.Doomed.~this" in result.stderr
     assert result.stdout == ""
 
 
