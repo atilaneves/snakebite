@@ -206,7 +206,7 @@ import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
 import snakebite.backends.comparison: ComparisonPlan;
 import snakebite.backends.controlflow: ControlFlowState,
-    ScopeFrame, scopePath;
+    ScopeFrame, ScopePaths, scopePathsOf;
 import snakebite.backends.exceptionplan: CatchPlan, catchPlanOf;
 import snakebite.backends.aggregateinit: AggregateInitPlan;
 import snakebite.backends.unwindplan:
@@ -333,6 +333,7 @@ private struct Shared {
     SharedTable!(TryCatchStatement, TryCatchPlan) tryCatchPlans;
     SharedTable!(TryFinallyStatement, ExceptionCandidate[]) finallyCandidates;
     SharedTable!(FinallyKey, bool) finallyRuns;
+    SharedTable!(FuncDeclaration, ScopePaths) scopePaths;
     SharedTable!(CallSiteKey, const(CallPlan)*) callSitePlans;
     SharedTable!(CallSiteKey, ContextSource) calleeContexts;
     SharedTable!(const(void)*, VariadicCallPlan) variadicCallPlans;
@@ -482,8 +483,8 @@ private struct TryCatchPlan {
 }
 
 // Whether a `finally` body runs depends on the statement, how control
-// leaves it, and where it goes: `destination` is the scope that a `goto`
-// targets, and null for every other way out.
+// leaves it, and where it goes: `destination` is the statement that a `goto`
+// lands on, and null for every other way out.
 private struct FinallyKey {
     enum Exit { gotoScope, fallThrough, transfer }
 
@@ -1403,7 +1404,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _function = function_;
         _pendingLoopLabel = null;
         _controlFlow = ControlFlowState.init;
-        _switchStatement = null;
         while (true) {
             body_.accept(this);
             if (!_controlFlow.hasGoto)
@@ -1749,8 +1749,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         callShapeOf(function_);
         closurePlanOf(function_);
         prepareFacts(function_.type.nextOf);
-        if (function_.fbody !is null)
+        if (function_.fbody !is null) {
+            scout.scopePaths = scopesOf(function_);
             function_.fbody.accept(scout);
+        }
     }
 
     extern(D) private void prepareCall(
@@ -1933,7 +1935,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         private FuncDeclaration _function;
         private Identifier _pendingLoopLabel;
         private ControlFlowState _controlFlow;
-        private SwitchStatement _switchStatement;
         private size_t _activationMark;
 
         @disable this();
@@ -1950,7 +1951,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             _function = evaluator._function;
             _pendingLoopLabel = evaluator._pendingLoopLabel;
             _controlFlow = evaluator._controlFlow;
-            _switchStatement = evaluator._switchStatement;
             _activationMark = evaluator._activationAllocations.length;
         }
 
@@ -1964,7 +1964,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             _evaluator._function = _function;
             _evaluator._pendingLoopLabel = _pendingLoopLabel;
             _evaluator._controlFlow = _controlFlow;
-            _evaluator._switchStatement = _switchStatement;
             _evaluator.releaseActivationAllocations(_activationMark);
         }
     }
@@ -2136,7 +2135,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto key = FinallyKey(cast(const(void)*) statement);
         if (_controlFlow.hasGoto) {
             key.exit = FinallyKey.Exit.gotoScope;
-            key.destination = _controlFlow.destinationScope;
+            key.destination = _controlFlow.target;
         } else
             key.exit = _controlFlow.hasTransfer
                 ? FinallyKey.Exit.transfer : FinallyKey.Exit.fallThrough;
@@ -2162,11 +2161,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.backends.exceptionplan: unwindPlanOf;
 
         // The unwind planner takes mutable ScopeFrame arrays from dmd.
-        auto source = scopePath(statement);
+        auto scopes = scopesOf(_preparing is null ? _function : _preparing);
+        auto source = scopes.through(statement);
         ScopeFrame[] destination;
         final switch (key.exit) with (FinallyKey.Exit) {
             case gotoScope:
-                destination = scopePath(cast(Statement) key.destination);
+                destination = scopes.enclosing(cast(Statement) key.destination);
                 break;
             case fallThrough:
                 if (source.length > 0)
@@ -2181,6 +2181,14 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             if (finalizer.owner == cast(const(void)*) statement)
                 return true;
         return false;
+    }
+
+    extern(D) private ScopePaths* scopesOf(FuncDeclaration function_) {
+        if (auto found = function_ in _shared.scopePaths)
+            return found;
+
+        return _shared.scopePaths.insert(
+            function_, scopePathsOf(function_.fbody));
     }
 
     override void visit(TryFinallyStatement statement) {
@@ -2497,11 +2505,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             _controlFlow.seek(cast(void*) selected);
         }
 
-        auto outerSwitch = _switchStatement;
-        _switchStatement = statement;
-        scope (exit)
-            _switchStatement = outerSwitch;
-
         statement._body.accept(this);
 
         while (true) {
@@ -2547,12 +2550,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto target = gotoCaseTarget(statement);
         assert(target !is null);
 
-        assert(_switchStatement !is null);
-
-        _controlFlow.transfer(
-            cast(void*) target,
-            cast(void*) _switchStatement.tryBody,
-        );
+        _controlFlow.transfer(cast(void*) target);
     }
 
     // The frontend's own "no case matched" default: a call to the
@@ -2572,10 +2570,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto target = gotoDefaultTarget(statement);
         assert(statement.sw !is null && target !is null);
 
-        _controlFlow.transfer(
-            cast(void*) target,
-            cast(void*) statement.sw.tryBody,
-        );
+        _controlFlow.transfer(cast(void*) target);
     }
 
     override void visit(GotoStatement statement) {
@@ -2585,10 +2580,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         assert(statement.label !is null && statement.label.statement !is null,
             "dmd rejects a `goto` to an undefined label in semantic3");
 
-        _controlFlow.transfer(
-            cast(void*) statement.label.statement,
-            cast(void*) statement.label.statement.tryBody,
-        );
+        _controlFlow.transfer(cast(void*) statement.label.statement);
     }
 
     protected override void visitThrowStatement(ThrowStatement statement) {

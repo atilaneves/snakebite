@@ -368,6 +368,158 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// A `continue` out of a `try` body runs the `finally`, from an `if` with no
+// `else`.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.continueInsideIfRunsFinally." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        3.shouldBeRetOf!(backend, q{
+            int result() {
+                int finallyRuns;
+                for (int i; i < 3; ++i) {
+                    try {
+                        if (i == 1)
+                            continue;
+                    } finally {
+                        ++finallyRuns;
+                    }
+                }
+                return finallyRuns;
+            }
+        }, "result");
+    }
+}
+
+
+// A `goto case` out of a `try` body runs the `finally`, from an `if` with
+// no `else`.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.gotoCaseInsideIfRunsFinally." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        11.shouldBeRetOf!(backend, q{
+            int pick(int v) {
+                int finallyRuns;
+                switch (v) {
+                    case 0:
+                        try {
+                            if (v == 0)
+                                goto case 1;
+                        } finally {
+                            ++finallyRuns;
+                        }
+                        break;
+                    case 1:
+                        finallyRuns += 10;
+                        break;
+                    default:
+                }
+                return finallyRuns;
+            }
+
+            int result() { return pick(0); }
+        }, "result");
+    }
+}
+
+
+// A `goto default` out of a `try` body runs the `finally`, from an `if` with
+// no `else`.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.gotoDefaultInsideIfRunsFinally." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        21.shouldBeRetOf!(backend, q{
+            int pick(int v) {
+                int finallyRuns;
+                switch (v) {
+                    case 0:
+                        try {
+                            if (v == 0)
+                                goto default;
+                        } finally {
+                            ++finallyRuns;
+                        }
+                        break;
+                    default:
+                        finallyRuns += 20;
+                }
+                return finallyRuns;
+            }
+
+            int result() { return pick(0); }
+        }, "result");
+    }
+}
+
+
+// A `throw` out of a `try` body runs the `finally` before the `catch`, from
+// an `if` with no `else`.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.throwInsideIfRunsFinally." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        11.shouldBeRetOf!(backend, q{
+            int pick(bool c) {
+                int finallyRuns;
+                try {
+                    try {
+                        if (c)
+                            throw new Exception("x");
+                    } finally {
+                        ++finallyRuns;
+                    }
+                } catch (Exception e) {
+                    finallyRuns += 10;
+                }
+                return finallyRuns;
+            }
+
+            int result() { return pick(true); }
+        }, "result");
+    }
+}
+
+
+// The error of a `final switch` that no `case` matches leaves a `try` body
+// through its `finally`, from an `if` with no `else`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE interpreter fails an assertion (rootobject.d:43) on " ~
+        "the statement that raises the switch error"),
+)) {
+    @("tryFinally.switchErrorInsideIfRunsFinally." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        11.shouldBeRetOf!(backend, q{
+            enum E { a, b }
+
+            int pick(int v) {
+                int finallyRuns;
+                try {
+                    try {
+                        if (v >= 0) {
+                            final switch (cast(E) v) {
+                                case E.a: break;
+                                case E.b: break;
+                            }
+                        }
+                    } finally {
+                        ++finallyRuns;
+                    }
+                } catch (Throwable e) {
+                    finallyRuns += 10;
+                }
+                return finallyRuns;
+            }
+
+            int result() { return pick(5); }
+        }, "result");
+    }
+}
+
+
 // The two `finally` bodies of nested `try` statements run innermost
 // first when a `return` leaves both, each exactly once, and the value
 // returned is the one computed before either ran.
@@ -1280,5 +1432,499 @@ static foreach (backend; Matrix!()) {
                 return false;
             }
         }, "result");
+    }
+}
+
+
+// A `scope(exit)` before a `return` and a `scope(failure)` after it, in one
+// function.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.scopeExitThenReturnThenScopeFailure." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void boom() { throw new Exception("x"); }
+
+            int result(ref int trace, int mode) {
+                scope(exit) trace += 1;
+                if (mode == 0)
+                    return 5;
+                scope(failure) trace += 10;
+                if (mode == 2)
+                    boom();
+                return 6;
+            }
+
+            int main() {
+                int trace;
+                if (result(trace, 0) != 5 || trace != 1) return 1;
+                trace = 0;
+                if (result(trace, 1) != 6 || trace != 1) return 2;
+                trace = 0;
+                try { result(trace, 2); return 3; } catch (Exception e) {}
+                return trace == 11 ? 0 : 4;
+            }
+        });
+    }
+}
+
+
+// A `finally` that throws replaces the value a `return` in its `try` body
+// carried out.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.finallyThrowsAfterReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            int inner() {
+                try {
+                    return 1;
+                } finally {
+                    throw new Exception("from finally");
+                }
+            }
+
+            int check() {
+                try {
+                    return inner();
+                } catch (Exception e) {
+                    return 42;
+                }
+            }
+        }, "check");
+    }
+}
+
+
+// A `throw` caught inside the `try` body does not count as an exit of the
+// `finally`'s statement.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.caughtThrowInBodyThenReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        31.shouldBeRetOf!(backend, q{
+            int result(ref int trace) {
+                try {
+                    try {
+                        throw new Exception("inner");
+                    } catch (Exception e) {
+                        return 3;
+                    }
+                } finally {
+                    ++trace;
+                }
+            }
+
+            int check() {
+                int trace;
+                const returned = result(trace);
+                return returned * 10 + trace;
+            }
+        }, "check");
+    }
+}
+
+
+// `break`s of a `switch` inside a `finally`, one of them in an `if` with no
+// `else`.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.switchBreakInFinallyIfWithoutElse." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        21.shouldBeRetOf!(backend, q{
+            int result() {
+                int n;
+                for (int i; i < 2; ++i) {
+                    try {
+                        n += 10;
+                    } finally {
+                        switch (i) {
+                            case 0:
+                                if (n > 0)
+                                    break;
+                                n += 100;
+                                break;
+                            default:
+                                n += 1;
+                        }
+                    }
+                }
+                return n;
+            }
+        }, "result");
+    }
+}
+
+
+// A `switch` with `break`s inside the `if` branch of a `finally`, which
+// has no `else`.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.switchInFinallyIfBranch." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        723.shouldBeRetOf!(backend, q{
+            int result(ref int trace, bool early, int k) {
+                try {
+                    if (early)
+                        return 7;
+                } finally {
+                    if (k >= 0) {
+                        switch (k) {
+                            case 0: trace += 1; break;
+                            case 1: trace += 2; break;
+                            default: trace += 4; break;
+                        }
+                        trace += 10;
+                    }
+                }
+                return 0;
+            }
+
+            int check() {
+                int trace;
+                const a = result(trace, true, 0);
+                result(trace, false, 1);
+                result(trace, true, -1);
+                return a * 100 + trace;
+            }
+        }, "check");
+    }
+}
+
+
+// A `scope(exit)` guard runs on a normal return from a function with an
+// `out` contract.
+static foreach (backend; Matrix!()) {
+    @("scopeGuard.exitRunsOnReturnWithOutContract." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int fine() { log ~= "fine,"; return 3; }
+                int f() out (r; r > 0) {
+                    scope(exit) log ~= "E,";
+                    return fine();
+                }
+                if (f() != 3) return 2;
+                return log == "fine,E," ? 0 : log == "fine," ? 3 : 5;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("scopeGuard.successRunsOnReturnWithOutContract." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int fine() { log ~= "fine,"; return 3; }
+                int f() out (r; r > 0) {
+                    scope(success) log ~= "S,";
+                    return fine();
+                }
+                if (f() != 3) return 2;
+                return log == "fine,S," ? 0 : log == "fine," ? 3 : 5;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("scopeGuard.exitRunsOnReturnWithInvariant." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C {
+                string log;
+                int x = 1;
+                invariant { assert(x > 0); }
+                int fine() { log ~= "fine,"; return 3; }
+                int f() {
+                    scope(exit) log ~= "E,";
+                    return fine();
+                }
+            }
+
+            int main() {
+                auto c = new C;
+                if (c.f() != 3) return 2;
+                return c.log == "fine,E," ? 0 : c.log == "fine," ? 3 : 5;
+            }
+        });
+    }
+}
+
+
+// The `out` contract runs after a `scope(exit)` guard of a `void` function.
+static foreach (backend; Matrix!()) {
+    @("scopeGuard.exitRunsOnVoidReturnWithOutContract." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                void f() out { log ~= "O,"; } do {
+                    scope(exit) log ~= "E,";
+                    log ~= "b,";
+                    return;
+                }
+                f();
+                return log == "b,E,O," ? 0 : 3;
+            }
+        });
+    }
+}
+
+// A `return` inside a nested block runs the guard once.
+static foreach (backend; Matrix!()) {
+    @("scopeGuard.exitRunsOnNestedReturnWithOutContract." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int f(bool c) out (r; r > 0) {
+                    scope(exit) log ~= "E,";
+                    if (c) {
+                        { return 3; }
+                    }
+                    return 4;
+                }
+                if (f(true) != 3) return 2;
+                return log == "E," ? 0 : 3;
+            }
+        });
+    }
+}
+
+// A `scope(failure)` guard stays silent on a normal return.
+static foreach (backend; Matrix!()) {
+    @("scopeGuard.failureSkippedOnReturnWithOutContract." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int f() out (r; r > 0) {
+                    scope(failure) log ~= "F,";
+                    scope(exit) log ~= "E,";
+                    return 3;
+                }
+                if (f() != 3) return 2;
+                return log == "E," ? 0 : 3;
+            }
+        });
+    }
+}
+
+// A `finally` runs on a normal return in a function with an `out` contract.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.runsOnReturnWithOutContract." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int f() out (r; r > 0) {
+                    try {
+                        return 3;
+                    } finally {
+                        log ~= "F,";
+                    }
+                }
+                if (f() != 3) return 2;
+                return log == "F," ? 0 : 3;
+            }
+        });
+    }
+}
+
+// A local's destructor runs on a normal return in a function with an `out` contract.
+static foreach (backend; Matrix!()) {
+    @("scopeGuard.localDestructorRunsOnReturnWithOutContract." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                struct S { string* log; ~this() { *log ~= "D,"; } }
+                int f() out (r; r > 0) {
+                    S s = S(&log);
+                    return 3;
+                }
+                if (f() != 3) return 2;
+                return log == "D," ? 0 : 3;
+            }
+        });
+    }
+}
+
+// Several guards run in reverse order before the return.
+static foreach (backend; Matrix!()) {
+    @("scopeGuard.exitOrderWithOutContract." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int f() out (r; r > 0) {
+                    scope(exit) log ~= "1,";
+                    scope(exit) log ~= "2,";
+                    return 3;
+                }
+                if (f() != 3) return 2;
+                return log == "2,1," ? 0 : 3;
+            }
+        });
+    }
+}
+
+// A value parameter's destructor runs once at the function end, however a `goto` moves within the body.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.userGotoRunsParameterDestructorOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int* count; ~this() { ++*count; } }
+            int loop(S s) {
+                int i;
+            again:
+                if (++i < 3) goto again;
+                return i;
+            }
+            int main() {
+                int count;
+                const r = loop(S(&count));
+                if (r != 3) return 1;
+                return count == 1 ? 0 : 10 + count;
+            }
+        });
+    }
+}
+
+// An `out` contract makes dmd send `return` through a label; the value parameter's destructor still runs once.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.returnWithOutContractRunsParameterDestructorOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int* count; ~this() { ++*count; } }
+            int f(S s) out (r; r > 0) { return 3; }
+            int main() {
+                int count;
+                if (f(S(&count)) != 3) return 1;
+                return count == 1 ? 0 : 10 + count;
+            }
+        });
+    }
+}
+
+// An invariant makes dmd send `return` through a label; the value parameter's destructor still runs once.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.returnWithInvariantRunsParameterDestructorOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int* count; ~this() { ++*count; } }
+            class C {
+                int x = 1;
+                invariant { assert(x > 0); }
+                int f(S s) { return 3; }
+            }
+            int main() {
+                int count;
+                auto c = new C;
+                if (c.f(S(&count)) != 3) return 1;
+                return count == 1 ? 0 : 10 + count;
+            }
+        });
+    }
+}
+
+// dmd replaces the cleanup of a returned local (NRVO) after it resolves jumps; a `goto` in its scope must not run that destructor.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.userGotoInNrvoScope." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int* count; int v; ~this() { ++*count; } }
+            S make(int* count) {
+                S s = S(count);
+                int i;
+            again:
+                if (++i < 3) goto again;
+                s.v = i;
+                return s;
+            }
+            int main() {
+                int count;
+                {
+                    auto s = make(&count);
+                    if (s.v != 3) return 1;
+                    if (count != 0) return 10 + count;
+                }
+                return count == 1 ? 0 : 20 + count;
+            }
+        });
+    }
+}
+
+// `goto case` and `goto default` do not run a value parameter's destructor early.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.gotoCaseRunsParameterDestructorOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int* count; ~this() { ++*count; } }
+            int pick(S s, int v) {
+                switch (v) {
+                    case 0: goto case 1;
+                    case 1: return 5;
+                    case 2: goto default;
+                    default: return 9;
+                }
+            }
+            int main() {
+                int count;
+                if (pick(S(&count), 0) != 5) return 1;
+                if (count != 1) return 10 + count;
+                if (pick(S(&count), 2) != 9) return 2;
+                return count == 2 ? 0 : 20 + count;
+            }
+        });
+    }
+}
+
+// `goto case` in the scope of a returned local (NRVO) must not run that local's destructor.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.gotoCaseInNrvoScope." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int* count; int v; ~this() { ++*count; } }
+            S make(int* count, int k) {
+                S s = S(count);
+                switch (k) {
+                    case 0: goto case 1;
+                    case 1: s.v = 5; break;
+                    default: s.v = 9;
+                }
+                return s;
+            }
+            int main() {
+                int count;
+                {
+                    auto s = make(&count, 0);
+                    if (s.v != 5) return 1;
+                    if (count != 0) return 10 + count;
+                }
+                return count == 1 ? 0 : 20 + count;
+            }
+        });
     }
 }

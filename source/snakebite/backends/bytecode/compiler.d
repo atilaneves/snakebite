@@ -14,7 +14,7 @@ import snakebite.backends.switchplan:
 import snakebite.backends.fullexpression:
     FullExpressionKind, FullExpressionScope;
 import snakebite.backends.controlflow:
-    ScopeFrame, scopePath;
+    ScopeFrame, ScopePaths, scopePathsOf;
 import snakebite.backends.exceptionplan:
     UnwindPlan, catchPlanOf, unwindPlanOf;
 import snakebite.backends.checkplan: BoundsCheck, hookOf;
@@ -777,11 +777,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `_body` alone (see `visit(TryFinallyStatement)`): a `return` inside
     // `finalbody` itself must not re-run the `finally` it is already in.
     private Statement[] _pendingFinallyBodies;
-    // The resolved enclosing scopes while compiling a protected body. A
-    // `goto case`/`goto default` has no `tryBody` of its own, so its source
-    // scope uses this path while its destination uses the switch's resolved
-    // `tryBody`.
-    private ScopeFrame[] _activeScopePath;
+    private ScopePaths _scopePaths;
     // The loop or unrolled `foreach` this compiler is currently inside the
     // body of, innermost last - what a `continue` targets, labelled or
     // not. A `do` knows its own continue target (the condition it
@@ -962,6 +958,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     public Function build(Statement body_) {
+        _scopePaths = scopePathsOf(body_);
         compileStatement(body_);
 
         if (!_finished) {
@@ -1362,8 +1359,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        _loops ~= LoopContext(label, size_t.max, null, activeScopePath);
-        _breakables ~= Breakable(label, null, activeScopePath);
+        _loops ~= LoopContext(label, size_t.max, null, _scopePaths.enclosing(statement));
+        _breakables ~= Breakable(label, null, _scopePaths.enclosing(statement));
 
         _finished = false;
         foreach (child; *statement.statements) {
@@ -1404,8 +1401,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto label = consumeLabel(statement); // auto: const(Identifier) will not implicitly convert back
         const bodyStart = _instructions.length;
 
-        _loops ~= LoopContext(label, size_t.max, null, activeScopePath);
-        _breakables ~= Breakable(label, null, activeScopePath);
+        _loops ~= LoopContext(label, size_t.max, null, _scopePaths.enclosing(statement));
+        _breakables ~= Breakable(label, null, _scopePaths.enclosing(statement));
         compileStatement(statement._body);
         const bodyFinished = _finished;
         const breakable = _breakables[$ - 1];
@@ -1503,9 +1500,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         );
         const finallyDepthAtStart = _pendingFinallyBodies.length;
         const bodyStart = _instructions.length;
-        _activeScopePath ~= ScopeFrame(cast(void*) statement, false);
         compileStatement(statement._body);
-        _activeScopePath.length -= 1;
         const bodyFinished = _finished;
         const bodyEnd = _instructions.length;
 
@@ -1565,13 +1560,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _pendingFinallyBodies ~= statement.finalbody;
         const finallyDepth = _pendingFinallyBodies.length;
         const bodyStart = _instructions.length;
-        _activeScopePath ~= ScopeFrame(
-            cast(void*) statement, true, statement.finalbody,
-        );
         compileStatement(statement._body);
         const bodyEnd = _instructions.length;
         const bodyFinished = _finished;
-        _activeScopePath.length -= 1;
         _pendingFinallyBodies.length -= 1;
 
         // Exceptional entry runs this range inside native try/finally so
@@ -1611,7 +1602,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     protected override void visitReturnTransfer(ReturnStatement statement) {
         const returnOffset = _returnOffset;
-        runPendingFinallyBodies(unwindPlanOf(activeScopePath));
+        runPendingFinallyBodies(unwindPlanOf(
+            _scopePaths.enclosing(statement)));
         if (_finished)
             return;
 
@@ -1718,7 +1710,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opJump, 0, 0, 0);
         jumpToDefault(statement, defaultJumpIndex);
 
-        _breakables ~= Breakable(label, null, activeScopePath);
+        _breakables ~= Breakable(label, null, _scopePaths.enclosing(statement));
         _switchStack ~= statement;
         compileSwitchBody(statement._body);
         const bodyFinished = _finished;
@@ -1767,8 +1759,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         // Finalizer bodies stay mutable DMD statements for code generation.
         auto unwind = unwindPlanOf(
-            activeScopePath,
-            scopePath(_switchStack[$ - 1].tryBody),
+            _scopePaths.enclosing(statement),
+            _scopePaths.enclosing(target),
         );
         runPendingFinallyBodies(unwind);
 
@@ -1786,8 +1778,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         // Finalizer bodies stay mutable DMD statements for code generation.
         auto unwind = unwindPlanOf(
-            activeScopePath,
-            scopePath(statement.sw.tryBody),
+            _scopePaths.enclosing(statement),
+            _scopePaths.enclosing(target),
         );
         runPendingFinallyBodies(unwind);
 
@@ -1804,7 +1796,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto target = statement.label.statement;
         // Finalizer bodies stay mutable DMD statements for code generation.
         auto unwind = unwindPlanOf(
-            scopePath(statement.tryBody), scopePath(target.tryBody),
+            _scopePaths.enclosing(statement),
+            _scopePaths.enclosing(target),
         );
         runPendingFinallyBodies(unwind);
         if (_finished)
@@ -1819,13 +1812,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         // A goto only leaves the path that reaches it. Other paths still
         // fall through to the statements after it, including its target.
-    }
-
-    extern(D) private ScopeFrame[] activeScopePath() {
-        ScopeFrame[] result;
-        foreach_reverse (frame; _activeScopePath)
-            result ~= frame;
-        return result;
     }
 
     // dmd's own synthesised "no case matched" default (see
@@ -1853,7 +1839,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             assert(0, "`visitBreak` rejects a `break` to an unknown label");
 
         runPendingFinallyBodies(unwindPlanOf(
-            activeScopePath, _breakables[target].scopePath,
+            _scopePaths.enclosing(statement), _breakables[target].scopePath,
         ));
         if (_finished)
             return;
@@ -1867,29 +1853,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     extern(D):
 
     // Each exit emits the shared scope plan's cleanup sequence. Temporarily
-    // leave each scope before compiling its cleanup: transfers and failures
-    // inside that cleanup must see only the scopes that still enclose it.
+    // leave each pending `finally` before compiling it: a `return` inside
+    // that cleanup must not run the `finally` it is already in.
     private void runPendingFinallyBodies(UnwindPlan plan) {
         if (plan.finalizers.length == 0)
             return;
 
         auto bodies = _pendingFinallyBodies.dup; // Restored to mutable compiler state.
-        auto scopes = _activeScopePath.dup; // Restored to mutable compiler state.
-        scope (exit) {
+        scope (exit)
             _pendingFinallyBodies = bodies;
-            _activeScopePath = scopes;
-        }
-        auto scopeEnd = scopes.length;
         foreach (offset, finalizer; plan.finalizers) {
             const index = bodies.length - offset - 1;
             assert(bodies[index] is finalizer.body);
-            while (scopeEnd != 0
-                    && scopes[scopeEnd - 1].owner != finalizer.owner)
-                --scopeEnd;
-            assert(scopeEnd != 0);
-            --scopeEnd;
             _pendingFinallyBodies = bodies[0 .. index].dup;
-            _activeScopePath = scopes[0 .. scopeEnd].dup;
             const start = _instructions.length;
             compileFinallyBody(finalizer.body);
             _finallyHoles ~= FinallyHole(start, _instructions.length, index);
@@ -2376,8 +2352,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (guarded)
             branchIndex = compileConditionBranch(statement.condition);
 
-        _loops ~= LoopContext(label, size_t.max, null, activeScopePath);
-        _breakables ~= Breakable(label, null, activeScopePath);
+        _loops ~= LoopContext(label, size_t.max, null, _scopePaths.enclosing(statement));
+        _breakables ~= Breakable(label, null, _scopePaths.enclosing(statement));
         compileStatement(statement._body);
         const breakable = _breakables[$ - 1];
         _breakables = _breakables[0 .. $ - 1];
@@ -2438,7 +2414,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 "`visitContinue` rejects a `continue` to an unknown label");
 
         runPendingFinallyBodies(unwindPlanOf(
-            activeScopePath, _loops[index].scopePath,
+            _scopePaths.enclosing(statement), _loops[index].scopePath,
         ));
         if (_finished)
             return;
