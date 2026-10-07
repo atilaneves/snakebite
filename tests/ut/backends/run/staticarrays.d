@@ -1291,3 +1291,74 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+// A slice of a static array whose upper bound is only known at run time.
+static foreach (backend; Matrix!()) {
+    @("staticArray.sliceWithRuntimeBound." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                char[8] b = "abcdefgh";
+                int n = 3;
+                assert(b[0 .. n] == "abc");
+            }
+        });
+    }
+}
+
+
+// Compiled D checks the lengths of a static array's sub-slice and its
+// source before it copies anything, so a mismatch is a `RangeError`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns a length mismatch into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("staticArray.subSliceCopyLengthMismatchIsRangeError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+
+            void main() {
+                int[4] a;
+                int[] d = [1, 2, 3];
+                bool caught;
+                try {
+                    a[1 .. 3] = d;
+                } catch (RangeError) {
+                    caught = true;
+                }
+                assert(caught);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns a length mismatch into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("staticArray.wholeSliceCopyLengthMismatchIsRangeError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+
+            void main() {
+                int[4] a;
+                int[] d = [1, 2, 3];
+                bool caught;
+                try {
+                    a[] = d;
+                } catch (RangeError) {
+                    caught = true;
+                }
+                assert(caught);
+            }
+        });
+    }
+}

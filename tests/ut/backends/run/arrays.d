@@ -1324,3 +1324,28 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// The byte size of `new T[](n)` is too big for a `size_t`: druntime throws
+// instead of allocating a block that is smaller than the array's length.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE reports an array allocation that is too big as a compile-time error"),
+)) {
+    @("array.newWithOverflowingByteSizeThrows." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                size_t n = size_t.max / 8 + 2;
+                bool caught;
+                try {
+                    auto p = new long[](n);
+                } catch (Throwable) {
+                    caught = true;
+                }
+                assert(caught);
+            }
+        });
+    }
+}

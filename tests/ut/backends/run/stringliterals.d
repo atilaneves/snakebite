@@ -607,3 +607,36 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible, "CTFE cannot
         });
     }
 }
+
+
+// A host C function reads a plain literal through its `.ptr`.
+static foreach (backend; Matrix!(NoCtfe)) {
+    @("string.literalPtrPassedToHostFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.string: strlen;
+
+            void main() {
+                auto n = strlen("hi".ptr);
+                assert(n == 2);
+            }
+        });
+    }
+}
+
+// A literal as the argument of a `const(char)*` parameter of a host
+// function.
+static foreach (backend; Matrix!(NoCtfe)) {
+    @("string.literalToConstCharPointerParameter." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.stdio: printf;
+
+            void main() {
+                assert(printf("x\n") == 2);
+            }
+        });
+    }
+}
