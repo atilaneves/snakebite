@@ -2801,3 +2801,37 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// A `case` inside an `if (__ctfe)` block is a jump target at run time, so
+// the block compiles even though it never runs through its `if`. dmd leaves
+// the statements of that block unlowered: a heap `new` has no
+// `_d_newitemT` call there.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd 2.113.0's code generator crashes on a `case` in an "
+            ~ "`if (__ctfe)` block; ldc compiles it and the program "
+            ~ "exits with status 0"),
+    Omit!(Ctfe, Because.inexpressible, "`__ctfe` is true in CTFE"),
+)) {
+    @("heapNewInsideCtfeBlockWithCase." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f(int x) {
+                switch (x) {
+                    if (__ctfe) {
+                        case 1:
+                            auto p = new int(3);
+                            return *p;
+                    }
+                    default:
+                        return 0;
+                }
+            }
+            int main() {
+                return f(0);
+            }
+        });
+    }
+}

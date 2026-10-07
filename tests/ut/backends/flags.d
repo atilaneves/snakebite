@@ -873,3 +873,28 @@ unittest {
     cMessageOf(BoundsCheck.slice).should == "array slice out of bounds";
     cMessageOf(BoundsCheck.sliceCopy).should == "array overflow";
 }
+
+
+// `-betterC` sets no lowering on a `~`, and dmd's glue never emits it. A
+// `case` in an `if (__ctfe)` block makes that block a jump target at run
+// time, so a backend still compiles the `~` in it.
+static foreach (backend; Guests) {
+    @("flags.betterC.catInCtfeBlockWithCase." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shouldRun!backend(Row(["-betterC"], q{
+            int f(int x, string a, string b) {
+                switch (x) {
+                    if (__ctfe) {
+                        case 1:
+                            auto s = a ~ b;
+                            return cast(int) s.length;
+                    }
+                    default:
+                        return 0;
+                }
+            }
+            unittest { assert(f(0, "a", "b") == 0); }
+        }, Expect.returned));
+    }
+}
