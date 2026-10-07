@@ -352,3 +352,23 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot start the native worker threads of a task pool"),
+)) {
+    @("taskPoolReduce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.parallelism: taskPool;
+            import std.range: iota;
+
+            int main() {
+                const sum = taskPool.reduce!"a + b"(iota(1, 101));
+                return sum == 5050 ? 0 : 1;
+            }
+        });
+    }
+}

@@ -640,3 +640,40 @@ static foreach (backend; Matrix!(
         "no builtin wrapper for `core.simd.__simd`".should.be in result.output;
     }
 }
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot start the native worker threads of a task pool"),
+)) {
+    @("taskPoolReduceInRelease." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-task-pool-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "app.d");
+        source.write(q{
+            module app;
+            import std.parallelism;
+            import std.range : iota;
+            unittest {
+                auto s = taskPool.reduce!"a + b"(iota(1, 101));
+                assert(s == 5050);
+            }
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-main", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else enum name = "bytecode";
+            const result = execute([
+                "timeout", "60", buildPath(getcwd, "bin", "sb"),
+                "-b", name, "--no-optimise-image", directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}
