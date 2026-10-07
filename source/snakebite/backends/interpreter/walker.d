@@ -4951,16 +4951,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // the array itself rather than a `.ptr` access node - reading the
         // array's own pointer word is what this cast means, not an
         // arbitrary reinterpretation of the array's bytes as a `T*`.
-        // The slice is evaluated as a value because its operand need not
-        // have storage: `__traits(initSymbol, S).ptr` and a call's result
-        // are slices that live nowhere.
-        case sliceToPointer: {
-            align(size_t.sizeof) ubyte[arrayValueSize] buffer = void;
-            evaluate(
-                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
-            applyCast(layoutOf(plan), buffer.ptr, _place);
+        // `_d_arrayappendcTX_`, on the `~=` lowering's own chain, reads
+        // `px.ptr` this way to ask the GC what it already knows about the
+        // block backing the array being grown.
+        case sliceToPointer:
+            applyCast(layoutOf(plan), addressOf(expression.e1), _place);
             return;
-        }
 
         // A pointer cast to a dynamic array reads the array's native
         // `{length, ptr}` value from the address in the pointer.
