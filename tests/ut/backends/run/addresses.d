@@ -235,3 +235,56 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// The address of `p[i]` in a loop condition of a null `int*` reads nothing.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: cannot cast `&null` to `ulong` at compile time"),
+)) {
+    @("nullPointerAddress.indexInLoopCondition." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int* p;
+                size_t i;
+                size_t last;
+                for (; cast(size_t) &p[i] < 12; ++i) last = cast(size_t) &p[i];
+                assert(i == 3 && last == 8);
+            }
+        });
+    }
+}
+
+// A `ref` return of `p[3]` of a null `int*` that the caller only takes the address of.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: cannot index through null pointer `p`"),
+)) {
+    @("nullPointerAddress.refReturnAddressOnly." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            ref int at(int* p) { return p[3]; }
+            void main() { assert(cast(size_t) &at(null) == 12); }
+        });
+    }
+}
+
+// The slice `p[1 .. 3]` of a null `int*` has a pointer and a length, and no element is read.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: cannot slice null pointer `p`"),
+)) {
+    @("nullPointerAddress.sliceOfNullPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int* p;
+                auto s = p[1 .. 3];
+                assert(cast(size_t) s.ptr == 4 && s.length == 2);
+            }
+        });
+    }
+}

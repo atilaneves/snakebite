@@ -3954,3 +3954,45 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A `final` method of an interface is a direct call: its `this` is the
+// interface reference, which is null, and nothing reads it.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: function call through null class reference `null`"),
+)) {
+    @("nullReceiver.finalInterfaceMethodCallDoesNotFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            interface I { final int w() { return 3; } int m(); }
+            class C: I { int m() { return 6; } }
+            void main() {
+                C c;
+                I i = c;
+                assert(i.w() == 3);
+            }
+        });
+    }
+}
+
+// A `final` method that calls another `final` method passes its null `this` on.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: function call through null class reference `null`"),
+)) {
+    @("nullReceiver.finalMethodCallsFinalMethodDoesNotFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C {
+                final int f() { return 7; }
+                final int g() { return f() + 1; }
+            }
+            void main() {
+                C c;
+                assert(c.g() == 8);
+            }
+        });
+    }
+}

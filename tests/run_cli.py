@@ -1675,6 +1675,30 @@ FAULTS = [
      "int main() { int zero; return divide(1, zero); }\n",
      -signal.SIGFPE, "fatal: integer division by zero or overflow",
      "main.divide"),
+    ("call through a null function pointer",
+     "module main;\n"
+     "int call(int function() callee) {\n"
+     "    int unused = 1;\n"
+     "    return callee();\n"
+     "}\n"
+     "int main() { int function() callee; return call(callee); }\n",
+     -signal.SIGSEGV, "fatal: null pointer dereference", "main.call"),
+    ("call through a null delegate",
+     "module main;\n"
+     "int call(int delegate() callee) {\n"
+     "    int unused = 1;\n"
+     "    return callee();\n"
+     "}\n"
+     "int main() { int delegate() callee; return call(callee); }\n",
+     -signal.SIGSEGV, "fatal: null pointer dereference", "main.call"),
+    ("throw of a null reference",
+     "module main;\n"
+     "void raise(Throwable thrown) {\n"
+     "    int unused = 1;\n"
+     "    throw thrown;\n"
+     "}\n"
+     "int main() { Throwable thrown; raise(thrown); return 0; }\n",
+     -signal.SIGSEGV, "fatal: null pointer dereference", "main.raise"),
 ]
 
 
