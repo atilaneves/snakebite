@@ -62,7 +62,8 @@ public struct RuntimeTypes {
         // instead includes the header and the default field values.
         if (auto classDeclaration = declaration.isClassDeclaration)
             return _classInfo(classDeclaration).m_init;
-        return _initialValue(declaration.type, declaration.loc);
+        // One image per struct, shared with `typeid(S).initializer`.
+        return structInfo(declaration.isStructDeclaration).m_init;
     }
 
     public immutable(void)* rtInfo(AggregateDeclaration declaration) {

@@ -3184,9 +3184,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         auto variable = declaration.isVarDeclaration;
         if (variable is null)
-            assert(0, "function and TypeInfo addresses are `SymOffExp`s, an "
-                ~ "initializer symbol is handled before this, so a name here "
-                ~ "is a variable");
+            assert(0, "function and TypeInfo addresses are `SymOffExp`s and "
+                ~ "the storage resolver sends only variables here");
 
         if (variable.isDataseg)
             return staticSlotOf(variable);

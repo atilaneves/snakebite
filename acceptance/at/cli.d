@@ -640,3 +640,79 @@ static foreach (backend; Matrix!(
         "no builtin wrapper for `core.simd.__simd`".should.be in result.output;
     }
 }
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd CTFE: variable `pool` cannot be modified at compile time"),
+)) {
+    @("taskPoolReduceRunsToCompletion." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-task-pool-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "app.d");
+        source.write(q{
+            module app;
+            import std.parallelism;
+            import std.range : iota;
+            unittest {
+                auto s = taskPool.reduce!"a + b"(iota(1, 101));
+                assert(s == 5050);
+            }
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-main", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
+            const result = execute([
+                "timeout", "60", buildPath(getcwd, "bin", "sb"),
+                "-b", name, "--no-optimise-image", directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("fileIsRelativeToTheDubProject." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-file-path-" ~ thisProcessID.text ~ backend.stringof);
+        mkdirRecurse(buildPath(directory, "source"));
+        mkdirRecurse(buildPath(directory, "tests", "pkg"));
+        scope(exit) directory.rmdirRecurse;
+        buildPath(directory, "dub.sdl").write(
+            "name \"app\"\nsourcePaths \"source\" \"tests\"\n"
+            ~ "importPaths \"source\" \"tests\"\n");
+        buildPath(directory, "source", "app.d").write(
+            "module app;\nvoid main() {}\n");
+        buildPath(directory, "tests", "pkg", "behave.d").write(q{
+            module pkg.behave;
+            unittest {
+                assert(__FILE__ == "tests/pkg/behave.d", __FILE__);
+            }
+        });
+        static if (is(backend == Native))
+            const result = execute(["dub", "test"],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
+            const result = execute([
+                "timeout", "60", buildPath(getcwd, "bin", "sb"),
+                "-b", name, "--no-optimise-image", directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}
