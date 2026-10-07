@@ -191,7 +191,6 @@ public struct Repl {
         import snakebite.backends: Program;
         import snakebite.backends.haltprocess: HostActions;
 
-        // A fault ends the cell like a halt does: the default action throws.
         HostActions actions;
         actions.halt = &endCell;
         return Program(

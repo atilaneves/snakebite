@@ -27,19 +27,14 @@ public noreturn haltProcess() nothrow @nogc @trusted {
     assert(0);
 }
 
-// What a program does when it ends the run: a failed check under
-// `-checkaction=halt`, and a guest fault. The process that owns the program
-// decides, so the program carries the actions and no backend keeps a global
-// one.
+// What a program does when a check fails under `-checkaction=halt`. The
+// process that owns the program decides, so the program carries the action
+// and no backend keeps a global one.
 public struct HostActions {
-    import snakebite.backends.guestfault: GuestFault;
-
     public HaltAction halt = &haltProcess;
-    public GuestFault.Action fault = &GuestFault.throwFault;
 }
 
-// What an action that ends only a cell throws, for a halt and for a guest
-// fault alike (`GuestFaultException` is a subclass). A halt is not an error
+// What an action that ends only a cell throws. A halt is not an error
 // that guest code handles, so it is neither an `Exception` nor an `Error`:
 // druntime code that handles every `Exception` (`rt_finalize2` makes a
 // `FinalizeError` of one) lets it pass. Each backend checks `isHalt` before

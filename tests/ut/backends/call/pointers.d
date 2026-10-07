@@ -2163,3 +2163,147 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+// A `ref` argument is an address: `f(*p)` reads no memory, as `&*p` does not.
+// Compiled D makes the call; only a use of the parameter faults.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE rejects a dereference of a null pointer"),
+)) {
+    @("pointers.refArgumentThroughNullPointerIsNotAFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        size_t addressOf(ref int value) { return cast(size_t) &value; }
+
+        int main() {
+            int* p;
+            return addressOf(*p) == 0 ? 0 : 1;
+        }
+        });
+    }
+}
+
+// The same for a field behind a null pointer.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE rejects a dereference of a null pointer"),
+)) {
+    @("pointers.refArgumentThroughNullFieldIsNotAFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        struct S { int a; int b; }
+
+        size_t addressOf(ref int value) { return cast(size_t) &value; }
+
+        int main() {
+            S* s;
+            return addressOf(s.b) == 4 ? 0 : 1;
+        }
+        });
+    }
+}
+
+// A `ref` local is an address too: `ref int r = *p;` reads no memory.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE rejects a dereference of a null pointer"),
+)) {
+    @("pointers.refLocalThroughNullIsNotAFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        int main() {
+            int* p;
+            ref int r = *p;
+            return cast(size_t) &r == 0 ? 0 : 1;
+        }
+        });
+    }
+}
+
+// A slice of a static array field is the address of the field and its length:
+// `p.elements[]` reads no memory.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE rejects a dereference of a null pointer"),
+)) {
+    @("pointers.staticArraySliceThroughNullIsNotAFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        struct S { int first; int[4] elements; }
+
+        int main() {
+            S* p;
+            auto slice = p.elements[];
+            return cast(size_t) slice.ptr == 4 && slice.length == 4 ? 0 : 1;
+        }
+        });
+    }
+}
+
+// A struct method receives `this` by reference: the call through a null
+// pointer reads no memory. Compiled D runs the method; only a use of a field
+// faults.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE rejects a dereference of a null pointer"),
+)) {
+    @("pointers.structMethodThroughNullIsNotAFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        struct S {
+            int field;
+            bool isNull() { return &this is null; }
+        }
+
+        int main() {
+            S* p;
+            return p.isNull() ? 0 : 1;
+        }
+        });
+    }
+}
+
+// `&e` forms an address and reads no memory: the classic `offsetof` through a
+// null pointer is no fault.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE rejects the address of a field behind a null pointer as a " ~
+        "dereference of a null pointer"),
+)) {
+    @("pointers.addressOfStructFieldThroughNullIsNotAFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        struct S { int a; int b; }
+
+        int main() {
+            return cast(size_t) &(cast(S*) null).b == 4 ? 0 : 1;
+        }
+        });
+    }
+}
+
+// The address of a field of a null class reference reads no memory.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE rejects the address of a field of a null class reference: " ~
+        "the class is `null` and cannot be dereferenced"),
+)) {
+    @("pointers.addressOfClassFieldThroughNullIsNotAFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        class C { int first; int second; }
+
+        int main() {
+            C c;
+            return cast(size_t) &c.second == C.second.offsetof ? 0 : 1;
+        }
+        });
+    }
+}

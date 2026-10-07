@@ -2,7 +2,6 @@ module ut.backends.call.arithmetic;
 
 
 import snakebite.backends.backend: Program;
-import snakebite.backends.guestfault: GuestFault, GuestFaultException;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import std.format: format;
@@ -289,128 +288,6 @@ static foreach (backend; Matrix!()) {
             },
             "remainder",
         );
-    }
-}
-
-// A zero divisor has no answer in D, and the host's divide instruction
-// raises SIGFPE on it. Both backends report that as the guest's fault
-// rather than ending the host process; compiled D really does die, and
-// dmd's interpreter reports a diagnostic, so those arms are omitted.
-private alias ByZero = Matrix!(
-    Omit!(Native, Because.inexpressible,
-        "the test catches the fault of a call on a backend object, and the "
-        ~ "Native arm is code compiled into bin/ut with no such object"),
-    Omit!(Ctfe, Because.diverges,
-        "dmd's interpreter reports a division by zero as a diagnostic and "
-        ~ "raises no GuestFaultException"),
-);
-
-static foreach (backend; ByZero) {
-    @("arithmetic.divide.byZero." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        shouldFaultOnZeroDivisor!backend("int", "/", "quotient");
-    }
-}
-
-private void shouldFaultOnZeroDivisor(BackendType)(
-    in string type,
-    in string op,
-    in string name,
-) {
-    auto module_ = parseSnippet(format(q{
-        %1$s seven() { return 7; }
-        %1$s zero() { return 0; }
-        %1$s %3$s() { return seven() %2$s zero(); }
-    }, type, op, name));
-
-    GuestFaultException fault;
-    long result;
-    try
-        new BackendType(Program([module_])).call(
-            module_.findFunction(name), &result, []);
-    catch (GuestFaultException caught)
-        fault = caught;
-
-    fault.shouldNotBeNull;
-    fault.kind.should == GuestFault.Kind.divisionByZero;
-}
-
-static foreach (backend; ByZero) {
-    @("arithmetic.modulo.byZero." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        shouldFaultOnZeroDivisor!backend("int", "%", "remainder");
-    }
-}
-
-static foreach (backend; ByZero) {
-    @("arithmetic.divide.byZero.unsigned." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        shouldFaultOnZeroDivisor!backend("uint", "/", "quotient");
-    }
-}
-
-static foreach (backend; ByZero) {
-    @("arithmetic.modulo.byZero.unsigned." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        shouldFaultOnZeroDivisor!backend("uint", "%", "remainder");
-    }
-}
-
-static foreach (backend; ByZero) {
-    @("arithmetic.divide.byZero.arrayOperation." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        auto module_ = parseSnippet(q{
-            int zero() { return 0; }
-            int quotients() {
-                int[] a = new int[2];
-                int[] b = [7, 8];
-                int[] c = [1, zero()];
-                a[] = b[] / c[];
-                return a[0];
-            }
-        });
-
-        GuestFaultException fault;
-        int result;
-        try
-            new backend(Program([module_])).call(
-                module_.findFunction("quotients"), &result, []);
-        catch (GuestFaultException caught)
-            fault = caught;
-
-        fault.shouldNotBeNull;
-        fault.kind.should == GuestFault.Kind.divisionByZero;
-    }
-}
-
-static foreach (backend; ByZero) {
-    @("arithmetic.divideAssign.byZero.arrayOperation." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        auto module_ = parseSnippet(q{
-            int zero() { return 0; }
-            int quotients() {
-                int[] a = [7, 8];
-                a[] /= zero();
-                return a[0];
-            }
-        });
-
-        GuestFaultException fault;
-        int result;
-        try
-            new backend(Program([module_])).call(
-                module_.findFunction("quotients"), &result, []);
-        catch (GuestFaultException caught)
-            fault = caught;
-
-        fault.shouldNotBeNull;
-        fault.kind.should == GuestFault.Kind.divisionByZero;
     }
 }
 

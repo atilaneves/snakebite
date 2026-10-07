@@ -23,16 +23,12 @@ string ldcPath() {
 // dmd/ldc, and linked into every dub target below - each for its own
 // reason a comment on the source file itself explains (the FFI call
 // stub, ADR-0001; the interpreter's native-stack switch; the weak
-// fallback for `dmd.astenums.Edition.init`; the thread's way out of a
-// hardware fault). `cc` is what already understands `.cfi_` directives and
-// `.note.GNU-stack`.
-// The C source checks signal-frame offsets against the Linux UAPI headers.
+// fallback for `dmd.astenums.Edition.init`). `cc` is what already
+// understands `.cfi_` directives and `.note.GNU-stack`.
 immutable string[] assembledSources = [
     "source/snakebite/ffi/sysv_amd64.S",
     "source/snakebite/backends/interpreter/interpreter_stack_amd64.S",
     "source/dmd/iasm/edition_init_amd64.S",
-    "source/snakebite/fault_trampoline_amd64.S",
-    "source/snakebite/fault_signal_abi.c",
 ];
 
 // `$project` keeps this target's own output text identical to the

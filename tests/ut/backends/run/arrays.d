@@ -38,7 +38,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-
 // A module-level array is initialised before anything runs, so a callee
 // that touches it first still sees its contents.
 static foreach (backend; Matrix!(
@@ -889,7 +888,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-
 // A 3-byte struct element fill: an element size that is not a native
 // integral width, so the value must be copied as bytes, not as a word.
 static foreach (backend; Matrix!()) {
@@ -1003,7 +1001,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-
 // An out-of-bounds index into a dynamic array is a `RangeError`, the same
 // as an out-of-bounds slice - both are one contract in compiled D, not
 // two, so a guest catching `RangeError` around an index must see it.
@@ -1031,7 +1028,6 @@ static foreach (backend; Matrix!(
         });
     }
 }
-
 
 // Compiled D's bounds check calls `_d_arraybounds_indexp`, which throws
 // `core.exception.ArrayIndexError`, a `RangeError` subclass - so a guest
@@ -1325,6 +1321,20 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A slice of no elements of a null pointer reads no memory.
+static foreach (backend; Matrix!()) {
+    @("emptySliceOfNullPointerIsNotAFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        int main() {
+            int* p;
+            auto slice = p[0 .. 0];
+            return slice.length == 0 ? 0 : 1;
+        }
+        });
+    }
+}
 
 // The byte size of `new T[](n)` is too big for a `size_t`: druntime throws
 // instead of allocating a block that is smaller than the array's length.
