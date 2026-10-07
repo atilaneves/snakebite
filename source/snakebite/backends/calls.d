@@ -47,6 +47,9 @@ public struct CallSelection {
     public struct Decision {
         public Route route;
         public BuiltinCall builtinEntry;
+        // For `builtin`: the declared parameter that the wrapper takes by
+        // address (`snakebite.backends.builtins.destinationParameterOf`).
+        public size_t destinationParameter = size_t.max;
     }
 
     // Read without a lock by every thread that runs guest code
@@ -281,18 +284,28 @@ public struct CallSelection {
         return function_.mangledNameOf == "alloca";
     }
 
-    // Asks dmd for `function_`'s own compiler-intrinsic classification
-    // (`dmd.builtin.isBuiltin`) - the *only* dmd query this backend ever
-    // makes about a builtin; `dmd.builtin.eval_builtin` (dmd's CTFE
-    // evaluator) is never called here or anywhere at run time. A
-    // function dmd does not classify (`BUILTIN.unimp`) - every ordinary
-    // bodiless native declaration, and also, today, `core.math.rint` and
-    // `core.math.rndtol`, which dmd's own `BUILTIN` enum has no member
-    // for - keeps the native route FFI already handles. Every bodiless
-    // declaration dmd does classify has a wrapper in the table.
+    // `function_`'s wrapper, when it is a bodiless declaration that dmd
+    // inlines instead of calling. dmd has two lists of these. Its
+    // semantic pass classifies some (`dmd.builtin.isBuiltin`: `core.math.
+    // fabs`, `core.bitop.bswap`, ...) and its CTFE evaluator is for that
+    // list only, which this backend never calls at run time. Its code
+    // generator (`dmd.glue.toir.intrinsic_op`) inlines more, among them
+    // `core.math.rint` and `rndtol`, `core.volatile` and `core.simd`,
+    // without classifying them; `isCodeGeneratorIntrinsicModule` finds
+    // those by module. No host symbol exists for either kind. Any other
+    // bodiless declaration is a native call.
+    //
+    // A declaration of either kind that the table has no wrapper for stops
+    // here, at the first decision, naming the intrinsic: sending it across
+    // the barrier would end in an unrelated "symbol not found" at its
+    // first execution.
     private static Decision builtinDecision(FuncDeclaration function_) {
         import dmd.builtin: isBuiltin;
-        import snakebite.backends.builtins: entryOf;
+        import snakebite.backends.builtins:
+            destinationParameterOf, entryOf;
+        import std.conv: text;
+        import core.stdc.stdio: fprintf, stderr;
+        import std.string: fromStringz;
 
         const classified = isBuiltin(function_) != BUILTIN.unimp;
         if (!classified && !isCodeGeneratorIntrinsicModule(function_))
@@ -304,21 +317,25 @@ public struct CallSelection {
         // every one of those identifiers - the same one dmd's own
         // `determine_builtin` keys on (`dmd/builtin.d`: `id3 = fd.
         // ident`) - so `function_.ident` is the lookup key, not `kind`.
-        auto entry = entryOf(
-            function_.ident.toString.idup, parameterTypeOf(function_));
+        const name = function_.ident.toString.idup;
+        ParameterType[] types;
+        const keyed = parameterTypesOf(function_, types);
+        auto entry = keyed ? entryOf(name, types) : null;
         if (entry is null) {
-            assert(!classified);
-            return Decision(Route.native);
+            // A release build halts without the assertion's message.
+            const message = text("no builtin wrapper for `",
+                function_.toPrettyChars.fromStringz, "`");
+            fprintf(stderr, "snakebite: %.*s\n",
+                cast(int) message.length, message.ptr);
+            assert(false, message);
         }
 
-        return Decision(Route.builtin, entry);
+        return Decision(
+            Route.builtin, entry, destinationParameterOf(name));
     }
 
     // dmd's code generator (`dmd.glue.toir.intrinsic_op`) inlines bodiless
-    // functions of these modules by name, among them `core.math.rint`,
-    // `core.math.rndtol`, `core.volatile` and `core.simd`, which `dmd.
-    // builtin.isBuiltin` does not classify. No host symbol exists for any
-    // of them.
+    // functions of these modules by name.
     private static bool isCodeGeneratorIntrinsicModule(
         FuncDeclaration function_,
     ) {
@@ -331,49 +348,72 @@ public struct CallSelection {
         return name == "math" || name == "volatile" || name == "simd";
     }
 
-    // The concrete type `function_`'s own first parameter declares - the
-    // half of `snakebite.backends.builtins.entryOf`'s lookup key dmd's
-    // `BUILTIN` classification does not carry, since it goes by name
-    // alone: `sin(float)` and `sin(double)` both classify as `BUILTIN.
-    // sin`, and `bswap(uint)`/`bswap(ulong)` both classify as `BUILTIN.
-    // bswap`. Every builtin this table serves takes at least one
-    // argument of the type its result (or, for `ldexp`'s second
-    // argument, an unrelated `int`) shares.
-    private static ParameterType parameterTypeOf(FuncDeclaration function_) {
-        import dmd.astenums: TY;
-        import dmd.typesem: nextOf, toBasetype;
+    // The concrete types `function_`'s parameters declare, the half of
+    // `snakebite.backends.builtins.entryOf`'s lookup key that the name
+    // alone does not give. `false` when a parameter has a type that no
+    // wrapper takes.
+    private static bool parameterTypesOf(
+        FuncDeclaration function_, out ParameterType[] types,
+    ) {
+        import dmd.typesem: toBasetype;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         // `const` fails: `ParameterList.length` and `opIndex` are not
         // `const` methods.
         auto parameterList = typeFunctionOf(function_).parameterList;
-        assert(parameterList.length > 0);
+        foreach (i; 0 .. parameterList.length) {
+            ParameterType type;
+            if (!parameterTypeOf(
+                    parameterList[i].type.toBasetype, false, type))
+                return false;
+            types ~= type;
+        }
+        return types.length > 0;
+    }
 
-        const parameterType = parameterList[0].type.toBasetype;
-        final switch (parameterType.ty) with (TY) {
-            case Tfloat32: return ParameterType.float_;
-            case Tfloat64: return ParameterType.double_;
-            case Tfloat80: return ParameterType.real_;
-            case Tuns16: return ParameterType.ushort_;
-            case Tuns32: return ParameterType.uint_;
-            case Tuns64: return ParameterType.ulong_;
+    // `pointee` is for the type that a pointer parameter points to.
+    private static bool parameterTypeOf(
+        imported!"dmd.mtype".Type type,
+        in bool pointee,
+        out ParameterType result,
+    ) {
+        import dmd.astenums: TY;
+        import dmd.typesem: nextOf, toBasetype;
+
+        final switch (type.ty) with (TY) {
+            case Tfloat32: result = ParameterType.float_; return !pointee;
+            case Tfloat64: result = ParameterType.double_; return !pointee;
+            case Tfloat80: result = ParameterType.real_; return !pointee;
+            case Tuns8:
+                result = pointee
+                    ? ParameterType.ubytePointer_ : ParameterType.ubyte_;
+                return true;
+            case Tuns16:
+                result = pointee
+                    ? ParameterType.ushortPointer_ : ParameterType.ushort_;
+                return true;
+            case Tint32: result = ParameterType.int_; return !pointee;
+            case Tuns32:
+                result = pointee
+                    ? ParameterType.uintPointer_ : ParameterType.uint_;
+                return true;
+            case Tuns64:
+                result = pointee
+                    ? ParameterType.ulongPointer_ : ParameterType.ulong_;
+                return true;
+            case Tvoid: result = ParameterType.voidPointer_; return pointee;
+            case Tvector: result = ParameterType.vector_; return !pointee;
             case Tpointer:
-                switch ((cast() parameterType).nextOf.toBasetype.ty) {
-                    case Tuns8: return ParameterType.ubytePointer_;
-                    case Tuns16: return ParameterType.ushortPointer_;
-                    case Tuns32: return ParameterType.uintPointer_;
-                    case Tuns64: return ParameterType.ulongPointer_;
-                    case Tvoid: return ParameterType.voidPointer_;
-                    default: return ParameterType.other_;
-                }
+                return !pointee && parameterTypeOf(
+                    type.nextOf.toBasetype, true, result);
             case Tarray, Tsarray, Taarray, Treference, Tfunction,
-                Tident, Tclass, Tstruct, Tenum, Tdelegate, Tnone, Tvoid,
-                Tint8, Tuns8, Tint16, Tint32, Tint64, Timaginary32,
+                Tident, Tclass, Tstruct, Tenum, Tdelegate, Tnone,
+                Tint8, Tint16, Tint64, Timaginary32,
                 Timaginary64, Timaginary80, Tcomplex32, Tcomplex64,
-                Tcomplex80, Tbool, Tchar, Twchar, Tdchar, Terror, Tinstance,
-                Ttypeof, Ttuple, Tslice, Treturn, Tnull, Tvector, Tint128,
-                Tuns128, Ttraits, Tmixin, Tnoreturn, Ttag:
-                return ParameterType.other_;
+                Tcomplex80, Tbool, Tchar, Twchar, Tdchar, Terror,
+                Tinstance, Ttypeof, Ttuple, Tslice, Treturn, Tnull,
+                Tint128, Tuns128, Ttraits, Tmixin, Tnoreturn, Ttag:
+                return false;
         }
     }
 }

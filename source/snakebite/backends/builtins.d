@@ -30,38 +30,50 @@ public extern(C) void startVariadicEntry(
 }
 
 
-// The concrete type a call's own first parameter declares - the other
-// half of this table's lookup key, since dmd's own `BUILTIN`
-// classification (`dmd.builtin.isBuiltin`) does not carry it: `sin
-// (float)` and `sin(double)` both classify as `BUILTIN.sin`, and `bswap
-// (uint)`/`bswap(ulong)` both classify as `BUILTIN.bswap`.
+// The concrete type of one parameter of a call's declaration - with the
+// name, the other half of this table's lookup key, since dmd's own
+// `BUILTIN` classification (`dmd.builtin.isBuiltin`) does not carry it:
+// `sin(float)` and `sin(double)` both classify as `BUILTIN.sin`, and
+// `bswap(uint)`/`bswap(ulong)` both classify as `BUILTIN.bswap`. Only the
+// types that a wrapper of this table takes have a member.
 public enum ParameterType {
-    float_, double_, real_, ushort_, uint_, ulong_,
+    float_, double_, real_, ubyte_, ushort_, int_, uint_, ulong_, vector_,
     ubytePointer_, ushortPointer_, uintPointer_, ulongPointer_, voidPointer_,
-    other_,
 }
 
 
 // `name` is a string key, not dmd's `BUILTIN` enum value, so this
 // module and the bytecode VM that calls into it need no DMD frontend
-// import path (CODING.md, "Code organisation"). `null` means the pair
-// is not a bodiless declaration dmd classifies as a builtin.
-public BuiltinCall entryOf(in string name, in ParameterType type)
+// import path (CODING.md, "Code organisation"). `null` means that no
+// wrapper takes this name with these parameter types.
+public BuiltinCall entryOf(in string name, in ParameterType[] types)
 @safe pure nothrow @nogc {
-    final switch (type) with (ParameterType) {
+    assert(types.length > 0);
+    final switch (types[0]) with (ParameterType) {
         case float_: return widthEntryOf!float(name);
         case double_: return widthEntryOf!double(name);
         case real_: return widthEntryOf!real(name);
+        case ubyte_: return null;
         case ushort_: return integerEntryOf!ushort(name);
+        case int_: return simdEntryOf(name, types[1 .. $]);
         case uint_: return integerEntryOf!uint(name);
         case ulong_: return integerEntryOf!ulong(name);
+        case vector_: return null;
         case ubytePointer_: return volatileEntryOf!ubyte(name);
         case ushortPointer_: return volatileEntryOf!ushort(name);
         case uintPointer_: return volatileEntryOf!uint(name);
         case ulongPointer_: return volatileEntryOf!ulong(name);
         case voidPointer_: return name == "__prefetch" ? &prefetchEntry : null;
-        case other_: return null;
     }
+}
+
+
+// The parameter that the wrapper of `name` takes by address although the
+// declaration passes it by value, or `size_t.max` if there is none. dmd's
+// code generator takes the first operand of `__simd_sto` as the memory
+// that the instruction writes.
+public size_t destinationParameterOf(in string name) @safe pure nothrow @nogc {
+    return name == "__simd_sto" ? 1 : size_t.max;
 }
 
 
@@ -109,24 +121,97 @@ private BuiltinCall volatileEntryOf(T)(in string name)
 
 
 // `core.simd.__prefetch` takes the same encoding `core.simd.prefetch`
-// computes from its template arguments. Hosts without `D_SIMD` compile no
-// prefetch, and a prefetch changes no value a program can read.
+// computes from its template arguments, and both host compilers have that
+// function.
 private extern(C) void prefetchEntry(
     void*, scope const(void*)* arguments, size_t argumentCount,
 ) @trusted nothrow @nogc {
-    assert(argumentCount == 2, "__prefetch arity");
-    version (D_SIMD) {
-        import core.simd: prefetch;
+    import core.simd: prefetch;
 
-        const address = *cast(const(void*)*) arguments[0];
-        switch (*cast(const(ubyte)*) arguments[1]) {
-            case 0: prefetch!(false, 3)(address); break;
-            case 1: prefetch!(false, 2)(address); break;
-            case 2: prefetch!(false, 1)(address); break;
-            case 3: prefetch!(false, 0)(address); break;
-            default: prefetch!(true, 0)(address); break;
-        }
+    assert(argumentCount == 2, "__prefetch arity");
+    const address = *cast(const(void*)*) arguments[0];
+    switch (*cast(const(ubyte)*) arguments[1]) {
+        case 0: prefetch!(false, 3)(address); break;
+        case 1: prefetch!(false, 2)(address); break;
+        case 2: prefetch!(false, 1)(address); break;
+        case 3: prefetch!(false, 0)(address); break;
+        default: prefetch!(true, 0)(address); break;
     }
+}
+
+
+// dmd's own array operations (`core.internal.array.operations`) and
+// `core.simd.loadUnaligned`/`storeUnaligned` move 16 bytes with these
+// opcodes of `core.simd.XMM`. The values are the x86 encodings of the
+// instructions, which neither host compiler declares as `XMM`: LDC has no
+// `core.simd.__simd`.
+private enum MoveOpcode : int {
+    loadUps = 0x0F10, storeUps = 0x0F11,
+    loadUpd = 0x660F10, storeUpd = 0x660F11,
+    loadDqu = 0xF30F6F, storeDqu = 0xF30F7F,
+}
+
+
+private BuiltinCall simdEntryOf(in string name, in ParameterType[] types)
+@safe pure nothrow @nogc {
+    if (types.length == 1 && types[0] == ParameterType.vector_) {
+        if (name == "__simd")
+            return &loadEntry;
+        return null;
+    }
+    if (types.length == 2 && types[0] == ParameterType.vector_
+            && types[1] == ParameterType.vector_ && name == "__simd_sto")
+        return &storeEntry;
+    return null;
+}
+
+
+// `__simd(XMM opcode, void16 op1)`: the operand is the 16 bytes that the
+// guest already read from memory, so the load instruction returns it.
+private extern(C) void loadEntry(
+    void* returnPlace, scope const(void*)* arguments, size_t argumentCount,
+) @trusted nothrow @nogc {
+    import core.stdc.string: memcpy;
+
+    assert(argumentCount == 2, "__simd arity");
+    requireMoveOpcode(*cast(const(int)*) arguments[0], false);
+    memcpy(returnPlace, arguments[1], 16);
+}
+
+
+// `__simd_sto(XMM opcode, void16 op1, void16 op2)`: `op1` arrives as the
+// address of the memory it names (`destinationParameterOf`).
+private extern(C) void storeEntry(
+    void* returnPlace, scope const(void*)* arguments, size_t argumentCount,
+) @trusted nothrow @nogc {
+    import core.stdc.string: memcpy;
+
+    assert(argumentCount == 3, "__simd_sto arity");
+    requireMoveOpcode(*cast(const(int)*) arguments[0], true);
+    memcpy(*cast(void**) arguments[1], arguments[2], 16);
+    memcpy(returnPlace, arguments[2], 16);
+}
+
+
+private void requireMoveOpcode(in int opcode, in bool store)
+@trusted nothrow @nogc {
+    import core.stdc.stdio: fprintf, stderr;
+
+    with (MoveOpcode) switch (opcode) {
+        case loadUps, loadUpd, loadDqu:
+            if (!store)
+                return;
+            break;
+        case storeUps, storeUpd, storeDqu:
+            if (store)
+                return;
+            break;
+        default:
+            break;
+    }
+    fprintf(stderr, "snakebite: core.simd.%s has no wrapper for the opcode "
+        ~ "0x%x\n", store ? "__simd_sto".ptr : "__simd".ptr, opcode);
+    assert(0);
 }
 
 

@@ -604,3 +604,39 @@ static foreach (backend; Matrix!(
             fail(result.output, __FILE__, __LINE__);
     }
 }
+
+
+// A call of a compiler intrinsic that no wrapper covers ends the run at
+// the call's first decision and names the intrinsic. Compiled D has the
+// instruction, and dmd's CTFE gives its own message.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "compiled D inlines the instruction"),
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE has no source for `__simd`"),
+)) {
+    @("intrinsicWithoutWrapperNamesItself." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-intrinsic-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            import core.simd;
+            void main() {
+                float4 a = 1, b = 2;
+                float4 c = cast(float4) __simd(XMM.ADDPS, a, b);
+            }
+        });
+        static if (is(backend == Interpreter)) enum name = "interpreter";
+        else enum name = "bytecode";
+        const result = execute([
+            "timeout", "60", buildPath(getcwd, "bin", "sb"),
+            "-b", name, directory,
+        ]);
+        result.status.should.not == 0;
+        "no builtin wrapper for `core.simd.__simd`".should.be in result.output;
+    }
+}

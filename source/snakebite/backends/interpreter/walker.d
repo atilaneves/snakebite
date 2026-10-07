@@ -6040,14 +6040,25 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         const(FrameLayout)* layout,
         in bool allowExtra = false,
     ) {
+        // Only a bodiless declaration can be a builtin whose wrapper takes
+        // a declared parameter by address.
+        const destination = function_.fbody is null
+            ? _callSelection.decisionOf(
+                function_,
+                (callee) => _program.isInterpreted(callee),
+                hasNativeSymbol(function_),
+                hasIndependentNativeSymbol(function_),
+            ).destinationParameter
+            : size_t.max;
         _bindArguments(typeFunctionOf(function_), arguments, loc,
-            frameBase, layout, allowExtra);
+            frameBase, layout, allowExtra, destination);
     }
 
     private void _bindArguments(
         TypeFunction type, Expressions* arguments, in Loc loc,
         ubyte* frameBase, const(FrameLayout)* layout,
         in bool allowExtra = false,
+        in size_t destination = size_t.max,
     ) {
         import snakebite.backends.calls: arityMismatches;
 
@@ -6056,7 +6067,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 ~ "extra arguments");
 
         auto preparation = CallAdapter.Arguments.of(
-            type, arguments,
+            type, arguments, destination,
         );
         preparation.eachDeclared((i, value) {
             auto argument = value.expression; // Frontend expressions remain mutable.
