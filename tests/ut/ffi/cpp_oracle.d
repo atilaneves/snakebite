@@ -41,6 +41,7 @@ extern(C++, ut_oracle) {
 
     struct CopyOnly {
         int value;
+        this(int v) { value = v; }
         this(ref const(CopyOnly) other) { value = other.value; ++_copied; }
     }
 

@@ -101,6 +101,7 @@ private enum cppBindings = q{
 
     extern(C++) struct CopyOnly {
         int value;
+        this(int v);
         this(ref const(CopyOnly) other);
     }
     extern(C++) int read_copy_only(CopyOnly c);
@@ -1105,5 +1106,20 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             };
         }
         runShape!(backend, Shape)(17).should == Counts(20, 0, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.constructor.valueOfNativeStructConstructor." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+                CopyOnly c;
+                r = c.__ctor(v).value;
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(17, 0, 0);
     }
 }
