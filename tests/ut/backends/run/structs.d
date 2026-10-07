@@ -6123,6 +6123,77 @@ static foreach (backend; Matrix!(
 }
 
 // The temporaries of a call whose argument throws die during unwinding, last constructed first.
+
+
+// The `.init` of a nested struct is a literal that copies the type's static
+// `.init` image, so its context pointer is null: it reads no enclosing frame.
+// A nested struct that is a field of another struct builds one for that field
+// too.
+static foreach (backend; Matrix!()) {
+    @("nestedStructInit.fieldOfNestedStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            auto make(int n) {
+                struct Nested { int get() { return n; } }
+                struct Wrap { Nested inner; int tag = 3; }
+                return Wrap(Nested(), 3);
+            }
+
+            void main() { auto w = typeof(make(1)).init; assert(w.tag == 3); }
+        });
+    }
+}
+
+// Reading the range with a loop: `joiner` over the `map!strip` of a
+// `splitter` result keeps a `MapResult` whose `_input` is `splitter`'s nested
+// `Result`, and `joiner`'s constructor assigns `typeof(_current).init`.
+static foreach (backend; Matrix!()) {
+    @("nestedStructInit.phobosJoinerOfMappedSplitter." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.algorithm: joiner, map, splitter;
+            import std.string: strip;
+            void main() {
+                string[] requested = ["a, b", "c"];
+                auto r = requested
+                    .map!(a => a.splitter(",").map!strip)
+                    .joiner();
+                string[] got;
+                for (; !r.empty; r.popFront)
+                    got ~= r.front;
+                assert(got == ["a", "b", "c"]);
+            }
+        });
+    }
+}
+
+// Every evaluation of the `.init` of a nested struct is a copy of one image,
+// so a field that defaults to an array literal points at the same data.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE evaluates the array literal again for each `.init`"),
+)) {
+    @("nestedStructInit.initIsOneImage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            auto make(int n) {
+                struct Nested { int get() { return n; } }
+                struct Wrap { Nested inner; int[] arr = [1, 2, 3]; }
+                return Wrap.init;
+            }
+            T get(T)() { return T.init; }
+            void shape(T)(T seed) {
+                auto a = get!T();
+                auto b = get!T();
+                assert(a.arr.ptr is b.arr.ptr);
+            }
+            void main() { shape(make(5)); }
+        });
+    }
+}
 // Two temporaries of one expression die in reverse order of construction.
 // The temporary of a call inside a `throw` operand dies before the `catch` runs.
 // The temporary of a `throw` expression's operand dies before the `catch` runs.
