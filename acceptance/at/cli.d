@@ -643,9 +643,9 @@ static foreach (backend; Matrix!(
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
-        "CTFE cannot start the native worker threads of a task pool"),
+        "dmd CTFE: variable `pool` cannot be modified at compile time"),
 )) {
-    @("taskPoolReduceInRelease." ~ backend.stringof)
+    @("taskPoolReduceRunsToCompletion." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         const directory = buildPath(tempDir,
@@ -667,7 +667,8 @@ static foreach (backend; Matrix!(
                 null, Config.none, size_t.max, directory);
         else {
             static if (is(backend == Interpreter)) enum name = "interpreter";
-            else enum name = "bytecode";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
             const result = execute([
                 "timeout", "60", buildPath(getcwd, "bin", "sb"),
                 "-b", name, "--no-optimise-image", directory,
@@ -679,10 +680,7 @@ static foreach (backend; Matrix!(
 }
 
 
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "CTFE cannot run a dub project"),
-)) {
+static foreach (backend; Matrix!()) {
     @("fileIsRelativeToTheDubProject." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -707,7 +705,8 @@ static foreach (backend; Matrix!(
                 null, Config.none, size_t.max, directory);
         else {
             static if (is(backend == Interpreter)) enum name = "interpreter";
-            else enum name = "bytecode";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
             const result = execute([
                 "timeout", "60", buildPath(getcwd, "bin", "sb"),
                 "-b", name, "--no-optimise-image", directory,

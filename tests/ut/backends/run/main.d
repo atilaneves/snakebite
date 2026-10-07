@@ -356,7 +356,7 @@ static foreach (backend; Matrix!()) {
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
-        "CTFE cannot start the native worker threads of a task pool"),
+        "dmd CTFE: variable `pool` cannot be modified at compile time"),
 )) {
     @("taskPoolReduce." ~ backend.stringof)
     @Tags(backend.stringof)
