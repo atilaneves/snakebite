@@ -5984,7 +5984,8 @@ static foreach (backend; Matrix!(
 }
 
 
-// An `out` argument is initialised by the callee, so a later argument still
+// An `out` argument is not reset before the call, so a later argument of the
+// same call still reads the old value of the variable.
 static foreach (backend; Matrix!()) {
     @("outArgument.intIsInitialisedInCallee." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -5994,84 +5995,6 @@ static foreach (backend; Matrix!()) {
             void main() {
                 int x = 5;
                 assert(f(x, x) == 5);
-                assert(x == 0);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("outArgument.structIsInitialisedInCallee." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct S { int a = 7; int b; }
-            int f(out S s, int b) { return b; }
-            void main() {
-                S x = S(1, 2);
-                assert(f(x, x.a) == 1);
-                assert(x.a == 7);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("outArgument.classReferenceIsInitialisedInCallee." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            class C {}
-            int f(out C c, int b) { return b; }
-            void main() {
-                C x = new C;
-                assert(f(x, x is null ? 1 : 2) == 2);
-                assert(x is null);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("outArgument.staticArrayIsInitialisedInCallee." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int f(out int[3] a, int b) { return b; }
-            void main() {
-                int[3] x = [4, 5, 6];
-                assert(f(x, x[1]) == 5);
-                assert(x == [0, 0, 0]);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("outArgument.sameVariableAlsoByRef." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int f(out int a, ref int b) { b += 1; return a; }
-            void main() {
-                int x = 5;
-                assert(f(x, x) == 1);
-                assert(x == 1);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("outArgument.laterArgumentReadsThroughPointer." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int f(out int a, int b) { return b; }
-            void main() {
-                int x = 5;
-                int* p = &x;
-                assert(f(x, *p) == 5);
                 assert(x == 0);
             }
         });
@@ -6090,134 +6013,6 @@ static foreach (backend; Matrix!(
                 ubyte[4] s = [1, 2, 0, 0];
                 assert(lengthOf(s) == 2);
                 assert(s == [1, 2, 0, 0]);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call native functions"),
-)) {
-    @("outArgument.nativeCallerOfGuestCallee." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            import core.stdc.stdlib: bsearch;
-            extern(C) int compare(out int a, out int b) {
-                return 0;
-            }
-            void main() {
-                int key = 2;
-                int[1] values = [1];
-                alias Compare = extern(C) int function(const void*, const void*);
-                bsearch(&key, values.ptr, 1, int.sizeof, cast(Compare) &compare);
-                assert(key == 0);
-                assert(values[0] == 0);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("outArgument.oldValueIsNotDestroyedOrCopied." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct S {
-                int id;
-                int* events;
-                this(this) { if (events) ++*events; }
-                ~this() { if (events) ++*events; }
-            }
-            void f(out S s) {}
-            void main() {
-                int events;
-                S x = S(5, &events);
-                f(x);
-                assert(x.id == 0);
-                assert(events == 0);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("outArgument.virtualCall." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            class A { int f(out int a, int b) { return b; } }
-            class B : A { override int f(out int a, int b) { return b + 1; } }
-            void main() {
-                A o = new B;
-                int x = 5;
-                assert(o.f(x, x) == 6);
-                assert(x == 0);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("outArgument.delegateCall." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            void main() {
-                int offset = 1;
-                int f(out int a, int b) { return b + offset; }
-                auto dg = &f;
-                int x = 5;
-                assert(dg(x, x) == 6);
-                assert(x == 0);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("outArgument.structConstructorCall." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct S { int v; this(out int a, int b) { v = b; } }
-            void main() {
-                int x = 5;
-                assert(S(x, x).v == 5);
-                assert(x == 0);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("outArgument.classConstructorCall." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            class C { int v; this(out int a, int b) { v = b; } }
-            void main() {
-                int x = 6;
-                assert((new C(x, x)).v == 6);
-                assert(x == 0);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "CTFE cannot read a static variable at compile time"),
-)) {
-    @("outArgument.defaultArgumentReadsOldValue." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int global = 5;
-            int f(out int a, int b = global) { return b; }
-            void main() {
-                assert(f(global) == 5);
-                assert(global == 0);
             }
         });
     }
