@@ -2,7 +2,6 @@ module at.cli;
 
 
 import ut.backends;
-import std.algorithm.searching: canFind;
 import std.conv: text;
 import std.file: getcwd, mkdir, mkdirRecurse, rmdirRecurse, tempDir, write;
 import std.path: buildPath;
@@ -568,30 +567,40 @@ static foreach (backend; Matrix!(
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
-        "dmd's interpreter reports a recursion limit, not a stack overflow"),
-    Omit!(Native, Because.inexpressible,
-        "compiled D has no stack overflow report: the process dies of "
-        ~ "SIGSEGV"),
+        "CTFE cannot start a native thread"),
 )) {
-    @("unboundedRecursionIsReportedAsStackOverflow." ~ backend.stringof)
+    @("deepRecursionInAGuestThread." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         const directory = buildPath(tempDir,
-            "snakebite-cli-unbounded-recursion-" ~ thisProcessID.text ~ backend.stringof);
+            "snakebite-cli-thread-deep-" ~ thisProcessID.text ~ backend.stringof);
         directory.mkdir;
         scope(exit) directory.rmdirRecurse;
-        buildPath(directory, "probe.d").write(q{
-            int forever(int n) { return forever(n + 1) + 1; }
-            int main() { return forever(0); }
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            import core.thread: Thread;
+            int depth(int n) { return n == 0 ? 0 : 1 + depth(n - 1); }
+            unittest {
+                int result;
+                auto thread = new Thread({ result = depth(100_000); });
+                thread.start;
+                thread.join;
+                assert(result == 100_000);
+            }
+            void main() {}
         });
-        static if (is(backend == Interpreter)) enum name = "interpreter";
-        else enum name = "bytecode";
-        const result = execute([
-            "timeout", "120", buildPath(getcwd, "bin", "sb"),
-            "-b", name, directory,
-        ]);
-        if (result.status != 1 || !result.output.canFind("stack overflow"))
-            fail(text("status ", result.status, ": ", result.output),
-                __FILE__, __LINE__);
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else enum name = "bytecode";
+            const result = execute([
+                "timeout", "60", buildPath(getcwd, "bin", "sb"),
+                "-b", name, directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
     }
 }
