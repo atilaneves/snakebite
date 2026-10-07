@@ -204,16 +204,7 @@ static foreach (backend; Matrix!()) {
 
 // `bump` is virtual here, the natural shape for a class member function -
 // dmd gives a class method a vtable slot unless it is `final` or
-// `private`. Reaching it goes through the interpreter's own virtual
-// dispatch, which routes the call through its indirect-call FFI adapter
-// (`_callIndirect`, `CallAdapter.invoke`): a thrown `AssertError` does not
-// propagate back out of that adapter into the guest's own `try`/`catch`,
-// crashing the process instead. That gap is pre-existing and unrelated to
-// invariants - an ordinary `assert(false)` in a virtual method body
-// crashes the same way, invariant or not - and is tracked separately as
-// https://github.com/atilaneves/snakebite/issues/407. The `final` variant
-// below proves the invariant fix itself still holds on the Interpreter,
-// through a direct call that does not cross that adapter.
+// `private`. The call goes through virtual dispatch.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE turns a failing assertion into a compile-time error, so " ~
@@ -250,10 +241,7 @@ static foreach (backend; Matrix!(
 }
 
 // Same shape, but `final`: the call is bound directly rather than through
-// the vtable, so it never crosses the indirect-call FFI adapter that
-// swallows the exception above (issue #407). This is the sibling that
-// keeps the invariant fix itself proven on the Interpreter even while the
-// virtual case above is omitted for it.
+// the vtable.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE turns a failing assertion into a compile-time error, so " ~

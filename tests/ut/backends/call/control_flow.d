@@ -1464,6 +1464,129 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// The `out` contract runs after a `scope(exit)` guard of a `void` function.
+static foreach (backend; Matrix!()) {
+    @("scopeGuard.exitRunsOnVoidReturnWithOutContract." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                void f() out { log ~= "O,"; } do {
+                    scope(exit) log ~= "E,";
+                    log ~= "b,";
+                }
+                f();
+                return log == "b,E,O," ? 0 : 3;
+            }
+        });
+    }
+}
+
+// A `return` inside a nested block runs the guard once.
+static foreach (backend; Matrix!()) {
+    @("scopeGuard.exitRunsOnNestedReturnWithOutContract." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int f(bool c) out (r; r > 0) {
+                    scope(exit) log ~= "E,";
+                    if (c) {
+                        { return 3; }
+                    }
+                    return 4;
+                }
+                if (f(true) != 3) return 2;
+                return log == "E," ? 0 : 3;
+            }
+        });
+    }
+}
+
+// A `scope(failure)` guard stays silent on a normal return.
+static foreach (backend; Matrix!()) {
+    @("scopeGuard.failureSkippedOnReturnWithOutContract." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int f() out (r; r > 0) {
+                    scope(failure) log ~= "F,";
+                    scope(exit) log ~= "E,";
+                    return 3;
+                }
+                if (f() != 3) return 2;
+                return log == "E," ? 0 : 3;
+            }
+        });
+    }
+}
+
+// A `finally` runs on a normal return in a function with an `out` contract.
+static foreach (backend; Matrix!()) {
+    @("finally.runsOnReturnWithOutContract." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int f() out (r; r > 0) {
+                    try {
+                        return 3;
+                    } finally {
+                        log ~= "F,";
+                    }
+                }
+                if (f() != 3) return 2;
+                return log == "F," ? 0 : 3;
+            }
+        });
+    }
+}
+
+// A local's destructor runs on a normal return in a function with an `out` contract.
+static foreach (backend; Matrix!()) {
+    @("destructor.localRunsOnReturnWithOutContract." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                struct S { string* log; ~this() { *log ~= "D,"; } }
+                int f() out (r; r > 0) {
+                    S s = S(&log);
+                    return 3;
+                }
+                if (f() != 3) return 2;
+                return log == "D," ? 0 : 3;
+            }
+        });
+    }
+}
+
+// Several guards run in reverse order before the return.
+static foreach (backend; Matrix!()) {
+    @("scopeGuard.exitOrderWithOutContract." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                string log;
+                int f() out (r; r > 0) {
+                    scope(exit) log ~= "1,";
+                    scope(exit) log ~= "2,";
+                    return 3;
+                }
+                if (f() != 3) return 2;
+                return log == "2,1," ? 0 : 3;
+            }
+        });
+    }
+}
+
 // A virtual method that fails an `assert`: the `AssertError` reaches the
 // caller's `catch`.
 static foreach (backend; Matrix!(
