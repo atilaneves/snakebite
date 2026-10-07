@@ -45,6 +45,14 @@ extern(C++, ut_oracle) {
         this(ref const(CopyOnly) other) { value = other.value; ++_copied; }
     }
 
+    struct Thrower {
+        int value;
+        this(ref const(Thrower) other) {
+            value = other.value;
+            throwInt(7);
+        }
+    }
+
     struct PostBlit {
         int value;
         this(this) { ++_copied; }
@@ -92,6 +100,11 @@ extern(C++) {
     alias MakerReadFn = int function(NonPodMaker*, ref NonPod);
     alias NonPodCallback = int function(NonPod);
     alias NonPodMakerCallback = NonPod function(int);
+    alias ThrowAfterReadFn = int function(NonPod);
+    alias IntCallback = int function(int);
+    alias CatchAroundFn = int function(IntCallback, int);
+    alias ReadThrowerFn = int function(Thrower);
+    alias ThrowIntFn = void function(int);
     alias CountFn = int function();
     alias BaseConstructorFn = void function(void*, int);
     alias CallNonPodCallbackFn = int function(NonPodCallback, int);
@@ -108,6 +121,10 @@ MakePostBlitFn make_post_blit;
 ReadPostBlitFn read_post_blit;
 CallNonPodCallbackFn call_non_pod_callback;
 CallNonPodMakerCallbackFn call_non_pod_maker_callback;
+ThrowAfterReadFn throw_after_read;
+CatchAroundFn catch_around;
+ReadThrowerFn read_thrower;
+private ThrowIntFn throwInt;
 private CountFn libraryDestroyed;
 private CountFn libraryCopied;
 private MakerMakeFn makeFn;
@@ -123,8 +140,47 @@ enum handlers = q{
         n.value = v * 3;
         return n;
     }
+    extern(C++) int throwingHandler(int v) {
+        return throw_after_read(make_non_pod(v));
+    }
+    extern(C++) int cleanupThrowCaughtHandler(int v) {
+        try {
+            scope(exit) throw new Exception("boom");
+            return throw_after_read(make_non_pod(v));
+        } catch (Exception e) {
+            return 66;
+        }
+    }
+    int cleanupThrowingHelper(int v) {
+        scope(exit) throw new Exception("boom");
+        return throw_after_read(make_non_pod(v));
+    }
+    extern(C++) int cleanupThrowCaughtAboveHandler(int v) {
+        auto n = make_non_pod(v);
+        try {
+            return cleanupThrowingHelper(v);
+        } catch (Exception e) {
+            return 66;
+        }
+    }
+    extern(C++) int finallyThrowsHandler(int v) {
+        try {
+            throw new Exception("boom");
+        } finally {
+            count_copy();
+            throw_after_read(make_non_pod(v));
+        }
+    }
+    extern(C++) int copyThrowingHandler(int v) {
+        auto local = make_non_pod(v);
+        Thrower thrower;
+        thrower.value = v;
+        return read_thrower(thrower);
+    }
 };
 mixin(handlers);
+
+void count_copy() { ++_copied; }
 
 
 
@@ -147,6 +203,11 @@ void bind(in DependencyImage image) {
     makeFn = symbol!MakerMakeFn(image, "_ZN11NonPodMaker4makeEi");
     readFn = symbol!MakerReadFn(image, "_ZN11NonPodMaker4readE6NonPod");
     libraryBaseConstructor = symbol!BaseConstructorFn(image, "_ZN4BaseC1Ei");
+    throw_after_read = symbol!ThrowAfterReadFn(
+        image, "_Z16throw_after_read6NonPod");
+    catch_around = symbol!CatchAroundFn(image, "_Z12catch_aroundPFiiEi");
+    read_thrower = symbol!ReadThrowerFn(image, "_Z12read_thrower7Thrower");
+    throwInt = symbol!ThrowIntFn(image, "_Z9throw_inti");
     call_non_pod_callback = symbol!CallNonPodCallbackFn(
         image, "_Z21call_non_pod_callbackPFi6NonPodEi");
     call_non_pod_maker_callback = symbol!CallNonPodMakerCallbackFn(

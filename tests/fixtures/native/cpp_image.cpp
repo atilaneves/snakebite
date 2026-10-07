@@ -134,6 +134,27 @@ int call_non_pod_maker_callback(NonPodMakerCallback callback, int v) {
     return callback(v).value;
 }
 
+// A C++ exception that leaves the callback and is caught here, with the
+// callback's own frames in between.
+typedef int (*IntCallback)(int);
+int throw_after_read(NonPod n) { throw n.value; }
+int catch_around(IntCallback callback, int v) {
+    try {
+        return callback(v);
+    } catch (int e) {
+        return e + 1000;
+    }
+}
+
+// Copying a Thrower throws.
+struct Thrower {
+    int value;
+    Thrower(const Thrower& other);
+};
+Thrower::Thrower(const Thrower& other) : value(other.value) { throw 7; }
+int read_thrower(Thrower t) { return t.value; }
+void throw_int(int v) { throw v; }
+
 // Non-trivially-copyable because of the destructor alone.
 struct DtorOnly {
     int value;
