@@ -276,6 +276,213 @@ static foreach (backend; Matrix!(
 }
 
 
+// Halfway values round to even, and a negative argument that rounds to
+// zero keeps its sign.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE has no source for `rint`"),
+)) {
+    @("ffi.executedIntrinsicCall.rint.halfway." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.math: rint;
+
+            bool negative(double value) {
+                return (*cast(ulong*) &value >> 63) != 0;
+            }
+
+            void main() {
+                assert(rint(0.5) == 0.0);
+                assert(rint(1.5) == 2.0);
+                assert(rint(2.5) == 2.0);
+                assert(rint(-1.5) == -2.0);
+                assert(rint(-2.5) == -2.0);
+                assert(rint(0.5f) == 0.0f);
+                assert(rint(3.5f) == 4.0f);
+                assert(rint(0.5L) == 0.0L);
+                assert(rint(3.5L) == 4.0L);
+                assert(negative(rint(-0.5)));
+                assert(negative(rint(-0.0)));
+                assert(!negative(rint(0.0)));
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE has no source for `rint`"),
+)) {
+    @("ffi.executedIntrinsicCall.rint.nonFinite." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.math: rint;
+
+            void main() {
+                assert(rint(double.infinity) == double.infinity);
+                assert(rint(-double.infinity) == -double.infinity);
+                const nan = rint(double.nan);
+                assert(nan != nan);
+                const nanf = rint(float.nan);
+                assert(nanf != nanf);
+                const nanl = rint(real.nan);
+                assert(nanl != nanl);
+                assert(rint(real.infinity) == real.infinity);
+            }
+        });
+    }
+}
+
+
+// The result follows the rounding mode the program sets.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE has no source for `rint`"),
+)) {
+    @("ffi.executedIntrinsicCall.rint.roundingMode." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.math: rint;
+            import core.stdc.fenv: fesetround, FE_UPWARD, FE_DOWNWARD,
+                FE_TOWARDZERO, FE_TONEAREST;
+
+            void main() {
+                fesetround(FE_UPWARD);
+                assert(rint(2.1) == 3.0);
+                assert(rint(-2.9) == -2.0);
+                assert(rint(2.1L) == 3.0L);
+                fesetround(FE_DOWNWARD);
+                assert(rint(2.9) == 2.0);
+                assert(rint(-2.1) == -3.0);
+                assert(rint(2.9f) == 2.0f);
+                fesetround(FE_TOWARDZERO);
+                assert(rint(2.9) == 2.0);
+                assert(rint(-2.9) == -2.0);
+                fesetround(FE_TONEAREST);
+                assert(rint(2.9) == 3.0);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE has no source for `rndtol`"),
+)) {
+    @("ffi.executedIntrinsicCall.rndtol.halfway." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.math: rndtol;
+
+            void main() {
+                assert(rndtol(0.5) == 0L);
+                assert(rndtol(1.5) == 2L);
+                assert(rndtol(2.5) == 2L);
+                assert(rndtol(-1.5) == -2L);
+                assert(rndtol(-2.5) == -2L);
+                assert(rndtol(3.5f) == 4L);
+                assert(rndtol(3.5L) == 4L);
+                assert(rndtol(-0.0) == 0L);
+                assert(rndtol(1.0e15) == 1_000_000_000_000_000L);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE has no source for `rndtol`"),
+)) {
+    @("ffi.executedIntrinsicCall.rndtol.roundingMode." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.math: rndtol;
+            import core.stdc.fenv: fesetround, FE_UPWARD, FE_DOWNWARD,
+                FE_TOWARDZERO, FE_TONEAREST;
+
+            void main() {
+                fesetround(FE_UPWARD);
+                assert(rndtol(2.1) == 3L);
+                assert(rndtol(-2.9) == -2L);
+                assert(rndtol(2.1L) == 3L);
+                fesetround(FE_DOWNWARD);
+                assert(rndtol(2.9) == 2L);
+                assert(rndtol(-2.1) == -3L);
+                assert(rndtol(2.9f) == 2L);
+                fesetround(FE_TOWARDZERO);
+                assert(rndtol(2.9) == 2L);
+                assert(rndtol(-2.9) == -2L);
+                fesetround(FE_TONEAREST);
+                assert(rndtol(2.9) == 3L);
+            }
+        });
+    }
+}
+
+
+// `core.volatile` accesses are bodiless intrinsics too.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE has no source for `volatileLoad`"),
+)) {
+    @("ffi.executedIntrinsicCall.volatile." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.volatile: volatileLoad, volatileStore;
+
+            void main() {
+                ubyte b;
+                volatileStore(&b, cast(ubyte) 0x9a);
+                assert(volatileLoad(&b) == 0x9a);
+                assert(b == 0x9a);
+                ushort s;
+                volatileStore(&s, cast(ushort) 0xbeef);
+                assert(volatileLoad(&s) == 0xbeef);
+                uint i;
+                volatileStore(&i, 0xdeadbeefu);
+                assert(volatileLoad(&i) == 0xdeadbeefu);
+                assert(i == 0xdeadbeefu);
+                ulong l;
+                volatileStore(&l, 0x1122334455667788uL);
+                assert(volatileLoad(&l) == 0x1122334455667788uL);
+                assert(l == 0x1122334455667788uL);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE has no source for `__prefetch`"),
+)) {
+    @("ffi.executedIntrinsicCall.prefetch." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.simd: prefetch;
+
+            void main() {
+                int value = 5;
+                prefetch!(false, 0)(&value);
+                prefetch!(false, 3)(&value);
+                prefetch!(true, 0)(&value);
+                assert(value == 5);
+            }
+        });
+    }
+}
+
+
 static foreach (backend; Matrix!()) {
     @("ffi.unexecutedIntrinsicCall.rint." ~ backend.stringof)
     @Tags(backend.stringof)
