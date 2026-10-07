@@ -1289,10 +1289,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                     arguments.ptr, arguments.length,
                 );
             });
-            // A constructor's ref-qualified ABI result is its receiver.
-            // An interpreted body has no return statement that stores it.
-            if (adapter.resultIsReceiver)
-                *cast(void**) place = receiver;
         }
 
         import snakebite.backends.temporary: constructTemporary;
@@ -1317,7 +1313,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 bindArguments(function_, callArguments, callSite.loc,
                     frameBase, layout);
             result = adapter.invoke(
-                returnPlace, arguments.values, &executeCallee);
+                returnPlace, receiver, arguments.values, &executeCallee);
         }, { _temporaries.armConstructor(receiver); });
         return result;
     }
@@ -6648,7 +6644,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             values[0] = &context;
         foreach (i, parameter; layout.parameters)
             values[i + hasContext] = frame.base + parameter.offset;
-        return CallAdapter.ofType(type).invoke(returnPlace, values,
+        return CallAdapter.ofType(type).invoke(returnPlace, null, values,
             (place, arguments) {
                 crossNative({
                     _plans.signatureOf(type, hasContext).callAt(

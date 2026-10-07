@@ -285,25 +285,15 @@ public struct CallAdapter {
         auto type = function_.type.isTypeFunction;
         assert(type !is null);
 
-        const isConstructor = function_.isCtorDeclaration !is null;
-        auto adapter = ofType(type, isConstructor);
-        // The constructor ABI returns its receiver by reference. Copy its
-        // aggregate, not dmd's placeholder-sized `void` return type.
-        if (isConstructor && adapter._referenceResult)
-            adapter._resultSize = TypeFacts.of(function_.isThis.type).size;
-        return adapter;
+        return ofType(type);
     }
 
     // As `of`, from a bare `TypeFunction` rather than a declaration - the
     // shape a call through a function pointer or a delegate value returns
     // into, since there is no `FuncDeclaration` at that call site to read
-    // a result adapter from otherwise. `isConstructor` covers a constructor,
-    // whose `TypeFunction` is `void` already, and any other callee dmd's
-    // own semantics already treat as returning nothing regardless of its
-    // declared return type.
+    // a result adapter from otherwise.
     public static CallAdapter ofType(
         TypeFunction type,
-        in bool isConstructor = false,
     ) {
         import dmd.astenums: Tvoid;
         import dmd.typesem: nextOf;
@@ -312,8 +302,8 @@ public struct CallAdapter {
         adapter._referenceResult = type.isRef;
 
         auto returnType = type.nextOf;
-        adapter._resultIsReceiver = isConstructor && type.isRef;
-        adapter._isVoid = isConstructor
+        adapter._resultIsReceiver = type.isCtor;
+        adapter._isVoid = type.isCtor
             || returnType is null || returnType.ty == Tvoid;
 
         if (adapter._referenceResult) {
@@ -327,10 +317,13 @@ public struct CallAdapter {
         return adapter;
     }
 
-    // Whether the call's value is the receiver the constructor was handed.
-    // Itanium and System V constructors return `void`, so whatever a native
-    // one leaves in the return register is not the receiver; the caller
-    // supplies it instead.
+    // Whether the call's value is the receiver the constructor was handed,
+    // for a struct and for a class. dmd's glue layer makes it the value of a
+    // call to a constructor with C++ linkage, because the Itanium ABI makes
+    // such a constructor return `void` (`glue/e2ir.d`, `isCPPCtor`). A
+    // constructor with D linkage returns its receiver itself, so the same
+    // value holds there. Whatever a callee leaves in the return register is
+    // not that value; the executor of the call supplies the receiver.
     public bool resultIsReceiver() const {
         return _resultIsReceiver;
     }
@@ -376,16 +369,21 @@ public struct CallAdapter {
     // reaches an ordinary expression's return place.
     pragma(inline, true) public CallResult invoke(
         void* returnPlace,
+        void* receiver,
         scope const(void*)[] arguments,
         scope CallInvoker invoke,
     ) const {
         if (!_referenceResult) {
             invoke(returnPlace, arguments);
+            if (_resultIsReceiver && returnPlace !is null)
+                storeReference(returnPlace, receiver);
             return CallResult.init;
         }
 
         align(size_t.sizeof) ubyte[size_t.sizeof] addressPlace = void;
         invoke(addressPlace.ptr, arguments);
+        if (_resultIsReceiver)
+            storeReference(addressPlace.ptr, receiver);
 
         // D makes a `const` local return as `const(CallResult)`, which does
         // not match this method's return type.
