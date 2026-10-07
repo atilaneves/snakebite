@@ -56,8 +56,12 @@ public struct StorageResolver(Result, Adapter) {
         if (auto superExp = expression.isSuperExp)
             return _adapter.storageSuper(superExp);
 
-        if (auto varExp = expression.isVarExp)
+        if (auto varExp = expression.isVarExp) {
+            // An initializer symbol has no storage to name.
+            if (varExp.var.isVarDeclaration is null)
+                return _adapter.storageValue(varExp);
             return _adapter.storageVariable(varExp);
+        }
 
         // `obj.Base` names the same object as `obj`.
         if (auto dotType = expression.isDotTypeExp)

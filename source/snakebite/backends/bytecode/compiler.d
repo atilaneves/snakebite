@@ -7394,8 +7394,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         public size_t storageVariable(VarExp expression) {
             auto variable = expression.var.isVarDeclaration;
-            if (variable is null)
-                return storageValue(expression);
             if (variable.isDataseg)
                 return compiler.compileStaticAddress(variable);
             if (compiler.isThisField(variable))
