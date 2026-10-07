@@ -155,6 +155,63 @@ public void shouldBeStatusOf(
     }
 }
 
+// `shouldBeStatusOf` with the dependency image that `imageSource` makes for
+// the snippet. A snippet runs on no image otherwise (`shouldBeStatusOf`
+// leaves it null), which is right for every test that no template instance
+// of a dependency decides. This one builds the image: it starts the image
+// compiler, so only tests about the image use it.
+public void shouldBeStatusOfOnImage(
+    BackendType, string code, string module_ = __MODULE__,
+)(
+    in int expected,
+    in string file = __FILE__,
+    in size_t line = __LINE__,
+) {
+    static if (is(BackendType == Native)) {
+        shouldBeStatusOf!(BackendType, code, module_)(expected, file, line);
+    } else {
+        import snakebite.dependencyimage:
+            Optimise, defaultCompiler, prepareImage;
+        import snakebite.frontend.imagesource: imageInputs, imageSource;
+
+        enum program_ = RegisterProgram!(module_, code).program;
+        auto program = Program([parsedProgram(program_)], "snakebite");
+        auto image = prepareImage(imageSource(program), imageCacheDirectory,
+            defaultCompiler, imageInputs(program), null, null, null, null,
+            null, Optimise.no);
+        program.dependencyImage = &image;
+        auto backend = Owned!BackendType(program);
+        asTestFailure(run(backend, program), file, line)
+            .should == expected;
+    }
+}
+
+// One directory for every image that a `bin/ut` run builds: the image cache
+// keys on content, so equal sources share an image. Removed at exit.
+private string imageCacheDirectory() {
+    import std.file: mkdirRecurse, tempDir;
+    import std.path: buildPath;
+    import std.uuid: randomUUID;
+
+    synchronized {
+        if (_imageCacheDirectory is null) {
+            _imageCacheDirectory = buildPath(tempDir,
+                "snakebite-ut-images-" ~ randomUUID.toString);
+            mkdirRecurse(_imageCacheDirectory);
+        }
+        return _imageCacheDirectory;
+    }
+}
+
+private __gshared string _imageCacheDirectory;
+
+shared static ~this() {
+    import std.file: exists, rmdirRecurse;
+
+    if (_imageCacheDirectory !is null && _imageCacheDirectory.exists)
+        rmdirRecurse(_imageCacheDirectory);
+}
+
 // `main`'s exit status, run natively, mirroring the backend-side semantics
 // documented on `snakebite.backends.backend.run`: `void main` is status 0,
 // an escaping `Throwable` is status 1, and no `main` at all is status 0.

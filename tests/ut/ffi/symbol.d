@@ -673,7 +673,7 @@ static foreach (backend; Matrix!(
     @("image.atomicLoad.classRef." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.shouldBeStatusOf!(backend, q{
+        0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
             class Node { int value; }
@@ -698,7 +698,7 @@ static foreach (backend; Matrix!(
     @("image.atomicStore.classRef." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.shouldBeStatusOf!(backend, q{
+        0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
             class Node { int value; }
@@ -724,7 +724,7 @@ static foreach (backend; Matrix!(
     @("image.cas.classRef." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.shouldBeStatusOf!(backend, q{
+        0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
             class Node { int value; }
@@ -751,7 +751,7 @@ static foreach (backend; Matrix!(
     @("image.atomicExchange.classRef." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.shouldBeStatusOf!(backend, q{
+        0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
             class Node { int value; }
@@ -778,7 +778,7 @@ static foreach (backend; Matrix!(
     @("image.atomicLoad.rootStructPtr." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.shouldBeStatusOf!(backend, q{
+        0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
             class Node { int value; }
@@ -803,7 +803,7 @@ static foreach (backend; Matrix!(
     @("image.atomicStore.rootStructPtr." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.shouldBeStatusOf!(backend, q{
+        0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
             class Node { int value; }
@@ -829,7 +829,7 @@ static foreach (backend; Matrix!(
     @("image.cas.rootStructPtr." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.shouldBeStatusOf!(backend, q{
+        0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
             class Node { int value; }
@@ -856,7 +856,7 @@ static foreach (backend; Matrix!(
     @("image.atomicExchange.rootStructPtr." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.shouldBeStatusOf!(backend, q{
+        0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
             class Node { int value; }
@@ -883,7 +883,7 @@ static foreach (backend; Matrix!(
     @("image.atomicLoad.rootStructPtrImmutable." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.shouldBeStatusOf!(backend, q{
+        0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
             class Node { int value; }
@@ -908,7 +908,7 @@ static foreach (backend; Matrix!(
     @("image.atomicStore.rootStructPtrImmutable." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.shouldBeStatusOf!(backend, q{
+        0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
             class Node { int value; }
@@ -934,7 +934,7 @@ static foreach (backend; Matrix!(
     @("image.cas.rootStructPtrImmutable." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.shouldBeStatusOf!(backend, q{
+        0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
             class Node { int value; }
@@ -961,7 +961,7 @@ static foreach (backend; Matrix!(
     @("image.atomicExchange.rootStructPtrImmutable." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.shouldBeStatusOf!(backend, q{
+        0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
             class Node { int value; }
@@ -988,7 +988,7 @@ static foreach (backend; Matrix!(
     @("image.atomicLoad.rootStruct." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.shouldBeStatusOf!(backend, q{
+        0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
             class Node { int value; }
@@ -1013,7 +1013,7 @@ static foreach (backend; Matrix!(
     @("image.atomicStore.rootStruct." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.shouldBeStatusOf!(backend, q{
+        0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
             class Node { int value; }
@@ -1039,7 +1039,7 @@ static foreach (backend; Matrix!(
     @("image.cas.rootStruct." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.shouldBeStatusOf!(backend, q{
+        0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
             class Node { int value; }
@@ -1066,7 +1066,7 @@ static foreach (backend; Matrix!(
     @("image.atomicExchange.rootStruct." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.shouldBeStatusOf!(backend, q{
+        0.shouldBeStatusOfOnImage!(backend, q{
             import core.atomic;
             struct Pair { int a; int b; }
             class Node { int value; }
