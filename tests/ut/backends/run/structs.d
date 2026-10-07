@@ -5922,3 +5922,63 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+// A struct with `@disable this()` and a destructor that asserts on its
+// state is moved into raw storage with `moveEmplace` and copied there with
+// `copyEmplace`; the destructor still runs on the temporaries.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `malloc`"),
+)) {
+    @("disabledConstructorElementMovedAndCopiedIntoRawStorage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.lifetime: copyEmplace, moveEmplace;
+            import core.stdc.stdlib: free, malloc;
+
+            enum initialValue = 0x69FF5705DAD1AB6CUL;
+            enum payloadValue = 0x495343303356D18CUL;
+
+            static struct S {
+                ulong value = initialValue;
+                @nogc:
+                @disable this();
+                this(ulong value) { this.value = value; }
+                ~this() {
+                    assert(value == initialValue || value == payloadValue);
+                }
+            }
+
+            struct Array(T) {
+                T[] storage;
+                size_t used;
+
+                void insertBack(T value) {
+                    if (storage.length == 0)
+                        storage = (cast(T*) malloc(T.sizeof * 4))[0 .. 4];
+                    moveEmplace(*cast(T*) &value, storage[used++]);
+                }
+
+                void append(T[] values) {
+                    foreach (ref value; values)
+                        copyEmplace(value, storage[used++]);
+                }
+
+                ~this() {
+                    free(storage.ptr);
+                }
+            }
+
+            int main() {
+                auto s = S(payloadValue);
+                Array!S array;
+                array.insertBack(s);
+                array.append([s]);
+                return array.used == 2
+                    && array.storage[1].value == payloadValue ? 0 : 1;
+            }
+        });
+    }
+}
