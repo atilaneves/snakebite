@@ -20,38 +20,88 @@ third route instead, the builtin route below.
 ## Decision
 
 `CallSelection.buildDecision`
-(`source/snakebite/backends/calls.d`) asks dmd for a bodiless
-declaration's own classification, `dmd.builtin.isBuiltin`. This is the
-only question this project asks dmd about a builtin. dmd's own CTFE
-evaluator, `dmd.builtin.eval_builtin`, is never called at run time.
+(`source/snakebite/backends/calls.d`) finds the compiler intrinsics
+among the bodiless declarations. dmd has two lists of them, and the
+decision uses both:
 
-When `isBuiltin` answers `BUILTIN.unimp`, the declaration keeps rule
-3's routing: a barrier call, or an error when the resolver also finds
-no host address.
+- `dmd.builtin.isBuiltin` classifies the ones that its semantic pass and
+  its CTFE evaluator know (`fabs`, `sqrt`, `sin`, `cos`, `ldexp`, `yl2x`,
+  `yl2xp1`, `bswap`, `_popcnt`). dmd's own CTFE evaluator,
+  `dmd.builtin.eval_builtin`, is never called at run time.
+- `dmd.glue.toir.intrinsic_op` lists the ones that its code generator
+  inlines. It has more, among them `core.math.rint` and `rndtol`, all of
+  `core.volatile`, and `core.simd.__prefetch`, `__simd`, `__simd_ib` and
+  `__simd_sto`. `isBuiltin` answers `BUILTIN.unimp` for these. The glue
+  module is not part of this build, so the decision finds them by module
+  (`core.math`, `core.volatile`, `core.simd`) and takes every bodiless
+  declaration of those modules.
 
-When `isBuiltin` names a real classification, the call takes the
-builtin route instead. `source/snakebite/backends/builtins.d` looks up
-a compiled wrapper by the declaration's own identifier
-(`function_.ident`, the same identifier dmd's own `determine_builtin`
-keys on) and its first parameter's type. The identifier alone is not a
-unique key: `sin(float)` and `sin(double)` both classify as
-`BUILTIN.sin`. The wrapper is a plain compiled snakebite function that
-calls the host compiler's own intrinsic for that name and type, for
-example `float fabs(float x) { return core.math.fabs(x); }`. Both
-backends call the wrapper directly, on arguments already in native
-layout, the same way they call a resolved native plan. Calling the
-host compiler's own intrinsic, rather than computing the result
-another way, is what keeps a builtin call's result identical to what
-compiled D would produce.
+Any other bodiless declaration keeps rule 3's routing: a barrier call, or
+an error when the resolver finds no host address.
 
-A declaration `isBuiltin` classifies, but the wrapper table has no
-entry for, is an error at decision time, not at the call's first
-execution.
+A declaration of either list takes the builtin route.
+`source/snakebite/backends/builtins.d` looks up a compiled wrapper by the
+declaration's own identifier (`function_.ident`, the same identifier
+dmd's own `determine_builtin` keys on) and the types of its parameters.
+The identifier alone is not a unique key: `sin(float)` and `sin(double)`
+both classify as `BUILTIN.sin`. The wrapper is a plain compiled snakebite
+function. Both backends call it directly, on arguments already in native
+layout, the same way they call a resolved native plan.
 
-Known gap: issue #423. dmd's own `BUILTIN` enum has no member for
-`core.math.rndtol` or `core.math.rint`. `isBuiltin` answers
-`BUILTIN.unimp` for both, so they keep rule 3's routing and still need
-a host symbol FFI cannot supply, on every backend but `Native`.
+A declaration of either list that the wrapper table has no entry for ends
+the run at the call's first decision, with a message that names the
+intrinsic. It does not go across the barrier, where it would fail at its
+first execution with a message about a missing symbol.
+
+### The result is dmd's result
+
+The guest is always analysed as dmd code (`version (DigitalMars)`, with
+`D_SIMD`). One guest program must therefore give one result in the
+dmd-built `bin/ut` and in the LDC-built `bin/sb` and `bin/at`, and that
+result is the one that dmd gives. A wrapper does not call whatever the
+host compiler's own `core.math` does. For example `rndtol(2.5)` is 2 with
+dmd, which rounds in the current rounding mode, and 3 with LDC, whose
+`core.math.rndtol` is `llround`. The wrapper under LDC rounds in the
+current rounding mode (`llvm_llrint`), so the guest gets 2.
+
+`source/snakebite/backends/dmdintrinsics.d` holds the definitions that
+the wrappers call. Under dmd they are dmd's own `core.math`. Under LDC
+they are what dmd emits: the x87 instruction on a `real` that is narrowed
+once when the result is not a `real` (`sin`, `cos`, `ldexp`, `yl2x`,
+`yl2xp1`), the SSE or x87 square root instruction, and `llvm_llrint`.
+The wrapper writes its result at the type that the guest's declaration
+returns, never at the type that the host's intrinsic returns: LDC
+declares only the `real` overload of `yl2x`.
+
+A test whose `Native` arm is compiled by LDC cannot use `Native` as the
+oracle for such a function. It asserts the values of a native dmd run and
+omits `Native` under LDC.
+
+### Array operations
+
+dmd lowers `a[] = b[] + c[]` to a call of
+`core.internal.array.operations.arrayOp`. The guest has `D_SIMD`, so the
+guest body of that template moves 16 bytes with `core.simd.__simd` and
+`__simd_sto` (`XMM.LODUPS`, `LODUPD`, `LODDQU`, `STOUPS`, `STOUPD`,
+`STODQU`). A run that has a dependency image calls the image's copy of
+the template instance instead, compiled by the host compiler, and never
+runs the guest body (`bin/sb`). A run that has no image runs the guest
+body (the test binaries).
+
+The wrapper table has those six opcodes. The first operand of
+`__simd_sto` is the memory that the instruction writes, so the call takes
+that parameter by address (`Decision.destinationParameter`). `__simd`
+with another opcode or another overload, `__simd_ib`, and `__simd_sto`
+with another opcode have no wrapper (see "Open").
+
+### Open
+
+Direct calls of `core.simd.__simd`, `__simd_ib` and `__simd_sto` from a
+guest program, other than the six moves above, have no wrapper. dmd needs
+a constant opcode for each call (`glue/e2ir.d`), so a complete wrapper
+needs one case for each of the about 265 `XMM` members for each operand
+shape, and a second implementation for an LDC host, which has no
+`__simd`.
 
 ## Considered options
 

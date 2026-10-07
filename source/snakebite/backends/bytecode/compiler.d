@@ -6755,7 +6755,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         case builtin:
             compileBuiltinCall(type, arguments, loc, exprText,
-                destOffset, decision.builtinEntry);
+                destOffset, decision.builtinEntry,
+                decision.destinationParameter);
             return;
         case vaStart:
             compileVaStart(type, arguments, loc, exprText,
@@ -6900,6 +6901,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t destOffset,
         in bool allowExtraArguments,
         scope CallSite delegate(Arg[] args, size_t returnWidth) site,
+        in size_t destinationParameter = size_t.max,
     ) {
         import snakebite.backends.calls: arityMismatches;
         import snakebite.ffi.call: CallAdapter;
@@ -6911,7 +6913,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (returnShape.isVoid && destOffset != discardResult)
             assert(0, "a `void` call is only ever evaluated for effect");
 
-        auto preparation = CallAdapter.Arguments.of(type, arguments);
+        auto preparation = CallAdapter.Arguments.of(
+            type, arguments, destinationParameter);
         Arg[] args = initialArgs;
         preparation.each((value) {
             args ~= compileBarrierArgument(value);
@@ -6947,14 +6950,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             destOffset, /* allowExtraArguments */ true,
             (args, returnWidth) {
                 auto preparation = CallAdapter.Arguments.of(type, arguments);
-                // `CallSelection` routes every builtin dmd classifies to
+                // `CallSelection` routes every compiler intrinsic to
                 // `compileBuiltinCall` instead, before this is ever
-                // reached. But dmd's own `BUILTIN` enum does not cover
-                // every bodiless function with no host symbol -
-                // `core.math.rndtol`/`rint`, and any
-                // declared-but-unlinked `extern(C)` function, still
-                // reach here. An unused branch can refer to one of
-                // those. Resolve it only if execution reaches the call.
+                // reached. A declared-but-unlinked `extern(C)` function
+                // still reaches here, and an unused branch can refer to
+                // one. Resolve it only if execution reaches the call.
                 // Known native targets stay prepared for callbacks that
                 // first run during GC. A target with no symbol has no
                 // plan to prepare early: the lookup misses again, so the
@@ -6977,9 +6977,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // A builtin needs no FFI plan and no symbol lookup, unlike a native
     // call, so `site` here builds a `CallSite` straight from `entry`.
-    // Arguments still bind through `compileBarrierArgument`, since a
-    // `core.math`/`core.bitop` intrinsic's parameters are plain
-    // by-value scalars, never `ref` or field reads.
+    // Arguments still bind through `compileBarrierArgument`: a builtin's
+    // parameters are by-value scalars and vectors, except the one that the
+    // wrapper writes through, which `Decision.destinationParameter` makes
+    // a reference.
     private void compileBuiltinCall(
         TypeFunction type,
         Expressions* arguments,
@@ -6987,10 +6988,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         string exprText,
         in size_t destOffset,
         BuiltinCall entry,
+        in size_t destinationParameter,
     ) {
         compileBarrierCall(type, arguments, loc, exprText, null,
             destOffset, /* allowExtraArguments */ false,
-            (args, returnWidth) => CallSite.builtin(entry, args, returnWidth));
+            (args, returnWidth) => CallSite.builtin(entry, args, returnWidth),
+            destinationParameter);
     }
 
     // The cursor is the one input of `va_start` that is not an argument:

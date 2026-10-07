@@ -20,10 +20,9 @@ public struct CallSelection {
     // Every call site resolves to exactly one of these. `guest` and
     // `native` are the two routes `usesGuestBody` always answered;
     // `builtin` is the third one this backend adds for a bodiless
-    // function dmd itself classifies as a compiler intrinsic (`dmd.
-    // builtin.isBuiltin`) - `core.math.fabs` and friends, which have no
-    // host symbol FFI could ever resolve (they compile to an inline
-    // instruction, not a call). `snakebite.backends.builtins` holds the
+    // function that is a compiler intrinsic (`builtinDecision`) -
+    // `core.math.fabs` and friends, which have no host symbol FFI could
+    // ever resolve (they compile to an inline instruction, not a call). `snakebite.backends.builtins` holds the
     // wrapper `builtinEntry` calls for that route.
     //
     // `vaStart` is the one intrinsic that is not a pure function of its
@@ -39,14 +38,16 @@ public struct CallSelection {
     // whether the function nests inside another (so it needs this
     // backend's own static chain), the same-declaration preference
     // every call falls back to otherwise, and - for a bodiless
-    // function - whether dmd classifies it as a compiler intrinsic this
-    // backend has a wrapper for. `route` and `builtinEntry` together,
+    // function - whether it is a compiler intrinsic, and its wrapper. `route` and `builtinEntry` together,
     // rather than two separate lookups, so a builtin call site - the
     // interpreter's hot path included - reads this cache once per call,
     // not twice.
     public struct Decision {
         public Route route;
         public BuiltinCall builtinEntry;
+        // For `builtin`: the declared parameter that the wrapper takes by
+        // address (`snakebite.backends.builtins.destinationParameterOf`).
+        public size_t destinationParameter = size_t.max;
     }
 
     // Read without a lock by every thread that runs guest code
@@ -281,21 +282,31 @@ public struct CallSelection {
         return function_.mangledNameOf == "alloca";
     }
 
-    // Asks dmd for `function_`'s own compiler-intrinsic classification
-    // (`dmd.builtin.isBuiltin`) - the *only* dmd query this backend ever
-    // makes about a builtin; `dmd.builtin.eval_builtin` (dmd's CTFE
-    // evaluator) is never called here or anywhere at run time. A
-    // function dmd does not classify (`BUILTIN.unimp`) - every ordinary
-    // bodiless native declaration, and also, today, `core.math.rint` and
-    // `core.math.rndtol`, which dmd's own `BUILTIN` enum has no member
-    // for - keeps the native route FFI already handles. Every bodiless
-    // declaration dmd does classify has a wrapper in the table.
+    // `function_`'s wrapper, when it is a bodiless declaration that dmd
+    // inlines instead of calling. dmd has two lists of these. Its
+    // semantic pass classifies some (`dmd.builtin.isBuiltin`: `core.math.
+    // fabs`, `core.bitop.bswap`, ...) and its CTFE evaluator is for that
+    // list only, which this backend never calls at run time. Its code
+    // generator (`dmd.glue.toir.intrinsic_op`) inlines more, among them
+    // `core.math.rint` and `rndtol`, `core.volatile` and `core.simd`,
+    // without classifying them; `isCodeGeneratorIntrinsicModule` finds
+    // those by module. No host symbol exists for either kind. Any other
+    // bodiless declaration is a native call.
+    //
+    // A declaration of either kind that the table has no wrapper for stops
+    // here, at the first decision, naming the intrinsic: sending it across
+    // the barrier would end in an unrelated "symbol not found" at its
+    // first execution.
     private static Decision builtinDecision(FuncDeclaration function_) {
         import dmd.builtin: isBuiltin;
-        import snakebite.backends.builtins: entryOf;
+        import snakebite.backends.builtins:
+            destinationParameterOf, entryOf;
+        import std.conv: text;
+        import core.stdc.stdio: fprintf, stderr;
+        import std.string: fromStringz;
 
-        const kind = isBuiltin(function_);
-        if (kind == BUILTIN.unimp)
+        const classified = isBuiltin(function_) != BUILTIN.unimp;
+        if (!classified && !isCodeGeneratorIntrinsicModule(function_))
             return Decision(Route.native);
 
         // dmd's own classification (`BUILTIN.popcnt` for the declared
@@ -304,47 +315,103 @@ public struct CallSelection {
         // every one of those identifiers - the same one dmd's own
         // `determine_builtin` keys on (`dmd/builtin.d`: `id3 = fd.
         // ident`) - so `function_.ident` is the lookup key, not `kind`.
-        auto entry = entryOf(
-            function_.ident.toString.idup, parameterTypeOf(function_));
-        assert(entry !is null);
+        const name = function_.ident.toString.idup;
+        ParameterType[] types;
+        const keyed = parameterTypesOf(function_, types);
+        auto entry = keyed ? entryOf(name, types) : null;
+        if (entry is null) {
+            // A release build halts without the assertion's message.
+            const message = text("no builtin wrapper for `",
+                function_.toPrettyChars.fromStringz, "`");
+            fprintf(stderr, "snakebite: %.*s\n",
+                cast(int) message.length, message.ptr);
+            assert(false, message);
+        }
 
-        return Decision(Route.builtin, entry);
+        return Decision(
+            Route.builtin, entry, destinationParameterOf(name));
     }
 
-    // The concrete type `function_`'s own first parameter declares - the
-    // half of `snakebite.backends.builtins.entryOf`'s lookup key dmd's
-    // `BUILTIN` classification does not carry, since it goes by name
-    // alone: `sin(float)` and `sin(double)` both classify as `BUILTIN.
-    // sin`, and `bswap(uint)`/`bswap(ulong)` both classify as `BUILTIN.
-    // bswap`. Every builtin this table serves takes at least one
-    // argument of the type its result (or, for `ldexp`'s second
-    // argument, an unrelated `int`) shares.
-    private static ParameterType parameterTypeOf(FuncDeclaration function_) {
-        import dmd.astenums: TY;
+    // dmd's code generator (`dmd.glue.toir.intrinsic_op`) inlines bodiless
+    // functions of these modules by name.
+    private static bool isCodeGeneratorIntrinsicModule(
+        FuncDeclaration function_,
+    ) {
+        const module_ = function_.getModule;
+        if (module_ is null || module_.md is null
+                || module_.md.packages.length != 1
+                || module_.md.packages[0].toString != "core")
+            return false;
+        const name = module_.md.id.toString;
+        return name == "math" || name == "volatile" || name == "simd";
+    }
+
+    // The concrete types `function_`'s parameters declare, the half of
+    // `snakebite.backends.builtins.entryOf`'s lookup key that the name
+    // alone does not give. `false` when a parameter has a type that no
+    // wrapper takes.
+    private static bool parameterTypesOf(
+        FuncDeclaration function_, out ParameterType[] types,
+    ) {
         import dmd.typesem: toBasetype;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         // `const` fails: `ParameterList.length` and `opIndex` are not
         // `const` methods.
         auto parameterList = typeFunctionOf(function_).parameterList;
-        assert(parameterList.length > 0);
+        foreach (i; 0 .. parameterList.length) {
+            ParameterType type;
+            if (!parameterTypeOf(
+                    parameterList[i].type.toBasetype, false, type))
+                return false;
+            types ~= type;
+        }
+        return types.length > 0;
+    }
 
-        const parameterType = parameterList[0].type.toBasetype;
-        final switch (parameterType.ty) with (TY) {
-            case Tfloat32: return ParameterType.float_;
-            case Tfloat64: return ParameterType.double_;
-            case Tfloat80: return ParameterType.real_;
-            case Tuns16: return ParameterType.ushort_;
-            case Tuns32: return ParameterType.uint_;
-            case Tuns64: return ParameterType.ulong_;
-            case Tarray, Tsarray, Taarray, Tpointer, Treference, Tfunction,
-                Tident, Tclass, Tstruct, Tenum, Tdelegate, Tnone, Tvoid,
-                Tint8, Tuns8, Tint16, Tint32, Tint64, Timaginary32,
+    // `pointee` is for the type that a pointer parameter points to.
+    private static bool parameterTypeOf(
+        imported!"dmd.mtype".Type type,
+        in bool pointee,
+        out ParameterType result,
+    ) {
+        import dmd.astenums: TY;
+        import dmd.typesem: nextOf, toBasetype;
+
+        final switch (type.ty) with (TY) {
+            case Tfloat32: result = ParameterType.float_; return !pointee;
+            case Tfloat64: result = ParameterType.double_; return !pointee;
+            case Tfloat80: result = ParameterType.real_; return !pointee;
+            case Tuns8:
+                result = pointee
+                    ? ParameterType.ubytePointer_ : ParameterType.ubyte_;
+                return true;
+            case Tuns16:
+                result = pointee
+                    ? ParameterType.ushortPointer_ : ParameterType.ushort_;
+                return true;
+            case Tint32: result = ParameterType.int_; return !pointee;
+            case Tuns32:
+                result = pointee
+                    ? ParameterType.uintPointer_ : ParameterType.uint_;
+                return true;
+            case Tuns64:
+                result = pointee
+                    ? ParameterType.ulongPointer_ : ParameterType.ulong_;
+                return true;
+            case Tvoid: result = ParameterType.voidPointer_; return pointee;
+            case Tvector: result = ParameterType.vector_; return !pointee;
+            case Tpointer:
+                return !pointee && parameterTypeOf(
+                    type.nextOf.toBasetype, true, result);
+            case Tarray, Tsarray, Taarray, Treference, Tfunction,
+                Tident, Tclass, Tstruct, Tenum, Tdelegate, Tnone,
+                Tint8, Tint16, Tint64, Timaginary32,
                 Timaginary64, Timaginary80, Tcomplex32, Tcomplex64,
-                Tcomplex80, Tbool, Tchar, Twchar, Tdchar, Terror, Tinstance,
-                Ttypeof, Ttuple, Tslice, Treturn, Tnull, Tvector, Tint128,
-                Tuns128, Ttraits, Tmixin, Tnoreturn, Ttag:
-                assert(0);
+                Tcomplex80, Tbool, Tchar, Twchar, Tdchar, Terror,
+                Tinstance, Ttypeof, Ttuple, Tslice, Treturn, Tnull,
+                Tint128, Tuns128, Ttraits, Tmixin, Tnoreturn, Ttag:
+                return false;
         }
     }
 }

@@ -56,8 +56,10 @@ The decision for one call, with three possible outcomes: run the
 callee's own guest body, call its host body across the barrier, or run
 snakebite's own builtin wrapper. Root ownership and the call's
 requirements choose between the guest and barrier outcomes. A bodiless
-declaration takes the builtin outcome instead when dmd's own
-`isBuiltin` classifies it as a compiler intrinsic (ADR-0013).
+declaration takes the builtin outcome instead when it is a compiler
+intrinsic: one that dmd's `isBuiltin` classifies, or one of `core.math`,
+`core.volatile` and `core.simd` that dmd's code generator inlines
+(ADR-0013).
 
 **Call arguments**:
 The values supplied to a call: hidden context and type information,

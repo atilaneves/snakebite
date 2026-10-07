@@ -98,11 +98,17 @@ public struct CallAdapter {
         private TypeFunction _type;
         private Expression[] _expressions;
         private size_t _declaredOffset;
+        private size_t _destination = size_t.max;
 
+        // `destination` is a declared parameter that the callee takes by
+        // address though its declaration says by value (`snakebite.
+        // backends.calls.CallSelection.Decision.destinationParameter`).
         public static Arguments of(
             TypeFunction type, Expressions* expressions,
+            in size_t destination = size_t.max,
         ) {
             Arguments result;
+            result._destination = destination;
             result._type = type;
             result._expressions = expressions is null ? null : (*expressions)[];
             result._declaredOffset = type.isDstyleVariadic ? 1 : 0;
@@ -220,7 +226,8 @@ public struct CallAdapter {
             import dmd.astenums: STC;
 
             auto parameter = _type.parameterList[i]; // Frontend types remain mutable.
-            const reference = Argument.of(parameter).isReference;
+            const reference = Argument.of(parameter).isReference
+                || i == _destination;
             const isOut = (parameter.storageClass & STC.out_) != 0;
             const isLazy = (parameter.storageClass & STC.lazy_) != 0;
             auto parameterType = parameter.type; // Frontend types remain mutable.
@@ -228,9 +235,30 @@ public struct CallAdapter {
                 ? _expressions[_declaredOffset + i].type
                 : parameterType;
             return Declared(
-                _expressions[_declaredOffset + i], parameterType,
-                evaluationType, reference, isOut, isLazy,
+                i == _destination
+                    ? memoryOperand(_expressions[_declaredOffset + i])
+                    : _expressions[_declaredOffset + i],
+                parameterType, evaluationType, reference, isOut, isLazy,
             );
+        }
+
+        // The semantic pass converts a vector operand to the declared vector
+        // type of the parameter (`void16`) with a cast that reinterprets the
+        // same bytes, and the cast of a memory operand is no memory. dmd's
+        // code generator does not see that cast either.
+        private static Expression memoryOperand(Expression expression) {
+            import dmd.expression: CastExp;
+            import dmd.astenums: TY;
+            import dmd.typesem: toBasetype;
+
+            while (true) {
+                auto cast_ = expression.isCastExp;
+                if (cast_ is null
+                        || cast_.type.toBasetype.ty != TY.Tvector
+                        || cast_.e1.type.toBasetype.ty != TY.Tvector)
+                    return expression;
+                expression = cast_.e1;
+            }
         }
 
         public Value hiddenArgument() {
