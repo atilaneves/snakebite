@@ -261,6 +261,27 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// `rndtol` and `rint` are bodiless `core.math` intrinsics that compiled D
+// emits inline, so no host symbol exists for either.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's own CTFE has no source for either intrinsic"),
+)) {
+    @("ffi.executedIntrinsicCall.rndtolAndRint." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.math: rndtol, rint;
+
+            void main() {
+                assert(rndtol(2.7) == 3L);
+                assert(rint(2.7) == 3.0);
+            }
+        });
+    }
+}
+
+
 // `core.math.rndtol` and `core.math.rint` are bodiless intrinsics that
 // dmd's code generator inlines but its `BUILTIN` enum has no member for,
 // so dmd's own CTFE cannot evaluate them either.

@@ -3588,6 +3588,35 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A class constructor takes a delegate whether the argument is a literal
+// that reads the enclosing function's local, a literal that reads
+// nothing, or a delegate that already exists.
+static foreach (backend; Matrix!()) {
+    @("newWithDelegateArguments." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Holder {
+                int delegate() dg;
+                this(int delegate() dg) {
+                    this.dg = dg;
+                }
+            }
+
+            int main() {
+                int base = 40;
+                auto captured = new Holder(() => base + 2);
+                auto plain = new Holder(() => 7);
+                int delegate() existing = () => base;
+                auto reused = new Holder(existing);
+                return captured.dg() == 42
+                    && plain.dg() == 7
+                    && reused.dg() == 40 ? 0 : 1;
+            }
+        });
+    }
+}
+
 // `==` on class references compares null first, and reads no vtable.
 static foreach (backend; Matrix!()) {
     @("nullClassReferenceEqualityIsNotAFault." ~ backend.stringof)
@@ -3622,6 +3651,67 @@ static foreach (backend; Matrix!(
             destroy(c);
             return 0;
         }
+        });
+    }
+}
+
+// A derived class whose constructor takes a `scope` delegate with default
+// arguments, hands a new base-class object to it, delegates to a sibling
+// constructor and then to the base constructor; the caller passes a
+// delegate literal with a `scope` parameter to a `scope` variable's `new`.
+static foreach (backend; Matrix!()) {
+    @("newWithScopeDelegateLiteralAndConstructorChain." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            interface Store {
+                void write(string name);
+            }
+
+            class MockStore: Store {
+                string[] names;
+                override void write(string name) {
+                    names ~= name;
+                }
+            }
+
+            class Base {
+                Store store;
+                string root;
+                this(Store store, string root) {
+                    this.store = store;
+                    this.root = root;
+                }
+            }
+
+            class Derived: Base {
+                this(scope void delegate(scope Store) dg = null,
+                    string root = "/root")
+                {
+                    auto store = new MockStore;
+                    if (dg !is null)
+                        dg(store);
+                    super(store, root);
+                }
+
+                this(scope void delegate(scope Store) dg, string root, int extra) {
+                    this(dg, root);
+                }
+            }
+
+            int main() {
+                scope derived = new Derived((scope Store store) {
+                    store.write("a");
+                    store.write("b");
+                });
+                scope other = new Derived((scope Store store) {
+                    store.write("c");
+                }, "/other", 1);
+                const first = cast(MockStore) derived.store;
+                const second = cast(MockStore) other.store;
+                return first.names == ["a", "b"] && derived.root == "/root"
+                    && second.names == ["c"] && other.root == "/other" ? 0 : 1;
+            }
         });
     }
 }
