@@ -1717,3 +1717,52 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// Increment and compound assignment on a narrow integral type operate at
+// `int` width and store only the low bytes back, so the result wraps.
+static foreach (backend; Matrix!()) {
+    @("narrowIncrementAndCompoundAssignmentWrap." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                byte b = 127;
+                b++;
+                assert(b == -128);
+                assert(++b == -127);
+                assert(b-- == -127);
+                b += 200;
+                assert(b == 72);
+
+                ubyte u = 255;
+                assert(++u == 0);
+                u -= 1;
+                assert(u == 255);
+                u *= 2;
+                assert(u == 254);
+                u >>= 1;
+                assert(u == 127);
+
+                short s = short.max;
+                s++;
+                assert(s == short.min);
+                s |= 1;
+                assert(s == short.min + 1);
+
+                ushort w = 0;
+                w--;
+                assert(w == ushort.max);
+
+                char c = 'a';
+                c += 1;
+                assert(c == 'b');
+                assert(c++ == 'b');
+                assert(c == 'c');
+
+                wchar x = wchar.max;
+                x++;
+                assert(x == 0);
+            }
+        });
+    }
+}

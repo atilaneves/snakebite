@@ -664,3 +664,35 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A range over the keys or the values of an associative array yields each
+// entry once.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE cannot convert the associative array handle that "
+        ~ "`byKey` and `byValue` take"),
+)) {
+    @("associativeArrayByKeyAndByValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[int] squares;
+                squares[2] = 4;
+                squares[3] = 9;
+
+                int keys;
+                foreach (k; squares.byKey) {
+                    keys += k;
+                }
+                assert(keys == 5);
+
+                int values;
+                foreach (v; squares.byValue) {
+                    values += v;
+                }
+                assert(values == 13);
+            }
+        });
+    }
+}

@@ -5857,3 +5857,68 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// Two structs without an `opEquals` compare equal when their fields do,
+// even when padding lies between the fields.
+static foreach (backend; Matrix!()) {
+    @("paddedStructValueEquality." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Coordinates {
+                ubyte x;
+                ushort y;
+            }
+
+            bool same(T)(auto ref T lhs, auto ref T rhs) {
+                return lhs == rhs;
+            }
+
+            void main() {
+                const value = Coordinates(1, 2);
+                assert(same(value, Coordinates(1, 2)));
+                assert(!same(value, Coordinates(1, 3)));
+                assert(!same(value, Coordinates(2, 2)));
+            }
+        });
+    }
+}
+
+// Struct equality also covers fields of floating-point type, which compare
+// by value rather than by bytes.
+static foreach (backend; Matrix!()) {
+    @("floatingStructValueEquality." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Inner {
+                real r;
+            }
+
+            struct Outer {
+                int n;
+                Inner inner;
+                double d;
+                float f;
+            }
+
+            bool same(Outer lhs, Outer rhs) {
+                return lhs == rhs;
+            }
+
+            void main() {
+                assert(same(Outer(1, Inner(2.5L), 3.0, 4.0f),
+                            Outer(1, Inner(2.5L), 3.0, 4.0f)));
+                assert(!same(Outer(1, Inner(2.5L), 3.0, 4.0f),
+                             Outer(1, Inner(2.5L), 3.0, 5.0f)));
+                assert(!same(Outer(1, Inner(2.5L), 3.0, 4.0f),
+                             Outer(1, Inner(2.0L), 3.0, 4.0f)));
+                Outer nan = Outer(1, Inner(real.nan), 3.0, 4.0f);
+                assert(!same(nan, nan));
+                Outer zero = Outer(1, Inner(0.0L), 0.0, 0.0f);
+                Outer negZero = Outer(1, Inner(-0.0L), -0.0, -0.0f);
+                assert(same(zero, negZero));
+            }
+        });
+    }
+}
