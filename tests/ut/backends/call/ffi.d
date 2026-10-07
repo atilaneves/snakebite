@@ -94,6 +94,27 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// `rndtol` and `rint` are bodiless `core.math` intrinsics that compiled D
+// emits inline, so no host symbol exists for either.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's own CTFE has no source for either intrinsic"),
+)) {
+    @("ffi.executedIntrinsicCall.rndtolAndRint." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.math: rndtol, rint;
+
+            void main() {
+                assert(rndtol(2.7) == 3L);
+                assert(rint(2.7) == 3.0);
+            }
+        });
+    }
+}
+
+
 // `core.bitop.bswap` is a bodiless intrinsic dmd's own `BUILTIN`
 // classification recognises (`BUILTIN.bswap`), the same as the
 // `core.math` names above, but its parameters are `uint`/`ulong`, not a
