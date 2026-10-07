@@ -58,7 +58,6 @@ unittest {
 
 // The GC never scans the arena, so a GC block that only the arena points
 // to would be freed while the AST still uses it.
-debug
 @("arenaHoldsNoGCPointers.largeImport")
 unittest {
     parseSnippet(q{
@@ -81,7 +80,6 @@ unittest {
 // initialization also uses) with the frontend's setup. That setup must not
 // leave a cache's storage in the arena: the host then stores GC data in
 // it, and no collection looks there.
-debug
 @("arenaHoldsNoGCPointers.hostLibraryCacheAfterInitialization")
 unittest {
     import std.regex: matchFirst, regex;
@@ -99,7 +97,6 @@ unittest {
 // identifier itself on the GC heap, so the planted word never lands in
 // the arena and the report stays empty; the report only ever names GC
 // pointers that the arena holds.
-debug
 @("arenaHoldsNoGCPointers.reportsAPointerIntoTheGCHeap")
 unittest {
     import dmd.identifier: Identifier;
@@ -126,10 +123,12 @@ unittest {
 }
 
 
-// Integer data can have the same bits as a GC address. NO_SCAN marks
-// blocks whose contents must not be treated as pointers, such as dmd's
-// line tables (uint[]). The arena report must ignore these blocks.
-debug
+// A block that druntime allocates NO_SCAN while the frontend runs is arena
+// memory that cannot hold a pointer: a word in it that has the value of a
+// GC address is data, so the report does not read it. dmd's own line
+// tables are such blocks (`uint[]`). `--lowmem` puts the block on the GC
+// heap instead, so the report is empty there whatever the report skips,
+// and the test then checks nothing.
 @("arenaHoldsNoGCPointers.skipsMemoryThatHoldsNoPointers")
 unittest {
     import snakebite.frontend.compiler: withCompilerLock;
@@ -153,9 +152,8 @@ unittest {
 }
 
 
-// A new arena region can have a lower address than an earlier region.
-// The report must still skip the pointer-free blocks in both regions.
-debug
+// Regions are walked in the order they were made, and a later region can
+// be at a lower address. Each range to skip is in the region it is in.
 @("arenaWalk.skipsRangesInRegionsAtDescendingAddresses")
 unittest {
     import snakebite.arena: PointerFreeRange, walkSpanPointerWords;
@@ -187,7 +185,6 @@ unittest {
 // stack of the thread here is a GC block: the word does point into a live
 // GC block while the report is read, and the report skips it only because
 // of what the word was when the frontend left.
-debug
 @("arenaHoldsNoGCPointers.stackAddressesOfTheFrontendThread")
 unittest {
     import core.sys.posix.pthread: pthread_attr_init, pthread_attr_setstack,
