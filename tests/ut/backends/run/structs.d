@@ -6197,3 +6197,25 @@ static foreach (backend; Matrix!(
 // Two temporaries of one expression die in reverse order of construction.
 // The temporary of a call inside a `throw` operand dies before the `catch` runs.
 // The temporary of a `throw` expression's operand dies before the `catch` runs.
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot cast a void pointer to a byte pointer"),
+)) {
+    @("structWithVoidArrayFieldHasZeroedInit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Blob {
+                void[3] bytes;
+            }
+
+            int main() {
+                Blob blob = Blob.init;
+                const bytes = cast(const(ubyte)*) blob.bytes.ptr;
+                return bytes[0] == 0 && bytes[1] == 0 && bytes[2] == 0 ? 0 : 1;
+            }
+        });
+    }
+}
