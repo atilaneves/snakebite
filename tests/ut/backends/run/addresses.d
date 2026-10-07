@@ -136,3 +136,102 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// `&p[3]` of a null `int*` is address 12 and reads nothing.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: cannot index through null pointer `p`"),
+)) {
+    @("nullPointerAddress.indexConstant." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() { int* p; auto q = &p[3]; assert(cast(size_t) q == 12); }
+        });
+    }
+}
+
+// `&p[i]` with a run-time index of a null pointer.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: cannot index through null pointer `p`"),
+)) {
+    @("nullPointerAddress.indexRuntime." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            pragma(inline, false) size_t three() { return 3; }
+            void main() { int* p; auto q = &p[three]; assert(cast(size_t) q == 12); }
+        });
+    }
+}
+
+// `&p.b` of a null struct pointer is the field offset.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: dereference of null pointer `p`"),
+)) {
+    @("nullPointerAddress.field." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; int b; }
+            void main() { S* p; auto q = &p.b; assert(cast(size_t) q == 4); }
+        });
+    }
+}
+
+// `&(*p)` of a null pointer is null.
+static foreach (backend; Matrix!()) {
+    @("nullPointerAddress.dereference." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() { int* p; auto q = &(*p); assert(q is null); }
+        });
+    }
+}
+
+// `&arr.ptr[3]` of an empty slice has a null pointer.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: cannot index through null pointer `cast(int*)arr`"),
+)) {
+    @("nullPointerAddress.emptySlicePointerIndex." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() { int[] arr; auto q = &arr.ptr[3]; assert(cast(size_t) q == 12); }
+        });
+    }
+}
+
+// A `ref` parameter bound to `p[3]` of a null pointer reads nothing.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: cannot index through null pointer `p`"),
+)) {
+    @("nullPointerAddress.refParameterNotRead." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            size_t address;
+            void f(ref int x) { address = cast(size_t) &x; }
+            void main() { int* p; f(p[3]); assert(address == 12); }
+        });
+    }
+}
+
+// `p + 3` of a null `int*`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: cannot perform pointer arithmetic on non-arrays at compile time"),
+)) {
+    @("nullPointerAddress.pointerArithmetic." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() { int* p; auto q = p + 3; assert(cast(size_t) q == 12); }
+        });
+    }
+}
