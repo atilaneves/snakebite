@@ -1676,10 +1676,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         prepareContext(outerFunctionOf(callee));
         if (callee.isThis is null && layout.hiddenThis.variable !is null)
             calleeContextPlanOf(site, callee);
-        auto calleeType = typeFunctionOf(callee);
-        foreach (i; 0 .. calleeType.parameterList.length)
-            if ((calleeType.parameterList[i].storageClass & STC.out_) != 0)
-                prepareDefault(calleeType.parameterList[i].type);
         const decision = _callSelection.decisionOf(
             callee,
             (function_) => _program.isInterpreted(function_),
