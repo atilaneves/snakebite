@@ -20,7 +20,6 @@ extern(C) bool executeIndirectCallPlan(
 import snakebite.backends.argumentflow: ArgumentFlow, Shape, Signature;
 import snakebite.backends.builtins: BuiltinCall;
 import snakebite.backends.haltprocess: HaltAction, isHalt;
-import snakebite.backends.guestfault: GuestFault;
 import snakebite.backends.unwindplan:
     ExceptionCandidate, UnwindPlan, unwindPlanOf;
 import snakebite.callarguments: CallArguments;
@@ -411,17 +410,6 @@ public struct Function {
     package size_t cursorOffset = size_t.max;
     package size_t declaredParameters;
     package const(Signature)* signature;
-    package string name;
-    package string file;
-    package size_t line;
-    package SourcePosition[] positions;
-    package bool rootOwned;
-    package const(Function)* previous;
-}
-
-package struct SourcePosition {
-    package string file;
-    package size_t line;
 }
 
 
@@ -429,9 +417,6 @@ import snakebite.framestack: FrameStack;
 
 public struct Vm {
     private FrameStack _frames;
-    private Throwable _halt;
-    private const(Function)* delegate(const(Instruction)*) nothrow @nogc _functionOf;
-    private GuestFault.Action _fault;
 
     @disable this();
     @disable this(this);
@@ -440,14 +425,6 @@ public struct Vm {
 
     public this(in size_t frameCapacity, TlsSlots* tls = null) {
         _frames = FrameStack(frameCapacity, tls);
-    }
-
-    public void faultReporting(
-        const(Function)* delegate(const(Instruction)*) nothrow @nogc functionOf,
-        GuestFault.Action fault,
-    ) {
-        _functionOf = functionOf;
-        _fault = fault;
     }
 
     // One argument the host hands a guest function: the callee frame
@@ -475,8 +452,6 @@ public struct Vm {
     ) {
         import core.stdc.string: memcpy;
 
-        if (_halt !is null)
-            throw _halt;
         assert(function_.instructions.length > 0);
         assert(function_.frameAlignment > 0);
 
@@ -579,8 +554,6 @@ private void dispatch(
     Vm* vm,
     const(Instruction)* end = null,
 ) {
-    import snakebite.faultsignal: runGuest;
-
     // Fill each field once. Default initialization otherwise clears the
     // arrays before these assignments on every callback entry.
     Activation root = void;
@@ -598,8 +571,7 @@ private void dispatch(
     root.parent = null;
     auto state = DispatchState(frames, null, null, vm,
         cast(DispatchState*) frames.backendEntry);
-    // These owners are above the assembly call, not in a frame that can
-    // fault. A halt must also discard a partially reserved activation.
+    // A halt must also discard a partially reserved activation.
     const frameMark = frames.mark;
     scope(failure) {
         frames.finishCleanups(root.cleanupMark, (in size_t) {});
@@ -607,45 +579,7 @@ private void dispatch(
     }
     scope(exit) frames.backendEntry = state.parent;
     frames.backendEntry = &state;
-    // A re-entry uses this execution state's existing controlled entry.
-    // dispatchLoop is a throwing seam: it propagates ordinary exceptions
-    // and halts. Its caller's cleanup is therefore kept without an opaque
-    // assembly call. Other Fibers have other FrameStacks (ADR-0006).
-    if (state.parent is null) {
-        state.current = &root;
-        runGuest(&state, &invokeDispatch, vm, &haltBeforeUnwind);
-    } else
-        dispatchLoop(root.pc, &root, &state);
-}
-
-private extern(C) void invokeDispatch(void* context) {
-    auto state = cast(DispatchState*) context;
-    dispatchLoop(state.current.pc, state.current, state);
-}
-
-private void haltBeforeUnwind(
-    void* context, imported!"snakebite.faultsignal".HardwareFault fault,
-) nothrow @nogc {
-    haltDispatches(cast(Vm*) context, fault);
-}
-
-private void haltDispatches(Vm* vm, Throwable fault) nothrow @nogc {
-    vm._halt = fault;
-    auto state = cast(DispatchState*) vm._frames.backendEntry;
-    // Each suspended native caller can suppress its callback's throwable.
-    // Its existing call transition must resume Halt, not guest instructions.
-    for (; state !is null; state = state.parent)
-        state.pending = cast(Activation*) &haltedNativeReturn;
-}
-
-private immutable Instruction nativeHaltInstruction = Instruction(&opNativeHalt);
-private immutable Activation haltedNativeReturn =
-    immutable(Activation)(&nativeHaltInstruction);
-
-private const(Instruction)* opNativeHalt(
-    const(Instruction)*, Activation*, DispatchState* state,
-) {
-    throw state.vm._halt;
+    dispatchLoop(root.pc, &root, &state);
 }
 
 pragma(inline, true)
@@ -684,89 +618,10 @@ private void dispatchLoop(
             } else
                 pc = handler(instruction, active, state);
         } catch (Throwable throwable) {
-            if (active is &haltedNativeReturn) {
-                active = state.current;
-                pc = active.pc;
-            }
             active.pc = pc;
-            import snakebite.faultsignal: HardwareFault;
-
-            // Native cleanup can retain an ordinary primary exception.
-            // The saved Halt must win before any guest handler runs.
-            if (state.vm._halt !is null)
-                throwable = state.vm._halt;
-            if (auto hardware = cast(HardwareFault) throwable)
-                throwable = reportHardwareFault(hardware, active, state);
             active = handleException(active, frames, throwable, state.vm);
             pc = active.pc;
         }
-    }
-}
-
-private Throwable reportHardwareFault(
-    imported!"snakebite.faultsignal".HardwareFault fault,
-    Activation* active,
-    DispatchState* state,
-) {
-    import snakebite.faultsignal: takeFault;
-    import snakebite.backends.guestfault: GuestFault;
-
-    takeFault(fault);
-    if (state.vm._fault is null)
-        return fault;
-    return reportGuestFault(fault.kind, active, state);
-}
-
-private Throwable reportGuestFault(
-    imported!"snakebite.backends.guestfault".GuestFault.Kind kind,
-    Activation* active,
-    DispatchState* state,
-) {
-    import snakebite.backends.guestfault: GuestFault;
-
-    auto position = SourcePosition.init;
-    bool foundRoot;
-    scope GuestFault.Stack stack = (scope GuestFault.FrameSink sink) {
-        auto activation = active;
-        auto dispatch = state;
-        bool ownerReported;
-        while (dispatch !is null) {
-            // A cleanup range uses its owner's activation, not a new
-            // invocation. Its current PC replaces the owner's saved PC.
-            // Carry this through nested cleanup ranges, but retain every
-            // real caller and callback, including recursive calls.
-            if (ownerReported && activation !is null) {
-                ownerReported = activation.end !is null;
-                activation = activation.parent;
-            }
-            while (activation !is null) {
-                const function_ = dispatch.vm._functionOf(activation.pc);
-                ownerReported = function_ !is null
-                    && activation.end !is null;
-                if (function_ !is null) {
-                    const source = function_.positions[
-                        activation.pc - function_.instructions.ptr];
-                    if (position.file.length == 0
-                            || (!foundRoot && function_.rootOwned)) {
-                        position = source;
-                        foundRoot = function_.rootOwned;
-                    }
-                    sink(GuestFault.Frame(function_.name, source.file,
-                        source.line));
-                }
-                activation = activation.parent;
-            }
-            dispatch = dispatch.parent;
-            if (dispatch !is null)
-                activation = dispatch.current;
-        }
-    };
-    stack((in GuestFault.Frame) {});
-    try {
-        GuestFault.report(
-            state.vm._fault, kind, position.file, position.line, stack);
-    } catch (Throwable reported) {
-        return reported;
     }
 }
 
@@ -783,8 +638,6 @@ private Activation* handleException(
         // A halt that ends a cell is not an error guest code handles: no
         // temporary's destructor, `catch` or `finally` sees it.
         const halting = isHalt(throwable);
-        if (halting)
-            haltDispatches(vm, throwable);
         try {
             unwindFinally(throwable, () {
                 if (halting)
@@ -793,7 +646,7 @@ private Activation* handleException(
                     active.cleanup(frames);
             });
         } catch (Throwable chained) {
-            throwable = vm._halt is null ? chained : vm._halt;
+            throwable = chained;
         }
         ExceptionCandidate[handlerBufferLength] handlerBuffer;
         const plan = isHalt(throwable)
@@ -827,7 +680,7 @@ private Activation* handleException(
                         handler.cleanupEnd);
                 });
             } catch (Throwable chained) {
-                throwable = vm._halt is null ? chained : vm._halt;
+                throwable = chained;
             }
             firstHandler = handler - active.exceptionHandlers.ptr + 1;
             continue;
@@ -1172,12 +1025,6 @@ package const(Instruction)* opThrow(
     auto execution = Execution!(OperandKind.storage, OperandKind.immediate)(
         pc, activation, state);
     auto throwable = cast(Throwable) *cast(void**) (execution.destination);
-    if (throwable is null) {
-        import snakebite.backends.guestfault: GuestFault;
-
-        activation.pc = pc;
-        throw reportGuestFault(GuestFault.Kind.throwNull, activation, state);
-    }
     throw throwable;
 }
 

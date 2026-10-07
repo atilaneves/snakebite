@@ -322,8 +322,7 @@ static foreach (backend; Compiled) {
 }
 
 
-// A null dereference is only checked when the flag asks for it; then it
-// raises where an unchecked one faults.
+// A null dereference is only checked when the flag asks for it.
 static foreach (backend; Guests) {
     @("flags.nullDerefField." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -343,9 +342,6 @@ static foreach (backend; Guests) {
                 Expect.raised(nullPointerError), Expect.same),
             Row(["-check=nullderef", "-checkaction=halt"], program,
                 Expect.halted, Expect.raised),
-            Row(["-check=nullderef=off"], program,
-                Expect.halted, Expect.raised),
-            Row([], program, Expect.halted, Expect.raised),
         ])
             shouldRun!backend(row);
     }
@@ -370,9 +366,6 @@ static foreach (backend; Guests) {
                 Expect.raised(nullPointerError), Expect.same),
             Row(["-check=nullderef", "-checkaction=halt"], program,
                 Expect.halted, Expect.raised),
-            Row(["-check=nullderef=off"], program,
-                Expect.halted, Expect.raised),
-            Row([], program, Expect.halted, Expect.raised),
         ])
             shouldRun!backend(row);
     }
@@ -423,9 +416,6 @@ static foreach (backend; Guests) {
                 Expect.raised(nullPointerError), Expect.same),
             Row(["-check=nullderef", "-checkaction=halt"], program,
                 Expect.halted, Expect.raised),
-            Row(["-check=nullderef=off"], program,
-                Expect.halted, Expect.raised),
-            Row([], program, Expect.halted, Expect.raised),
         ])
             shouldRun!backend(row);
     }

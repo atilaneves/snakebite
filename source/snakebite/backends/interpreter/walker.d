@@ -145,6 +145,7 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
 }
 
 import snakebite.exception: SnakebiteException;
+import snakebite.faulthandler: GuestPosition, GuestRun, register, unregister;
 
 // Runs `action` on the evaluator of the calling thread: made on its first
 // entry, and kept until it ends. A free function, because a member that
@@ -200,7 +201,6 @@ import snakebite.backends.checkplan:
     BoundsCheck, FailurePlan, hookOf, isUnanalysed, readsVtable;
 import snakebite.backends.calls: ValueCall;
 import snakebite.backends.haltprocess: isHalt;
-import snakebite.backends.guestfault: GuestFault;
 import snakebite.backends.exceptions: CAssertCall;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
@@ -281,9 +281,8 @@ private struct Shared {
     // first call and reused by every call after it.
     SharedTable!(FuncDeclaration, FrameLayout) layouts;
     // Each guest function's name for a fault report, made with its frame
-    // layout: the report can run in a destructor that the GC finalizer
-    // runs, where it cannot wait for the compiler lock that dmd needs
-    // to make the name.
+    // layout: the signal handler reads it and can take no lock, which dmd
+    // needs to make the name.
     SharedTable!(FuncDeclaration, const(char)[]) names;
     // The FFI call adapter for a guest callee's own signature: whether it
     // returns by `ref`, and whether each declared parameter passes an
@@ -469,14 +468,6 @@ private struct Shared {
     }
 }
 
-private struct FaultFrame {
-    GuestFault.Frame frame;
-
-    void walk(scope GuestFault.FrameSink sink) nothrow @nogc {
-        sink(frame);
-    }
-}
-
 private struct TryCatchPlan {
     ExceptionCandidate[] candidates;
     CatchPlan catches;
@@ -528,7 +519,6 @@ private struct CallShape {
 // state, and reads every per-function answer from the `Shared` tables
 // the program's evaluators fill together.
 extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
-    import snakebite.faultsignal: HardwareFault;
     import snakebite.backends.aggregateinit: InitStep, NewPlan;
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.backend: Program;
@@ -732,9 +722,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // the way up. A halt ends the thread that halts, so another thread of
     // the program keeps its cleanups.
     private bool _halted;
-    private Throwable _fault;
-    private FuncDeclaration _faultFunction;
-    private Loc _faultLocation;
+    private GuestRun _guestRun;
     // `extern(D)`: only `Visitor`'s `visit` overloads need the C++
     // linkage.
     extern(D) public this(Shared* shared_) {
@@ -823,9 +811,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         void* variadicCursor = null,
         const(void)* variadicTypes = null,
     ) {
-        if (_fault !is null)
-            throw _fault;
-
         // A re-entry on this execution state already has the correct native
         // stack and its controlled owner. Other Fibers have other evaluators.
         if (_frames.backendEntry !is null) {
@@ -847,108 +832,46 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         void* variadicCursor,
         const(void)* variadicTypes,
     ) {
-        import snakebite.faultsignal: HardwareFault, runGuest;
-
-        auto entry = GuestEntry(this, function_, returnPlace, args,
-            variadicCursor, variadicTypes);
+        ubyte entry; // Only its address matters: it marks an active entry.
         auto parent = _frames.backendEntry; // Restored as a mutable entry link.
         const frameMark = _frames.mark;
         const guard = CallStateGuard(this);
         scope(exit) {
+            unregister(&_guestRun);
             _frames.backendEntry = parent;
             if (_frames.mark > frameMark)
                 _frames.release(frameMark);
         }
         _frames.backendEntry = &entry;
-        try {
-            runGuest(&entry, &invokeGuestEntry, &entry, &haltBeforeUnwind);
-            if (_fault !is null)
-                throw _fault;
-        } catch (HardwareFault fault) {
-            reportHardwareFault(fault);
-        } catch (Throwable thrown) {
-            if (auto fault = cast(HardwareFault) _fault)
-                reportHardwareFault(fault);
-            if (_fault !is null)
-                throw _fault;
-            if (isHalt(thrown)) {
-                _halted = true;
-                _fault = thrown;
-            }
-            throw thrown;
-        }
+        _guestRun = GuestRun(
+            cast(void*) this, &guestPosition,
+            _interpreterStack.bottom, _interpreterStack.top,
+        );
+        register(&_guestRun);
+        executeHostToGuest(function_, returnPlace, args,
+            variadicCursor, variadicTypes);
     }
 
-    private static struct GuestEntry {
-        Evaluator evaluator;
-        FuncDeclaration function_;
-        void* returnPlace;
-        const(void*)[] arguments;
-        void* variadicCursor;
-        const(void)* variadicTypes;
-    }
+    // What the fault handler reads: the function that runs, and the line of
+    // the full expression that runs in it. Native code that the guest calls
+    // runs outside any expression of the guest, and then no line is known.
+    extern(D) private static GuestPosition guestPosition(void* context)
+    nothrow @nogc {
+        import std.string: fromStringz;
 
-    extern(C) private static void invokeGuestEntry(void* context) {
-        auto entry = cast(GuestEntry*) context;
-        entry.evaluator.executeHostToGuest(entry.function_, entry.returnPlace,
-            entry.arguments, entry.variadicCursor, entry.variadicTypes);
-    }
-
-    // Native cleanup can call back before the entry's catch runs. Save the
-    // source and stop guest execution before any host frame is unwound.
-    extern(D) private static void haltBeforeUnwind(
-        void* context, HardwareFault fault,
-    ) nothrow @nogc {
-        auto entry = cast(GuestEntry*) context;
-        auto evaluator = entry.evaluator;
-        evaluator._halted = true;
-        evaluator._fault = fault;
-        evaluator._faultFunction = evaluator._function is null
-            ? entry.function_ : evaluator._function;
+        auto evaluator = cast(Evaluator) context;
+        auto function_ = evaluator._function;
+        if (function_ is null)
+            return GuestPosition();
+        const name = function_ in evaluator._shared.names;
         const root = evaluator._temporaries.root;
-        evaluator._faultLocation = root is null
-            ? evaluator._faultFunction.loc : root.loc;
-        evaluator.endProcessInFinalizer(fault);
-    }
-
-    // The collector must not unwind, so a fault in a finalizer is reported
-    // where it happens and not at the outermost entry.
-    extern(D) private void endProcessInFinalizer(
-        HardwareFault fault,
-    ) nothrow @nogc {
-        import std.string: fromStringz;
-
-        const file = fromStringz(_faultLocation.filename);
-        auto frame = faultFrame(file);
-        scope stack = &frame.walk;
-        GuestFault.endProcessInFinalizer(
-            fault.kind, file, _faultLocation.linnum, stack);
-    }
-
-    extern(D) private noreturn reportHardwareFault(
-        HardwareFault fault,
-    ) {
-        import snakebite.faultsignal: takeFault;
-        import std.string: fromStringz;
-
-        takeFault(fault);
-        const file = fromStringz(_faultLocation.filename);
-        auto frame = faultFrame(file);
-        scope stack = &frame.walk;
-        try
-            _program.fault(fault.kind, file, _faultLocation.linnum, stack);
-        catch (Throwable reported) {
-            _fault = reported;
-            throw reported;
-        }
-    }
-
-    // The one frame that the walk keeps: the function that faulted.
-    extern(D) private auto faultFrame(in const(char)[] file) nothrow @nogc {
-        return FaultFrame(
-            GuestFault.Frame(
-                *(_faultFunction in _shared.names), file,
-                _faultLocation.linnum));
+        if (root is null)
+            return GuestPosition(name is null ? null : *name);
+        return GuestPosition(
+            name is null ? null : *name,
+            fromStringz(root.loc.filename),
+            root.loc.linnum,
+        );
     }
 
     extern(D) private void executeHostToGuest(
@@ -1478,16 +1401,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     extern(D) private void crossNative(scope void delegate() call) {
         try {
             call();
-            if (_fault !is null)
-                throw _fault;
         } catch (Throwable thrown) {
-            // Native unwinding can retain an ordinary exception as primary.
-            // Stop at the barrier, before a guest handler can see that chain.
-            if (_fault !is null)
-                throw _fault;
             if (isHalt(thrown)) {
                 _halted = true;
-                _fault = thrown;
                 throw thrown;
             }
             if (cast(SnakebiteException) thrown !is null
@@ -2258,10 +2174,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                     throw exception.take;
             });
         } catch (Throwable exception) {
-            // Native unwinding can keep the original exception as primary.
-            // The before-unwind owner still holds the Halt that ends this run.
-            if (_fault !is null)
-                throw _fault;
             if (isHalt(exception))
                 throw exception;
 
@@ -5518,11 +5430,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                     "`: it is null"),
             );
 
-        if (isHalt(guest)) {
-            _halted = true;
-            _fault = guest;
-            throw guest;
-        }
         throw GuestException.make(guest);
     }
 
@@ -7137,8 +7044,7 @@ private bool sharedSignedness(
 }
 
 // D leaves a division by zero undefined. It is not checked here: the host's
-// divide instruction raises SIGFPE, which the fault handler reports as the
-// guest's `GuestFault.Kind.divisionByZero`, as it does a null dereference.
+// divide instruction raises SIGFPE, as it does for compiled D.
 private ulong divided(string op)(
     in long a,
     in long b,

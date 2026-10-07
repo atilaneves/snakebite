@@ -245,35 +245,32 @@ static foreach (backend; EnumMembers!ReplBackendName) {
 }
 
 
-// The host function that the guest calls here throws a guest fault by hand,
-// so that the cell sees a fault that comes from native code, as the one a
-// signal handler makes will.
-private extern(C) void snakebite_ut_repl_fault() {
-    import snakebite.backends.guestfault: GuestFault, GuestFaultException;
-
-    throw new GuestFaultException(
-        GuestFault.Kind.nullDereference, "cell.d", 1, []);
-}
-
-// A guest fault ends the cell with its message, and the session goes on.
-// The CTFE backend cannot call a host function.
-static foreach (backend; [BackendName.interpreter, BackendName.bytecode]) {
-    @("submit.faultEndsTheCellAndTheSessionContinues." ~ backend.stringof)
+// The cell that halts inside a Fiber stops where compiled code stops: the
+// `finally` block of the code that resumed the Fiber does not run. CTFE
+// cannot run a Fiber.
+static foreach (backend; EnumMembers!ReplBackendName) {
+    static if (backend != ReplBackendName.ctfe)
+    @("submit.haltedCellDoesNotRunFinallyAroundAFiber." ~ backend.stringof)
     unittest {
-        auto repl = Repl(backend);
-        repl.submit("int before = 40;").kind.should == SubmitResult.Kind.none;
-        repl.submit("extern(C) void snakebite_ut_repl_fault();")
-            .kind.should == SubmitResult.Kind.none;
-        repl.submit("int trip() { snakebite_ut_repl_fault(); return 1; }")
-            .kind.should == SubmitResult.Kind.none;
+        import snakebite.frontend.compiler: FrontendFlags;
+        import std.process: environment;
 
-        const result = repl.submit("trip()");
+        enum ran = "SNAKEBITE_HALT_FIBER_" ~ backend.stringof;
+        auto repl = Repl(
+            backend, [], [], FrontendFlags(["-checkaction=halt"]),
+        );
+        repl.submit(
+            "int check() {"
+            ~ " import core.thread: Fiber;"
+            ~ " import core.sys.posix.stdlib: setenv;"
+            ~ " auto fiber = new Fiber({ assert(false); });"
+            ~ " try fiber.call;"
+            ~ " finally setenv(\"" ~ ran ~ "\", \"1\", 1);"
+            ~ " return 0; }",
+        ).kind.should == SubmitResult.Kind.none;
 
-        result.kind.should == SubmitResult.Kind.error;
-        result.text.should == "cell.d(1): fatal: null pointer dereference";
-        repl.submit("before + 2").text.should == "42";
-        repl.submit("trip()").kind.should == SubmitResult.Kind.error;
-        repl.submit("before + 3").text.should == "43";
+        repl.submit("check()").kind.should == SubmitResult.Kind.error;
+        environment.get(ran, "did not run").should == "did not run";
     }
 }
 

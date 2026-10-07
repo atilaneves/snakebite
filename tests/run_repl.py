@@ -33,192 +33,6 @@ def history_file(
 UP_ARROW = "\x1b[A"
 
 
-@pytest.mark.parametrize(
-    "shape", ["direct", "deep", "callback", "reentrant", "fiber", "thread",
-              "cleanup"],
-)
-@pytest.mark.parametrize("backend", ["bytecode", "interpreter"])
-def test_hardware_fault_recovery_uses_fresh_cell_state(
-    shape: str, backend: str,
-) -> None:
-    declarations = {
-        "cleanup": [
-            "int fault() { try { throw new Exception(\"ordinary\"); } "
-            "finally { int* p; *p = 1; } }",
-        ],
-        "direct": ["int fault() { int* p; return *p; }"],
-        "deep": [
-            "int descend(int n) { if (n) return descend(n - 1); "
-            "int* p; return *p; }",
-            "int fault() { return descend(200); }",
-        ],
-        "callback": [
-            "import core.stdc.stdlib: qsort",
-            "extern(C) int compare(const void* a, const void* b) { "
-            "int* p; return *p; }",
-            "int fault() { int[2] a = [2, 1]; "
-            "qsort(a.ptr, 2, int.sizeof, &compare); return 0; }",
-        ],
-        "fiber": [
-            "import core.thread: Fiber",
-            "void fiberFault() { int* p; int value = *p; }",
-            "int fault() { auto f = new Fiber(&fiberFault); "
-            "f.call(); return 0; }",
-        ],
-        "thread": [
-            "import core.thread: Thread",
-            "import core.sys.posix.unistd: write",
-            "void threadFault() { int* p; int value = *p; }",
-            "int fault() { auto t = new Thread(&threadFault); "
-            "try { t.start(); t.join(); return 0; } "
-            "finally { write(1, \"guest cleanup\\n\".ptr, 14); } }",
-        ],
-        "reentrant": [
-            "import core.stdc.stdlib: qsort",
-            "extern(C) int innerCompare(const void* a, const void* b) { "
-            "int* p; return *p; }",
-            "extern(C) int outerCompare(const void* a, const void* b) { "
-            "int[2] nested = [2, 1]; qsort(nested.ptr, 2, int.sizeof, "
-            "&innerCompare); return 0; }",
-            "int fault() { int[2] a = [2, 1]; "
-            "qsort(a.ptr, 2, int.sizeof, &outerCompare); return 0; }",
-        ],
-    }
-    child = pexpect.spawn(
-        sb_path(), ["-b", backend], timeout=TIMEOUT, encoding="utf-8",
-    )
-    try:
-        child.expect_exact("Snakebite REPL")
-        child.expect_exact("[   0.0 ms] > ")
-        for declaration in declarations[shape]:
-            child.sendline(declaration)
-            child.expect(r"\[\s+\d+\.\d ms\] > ")
-            assert "Error" not in clean(child.before)
-        for _ in range(3):
-            child.sendline("fault()")
-            child.expect(r"\[\s+\d+\.\d ms\] > ")
-            assert "null pointer dereference" in clean(child.before)
-            assert "guest cleanup" not in clean(child.before)
-            child.sendline("40 + 2")
-            child.expect(r"\[\s+\d+\.\d ms\] > ")
-            assert "42\n" in clean(child.before)
-        child.sendline(":q")
-        child.expect(pexpect.EOF)
-    finally:
-        child.close(force=True)
-    assert child.exitstatus == 0
-
-
-@pytest.mark.parametrize("backend", ["bytecode", "interpreter"])
-@pytest.mark.parametrize("shape", ["chained", "swallowed"])
-@pytest.mark.parametrize("entry", [
-    "body", "cleanup", "callback", "swallow-callback",
-    "nested-swallow-callback", "cleanup-swallow-callback", "swallow-guest-fault",
-])
-def test_native_fault_recovery_keeps_host_cleanup(
-    tmp_path: Path, backend: str, shape: str, entry: str,
-) -> None:
-    native = tmp_path / "native.d"
-    native.write_text(
-        'module native_fixture;\nimport core.sys.posix.unistd: write;\n'
-        'extern(C) void nativeTrap();\n'
-        'extern(C) void fault() {\n'
-        ' scope(exit) write(1, "host released\\n".ptr, 14);\n'
-        + (' try { throw new Exception("ordinary"); }\n'
-           ' finally { nativeTrap(); }\n' if shape == "chained" else
-           ' try { nativeTrap(); } catch(Throwable) {}\n')
-        + '}\n'
-        'alias Callback = extern(C) void function();\n'
-        'extern(C) void swallow(Callback callback) {\n'
-        ' scope(exit) write(1, "host released\\n".ptr, 14);\n'
-        ' try { callback(); } catch(Throwable) {}\n'
-        '}\n', encoding="utf-8",
-    )
-    trap = tmp_path / "trap.S"
-    trap.write_text(
-        '.text\n.globl nativeTrap\n.type nativeTrap,@function\n'
-        'nativeTrap:\n.cfi_startproc\nxor %eax,%eax\n'
-        'mov (%rax),%rax\nret\n.cfi_endproc\n'
-        '.section .note.GNU-stack,"",@progbits\n', encoding="utf-8",
-    )
-    library = tmp_path / "libfault.so"
-    for command in (
-        ["cc", "-c", "-fPIC", str(trap), "-o", str(tmp_path / "trap.o")],
-        ["ldc2", "-shared", "-link-defaultlib-shared", "-relocation-model=pic",
-         "-O", "-release", f"-of={library}", str(native),
-         str(tmp_path / "trap.o")],
-    ):
-        built = subprocess.run(command, capture_output=True, text=True)
-        assert built.returncode == 0, built.stdout + built.stderr
-    child = pexpect.spawn(
-        sb_path(), ["-b", backend], timeout=TIMEOUT, encoding="utf-8",
-    )
-    try:
-        child.expect_exact("[   0.0 ms] > ")
-        call = {
-            "body": "nativeFault();",
-            "cleanup": 'try { throw new Exception("ordinary guest"); } '
-                       'finally { nativeFault(); }',
-            "callback": 'int[2] items = [2, 1]; '
-                        'qsort(items.ptr, 2, int.sizeof, &compare);',
-            "swallow-callback": "nativeSwallow(&callbackFault);",
-            "nested-swallow-callback": "nativeSwallow(&nestedCallback);",
-            "cleanup-swallow-callback":
-                'try { throw new Exception("ordinary guest"); } '
-                'finally { nativeSwallow(&callbackFault); }',
-            "swallow-guest-fault": "nativeSwallow(&guestFault);",
-        }[entry]
-        for declaration in (
-            "import core.sys.posix.dlfcn",
-            "import core.sys.posix.unistd: write",
-            "import core.stdc.stdlib: qsort",
-            "alias Fn = extern(C) void function();",
-            "alias Callback = extern(C) void function();",
-            "alias Swallow = extern(C) void function(Callback);",
-            'void nativeFault() { auto h = dlopen("' + str(library)
-            + '".ptr, RTLD_NOW); assert(h !is null); '
-            'auto f = cast(Fn) dlsym(h, "fault".ptr); assert(f !is null); '
-            'f(); }',
-            'extern(C) int compare(const void* a, const void* b) { '
-            'nativeFault(); return 0; }',
-            'void nativeSwallow(Callback callback) { auto h = dlopen("'
-            + str(library) + '".ptr, RTLD_NOW); assert(h !is null); '
-            'auto f = cast(Swallow) dlsym(h, "swallow".ptr); '
-            'assert(f !is null); f(callback); }',
-            'extern(C) void callbackFault() { nativeFault(); }',
-            'extern(C) void nestedCallback() { nativeSwallow(&callbackFault); }',
-            'extern(C) void guestFault() { int* p; *p = 1; }',
-            'int fault() { '
-            'scope(exit) write(1, "guest scope\\n".ptr, 12); '
-            'try { ' + call + ' } catch(Throwable) { '
-            'write(1, "guest catch\\n".ptr, 12); } finally { '
-            'write(1, "guest finally\\n".ptr, 14); } '
-            'write(1, "guest continued\\n".ptr, 16); return 0; }',
-        ):
-            child.sendline(declaration)
-            child.expect(r"\[\s+\d+\.\d ms\] > ")
-            assert "Error" not in clean(child.before)
-        for _ in range(3):
-            child.sendline("fault()")
-            child.expect(r"\[\s+\d+\.\d ms\] > ")
-            fault = clean(child.before)
-            releases = {
-                "swallow-callback": 2, "nested-swallow-callback": 3,
-                "cleanup-swallow-callback": 2,
-            }.get(entry, 1)
-            assert fault.count("host released\n") == releases, fault
-            assert "guest " not in fault, fault
-            assert fault.count("fatal: null pointer dereference") == 1, fault
-            child.sendline("40 + 2")
-            child.expect(r"\[\s+\d+\.\d ms\] > ")
-            assert "42\n" in clean(child.before)
-        child.sendline(":q")
-        child.expect(pexpect.EOF)
-    finally:
-        child.close(force=True)
-    assert child.exitstatus == 0
-
-
 def test_repl() -> None:
     repl = sb_path()
     child = spawn(repl, timeout=TIMEOUT, encoding="utf-8")
@@ -772,15 +586,16 @@ def test_command_uses_requested_backend(backend: str) -> None:
     assert result.stderr == ""
 
 
-# A fault in a destructor that the collector runs is not recoverable, so no
-# exception may leave the collector. The process ends as `bin/sb` ends it.
+# A fault in a destructor that the collector runs ends the process of the
+# REPL with the signal, as it ends `bin/sb`.
 @pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
-@pytest.mark.parametrize("fault,message", [
-    ("*pointer = 1", "fatal: null pointer dereference"),
-    ("auto quotient = 1 / zero", "fatal: integer division by zero"),
+@pytest.mark.parametrize("fault,status,message", [
+    ("*pointer = 1", -signal.SIGSEGV, "fatal: null pointer dereference"),
+    ("auto quotient = 1 / zero", -signal.SIGFPE,
+     "fatal: integer division by zero"),
 ])
 def test_fault_in_a_finalizer_ends_the_process(
-    tmp_path: Path, backend: str, fault: str, message: str,
+    tmp_path: Path, backend: str, fault: str, status: int, message: str,
 ) -> None:
     module = tmp_path / "doomed.d"
     module.write_text(
@@ -794,9 +609,8 @@ def test_fault_in_a_finalizer_ends_the_process(
 
     result = run_sb("-b", backend, str(module), "-c", "collect()")
 
-    assert result.returncode == 1
+    assert result.returncode == status
     assert message in result.stderr
-    assert "in snippet_1.Doomed.~this" in result.stderr
     assert result.stdout == ""
 
 

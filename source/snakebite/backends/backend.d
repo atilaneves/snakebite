@@ -13,7 +13,6 @@ public struct Program {
     import dmd.dmodule: Module;
     import dmd.func: FuncDeclaration;
     import dmd.dsymbol: Dsymbol;
-    import snakebite.backends.guestfault: GuestFault;
     import snakebite.backends.haltprocess: HaltAction, HostActions;
     import snakebite.frontend.checks: Checks;
     import snakebite.frontend.dmd.linking: LinkMap;
@@ -55,8 +54,8 @@ public struct Program {
     }
 
     // `checks` are the ones the frontend analysed `rootModules` under, and
-    // `actions` are what `-checkaction=halt` and a guest fault do here: the
-    // default halt ends the process, as compiled code does.
+    // `actions` are what `-checkaction=halt` does here: the default halt ends
+    // the process, as compiled code does.
     this(
         Module[] rootModules,
         in string name,
@@ -99,19 +98,6 @@ public struct Program {
 
     public noreturn halt() const {
         _actions.halt();
-    }
-
-    public GuestFault.Action faultAction() const {
-        return _actions.fault;
-    }
-
-    public noreturn fault(
-        in GuestFault.Kind kind,
-        in const(char)[] file,
-        in size_t line,
-        scope GuestFault.Stack stack,
-    ) const {
-        GuestFault.report(_actions.fault, kind, file, line, stack);
     }
 
     // The root definition that the linker makes of the declaration

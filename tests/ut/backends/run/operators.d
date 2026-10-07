@@ -29,7 +29,6 @@ static foreach (backend; Matrix!(
     }
 }
 
-
 static foreach (backend; Matrix!()) {
     @("functionPointerCastsPreserveCallableAddress." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -48,7 +47,6 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
-
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
@@ -71,7 +69,6 @@ static foreach (backend; Matrix!(
     }
 }
 
-
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE does not form a byte-length slice from a static array"),
@@ -90,7 +87,6 @@ static foreach (backend; Matrix!(
         });
     }
 }
-
 
 // Shifting a value into bytes and back reconstructs it, which pins the
 // shift amounts and the truncation each `cast(ubyte)` does.
@@ -152,7 +148,6 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
-
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
@@ -1205,7 +1200,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot cast an imaginary value to a pointer"),
@@ -1244,7 +1238,6 @@ static foreach (backend; Matrix!(
     }
 }
 
-
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read a zero-size static array in this cast"),
@@ -1265,7 +1258,6 @@ static foreach (backend; Matrix!(
         });
     }
 }
-
 
 static foreach (backend; Matrix!()) {
     @("compoundAssignFieldsOfDifferentTypesInMember." ~ backend.stringof)
@@ -1290,7 +1282,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-
 static foreach (backend; Matrix!()) {
     @("shiftLongLocalByInt." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -1304,7 +1295,6 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
-
 
 static foreach (backend; Matrix!()) {
     @("shiftLongFieldThroughThisByInt." ~ backend.stringof)
@@ -1324,7 +1314,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-
 static foreach (backend; Matrix!()) {
     @("powAssignLongByInt." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -1340,7 +1329,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-
 static foreach (backend; Matrix!()) {
     @("addAssignIntByDouble." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -1355,7 +1343,6 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
-
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.diverges,
@@ -1376,7 +1363,6 @@ static foreach (backend; Matrix!(
     }
 }
 
-
 @("subAssignLongByDouble.Ctfe.diverges")
 @Tags("Ctfe")
 unittest {
@@ -1389,7 +1375,6 @@ unittest {
         }
     });
 }
-
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.diverges,
@@ -1410,7 +1395,6 @@ static foreach (backend; Matrix!(
     }
 }
 
-
 @("mulAssignUintByReal.Ctfe.diverges")
 @Tags("Ctfe")
 unittest {
@@ -1423,7 +1407,6 @@ unittest {
         }
     });
 }
-
 
 static foreach (backend; Matrix!()) {
     @("addAssignIntFieldThroughThisByDouble." ~ backend.stringof)
@@ -1444,7 +1427,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.diverges,
         "CTFE converts a floating step to the integral target before the "
@@ -1464,7 +1446,6 @@ static foreach (backend; Matrix!(
     }
 }
 
-
 @("mulAssignIntArrayElementByDouble.Ctfe.diverges")
 @Tags("Ctfe")
 unittest {
@@ -1477,7 +1458,6 @@ unittest {
         }
     });
 }
-
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
@@ -1497,7 +1477,6 @@ static foreach (backend; Matrix!(
     }
 }
 
-
 static foreach (backend; Matrix!()) {
     @("addAssignIntGivesTheStoredValue." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -1512,7 +1491,6 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
-
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.diverges,
@@ -1546,7 +1524,6 @@ unittest {
         }
     });
 }
-
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.diverges,
@@ -1684,7 +1661,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-
 static foreach (backend; Matrix!()) {
     @("addAssignBitFieldGivesTheStoredValue." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -1701,7 +1677,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-
 static foreach (backend; Matrix!()) {
     @("addAssignSignedBitFieldGivesTheStoredValue." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -1714,6 +1689,130 @@ static foreach (backend; Matrix!()) {
                 const result = (bits.low += 10);
                 return result == -12 && bits.low == -12 ? 0 : 1;
             }
+        });
+    }
+}
+
+// `byte.min / -1` divides the promoted `int` operands, and `128` fits.
+static foreach (backend; Matrix!()) {
+    @("arrayOperationOfSmallestByteDividedByMinusOneIsNotAnOverflow."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        int main() {
+            byte[] a = [byte.min, 6];
+            byte[] b = [-1, 1];
+            byte[2] c;
+            c[] = a[] / b[];
+            return c[0] == byte.min ? 0 : 1;
+        }
+        });
+    }
+}
+
+// `a /= b` on a `byte` divides the promoted `int` operands: `-128 / -1` is
+// `128`, which fits in an `int`, and the assignment truncates it. The
+// hardware does not trap, so this is no fault.
+static foreach (backend; Matrix!()) {
+    @("narrowDivideAssignIsNotAnOverflow." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        byte lowest() { return byte.min; }
+        byte minusOne() { return -1; }
+
+        int main() {
+            byte value = lowest();
+            value /= minusOne();
+            return value == byte.min ? 0 : 1;
+        }
+        });
+    }
+}
+
+// `a /= b` with an `int` target and a `long` divisor divides as `long`:
+// `int.min / -1L` is `2147483648L`, which fits. No fault.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE rejects `int.min /= -1L` as an integer overflow"),
+)) {
+    @("wideDivisorDivideAssignIsNotAnOverflow." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        int lowest() { return int.min; }
+        long minusOne() { return -1; }
+
+        int main() {
+            int value = lowest();
+            value /= minusOne();
+            return value == int.min ? 0 : 1;
+        }
+        });
+    }
+}
+
+// `byte.min / -1` divides the promoted `int` operands, and `128` fits.
+static foreach (backend; Matrix!()) {
+    @("narrowDivisionIsNotAnOverflow." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        byte lowest() { return byte.min; }
+        byte minusOne() { return -1; }
+
+        int main() {
+            return lowest() / minusOne() == 128 ? 0 : 1;
+        }
+        });
+    }
+}
+
+// `int.min / -1L` divides as `long`, and `2147483648L` fits.
+static foreach (backend; Matrix!()) {
+    @("wideDivisorDivisionIsNotAnOverflow." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        int lowest() { return int.min; }
+        long minusOne() { return -1; }
+
+        int main() {
+            return lowest() / minusOne() == 2147483648L ? 0 : 1;
+        }
+        });
+    }
+}
+
+// A floating point remainder by zero is `nan`, not a trap.
+static foreach (backend; Matrix!()) {
+    @("floatingModuloByZeroIsNotAFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        double zero() { return 0; }
+
+        int main() {
+            const remainder = 1.0 % zero();
+            return remainder != remainder ? 0 : 1;
+        }
+        });
+    }
+}
+
+// A floating point division by zero is `inf`, not a trap.
+static foreach (backend; Matrix!()) {
+    @("floatingDivisionByZeroIsNotAFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        double zero() { return 0; }
+
+        int main() {
+            const quotient = 1.0 / zero();
+            return quotient == double.infinity ? 0 : 1;
+        }
         });
     }
 }

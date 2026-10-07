@@ -69,7 +69,6 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // once and never relocates, unlike an associative array's own
     // storage, which can rehash as more entries go in.
     private Function*[FuncDeclaration] _compiled;
-    private const(Function)* _faultFunctions;
     // The functions in `_compiled` whose body is complete, read without a
     // lock: the first guest call of a thread can be the one that a GC
     // finalizer makes, and it cannot wait for a lock that another thread
@@ -114,9 +113,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             &classRuntimeInfo,
             (type, loc) => _nativeData.initialValue(type, loc));
         _vms = PerThread!(Vm*, true)(() {
-            auto vm = heapNew!Vm(defaultFrameCapacity, _nativeData.tlsSlots);
-            vm.faultReporting(&functionOfPc, program.faultAction);
-            return vm;
+            return heapNew!Vm(defaultFrameCapacity, _nativeData.tlsSlots);
         });
         _plans.useCallbacks(
             new CallbackBridge(&invokeCallback, cast(void*) this));
@@ -134,20 +131,6 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             return callableAddress(function_, 0);
 
         return _plans.resolve(nativeSymbolName(symbol));
-    }
-
-    private const(Function)* functionOfPc(
-        const(imported!"snakebite.backends.bytecode.vm".Instruction)* pc,
-    ) nothrow @nogc {
-        import core.atomic: atomicLoad, MemoryOrder;
-
-        for (auto function_ = atomicLoad!(MemoryOrder.acq)(_faultFunctions);
-                function_ !is null; function_ = function_.previous)
-            if (pc >= function_.instructions.ptr
-                    && pc < function_.instructions.ptr
-                        + function_.instructions.length)
-                return function_;
-        return null;
     }
 
     private void callLowering(
@@ -614,16 +597,6 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                 this, function_, layout, returnFacts, isVoidReturn,
                 isRefReturn);
             *placeholder = compiler.build(body_);
-            import core.atomic: atomicLoad, atomicStore, MemoryOrder;
-            import std.string: fromStringz;
-
-            placeholder.name = function_.toPrettyChars.fromStringz.idup;
-            placeholder.file = function_.loc.filename.fromStringz.idup;
-            placeholder.line = function_.loc.linnum;
-            placeholder.rootOwned = _program.isRootOwned(function_);
-            placeholder.previous = atomicLoad!(MemoryOrder.acq)(_faultFunctions);
-            atomicStore!(MemoryOrder.rel)(_faultFunctions,
-                cast(const(Function)*) placeholder);
             _complete.insert(function_, placeholder);
             if (outermost)
                 prepareCallbackBodies;
@@ -664,7 +637,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.backends.bytecode.vm:
         Arg, AssertSite, CallSite, ClosureSlot, castSizeWithSignedness,
         discardResult, indirectStorage,
-        ExceptionHandler, Function, SourcePosition,
+        ExceptionHandler, Function,
         Instruction,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall,
@@ -742,7 +715,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t _returnOffset;
 
     private Instruction[] _instructions;
-    private SourcePosition[] _positions;
     private long[] _constants;
     private CallSite[] _callSites;
     private AssertSite[] _assertSites;
@@ -1045,7 +1017,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _layout.parameters.length,
             _layout.signature,
         );
-        result.positions = _positions;
         return result;
     }
 
@@ -1075,7 +1046,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t source,
         in size_t width,
         in size_t sourceWidth = 0,
-        in Loc* sourceLocation = null,
     ) {
         if (width == int.sizeof) {
             if (handler is &opDivideSigned)
@@ -1108,14 +1078,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
         _instructions ~= Instruction(
             handler, destination, source, width, sourceWidth);
-        import snakebite.backends.bytecode.vm: SourcePosition;
-        import std.string: fromStringz;
-
-        const root = cast(const(Expression)) _expressions.root;
-        const location = sourceLocation !is null ? *sourceLocation
-            : root is null ? _function.loc : root.loc;
-        _positions ~= SourcePosition(location.filename.fromStringz.idup,
-            location.linnum);
     }
 
     private size_t addConstant(in long value) {
@@ -1171,13 +1133,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         foreach (index, instruction; _instructions) {
             offsets[index] = count;
             if (instruction.handler !is null) {
-                _positions[count] = _positions[index];
                 _instructions[count++] = instruction;
             }
         }
         offsets[$ - 1] = count;
         _instructions.length = count;
-        _positions.length = count;
 
         foreach (ref instruction; _instructions) {
             auto target = branchTargetField(instruction);
@@ -1618,14 +1578,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     protected override void visitThrowStatement(ThrowStatement statement) {
-        compileThrow(statement.exp, statement.loc);
+        compileThrow(statement.exp);
     }
 
     protected override void visitThrowExp(ThrowExp expression) {
-        compileThrow(expression.e1, expression.loc);
+        compileThrow(expression.e1);
     }
 
-    private void compileThrow(Expression expression, in Loc loc) {
+    private void compileThrow(Expression expression) {
         import dmd.astenums: Tclass;
 
         if (!(expression !is null
@@ -1636,9 +1596,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const facts = TypeFacts.of(expression.type);
         const offset = reserveTemp(facts);
         evalInto(expression, offset, facts.size);
-        // A throw can follow its operand's full-expression scope or be
-        // inside a larger expression whose root starts on another line.
-        emit(&opThrow, offset, 0, 0, 0, &loc);
+        emit(&opThrow, offset, 0, 0, 0);
         _finished = true;
     }
 

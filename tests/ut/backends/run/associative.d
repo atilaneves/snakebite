@@ -665,6 +665,34 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A null associative array has no key.
+static foreach (backend; Matrix!()) {
+    @("nullAssociativeArrayLookupIsNotAFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        int main() {
+            int[int] aa;
+            return (1 in aa) is null ? 0 : 1;
+        }
+        });
+    }
+}
+
+// A null associative array is an empty one.
+static foreach (backend; Matrix!()) {
+    @("nullAssociativeArrayLengthIsNotAFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        int main() {
+            int[int] aa;
+            return aa.length == 0 ? 0 : 1;
+        }
+        });
+    }
+}
+
 // A range over the keys or the values of an associative array yields each
 // entry once.
 static foreach (backend; Matrix!(

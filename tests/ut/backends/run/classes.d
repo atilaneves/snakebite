@@ -3570,3 +3570,58 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A cast of a null class reference reads no vtable: the result is null.
+static foreach (backend; Matrix!()) {
+    @("castNullClassReferenceIsNotAFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        class Base { }
+        class Derived: Base { }
+
+        int main() {
+            Base b;
+            return cast(Derived) b is null ? 0 : 1;
+        }
+        });
+    }
+}
+
+// `==` on class references compares null first, and reads no vtable.
+static foreach (backend; Matrix!()) {
+    @("nullClassReferenceEqualityIsNotAFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        class C { }
+
+        int main() {
+            C a;
+            C b = new C;
+            return a == b || b == a ? 1 : 0;
+        }
+        });
+    }
+}
+
+// `destroy` of a null class reference does nothing.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot convert the reference that `destroy` takes, `&C`, to " ~
+        "`void**`"),
+)) {
+    @("destroyNullClassReferenceIsNotAFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+        class C { }
+
+        int main() {
+            C c;
+            destroy(c);
+            return 0;
+        }
+        });
+    }
+}
