@@ -5922,3 +5922,27 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// `W.this` is no nested function, yet `T.init` is a literal of `M!N` that
+// holds a literal of `N`, a struct whose hidden context pointer belongs to
+// `mk`. That context is null in an `.init` value, so no frame has to be
+// reachable from `W.this`.
+static foreach (backend; Matrix!()) {
+    @("initLiteralOfNestedStructInsideLiteralOfOtherStructInConstructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct M(R) { R r; int i; }
+            struct W(T) { T cur; this(int) { cur = T.init; } }
+            auto mk() {
+                int k = 1;
+                struct N { int get() { return k; } }
+                return M!N(N(), 1);
+            }
+            void main() {
+                auto m = mk();
+                auto w = W!(typeof(m))(0);
+            }
+        });
+    }
+}
