@@ -524,6 +524,18 @@ static foreach (backend; Guests) {
     }
 }
 
+// A comparison of two literals reaches the backend as `assert(false)` with
+// the operands in the message.
+static foreach (backend; Guests) {
+    @("flags.checkactionContextLiteralOperands." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shouldRun!backend(Row(["-checkaction=context"], q{
+            unittest { assert(1 == 2); }
+        }, Expect.raised(assertError, "1 != 2")));
+    }
+}
+
 
 private enum indexBody = q{
     int[4] storage = [1, 2, 3, 4];

@@ -2777,3 +2777,27 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// A literal comparison folds to `assert(false)` at semantic time, and
+// that still throws.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not catch this assertion failure"),
+)) {
+    @("failedLiteralComparisonAssertThrows." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: AssertError;
+
+            int main() {
+                try {
+                    assert(1 == 2);
+                } catch (AssertError) {
+                    return 0;
+                }
+                return 2;
+            }
+        });
+    }
+}
