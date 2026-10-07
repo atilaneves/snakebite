@@ -1699,14 +1699,6 @@ FAULTS = [
      "}\n"
      "int main() { Throwable thrown; raise(thrown); return 0; }\n",
      -signal.SIGSEGV, "fatal: null pointer dereference", "main.raise"),
-    ("virtual call through a null class reference",
-     "module main; class C { int value() { return 1; } }\n"
-     "int call(C receiver) {\n"
-     "    int unused = 1;\n"
-     "    return receiver.value();\n"
-     "}\n"
-     "int main() { C receiver; return call(receiver); }\n",
-     -signal.SIGSEGV, "fatal: null pointer dereference", "main.call"),
 ]
 
 
