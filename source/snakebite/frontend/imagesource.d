@@ -144,7 +144,7 @@ private extern(C++) class Collector
             auto reference = _references[key]; // Function identities are mutable AST nodes.
             import std.algorithm: canFind;
             // An instance with inline assembler has no guest fallback.
-            const assembler = reference.functions.canFind!(function_ => function_ in _hasAsm);
+            const assembler = reference.functions.canFind!(function_ => needsStandIn(function_));
             if (!assembler && reference.functions.canFind!(function_ => function_ in _needsRoot))
                 continue;
             const spelled = replaceRootTypes(key);
@@ -251,6 +251,15 @@ private extern(C++) class Collector
         return format!"%(%s%)"([value]);
     }
 
+    // Instances with inline assembler that name no root type, and need no
+    // root code, are in the image or not by the rules of every other
+    // instance: an image compiler whose druntime differs from the frontend's
+    // has no such instance.
+    private extern(D) bool needsStandIn(FuncDeclaration function_) {
+        return function_ in _hasAsm && (function_ in _rootTypes
+            || function_ in _blockers || function_ in _needsRootCode);
+    }
+
     private extern(D) string unplaceableMessage(in string key, in string reason) {
         return text("cannot place the instance `", key,
             "` in the dependency image: ", reason,
@@ -268,7 +277,8 @@ private extern(C++) class Collector
         foreach (function_; _foreign.keys)
             _hasAsm.remove(function_);
         foreach (function_; _hasAsm.keys) {
-            if (function_.parent is null || function_.parent.isTemplateInstance is null)
+            if (!needsStandIn(function_) || function_.parent is null
+                    || function_.parent.isTemplateInstance is null)
                 continue;
             const key = sourceSpelling(
                 function_.parent.isTemplateInstance.toPrettyChars(true).fromStringz);
