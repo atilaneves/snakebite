@@ -1351,3 +1351,23 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read runtime TypeInfo"),
+)) {
+    @("typeidOfStructWithVoidArrayField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder {
+                void[3] bytes;
+            }
+
+            int main() {
+                return typeid(Holder).tsize == 3 ? 0 : 1;
+            }
+        });
+    }
+}
