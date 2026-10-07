@@ -3715,3 +3715,242 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// A call of a `final` method on a null class reference faults only if the body reads the object.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: function call through null class reference `null`"),
+)) {
+    @("nullReceiver.finalMethodCallDoesNotFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C { final int f() { return 7; } }
+            void main() {
+                C c;
+                assert(c.f() == 7);
+            }
+        });
+    }
+}
+
+// A method of a `final class` is not virtual: no fault for a null receiver.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: function call through null class reference `null`"),
+)) {
+    @("nullReceiver.finalClassMethodCallDoesNotFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            final class C { int f() { return 6; } }
+            void main() {
+                C c;
+                assert(c.f() == 6);
+            }
+        });
+    }
+}
+
+// A `private` method is never virtual.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: function call through null class reference `null`"),
+)) {
+    @("nullReceiver.privateMethodCallDoesNotFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C { private int f() { return 4; } }
+            void main() {
+                C c;
+                assert(c.f() == 4);
+            }
+        });
+    }
+}
+
+// A template method is never virtual.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: function call through null class reference `null`"),
+)) {
+    @("nullReceiver.templateMethodCallDoesNotFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C { int f(T)(T x) { return x; } }
+            void main() {
+                C c;
+                assert(c.f(9) == 9);
+            }
+        });
+    }
+}
+
+// A `static` method called through a null instance does not read the instance.
+static foreach (backend; Matrix!()) {
+    @("nullReceiver.staticMethodCallDoesNotFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C { static int f() { return 8; } }
+            void main() {
+                C c;
+                assert(c.f() == 8);
+            }
+        });
+    }
+}
+
+// `d.B.f()` is a direct call of `B.f`, even where `f` is virtual.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: function call through null class reference `null`"),
+)) {
+    @("nullReceiver.qualifiedBaseMethodCallDoesNotFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class B { int f() { return 3; } }
+            class D : B { override int f() { return 5; } }
+            void main() {
+                D d;
+                assert(d.B.f() == 3);
+            }
+        });
+    }
+}
+
+// The GC keeps an object whose only reference is an element of a heap array literal.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("arrayLiteralOfClassReferencesIsScanned." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.memory: GC;
+            __gshared int dead;
+            class C { ~this() { ++dead; } }
+            C[] make() { return [new C, new C]; }
+            void main() {
+                C[][] keep;
+                foreach (i; 0 .. 1000)
+                    keep ~= make;
+                GC.collect;
+                assert(dead == 0);
+            }
+        });
+    }
+}
+
+// The GC keeps what the elements of a heap array literal of pointers point at.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("arrayLiteralOfPointersIsScanned." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.memory: GC;
+            int*[] make() { return [new int(5), new int(6)]; }
+            void main() {
+                int*[][] keep;
+                foreach (i; 0 .. 1000)
+                    keep ~= make;
+                GC.collect;
+                long sum;
+                foreach (a; keep)
+                    sum += *a[0] + *a[1];
+                assert(sum == 11000);
+            }
+        });
+    }
+}
+
+// A finalizer whose destructor declares a tuple variable runs its body.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerDestructorDeclaresTupleVariable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+            __gshared int dead;
+            class B {
+                ~this() {
+                    AliasSeq!(int, int) t;
+                    t[0] = 1;
+                    t[1] = 2;
+                    dead += t[0] + t[1];
+                }
+            }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new B;
+            }
+            void main() {
+                import core.memory: GC;
+                make;
+                GC.collect;
+                assert(dead > 3000);
+            }
+        });
+    }
+}
+
+// A finalizer whose destructor declares a variable through a template mixin.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerDestructorDeclaresMixinVariable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared int dead;
+            mixin template M() { int y = 3; }
+            class B { ~this() { mixin M; dead += y; } }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new B;
+            }
+            void main() {
+                import core.memory: GC;
+                make;
+                GC.collect;
+                assert(dead > 1000);
+            }
+        });
+    }
+}
+
+// A finalizer whose destructor declares a variable under `static if`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerDestructorDeclaresVariableInStaticIf." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared int dead;
+            class B { ~this() { static if (true) { int x = 3; dead += x; } } }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new B;
+            }
+            void main() {
+                import core.memory: GC;
+                make;
+                GC.collect;
+                assert(dead > 1000);
+            }
+        });
+    }
+}

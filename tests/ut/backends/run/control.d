@@ -2801,3 +2801,202 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A label on an empty statement before a loop.
+static foreach (backend; Matrix!()) {
+    @("label.onEmptyStatementBeforeLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int n;
+                L: ;
+                for (int i = 0; i < 3; i++)
+                    n += i;
+                goto M;
+                M: assert(n == 3);
+            }
+        });
+    }
+}
+
+// `continue L` and `break L` for a labelled loop that contains a loop.
+static foreach (backend; Matrix!()) {
+    @("label.continueOuterLoopFromInnerLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int n;
+                L: for (int i = 0; i < 5; i++) {
+                    for (int j = 0; j < 5; j++) {
+                        if (j == 2)
+                            continue L;
+                        if (i == 3)
+                            break L;
+                        n += 1;
+                    }
+                }
+                assert(n == 6);
+            }
+        });
+    }
+}
+
+// A label on a block that contains a loop with `continue`.
+static foreach (backend; Matrix!()) {
+    @("label.onBlockThatContainsLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int n;
+                L: {
+                    foreach (i; 0 .. 4) {
+                        if (i == 1)
+                            continue;
+                        n += i;
+                    }
+                }
+                assert(n == 5);
+            }
+        });
+    }
+}
+
+// A label on the first of two loops does not apply to the second.
+static foreach (backend; Matrix!()) {
+    @("label.beforeFirstOfTwoLoops." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int n;
+                L: for (int i = 0; i < 2; i++)
+                    n += 1;
+                for (int i = 0; i < 3; i++) {
+                    n += 10;
+                    if (i == 1)
+                        break;
+                }
+                assert(n == 22);
+            }
+        });
+    }
+}
+
+// `break L` of a labelled `switch` from a loop inside a case.
+static foreach (backend; Matrix!()) {
+    @("label.breakLabelledSwitchFromLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int n;
+                L: switch (n) {
+                    case 0:
+                        foreach (i; 0 .. 5) {
+                            if (i == 3)
+                                break L;
+                            n += 1;
+                        }
+                        goto default;
+                    default:
+                        n += 100;
+                }
+                assert(n == 3);
+            }
+        });
+    }
+}
+
+// `with` on an rvalue struct destroys it after the body.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `n` cannot be read at compile time"),
+)) {
+    @("with.rvalueStructWithDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int n;
+            struct S { int v; ~this() { n += 1; } }
+            S mk() { return S(4); }
+            void main() {
+                int r;
+                with (mk) {
+                    r = v;
+                }
+                assert(r == 4);
+                assert(n == 1);
+            }
+        });
+    }
+}
+
+// `with` on a `ref` expression changes the original and runs no destructor yet.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `n` cannot be read at compile time"),
+)) {
+    @("with.refExpression." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int n;
+            struct S { int v; ~this() { n += 1; } }
+            void main() {
+                S s = S(3);
+                with (s) {
+                    v = 9;
+                }
+                assert(s.v == 9);
+                assert(n == 0);
+            }
+        });
+    }
+}
+
+// A closure made inside `with` reads the member of the original.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: variable `with` cannot be read at compile time"),
+)) {
+    @("with.closureCapturesMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int v; }
+            void main() {
+                int delegate() d;
+                S s = S(6);
+                with (s) {
+                    d = () => v;
+                }
+                s.v = 8;
+                assert(d() == 8);
+            }
+        });
+    }
+}
+
+// A closure made inside `with` on an rvalue reads the member of the temporary.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: variable `with` cannot be read at compile time"),
+)) {
+    @("with.closureCapturesMemberOfRvalue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int v; ~this() {} }
+            void main() {
+                int delegate() d;
+                with (S(6)) {
+                    d = () => v;
+                }
+                assert(d() == 6);
+            }
+        });
+    }
+}

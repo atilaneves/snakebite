@@ -591,3 +591,28 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// The temporary of a `throw` operand is destroyed before the `catch` body runs.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `log` cannot be read at compile time"),
+)) {
+    @("throwOperandTemporaryDestructorRunsBeforeCatch." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            string log;
+            struct T { int v; ~this() { log ~= "d"; } }
+            T mk() { return T(1); }
+            void f() { throw new Exception(mk().v ? "x" : "y"); }
+            void main() {
+                try
+                    f;
+                catch (Exception) {
+                    log ~= "c";
+                }
+                assert(log == "dc");
+            }
+        });
+    }
+}

@@ -1601,3 +1601,92 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A closure captures a local that has a postblit and a destructor.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `n` cannot be read at compile time"),
+)) {
+    @("closure.capturedLocalWithDestructorAndPostblit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int n;
+            struct T { int v; ~this() { n += 1; } this(this) { n += 10; } }
+            int delegate() mk() {
+                T s = T(5);
+                T t = s;
+                return () => t.v;
+            }
+            void main() {
+                auto d = mk;
+                assert(d() == 5);
+                assert(n == 12);
+            }
+        });
+    }
+}
+
+// Closures made in a loop body share the one frame of the function.
+static foreach (backend; Matrix!()) {
+    @("closure.inForeachBodySharesFrame." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int delegate()[3] ds;
+                foreach (i; 0 .. 3) {
+                    int j = i * 2 + 1;
+                    ds[i] = () => j;
+                }
+                assert(ds[0]() == 5 && ds[1]() == 5 && ds[2]() == 5);
+            }
+        });
+    }
+}
+
+// Closures made in a loop capture a local with a destructor.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `n` cannot be read at compile time"),
+)) {
+    @("closure.inLoopCapturesLocalWithDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int n;
+            struct T { int v; ~this() { n += 1; } }
+            void main() {
+                int delegate()[3] ds;
+                foreach (i; 0 .. 3) {
+                    T t = T(i + 1);
+                    ds[i] = () => t.v;
+                }
+                assert(ds[0]() == 3 && ds[1]() == 3 && ds[2]() == 3);
+                assert(n == 3);
+            }
+        });
+    }
+}
+
+// Closures made in a `while` body mutate one shared local.
+static foreach (backend; Matrix!()) {
+    @("closure.inWhileBodyMutatesSharedLocal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int delegate()[] ds;
+                int i;
+                while (i < 3) {
+                    int j = i;
+                    ds ~= () { return j += 1; };
+                    ++i;
+                }
+                assert(ds[0]() == 3);
+                assert(ds[0]() == 4);
+                assert(ds[2]() == 5);
+            }
+        });
+    }
+}

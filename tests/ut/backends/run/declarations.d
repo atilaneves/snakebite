@@ -1060,3 +1060,51 @@ static foreach (backend; Matrix!(
         sandbox.shouldEqualContent("trace", "second program;");
     }
 }
+
+// A `switch` on strings, a static array initializer and a static `immutable` slice read from two threads.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE has no threads"),
+)) {
+    @("compilerMadeStatics.readFromTwoThreads." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.atomic: atomicOp;
+            import core.thread: Thread;
+            shared int total;
+            int f(string s) {
+                switch (s) {
+                    case "alpha": return 1;
+                    case "beta": return 2;
+                    case "gamma": return 3;
+                    default: return 0;
+                }
+            }
+            int g() {
+                static immutable int[] a = [1, 2, 3];
+                return a[0] + a[1] + a[2];
+            }
+            int h() {
+                auto a = [4, 5, 6];
+                static immutable int[] b = [7, 8];
+                return a[0] + b[1];
+            }
+            void work() {
+                int t;
+                foreach (i; 0 .. 2000)
+                    t += f("beta") + g + h;
+                total.atomicOp!"+="(t);
+            }
+            void main() {
+                auto a = new Thread(&work);
+                auto b = new Thread(&work);
+                a.start;
+                b.start;
+                a.join;
+                b.join;
+                assert(total == 2 * 2000 * (2 + 6 + 12));
+            }
+        });
+    }
+}

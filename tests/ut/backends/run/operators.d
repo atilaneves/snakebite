@@ -2024,3 +2024,108 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// `cast(void)` of an expression keeps the side effect.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `n` cannot be read at compile time"),
+)) {
+    @("voidValue.castOfSideEffect." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int n;
+            int g() { ++n; return 1; }
+            void main() {
+                cast(void) g();
+                cast(void)(n += 5);
+                assert(n == 6);
+            }
+        });
+    }
+}
+
+// `a && voidFunc()` as a statement calls only when `a` holds.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `n` cannot be read at compile time"),
+)) {
+    @("voidValue.andWithVoidCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int n;
+            void v() { n += 3; }
+            void main() {
+                bool yes = true, no = false;
+                yes && v();
+                assert(n == 3);
+                no && v();
+                assert(n == 3);
+            }
+        });
+    }
+}
+
+// `a || voidFunc()` as a statement calls only when `a` fails.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `n` cannot be read at compile time"),
+)) {
+    @("voidValue.orWithVoidCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int n;
+            void v() { n += 3; }
+            void main() {
+                bool yes = true, no = false;
+                no || v();
+                assert(n == 3);
+                yes || v();
+                assert(n == 3);
+            }
+        });
+    }
+}
+
+// A `&&` with a void call inside the comma of a loop step.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `n` cannot be read at compile time"),
+)) {
+    @("voidValue.inCommaOfLoopStep." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int n;
+            void v() { n += 3; }
+            void main() {
+                bool yes = true;
+                for (int i = 0; i < 2; yes && v(), ++i) {}
+                assert(n == 6);
+            }
+        });
+    }
+}
+
+// Side effects of the first parts of a comma expression run when its last part has no effect.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `n` cannot be read at compile time"),
+)) {
+    @("commaExpression.discardedLastPartHasNoEffect." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int n;
+            void main() {
+                int x;
+                for (int i = 0; i < 3; (n++, i++), 7)
+                    x += i;
+                assert(x == 3);
+                assert(n == 3);
+            }
+        });
+    }
+}

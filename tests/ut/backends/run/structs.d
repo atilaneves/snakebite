@@ -5982,3 +5982,429 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// An `out` argument is initialised by the callee, so a later argument still
+// reads the value that the caller's variable had before the call.
+static foreach (backend; Matrix!()) {
+    @("outArgument.intIsInitialisedInCallee." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f(out int a, int b) { return b; }
+            void main() {
+                int x = 5;
+                assert(f(x, x) == 5);
+                assert(x == 0);
+            }
+        });
+    }
+}
+
+// An `out` struct keeps its old value while the later arguments evaluate.
+static foreach (backend; Matrix!()) {
+    @("outArgument.structIsInitialisedInCallee." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a = 7; int b; }
+            int f(out S s, int b) { return b; }
+            void main() {
+                S x = S(1, 2);
+                assert(f(x, x.a) == 1);
+                assert(x.a == 7);
+            }
+        });
+    }
+}
+
+// An `out` class reference is still set while the later arguments evaluate.
+static foreach (backend; Matrix!()) {
+    @("outArgument.classReferenceIsInitialisedInCallee." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C {}
+            int f(out C c, int b) { return b; }
+            void main() {
+                C x = new C;
+                assert(f(x, x is null ? 1 : 2) == 2);
+                assert(x is null);
+            }
+        });
+    }
+}
+
+// An `out` static array keeps its elements while the later arguments evaluate.
+static foreach (backend; Matrix!()) {
+    @("outArgument.staticArrayIsInitialisedInCallee." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f(out int[3] a, int b) { return b; }
+            void main() {
+                int[3] x = [4, 5, 6];
+                assert(f(x, x[1]) == 5);
+                assert(x == [0, 0, 0]);
+            }
+        });
+    }
+}
+
+// One variable passed as `out` and as `ref` is one object: the callee sees the reset.
+static foreach (backend; Matrix!()) {
+    @("outArgument.sameVariableAlsoByRef." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f(out int a, ref int b) { b += 1; return a; }
+            void main() {
+                int x = 5;
+                assert(f(x, x) == 1);
+                assert(x == 1);
+            }
+        });
+    }
+}
+
+// A later argument that reads the variable through a pointer sees the old value.
+static foreach (backend; Matrix!()) {
+    @("outArgument.laterArgumentReadsThroughPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f(out int a, int b) { return b; }
+            void main() {
+                int x = 5;
+                int* p = &x;
+                assert(f(x, *p) == 5);
+                assert(x == 0);
+            }
+        });
+    }
+}
+
+// A method called on a constructor call result.
+static foreach (backend; Matrix!()) {
+    @("constructorRvalue.methodCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct P { long v; this(long v) { this.v = v; } long get() { return v; } }
+            void main() { assert(P(3).get() == 3); }
+        });
+    }
+}
+
+// A `ref`-returning method called on a constructor call result.
+static foreach (backend; Matrix!()) {
+    @("constructorRvalue.refReturningMethod." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct P { long v; this(long v) { this.v = v; } ref long r() { return v; } }
+            void main() { assert(P(3).r == 3); }
+        });
+    }
+}
+
+// An assignment through a `ref` result of a method on a constructor call result reaches the global.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `g` cannot be read at compile time"),
+)) {
+    @("constructorRvalue.refReturnAssigned." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared long g;
+            struct P { long v; this(long v) { this.v = v; } ref long r() { return g; } }
+            void main() {
+                P(3).r = 5;
+                assert(g == 5);
+            }
+        });
+    }
+}
+
+// A chain through a method that returns `ref this`.
+static foreach (backend; Matrix!()) {
+    @("constructorRvalue.chainedMethodCalls." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct P {
+                long v;
+                this(long v) { this.v = v; }
+                ref P inc() { ++v; return this; }
+                long get() { return v; }
+            }
+            void main() { assert(P(3).inc().get() == 4); }
+        });
+    }
+}
+
+// A constructor that calls a method on `this`.
+static foreach (backend; Matrix!()) {
+    @("constructorRvalue.constructorCallsHelperOnThis." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct P {
+                long v;
+                this(long v) { this.v = v; init2; }
+                void init2() { v *= 2; }
+                long get() { return v; }
+            }
+            void main() { assert(P(3).get() == 6); }
+        });
+    }
+}
+
+// The destructor of the constructor call result runs once, after the method.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `n` cannot be read at compile time"),
+)) {
+    @("constructorRvalue.destructorRunsAfterMethod." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int n;
+            struct P {
+                long v;
+                this(long v) { this.v = v; }
+                ~this() { n += 10; }
+                long get() { return v + n; }
+            }
+            void main() {
+                assert(P(3).get() == 3);
+                assert(n == 10);
+            }
+        });
+    }
+}
+
+// A field read of a call result.
+static foreach (backend; Matrix!()) {
+    @("fieldOfRvalue.callResult." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int x; int y; }
+            S make() { return S(3, 4); }
+            void main() { assert(make().x == 3); assert(make().y == 4); }
+        });
+    }
+}
+
+// A field read of a conditional expression.
+static foreach (backend; Matrix!()) {
+    @("fieldOfRvalue.conditionalOperand." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int x; int y; }
+
+              pragma(inline, false) bool yes() { return true; }
+              void main() {
+                  S a = S(1, 2), b = S(3, 4);
+                  assert((yes ? a : b).y == 2);
+                  assert((!yes ? a : b).y == 4);
+              }
+        });
+    }
+}
+
+// A field read of a slice element at a run-time index.
+static foreach (backend; Matrix!()) {
+    @("fieldOfRvalue.sliceElement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int x; int y; }
+
+              pragma(inline, false) size_t one() { return 1; }
+              void main() {
+                  S[] arr = [S(5, 6), S(7, 8)];
+                  assert(arr[one].y == 8);
+              }
+        });
+    }
+}
+
+// A bit field read of a call result.
+static foreach (backend; Matrix!()) {
+    @("bitFieldOfRvalue.callResult." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a: 3; int b: 5; }
+
+              S make() { S s; s.a = 2; s.b = 9; return s; }
+              void main() { assert(make().a == 2); assert(make().b == 9); }
+        });
+    }
+}
+
+// A bit field read of a conditional expression.
+static foreach (backend; Matrix!()) {
+    @("bitFieldOfRvalue.conditionalOperand." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a: 3; int b: 5; }
+
+              pragma(inline, false) bool no() { return false; }
+              void main() {
+                  S p, q;
+                  p.b = 7;
+                  q.b = 9;
+                  assert((no ? p : q).b == 9);
+              }
+        });
+    }
+}
+
+// A bit field read of a slice element.
+static foreach (backend; Matrix!()) {
+    @("bitFieldOfRvalue.sliceElement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a: 3; int b: 5; }
+
+              pragma(inline, false) size_t one() { return 1; }
+              void main() {
+                  S[] arr = new S[2];
+                  arr[1].b = 11;
+                  assert(arr[one].b == 11);
+              }
+        });
+    }
+}
+
+// The value of a bit field assignment is the truncated value.
+static foreach (backend; Matrix!()) {
+    @("bitFieldAssignment.valueIsTruncated." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { uint bits: 3; }
+
+              void main() {
+                  S s;
+                  auto v = (s.bits = 300);
+                  assert(v == 4);
+                  assert(s.bits == 4);
+              }
+        });
+    }
+}
+
+// The value of a bit field assignment through a `ref` parameter.
+static foreach (backend; Matrix!()) {
+    @("bitFieldAssignment.throughRefParameter." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { uint bits: 3; }
+
+              uint set(ref S s) { return s.bits = 300; }
+              void main() {
+                  S s;
+                  assert(set(s) == 4);
+                  assert(s.bits == 4);
+              }
+        });
+    }
+}
+
+// The value of a bit field assignment that is a call argument.
+static foreach (backend; Matrix!()) {
+    @("bitFieldAssignment.asCallArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { uint bits: 3; }
+
+              uint id(uint x) { return x; }
+              void main() {
+                  S s;
+                  assert(id(s.bits = 300) == 4);
+                  assert(s.bits == 4);
+              }
+        });
+    }
+}
+
+// A `ref` return that chooses by a temporary destroys the temporary once.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `n` cannot be read at compile time"),
+)) {
+    @("refReturnTemporary.inConditionOperand." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int n;
+            struct T { int v; ~this() { ++n; } }
+            T mk(int v) { return T(v); }
+
+            ref int g(ref int a, ref int b) { return mk(1).v ? a : b; }
+            void main() {
+                int a = 1, b = 2;
+                g(a, b) = 5;
+                assert(a == 5 && b == 2);
+                assert(n == 1);
+            }
+        });
+    }
+}
+
+// A `ref` return of an assignment from a temporary's field destroys the temporary.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `n` cannot be read at compile time"),
+)) {
+    @("refReturnTemporary.inAssignment." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int n;
+            struct T { int v; ~this() { ++n; } }
+            T mk(int v) { return T(v); }
+
+            ref int k(ref int a) { return a = mk(3).v; }
+            void main() {
+                int a = 1;
+                k(a) += 1;
+                assert(a == 4);
+                assert(n == 1);
+            }
+        });
+    }
+}
+
+// A `ref` return of an index chosen by a temporary destroys the temporary.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `n` cannot be read at compile time"),
+)) {
+    @("refReturnTemporary.inIndex." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int n;
+            struct T { int v; ~this() { ++n; } }
+            T mk(int v) { return T(v); }
+
+            ref int h(return ref int[3] a) { return a[mk(2).v]; }
+            void main() {
+                int[3] a = [1, 2, 3];
+                h(a) = 9;
+                assert(a[2] == 9);
+                assert(n == 1);
+            }
+        });
+    }
+}

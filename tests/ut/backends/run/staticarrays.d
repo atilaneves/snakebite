@@ -1362,3 +1362,39 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A static array literal built from the elements of its destination swaps them.
+static foreach (backend; Matrix!()) {
+    @("assignLiteralOfOwnElements.int." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[2] a = [1, 2];
+                a = [a[1], a[0]];
+                assert(a == [2, 1]);
+            }
+        });
+    }
+}
+
+// The same swap for structs with a postblit.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `n` cannot be read at compile time"),
+)) {
+    @("assignLiteralOfOwnElements.structWithPostblit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int n;
+            struct S { int v; this(this) { ++n; } }
+            void main() {
+                S[2] a = [S(1), S(2)];
+                a = [a[1], a[0]];
+                assert(a[0].v == 2 && a[1].v == 1);
+                assert(n == 2);
+            }
+        });
+    }
+}

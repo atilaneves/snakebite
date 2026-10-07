@@ -1361,3 +1361,127 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// `a[] = b` with `b` a static array.
+static foreach (backend; Matrix!()) {
+    @("sliceAssign.fromStaticArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[3] a;
+                int[3] b = [1, 2, 3];
+                a[] = b;
+                assert(a == [1, 2, 3]);
+            }
+        });
+    }
+}
+
+// `a[] = b` with `b` a dynamic array.
+static foreach (backend; Matrix!()) {
+    @("sliceAssign.fromDynamicArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[3] a;
+                int[] b = [4, 5, 6];
+                a[] = b;
+                assert(a == [4, 5, 6]);
+            }
+        });
+    }
+}
+
+// `a[] = 7` sets every element.
+static foreach (backend; Matrix!()) {
+    @("sliceAssign.fromScalar." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() { int[3] a; a[] = 7; assert(a == [7, 7, 7]); }
+        });
+    }
+}
+
+// `a[] = lit` with a stored literal.
+static foreach (backend; Matrix!()) {
+    @("sliceAssign.fromStoredLiteral." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            static immutable int[3] lit = [1, 2, 3];
+            void main() {
+                int[] a = new int[3];
+                a[] = lit;
+                assert(a == [1, 2, 3]);
+            }
+        });
+    }
+}
+
+// `a[] = [1, 2, 3]` on a dynamic array.
+static foreach (backend; Matrix!()) {
+    @("sliceAssign.fromArrayLiteral." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] a = new int[3];
+                a[] = [1, 2, 3];
+                assert(a == [1, 2, 3]);
+            }
+        });
+    }
+}
+
+// A copy between `void[]` slices.
+static foreach (backend; Matrix!()) {
+    @("sliceAssign.voidSlices." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[3] a = [1, 2, 3];
+                int[3] b;
+                void[] x = a[];
+                void[] y = b[];
+                y[] = x[];
+                assert(b == [1, 2, 3]);
+            }
+        });
+    }
+}
+
+// `a[1 .. 3] = c[]` into a static array.
+static foreach (backend; Matrix!()) {
+    @("sliceAssign.subrangeOfStaticArrayFromSlice." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[4] a;
+                int[2] c = [8, 9];
+                a[1 .. 3] = c[];
+                assert(a == [0, 8, 9, 0]);
+            }
+        });
+    }
+}
+
+// `a[1 .. 3] = c` into a static array.
+static foreach (backend; Matrix!()) {
+    @("sliceAssign.subrangeOfStaticArrayFromStaticArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[4] a = [1, 2, 3, 4];
+                int[2] c = [8, 9];
+                a[1 .. 3] = c;
+                assert(a == [1, 8, 9, 4]);
+            }
+        });
+    }
+}
