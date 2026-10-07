@@ -315,6 +315,35 @@ static foreach (backend; Matrix!(
     }
 }
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot hold mutable static state across calls"),
+)) {
+    @("assign.plainAssign.indexEvaluatedOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        11.shouldBeRetOf!(
+            backend,
+            q{
+                int calls;
+
+                int index() {
+                    ++calls;
+                    return 1;
+                }
+
+                int answer() {
+                    uint[] values = new uint[](2);
+
+                    values[index()] = 10;
+                    return calls + cast(int) values[1];
+                }
+            },
+            "answer",
+        );
+    }
+}
+
 // Applied twice, so a backend that wrote the addend over the target instead
 // of adding to it would disagree: the answer differs from the last addend.
 static foreach (backend; Matrix!()) {

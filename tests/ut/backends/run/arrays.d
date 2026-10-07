@@ -1324,3 +1324,30 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// The byte size of `new T[](n)` is too big for a `size_t`: druntime throws
+// instead of allocating a block that is smaller than the array's length.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd CTFE crashes the test process (SIGSEGV) on an array allocation whose byte size overflows"),
+)) {
+    @("array.newWithOverflowingByteSizeThrows." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: OutOfMemoryError;
+
+            void main() {
+                size_t n = size_t.max / 8 + 2;
+                bool caught;
+                try {
+                    auto p = new long[](n);
+                } catch (OutOfMemoryError) {
+                    caught = true;
+                }
+                assert(caught);
+            }
+        });
+    }
+}
