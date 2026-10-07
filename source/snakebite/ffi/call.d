@@ -312,7 +312,7 @@ public struct CallAdapter {
         adapter._referenceResult = type.isRef;
 
         auto returnType = type.nextOf;
-        adapter._resultIsReceiver = isConstructor;
+        adapter._resultIsReceiver = isConstructor && type.isRef;
         adapter._isVoid = isConstructor
             || returnType is null || returnType.ty == Tvoid;
 
