@@ -1605,7 +1605,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
                 planOf(*_plans, planDelete(expression).hook);
             }),
-            (expression) => attempt({ structLiteralPlanOf(expression); }),
+            (expression) => attempt({
+                structLiteralPlanOf(expression);
+                if (expression.useStaticInit)
+                    prepareDefault(expression.type);
+            }),
             (expression) => attempt({ _nativeData.stringData(expression); }),
             (constructor) => attempt({
                 auto definition = _callSelection.definitionOf(
@@ -6160,6 +6164,15 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     override void visit(StructLiteralExp expression) {
         import core.stdc.string: memset;
         import snakebite.nativelayout: isStoredLiteral;
+
+        if (expression.useStaticInit) {
+            import core.stdc.string: memcpy;
+
+            const image = _nativeData.initialValue(
+                expression.type, expression.loc);
+            memcpy(_place, image.ptr, _facts.size);
+            return;
+        }
 
         if (isStoredLiteral(expression)) {
             _nativeData.write(_type, _facts, expression, _place);

@@ -197,18 +197,6 @@ if (isAggregateInitHooks!Hooks)
 // The single decision both backends' `StructLiteralExp` adapters read:
 // `expression.elements` pairs positionally with `expression.sd.fields`,
 // with a `null` entry for a field the literal leaves out entirely.
-//
-// `expression.useStaticInit` marks a literal built from a nested struct
-// type's own `.init` (dmd's `getProperty`, `Id._init`, sets it whenever
-// the type `needsNested`), not from constructing a live instance: dmd's
-// glue layer (`e2ir.d`) then copies that type's precomputed static `.init`
-// image wholesale instead of emitting these steps at all, so it never
-// reads a context for `vthis` - there is no enclosing frame to read one
-// from, since a type's `.init` is a compile-time constant, not a value
-// built at some particular call site. `visit(StructLiteralExp)` already
-// zeroes the destination before running any step, so skipping the `vthis`
-// step here reproduces that null context exactly, matching compiled D
-// instead of chasing a static chain that provably cannot exist.
 public AggregateInitPlan planStructLiteral(
     imported!"dmd.expression".StructLiteralExp expression,
 ) {
@@ -218,8 +206,7 @@ public AggregateInitPlan planStructLiteral(
 
     InitStep[] steps;
 
-    if (!expression.useStaticInit)
-        steps ~= vthisStepsOf(expression.sd);
+    steps ~= vthisStepsOf(expression.sd);
 
     if (expression.elements !is null)
         foreach (i, element; *expression.elements) {

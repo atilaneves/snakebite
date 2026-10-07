@@ -474,6 +474,10 @@ public bool initializerRunsForEffect(
 }
 
 // These literals require neither execution nor a fresh runtime allocation.
+// A literal with `useStaticInit` is a copy of the type's `.init` image
+// (`glue/e2ir.d`, `toSymbol`'s `toInitializer`), whatever it holds: every
+// context pointer in that image is null, also the one of a nested struct
+// that is a field of another struct, so there is no frame to read.
 public bool isStoredLiteral(imported!"dmd.expression".Expression value) {
     if (auto variable = value.isVarExp) {
         auto symbol = variable.var.isSymbolDeclaration;
@@ -482,6 +486,8 @@ public bool isStoredLiteral(imported!"dmd.expression".Expression value) {
         return declaration !is null && !declaration.isNested();
     }
     if (auto literal = value.isStructLiteralExp) {
+        if (literal.useStaticInit)
+            return true;
         if (literal.sd.isNested())
             return false;
         foreach (element; *literal.elements)
