@@ -4,7 +4,7 @@ module ut.backends.call.ffi;
 import ut.backends;
 import snakebite.backends.backend: Program;
 import snakebite.ffi: PlanCache;
-import snakebite.frontend.compiler: parseSnippet;
+import snakebite.frontend.compiler: parseSnippet, parseSnippets;
 import snakebite.frontend.dmd.functions: findFunction;
 import std.conv: text;
 
@@ -4134,5 +4134,39 @@ static foreach (backend; Matrix!(
             },
             "answer",
         );
+    }
+}
+
+
+// `dmd.builtin.isBuiltin` classifies a bodiless function by its name and
+// by the package of its module alone, so a declaration in a module of
+// the `std.math` package that happens to share an intrinsic's name is
+// one too, whatever its parameter type is. Compiled D calls the native
+// function for it.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a guest module declaration cannot be mixed into the host module"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call an external function without source"),
+)) {
+    @("ffi.declarationNamedLikeAnIntrinsicCallsTheNativeFunction."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        auto modules = parseSnippets([
+            q{
+                module std.math.audit;
+
+                extern(C) double floor(int);
+
+                void main() {
+                    const ignored = floor(3);
+                }
+            },
+        ]);
+        auto program = Program([modules[0]]);
+        auto backend_ = Owned!backend(program);
+
+        backend_.call(findFunction(modules[0], "main"), null, []);
     }
 }
