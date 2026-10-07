@@ -2,6 +2,12 @@
 # nothing removes it. A test that makes a throw-away dub package names it
 # with `dub_name`, and the fixture in conftest.py deletes the record of that
 # name when the test is over, also when it failed.
+#
+# The same fixture fails a test whose recipe has a plain name with a record,
+# and deletes that record only if the test made it. It reads only the recipes
+# below `tmp_path` at the end of the test: a project made elsewhere, or a
+# recipe that the test removed or changed, is not seen. A record that a
+# killed run left is not removed.
 
 import json
 import re
@@ -20,10 +26,18 @@ def dub_name(base: str) -> str:
     return _names[base]
 
 
+def _cache() -> Path:
+    return Path.home() / ".dub" / "cache"
+
+
+def cache_entries() -> set[str]:
+    cache = _cache()
+    return {entry.name for entry in cache.iterdir()} if cache.is_dir() else set()
+
+
 def forget_dub_names() -> None:
-    cache = Path.home() / ".dub" / "cache"
     for name in _names.values():
-        shutil.rmtree(cache / name, ignore_errors=True)
+        shutil.rmtree(_cache() / name, ignore_errors=True)
     _names.clear()
 
 
@@ -62,15 +76,18 @@ def _recipe_package_names(recipe: Path) -> list[str]:
             for a, b in _sdl_path_dependency.findall(text)
         ]
     try:
-        return _json_names(json.loads(text))
+        recipe_json = json.loads(text)
     except json.JSONDecodeError:
         return []
+    return _json_names(recipe_json) if isinstance(recipe_json, dict) else []
 
 
-def delete_plain_dub_names(root: Path) -> list[str]:
-    """Delete the cache record of each package name in the dub recipes under
-    `root` that did not come from `dub_name`. Returns a message for each."""
-    cache = Path.home() / ".dub" / "cache"
+def delete_plain_dub_names(root: Path, before: set[str]) -> list[str]:
+    """A message for each package name in the dub recipes under `root` that
+    did not come from `dub_name` and has a cache record. The record is
+    deleted unless its name is in `before`, the entries of the cache when
+    the test began."""
+    cache = _cache()
     messages: list[str] = []
     for recipe in sorted(root.rglob("*")):
         if recipe.name not in _recipe_names or not recipe.is_file():
@@ -79,7 +96,8 @@ def delete_plain_dub_names(root: Path) -> list[str]:
             record = cache / name
             if name in _names.values() or not record.is_dir():
                 continue
-            shutil.rmtree(record, ignore_errors=True)
+            if name not in before:
+                shutil.rmtree(record, ignore_errors=True)
             messages.append(
                 f"package {name} in {recipe}: use dub_name() for the name"
             )

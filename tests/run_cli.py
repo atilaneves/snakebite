@@ -14,11 +14,14 @@ import shutil
 import signal
 import stat
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
 import pytest
 from dubname import delete_plain_dub_names, dub_name, forget_dub_names
+
+pytest_plugins = ["pytester"]
 
 BACKENDS = ["interpreter", "bytecode", "ctfe"]
 
@@ -3244,7 +3247,7 @@ def test_crt_destructor_runs_after_exit_in_a_module_destructor(
 # directory that imports from `deps`. `optimised` leaves the image
 # optimisation on, which is the default of `bin/sb`.
 class ImageShape(NamedTuple):
-    files: dict[str, str]
+    files: dict[str, str | Callable[[], str]]
     backends: tuple[str, ...] = tuple(BACKENDS)
     imports: bool = False
     optimised: bool = False
@@ -3254,9 +3257,17 @@ class ImageShape(NamedTuple):
 
 def dub_app_recipe(name: str, settings: str = "") -> str:
     return (
-        f'name "{name}"\ntargetType "library"\n{settings}'
+        f'name "{dub_name(name)}"\ntargetType "library"\n{settings}'
         'configuration "unittest" {\n    targetType "executable"\n}\n'
     )
+
+
+def dub_library(name: str) -> Callable[[], str]:
+    return lambda: f'name "{dub_name(name)}"\ntargetType "library"\n'
+
+
+def dub_dependency(name: str) -> str:
+    return f'dependency "{dub_name(name)}" path="../dependency"\n'
 
 
 def snippet_shape(code: str, result: int, backends: tuple[str, ...]) -> ImageShape:
@@ -3410,17 +3421,17 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
     # and interpreted code share one storage.
     "dependency_global": ImageShape(
         {
-            "app/dub.sdl": """
-                name "global-app"
+            "app/dub.sdl": lambda: f"""
+                name "{dub_name("global-app")}"
                 targetType "library"
                 targetName "global-app"
-                dependency "global-dependency" path="../dependency"
-                configuration "unittest" {
+                {dub_dependency("global-dependency")}
+                configuration "unittest" {{
                     targetType "executable"
-                }
+                }}
                 """,
-            "dependency/dub.sdl": """
-                name "global-dependency"
+            "dependency/dub.sdl": lambda: f"""
+                name "{dub_name("global-dependency")}"
                 targetType "staticLibrary"
                 """,
             "dependency/source/global_dependency.d": """
@@ -3452,17 +3463,17 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
     # the dependency's thread-local variable.
     "dependency_thread_local_per_thread": ImageShape(
         {
-            "app/dub.sdl": """
-                name "global-app"
+            "app/dub.sdl": lambda: f"""
+                name "{dub_name("global-app")}"
                 targetType "library"
                 targetName "global-app"
-                dependency "global-dependency" path="../dependency"
-                configuration "unittest" {
+                {dub_dependency("global-dependency")}
+                configuration "unittest" {{
                     targetType "executable"
-                }
+                }}
                 """,
-            "dependency/dub.sdl": """
-                name "global-dependency"
+            "dependency/dub.sdl": lambda: f"""
+                name "{dub_name("global-dependency")}"
                 targetType "staticLibrary"
                 """,
             "dependency/source/global_dependency.d": """
@@ -3499,7 +3510,7 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
     # dmd must infer and that the guest never calls.
     "subclass_of_native_class_with_inferred_virtual_method": ImageShape(
         {
-            "dependency/dub.sdl": 'name "vtable-dep"\ntargetType "library"\n',
+            "dependency/dub.sdl": dub_library("vtable-dep"),
             "dependency/source/vtable_dep.d": """
                 module vtable_dep;
                 import std.algorithm.iteration: filter;
@@ -3513,8 +3524,8 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
                     }
                 }
                 """,
-            "app/dub.sdl": dub_app_recipe(
-                "vtable-app", 'dependency "vtable-dep" path="../dependency"\n',
+            "app/dub.sdl": lambda: dub_app_recipe(
+                "vtable-app", dub_dependency("vtable-dep"),
             ),
             "app/source/vtable_app.d": """
                 module vtable_app;
@@ -3534,13 +3545,13 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
     ),
     "address_of_native_inferred_free_function": ImageShape(
         {
-            "dependency/dub.sdl": 'name "fnptr-dep"\ntargetType "library"\n',
+            "dependency/dub.sdl": dub_library("fnptr-dep"),
             "dependency/source/fnptr_dep.d": """
                 module fnptr_dep;
                 auto increment(int x) { return x + 1; }
                 """,
-            "app/dub.sdl": dub_app_recipe(
-                "fnptr-app", 'dependency "fnptr-dep" path="../dependency"\n',
+            "app/dub.sdl": lambda: dub_app_recipe(
+                "fnptr-app", dub_dependency("fnptr-dep"),
             ),
             "app/source/fnptr_app.d": """
                 module fnptr_app;
@@ -3557,7 +3568,7 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
     "new_native_class_with_variadic_constructor": ImageShape(
         {
             "dependency/dub.sdl":
-                'name "variadic-ctor-dep"\ntargetType "library"\n',
+                dub_library("variadic-ctor-dep"),
             "dependency/source/variadic_ctor_dep.d": """
                 module variadic_ctor_dep;
                 import core.vararg;
@@ -3573,9 +3584,9 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
                     }
                 }
                 """,
-            "app/dub.sdl": dub_app_recipe(
+            "app/dub.sdl": lambda: dub_app_recipe(
                 "variadic-ctor-app",
-                'dependency "variadic-ctor-dep" path="../dependency"\n',
+                dub_dependency("variadic-ctor-dep"),
             ),
             "app/source/variadic_ctor_app.d": """
                 module variadic_ctor_app;
@@ -3592,7 +3603,7 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
     "new_native_struct_with_variadic_constructor": ImageShape(
         {
             "dependency/dub.sdl":
-                'name "variadic-struct-ctor-dep"\ntargetType "library"\n',
+                dub_library("variadic-struct-ctor-dep"),
             "dependency/source/variadic_struct_ctor_dep.d": """
                 module variadic_struct_ctor_dep;
                 import core.vararg;
@@ -3608,9 +3619,9 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
                     }
                 }
                 """,
-            "app/dub.sdl": dub_app_recipe(
+            "app/dub.sdl": lambda: dub_app_recipe(
                 "variadic-struct-ctor-app",
-                'dependency "variadic-struct-ctor-dep" path="../dependency"\n',
+                dub_dependency("variadic-struct-ctor-dep"),
             ),
             "app/source/variadic_struct_ctor_app.d": """
                 module variadic_struct_ctor_app;
@@ -3629,7 +3640,7 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
     "native_inferred_method_through_delegate": ImageShape(
         {
             "dependency/dub.sdl":
-                'name "delegate-dep"\ntargetType "library"\n',
+                dub_library("delegate-dep"),
             "dependency/source/delegate_dep.d": """
                 module delegate_dep;
 
@@ -3639,9 +3650,9 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
                     auto answer(int x) { return _base + x; }
                 }
                 """,
-            "app/dub.sdl": dub_app_recipe(
+            "app/dub.sdl": lambda: dub_app_recipe(
                 "delegate-app",
-                'dependency "delegate-dep" path="../dependency"\n',
+                dub_dependency("delegate-dep"),
             ),
             "app/source/delegate_app.d": """
                 module delegate_app;
@@ -3659,7 +3670,7 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
     # it, so a root module's `__FILE__` is that relative path.
     "root_module_file_is_relative_to_the_project": ImageShape(
         {
-            "app/dub.sdl": dub_app_recipe(
+            "app/dub.sdl": lambda: dub_app_recipe(
                 "filename", 'sourcePaths "sub"\nimportPaths "imports"\n',
             ),
             "app/imports/.keep": "",
@@ -3672,7 +3683,7 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
     # An empty source file is a valid module.
     "empty_root_source": ImageShape(
         {
-            "app/dub.sdl": dub_app_recipe("emptyroot"),
+            "app/dub.sdl": lambda: dub_app_recipe("emptyroot"),
             "app/source/main_empty_root.d": """
                 module main_empty_root;
                 int main() { return 0; }
@@ -3683,7 +3694,7 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
     # dub's debug and unittest build types pass `-debug`.
     "dub_debug_mode_compiles_debug_blocks": ImageShape(
         {
-            "app/dub.sdl": dub_app_recipe("debugmode"),
+            "app/dub.sdl": lambda: dub_app_recipe("debugmode"),
             "app/source/debug_mode.d": """
                 module debug_mode;
                 int main() { debug { return 0; } return 1; }
@@ -3809,27 +3820,11 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
 }
 
 
-_sdl_package_name = re.compile(
-    r'^(\s*(?:name|targetName|dependency)\s+)"([^"]+)"', re.MULTILINE,
-)
-
-
-def dub_named(recipe: str) -> str:
-    """`recipe` with each package name replaced by its `dub_name`."""
-    return _sdl_package_name.sub(
-        lambda m: f'{m[1]}"{dub_name(m[2])}"', recipe,
-    )
-
-
-def write_recipe(path: Path, recipe: str) -> None:
-    write(path, dub_named(recipe))
-
-
-def write_files(root: Path, files: dict[str, str]) -> None:
+def write_files(
+    root: Path, files: dict[str, str | Callable[[], str]],
+) -> None:
     for relative, text in files.items():
-        if relative.endswith("dub.sdl"):
-            text = dub_named(text)
-        write(root / relative, text)
+        write(root / relative, text() if callable(text) else text)
 
 
 def run_image_shape(
@@ -4103,10 +4098,10 @@ def test_unresolved_dependency_symbol_fails_the_image_link(
 def test_dependency_runner_replaces_the_default_test_runner(
     tmp_path: Path, backend: str,
 ) -> None:
-    write_recipe(
+    write(
         tmp_path / "app" / "dub.sdl",
-        'name "repeat-runner-app"\ntargetType "library"\n'
-        'dependency "repeat-runner" path="../runner"\n',
+        f'name "{dub_name("repeat-runner-app")}"\ntargetType "library"\n'
+        f'dependency "{dub_name("repeat-runner")}" path="../runner"\n',
     )
     write(
         tmp_path / "app" / "source" / "app.d",
@@ -4116,9 +4111,9 @@ def test_dependency_runner_replaces_the_default_test_runner(
         unittest { assert(false, "custom runner must replace default tests"); }
         """,
     )
-    write_recipe(
+    write(
         tmp_path / "runner" / "dub.sdl",
-        'name "repeat-runner"\ntargetType "staticLibrary"\n',
+        f'name "{dub_name("repeat-runner")}"\ntargetType "staticLibrary"\n',
     )
     write(
         tmp_path / "runner" / "source" / "repeat_runner.d",
@@ -4154,9 +4149,9 @@ def test_dependency_runner_replaces_the_default_test_runner(
 def test_throwable_escaping_a_unittest_runner_ends_the_program_cleanly(
     tmp_path: Path, backend: str,
 ) -> None:
-    write_recipe(
+    write(
         tmp_path / "app" / "dub.sdl",
-        'name "escaping-throwable-app"\ntargetType "library"\n',
+        f'name "{dub_name("escaping-throwable-app")}"\ntargetType "library"\n',
     )
     write(
         tmp_path / "app" / "source" / "escaping_throwable_app.d",
@@ -4226,7 +4221,7 @@ def app_using_unused_member(backend: str, expected: int) -> str:
 def test_transitive_dub_dependencies_reach_the_image(
     tmp_path: Path, backend: str,
 ) -> None:
-    write_recipe(
+    write(
         tmp_path / "app" / "dub.sdl",
         """
         name "image-app"
@@ -4241,7 +4236,7 @@ def test_transitive_dub_dependencies_reach_the_image(
     )
     app_source = tmp_path / "app" / "source" / "app.d"
     write(app_source, app_using_unused_member(backend, 73))
-    write_recipe(
+    write(
         tmp_path / "middle" / "dub.sdl",
         """
         name "image-middle"
@@ -4258,9 +4253,7 @@ def test_transitive_dub_dependencies_reach_the_image(
         """,
     )
     leaf = tmp_path / "leaf archives"
-    write_recipe(
-        leaf / "dub.sdl", 'name "image-leaf"\ntargetType "staticLibrary"\n',
-    )
+    write(leaf / "dub.sdl", 'name "image-leaf"\ntargetType "staticLibrary"\n')
     write(
         leaf / "source" / "image_leaf.d",
         "module image_leaf;\nint leaf() { return 41; }\n",
@@ -4303,7 +4296,7 @@ def test_transitive_dub_dependencies_reach_the_image(
     assert edited_leaf.returncode == 0, output(edited_leaf)
 
     # Another compiler's build replaces the copy in the package directory.
-    write(leaf / f"lib{dub_name('image-leaf')}.a", "not an archive")
+    write(leaf / "libimage-leaf.a", "not an archive")
     foreign = start()
     assert foreign.returncode == 0, output(foreign)
 
@@ -4311,7 +4304,7 @@ def test_transitive_dub_dependencies_reach_the_image(
     # so it builds none.
     if backend == "ctfe":
         return
-    artifacts = list(dpath.rglob(f"lib{dub_name('image-leaf')}.a"))
+    artifacts = list(dpath.rglob("libimage-leaf.a"))
     assert len(artifacts) == 1, artifacts
     artifacts[0].unlink()
     rebuilt = start()
@@ -4326,9 +4319,9 @@ def test_generation_hook_runs_at_every_start(
     tmp_path: Path, backend: str,
 ) -> None:
     app = tmp_path / "app"
-    write_recipe(
+    write(
         app / "dub.sdl",
-        'name "hook-app"\ntargetType "library"\n'
+        f'name "{dub_name("hook-app")}"\ntargetType "library"\n'
         'preGenerateCommands "echo hook >> hooks.log"\n',
     )
     write(app / "source" / "app.d", "module app;\n")
@@ -4351,7 +4344,10 @@ def test_generated_test_runner_follows_a_module_rename(
     tmp_path: Path, backend: str,
 ) -> None:
     app = tmp_path / "app"
-    write_recipe(app / "dub.sdl", 'name "renamed-app"\ntargetType "library"\n')
+    write(
+        app / "dub.sdl",
+        f'name "{dub_name("renamed-app")}"\ntargetType "library"\n',
+    )
 
     def start(module_name: str) -> subprocess.CompletedProcess[str]:
         write(
@@ -4949,10 +4945,10 @@ def test_c_module_is_imported_by_d(
     app = tmp_path / "app"
     source = app / "source" if case.dub else app
     if case.dub:
-        write_recipe(
+        write(
             app / "dub.sdl",
             f'''
-            name "importc_project"
+            name "{dub_name("importc_project")}"
             targetType "library"
             mainSourceFile "source/{module}_app.d"
             sourceFiles "source/{module}.c"
@@ -5023,7 +5019,7 @@ def test_project_changes_are_in_the_next_start(
 ) -> None:
     app = tmp_path / "app"
     recipe = dub_project_recipe("changing")
-    write_recipe(app / "dub.sdl", recipe)
+    write(app / "dub.sdl", recipe)
     write(
         app / "source" / "main.d",
         """
@@ -5053,7 +5049,7 @@ def test_project_changes_are_in_the_next_start(
     assert start() == 0
     write(app / "source" / "nested" / "extra.d", "module nested.extra;\n")
     assert start() == 2
-    write_recipe(app / "dub.sdl", recipe + 'versions "Changed"\n')
+    write(app / "dub.sdl", recipe + 'versions "Changed"\n')
     assert start() == 6
 
 
@@ -5064,10 +5060,10 @@ def test_unittest_configuration_settings_are_loaded(
     tmp_path: Path, backend: str,
 ) -> None:
     app = tmp_path / "app"
-    write_recipe(
+    write(
         app / "dub.sdl",
+        f'name "{dub_name("dub-package-settings")}"\n'
         """
-        name "dub-package-settings"
         targetType "library"
 
         configuration "library" {
@@ -5155,29 +5151,75 @@ def sb_path() -> str:
     return sb
 
 
-# The tests can run in parallel (see build/pytest-workers.sh) because the
-# state that they share, the `.snakebite` directory and the dub package store,
-# is keyed by project path and published with an atomic rename.
-def test_plain_dub_name_with_a_cache_record_fails_the_test(
+def write_plain_recipe(root: Path, name: str) -> None:
+    (root / name).mkdir()
+    (root / name / "dub.sdl").write_text(f'name "{name}"\n')
+
+
+# A plain package name with a cache record fails its test and the record goes,
+# a name from `dub_name` is not a failure, and a record that was there before
+# the test began stays.
+def test_plain_dub_name_with_a_cache_record_is_reported(
     tmp_path: Path,
 ) -> None:
     plain = f"plain-name-check-{secrets.token_hex(6)}"
+    kept = f"kept-name-check-{secrets.token_hex(6)}"
     safe = dub_name("safe-name-check")
     cache = Path.home() / ".dub" / "cache"
-    for name in (plain, safe):
-        (tmp_path / name).mkdir()
-        (tmp_path / name / "dub.sdl").write_text(f'name "{name}"\n')
+    for name in (plain, kept, safe):
+        write_plain_recipe(tmp_path, name)
         (cache / name / "~master").mkdir(parents=True)
     try:
-        messages = delete_plain_dub_names(tmp_path)
-        assert [plain in m and "dub_name()" in m for m in messages] == [True]
-        assert f"{plain}/dub.sdl" in messages[0]
+        messages = delete_plain_dub_names(tmp_path, before={kept})
+        assert len(messages) == 2
+        assert {n for n in (plain, kept, safe)
+                if any(n in m for m in messages)} == {plain, kept}
         assert not (cache / plain).exists()
+        assert (cache / kept).is_dir()
         forget_dub_names()
         assert not (cache / safe).exists()
+    finally:
+        for name in (plain, kept):
+            shutil.rmtree(cache / name, ignore_errors=True)
+
+
+# A recipe that is JSON but not an object has no package name.
+def test_recipe_that_is_not_a_json_object_has_no_package_name(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "package.json").write_text("[]")
+
+    assert delete_plain_dub_names(tmp_path, before=set()) == []
+
+
+# The autouse fixture of conftest.py makes the check fail the test.
+def test_fixture_fails_a_test_with_a_plain_dub_name(
+    pytester: pytest.Pytester,
+) -> None:
+    plain = f"plain-fixture-check-{secrets.token_hex(6)}"
+    cache = Path.home() / ".dub" / "cache"
+    pytester.makeconftest((Path(__file__).parent / "conftest.py").read_text())
+    pytester.makepyfile(
+        f"""
+        from pathlib import Path
+
+        def test_plain_name(tmp_path):
+            (tmp_path / "dub.sdl").write_text('name "{plain}"\\n')
+            (Path.home() / ".dub" / "cache" / "{plain}" / "~master").mkdir(
+                parents=True)
+        """
+    )
+    try:
+        result = pytester.runpytest_inprocess("-p", "no:xdist")
+        result.assert_outcomes(passed=1, errors=1)
+        assert plain in result.stdout.str()
+        assert not (cache / plain).exists()
     finally:
         shutil.rmtree(cache / plain, ignore_errors=True)
 
 
+# The tests can run in parallel (see build/pytest-workers.sh) because the
+# state that they share, the `.snakebite` directory and the dub package store,
+# is keyed by project path and published with an atomic rename.
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
