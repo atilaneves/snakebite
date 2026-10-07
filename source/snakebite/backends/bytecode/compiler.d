@@ -1803,8 +1803,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto target = statement.label.statement;
         // Finalizer bodies stay mutable DMD statements for code generation.
+        // The compiler's own scope path is the source: dmd leaves `tryBody`
+        // null on the `goto` it synthesises for a `return` in a function
+        // with an `out` contract or invariant.
         auto unwind = unwindPlanOf(
-            scopePath(statement.tryBody), scopePath(target.tryBody),
+            activeScopePath, scopePath(target.tryBody),
         );
         runPendingFinallyBodies(unwind);
         if (_finished)
