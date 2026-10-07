@@ -393,8 +393,8 @@ private final class SnakebiteGC : GC {
     // without that byte `strlen` would run on into the next arena block.
     private BlkInfo arenaBlock(in size_t size, in uint bits) nothrow {
         import core.memory: CoreGC = GC;
-        import snakebite.arena: ArenaArray, arenaAlignment, recordArenaArray,
-            recordPointerFreeBlock;
+        import snakebite.arena: ArenaArray, arenaAlignment, recordArenaArray;
+        debug import snakebite.arena: recordPointerFreeBlock;
 
         const appendable = bits & CoreGC.BlkAttr.APPENDABLE;
         const reserved = appendable ? size + 1 : size;
@@ -403,8 +403,8 @@ private final class SnakebiteGC : GC {
             return BlkInfo.init;
         const rounded = (reserved + arenaAlignment - 1) & ~(arenaAlignment - 1);
         const capacity = appendable ? rounded - 1 : rounded;
-        if (bits & CoreGC.BlkAttr.NO_SCAN)
-            recordPointerFreeBlock(base, reserved);
+        debug if (bits & CoreGC.BlkAttr.NO_SCAN)
+            recordPointerFreeBlock(base, rounded);
         if (appendable)
             recordArenaArray(base, ArenaArray(capacity, size));
         return BlkInfo(base, capacity, appendable);

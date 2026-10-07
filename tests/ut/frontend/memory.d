@@ -129,20 +129,23 @@ unittest {
 // dmd's line tables are `uint[]` in the arena: two neighbouring line
 // starts read as one word can have the value of an address in the GC
 // heap. `locFileTable` is private to dmd; the test reads it by name. Data
-// that druntime allocated NO_SCAN cannot hold a pointer, so
-// the report does not read it.
+// that druntime allocated NO_SCAN cannot hold a pointer, so the report
+// does not read it. `--lowmem` puts the table on the GC heap instead, so
+// the report is empty there whatever the report skips, and the test then
+// checks nothing.
 debug
 @("arenaHoldsNoGCPointers.skipsMemoryThatHoldsNoPointers")
 unittest {
     import location = dmd.location;
+    import snakebite.frontend.compiler: withCompilerLock;
     import std.algorithm.searching: startsWith;
 
     enum header = "module arenaSkipsMemoryThatHoldsNoPointers;\n";
     parseSnippet(header ~ "int a;\nint b;\nint c;\nint d;\n");
 
-    {
-        arenaReportLock.lock;
-        scope(exit) arenaReportLock.unlock;
+    arenaReportLock.lock;
+    scope(exit) arenaReportLock.unlock;
+    withCompilerLock({
         uint[] lines;
         foreach (table; __traits(getMember, location, "locFileTable"))
             if (table.fileContents.startsWith(header))
@@ -157,7 +160,34 @@ unittest {
         scope(exit) *word = saved;
 
         arenaReport.should == "";
-    }
+    });
+}
+
+
+// Regions are walked in the order they were made, and a later region can
+// be at a lower address. Each range to skip is in the region it is in.
+debug
+@("arenaWalk.skipsRangesInRegionsAtDescendingAddresses")
+unittest {
+    import snakebite.arena: PointerFreeRange, walkSpanPointerWords;
+
+    align(16) static ubyte[128] low;
+    align(16) static ubyte[128] high;
+    const(ubyte)[][2] spans = [high[], low[]];
+    const PointerFreeRange[2] skip = [
+        PointerFreeRange(&high[32], &high[64]),
+        PointerFreeRange(&low[16], &low[48]),
+    ];
+
+    size_t visited;
+    size_t next;
+    foreach (span; spans)
+        walkSpanPointerWords(span, skip[], next, (const(void*)* word) nothrow @nogc {
+            ++visited;
+        });
+
+    // 32 words in all, 8 of them in the ranges.
+    visited.should == 24;
 }
 
 
