@@ -1089,6 +1089,7 @@ private void driveSharedSemantic(
     import dmd.globals: global;
     import dmd.semantic2: semantic2;
     import dmd.semantic3: semantic3;
+    import snakebite.frontend.hostlayout: reconcileHostClassLayouts;
     import snakebite.frontend.inlineasm:
         disableInlineAsmVersion,
         reportInlineAsmDiagnostics;
@@ -1100,12 +1101,14 @@ private void driveSharedSemantic(
         rootModules ~= discoverRootOwnedImports(modules, rootImportPaths);
 
     foreach (m; rootModules) m.importAll(null);
+    reconcileHostClassLayouts(rootModules, true);
     foreach (m; rootModules) m.dsymbolSemantic(null);
     runDeferredSemantic;
     foreach (m; rootModules) m.semantic2(null);
     runDeferredSemantic2;
     foreach (m; rootModules) m.semantic3(null);
     runDeferredSemantic3;
+    reconcileHostClassLayouts(rootModules, false);
     if (rootImportPaths.length)
         rootModules ~= analyseLoadedRootOwnedImports(rootImportPaths);
 
