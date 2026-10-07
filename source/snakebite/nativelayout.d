@@ -441,17 +441,22 @@ public bool isThreadLocalStorage(
     return variable.isThreadlocal && !(variable.storage_class & STC.temp);
 }
 
-// `T[n] v = source;` (a static array constructed from a slice or a
-// scalar, never an array literal) is not a plain value initializer: dmd
-// rewrites the construction to `v[] = source` (expressionsem.d, around
-// line 12776), a `ConstructExp`/`BlitExp` whose `e1` is a `SliceExp` of
-// `v`, not `v` itself. That node's own value is the slice `e1` evaluates
-// to - storing it as `v`'s own type stores the slice header, not the
-// elements. A declaration initializer shaped this way must run as an
-// effect, through the normal assignment path that resolves `e1`'s
-// address and writes through it, rather than have `initializerValueOf`'s
-// `e2` evaluated into `v`'s slot as if it were `v`'s own value.
-public bool initializerConstructsThroughSlice(
+// Whether a declaration's initializer runs as an effect on `variable`'s
+// storage, with no value of its own to store. Two shapes:
+//
+// - `T[n] v = source;` (a static array constructed from a slice or a
+//   scalar, never an array literal) is rewritten by dmd to `v[] = source`,
+//   a `ConstructExp`/`BlitExp` whose `e1` is a `SliceExp` of `v`, not `v`
+//   itself. Its own value is the slice `e1` evaluates to, which is not
+//   `v`'s elements.
+// - `T[n] v = source;` where `T` has a postblit, a copy constructor or a
+//   destructor carries a lowering to `_d_arrayctor(cast(T[]) v, ...)` or
+//   `_d_arraysetctor`. The call constructs the elements in `v` and
+//   returns a slice or nothing, not `v`'s value.
+//
+// Either way the initializer must run through the normal expression path,
+// not have `initializerValueOf`'s `e2` evaluated into `v`'s slot.
+public bool initializerRunsForEffect(
     imported!"dmd.init".ExpInitializer initializer,
     imported!"dmd.declaration".VarDeclaration variable,
 ) {
@@ -461,9 +466,6 @@ public bool initializerConstructsThroughSlice(
     if (e1 is null)
         return false;
 
-    // `T[n] v = source;` where `T` has a postblit or copy constructor is
-    // lowered to `_d_arrayctor(cast(T[]) v, ...)`: the call constructs the
-    // elements in `v` and returns a slice, which is not `v`'s value.
     if (value.isConstructExp !is null && value.isConstructExp.lowering !is null)
         return true;
 
