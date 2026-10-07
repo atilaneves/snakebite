@@ -1676,10 +1676,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         prepareContext(outerFunctionOf(callee));
         if (callee.isThis is null && layout.hiddenThis.variable !is null)
             calleeContextPlanOf(site, callee);
-        auto calleeType = typeFunctionOf(callee);
-        foreach (i; 0 .. calleeType.parameterList.length)
-            if ((calleeType.parameterList[i].storageClass & STC.out_) != 0)
-                prepareDefault(calleeType.parameterList[i].type);
         const decision = _callSelection.decisionOf(
             callee,
             (function_) => _program.isInterpreted(function_),
@@ -5968,11 +5964,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             const parameter = layout.parameters[i];
             auto slot = frameBase + parameter.offset; // Evaluation writes the slot.
 
-            void* address;
-
             void* argumentAddress() {
-                address = addressOf(argument);
-                return address;
+                return addressOf(argument);
             }
 
             void evaluateArgument(void* place) {
@@ -5987,14 +5980,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 &argumentAddress,
                 &evaluateArgument,
             );
-
-            if (value.isOut)
-                initializeDefault(
-                    value.parameterType,
-                    factsOf(value.parameterType),
-                    cast(ubyte*) address,
-                    loc,
-                );
         });
     }
 

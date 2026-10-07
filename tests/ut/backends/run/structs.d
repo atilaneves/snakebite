@@ -5982,3 +5982,38 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// An `out` argument is not reset before the call, so a later argument of the
+// same call still reads the old value of the variable.
+static foreach (backend; Matrix!()) {
+    @("outArgument.intIsInitialisedInCallee." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f(out int a, int b) { return b; }
+            void main() {
+                int x = 5;
+                assert(f(x, x) == 5);
+                assert(x == 0);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call native functions"),
+)) {
+    @("outArgument.nativeCalleeDoesNotWriteIt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C) pragma(mangle, "strlen") size_t lengthOf(out ubyte[4] s);
+            void main() {
+                ubyte[4] s = [1, 2, 0, 0];
+                assert(lengthOf(s) == 2);
+                assert(s == [1, 2, 0, 0]);
+            }
+        });
+    }
+}
