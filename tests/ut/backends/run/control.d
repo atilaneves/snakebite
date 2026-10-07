@@ -2801,3 +2801,83 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE asserts on a class reference as a logical operand"),
+)) {
+    @("classReferenceIsTruthyOperandOfLogicalAnd." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Thing {
+            }
+
+            int main() {
+                Thing present = new Thing;
+                Thing absent = null;
+                const both = present && true;
+                const neither = absent && true;
+                return both && !neither ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("sliceIsTruthyOperandOfLogicalOr." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int[] present = [1];
+                int[] absent = null;
+                const either = present || false;
+                const neither = absent || false;
+                return either && !neither ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot cast a delegate to bool at compile time"),
+)) {
+    @("delegateIsTruthyOperandOfLogicalAnd." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int delegate() present = () => 1;
+                int delegate() absent = null;
+                const both = present && true;
+                const neither = absent && true;
+                return both && !neither ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot cast an associative array to bool at compile time"),
+)) {
+    @("associativeArrayIsTruthyOperandOfLogicalAnd." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int[int] present = [1: 2];
+                int[int] absent = null;
+                const both = present && true;
+                const neither = absent && true;
+                return both && !neither ? 0 : 1;
+            }
+        });
+    }
+}
