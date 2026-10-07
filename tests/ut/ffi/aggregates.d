@@ -403,3 +403,29 @@ static foreach (backend; Matrix!(
         }, "answer");
     }
 }
+
+
+public extern(C) real[1] snakebite_ut_aggregates_real_array_echo(
+    real[1] value,
+) {
+    return value;
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call an external function without source"),
+)) {
+    @("realStaticArray.echoedByValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(backend, q{
+            pragma(mangle, "snakebite_ut_aggregates_real_array_echo")
+            extern(C) real[1] nativeEcho(real[1]);
+            int answer() {
+                real[1] value = [7.0L];
+                return cast(int) nativeEcho(value)[0];
+            }
+        }, "answer");
+    }
+}
