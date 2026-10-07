@@ -294,8 +294,8 @@ public struct CallSelection {
         import dmd.builtin: isBuiltin;
         import snakebite.backends.builtins: entryOf;
 
-        const kind = isBuiltin(function_);
-        if (kind == BUILTIN.unimp)
+        const classified = isBuiltin(function_) != BUILTIN.unimp;
+        if (!classified && !isCodeGeneratorIntrinsicModule(function_))
             return Decision(Route.native);
 
         // dmd's own classification (`BUILTIN.popcnt` for the declared
@@ -306,9 +306,29 @@ public struct CallSelection {
         // ident`) - so `function_.ident` is the lookup key, not `kind`.
         auto entry = entryOf(
             function_.ident.toString.idup, parameterTypeOf(function_));
-        assert(entry !is null);
+        if (entry is null) {
+            assert(!classified);
+            return Decision(Route.native);
+        }
 
         return Decision(Route.builtin, entry);
+    }
+
+    // dmd's code generator (`dmd.glue.toir.intrinsic_op`) inlines bodiless
+    // functions of these modules by name, among them `core.math.rint`,
+    // `core.math.rndtol`, `core.volatile` and `core.simd`, which `dmd.
+    // builtin.isBuiltin` does not classify. No host symbol exists for any
+    // of them.
+    private static bool isCodeGeneratorIntrinsicModule(
+        FuncDeclaration function_,
+    ) {
+        const module_ = function_.getModule;
+        if (module_ is null || module_.md is null
+                || module_.md.packages.length != 1
+                || module_.md.packages[0].toString != "core")
+            return false;
+        const name = module_.md.id.toString;
+        return name == "math" || name == "volatile" || name == "simd";
     }
 
     // The concrete type `function_`'s own first parameter declares - the
@@ -321,7 +341,7 @@ public struct CallSelection {
     // argument, an unrelated `int`) shares.
     private static ParameterType parameterTypeOf(FuncDeclaration function_) {
         import dmd.astenums: TY;
-        import dmd.typesem: toBasetype;
+        import dmd.typesem: nextOf, toBasetype;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         // `const` fails: `ParameterList.length` and `opIndex` are not
@@ -337,14 +357,23 @@ public struct CallSelection {
             case Tuns16: return ParameterType.ushort_;
             case Tuns32: return ParameterType.uint_;
             case Tuns64: return ParameterType.ulong_;
-            case Tarray, Tsarray, Taarray, Tpointer, Treference, Tfunction,
+            case Tpointer:
+                switch ((cast() parameterType).nextOf.toBasetype.ty) {
+                    case Tuns8: return ParameterType.ubytePointer_;
+                    case Tuns16: return ParameterType.ushortPointer_;
+                    case Tuns32: return ParameterType.uintPointer_;
+                    case Tuns64: return ParameterType.ulongPointer_;
+                    case Tvoid: return ParameterType.voidPointer_;
+                    default: return ParameterType.other_;
+                }
+            case Tarray, Tsarray, Taarray, Treference, Tfunction,
                 Tident, Tclass, Tstruct, Tenum, Tdelegate, Tnone, Tvoid,
                 Tint8, Tuns8, Tint16, Tint32, Tint64, Timaginary32,
                 Timaginary64, Timaginary80, Tcomplex32, Tcomplex64,
                 Tcomplex80, Tbool, Tchar, Twchar, Tdchar, Terror, Tinstance,
                 Ttypeof, Ttuple, Tslice, Treturn, Tnull, Tvector, Tint128,
                 Tuns128, Ttraits, Tmixin, Tnoreturn, Ttag:
-                assert(0);
+                return ParameterType.other_;
         }
     }
 }

@@ -13,9 +13,7 @@ import std.conv: text;
 // classifies it, so the call runs through snakebite's own compiled
 // wrapper, never across the FFI barrier). This test pins an unexecuted
 // builtin call: a call site that never executes must run without
-// resolving the intrinsic at all, unlike `ffi.unexecutedIntrinsicCall.
-// rndtol` and `.rint` below, which pin the native route with no host
-// symbol.
+// resolving the intrinsic at all.
 static foreach (backend; Matrix!()) {
     @("ffi.unexecutedIntrinsicCall." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -211,36 +209,13 @@ static foreach (backend; Matrix!()) {
 }
 
 
-// `core.math.rndtol` is a bodiless intrinsic like the ones above, but
-// dmd's own `BUILTIN` enum (`dmd.func`) has no member for it - unlike
-// `fabs`/`sqrt`/`sin`/`cos`/`ldexp`/`yl2x`/`yl2xp1` above, `dmd.builtin.
-// isBuiltin(fd)` always answers `BUILTIN.unimp` for `rndtol`, the same
-// answer it gives a function that is not a compiler intrinsic at all.
-// dmd's own CTFE engine (`dmd.dinterpret.evaluateIfBuiltin`) gates on
-// that exact same `isBuiltin` check, so `rndtol` is uncomputable at
-// compile time in plain dmd too, not only here - `Ctfe` fails for the
-// same reason a real `static assert(rndtol(2.7f) == 3)` would. A
-// snakebite backend that routes a builtin call by asking dmd for this
-// classification (the design every other intrinsic above now uses)
-// inherits the same gap: it never reaches this call in the first place,
-// so it still needs a host symbol FFI cannot find. Only `Native` - which
-// runs real compiled D, unaffected by dmd's own classification - can
-// run this today. Tracked as issue #423.
+// `core.math.rndtol` and `core.math.rint` are bodiless intrinsics that
+// dmd's code generator inlines but its `BUILTIN` enum has no member for,
+// so dmd's own CTFE cannot evaluate them either.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
-        "dmd's own BUILTIN enum has no member for `rndtol` (issue " ~
-        "#423), so dmd's CTFE (dmd.dinterpret.evaluateIfBuiltin) " ~
-        "cannot evaluate it either, the same as this backend"),
-    Omit!(Bytecode, Because.unconfirmed,
-        "dmd's own BUILTIN enum has no member for `rndtol` (issue " ~
-        "#423), so `dmd.builtin.isBuiltin` never classifies it as a " ~
-        "builtin; the call still reaches FFI, which has no host " ~
-        "symbol for it"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "dmd's own BUILTIN enum has no member for `rndtol` (issue " ~
-        "#423), so `dmd.builtin.isBuiltin` never classifies it as a " ~
-        "builtin; the call still reaches FFI, which has no host " ~
-        "symbol for it"),
+        "dmd's CTFE has no source for `rndtol` (`dmd.builtin.isBuiltin` " ~
+        "does not classify it)"),
 )) {
     @("ffi.executedIntrinsicCall.rndtol." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -258,14 +233,7 @@ static foreach (backend; Matrix!(
 }
 
 
-// `rndtol` never takes the builtin route (`dmd.builtin.isBuiltin` has no
-// member for it, above), so an unexecuted call to it stays on the plain
-// native route with no host symbol - the same shape
-// `ffi.unexecutedIntrinsicCall` above pins for `fabs`, which now takes
-// the builtin route instead and so no longer exercises this. A call
-// site that never runs must not need a symbol lookup that would only
-// fail, on every backend, including the ones that treat `rndtol` as an
-// ordinary bodiless native call.
+// A call site that never runs must not resolve the intrinsic.
 static foreach (backend; Matrix!()) {
     @("ffi.unexecutedIntrinsicCall.rndtol." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -287,27 +255,10 @@ static foreach (backend; Matrix!()) {
 }
 
 
-// `core.math.rint` has the same gap as `rndtol` above: dmd's own
-// `BUILTIN` enum (`dmd.func`) has no member for it either, so
-// `dmd.builtin.isBuiltin` always answers `BUILTIN.unimp` for it, and
-// dmd's own CTFE engine (`dmd.dinterpret.evaluateIfBuiltin`, gated on
-// that same check) cannot evaluate it. Only `Native` runs this today.
-// Tracked as issue #423.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
-        "dmd's own BUILTIN enum has no member for `rint` (issue " ~
-        "#423), so dmd's CTFE (dmd.dinterpret.evaluateIfBuiltin) " ~
-        "cannot evaluate it either, the same as this backend"),
-    Omit!(Bytecode, Because.unconfirmed,
-        "dmd's own BUILTIN enum has no member for `rint` (issue " ~
-        "#423), so `dmd.builtin.isBuiltin` never classifies it as a " ~
-        "builtin; the call still reaches FFI, which has no host " ~
-        "symbol for it"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "dmd's own BUILTIN enum has no member for `rint` (issue " ~
-        "#423), so `dmd.builtin.isBuiltin` never classifies it as a " ~
-        "builtin; the call still reaches FFI, which has no host " ~
-        "symbol for it"),
+        "dmd's CTFE has no source for `rint` (`dmd.builtin.isBuiltin` " ~
+        "does not classify it)"),
 )) {
     @("ffi.executedIntrinsicCall.rint." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -325,10 +276,6 @@ static foreach (backend; Matrix!(
 }
 
 
-// `rint` never takes the builtin route either (`dmd.builtin.isBuiltin`
-// has no member for it, above), so an unexecuted call to it stays on
-// the plain native route with no host symbol - the same shape
-// `ffi.unexecutedIntrinsicCall.rndtol` above pins for `rndtol`.
 static foreach (backend; Matrix!()) {
     @("ffi.unexecutedIntrinsicCall.rint." ~ backend.stringof)
     @Tags(backend.stringof)

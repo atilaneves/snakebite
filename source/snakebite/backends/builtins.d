@@ -35,7 +35,11 @@ public extern(C) void startVariadicEntry(
 // classification (`dmd.builtin.isBuiltin`) does not carry it: `sin
 // (float)` and `sin(double)` both classify as `BUILTIN.sin`, and `bswap
 // (uint)`/`bswap(ulong)` both classify as `BUILTIN.bswap`.
-public enum ParameterType { float_, double_, real_, ushort_, uint_, ulong_ }
+public enum ParameterType {
+    float_, double_, real_, ushort_, uint_, ulong_,
+    ubytePointer_, ushortPointer_, uintPointer_, ulongPointer_, voidPointer_,
+    other_,
+}
 
 
 // `name` is a string key, not dmd's `BUILTIN` enum value, so this
@@ -51,6 +55,12 @@ public BuiltinCall entryOf(in string name, in ParameterType type)
         case ushort_: return integerEntryOf!ushort(name);
         case uint_: return integerEntryOf!uint(name);
         case ulong_: return integerEntryOf!ulong(name);
+        case ubytePointer_: return volatileEntryOf!ubyte(name);
+        case ushortPointer_: return volatileEntryOf!ushort(name);
+        case uintPointer_: return volatileEntryOf!uint(name);
+        case ulongPointer_: return volatileEntryOf!ulong(name);
+        case voidPointer_: return name == "__prefetch" ? &prefetchEntry : null;
+        case other_: return null;
     }
 }
 
@@ -69,6 +79,8 @@ private BuiltinCall widthEntryOf(T)(in string name)
             // call's own floating point type - the one intrinsic here
             // whose arguments do not all share one type.
             return &entry!("ldexp", T, int);
+        case "rndtol":
+            return &entry!("rndtol", T);
         default:
             return null;
     }
@@ -78,16 +90,44 @@ private BuiltinCall widthEntryOf(T)(in string name)
 // Every `core.math` intrinsic snakebite has a builtin wrapper for, split
 // by how many arguments it takes and, for the two-argument ones, whether
 // the second argument shares the call's own floating point type.
-// `rint` and `rndtol` are real `core.math` intrinsics too, but dmd's own
-// `BUILTIN` enum (`dmd.func`) has no member for either one - dmd's
-// `isBuiltin` always answers `BUILTIN.unimp` for them, the same answer a
-// function that is not a compiler intrinsic at all gets, and so does
-// dmd's own CTFE engine (`dmd.dinterpret.evaluateIfBuiltin` gates on the
-// identical check). A call to either of them never reaches this table:
-// `CallSelection` keeps routing it through FFI, same as before this
-// module existed.
-private enum oneArgumentNames = ["fabs", "sqrt", "sin", "cos"];
+// `rint` and `rndtol` are intrinsics of dmd's code generator
+// (`dmd.glue.toir.intrinsic_op`) that its `BUILTIN` enum (`dmd.func`)
+// omits, so `CallSelection` asks this table for them by module and name.
+private enum oneArgumentNames = ["fabs", "sqrt", "sin", "cos", "rint"];
 private enum sameTypeTwoArgumentNames = ["yl2x", "yl2xp1"];
+
+
+// `core.volatile`'s accesses, keyed by the pointer's own element type.
+private BuiltinCall volatileEntryOf(T)(in string name)
+@safe pure nothrow @nogc {
+    switch (name) {
+        case "volatileLoad": return &entry!("volatileLoad", T*);
+        case "volatileStore": return &entry!("volatileStore", T*, T);
+        default: return null;
+    }
+}
+
+
+// `core.simd.__prefetch` takes the same encoding `core.simd.prefetch`
+// computes from its template arguments. Hosts without `D_SIMD` compile no
+// prefetch, and a prefetch changes no value a program can read.
+private extern(C) void prefetchEntry(
+    void*, scope const(void*)* arguments, size_t argumentCount,
+) @trusted nothrow @nogc {
+    assert(argumentCount == 2, "__prefetch arity");
+    version (D_SIMD) {
+        import core.simd: prefetch;
+
+        const address = *cast(const(void*)*) arguments[0];
+        switch (*cast(const(ubyte)*) arguments[1]) {
+            case 0: prefetch!(false, 3)(address); break;
+            case 1: prefetch!(false, 2)(address); break;
+            case 2: prefetch!(false, 1)(address); break;
+            case 3: prefetch!(false, 0)(address); break;
+            default: prefetch!(true, 0)(address); break;
+        }
+    }
+}
 
 
 private BuiltinCall integerEntryOf(T)(in string name)
@@ -147,12 +187,16 @@ private extern(C) void entry(string name, Params...)(
 ) @trusted nothrow @nogc {
     import core.math;
     import core.bitop;
+    import core.volatile;
 
     assert(argumentCount == Params.length, name ~ " arity");
     Params values;
     static foreach (i, P; Params)
-        values[i] = *cast(const(P)*) arguments[i];
+        values[i] = *cast(P*) arguments[i];
     alias call = mixin(name);
     alias Result = typeof(call(values));
-    *cast(Result*) returnPlace = call(values);
+    static if (is(Result == void))
+        call(values);
+    else
+        *cast(Result*) returnPlace = call(values);
 }
