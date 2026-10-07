@@ -5922,3 +5922,614 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// The `.init` of a nested struct is a literal that copies the type's static
+// `.init` image, so its context pointer is null: it reads no enclosing frame.
+// A nested struct whose field is another nested struct builds a literal for
+// that field too. Neither literal has a frame to read when the code that
+// takes `.init` is not on the static chain of the function that declares the
+// types, as when `shape` is a template instantiated with a type that `make`
+// declares. A nested struct on its own works; the failing shapes all have a
+// nested struct inside a nested struct.
+static foreach (backend; Matrix!()) {
+    @("nestedStructInit.oneLevel." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            auto make(int n) {
+                struct Nested { int get() { return n; } int tag = 3; }
+                return Nested();
+            }
+            void main() { auto w = typeof(make(1)).init; assert(w.tag == 3); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("nestedStructInit.fieldOfNestedStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            auto make(int n) {
+                struct Nested { int get() { return n; } }
+                struct Wrap { Nested inner; int tag = 3; }
+                return Wrap(Nested(), 3);
+            }
+
+            void main() { auto w = typeof(make(1)).init; assert(w.tag == 3); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("nestedStructInit.constructorArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            auto make(int n) {
+                struct Nested { int get() { return n; } }
+                struct Wrap { Nested inner; int tag = 3; }
+                return Wrap(Nested(), 3);
+            }
+
+            void shape(T)(T seed) {
+
+                struct H { T v; }
+                auto h = H(T.init);
+                assert(h.v.tag == 3);
+            }
+            void main() { shape(make(5)); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("nestedStructInit.arrayElement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            auto make(int n) {
+                struct Nested { int get() { return n; } }
+                struct Wrap { Nested inner; int tag = 3; }
+                return Wrap(Nested(), 3);
+            }
+
+            void shape(T)(T seed) {
+
+                T[] a = [T.init, T.init];
+                assert(a[1].tag == 3);
+            }
+            void main() { shape(make(5)); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("nestedStructInit.returnValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            auto make(int n) {
+                struct Nested { int get() { return n; } }
+                struct Wrap { Nested inner; int tag = 3; }
+                return Wrap(Nested(), 3);
+            }
+
+            void shape(T)(T seed) {
+
+                T g() { return T.init; }
+                assert(g().tag == 3);
+            }
+            void main() { shape(make(5)); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("nestedStructInit.classFieldInitializer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            auto make(int n) {
+                struct Nested { int get() { return n; } }
+                struct Wrap { Nested inner; int tag = 3; }
+                return Wrap(Nested(), 3);
+            }
+
+            void shape(T)(T seed) {
+
+                class C { T v = T.init; }
+                auto c = new C;
+                assert(c.v.tag == 3);
+            }
+            void main() { shape(make(5)); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("nestedStructInit.nestedClassField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            auto make(int n) {
+                class Nested { int get() { return n; } }
+                struct Wrap { Nested inner; int tag = 3; }
+                return Wrap(null, 3);
+            }
+            void shape(T)(T seed) {
+                auto w = T.init;
+                assert(w.tag == 3);
+            }
+            void main() { shape(make(5)); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("nestedStructInit.twoLevels." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            auto make(int n) {
+                struct Nested { int get() { return n; } }
+                struct Mid { Nested inner; int tag = 3; }
+                struct Wrap { Mid mid; int tag = 4; }
+                return Wrap(Mid(Nested(), 3), 4);
+            }
+            void shape(T)(T seed) {
+                auto w = T.init;
+                assert(w.tag == 4 && w.mid.tag == 3);
+            }
+            void main() { shape(make(5)); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("nestedStructInit.templateStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            auto make(int n) {
+                struct Nested { int get() { return n; } }
+                struct Wrap { Nested inner; int tag = 3; }
+                return Wrap(Nested(), 3);
+            }
+
+            void shape(T)(T seed) {
+
+                struct Box(U) { U u; }
+                auto b = Box!T.init;
+                assert(b.u.tag == 3);
+            }
+            void main() { shape(make(5)); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("nestedStructInit.lambda." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            auto make(int n) {
+                struct Nested { int get() { return n; } }
+                struct Wrap { Nested inner; int tag = 3; }
+                return Wrap(Nested(), 3);
+            }
+
+            void shape(T)(T seed) {
+
+                auto f = () { return T.init; };
+                assert(f().tag == 3);
+            }
+            void main() { shape(make(5)); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("nestedStructInit.localVariable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            auto make(int n) {
+                struct Nested { int get() { return n; } }
+                struct Wrap { Nested inner; int tag = 3; }
+                return Wrap(Nested(), 3);
+            }
+
+            void shape(T)(T seed) {
+
+                T t = T.init;
+                assert(t.tag == 3);
+            }
+            void main() { shape(make(5)); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("nestedStructInit.assignment." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            auto make(int n) {
+                struct Nested { int get() { return n; } }
+                struct Wrap { Nested inner; int tag = 3; }
+                return Wrap(Nested(), 3);
+            }
+
+            void shape(T)(T seed) {
+
+                T t = seed;
+                t = T.init;
+                assert(t.tag == 3);
+            }
+            void main() { shape(make(5)); }
+        });
+    }
+}
+
+// The same literal, reached through Phobos: `joiner` over the `map!strip` of
+// a `splitter` result keeps a `MapResult` whose `_input` is `splitter`'s
+// nested `Result`, and `joiner`'s constructor assigns `typeof(_current).init`.
+static foreach (backend; Matrix!()) {
+    @("nestedStructInit.phobosJoinerOfMappedSplitter." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.algorithm: joiner, map, splitter;
+            import std.array: array;
+            import std.string: strip;
+            void main() {
+                string[] requested = ["a, b", "c"];
+                auto got = requested
+                    .map!(a => a.splitter(",").map!strip)
+                    .joiner()
+                    .array();
+                assert(got == ["a", "b", "c"]);
+            }
+        });
+    }
+}
+
+// A static array of structs with a postblit or a copy constructor is copied
+// element by element, so the copy runs it once for each element. A struct
+// literal that initialises a static array field from an lvalue copies the
+// array, so the same rule applies there. The failing shapes all build a
+// struct literal whose field is that array and whose value is a `ref`
+// parameter: `std.sumtype.SumType`'s copy constructor is one, and it
+// builds the literal inside a lambda.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "CTFE does not copy-construct the elements of the static array"),
+)) {
+    @("postblitStaticArray.structLiteralFromRefParam." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            static struct S { int n; this(this) { n++; } }
+
+            struct Storage { S[1] a; }
+            void f(ref S[1] value) {
+                Storage s = Storage(value);
+                assert(s.a[0].n == 1);
+            }
+            void main() { S[1] v = [S(0)]; f(v); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "CTFE does not copy-construct the elements of the static array"),
+)) {
+    @("postblitStaticArray.designatedInitFromRefParam." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            static struct S { int n; this(this) { n++; } }
+
+            struct Storage { S[1] a; }
+            void f(ref S[1] value) {
+                Storage s = { a: value };
+                assert(s.a[0].n == 1);
+            }
+            void main() { S[1] v = [S(0)]; f(v); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "CTFE does not copy-construct the elements of the static array"),
+)) {
+    @("postblitStaticArray.twoElements." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            static struct S { int n; this(this) { n++; } }
+
+            struct Storage { S[2] a; }
+            void f(ref S[2] value) {
+                Storage s = { a: value };
+                assert(s.a[0].n == 1 && s.a[1].n == 1);
+            }
+            void main() { S[2] v = [S(0), S(0)]; f(v); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "CTFE does not copy-construct the elements of the static array"),
+)) {
+    @("postblitStaticArray.copyConstructorElement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            static struct S { int n; this(ref const S other) { n = other.n + 1; } }
+            struct Storage { S[1] a; }
+            void f(ref S[1] value) {
+                Storage s = { a: value };
+                assert(s.a[0].n == 1);
+            }
+            void main() { S[1] v = [S(0)]; f(v); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "CTFE does not copy-construct the elements of the static array"),
+)) {
+    @("postblitStaticArray.constRefParam." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            static struct S { int n; this(this) { n++; } }
+
+            struct Storage { S[1] a; }
+            void f(ref const S[1] value) {
+                Storage s = { a: value };
+                assert(s.a[0].n == 1);
+            }
+            void main() { S[1] v = [S(0)]; f(v); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "CTFE does not copy-construct the elements of the static array"),
+)) {
+    @("postblitStaticArray.unionMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            static struct S { int n; this(this) { n++; } }
+
+            union Storage { S[1] a; }
+            void f(ref S[1] value) {
+                Storage s = { a: value };
+                assert(s.a[0].n == 1);
+            }
+            void main() { S[1] v = [S(0)]; f(v); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "CTFE does not copy-construct the elements of the static array"),
+)) {
+    @("postblitStaticArray.returnedFromFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            static struct S { int n; this(this) { n++; } }
+
+            struct Storage { S[1] a; }
+            Storage f(ref S[1] value) {
+                Storage newStorage = { a: value };
+                return newStorage;
+            }
+            void main() {
+                S[1] v = [S(0)];
+                auto st = f(v);
+                assert(st.a[0].n == 1);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "CTFE does not copy-construct the elements of the static array"),
+)) {
+    @("postblitStaticArray.returnedFromLambda." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            static struct S { int n; this(this) { n++; } }
+
+            union Storage { S[1] a; }
+            void main() {
+                S[1] v = [S(0)];
+                auto f = (ref S[1] value) {
+                    Storage newStorage = { a: value };
+                    return newStorage;
+                };
+                auto st = f(v);
+                assert(st.a[0].n == 1);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "CTFE does not copy-construct the elements of the static array"),
+)) {
+    @("postblitStaticArray.byValueParameter." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            static struct S { int n; this(this) { n++; } }
+
+            union Storage { S[1] a; }
+            Storage f(S[1] value) {
+                Storage newStorage = { a: value };
+                return newStorage;
+            }
+            void main() {
+                S[1] v = [S(0)];
+                auto st = f(v);
+                assert(st.a[0].n == 2);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("postblitStaticArray.localCopyFromRefParam." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            static struct S { int n; this(this) { n++; } }
+
+            void f(ref S[1] value) {
+                S[1] w = value;
+                assert(w[0].n == 1);
+            }
+            void main() { S[1] v = [S(0)]; f(v); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("postblitStaticArray.localCopy." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            static struct S { int n; this(this) { n++; } }
+
+            void main() {
+                S[1] v = [S(0)];
+                S[1] w = v;
+                assert(w[0].n == 1);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("postblitStaticArray.assignFromRefParam." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            static struct S { int n; this(this) { n++; } }
+
+            void f(ref S[1] value) {
+                S[1] w;
+                w = value;
+                assert(w[0].n == 1);
+            }
+            void main() { S[1] v = [S(0)]; f(v); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("postblitStaticArray.structCopy." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            static struct S { int n; this(this) { n++; } }
+
+            struct Holder { S[1] a; }
+            void main() {
+                Holder h = Holder([S(0)]);
+                Holder g = h;
+                assert(g.a[0].n == 1);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("postblitStaticArray.plainElementControl." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            static struct S { int n; this(this) { n++; } }
+
+            struct Storage { S a; }
+            void f(ref S value) {
+                Storage s = { a: value };
+                assert(s.a.n == 1);
+            }
+            void main() { S v = S(0); f(v); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("postblitStaticArray.dynamicArrayControl." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            static struct S { int n; this(this) { n++; } }
+
+            struct Storage { S[] a; }
+            void f(ref S[] value) {
+                Storage s = { a: value };
+                assert(s.a[0].n == 0);
+            }
+            void main() { S[] v = [S(0)]; f(v); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("postblitStaticArray.noPostblitControl." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            union Storage { int[1] a; }
+            Storage f(ref int[1] value) {
+                Storage newStorage = { a: value };
+                return newStorage;
+            }
+            void main() {
+                int[1] v = [4];
+                auto st = f(v);
+                assert(st.a[0] == 4);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "CTFE does not copy-construct the elements of the static array"),
+)) {
+    @("postblitStaticArray.sumTypeCopy." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.sumtype: SumType, match;
+            static struct S { int n; this(this) { n++; } }
+            void main() {
+                SumType!(S[1]) x = [S(0)];
+                SumType!(S[1]) y = x;
+                auto xv = x.match!((ref S[1] a) => a[0].n);
+                auto yv = y.match!((ref S[1] a) => a[0].n);
+                assert(xv != yv);
+            }
+        });
+    }
+}
+
