@@ -700,7 +700,7 @@ def test_dependency_entry_startup(
     dependency = tmp_path / "dependency"
     (dependency / "source").mkdir(parents=True)
     (dependency / "dub.sdl").write_text(
-        'name "dep"\ntargetType "library"\n', encoding="utf-8",
+        f'name "{dub_name("dep")}"\ntargetType "library"\n', encoding="utf-8",
     )
     (dependency / "source" / "dep.d").write_text("""\
 module dep;
@@ -716,8 +716,8 @@ extern(C) int callback(int function() next) { return next(); }
     root = tmp_path / "root"
     (root / "source").mkdir(parents=True)
     (root / "dub.json").write_text(json.dumps({
-        "name": "app", "targetType": "executable",
-        "dependencies": {"dep": {"path": "../dependency"}},
+        "name": dub_name("app"), "targetType": "executable",
+        "dependencies": {dub_name("dep"): {"path": "../dependency"}},
         "dflags": ["-betterC"] if entry == "betterc" else [],
         "libs-dmd": ["phobos2"],
         "mainSourceFile": "source/app.d",
@@ -796,7 +796,7 @@ def test_dependency_explicit_lifecycle(tmp_path: Path, backend: str, case: str) 
         pytest.skip("Verified CTFE limit: native fputs has no compile-time body")
     dependency = tmp_path / "dependency"
     (dependency / "source").mkdir(parents=True)
-    (dependency / "dub.sdl").write_text('name "dep"\ntargetType "library"\n', encoding="utf-8")
+    (dependency / "dub.sdl").write_text(f'name "{dub_name("dep")}"\ntargetType "library"\n', encoding="utf-8")
     override = 'extern(C) int rt_init() { fputs("USER_INIT\\n", stderr); return 7; }' if case == "override" else "extern(C) int rt_init();"
     (dependency / "source" / "dep.d").write_text("""module dep;
 import core.stdc.stdio;
@@ -820,8 +820,8 @@ int fullDBody() { try { throw new Exception("full D"); } catch (Exception error)
     root = tmp_path / "root"
     (root / "source").mkdir(parents=True)
     (root / "dub.json").write_text(json.dumps({
-        "name": "app", "targetType": "executable",
-        "dependencies": {"dep": {"path": "../dependency"}},
+        "name": dub_name("app"), "targetType": "executable",
+        "dependencies": {dub_name("dep"): {"path": "../dependency"}},
         "libs-dmd": ["phobos2"], "dflags-ldc": ["-link-defaultlib-shared"],
         "mainSourceFile": "source/app.d",
         "configurations": [{"name": "unittest", "targetType": "executable", "mainSourceFile": "source/app.d"}],
@@ -946,7 +946,7 @@ def test_explicit_lifecycle_without_dependency(tmp_path: Path, backend: str) -> 
         pytest.skip("Verified CTFE limit: native fputs has no compile-time body")
     (tmp_path / "source").mkdir()
     (tmp_path / "dub.json").write_text(json.dumps({
-        "name": "app", "targetType": "executable",
+        "name": dub_name("app"), "targetType": "executable",
         "libs-dmd": ["phobos2"], "dflags-ldc": ["-link-defaultlib-shared"],
         "mainSourceFile": "source/app.d",
         "configurations": [{"name": "unittest", "targetType": "executable", "mainSourceFile": "source/app.d"}],
