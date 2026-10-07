@@ -284,24 +284,20 @@ private extern(C++) class Collector
             return type;
         Type standIn;
         if (auto enumType = type.isTypeEnum) {
-            if (!isRootSymbol(enumType.sym) || enumType.sym.memtype is null)
-                return null;
             standIn = opaqueType(enumType.sym.memtype, false);
         } else if (auto structType = type.isTypeStruct) {
-            if (pointee && isRootSymbol(structType.sym))
+            if (pointee)
                 standIn = opaqueAggregate(structType.sym, Aggregate.struct_);
         } else if (auto classType = type.isTypeClass) {
-            import dmd.aggregate: ClassKind;
-            if (classType.sym.classKind == ClassKind.d && isRootSymbol(classType.sym))
-                standIn = opaqueAggregate(classType.sym,
-                    classType.sym.isInterfaceDeclaration ? Aggregate.interface_ : Aggregate.class_);
+            standIn = opaqueAggregate(classType.sym,
+                classType.sym.isInterfaceDeclaration ? Aggregate.interface_ : Aggregate.class_);
         } else if (auto pointerType = type.isTypePointer) {
             if (auto next = opaqueType(pointerType.next, true))
                 standIn = newInFrontend!pointerTo(next);
         }
         if (standIn is null)
             return null;
-        return type.mod ? newInFrontend!addMod(standIn, type.mod) : standIn;
+        return newInFrontend!addMod(standIn, type.mod);
     }
 
     // One aggregate without members per root symbol, named after the order in
