@@ -570,6 +570,8 @@ extern(C++) private final class LocalsCollector:
     override void visit(DoStatement statement) {
         if (statement._body !is null)
             statement._body.accept(this);
+        if (statement.condition !is null)
+            collectDeclarations(statement.condition);
     }
 
     override void visit(LabelStatement statement) {

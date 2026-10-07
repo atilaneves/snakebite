@@ -215,7 +215,8 @@ import snakebite.backends.switchplan: switchPlan, selectCase,
     gotoCaseTarget, gotoDefaultTarget;
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
 import snakebite.cstack: CStack;
-import snakebite.backends.fullexpression: FullExpressionKind;
+import snakebite.backends.fullexpression:
+    FullExpressionKind, FullExpressionScope;
 import snakebite.backends.temporary: canRetainTemporaries;
 
 // The state one program's evaluators share, whichever thread they run
@@ -2252,25 +2253,18 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // before the body, so an aggregate expression has the same evaluation
     // and aliasing behaviour as compiled D. A type `with` has no temporary:
     // it only changes name lookup, which semantic analysis already did.
-    override void visit(WithStatement statement) {
-        if (_controlFlow.seeking) {
-            if (statement._body !is null)
-                statement._body.accept(this);
+    protected override void visitWithOperand(WithStatement statement) {
+        if (_controlFlow.seeking)
             return;
-        }
 
-        if (statement.wthis !is null) {
-            auto initializer = statement.wthis._init.isExpInitializer;
-            assert(initializer !is null,
-                "a with statement temporary has an expression initializer");
+        evaluate(
+            initializerValueOf(statement.wthis._init.isExpInitializer),
+            statement.wthis.type,
+            storageOf(statement.wthis),
+        );
+    }
 
-            evaluate(
-                initializerValueOf(initializer),
-                statement.wthis.type,
-                storageOf(statement.wthis),
-            );
-        }
-
+    protected override void visitWithBody(WithStatement statement) {
         if (statement._body !is null)
             statement._body.accept(this);
     }
@@ -2294,33 +2288,39 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (_type.ty == Tvoid)
             return;
 
-        _temporaries.withExpression(FullExpressionKind.value, statement.exp, {
-            void* referenceAddress() {
-                return addressOf(statement.exp);
+        void* referenceAddress() {
+            return addressOf(statement.exp);
+        }
+
+        void evaluateValue() {
+            // `_type`/`_facts` are already this function's return type
+            // and its facts, set together on entry (`executeRaw`) or by
+            // the last `evaluate`, so this callback needs no fresh type
+            // lookup.
+            if (_place !is null) {
+                evaluate(statement.exp, _type, _facts, _place);
+                return;
             }
 
-            void evaluateValue() {
-                // `_type`/`_facts` are already this function's return type
-                // and its facts, set together on entry (`executeRaw`) or by
-                // the last `evaluate`, so this callback needs no fresh type
-                // lookup.
-                if (_place !is null) {
-                    evaluate(statement.exp, _type, _facts, _place);
-                    return;
-                }
+            // The caller discarded the result, but evaluating the
+            // expression can have effects, so it still runs - into a
+            // reservation on the frame stack, popped when it goes out
+            // of scope, not into a GC allocation.
+            auto frame = _frames.push(_facts.size, _facts.alignment);
+            evaluate(statement.exp, _type, _facts, frame.base);
+        }
 
-                // The caller discarded the result, but evaluating the
-                // expression can have effects, so it still runs - into a
-                // reservation on the frame stack, popped when it goes out
-                // of scope, not into a GC allocation.
-                auto frame = _frames.push(_facts.size, _facts.alignment);
-                evaluate(statement.exp, _type, _facts, frame.base);
-            }
+        callShapeOf(_function).adapter.returnFromCall(
+            _place, &referenceAddress, &evaluateValue,
+        );
+    }
 
-            callShapeOf(_function).adapter.returnFromCall(
-                _place, &referenceAddress, &evaluateValue,
-            );
-        });
+    extern(D) protected override void withFullExpression(
+        in FullExpressionKind kind,
+        Expression root,
+        scope void delegate() evaluate,
+    ) {
+        _temporaries.withExpression(kind, root, evaluate);
     }
 
     protected override void visitReturnTransfer(ReturnStatement) {
@@ -2330,29 +2330,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _controlFlow.returnFromFunction;
     }
 
-    override void visit(ExpStatement statement) {
+    protected override void visitExpressionStatement(ExpStatement statement) {
         if (_controlFlow.seeking)
             return;
 
-        if (statement.exp is null)
-            return;
-
-        runFullExpression(statement.exp);
-    }
-
-    // Runs one full expression for its effects, giving back its rvalue
-    // temporaries afterward - the end of the full expression is where D
-    // destroys them. The mark is recorded before anything can reserve a
-    // temporary, so a guest throw from any point of the evaluation still
-    // releases whatever was reserved by then.
-    //
-    // A declaration keeps the bytes of its temporaries in a slot of the
-    // running call: the variable it initialises can point into them, and
-    // compiled D keeps a temporary's stack slot for the whole function.
-    private void runFullExpression(Expression expression) {
-        _temporaries.withExpression(FullExpressionKind.effect, expression, {
-            runForEffect(expression);
-        });
+        runForEffect(statement.exp);
     }
 
     // A condition is a full expression of its own on each evaluation - a
@@ -2360,7 +2342,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // soon as its truth is known.
     private bool conditionHolds(Expression condition) {
         bool result;
-        _temporaries.withExpression(FullExpressionKind.value, condition, {
+        fullExpression(FullExpressionScope.Position.condition, condition, {
             result = truthOf(condition);
         });
         return result;
@@ -2394,7 +2376,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto plan = switchPlan(statement);
         if (!_controlFlow.seeking) {
             Statement selected;
-            _temporaries.withExpression(FullExpressionKind.value,
+            fullExpression(FullExpressionScope.Position.switchOperand,
                 statement.condition, {
                 const condition = asIntegral(statement.condition);
                 selected = selectCase(plan, condition,
@@ -2459,12 +2441,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     // The frontend's own "no case matched" default: a call to the
     // druntime switch-error hook, run like any other call.
-    override void visit(SwitchErrorStatement statement) {
+    protected override void visitSwitchError(SwitchErrorStatement statement) {
         if (_controlFlow.seeking)
             return;
 
-        assert(statement.exp !is null);
-        runFullExpression(statement.exp);
+        runForEffect(statement.exp);
     }
 
     override void visit(GotoDefaultStatement statement) {
@@ -2485,15 +2466,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             "dmd rejects a `goto` to an undefined label in semantic3");
 
         _controlFlow.transfer(cast(void*) statement.label.statement);
-    }
-
-    protected override void visitThrowStatement(ThrowStatement statement) {
-        if (_controlFlow.seeking)
-            return;
-
-        _temporaries.withTemporaryLifetime({
-            throwGuest(statement.exp);
-        });
     }
 
     // Runs `expression` for its side effects, discarding whatever value it
@@ -2604,7 +2576,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             }
 
             if (statement.increment !is null)
-                runFullExpression(statement.increment);
+                fullExpression(FullExpressionScope.Position.loopIncrement,
+                    statement.increment, {
+                    runForEffect(statement.increment);
+                });
         }
     }
 
@@ -5397,31 +5372,37 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         });
     }
 
-    protected override void visitThrowExp(ThrowExp expression) {
-        throwGuest(expression.e1);
-    }
-
-    private void throwGuest(Expression expression) {
+    protected override size_t visitThrowOperand(Expression operand) {
         import snakebite.nativelayout: loadIntegral;
         import std.conv: text;
 
-        assert(expression.type.toBasetype.ty == Tclass,
+        if (_controlFlow.seeking)
+            return 0;
+
+        assert(operand.type.toBasetype.ty == Tclass,
             "dmd rejects `throw` of anything but a class object");
 
-        const facts = factsOf(expression.type);
+        const facts = factsOf(operand.type);
         align(size_t.sizeof) ubyte[size_t.sizeof] value = void;
-        evaluate(expression, expression.type, facts, value.ptr);
+        evaluate(operand, operand.type, facts, value.ptr);
 
         auto guest = cast(Throwable) cast(void*) loadIntegral(
             value.ptr, facts.size, false,
         );
         if (guest is null)
             throw new SnakebiteException(
-                text("interpreter cannot throw `", expression.toString,
+                text("interpreter cannot throw `", operand.toString,
                     "`: it is null"),
             );
 
-        throw GuestException.make(guest);
+        return cast(size_t) cast(void*) guest;
+    }
+
+    protected override void visitThrowTransfer(size_t thrown) {
+        if (_controlFlow.seeking)
+            return;
+
+        throw GuestException.make(cast(Throwable) cast(void*) thrown);
     }
 
     override void visit(ArrayLengthExp expression) {
