@@ -657,3 +657,432 @@ unittest {
     prepare(generatorB);
     builds.should == 2;
 }
+
+
+// `core.atomic` forwards to `core.internal.atomic`, whose x86-64 bodies are
+// `asm` blocks. No backend runs `asm` (ADR-0012), so such an instance must be
+// compiled natively. An instance whose type argument is declared by the
+// root package has no spelling in the dependency image's own module, so the
+// image does not hold it (`imagesource.d` marks it as needing the root). It
+// then runs on a backend, which reaches the `asm` block. Compiled D runs the
+// same program and gives the native result.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicLoad.classRef." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.atomic;
+            struct Pair { int a; int b; }
+            class Node { int value; }
+
+
+            void main() {
+                int ia = 1, ib = 2;
+                Node na = new Node, nb = new Node;
+                Pair pa = Pair(1, 2), pb = Pair(3, 4);
+                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
+                shared(Node) v = cast(shared) na;
+                assert(atomicLoad(v) is cast(shared) na);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicStore.classRef." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.atomic;
+            struct Pair { int a; int b; }
+            class Node { int value; }
+
+
+            void main() {
+                int ia = 1, ib = 2;
+                Node na = new Node, nb = new Node;
+                Pair pa = Pair(1, 2), pb = Pair(3, 4);
+                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
+                shared(Node) v = cast(shared) na;
+                atomicStore(v, cast(shared) nb);
+                assert(atomicLoad(v) is cast(shared) nb);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.cas.classRef." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.atomic;
+            struct Pair { int a; int b; }
+            class Node { int value; }
+
+
+            void main() {
+                int ia = 1, ib = 2;
+                Node na = new Node, nb = new Node;
+                Pair pa = Pair(1, 2), pb = Pair(3, 4);
+                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
+                shared(Node) v = cast(shared) na;
+                assert(cas(&v, cast(shared) na, cast(shared) nb));
+                assert(!cas(&v, cast(shared) na, cast(shared) na));
+                assert(atomicLoad(v) is cast(shared) nb);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicExchange.classRef." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.atomic;
+            struct Pair { int a; int b; }
+            class Node { int value; }
+
+
+            void main() {
+                int ia = 1, ib = 2;
+                Node na = new Node, nb = new Node;
+                Pair pa = Pair(1, 2), pb = Pair(3, 4);
+                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
+                shared(Node) v = cast(shared) na;
+                auto old = atomicExchange(&v, cast(shared) nb);
+                assert(old is cast(shared) na);
+                assert(atomicLoad(v) is cast(shared) nb);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicLoad.rootStructPtr." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.atomic;
+            struct Pair { int a; int b; }
+            class Node { int value; }
+
+
+            void main() {
+                int ia = 1, ib = 2;
+                Node na = new Node, nb = new Node;
+                Pair pa = Pair(1, 2), pb = Pair(3, 4);
+                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
+                shared(Pair*) v = cast(shared) &pa;
+                assert(atomicLoad(v) is cast(shared) &pa);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicStore.rootStructPtr." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.atomic;
+            struct Pair { int a; int b; }
+            class Node { int value; }
+
+
+            void main() {
+                int ia = 1, ib = 2;
+                Node na = new Node, nb = new Node;
+                Pair pa = Pair(1, 2), pb = Pair(3, 4);
+                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
+                shared(Pair*) v = cast(shared) &pa;
+                atomicStore(v, cast(shared) &pb);
+                assert(atomicLoad(v) is cast(shared) &pb);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.cas.rootStructPtr." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.atomic;
+            struct Pair { int a; int b; }
+            class Node { int value; }
+
+
+            void main() {
+                int ia = 1, ib = 2;
+                Node na = new Node, nb = new Node;
+                Pair pa = Pair(1, 2), pb = Pair(3, 4);
+                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
+                shared(Pair*) v = cast(shared) &pa;
+                assert(cas(&v, cast(shared) &pa, cast(shared) &pb));
+                assert(!cas(&v, cast(shared) &pa, cast(shared) &pa));
+                assert(atomicLoad(v) is cast(shared) &pb);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicExchange.rootStructPtr." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.atomic;
+            struct Pair { int a; int b; }
+            class Node { int value; }
+
+
+            void main() {
+                int ia = 1, ib = 2;
+                Node na = new Node, nb = new Node;
+                Pair pa = Pair(1, 2), pb = Pair(3, 4);
+                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
+                shared(Pair*) v = cast(shared) &pa;
+                auto old = atomicExchange(&v, cast(shared) &pb);
+                assert(old is cast(shared) &pa);
+                assert(atomicLoad(v) is cast(shared) &pb);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicLoad.rootStructPtrImmutable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.atomic;
+            struct Pair { int a; int b; }
+            class Node { int value; }
+
+
+            void main() {
+                int ia = 1, ib = 2;
+                Node na = new Node, nb = new Node;
+                Pair pa = Pair(1, 2), pb = Pair(3, 4);
+                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
+                shared(immutable(Pair)*) v = cast(shared) &ipa;
+                assert(atomicLoad(v) is cast(shared) &ipa);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicStore.rootStructPtrImmutable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.atomic;
+            struct Pair { int a; int b; }
+            class Node { int value; }
+
+
+            void main() {
+                int ia = 1, ib = 2;
+                Node na = new Node, nb = new Node;
+                Pair pa = Pair(1, 2), pb = Pair(3, 4);
+                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
+                shared(immutable(Pair)*) v = cast(shared) &ipa;
+                atomicStore(v, cast(shared) &ipb);
+                assert(atomicLoad(v) is cast(shared) &ipb);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.cas.rootStructPtrImmutable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.atomic;
+            struct Pair { int a; int b; }
+            class Node { int value; }
+
+
+            void main() {
+                int ia = 1, ib = 2;
+                Node na = new Node, nb = new Node;
+                Pair pa = Pair(1, 2), pb = Pair(3, 4);
+                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
+                shared(immutable(Pair)*) v = cast(shared) &ipa;
+                assert(cas(&v, cast(shared) &ipa, cast(shared) &ipb));
+                assert(!cas(&v, cast(shared) &ipa, cast(shared) &ipa));
+                assert(atomicLoad(v) is cast(shared) &ipb);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicExchange.rootStructPtrImmutable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.atomic;
+            struct Pair { int a; int b; }
+            class Node { int value; }
+
+
+            void main() {
+                int ia = 1, ib = 2;
+                Node na = new Node, nb = new Node;
+                Pair pa = Pair(1, 2), pb = Pair(3, 4);
+                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
+                shared(immutable(Pair)*) v = cast(shared) &ipa;
+                auto old = atomicExchange(&v, cast(shared) &ipb);
+                assert(old is cast(shared) &ipa);
+                assert(atomicLoad(v) is cast(shared) &ipb);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicLoad.rootStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.atomic;
+            struct Pair { int a; int b; }
+            class Node { int value; }
+
+
+            void main() {
+                int ia = 1, ib = 2;
+                Node na = new Node, nb = new Node;
+                Pair pa = Pair(1, 2), pb = Pair(3, 4);
+                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
+                shared(Pair) v = Pair(3, 4);
+                assert(atomicLoad(v) == Pair(3, 4));
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicStore.rootStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.atomic;
+            struct Pair { int a; int b; }
+            class Node { int value; }
+
+
+            void main() {
+                int ia = 1, ib = 2;
+                Node na = new Node, nb = new Node;
+                Pair pa = Pair(1, 2), pb = Pair(3, 4);
+                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
+                shared(Pair) v = Pair(3, 4);
+                atomicStore(v, Pair(5, 6));
+                assert(atomicLoad(v) == Pair(5, 6));
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.cas.rootStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.atomic;
+            struct Pair { int a; int b; }
+            class Node { int value; }
+
+
+            void main() {
+                int ia = 1, ib = 2;
+                Node na = new Node, nb = new Node;
+                Pair pa = Pair(1, 2), pb = Pair(3, 4);
+                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
+                shared(Pair) v = Pair(3, 4);
+                assert(cas(&v, Pair(3, 4), Pair(5, 6)));
+                assert(!cas(&v, Pair(3, 4), Pair(3, 4)));
+                assert(atomicLoad(v) == Pair(5, 6));
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret `asm` statements"),
+)) {
+    @("image.atomicExchange.rootStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.atomic;
+            struct Pair { int a; int b; }
+            class Node { int value; }
+
+
+            void main() {
+                int ia = 1, ib = 2;
+                Node na = new Node, nb = new Node;
+                Pair pa = Pair(1, 2), pb = Pair(3, 4);
+                immutable Pair ipa = Pair(1, 2), ipb = Pair(3, 4);
+                shared(Pair) v = Pair(3, 4);
+                auto old = atomicExchange(&v, Pair(5, 6));
+                assert(old == Pair(3, 4));
+                assert(atomicLoad(v) == Pair(5, 6));
+            }
+        });
+    }
+}
+
