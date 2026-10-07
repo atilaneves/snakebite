@@ -410,13 +410,6 @@ private real combined(in real a, in bool hasA, in real b, in bool hasB)
     return hasA ? a : b;
 }
 
-pragma(inline, true) public bool complexTruth(
-    in void* place,
-    in size_t size,
-) @nogc nothrow {
-    return loadComplexRe(place, size) != 0 || loadComplexIm(place, size) != 0;
-}
-
 // Whether an integral width has a native representation handled above.
 public bool isIntegralSize(in size_t size) @safe @nogc nothrow pure {
     return size == 1 || size == 2 || size == 4 || size == 8;
@@ -450,11 +443,11 @@ public enum delegateValueSize = 2 * (void*).sizeof;
 // modules, so keeping the enum here, DMD-free, is what lets it name
 // the same `CastKind` its own per-kind `opCastAs`/`opCastFixedAs` ops
 // are instantiated over. `applyCastAs` below carries out every kind
-// except `copy`, `classReference`, and `zero`: each of
+// except `copy`, `classReference`, `zero`, and `truth`: each of
 // those needs a backend's own control flow (a plain move, a class
-// reference adjustment, or a zero fill), so `applyCast`'s own
-// `final switch` hits `assert(0)` on any of the three - both backends'
-// `compileCast`/`visitUnloweredCast` switches
+// reference adjustment, a zero fill, or the condition code), so
+// `applyCast`'s own `final switch` hits `assert(0)` on any of the
+// four - both backends' `compileCast`/`visitUnloweredCast` switches
 // handle them directly and never reach `applyCast` with one.
 public enum CastKind {
     // Bit-identical representations: a plain move of the destination's
@@ -470,9 +463,7 @@ public enum CastKind {
     floatToIntegral,
     floatToPointer,
     pointerToFloat,
-    floatToBool,
     floatWidth,
-    complexToBool,
     complexToReal,
     complexToImaginary,
     complexToIntegral,
@@ -490,8 +481,11 @@ public enum CastKind {
     narrow,
     widenSigned,
     widenUnsigned,
-    toBool,
     zero,
+    // The destination is a `bool`: the source is true by the one rule
+    // `TypeFacts.Truth` states for a condition. Each backend evaluates
+    // it with the code it already uses for a condition.
+    truth,
 }
 
 // The DMD-free subset of `snakebite.backends.casts.CastPlan` that
@@ -560,18 +554,9 @@ pragma(inline, true) public void applyCastAs(CastKind kind)(
         integralToFloating(destination, source, layout.destSize,
             layout.sourceSize, true);
 
-    else static if (kind == floatToBool)
-        floatingToBool(destination, source, layout.sourceSize);
-
     else static if (kind == floatWidth)
         storeFloating(
             destination, loadFloating(source, layout.sourceSize),
-            layout.destSize,
-        );
-
-    else static if (kind == complexToBool)
-        storeIntegral(
-            destination, complexTruth(source, layout.sourceSize),
             layout.destSize,
         );
 
@@ -675,12 +660,6 @@ pragma(inline, true) public void applyCastAs(CastKind kind)(
         storeIntegral(bytes + arrayPointerOffset, pointer, size_t.sizeof);
     }
 
-    else static if (kind == toBool)
-        storeIntegral(
-            destination, loadUnsigned(source, layout.sourceSize) != 0,
-            layout.destSize,
-        );
-
     // A narrowing cast keeps only its destination's own low bytes out
     // of the source's, on this VM's little-endian host - bits sign- or
     // zero-extension would add live only at or above the source's own
@@ -739,6 +718,8 @@ public void applyCast(
             ~ "adjustment");
     case zero:
         assert(0, "applyCast: zero needs a backend's own zero fill");
+    case truth:
+        assert(0, "applyCast: truth needs a backend's own condition code");
     case integralToFloat:
         return applyCastAs!integralToFloat(layout, source, destination);
     case floatToIntegral:
@@ -747,12 +728,8 @@ public void applyCast(
         return applyCastAs!floatToPointer(layout, source, destination);
     case pointerToFloat:
         return applyCastAs!pointerToFloat(layout, source, destination);
-    case floatToBool:
-        return applyCastAs!floatToBool(layout, source, destination);
     case floatWidth:
         return applyCastAs!floatWidth(layout, source, destination);
-    case complexToBool:
-        return applyCastAs!complexToBool(layout, source, destination);
     case complexToReal:
         return applyCastAs!complexToReal(layout, source, destination);
     case complexToImaginary:
@@ -781,8 +758,6 @@ public void applyCast(
         return applyCastAs!delegateToPointer(layout, source, destination);
     case reinterpretSlice:
         return applyCastAs!reinterpretSlice(layout, source, destination);
-    case toBool:
-        return applyCastAs!toBool(layout, source, destination);
     case narrow:
         return applyCastAs!narrow(layout, source, destination);
     case widenSigned:

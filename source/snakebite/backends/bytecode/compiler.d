@@ -1059,14 +1059,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     handler = &opCopyFixed!size;
             }
         }
-        // `narrow`/`widenSigned`/`widenUnsigned`/`toBool` only ever see
+        // `narrow`/`widenSigned`/`widenUnsigned` only ever see
         // `width`/`sourceWidth` in `1`/`2`/`4`/`8` - every D integral's
         // own byte count - so this is the same peephole as `opCopy`'s
         // own above, just over both sizes `opCastFixedAs` takes as
         // template parameters instead of reading off the instruction.
         static foreach (kind; [
             CastKind.narrow, CastKind.widenSigned, CastKind.widenUnsigned,
-            CastKind.toBool,
         ]) {
             if (handler is &opCastAs!kind) {
                 static foreach (destSize; [1UL, 2, 4, 8])
@@ -3772,7 +3771,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in CastPlan plan, in size_t destination, in size_t source,
     ) {
         with (CastKind) final switch (plan.kind) {
-            case complexToBool, complexToReal, complexToImaginary,
+            case complexToReal, complexToImaginary,
                     complexWidth, realToComplex, imaginaryToComplex,
                     floatToPointer, pointerToFloat, floatWidth:
                 emit(castOp(plan.kind), destination, source,
@@ -3790,14 +3789,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     castSizeWithSignedness(
                         plan.sourceFacts.size, plan.sourceFacts.isUnsigned));
                 return;
-            case floatToBool:
-                emit(&opCastAs!floatToBool, destination, source, 0,
-                    plan.sourceFacts.size);
-                return;
-            case copy, classReference, zero, sarrayToSlice,
+            case copy, classReference, zero, truth, sarrayToSlice,
                     sarrayToPointer, sliceToPointer, pointerToArray,
                     pointerToIntegral, delegateToPointer, reinterpretSlice,
-                    narrow, widenSigned, widenUnsigned, toBool:
+                    narrow, widenSigned, widenUnsigned:
                 assert(0, "this kind does not take a packed operand pair");
         }
     }
@@ -6275,10 +6270,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opZero, destOffset, 0, width);
             return;
 
+        // The operand's truth is the same one a condition tests; the
+        // `bool` is that answer reduced to one byte.
+        case truth: {
+            const truthOffset = compileCondition(expression.e1);
+            emit(&opCastToBool, truthOffset, 0, conditionWidth(expression.e1));
+            if (destOffset != truthOffset)
+                emit(&opCopy, destOffset, truthOffset, 1);
+            return;
+        }
+
         // Each of these kinds reads its whole evaluated operand out of one
         // temporary; `emitPackedCast` knows which two sizes, and which one
         // signedness, the instruction carries for each.
-        case complexToBool:
         case complexToReal:
         case complexToImaginary:
         case complexToIntegral:
@@ -6289,8 +6293,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         case floatToIntegral:
         case integralToFloat:
         case floatToPointer:
-        case pointerToFloat:
-        case floatToBool: {
+        case pointerToFloat: {
             const sourceOffset = reserveTemp(plan.sourceFacts);
             evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
             emitPackedCast(plan, destOffset, sourceOffset);
@@ -6368,7 +6371,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         // `narrow` reads its operand into a full-width temporary
         // first, since truncating straight into a narrower
-        // `destOffset` while evaluating would overrun it; `toBool`/
+        // `destOffset` while evaluating would overrun it;
         // `widenSigned`/`widenUnsigned` never widen past their
         // operand's own width while evaluating it, so they can
         // evaluate straight into `destOffset` and cast it in place.
@@ -6385,7 +6388,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        case toBool:
         case widenSigned:
         case widenUnsigned: {
             evalInto(expression.e1, destOffset, plan.sourceFacts.size);
@@ -6413,10 +6415,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         case copy:
         case classReference:
         case zero:
+        case truth:
             assert(0);
         static foreach (member; EnumMembers!CastKind) {
             static if (member != copy && member != classReference
-                    && member != zero)
+                    && member != zero && member != truth)
                 case member:
                     return &opCastAs!member;
         }
