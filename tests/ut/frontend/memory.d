@@ -126,12 +126,9 @@ unittest {
 }
 
 
-// A block that druntime allocates NO_SCAN while the frontend runs is arena
-// memory that cannot hold a pointer: a word in it that has the value of a
-// GC address is data, so the report does not read it. dmd's own line
-// tables are such blocks (`uint[]`). `--lowmem` puts the block on the GC
-// heap instead, so the report is empty there whatever the report skips,
-// and the test then checks nothing.
+// Integer data can have the same bits as a GC address. NO_SCAN marks
+// blocks whose contents must not be treated as pointers, such as dmd's
+// line tables (uint[]). The arena report must ignore these blocks.
 debug
 @("arenaHoldsNoGCPointers.skipsMemoryThatHoldsNoPointers")
 unittest {
@@ -156,8 +153,8 @@ unittest {
 }
 
 
-// Regions are walked in the order they were made, and a later region can
-// be at a lower address. Each range to skip is in the region it is in.
+// A new arena region can have a lower address than an earlier region.
+// The report must still skip the pointer-free blocks in both regions.
 debug
 @("arenaWalk.skipsRangesInRegionsAtDescendingAddresses")
 unittest {
