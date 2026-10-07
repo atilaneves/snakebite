@@ -52,7 +52,8 @@ private extern(C++) class Collector
 
     import dmd.func: FuncDeclaration;
     import dmd.dmodule: Module;
-    import dmd.expression: CallExp, VarExp, DelegateExp;
+    import dmd.dsymbol: Dsymbol;
+    import dmd.expression: CallExp, VarExp, DelegateExp, TypeidExp;
     import snakebite.backends.backend: Program;
     import std.string: fromStringz;
     import std.conv: text;
@@ -62,6 +63,22 @@ private extern(C++) class Collector
     private FuncDeclaration _current;
     private FuncDeclaration[][FuncDeclaration] _callees;
     private bool[FuncDeclaration] _needsRoot;
+    // Which functions reference root code or root state, as opposed to only
+    // naming a root type: a layout stand-in answers the latter.
+    private bool[FuncDeclaration] _needsRootCode;
+    private bool[FuncDeclaration] _hasAsm;
+    // Instances that another program's root homes here, with its types.
+    private bool[FuncDeclaration] _foreign;
+    private Dsymbol[][FuncDeclaration] _rootTypes;
+    private string[][FuncDeclaration] _blockers;
+    private string[FuncDeclaration] _notInImage;
+    private FuncDeclaration _instance;
+    // Spelling of a root type in a key, to its stand-in's name.
+    private string[string] _standInNames;
+    private string[Dsymbol] _standInOf;
+    private string[] _standInSource;
+    private string[] _standInChecks;
+    private string[Dsymbol] _standInFailed;
     private bool[string] _imports;
     private bool[Module] _modules;
     private struct Reference {
@@ -102,27 +119,35 @@ private extern(C++) class Collector
         while (changed) {
             changed = false;
             foreach (caller, callees; _callees) {
-                if (caller in _needsRoot)
-                    continue;
                 foreach (callee; callees) {
-                    if (_program.isRootOwned(callee) || callee in _needsRoot) {
+                    if (caller !in _needsRoot
+                            && (_program.isRootOwned(callee) || callee in _needsRoot)) {
                         _needsRoot[caller] = true;
                         changed = true;
-                        break;
+                    }
+                    if (caller !in _needsRootCode
+                            && (_program.isRootOwned(callee) || callee in _needsRootCode)) {
+                        _needsRootCode[caller] = true;
+                        changed = true;
                     }
                 }
             }
         }
+        reportUnplaceable();
         string result = "module snakebite_dependency_image;\n";
         foreach (name; _imports.keys.sort)
             result ~= "import " ~ name ~ ";\n";
+        result ~= standInSource;
         string registry = "export extern(C) void* "
             ~ DependencyImage.registrySymbol ~ "(const(char)[] name) {\n";
         foreach (i, key; _references.keys.sort.array) {
             auto reference = _references[key]; // Function identities are mutable AST nodes.
             import std.algorithm: canFind;
-            if (reference.functions.canFind!(function_ => function_ in _needsRoot))
+            // An instance with inline assembler has no guest fallback.
+            const assembler = reference.functions.canFind!(function_ => function_ in _hasAsm);
+            if (!assembler && reference.functions.canFind!(function_ => function_ in _needsRoot))
                 continue;
+            const spelled = replaceRootTypes(key);
             // `addressGuard` below prints each function's own declared
             // signature (its pointer type's `toChars`), so its type must
             // already be complete the same way `mangledNameOf` needs it -
@@ -133,33 +158,304 @@ private extern(C++) class Collector
             // Diagnostic type spellings are not always valid D expressions.
             // Parse each candidate inside the guarded mixin so an inaccessible
             // instance can keep its normal guest fallback.
-            const guard = addressGuard(reference, key);
+            string guard = addressGuard(reference, spelled);
+            if (assembler)
+                guard = "rootStandInsLayout && " ~ guard;
             result ~= text("static if (", guard, ") {\n",
-                "    export __gshared auto retained", i, " = mixin(q{&", key, "});\n",
+                "    export __gshared auto retained", i, " = mixin(q{&", spelled, "});\n",
                 "} else {\n");
             registry ~= text("    static if (", guard,
-                ") { static if (!is(typeof(mixin(q{&", key,
+                ") { static if (!is(typeof(mixin(q{&", spelled,
                 "})) == delegate)) {\n");
             // An eponymous template's .mangleof can name its template
             // instance rather than the function returned by its address.
             foreach (function_; reference.functions)
                 registry ~= text("if (name == q{",
                     mangledNameOf(function_),
-                    "}) return cast(void*) mixin(q{&", key, "});\n");
+                    "}) return cast(void*) mixin(q{&", spelled, "});\n");
             registry ~= "}\n} else {\n";
+            string anchored = "false";
             foreach (j, function_; reference.functions) {
-                registry ~= overloadRegistry(function_, key);
-                const anchor = overloadAnchor(function_, key, text("retained", i, "_", j));
+                registry ~= overloadRegistry(function_, spelled);
+                const anchor = overloadAnchor(function_, spelled, text("retained", i, "_", j));
                 if (!anchor.length)
                     continue;
-                result ~= text("static if (__traits(compiles, { mixin(q{", anchor,
-                    "}); })) mixin(q{export ", anchor, "});\n");
+                const compiles = text("__traits(compiles, { mixin(q{", anchor, "}); })");
+                anchored ~= " || " ~ compiles;
+                result ~= text("static if (", compiles, ") mixin(q{export ", anchor, "});\n");
             }
             registry ~= "}\n";
+            if (assembler)
+                result ~= text("static assert(", anchored, ", ", stringLiteral(unplaceableMessage(key,
+                    "the dependency image compiler cannot name the instance")), ");\n");
             result ~= "}\n";
         }
         registry ~= "    return null;\n}\n";
         result ~= registry;
+        return result;
+    }
+
+    // The spelling of a type that the image source can write: an instance
+    // key or a signature names a root type by its stand-in.
+    private extern(D) string spell(in char[] spelling) {
+        return replaceRootTypes(sourceSpelling(spelling));
+    }
+
+    private extern(D) string replaceRootTypes(in char[] spelling) {
+        import snakebite.frontend.compiler: lex;
+        import std.algorithm: sort;
+        import std.array: array;
+        import std.string: strip;
+
+        if (!_standInNames.length)
+            return spelling.idup;
+        const tokens = lex(spelling);
+        string textOf(in char[] source, in typeof(tokens) all, size_t i) {
+            return i + 1 < all.length
+                ? source[all[i].offset .. all[i + 1].offset].strip.idup : "";
+        }
+        // The longest spelling first: `app.Box!(app.Pair)` before `app.Pair`.
+        auto candidates = _standInNames.keys.sort!((a, b) => a.length > b.length).array;
+        string result;
+        size_t copied;
+        size_t i;
+        while (i + 1 < tokens.length) {
+            bool replaced;
+            foreach (candidate; candidates) {
+                const wanted = lex(candidate);
+                size_t n;
+                while (n + 1 < wanted.length && i + n + 1 < tokens.length
+                        && textOf(candidate, wanted, n) == textOf(spelling, tokens, i + n)
+                        && wanted[n].value == tokens[i + n].value)
+                    ++n;
+                if (n + 1 != wanted.length)
+                    continue;
+                // `x.app.Pair` is another symbol than `app.Pair`.
+                if (i > 0 && textOf(spelling, tokens, i - 1) == ".")
+                    continue;
+                result ~= spelling[copied .. tokens[i].offset] ~ _standInNames[candidate];
+                copied = tokens[i + n - 1].offset + textOf(spelling, tokens, i + n - 1).length;
+                i += n;
+                replaced = true;
+                break;
+            }
+            if (!replaced)
+                ++i;
+        }
+        return (result ~ spelling[copied .. $]).idup;
+    }
+
+    private extern(D) string stringLiteral(in string value) {
+        import std.format: format;
+
+        return format!"%(%s%)"([value]);
+    }
+
+    private extern(D) string unplaceableMessage(in string key, in string reason) {
+        return text("cannot place the instance `", key,
+            "` in the dependency image: ", reason,
+            ". It contains inline assembler, which no backend runs (ADR-0012)");
+    }
+
+    // An instance with inline assembler runs only from the image. When it
+    // cannot be placed there, the load fails here, naming the instance,
+    // instead of the run failing at the assembler.
+    private extern(D) void reportUnplaceable() {
+        import std.algorithm: sort;
+        import std.array: array, join;
+
+        string[] problems;
+        foreach (function_; _foreign.keys)
+            _hasAsm.remove(function_);
+        foreach (function_; _hasAsm.keys) {
+            if (function_.parent is null || function_.parent.isTemplateInstance is null)
+                continue;
+            const key = sourceSpelling(
+                function_.parent.isTemplateInstance.toPrettyChars(true).fromStringz);
+            string reason;
+            if (auto blocker = function_ in _notInImage)
+                reason = *blocker;
+            else if (auto blockers = function_ in _blockers)
+                reason = (*blockers).join("; ");
+            else if (function_ in _needsRootCode)
+                reason = "its body uses code or state of the root package";
+            else
+                foreach (symbol; _rootTypes.get(function_, null)) {
+                    const failure = makeStandIn(symbol);
+                    if (failure.length) {
+                        reason = failure;
+                        break;
+                    }
+                }
+            if (reason.length)
+                problems ~= unplaceableMessage(key, reason);
+        }
+        if (problems.length)
+            throw new Exception(problems.sort.array.join("\n"));
+    }
+
+    // Empty when the root type has a stand-in, the reason otherwise. The
+    // stand-in is a type of the image with the layout of the root type: same
+    // size, alignment, field offsets and calling convention, and none of its
+    // functions, `TypeInfo`, or static data. An instance that needs those
+    // reads as root code (see `_needsRootCode`), never reaches here.
+    private extern(D) string makeStandIn(Dsymbol symbol) {
+        import dmd.aggregate: AggregateDeclaration;
+        import dmd.dclass: ClassDeclaration, InterfaceDeclaration;
+        import dmd.declaration: VarDeclaration;
+        import dmd.denum: EnumDeclaration;
+        import dmd.dstruct: StructDeclaration;
+        import dmd.dsymbolsem: isPOD;
+        import dmd.typesem: size;
+        import dmd.mtype: Type;
+        import std.algorithm: canFind;
+
+        if (symbol in _standInOf)
+            return "";
+        if (auto failure = symbol in _standInFailed)
+            return *failure;
+        const prettyName = symbol.toPrettyChars(true).fromStringz.idup;
+        string fail(in string reason) {
+            _standInFailed[symbol] = text("root type `", prettyName, "` has no stand-in: ", reason);
+            return _standInFailed[symbol];
+        }
+        const name = text("rootStandIn", _standInOf.length);
+        _standInOf[symbol] = name;
+        // Aggregates may refer to themselves through pointers and references.
+        _standInNames[prettyName] = name;
+        if (auto type = symbol.isAggregateDeclaration ? symbol.isAggregateDeclaration.type
+                : symbol.isEnumDeclaration ? symbol.isEnumDeclaration.type : null)
+            _standInNames[qualified(type)] = name;
+
+        string typeSpelling(Type type, ref string reason) {
+            import dmd.mtype: Type;
+            bool[Type] visited;
+            eachTemplateArgumentSymbol(type, visited, (dependency) {
+                auto module_ = dependency.getModule;
+                if (module_ is null)
+                    return false;
+                if (_program.isRootOwned(module_)) {
+                    if (!dependency.isAggregateDeclaration && !dependency.isEnumDeclaration)
+                        reason = text("`", dependency.toPrettyChars.fromStringz, "` is not a type");
+                    else if (auto failure = makeStandIn(dependency).length ? makeStandIn(dependency) : null)
+                        reason = failure;
+                } else if (module_ !in _modules)
+                    reason = text("`", dependency.toPrettyChars.fromStringz,
+                        "` belongs to another program");
+                else {
+                    for (auto ancestor = dependency.parent; ancestor !is null; ancestor = ancestor.parent)
+                        if (ancestor.isFuncDeclaration)
+                            reason = text("`", dependency.toPrettyChars.fromStringz,
+                                "` is declared inside a function");
+                    _imports[module_.toPrettyChars.fromStringz.idup] = true;
+                }
+                return false;
+            });
+            return spell(qualified(type));
+        }
+
+        string alignment(in typeof(VarDeclaration.init.alignment) value) {
+            return !value.isDefault && !value.isPack ? text("align(", value.get, ") ") : "";
+        }
+
+        string checks;
+        string declaration;
+        string reason;
+        void fields(AggregateDeclaration aggregate) {
+            foreach (field; aggregate.fields) {
+                if (field.isBitFieldDeclaration) {
+                    reason = "it has a bit field";
+                    return;
+                }
+                if (field.toParent !is aggregate)
+                    continue;
+                const ident = field.ident.toString.idup;
+                if (ident == "__vptr" || ident == "__monitor")
+                    continue;
+                const type = typeSpelling(field.type, reason);
+                if (reason.length)
+                    return;
+                declaration ~= text("    ", alignment(field.alignment), type, " ", ident);
+                if (field._init !is null && !field._init.isVoidInitializer)
+                    declaration ~= text(" = ", field._init.toChars.fromStringz);
+                declaration ~= ";\n";
+                checks ~= text(" && ", name, ".", ident, ".offsetof == ", field.offset);
+            }
+        }
+
+        if (auto struct_ = symbol.isStructDeclaration) {
+            if (!isPOD(struct_))
+                return fail("it has a postblit, copy constructor, or destructor, so it is passed by reference");
+            if (struct_.isNested)
+                return fail("it has a context pointer");
+            fields(struct_);
+            if (reason.length)
+                return fail(reason);
+            declaration = text(alignment(struct_.alignment), struct_.isUnionDeclaration ? "union " : "struct ",
+                name, " {\n", declaration, "}\n");
+            checks = text(name, ".sizeof == ", struct_.structsize, " && ", name, ".alignof == ",
+                struct_.alignsize, checks);
+        } else if (auto interface_ = symbol.isInterfaceDeclaration) {
+            string bases;
+            foreach (base; interface_.interfaces) {
+                const spelled = typeSpelling(base.sym.type, reason);
+                if (reason.length)
+                    return fail(reason);
+                bases ~= (bases.length ? ", " : " : ") ~ spelled;
+            }
+            declaration = text("interface ", name, bases, " {}\n");
+            checks = "true";
+        } else if (auto class_ = symbol.isClassDeclaration) {
+            if (class_.isCPPclass || class_.isCOMclass)
+                return fail("it is not a D class");
+            if (class_.isNested)
+                return fail("it has a context pointer");
+            string bases;
+            if (class_.baseClass !is null && class_.baseClass.ident.toString != "Object") {
+                bases = " : " ~ typeSpelling(class_.baseClass.type, reason);
+                if (reason.length)
+                    return fail(reason);
+            }
+            foreach (base; class_.interfaces) {
+                const spelled = typeSpelling(base.sym.type, reason);
+                if (reason.length)
+                    return fail(reason);
+                bases ~= (bases.length ? ", " : " : ") ~ spelled;
+            }
+            fields(class_);
+            if (reason.length)
+                return fail(reason);
+            declaration = text("abstract class ", name, bases, " {\n", declaration, "}\n");
+            checks = text("__traits(classInstanceSize, ", name, ") == ", class_.structsize, checks);
+        } else if (auto enum_ = symbol.isEnumDeclaration) {
+            const base = typeSpelling(enum_.memtype, reason);
+            if (reason.length)
+                return fail(reason);
+            declaration = text("enum ", name, " : ", base, " {\n");
+            foreach (member; *enum_.members) {
+                auto enumMember = member.isEnumMember;
+                if (enumMember is null)
+                    return fail("it has a member that is not an enumerator");
+                declaration ~= text("    ", enumMember.ident.toString, " = ",
+                    enumMember.value.toChars.fromStringz, ",\n");
+            }
+            declaration ~= "}\n";
+            checks = text(name, ".sizeof == ", size(enum_.memtype));
+        } else
+            return fail("it is not an aggregate or an enum");
+        _standInSource ~= declaration;
+        _standInChecks ~= checks;
+        return "";
+    }
+
+    private extern(D) string standInSource() {
+        import std.array: join;
+
+        string result;
+        foreach (declaration; _standInSource)
+            result ~= declaration;
+        result ~= text("enum rootStandInsLayout = ",
+            _standInChecks.length ? "(" ~ _standInChecks.join(") && (") ~ ")" : "true", ";\n");
         return result;
     }
 
@@ -194,7 +490,7 @@ private extern(C++) class Collector
             if (function_.type.isTypeFunction is null)
                 continue;
             auto pointerType = newInFrontend!pointerTo(function_.type);
-            const declaration = text(sourceSpelling(pointerType.toChars.fromStringz),
+            const declaration = text(spell(qualified(pointerType)),
                 " matched = pointer;");
             guard ~= text(" && __traits(compiles, { auto pointer = ", untyped,
                 "; mixin(q{", declaration, "}); })");
@@ -217,14 +513,14 @@ private extern(C++) class Collector
         // yet would otherwise print incomplete.
         const mangled = mangledNameOf(function_);
         auto pointerType = newInFrontend!pointerTo(function_.type);
-        const pointer = text(sourceSpelling(pointerType.toChars.fromStringz),
+        const pointer = text(spell(qualified(pointerType)),
             " pointer = &", key, ";");
         const result = text("{\nstatic if (__traits(compiles, { mixin(q{", pointer,
             "}); })) {\nmixin(q{", pointer, "});\n",
             "if (name == q{", mangled,
             "}) return cast(void*) pointer;\n} else {\n");
         const selected = selectedOverload(
-            function_, key, sourceSpelling(pointerType.toChars.fromStringz), mangled,
+            function_, key, spell(qualified(pointerType)), mangled,
         );
         return result ~ selected ~ "}\n}\n";
     }
@@ -307,7 +603,7 @@ private extern(C++) class Collector
             else if (parameter.storageClass & STC.lazy_)
                 parameters ~= "lazy ";
             const argument = text("argument", i);
-            parameters ~= sourceSpelling(parameter.type.toChars.fromStringz)
+            parameters ~= spell(qualified(parameter.type))
                 ~ " " ~ argument;
             arguments ~= argument;
         }
@@ -325,36 +621,62 @@ private extern(C++) class Collector
         auto previous = _current; // DMD visitors require mutable declarations.
         _current = function_;
         scope(exit) _current = previous;
+        auto previousInstance = _instance;
+        scope(exit) _instance = previousInstance;
+        // A callee is a function of its own: only a function declared inside
+        // the instance's body is part of the instance.
+        if (_instance !is null && !isDeclaredIn(function_, _instance))
+            _instance = null;
+        if (function_.hasInlineAsm && _instance !is null)
+            _hasAsm[_instance] = true;
         if (auto instance = function_.parent.isTemplateInstance) {
             if (instance.tempdecl !is null
                     && !_program.isRootOwned(instance.tempdecl)
-                    && !isImportCBuiltins(instance.tempdecl.getModule)
-                    && !function_.needThis && !function_.isNested
-                    && !hasFunctionLocalType(instance)) {
-                const name = instance.tempdecl.getModule.toPrettyChars.fromStringz.idup;
-                _imports[name] = true;
-                import dmd.mtype: Type;
-                bool[Type] visited;
-                // Pointer, array, delegate parameter, associative array
-                // key, tuple element, and nested template instance
-                // arguments can all also name dependency types.
-                eachTemplateArgument(instance, visited, (symbol) {
-                    auto module_ = symbol.getModule; // DMD symbol queries are mutable.
-                    if (module_ !is null) {
-                        // DMD can home another program's instances on
-                        // this root. Their types are not dependencies
-                        // of the program being compiled into an image.
-                        if (_program.isRootOwned(module_) || module_ !in _modules)
-                            _needsRoot[function_] = true;
-                        else
-                            _imports[module_.toPrettyChars.fromStringz.idup] = true;
-                    }
-                    return false;
-                });
-                const key = sourceSpelling(instance.toPrettyChars(true).fromStringz);
-                if (key !in _references)
-                    _references[key] = Reference.init;
-                _references[key].functions ~= function_;
+                    && !isImportCBuiltins(instance.tempdecl.getModule)) {
+                _instance = function_;
+                if (function_.hasInlineAsm)
+                    _hasAsm[function_] = true;
+                const blocker = function_.needThis ? "it is a member function"
+                    : function_.isNested ? "it is a nested function"
+                    : hasDependencyLocalType(instance, _program)
+                    ? "a template argument is declared inside a function" : "";
+                if (blocker.length)
+                    _notInImage[function_] = blocker;
+                else {
+                    const name = instance.tempdecl.getModule.toPrettyChars.fromStringz.idup;
+                    _imports[name] = true;
+                    import dmd.mtype: Type;
+                    bool[Type] visited;
+                    // Pointer, array, delegate parameter, associative array
+                    // key, tuple element, and nested template instance
+                    // arguments can all also name dependency types.
+                    eachTemplateArgument(instance, visited, (symbol) {
+                        auto module_ = symbol.getModule; // DMD symbol queries are mutable.
+                        if (module_ !is null) {
+                            // DMD can home another program's instances on
+                            // this root. Their types are not dependencies
+                            // of the program being compiled into an image.
+                            if (_program.isRootOwned(module_)) {
+                                _needsRoot[function_] = true;
+                                if (symbol.isAggregateDeclaration || symbol.isEnumDeclaration)
+                                    _rootTypes[function_] ~= symbol;
+                                else
+                                    _blockers[function_] ~= text("template argument `",
+                                        symbol.toPrettyChars.fromStringz,
+                                        "` is not a type");
+                            } else if (module_ !in _modules) {
+                                _needsRoot[function_] = true;
+                                _foreign[function_] = true;
+                            } else
+                                _imports[module_.toPrettyChars.fromStringz.idup] = true;
+                        }
+                        return false;
+                    });
+                    const key = sourceSpelling(instance.toPrettyChars(true).fromStringz);
+                    if (key !in _references)
+                        _references[key] = Reference.init;
+                    _references[key].functions ~= function_;
+                }
             }
         }
         function_.fbody.accept(this);
@@ -367,16 +689,65 @@ private extern(C++) class Collector
     }
 
     override void visit(VarExp expression) {
-        if (_current !is null && _program.isRootOwned(expression.var))
+        if (_current !is null && _program.isRootOwned(expression.var)) {
             _needsRoot[_current] = true;
+            _needsRootCode[_current] = true;
+        }
         if (auto function_ = expression.var.isFuncDeclaration)
             function_.accept(this);
+    }
+
+    // `typeid` of a root type names the guest's `TypeInfo`: an instance in
+    // the image would use the stand-in's, and two of them break identity.
+    override void visit(TypeidExp expression) {
+        import dmd.dtemplate: getType;
+
+        if (_current !is null) {
+            if (auto type = getType(expression.obj)) {
+                import dmd.mtype: Type;
+                bool[Type] visited;
+                if (eachTemplateArgumentSymbol(type, visited, (symbol) {
+                    auto module_ = symbol.getModule;
+                    return module_ !is null && _program.isRootOwned(module_);
+                })) {
+                    _needsRoot[_current] = true;
+                    _needsRootCode[_current] = true;
+                }
+            }
+        }
+        super.visit(expression);
     }
 
     override void visit(DelegateExp expression) {
         expression.func.accept(this);
         super.visit(expression);
     }
+}
+
+
+private bool isDeclaredIn(
+    imported!"dmd.dsymbol".Dsymbol symbol,
+    imported!"dmd.dsymbol".Dsymbol outer,
+) {
+    for (auto ancestor = symbol.parent; ancestor !is null; ancestor = ancestor.parent)
+        if (ancestor is outer)
+            return true;
+    return false;
+}
+
+
+// `Type.toChars` leaves a type spelled the way the scope that prints it sees
+// it. The image source has its own scope.
+private string qualified(imported!"dmd.mtype".Type type) {
+    import dmd.hdrgen: HdrGenState, toCBuffer;
+    import dmd.common.outbuffer: OutBuffer;
+    import std.string: fromStringz;
+
+    OutBuffer buffer;
+    HdrGenState state;
+    state.fullQual = true;
+    toCBuffer(type, buffer, null, state);
+    return buffer.extractChars.fromStringz.idup;
 }
 
 
@@ -391,11 +762,18 @@ private bool isImportCBuiltins(imported!"dmd.dmodule".Module module_) {
 
 // Function-local types cannot be named from an independent module. Their
 // enclosing dependency body can still instantiate them when it is compiled.
-private bool hasFunctionLocalType(imported!"dmd.dtemplate".TemplateInstance instance) {
+// A root function's local type is no different from a root type declared at
+// module scope: it is never named in the image, a stand-in is.
+private bool hasDependencyLocalType(
+    imported!"dmd.dtemplate".TemplateInstance instance,
+    imported!"snakebite.backends.backend".Program program,
+) {
     import dmd.mtype: Type;
 
     bool[Type] visited;
     return eachTemplateArgument(instance, visited, (symbol) {
+        if (symbol.getModule !is null && program.isRootOwned(symbol.getModule))
+            return false;
         for (auto ancestor = symbol.parent; ancestor !is null; ancestor = ancestor.parent)
             if (ancestor.isFuncDeclaration)
                 return true;
