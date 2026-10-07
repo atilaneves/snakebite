@@ -1656,36 +1656,41 @@ def test_c_preprocessor_flags_from_dflags(
 
 # A fault of the guest ends the process with the signal that compiled D dies
 # of, after one line on standard error. The Bytecode VM does not keep its
-# program counter where a signal handler can read it, so it names no function.
+# program counter where a signal handler can read it, so its line names the
+# kind only.
 FAULTS = [
     ("null pointer read",
      "module main;\n"
      "int load(int* pointer) { return *pointer; }\n"
      "int main() { int* pointer; return load(pointer); }\n",
-     -signal.SIGSEGV, "fatal: null pointer dereference", 2),
+     -signal.SIGSEGV, "fatal: null pointer dereference", "main.load"),
     ("integer division by zero",
      "module main;\n"
      "int divide(int dividend, int divisor) { return dividend / divisor; }\n"
      "int main() { int zero; return divide(1, zero); }\n",
-     -signal.SIGFPE, "fatal: integer division fault", 2),
+     -signal.SIGFPE, "fatal: integer division by zero or overflow",
+     "main.divide"),
 ]
 
 
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
 @pytest.mark.parametrize(
-    "source,status,message,line", [fault[1:] for fault in FAULTS],
+    "source,status,message,function", [fault[1:] for fault in FAULTS],
     ids=[fault[0] for fault in FAULTS],
 )
 def test_guest_fault_ends_the_process_with_the_signal(
     tmp_path: Path, backend: str, source: str, status: int, message: str,
-    line: int,
+    function: str,
 ) -> None:
     write(tmp_path / "app" / "main.d", source)
 
     result = run_sb(f"--backend={backend}", str(tmp_path / "app"), cwd=tmp_path)
 
     assert result.returncode == status, output(result)
-    assert message in result.stderr, output(result)
+    position = f"main.d(2): {message}, in {function}"
+    assert result.stderr == (
+        position if backend == "interpreter" else message
+    ) + "\n", output(result)
 
 
 def write_unlisted_c_project(app: Path) -> None:

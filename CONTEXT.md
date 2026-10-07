@@ -79,18 +79,16 @@ The end of a run with no more guest code. No `catch`, `finally`,
 `Exception` lets it pass. The `Program` owns the actions (`HostActions`),
 and the host that makes the program chooses them. `bin/sb` ends the
 process. A REPL cell or an in-process test fails and the session goes on.
-A failed check under `-checkaction=halt` and a guest fault are halts.
+A failed check under `-checkaction=halt` is a halt.
 A `synchronized` block that a halt leaves does not unlock its mutex.
 _Avoid_: abort, crash
 
 **Guest fault**:
-A halt for a hardware fault that compiled D would die of: a load, a store
+A hardware fault of the guest that compiled D would die of: a load, a store
 or a call through an address that is not mapped (a null pointer included),
-and an integer division that the hardware traps. The kind and the message
-say what the hardware reported. The fault action of the `Program` prints
-the message and the guest call stack (`bin/sb`) or throws a
-`GuestFaultException` (a session). A guest fault in a destructor that the
-garbage collector runs is not recoverable: for each host and each backend,
-the process prints the report and ends with status 1, and no exception goes
-through the collector.
+and an integer division that the hardware traps. It is not a halt and
+nothing recovers from it. A handler for SIGSEGV and SIGFPE writes one line
+to standard error (the kind, and the innermost guest function and the line
+when the backend knows them), then the default action of the signal ends the
+process, as it ends compiled D.
 _Avoid_: crash, trap

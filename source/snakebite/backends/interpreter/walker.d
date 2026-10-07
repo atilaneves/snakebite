@@ -2194,7 +2194,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             });
         } catch (Throwable exception) {
             // Native unwinding can keep the original exception as primary.
-            // The before-unwind owner still holds the Halt that ends this run.
+            // The saved Halt still ends this run.
             if (_fault !is null)
                 throw _fault;
             if (isHalt(exception))
