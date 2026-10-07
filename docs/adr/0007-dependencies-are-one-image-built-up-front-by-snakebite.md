@@ -59,3 +59,35 @@ image, not when snakebite decides to run them.
 ## Supersedes
 
 The "built lazily on first dependency symbol request" plan in #36.
+
+## Amendment: layout stand-ins for root types
+
+The rejected option "Compile the project's own modules into the image"
+stays rejected: no function, variable, `ModuleInfo` or `TypeInfo` of a
+root module enters the image. One rule is added.
+
+A dependency template instance that has inline assembler (ADR-0012) runs
+only from the image, because no backend runs the assembler. When a
+template argument of such an instance is a type of the root package, the
+image source declares a stand-in for that type: a type of the image with
+the layout of the root type and nothing else. A struct or union stand-in
+has the same field types, initializers, alignments, size and alignment. A
+class stand-in has the same base classes, interfaces and fields. An enum
+stand-in has the same base type and values. The image compiles the
+instance over the stand-ins, and the registry returns it under the
+mangled name of the instance over the root types, which is the name the
+backends look up. The image source checks every offset and size against
+the root type, so a stand-in that disagrees fails the image build.
+
+An instance is placed this way when its body needs only the layout of the
+root types. It needs more when it uses code or state of the root package:
+a function of a root type (a postblit, a destructor, `opEquals`, an
+`opAssign`), a root function or variable, or `typeid` of a root type. It
+also needs more when a root type has no stand-in: a type with a context
+pointer, a bit field, or a template alias argument that names root code.
+Such an instance fails when the image source is made, with a message that
+names the instance and the reason.
+
+An instance without inline assembler that names a root type stays in the
+guest, as before. Two sets of `TypeInfo` cannot exist, because a stand-in
+has none.
