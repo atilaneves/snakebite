@@ -1718,50 +1718,209 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// Increment and compound assignment on a narrow integral type operate at
-// `int` width and store only the low bytes back, so the result wraps.
+// Compound assignment and increment on a narrow integral type operate at
+// `int` width and store only the low bytes back. Each expectation is
+// computed with plain `int` arithmetic and a cast, a form without the
+// compound operator, and each test runs it against one kind of lvalue.
+// A signed `>>>=` shifts the value at its own width, so the expectation
+// shifts the unsigned type of the same width.
+private enum compoundPrelude = q{
+    immutable int[] starts = [
+        0, 1, 2, 100, 127, 128, 129, 200, 255, 256, 32767, 32768, 65535,
+        -1, -2, -100, -128, -129, -32768,
+    ];
+    immutable int[] operands = [1, 3, 200];
+    immutable int[] counts = [1, 3];
+
+    T expectedAfter(T, string op)(int start, int rhs) {
+        static if (op == ">>>") {
+            static if (is(T == byte)) alias W = ubyte;
+            else static if (is(T == short)) alias W = ushort;
+            else alias W = T;
+            return cast(T)(cast(W) cast(T) start >>> rhs);
+        } else {
+            return cast(T) mixin("cast(int) cast(T) start " ~ op ~ " rhs");
+        }
+    }
+
+    void sweep(T)() {
+        static foreach (op; ["+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>", ">>>"]) {
+            foreach (start; starts)
+                foreach (rhs; op == "<<" || op == ">>" || op == ">>>" ? counts : operands)
+                    cell!(T, op)(start, rhs);
+        }
+    }
+
+    void main() {
+        sweep!byte;
+        sweep!ubyte;
+        sweep!short;
+        sweep!ushort;
+        sweep!char;
+        sweep!wchar;
+    }
+};
+
+private enum stepPrelude = q{
+    immutable int[] starts = [
+        0, 1, 2, 100, 127, 128, 129, 200, 255, 256, 32767, 32768, 65535,
+        -1, -2, -100, -128, -129, -32768,
+    ];
+
+    T moved(T)(int start, int delta) {
+        return cast(T)(cast(int) cast(T) start + delta);
+    }
+
+    void sweep(T)() {
+        static foreach (i, pre; ["++", "--", "", ""]) {
+            foreach (start; starts)
+                step!(T, pre, ["", "", "++", "--"][i])(start, i % 2 ? -1 : 1, i >= 2);
+        }
+    }
+
+    void main() {
+        sweep!byte;
+        sweep!ubyte;
+        sweep!short;
+        sweep!ushort;
+        sweep!char;
+        sweep!wchar;
+    }
+};
+
 static foreach (backend; Matrix!()) {
-    @("narrowIncrementAndCompoundAssignmentWrap." ~ backend.stringof)
+    @("narrowCompoundAssignmentOnLocal." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.shouldBeStatusOf!(backend, q{
-            void main() {
-                byte b = 127;
-                b++;
-                assert(b == -128);
-                assert(++b == -127);
-                assert(b-- == -127);
-                b += 200;
-                assert(b == 72);
+        0.shouldBeStatusOf!(backend, compoundPrelude ~ q{
+            void cell(T, string op)(int start, int rhs) {
+                const expected = expectedAfter!(T, op)(start, rhs);
+                T value = cast(T) start;
+                T result = mixin("value " ~ op ~ "= rhs");
+                assert(result == expected);
+                assert(value == expected);
+            }
+        });
+    }
+}
 
-                ubyte u = 255;
-                assert(++u == 0);
-                u -= 1;
-                assert(u == 255);
-                u *= 2;
-                assert(u == 254);
-                u >>= 1;
-                assert(u == 127);
+static foreach (backend; Matrix!()) {
+    @("narrowCompoundAssignmentOnStructField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, compoundPrelude ~ q{
+            struct Fields(T) { T before; T field; T after; }
 
-                short s = short.max;
-                s++;
-                assert(s == short.min);
-                s |= 1;
-                assert(s == short.min + 1);
+            void cell(T, string op)(int start, int rhs) {
+                const expected = expectedAfter!(T, op)(start, rhs);
+                Fields!T fields = Fields!T(cast(T) 17, cast(T) start, cast(T) 99);
+                T result = mixin("fields.field " ~ op ~ "= rhs");
+                assert(result == expected);
+                assert(fields.field == expected);
+                assert(fields.before == 17 && fields.after == 99);
+            }
+        });
+    }
+}
 
-                ushort w = 0;
-                w--;
-                assert(w == ushort.max);
+static foreach (backend; Matrix!()) {
+    @("narrowCompoundAssignmentThroughPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, compoundPrelude ~ q{
+            void cell(T, string op)(int start, int rhs) {
+                const expected = expectedAfter!(T, op)(start, rhs);
+                T[3] storage = [cast(T) 17, cast(T) start, cast(T) 99];
+                T* pointer = &storage[1];
+                T result = mixin("*pointer " ~ op ~ "= rhs");
+                assert(result == expected);
+                assert(storage[1] == expected);
+                assert(storage[0] == 17 && storage[2] == 99);
+            }
+        });
+    }
+}
 
-                char c = 'a';
-                c += 1;
-                assert(c == 'b');
-                assert(c++ == 'b');
-                assert(c == 'c');
+static foreach (backend; Matrix!()) {
+    @("narrowCompoundAssignmentOnSliceElement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, compoundPrelude ~ q{
+            void cell(T, string op)(int start, int rhs) {
+                const expected = expectedAfter!(T, op)(start, rhs);
+                T[3] storage = [cast(T) 17, cast(T) start, cast(T) 99];
+                T[] slice = storage[];
+                T result = mixin("slice[1] " ~ op ~ "= rhs");
+                assert(result == expected);
+                assert(storage[1] == expected);
+                assert(storage[0] == 17 && storage[2] == 99);
+            }
+        });
+    }
+}
 
-                wchar x = wchar.max;
-                x++;
-                assert(x == 0);
+static foreach (backend; Matrix!()) {
+    @("narrowIncrementOnLocal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, stepPrelude ~ q{
+            void step(T, string pre, string post)(int start, int delta, bool givesOld) {
+                T value = cast(T) start;
+                T result = mixin(pre ~ "value" ~ post);
+                assert(value == moved!T(start, delta));
+                assert(result == (givesOld ? cast(T) start : moved!T(start, delta)));
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("narrowIncrementOnStructField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, stepPrelude ~ q{
+            struct Fields(T) { T before; T field; T after; }
+
+            void step(T, string pre, string post)(int start, int delta, bool givesOld) {
+                Fields!T fields = Fields!T(cast(T) 17, cast(T) start, cast(T) 99);
+                T result = mixin(pre ~ "fields.field" ~ post);
+                assert(fields.field == moved!T(start, delta));
+                assert(result == (givesOld ? cast(T) start : moved!T(start, delta)));
+                assert(fields.before == 17 && fields.after == 99);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("narrowIncrementThroughPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, stepPrelude ~ q{
+            void step(T, string pre, string post)(int start, int delta, bool givesOld) {
+                T[3] storage = [cast(T) 17, cast(T) start, cast(T) 99];
+                T* pointer = &storage[1];
+                T result = mixin(pre ~ "(*pointer)" ~ post);
+                assert(storage[1] == moved!T(start, delta));
+                assert(result == (givesOld ? cast(T) start : moved!T(start, delta)));
+                assert(storage[0] == 17 && storage[2] == 99);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("narrowIncrementOnSliceElement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, stepPrelude ~ q{
+            void step(T, string pre, string post)(int start, int delta, bool givesOld) {
+                T[3] storage = [cast(T) 17, cast(T) start, cast(T) 99];
+                T[] slice = storage[];
+                T result = mixin(pre ~ "slice[1]" ~ post);
+                assert(storage[1] == moved!T(start, delta));
+                assert(result == (givesOld ? cast(T) start : moved!T(start, delta)));
+                assert(storage[0] == 17 && storage[2] == 99);
             }
         });
     }
