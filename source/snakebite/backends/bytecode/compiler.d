@@ -6734,7 +6734,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
         import snakebite.backends.calls: arityMismatches;
-        const isConstructor = callee.isCtorDeclaration !is null;
 
         auto type = typeFunctionOf(callee);
 
@@ -6813,9 +6812,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // by `CallAdapter`, rather than re-derived at each of the three.
         import snakebite.ffi.call: CallAdapter;
 
-        const returnShape = CallAdapter.ofType(calleeType, isConstructor);
+        const returnShape = CallAdapter.ofType(calleeType);
         const isVoidCallee = returnShape.isVoid;
-        if (isVoidCallee && !isConstructor && destOffset != discardResult)
+        if (isVoidCallee && !returnShape.resultIsReceiver
+                && destOffset != discardResult)
             assert(0, "a `void` call is only ever evaluated for effect");
 
         const siteIndex = _callSites.length;
@@ -6827,6 +6827,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             returnShape.returnFacts.size,
         );
         emit(&opCall, destOffset, siteIndex, 0);
+        emitReceiverResult(returnShape, destOffset, receiverOffset);
+    }
+
+    // The value of a constructor call is its receiver, whatever the callee
+    // is and wherever it lives; `CallAdapter` decides that, this only copies.
+    private void emitReceiverResult(
+        in CallAdapter shape,
+        in size_t destOffset,
+        in size_t receiverOffset,
+    ) {
+        if (shape.resultIsReceiver && destOffset != discardResult)
+            emit(&opCopy, destOffset, receiverOffset, size_t.sizeof);
     }
 
     // Runs `compute` (always `bytecode.compileFunction(callee)`, the one
@@ -6910,7 +6922,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             assert(0, "dmd rejects a call with the wrong number of arguments");
 
         const returnShape = CallAdapter.ofType(type);
-        if (returnShape.isVoid && destOffset != discardResult)
+        if (returnShape.isVoid && !returnShape.resultIsReceiver
+                && destOffset != discardResult)
             assert(0, "a `void` call is only ever evaluated for effect");
 
         auto preparation = CallAdapter.Arguments.of(
@@ -6920,11 +6933,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             args ~= compileBarrierArgument(value);
         });
 
-        _callSites ~= site(args, returnShape.returnFacts.size);
+        _callSites ~= site(args, returnShape.resultIsReceiver
+            ? 0 : returnShape.returnFacts.size);
         emit(&opCall,
             nativeResultPlace(destOffset, returnShape.isVoid,
                 returnShape.returnFacts),
             _callSites.length - 1, 0);
+        if (returnShape.resultIsReceiver)
+            emitReceiverResult(
+                returnShape, destOffset, initialArgs[0].callerOffset);
     }
 
     // Builds the FFI call plan for a native callee - one druntime already

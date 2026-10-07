@@ -107,14 +107,17 @@ struct NonPod {
 };
 
 static thread_local int destroyedCount = 0;
+static thread_local int copiedCount = 0;
 
 NonPod::NonPod(int v) : value(v) {}
-NonPod::NonPod(const NonPod& other) : value(other.value) {}
+NonPod::NonPod(const NonPod& other) : value(other.value) { ++copiedCount; }
 NonPod::~NonPod() { ++destroyedCount; }
 
 int read_non_pod(NonPod n) { return n.value; }
 NonPod make_non_pod(int v) { return NonPod(v); }
 int destroyed_count() { return destroyedCount; }
+int copied_count() { return copiedCount; }
+void count_copy() { ++copiedCount; }
 
 // A callback that itself takes a non-trivially-copyable value by
 // hidden reference: the reverse plan (`prepareCallback`) must unpack
@@ -123,6 +126,55 @@ typedef int (*NonPodCallback)(NonPod);
 int call_non_pod_callback(NonPodCallback callback, int v) {
     return callback(NonPod(v));
 }
+
+// A callback whose return value is a non-trivially-copyable value: the
+// guest produces it, this library consumes and destroys it.
+typedef NonPod (*NonPodMakerCallback)(int);
+int call_non_pod_maker_callback(NonPodMakerCallback callback, int v) {
+    return callback(v).value;
+}
+
+// Non-trivially-copyable because of the destructor alone.
+struct DtorOnly {
+    int value;
+    ~DtorOnly();
+};
+DtorOnly::~DtorOnly() { ++destroyedCount; }
+int read_dtor_only(DtorOnly d) { return d.value; }
+DtorOnly make_dtor_only(int v) { DtorOnly d; d.value = v; return d; }
+
+// Non-trivially-copyable because of the copy constructor alone.
+struct CopyOnly {
+    int value;
+    CopyOnly(int v);
+    CopyOnly(const CopyOnly& other);
+};
+CopyOnly::CopyOnly(int v) : value(v) {}
+CopyOnly::CopyOnly(const CopyOnly& other) : value(other.value) {
+    ++copiedCount;
+}
+int read_copy_only(CopyOnly c) { return c.value; }
+CopyOnly make_copy_only(int v) { return CopyOnly(v); }
+
+// The D declaration of this type has a postblit; C++ itself only sees
+// a destructor.
+struct PostBlit {
+    int value;
+    ~PostBlit();
+};
+PostBlit::~PostBlit() { ++destroyedCount; }
+int read_post_blit(PostBlit p) { return p.value; }
+PostBlit make_post_blit(int v) { PostBlit p; p.value = v; return p; }
+
+// A method that takes and returns a non-trivially-copyable value:
+// `this` and the hidden return pointer both appear.
+struct NonPodMaker {
+    int base;
+    NonPod make(int v);
+    int read(NonPod n);
+};
+NonPod NonPodMaker::make(int v) { return NonPod(v + base); }
+int NonPodMaker::read(NonPod n) { return n.value + base; }
 
 // Never instantiated anywhere in this file: its mangled name never
 // reaches the compiled object.

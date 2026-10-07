@@ -7,18 +7,20 @@ import snakebite.backends.backend: Program;
 import snakebite.dependencyimage: DependencyImage, loadImage;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
+import ut.ffi.cpp_oracle: Counts, bind, handlers, nativeShape;
 
 
 // The C++ test library (tests/fixtures/native/cpp_image.cpp) is compiled
 // into a shared object when `bin/ut` is built, and each test loads it.
 // It has: free functions over integers, doubles and a struct; a class with
-// a non-virtual method and two virtual methods, one of them overridden by a
-// derived class; a method that returns a large struct through the hidden
-// return pointer, non-virtual and virtual; a struct (not a class) with its
-// own method; a non-trivially-copyable type (a user-declared copy
-// constructor and a counting destructor) passed and returned by value; a
-// callback that itself takes a non-trivially-copyable value; and a template
-// the library never instantiates.
+// a constructor, a non-virtual method and two virtual methods, one of them
+// overridden by a derived class; a method that returns a large struct
+// through the hidden return pointer, non-virtual and virtual; a struct (not
+// a class) with its own method; non-trivially-copyable types (a copy
+// constructor, a destructor, or both, and one with a D postblit) passed and
+// returned by value, with a counter of copies and of destructions; a
+// struct whose method takes and returns such a value; callbacks that take
+// or return such a value; and a template the library never instantiates.
 
 
 // The D side's own `extern(C++)` declarations for the C++ library, shared
@@ -36,6 +38,8 @@ private enum cppBindings = q{
     // not shift `first`, `second` and `bigVirtual` off their real
     // Itanium slots `0`, `1` and `2`.
     extern(C++) class Base {
+        int tag_;
+        this(int tag);
         final int tag_value();
         int first();
         int second();
@@ -43,6 +47,7 @@ private enum cppBindings = q{
         Big bigVirtual();
     }
     extern(C++) class Derived : Base {
+        this(int tag);
         override int first();
     }
     extern(C++) Base get_base();
@@ -83,6 +88,42 @@ private enum cppBindings = q{
 
     alias NonPodCallback = extern(C++) int function(NonPod);
     extern(C++) int call_non_pod_callback(NonPodCallback callback, int v);
+
+    extern(C++) int copied_count();
+    extern(C++) void count_copy();
+
+    extern(C++) struct DtorOnly {
+        int value;
+        ~this();
+    }
+    extern(C++) int read_dtor_only(DtorOnly d);
+    extern(C++) DtorOnly make_dtor_only(int v);
+
+    extern(C++) struct CopyOnly {
+        int value;
+        this(int v);
+        this(ref const(CopyOnly) other);
+    }
+    extern(C++) int read_copy_only(CopyOnly c);
+    extern(C++) CopyOnly make_copy_only(int v);
+
+    extern(C++) struct PostBlit {
+        int value;
+        this(this) { count_copy(); }
+        ~this();
+    }
+    extern(C++) int read_post_blit(PostBlit p);
+    extern(C++) PostBlit make_post_blit(int v);
+
+    extern(C++) struct NonPodMaker {
+        int base;
+        NonPod make(int v);
+        int read(NonPod n);
+    }
+
+    alias NonPodMakerCallback = extern(C++) NonPod function(int);
+    extern(C++) int call_non_pod_maker_callback(
+        NonPodMakerCallback callback, int v);
 
     extern(C++) T uninstantiated_template(T)(T value);
 };
@@ -508,6 +549,299 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
 }
 
 
+// Runs `Shape.body_` as the inside of one function, on compiled D for
+// `Native` and on `backend` otherwise, and reports the result it leaves in
+// `r` together with how many destructions and copies the C++ library or the
+// oracle counted. The body is the text of a type's enum, not a string
+// argument: dmd cannot mangle an `extern(C++)` class declared in the body
+// inside a template instance with a string argument.
+private Counts runShape(backend, Shape)(int v) {
+    auto image = cppImage;
+    static if (is(backend == Native)) {
+        bind(image);
+        return nativeShape!Shape(v);
+    } else {
+        auto module_ = parseSnippet(cppBindings ~ handlers ~ q{
+            struct Counts { int result; int destroyed; int copied; }
+        } ~ "
+            Counts shape(int v) {
+                const destroyedBefore = destroyed_count();
+                const copiedBefore = copied_count();
+                int r;
+                {
+                    " ~ Shape.body_ ~ "
+                }
+                return Counts(r, destroyed_count() - destroyedBefore,
+                    copied_count() - copiedBefore);
+            }
+        ");
+        auto program = Program([module_]);
+        program.dependencyImage = &image;
+        auto instance = Owned!backend(program);
+
+        Counts counts;
+        instance.call(findFunction(module_, "shape"), &counts,
+            [cast(void*) &v]);
+        return counts;
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.namedLocalArgument." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            auto s = make_non_pod(v);
+            r = read_non_pod(s);
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(17, 2, 1);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.temporaryArgument." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            r = read_non_pod(make_non_pod(v));
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(17, 1, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.fieldArgument." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            struct Holder { NonPod n; }
+            auto h = Holder(make_non_pod(v));
+            r = read_non_pod(h.n);
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(17, 2, 1);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.arrayElementArgument." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            NonPod[1] a = [make_non_pod(v)];
+            r = read_non_pod(a[0]);
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(17, 2, 1);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.refParameterArgument." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            int viaRef(ref NonPod n) { return read_non_pod(n); }
+            auto s = make_non_pod(v);
+            r = viaRef(s);
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(17, 2, 1);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.returnedIntoAssignment." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            NonPod s;
+            s = make_non_pod(v);
+            r = s.value;
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(17, 2, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.returnedAndDiscarded." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            make_non_pod(v);
+            r = v;
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(17, 1, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.receivedByCallback." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            r = call_non_pod_callback(&receiveHandler, v);
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(34, 1, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.returnedByCallback." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            r = call_non_pod_maker_callback(&returnHandler, v);
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(51, 1, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.methodNamedLocal." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            NonPodMaker m;
+            m.base = 5;
+            auto s = m.make(v);
+            r = m.read(s);
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(27, 2, 1);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.methodTemporary." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            NonPodMaker m;
+            m.base = 5;
+            r = m.read(m.make(v));
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(27, 1, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.destructorOnlyNamedLocal." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            auto s = make_dtor_only(v);
+            r = read_dtor_only(s);
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(17, 2, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.destructorOnlyTemporary." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            r = read_dtor_only(make_dtor_only(v));
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(17, 1, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.copyConstructorOnlyNamedLocal." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            auto s = make_copy_only(v);
+            r = read_copy_only(s);
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(17, 0, 1);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.copyConstructorOnlyTemporary." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            r = read_copy_only(make_copy_only(v));
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(17, 0, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.postblitNamedLocal." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            auto s = make_post_blit(v);
+            r = read_post_blit(s);
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(17, 2, 1);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.nonPod.postblitTemporary." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            r = read_post_blit(make_post_blit(v));
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(17, 1, 0);
+    }
+}
+
+
 // A callback that itself takes a non-trivially-copyable value by
 // hidden reference: the reverse plan must unpack that reference the
 // same way a forward call's argument does (issue #336 review, finding
@@ -649,5 +983,143 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
                 findFunction(module_, "callBigVirtual"), &big, []);
             (big.a * 100 + big.b * 10 + big.c).should == 345;
         }
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.constructor.superToNativeClassConstructor." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            extern(C++) class Mine : Base {
+                this(int t) { super(t); }
+                override int second() { return 5; }
+            }
+            auto m = new Mine(v);
+            r = m.tag_value() * 100 + m.second();
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(1705, 0, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.constructor.conditionalSuperToNativeClassConstructor."
+        ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            extern(C++) class Mine : Base {
+                this(int t, bool b) { b ? super(t) : super(t + 1); }
+            }
+            auto m = new Mine(v, true);
+            r = m.tag_value();
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(17, 0, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.constructor.twoGuestClassesOverNativeBase." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            extern(C++) class First : Base {
+                this(int t) { super(t + 1); }
+            }
+            extern(C++) class Second : First {
+                this(int t) { super(t); }
+                override int second() { return 57; }
+            }
+            auto m = new Second(v);
+            r = m.tag_value() * 100 + m.second();
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(1857, 0, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.constructor.guestClassOverNativeDerived." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            extern(C++) class Mine : Derived {
+                this(int t) { super(t); }
+                override int second() { return 15; }
+            }
+            auto m = new Mine(v);
+            r = m.tag_value() * 100 + m.second();
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(1715, 0, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.constructor.superValueOfNativeClassConstructor."
+        ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            extern(C++) class Mine : Base {
+                int extra;
+                this(int t) {
+                    auto b = super(t);
+                    extra = b.tag_value();
+                }
+            }
+            auto m = new Mine(v);
+            r = m.extra;
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(17, 0, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.constructor.superValueOfDClassConstructor." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            class Failure : Exception {
+                size_t n;
+                this(string m) {
+                    auto b = super(m);
+                    n = b.msg.length;
+                }
+            }
+            r = cast(int) (new Failure("abc")).n + v;
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(20, 0, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.constructor.valueOfNativeStructConstructor." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+                CopyOnly c;
+                r = c.__ctor(v).value;
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(17, 0, 0);
     }
 }

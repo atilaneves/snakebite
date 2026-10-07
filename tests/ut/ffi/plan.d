@@ -482,7 +482,7 @@ unittest {
 
     int value;
     auto result = CallAdapter.of(function_).invoke(
-        &value, [], &invoke,
+        &value, null, [], &invoke,
     );
 
     value.should == 1234;
