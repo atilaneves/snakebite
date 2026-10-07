@@ -3809,8 +3809,26 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
 }
 
 
+_sdl_package_name = re.compile(
+    r'^(\s*(?:name|targetName|dependency)\s+)"([^"]+)"', re.MULTILINE,
+)
+
+
+def dub_named(recipe: str) -> str:
+    """`recipe` with each package name replaced by its `dub_name`."""
+    return _sdl_package_name.sub(
+        lambda m: f'{m[1]}"{dub_name(m[2])}"', recipe,
+    )
+
+
+def write_recipe(path: Path, recipe: str) -> None:
+    write(path, dub_named(recipe))
+
+
 def write_files(root: Path, files: dict[str, str]) -> None:
     for relative, text in files.items():
+        if relative.endswith("dub.sdl"):
+            text = dub_named(text)
         write(root / relative, text)
 
 
@@ -4085,7 +4103,7 @@ def test_unresolved_dependency_symbol_fails_the_image_link(
 def test_dependency_runner_replaces_the_default_test_runner(
     tmp_path: Path, backend: str,
 ) -> None:
-    write(
+    write_recipe(
         tmp_path / "app" / "dub.sdl",
         'name "repeat-runner-app"\ntargetType "library"\n'
         'dependency "repeat-runner" path="../runner"\n',
@@ -4098,7 +4116,7 @@ def test_dependency_runner_replaces_the_default_test_runner(
         unittest { assert(false, "custom runner must replace default tests"); }
         """,
     )
-    write(
+    write_recipe(
         tmp_path / "runner" / "dub.sdl",
         'name "repeat-runner"\ntargetType "staticLibrary"\n',
     )
@@ -4136,7 +4154,7 @@ def test_dependency_runner_replaces_the_default_test_runner(
 def test_throwable_escaping_a_unittest_runner_ends_the_program_cleanly(
     tmp_path: Path, backend: str,
 ) -> None:
-    write(
+    write_recipe(
         tmp_path / "app" / "dub.sdl",
         'name "escaping-throwable-app"\ntargetType "library"\n',
     )
@@ -4208,7 +4226,7 @@ def app_using_unused_member(backend: str, expected: int) -> str:
 def test_transitive_dub_dependencies_reach_the_image(
     tmp_path: Path, backend: str,
 ) -> None:
-    write(
+    write_recipe(
         tmp_path / "app" / "dub.sdl",
         """
         name "image-app"
@@ -4223,7 +4241,7 @@ def test_transitive_dub_dependencies_reach_the_image(
     )
     app_source = tmp_path / "app" / "source" / "app.d"
     write(app_source, app_using_unused_member(backend, 73))
-    write(
+    write_recipe(
         tmp_path / "middle" / "dub.sdl",
         """
         name "image-middle"
@@ -4240,7 +4258,9 @@ def test_transitive_dub_dependencies_reach_the_image(
         """,
     )
     leaf = tmp_path / "leaf archives"
-    write(leaf / "dub.sdl", 'name "image-leaf"\ntargetType "staticLibrary"\n')
+    write_recipe(
+        leaf / "dub.sdl", 'name "image-leaf"\ntargetType "staticLibrary"\n',
+    )
     write(
         leaf / "source" / "image_leaf.d",
         "module image_leaf;\nint leaf() { return 41; }\n",
@@ -4283,7 +4303,7 @@ def test_transitive_dub_dependencies_reach_the_image(
     assert edited_leaf.returncode == 0, output(edited_leaf)
 
     # Another compiler's build replaces the copy in the package directory.
-    write(leaf / "libimage-leaf.a", "not an archive")
+    write(leaf / f"lib{dub_name('image-leaf')}.a", "not an archive")
     foreign = start()
     assert foreign.returncode == 0, output(foreign)
 
@@ -4291,7 +4311,7 @@ def test_transitive_dub_dependencies_reach_the_image(
     # so it builds none.
     if backend == "ctfe":
         return
-    artifacts = list(dpath.rglob("libimage-leaf.a"))
+    artifacts = list(dpath.rglob(f"lib{dub_name('image-leaf')}.a"))
     assert len(artifacts) == 1, artifacts
     artifacts[0].unlink()
     rebuilt = start()
@@ -4306,7 +4326,7 @@ def test_generation_hook_runs_at_every_start(
     tmp_path: Path, backend: str,
 ) -> None:
     app = tmp_path / "app"
-    write(
+    write_recipe(
         app / "dub.sdl",
         'name "hook-app"\ntargetType "library"\n'
         'preGenerateCommands "echo hook >> hooks.log"\n',
@@ -4331,7 +4351,7 @@ def test_generated_test_runner_follows_a_module_rename(
     tmp_path: Path, backend: str,
 ) -> None:
     app = tmp_path / "app"
-    write(app / "dub.sdl", 'name "renamed-app"\ntargetType "library"\n')
+    write_recipe(app / "dub.sdl", 'name "renamed-app"\ntargetType "library"\n')
 
     def start(module_name: str) -> subprocess.CompletedProcess[str]:
         write(
@@ -4929,7 +4949,7 @@ def test_c_module_is_imported_by_d(
     app = tmp_path / "app"
     source = app / "source" if case.dub else app
     if case.dub:
-        write(
+        write_recipe(
             app / "dub.sdl",
             f'''
             name "importc_project"
@@ -5003,7 +5023,7 @@ def test_project_changes_are_in_the_next_start(
 ) -> None:
     app = tmp_path / "app"
     recipe = dub_project_recipe("changing")
-    write(app / "dub.sdl", recipe)
+    write_recipe(app / "dub.sdl", recipe)
     write(
         app / "source" / "main.d",
         """
@@ -5033,7 +5053,7 @@ def test_project_changes_are_in_the_next_start(
     assert start() == 0
     write(app / "source" / "nested" / "extra.d", "module nested.extra;\n")
     assert start() == 2
-    write(app / "dub.sdl", recipe + 'versions "Changed"\n')
+    write_recipe(app / "dub.sdl", recipe + 'versions "Changed"\n')
     assert start() == 6
 
 
@@ -5044,7 +5064,7 @@ def test_unittest_configuration_settings_are_loaded(
     tmp_path: Path, backend: str,
 ) -> None:
     app = tmp_path / "app"
-    write(
+    write_recipe(
         app / "dub.sdl",
         """
         name "dub-package-settings"
