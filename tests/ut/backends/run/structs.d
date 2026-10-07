@@ -6017,3 +6017,112 @@ static foreach (backend; Matrix!(
         });
     }
 }
+// A `ref` return that chooses by a temporary destroys the temporary once.
+// A `ref` return of an assignment from a temporary's field destroys the temporary.
+// A `ref` return of an index chosen by a temporary destroys the temporary.
+// A `throw` operand's temporary dies before the `finally` body runs.
+// A `throw` operand's temporary inside a `scope(exit)` dies before the outer `catch` runs.
+// A `throw` operand's temporary dies before an enclosing `scope(exit)` runs.
+// A `ref` return of a call destroys the temporary of its argument.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `log` cannot be read at compile time"),
+)) {
+    @("fullExpression.refReturnCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            string log;
+            struct T { int v; ~this() { log ~= "d"; log ~= cast(char)('0' + v); } }
+            T mk(int v) { return T(v); }
+            ref int id(ref int a, int) { return a; }
+            ref int f(ref int a) { return id(a, mk(1).v); }
+            void main() {
+                int a = 1;
+                f(a) = 5;
+                assert(log == "d1", log);
+            }
+        });
+    }
+}
+
+// A `ref` return destroys a temporary in the condition of `?:` whichever arm is taken.
+// A `ref` return destroys a temporary evaluated in the arm that `?:` takes, and only that one.
+// A `ref` return through a cast destroys the temporary of its index.
+// A value `return` destroys the temporary of its operand before the caller continues.
+// The temporary of a `do`/`while` condition dies after the body, on every test.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `log` cannot be read at compile time"),
+)) {
+    @("fullExpression.doWhileCondition." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            string log;
+            struct T { int v; ~this() { log ~= "d"; log ~= cast(char)('0' + v); } }
+            T mk(int v) { return T(v); }
+            void main() {
+                int n;
+                do { log ~= "o"; } while (mk(n++).v < 1);
+                assert(log == "od0od1", log);
+            }
+        });
+    }
+}
+
+// The temporaries of a `for` condition and increment die on every iteration.
+// The temporary of a `switch` operand dies before the selected case runs.
+// The temporary of an `assert` condition dies when it passes, and one of its message dies when it fails; a passing assertion evaluates no message.
+// The temporary of a `foreach` aggregate dies before the body first runs.
+// The temporary of a `with` operand lives for the body of the `with`.
+// The temporary of a `with` operand that is not the subject dies before the body runs.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `log` cannot be read at compile time"),
+)) {
+    @("fullExpression.withOperandArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            string log;
+            struct T { int v; ~this() { log ~= "d"; log ~= cast(char)('0' + v); } }
+            T mk(int v) { return T(v); }
+            class C { int x; this(int x) { this.x = x; } }
+            void main() {
+                with (new C(mk(1).v)) { log ~= "b"; }
+                log ~= "a";
+                assert(log == "d1ba", log);
+            }
+        });
+    }
+}
+
+// A `throw` operand's temporary is destroyed before the throw starts, so a destructor that throws wins.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `log` cannot be read at compile time"),
+)) {
+    @("fullExpression.throwingDestructorBeforeThrow." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            string log;
+            struct X { int v; ~this() {
+                log ~= "x";
+                throw new Exception("dtor");
+            } }
+            X mkx() { return X(9); }
+            void main() {
+                try { throw new Exception(mkx().v ? "a" : "b"); }
+                catch (Exception e) { log ~= "<"; log ~= e.msg; log ~= ">"; }
+                assert(log == "x<dtor>", log);
+            }
+        });
+    }
+}
+
+// The temporaries of a call whose argument throws die during unwinding, last constructed first.
+// Two temporaries of one expression die in reverse order of construction.
+// The temporary of a call inside a `throw` operand dies before the `catch` runs.
+// The temporary of a `throw` expression's operand dies before the `catch` runs.

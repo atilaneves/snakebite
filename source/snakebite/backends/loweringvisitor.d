@@ -9,7 +9,11 @@ import dmd.expression:
     CatElemAssignExp, CatDcharAssignExp,
     ConstructExp, Expression, IdentityExp, LoweredAssignExp, NewExp, ThrowExp,
     TupleExp;
-import dmd.statement: ReturnStatement, ThrowStatement;
+import dmd.statement:
+    ExpStatement, ReturnStatement, SwitchErrorStatement, ThrowStatement,
+    WithStatement;
+import snakebite.backends.fullexpression:
+    FullExpressionKind, FullExpressionScope;
 import snakebite.backends.identity: IdentityPlan, identityPlan;
 import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
 import snakebite.backends.aggregateinit: NewPlan, planNew;
@@ -48,28 +52,102 @@ static foreach (name; __traits(allMembers, imported!"dmd.expression")) {
 extern(C++) package abstract class LoweringVisitor: Visitor {
     alias visit = Visitor.visit;
 
+    // The statements and operands that end a full expression are opened
+    // here, so no backend can forget one; the positions are listed in
+    // `FullExpressionScope.Position`. A position that a backend's own control
+    // flow owns (a loop's condition, a `switch` operand) goes through
+    // `fullExpression` too. `withFullExpression` is the backend's hook and
+    // nothing else calls it.
+    extern(D) protected abstract void withFullExpression(
+        in FullExpressionKind kind,
+        Expression root,
+        scope void delegate() evaluate,
+    );
+
+    extern(D) protected final void fullExpression(
+        in FullExpressionScope.Position position,
+        Expression root,
+        scope void delegate() evaluate,
+    ) {
+        withFullExpression(FullExpressionScope.kindOf(position), root, evaluate);
+    }
+
+    final override void visit(ExpStatement statement) {
+        if (statement.exp is null)
+            return;
+
+        fullExpression(FullExpressionScope.Position.expressionStatement,
+            statement.exp, { visitExpressionStatement(statement); });
+    }
+
+    final override void visit(SwitchErrorStatement statement) {
+        assert(statement.exp !is null,
+            "dmd always gives a `SwitchErrorStatement` its `__switch_error` call");
+        fullExpression(FullExpressionScope.Position.switchError,
+            statement.exp, { visitSwitchError(statement); });
+    }
+
+    // dmd ends the full expression of a `throw` operand before it starts
+    // the throw, so a destructor of an operand temporary that throws
+    // replaces the exception the operand built.
     final override void visit(ThrowStatement statement) {
-        visitThrowStatement(statement);
+        throwOperand(statement.exp);
     }
 
     final override void visit(ThrowExp expression) {
-        visitThrowExp(expression);
+        throwOperand(expression.e1);
+    }
+
+    private void throwOperand(Expression operand) {
+        size_t thrown;
+        fullExpression(FullExpressionScope.Position.throwOperand,
+            operand, { thrown = visitThrowOperand(operand); });
+        visitThrowTransfer(thrown);
+    }
+
+    // The initialiser of the `with` handle is a full expression of its own:
+    // its temporaries die before the body runs.
+    final override void visit(WithStatement statement) {
+        if (statement.wthis !is null) {
+            auto initializer = statement.wthis._init.isExpInitializer;
+            assert(initializer !is null,
+                "a with statement temporary has an expression initializer");
+            fullExpression(FullExpressionScope.Position.withOperand,
+                initializer.exp, { visitWithOperand(statement); });
+        }
+        visitWithBody(statement);
     }
 
     // The operand of `return` is evaluated before the function starts to
     // return: a throw from the operand leaves with an exception, and no
     // handler or cleanup that runs then may see a pending return. Which
-    // cleanups the transfer runs is the shared unwind plan's decision.
+    // cleanups the transfer runs is the shared unwind plan's decision. The
+    // temporaries of the operand die when it has been evaluated, whether
+    // the function returns a value or a `ref`.
     final override void visit(ReturnStatement statement) {
-        visitReturnOperand(statement);
+        if (statement.exp is null)
+            visitReturnOperand(statement);
+        else
+            fullExpression(FullExpressionScope.Position.returnOperand,
+                statement.exp, { visitReturnOperand(statement); });
         visitReturnTransfer(statement);
     }
 
+    protected abstract void visitExpressionStatement(ExpStatement statement);
+    protected abstract void visitSwitchError(SwitchErrorStatement statement);
     protected abstract void visitReturnOperand(ReturnStatement statement);
     protected abstract void visitReturnTransfer(ReturnStatement statement);
 
-    protected abstract void visitThrowStatement(ThrowStatement statement);
-    protected abstract void visitThrowExp(ThrowExp expression);
+    protected abstract void visitWithOperand(WithStatement statement);
+    protected abstract void visitWithBody(WithStatement statement);
+
+    // Evaluates the operand and returns a backend-defined handle for the
+    // object it made. The handle is a plain number because a destructor of
+    // an operand temporary can run during a collection, where a throw must
+    // not allocate. The shared visitor passes it to `visitThrowTransfer`
+    // once the full expression has ended.
+    protected abstract size_t visitThrowOperand(Expression operand);
+    protected abstract void visitThrowTransfer(size_t thrown);
 
     // DMD's semantic pass leaves `lowering` null in a scope that needs no
     // code generation, and dmd's glue cannot compile such an append. A

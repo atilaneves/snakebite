@@ -13,6 +13,39 @@ public enum FullExpressionKind {
 // keeps the outer root and lifetime, so a declaration reached through a
 // comma expression cannot start a second lifetime.
 public struct FullExpressionScope {
+    // The places where dmd's glue code (`toElemDtor`) ends a full
+    // expression: the destructors of the temporaries made inside it run
+    // there. A backend names the position, and `kindOf` gives the answer
+    // for all of them. The right operand of `&&` and `||` also ends one in
+    // dmd and is not listed: a backend decides it alone.
+    public enum Position {
+        expressionStatement,
+        loopIncrement,
+        switchError,
+        returnOperand,
+        throwOperand,
+        withOperand,
+        condition,
+        switchOperand,
+    }
+
+    public static FullExpressionKind kindOf(in Position position)
+        @safe @nogc nothrow pure
+    {
+        final switch (position) with (Position) {
+            case expressionStatement:
+            case loopIncrement:
+            case switchError:
+            case withOperand:
+                return FullExpressionKind.effect;
+            case returnOperand:
+            case throwOperand:
+            case condition:
+            case switchOperand:
+                return FullExpressionKind.value;
+        }
+    }
+
     public struct CallState {
         private const(void)* root;
         private FullExpressionKind kind;

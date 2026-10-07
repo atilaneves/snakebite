@@ -1438,10 +1438,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `with (Scope)` and `with (EnumType)` leave `wthis` null: they only
     // change name lookup, which semantic analysis already resolved, so
     // only the body needs compiling.
-    override void visit(WithStatement statement) {
-        if (statement.wthis !is null)
-            compileVariableInitializer(statement.wthis);
+    protected override void visitWithOperand(WithStatement statement) {
+        compileVariableInitializer(statement.wthis);
+    }
 
+    protected override void visitWithBody(WithStatement statement) {
         if (statement._body !is null)
             compileStatement(statement._body);
     }
@@ -1557,7 +1558,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // finally can go on to use its own temporaries without disturbing
         // the value already on its way out.
         _returnOffset = reserveTemp(_returnFacts);
-        compileValue(statement.exp, _returnOffset, _returnFacts.size);
+        evalInto(statement.exp, _returnOffset, _returnFacts.size);
     }
 
     protected override void visitReturnTransfer(ReturnStatement statement) {
@@ -1577,15 +1578,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _finished = true;
     }
 
-    protected override void visitThrowStatement(ThrowStatement statement) {
-        compileThrow(statement.exp);
-    }
-
-    protected override void visitThrowExp(ThrowExp expression) {
-        compileThrow(expression.e1);
-    }
-
-    private void compileThrow(Expression expression) {
+    protected override size_t visitThrowOperand(Expression expression) {
         import dmd.astenums: Tclass;
 
         if (!(expression !is null
@@ -1596,13 +1589,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const facts = TypeFacts.of(expression.type);
         const offset = reserveTemp(facts);
         evalInto(expression, offset, facts.size);
+        return offset;
+    }
+
+    protected override void visitThrowTransfer(size_t offset) {
         emit(&opThrow, offset, 0, 0, 0);
         _finished = true;
     }
 
-    override void visit(ExpStatement statement) {
-        if (statement.exp !is null)
-            compileEffect(statement.exp);
+    protected override void visitExpressionStatement(
+        ExpStatement statement,
+    ) {
+        compileEffect(statement.exp);
     }
 
     override void visit(IfStatement statement) {
@@ -1648,13 +1646,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         assert(facts.isIntegral && isIntegralSize(facts.size));
 
         const conditionOffset = reserveTemp(facts);
-        compileValue(statement.condition, conditionOffset, facts.size);
+        compileValue(FullExpressionScope.Position.switchOperand,
+            statement.condition, conditionOffset, facts.size);
 
         foreach (case_; plan.cases) {
             const testOffset = reserveTemp(facts);
             emit(&opCopy, testOffset, conditionOffset, facts.size);
             const literalOffset = reserveTemp(facts);
-            compileValue(case_.exp, literalOffset, facts.size);
+            compileValue(FullExpressionScope.Position.switchOperand,
+                case_.exp, literalOffset, facts.size);
             emit(&opEqual, testOffset, literalOffset, facts.size);
 
             const branchIndex = _instructions.length;
@@ -1778,10 +1778,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `FuncDeclaration` - compiled the same way any other call to a
     // function this compiler did not itself compile is, through the
     // native FFI boundary in `compileCall`.
-    override void visit(SwitchErrorStatement statement) {
-        if (statement.exp is null)
-            assert(0, "dmd always gives a `SwitchErrorStatement` its "
-                ~ "`__switch_error` call");
+    protected override void visitSwitchError(
+        SwitchErrorStatement statement,
+    ) {
         compileEffect(statement.exp);
 
         _finished = true;
@@ -1867,7 +1866,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const facts = TypeFacts.of(condition.type);
         const valueOffset = reserveTemp(facts);
-        compileValue(condition, valueOffset, facts.size);
+        compileValue(FullExpressionScope.Position.condition,
+            condition, valueOffset, facts.size);
         const offset = valueOffset + truth.offset;
 
         if (truth.isFloat) {
@@ -1908,7 +1908,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return size_t.max;
         const leftOffset = reserveTemp(facts);
         const rightOffset = reserveTemp(facts);
-        withFullExpression(FullExpressionKind.value, expression, {
+        fullExpression(FullExpressionScope.Position.condition, expression, {
             evalInto(expression.e1, leftOffset, facts.size);
             evalInto(expression.e2, rightOffset, facts.size);
         });
@@ -2322,7 +2322,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _loops = _loops[0 .. $ - 1];
 
         if (statement.increment !is null)
-            compileEffect(statement.increment);
+            fullExpression(FullExpressionScope.Position.loopIncrement,
+                statement.increment, {
+                compileEffect(statement.increment);
+            });
 
         emit(&opJump, conditionIndex, 0, 0);
 
@@ -2513,19 +2516,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // Runs `expression` for effect, at statement level: whatever value it
     // produces (a call's return, an assignment's own value) is never read.
     private void compileEffect(Expression expression) {
-        discardingResult({
-            withFullExpression(FullExpressionKind.effect, expression,
-                { expression.accept(this); },
-            );
-        });
-    }
-
-    // `NewExp.argprefix` stages constructor arguments before the call. Its
-    // declarations and any destructible values must stay alive until the
-    // enclosing `NewExp` finishes, so execute it in the current full
-    // expression instead of opening a nested one that would clean them up
-    // before the constructor reads its arguments.
-    private void compileEffectInCurrentLifetime(Expression expression) {
+        assert(_expressions.active,
+            "a statement, condition or operand opened the full expression");
         discardingResult({ expression.accept(this); });
     }
 
@@ -2545,18 +2537,21 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private void compileValue(
-        Expression expression, in size_t destination, in size_t width,
+        in FullExpressionScope.Position position,
+        Expression expression,
+        in size_t destination,
+        in size_t width,
     ) {
         if (_emittingCleanup)
             return evalInto(expression, destination, width);
 
-        withFullExpression(FullExpressionKind.value, expression,
+        fullExpression(position, expression,
             { evalInto(expression, destination, width); },
         );
     }
 
-    private void withFullExpression(
-        FullExpressionKind kind,
+    extern(D) protected override void withFullExpression(
+        in FullExpressionKind kind,
         Expression root,
         scope void delegate() evaluate,
     ) {
@@ -2662,9 +2657,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (_emittingCleanup)
             return emitDeclaration();
 
-        withFullExpression(FullExpressionKind.effect, expression,
-            emitDeclaration,
-        );
+        assert(_expressions.active,
+            "a statement, condition or operand opened the full expression");
+        emitDeclaration();
     }
 
     // Runs `variable`'s own initialiser into whichever storage its layout
@@ -5029,7 +5024,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         driveInit(hooks, plan, expression.member !is null,
             () {
                 if (newPlan.argumentPrefix !is null)
-                    compileEffectInCurrentLifetime(
+                    compileEffect(
                         newPlan.argumentPrefix);
                 compileResolvedCall(
                     expression.member, expression.arguments, expression.loc,
