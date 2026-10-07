@@ -247,12 +247,8 @@ private BuiltinCall integerEntryOf(T)(in string name)
 
 // Every `core.bitop` intrinsic snakebite has a builtin wrapper for.
 // `bsf` and `bsr` also classify (`BUILTIN.bsf`/`BUILTIN.bsr`), but both
-// have real bodies in `core.bitop` (`pragma(inline, false)` wrapping a
-// soft fallback, kept so intrinsic detection still works on the type
-// this table never sees them through) - `CallSelection.buildDecision`
-// only ever asks `builtinDecision` about a function whose `fbody is
-// null`, so a name here is only ever one dmd itself declared bodiless:
-// `bswap` and `_popcnt`.
+// have real bodies in `core.bitop`, and `CallSelection` only asks for a
+// wrapper of a function with no body: `bswap` and `_popcnt`.
 private enum sameTypeIntegerNames = ["bswap"];
 private enum ownReturnTypeIntegerNames = ["_popcnt"];
 

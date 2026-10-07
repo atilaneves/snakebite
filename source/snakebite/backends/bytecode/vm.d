@@ -77,9 +77,8 @@ public struct CallSite {
         value,
         // `builtinEntry` is a `snakebite.backends.builtins.BuiltinCall`,
         // resolved once by `CallSelection` (`snakebite.backends.calls`)
-        // and never re-resolved: a compiler intrinsic dmd itself
-        // classifies (`core.math.fabs` and the like), which has no host
-        // symbol FFI could ever find, so this VM calls the entry
+        // and never re-resolved: a compiler intrinsic (`core.math.fabs`
+        // and the like), which has no host symbol FFI could ever find, so this VM calls the entry
         // directly instead of going through `executeCallPlan`.
         builtin,
     }

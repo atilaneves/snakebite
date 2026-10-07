@@ -20,10 +20,9 @@ public struct CallSelection {
     // Every call site resolves to exactly one of these. `guest` and
     // `native` are the two routes `usesGuestBody` always answered;
     // `builtin` is the third one this backend adds for a bodiless
-    // function dmd itself classifies as a compiler intrinsic (`dmd.
-    // builtin.isBuiltin`) - `core.math.fabs` and friends, which have no
-    // host symbol FFI could ever resolve (they compile to an inline
-    // instruction, not a call). `snakebite.backends.builtins` holds the
+    // function that is a compiler intrinsic (`builtinDecision`) -
+    // `core.math.fabs` and friends, which have no host symbol FFI could
+    // ever resolve (they compile to an inline instruction, not a call). `snakebite.backends.builtins` holds the
     // wrapper `builtinEntry` calls for that route.
     //
     // `vaStart` is the one intrinsic that is not a pure function of its
@@ -39,8 +38,7 @@ public struct CallSelection {
     // whether the function nests inside another (so it needs this
     // backend's own static chain), the same-declaration preference
     // every call falls back to otherwise, and - for a bodiless
-    // function - whether dmd classifies it as a compiler intrinsic this
-    // backend has a wrapper for. `route` and `builtinEntry` together,
+    // function - whether it is a compiler intrinsic, and its wrapper. `route` and `builtinEntry` together,
     // rather than two separate lookups, so a builtin call site - the
     // interpreter's hot path included - reads this cache once per call,
     // not twice.
