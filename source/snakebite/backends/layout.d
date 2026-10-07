@@ -679,9 +679,12 @@ extern(C++) private final class LocalsCollector:
             return;
         if (auto initializer = variable._init.isExpInitializer) {
             auto value = initializer.exp;
-            if (auto construct = value.isConstructExp)
-                value = construct.e2;
-            else if (auto blit = value.isBlitExp)
+            // A construction's lowering declares its own temporaries
+            // (`__setctor*`), reached only by walking the node itself.
+            if (auto construct = value.isConstructExp) {
+                if (construct.lowering is null)
+                    value = construct.e2;
+            } else if (auto blit = value.isBlitExp)
                 value = blit.e2;
             collectDeclarations(value);
         }

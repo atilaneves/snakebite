@@ -461,6 +461,12 @@ public bool initializerConstructsThroughSlice(
     if (e1 is null)
         return false;
 
+    // `T[n] v = source;` where `T` has a postblit or copy constructor is
+    // lowered to `_d_arrayctor(cast(T[]) v, ...)`: the call constructs the
+    // elements in `v` and returns a slice, which is not `v`'s value.
+    if (value.isConstructExp !is null && value.isConstructExp.lowering !is null)
+        return true;
+
     auto target = e1.isVarExp;
     return target is null || target.var !is variable;
 }
