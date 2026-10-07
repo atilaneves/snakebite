@@ -20,7 +20,7 @@ import snakebite.frontend.dmd.functions: findFunction;
 // forever, once per fiber that ever touched guest code.
 //
 // A `GC.addRange` over the whole dedicated stack used to be exactly such a
-// cost: `Evaluator.runOnInterpreterStack` (walker.d) already re-points the
+// cost: `InterpreterStack.run` already re-points the
 // switched-to guest `Fiber`'s own `StackContext.bstack` at this stack
 // while a call runs on it, so druntime's ordinary stack scan already
 // covers every live byte on it - a separate `addRange`'d region never

@@ -11,8 +11,7 @@ import snakebite.frontend.dmd.functions: findFunction;
 
 // `InterpreterStack.active` tracks whether a host-to-guest call is
 // switched onto this stack and has not yet unwound back through
-// `Evaluator.runOnInterpreterStack`'s own `scope(exit)`
-// (source/snakebite/backends/interpreter/walker.d). While it is set, a
+// `InterpreterStack.run`. While it is set, a
 // guest `Fiber`'s own `StackContext` may still name this stack's mapping -
 // left there by an abandoned fiber (suspended mid-call, never resumed) or
 // by `Fiber.reset` writing a fresh entry frame onto it, per that
@@ -56,7 +55,7 @@ unittest {
 
 // Regression test for review comment
 // https://github.com/atilaneves/snakebite/pull/426#discussion_r4082454024
-// point (a). `Evaluator.runOnInterpreterStack` (walker.d) repoints the
+// point (a). `InterpreterStack.run` repoints the
 // active guest `Fiber`'s own `StackContext.bstack` at the dedicated
 // `InterpreterStack` for as long as the switch lasts, which correctly
 // extends druntime's scan to that dedicated stack - but for the same
@@ -76,7 +75,7 @@ unittest {
 // collection while the switch onto `InterpreterStack` is active, mid
 // `backend.call`. `box.value` is read back in that same host frame right
 // after: unless the abandoned span is separately registered with the GC
-// (`GC.addRange`, `Evaluator.callOnInterpreterStack`), nothing roots
+// (`GC.addRange`, `InterpreterStack.run`), nothing roots
 // `box` during that collection.
 @("nativeStack.hostFiberOwnStackSurvivesCollectionDuringSwitch")
 unittest {
