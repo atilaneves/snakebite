@@ -150,11 +150,14 @@ public struct ScopePaths {
 
     // Innermost scope first. A handler or a `finally` body is not inside the
     // `try` that owns it.
-    public ScopeFrame[] enclosing(in imported!"dmd.statement".Statement statement)
+    public ScopeFrame[] enclosing(
+        in imported!"dmd.statement".Statement statement,
+    )
         @trusted
     {
         auto found = cast(const(void)*) statement in _enclosing;
-        assert(found !is null, "the scope pass records every jump source and destination");
+        assert(found !is null,
+            "the scope pass records every jump source and destination");
         return *found;
     }
 
@@ -197,8 +200,7 @@ extern(C++) private final class ScopeRecorder:
         BreakStatement, CaseStatement, ContinueStatement, DefaultStatement,
         DoStatement, ForStatement, GotoCaseStatement, GotoDefaultStatement,
         GotoStatement, LabelStatement, ReturnStatement, ScopeGuardStatement,
-        Statement,
-        SwitchStatement, TryCatchStatement, TryFinallyStatement,
+        Statement, SwitchStatement, TryCatchStatement, TryFinallyStatement,
         UnrolledLoopStatement;
 
     alias visit = StatementRewriteWalker.visit;
