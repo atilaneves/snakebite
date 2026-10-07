@@ -666,7 +666,7 @@ def test_interactive_error_label_is_red() -> None:
 
         child.sendline(":t")
         child.expect_exact(
-            "\x1b[31mError:\x1b[0m unittest at <repl cell 1>(1) failed: 1 != 2",
+            "\x1b[31mError:\x1b[0m unittest at <repl cell 1>(1) failed: unittest failure",
         )
         child.expect(r"\[\s+\d+\.\d ms\] > ")
 
@@ -676,6 +676,35 @@ def test_interactive_error_label_is_red() -> None:
         child.close(force=True)
 
     assert child.exitstatus == 0
+
+
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+@pytest.mark.parametrize(
+    ("dflags", "expected"),
+    [
+        ('dflags "-checkaction=context"\n', "failed: 1 != 2"),
+        ("", "failed: unittest failure"),
+    ],
+)
+def test_failed_assert_names_the_compared_values_only_with_context(
+    tmp_path: Path, backend: str, dflags: str, expected: str,
+) -> None:
+    (tmp_path / "dub.sdl").write_text(
+        f'name "{dub_name("repl-context-test")}"\n' + dflags,
+        encoding="utf-8",
+    )
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "repl_context_test.d").write_text(
+        "module repl_context_test;\n", encoding="utf-8",
+    )
+
+    result = run_sb(
+        "--project", str(tmp_path), "-b", backend,
+        input="unittest { int a = 1; int b = 2; assert(a == b); }\n:t\n",
+    )
+
+    assert expected in result.stdout + result.stderr
 
 
 def test_piped_error_label_is_not_coloured() -> None:
