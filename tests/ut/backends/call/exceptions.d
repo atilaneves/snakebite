@@ -624,3 +624,39 @@ static foreach (backend; AliasSeq!(Interpreter, Bytecode)) {
         ).shouldThrow!SnakebiteException;
     }
 }
+
+
+// A virtual method that fails an `assert`: the `AssertError` reaches the
+// caller's `catch`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns a failing assertion into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("assert.fails.inVirtualMethodReachesCatch." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            import core.exception: AssertError;
+
+            class Counter {
+                int value;
+                void bump() {
+                    assert(value >= 0);
+                    value += 1;
+                }
+            }
+
+            int result() {
+                auto counter = new Counter;
+                counter.value = -1;
+                try {
+                    counter.bump();
+                } catch (AssertError) {
+                    return 42;
+                }
+                return 0;
+            }
+        }, "result");
+    }
+}

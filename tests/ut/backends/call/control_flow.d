@@ -368,6 +368,158 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// A `continue` out of a `try` body runs the `finally`, from an `if` with no
+// `else`.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.continueInsideIfRunsFinally." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        3.shouldBeRetOf!(backend, q{
+            int result() {
+                int finallyRuns;
+                for (int i; i < 3; ++i) {
+                    try {
+                        if (i == 1)
+                            continue;
+                    } finally {
+                        ++finallyRuns;
+                    }
+                }
+                return finallyRuns;
+            }
+        }, "result");
+    }
+}
+
+
+// A `goto case` out of a `try` body runs the `finally`, from an `if` with
+// no `else`.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.gotoCaseInsideIfRunsFinally." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        11.shouldBeRetOf!(backend, q{
+            int pick(int v) {
+                int finallyRuns;
+                switch (v) {
+                    case 0:
+                        try {
+                            if (v == 0)
+                                goto case 1;
+                        } finally {
+                            ++finallyRuns;
+                        }
+                        break;
+                    case 1:
+                        finallyRuns += 10;
+                        break;
+                    default:
+                }
+                return finallyRuns;
+            }
+
+            int result() { return pick(0); }
+        }, "result");
+    }
+}
+
+
+// A `goto default` out of a `try` body runs the `finally`, from an `if` with
+// no `else`.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.gotoDefaultInsideIfRunsFinally." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        21.shouldBeRetOf!(backend, q{
+            int pick(int v) {
+                int finallyRuns;
+                switch (v) {
+                    case 0:
+                        try {
+                            if (v == 0)
+                                goto default;
+                        } finally {
+                            ++finallyRuns;
+                        }
+                        break;
+                    default:
+                        finallyRuns += 20;
+                }
+                return finallyRuns;
+            }
+
+            int result() { return pick(0); }
+        }, "result");
+    }
+}
+
+
+// A `throw` out of a `try` body runs the `finally` before the `catch`, from
+// an `if` with no `else`.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.throwInsideIfRunsFinally." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        11.shouldBeRetOf!(backend, q{
+            int pick(bool c) {
+                int finallyRuns;
+                try {
+                    try {
+                        if (c)
+                            throw new Exception("x");
+                    } finally {
+                        ++finallyRuns;
+                    }
+                } catch (Exception e) {
+                    finallyRuns += 10;
+                }
+                return finallyRuns;
+            }
+
+            int result() { return pick(true); }
+        }, "result");
+    }
+}
+
+
+// The error of a `final switch` that no `case` matches leaves a `try` body
+// through its `finally`, from an `if` with no `else`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE interpreter fails an assertion (rootobject.d:43) on " ~
+        "the statement that raises the switch error"),
+)) {
+    @("tryFinally.switchErrorInsideIfRunsFinally." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        11.shouldBeRetOf!(backend, q{
+            enum E { a, b }
+
+            int pick(int v) {
+                int finallyRuns;
+                try {
+                    try {
+                        if (v >= 0) {
+                            final switch (cast(E) v) {
+                                case E.a: break;
+                                case E.b: break;
+                            }
+                        }
+                    } finally {
+                        ++finallyRuns;
+                    }
+                } catch (Throwable e) {
+                    finallyRuns += 10;
+                }
+                return finallyRuns;
+            }
+
+            int result() { return pick(5); }
+        }, "result");
+    }
+}
+
+
 // The two `finally` bodies of nested `try` statements run innermost
 // first when a `return` leaves both, each exactly once, and the value
 // returned is the one computed before either ran.
@@ -1290,21 +1442,29 @@ static foreach (backend; Matrix!()) {
     @("tryFinally.scopeExitThenReturnThenScopeFailure." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        51.shouldBeRetOf!(backend, q{
-            int result(ref int trace, bool early) {
+        0.shouldBeStatusOf!(backend, q{
+            void boom() { throw new Exception("x"); }
+
+            int result(ref int trace, int mode) {
                 scope(exit) trace += 1;
-                if (early)
+                if (mode == 0)
                     return 5;
                 scope(failure) trace += 10;
+                if (mode == 2)
+                    boom();
                 return 6;
             }
 
-            int check() {
+            int main() {
                 int trace;
-                const returned = result(trace, true);
-                return returned * 10 + trace;
+                if (result(trace, 0) != 5 || trace != 1) return 1;
+                trace = 0;
+                if (result(trace, 1) != 6 || trace != 1) return 2;
+                trace = 0;
+                try { result(trace, 2); return 3; } catch (Exception e) {}
+                return trace == 11 ? 0 : 4;
             }
-        }, "check");
+        });
     }
 }
 
@@ -1396,6 +1556,42 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// A `switch` with `break`s inside the `if` branch of a `finally`, which
+// has no `else`.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.switchInFinallyIfBranch." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        723.shouldBeRetOf!(backend, q{
+            int result(ref int trace, bool early, int k) {
+                try {
+                    if (early)
+                        return 7;
+                } finally {
+                    if (k >= 0) {
+                        switch (k) {
+                            case 0: trace += 1; break;
+                            case 1: trace += 2; break;
+                            default: trace += 4; break;
+                        }
+                        trace += 10;
+                    }
+                }
+                return 0;
+            }
+
+            int check() {
+                int trace;
+                const a = result(trace, true, 0);
+                result(trace, false, 1);
+                result(trace, true, -1);
+                return a * 100 + trace;
+            }
+        }, "check");
+    }
+}
+
+
 // A `scope(exit)` guard runs on a normal return from a function with an
 // `out` contract.
 static foreach (backend; Matrix!()) {
@@ -1475,6 +1671,7 @@ static foreach (backend; Matrix!()) {
                 void f() out { log ~= "O,"; } do {
                     scope(exit) log ~= "E,";
                     log ~= "b,";
+                    return;
                 }
                 f();
                 return log == "b,E,O," ? 0 : 3;
@@ -1527,7 +1724,7 @@ static foreach (backend; Matrix!()) {
 
 // A `finally` runs on a normal return in a function with an `out` contract.
 static foreach (backend; Matrix!()) {
-    @("finally.runsOnReturnWithOutContract." ~ backend.stringof)
+    @("tryFinally.runsOnReturnWithOutContract." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
@@ -1549,7 +1746,7 @@ static foreach (backend; Matrix!()) {
 
 // A local's destructor runs on a normal return in a function with an `out` contract.
 static foreach (backend; Matrix!()) {
-    @("destructor.localRunsOnReturnWithOutContract." ~ backend.stringof)
+    @("scopeGuard.localDestructorRunsOnReturnWithOutContract." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
@@ -1584,41 +1781,6 @@ static foreach (backend; Matrix!()) {
                 return log == "2,1," ? 0 : 3;
             }
         });
-    }
-}
-
-// A virtual method that fails an `assert`: the `AssertError` reaches the
-// caller's `catch`.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "CTFE turns a failing assertion into a compile-time error, so " ~
-        "it cannot be expressed the same way as a runtime throw"),
-)) {
-    @("virtualMethodAssertReachesCatch." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        42.shouldBeRetOf!(backend, q{
-            import core.exception: AssertError;
-
-            class Counter {
-                int value;
-                void bump() {
-                    assert(value >= 0);
-                    value += 1;
-                }
-            }
-
-            int result() {
-                auto counter = new Counter;
-                counter.value = -1;
-                try {
-                    counter.bump();
-                } catch (AssertError) {
-                    return 42;
-                }
-                return 0;
-            }
-        }, "result");
     }
 }
 
