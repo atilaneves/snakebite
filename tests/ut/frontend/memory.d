@@ -126,6 +126,41 @@ unittest {
 }
 
 
+// dmd's line tables are `uint[]` in the arena: two neighbouring line
+// starts read as one word can have the value of an address in the GC
+// heap. `locFileTable` is private to dmd; the test reads it by name. Data
+// that druntime allocated NO_SCAN cannot hold a pointer, so
+// the report does not read it.
+debug
+@("arenaHoldsNoGCPointers.skipsMemoryThatHoldsNoPointers")
+unittest {
+    import location = dmd.location;
+    import std.algorithm.searching: startsWith;
+
+    enum header = "module arenaSkipsMemoryThatHoldsNoPointers;\n";
+    parseSnippet(header ~ "int a;\nint b;\nint c;\nint d;\n");
+
+    {
+        arenaReportLock.lock;
+        scope(exit) arenaReportLock.unlock;
+        uint[] lines;
+        foreach (table; __traits(getMember, location, "locFileTable"))
+            if (table.fileContents.startsWith(header))
+                lines = table.lines;
+        (lines.length >= 4).should == true;
+
+        // Two line starts together are the address of a live GC block.
+        auto block = new ubyte[64];
+        auto word = cast(size_t*) lines.ptr;
+        auto saved = *word;
+        *word = cast(size_t) block.ptr;
+        scope(exit) *word = saved;
+
+        arenaReport.should == "";
+    }
+}
+
+
 // dmd's closure frames keep the address of the stack objects they
 // capture, and the arena never frees them. The report skips a word that
 // was a stack address when the frontend left. The GC heap covering a
