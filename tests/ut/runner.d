@@ -2,6 +2,7 @@ module ut.runner;
 
 
 static import ut.backends.run.main,
+    ut.backends.run.addresses,
     ut.backends.run.arrays,
     ut.backends.run.associative,
     ut.backends.run.classes,
@@ -113,6 +114,7 @@ int run(string[] args) {
 
     const status = args.runTests!(
         "ut.backends.run.main",
+        "ut.backends.run.addresses",
         "ut.backends.run.arrays",
         "ut.backends.run.associative",
         "ut.backends.run.classes",
