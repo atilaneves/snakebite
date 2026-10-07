@@ -41,6 +41,26 @@ extern(C) private void guestHandler(int) nothrow @nogc {
     _exit(42);
 }
 
+private noreturn throwingAction(
+    in GuestFault.Kind, in const(char)[], in size_t, scope GuestFault.Stack,
+) {
+    throw new Exception("a host action that throws");
+}
+
+private final class Doomed {
+    ~this() {
+        GuestFault.report(
+            &throwingAction, GuestFault.Kind.nullDereference, "doomed.d", 7,
+            (scope sink) {});
+    }
+}
+
+private void collectFaultingFinalizer() {
+    foreach (_; 0 .. 64)
+        cast(void) new Doomed;
+    GC.collect;
+}
+
 private void faultInCleanup() {
     scope(exit) load;
     runGuest({ load; });
@@ -133,6 +153,9 @@ int main(string[] args) {
             break;
         case "faultInCleanup":
             runGuest({ faultInCleanup; });
+            break;
+        case "finalizerFaultWithAHostAction":
+            collectFaultingFinalizer;
             break;
         case "sentSignalWhileIgnored":
             runGuest({ raise(SIGSEGV); });

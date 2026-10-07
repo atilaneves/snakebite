@@ -138,7 +138,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 
     private const(Function)* functionOfPc(
         const(imported!"snakebite.backends.bytecode.vm".Instruction)* pc,
-    ) {
+    ) nothrow @nogc {
         import core.atomic: atomicLoad, MemoryOrder;
 
         for (auto function_ = atomicLoad!(MemoryOrder.acq)(_faultFunctions);

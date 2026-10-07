@@ -200,6 +200,7 @@ import snakebite.backends.checkplan:
     BoundsCheck, FailurePlan, hookOf, isUnanalysed, readsVtable;
 import snakebite.backends.calls: ValueCall;
 import snakebite.backends.haltprocess: isHalt;
+import snakebite.backends.guestfault: GuestFault;
 import snakebite.backends.exceptions: CAssertCall;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
@@ -464,6 +465,14 @@ private struct Shared {
         if (adjustment == 0)
             callableDeclarations.insert(address, method);
         return address;
+    }
+}
+
+private struct FaultFrame {
+    GuestFault.Frame frame;
+
+    void walk(scope GuestFault.FrameSink sink) nothrow @nogc {
+        sink(frame);
     }
 }
 
@@ -1031,27 +1040,47 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         const root = evaluator._temporaries.root;
         evaluator._faultLocation = root is null
             ? evaluator._faultFunction.loc : root.loc;
+        evaluator.endProcessInFinalizer(fault);
+    }
+
+    // The collector must not unwind, so a fault in a finalizer is reported
+    // where it happens and not at the outermost entry.
+    extern(D) private void endProcessInFinalizer(
+        HardwareFault fault,
+    ) nothrow @nogc {
+        import std.string: fromStringz;
+
+        const file = fromStringz(_faultLocation.filename);
+        auto frame = faultFrame(file);
+        scope stack = &frame.walk;
+        GuestFault.endProcessInFinalizer(
+            fault.kind, file, _faultLocation.linnum, stack);
     }
 
     extern(D) private noreturn reportHardwareFault(
         HardwareFault fault,
     ) {
         import snakebite.faultsignal: takeFault;
-        import snakebite.backends.guestfault: GuestFault;
         import std.string: fromStringz;
 
         takeFault(fault);
         const file = fromStringz(_faultLocation.filename);
-        const name = *(_faultFunction in _shared.names);
-        scope GuestFault.Stack stack = (scope GuestFault.FrameSink sink) {
-            sink(GuestFault.Frame(name, file, _faultLocation.linnum));
-        };
+        auto frame = faultFrame(file);
+        scope stack = &frame.walk;
         try
             _program.fault(fault.kind, file, _faultLocation.linnum, stack);
         catch (Throwable reported) {
             _fault = reported;
             throw reported;
         }
+    }
+
+    // The one frame that the walk keeps: the function that faulted.
+    extern(D) private auto faultFrame(in const(char)[] file) nothrow @nogc {
+        return FaultFrame(
+            GuestFault.Frame(
+                *(_faultFunction in _shared.names), file,
+                _faultLocation.linnum));
     }
 
     extern(D) private void executeHostToGuest(

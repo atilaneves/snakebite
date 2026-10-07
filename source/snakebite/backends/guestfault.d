@@ -71,28 +71,59 @@ public struct GuestFault {
     // guest runs, and an action that only prints allocates nothing. A fault
     // can be in a destructor that the garbage collector runs, where an
     // allocation is an error.
-    public alias FrameSink = void delegate(in Frame);
-    public alias Stack = void delegate(scope FrameSink);
+    public alias FrameSink = void delegate(in Frame) nothrow @nogc;
+    public alias Stack = void delegate(scope FrameSink) nothrow @nogc;
     public alias Action = noreturn function(
         in Kind kind, in const(char)[] file, in size_t line, scope Stack stack,
     );
 
+    // Every guest fault goes to the host through here, so that a fault in a
+    // finalizer ends the process whatever the action of the host is.
+    public static noreturn report(
+        in Action action, in Kind kind, in const(char)[] file,
+        in size_t line, scope Stack stack,
+    ) {
+        endProcessInFinalizer(kind, file, line, stack);
+        action(kind, file, line, stack);
+    }
+
     public static noreturn throwFault(
         in Kind kind, in const(char)[] file, in size_t line, scope Stack stack,
     ) {
-        const(Frame)[] frames;
+        size_t count, length;
         stack((in frame) {
-            frames ~= Frame(
-                frame.function_.idup, frame.file.idup, frame.line);
+            ++count;
+            length += frame.function_.length + frame.file.length;
+        });
+        auto frames = new Frame[count];
+        auto text = new char[length];
+        size_t index, used;
+        stack((in frame) {
+            frames[index++] = Frame(
+                copied(text, used, frame.function_),
+                copied(text, used, frame.file),
+                frame.line);
         });
         throw new GuestFaultException(kind, file.idup, line, frames);
     }
 
-    public alias Sink = void delegate(in const(char)[]);
+    // A fault in a destructor that the garbage collector runs cannot end one
+    // call: an exception that leaves the collector leaves it broken. Compiled
+    // D dies of the signal there, and so does this. A backend that reaches
+    // its report only after the collector has unwound calls this where the
+    // fault happens.
+    public static void endProcessInFinalizer(
+        in Kind kind, in const(char)[] file, in size_t line, scope Stack stack,
+    ) nothrow @nogc {
+        import core.memory: GC;
+
+        if (GC.inFinalizer)
+            endProcess(kind, file, line, stack);
+    }
 
     // The text of a fault, as pieces for `sink`: the message and then one
     // line for each frame. It makes no allocation of its own.
-    public static void render(
+    public static void render(Sink)(
         in Kind kind, in const(char)[] file, in size_t line,
         scope Stack stack, scope Sink sink,
     ) {
@@ -107,7 +138,7 @@ public struct GuestFault {
         });
     }
 
-    public static void renderHeadline(
+    public static void renderHeadline(Sink)(
         in Kind kind, in const(char)[] file, in size_t line, scope Sink sink,
     ) {
         renderPosition(file, line, sink);
@@ -123,7 +154,7 @@ public struct GuestFault {
     // output that is skipped when another thread holds that stream.
     public static void print(
         in Kind kind, in const(char)[] file, in size_t line, scope Stack stack,
-    ) @trusted {
+    ) @trusted nothrow @nogc {
         flushStandardOutput;
         StandardError buffer;
         render(kind, file, line, stack, &buffer.put);
@@ -134,7 +165,7 @@ public struct GuestFault {
     // the signal with no guest cleanup, and so does this.
     public static noreturn endProcess(
         in Kind kind, in const(char)[] file, in size_t line, scope Stack stack,
-    ) {
+    ) nothrow @nogc {
         import core.stdc.stdlib: _Exit;
 
         print(kind, file, line, stack);
@@ -147,7 +178,7 @@ public struct GuestFault {
 // blocked in a read holds that lock for ever.
 private extern (C) int fflush_unlocked(imported!"core.stdc.stdio".FILE*) nothrow @nogc;
 
-private void flushStandardOutput() @trusted {
+private void flushStandardOutput() @trusted nothrow @nogc {
     import core.stdc.stdio: FILE, stdout;
     import core.sys.posix.stdio: ftrylockfile, funlockfile;
 
@@ -157,8 +188,8 @@ private void flushStandardOutput() @trusted {
     funlockfile(stdout);
 }
 
-private void renderPosition(
-    in const(char)[] file, in size_t line, scope GuestFault.Sink sink,
+private void renderPosition(Sink)(
+    in const(char)[] file, in size_t line, scope Sink sink,
 ) {
     char[20] digits = void;
     size_t start = digits.length;
@@ -178,7 +209,7 @@ private struct StandardError {
     private char[4096] _text = void;
     private size_t _used;
 
-    public void put(in const(char)[] piece) @trusted {
+    public void put(in const(char)[] piece) @trusted nothrow @nogc {
         foreach (character; piece) {
             if (_used == _text.length)
                 flush;
@@ -186,7 +217,7 @@ private struct StandardError {
         }
     }
 
-    public void flush() @trusted {
+    public void flush() @trusted nothrow @nogc {
         import core.sys.posix.unistd: write;
 
         size_t done;
@@ -198,6 +229,16 @@ private struct StandardError {
         }
         _used = 0;
     }
+}
+
+
+private const(char)[] copied(
+    char[] text, ref size_t used, in const(char)[] piece,
+) nothrow @nogc {
+    const start = used;
+    used += piece.length;
+    text[start .. used] = piece[];
+    return text[start .. used];
 }
 
 
@@ -214,9 +255,8 @@ public final class GuestFaultException: Halted {
         import std.array: appender;
 
         auto text = appender!string;
-        GuestFault.renderHeadline(kind, file, line, (in piece) {
-            text ~= piece;
-        });
+        scope sink = (in const(char)[] piece) { text ~= piece; };
+        GuestFault.renderHeadline(kind, file, line, sink);
         super(text[], file, line);
         this.kind = kind;
         this.stack = stack;

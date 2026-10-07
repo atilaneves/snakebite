@@ -89,5 +89,8 @@ or a call through an address that is not mapped (a null pointer included),
 and an integer division that the hardware traps. The kind and the message
 say what the hardware reported. The fault action of the `Program` prints
 the message and the guest call stack (`bin/sb`) or throws a
-`GuestFaultException` (a session).
+`GuestFaultException` (a session). A guest fault in a destructor that the
+garbage collector runs is not recoverable: for each host and each backend,
+the process prints the report and ends with status 1, and no exception goes
+through the collector.
 _Avoid_: crash, trap

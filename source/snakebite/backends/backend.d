@@ -111,7 +111,7 @@ public struct Program {
         in size_t line,
         scope GuestFault.Stack stack,
     ) const {
-        _actions.fault(kind, file, line, stack);
+        GuestFault.report(_actions.fault, kind, file, line, stack);
     }
 
     // The root definition that the linker makes of the declaration
