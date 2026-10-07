@@ -6968,6 +6968,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t destOffset,
         in bool allowExtraArguments,
         scope CallSite delegate(Arg[] args, size_t returnWidth) site,
+        in bool constructsReceiver = false,
     ) {
         import snakebite.backends.calls: arityMismatches;
         import snakebite.ffi.call: CallAdapter;
@@ -6975,8 +6976,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (arityMismatches(type.parameterList, arguments, allowExtraArguments))
             assert(0, "dmd rejects a call with the wrong number of arguments");
 
-        const returnShape = CallAdapter.ofType(type);
-        if (returnShape.isVoid && destOffset != discardResult)
+        const returnShape = CallAdapter.ofType(type, constructsReceiver);
+        if (returnShape.isVoid && !returnShape.resultIsReceiver
+                && destOffset != discardResult)
             assert(0, "a `void` call is only ever evaluated for effect");
 
         auto preparation = CallAdapter.Arguments.of(type, arguments);
@@ -6985,11 +6987,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             args ~= compileBarrierArgument(value);
         });
 
-        _callSites ~= site(args, returnShape.returnFacts.size);
+        _callSites ~= site(args, returnShape.resultIsReceiver
+            ? 0 : returnShape.returnFacts.size);
         emit(&opCall,
             nativeResultPlace(destOffset, returnShape.isVoid,
                 returnShape.returnFacts),
             _callSites.length - 1, 0);
+        // The constructed object's address is the value of a call to a `ref`
+        // constructor, as for a guest one; `initialArgs[0]` is the receiver.
+        if (returnShape.resultIsReceiver && destOffset != discardResult)
+            emit(&opCopy, destOffset, initialArgs[0].callerOffset, size_t.sizeof);
     }
 
     // Builds the FFI call plan for a native callee - one druntime already
@@ -7040,7 +7047,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     deferred(() => cast(const(void)*)
                         preparation.prepare(bytecode._plans, callee)),
                     args, returnWidth);
-            });
+            }, callee.isCtorDeclaration !is null);
     }
 
     // A builtin needs no FFI plan and no symbol lookup, unlike a native

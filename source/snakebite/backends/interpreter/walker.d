@@ -1291,7 +1291,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             });
             // A constructor's ref-qualified ABI result is its receiver.
             // An interpreted body has no return statement that stores it.
-            if (adapter.isVoid && adapter.isReferenceResult)
+            if (adapter.resultIsReceiver)
                 *cast(void**) place = receiver;
         }
 

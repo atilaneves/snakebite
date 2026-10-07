@@ -44,6 +44,7 @@ public struct CallAdapter {
     private bool _referenceResult;
     private size_t _resultSize;
     private bool _isVoid;
+    private bool _resultIsReceiver;
     private TypeFacts _returnFacts;
 
     public struct Argument {
@@ -296,13 +297,13 @@ public struct CallAdapter {
     // As `of`, from a bare `TypeFunction` rather than a declaration - the
     // shape a call through a function pointer or a delegate value returns
     // into, since there is no `FuncDeclaration` at that call site to read
-    // a result adapter from otherwise. `isVoidResult` covers a constructor,
+    // a result adapter from otherwise. `isConstructor` covers a constructor,
     // whose `TypeFunction` is `void` already, and any other callee dmd's
     // own semantics already treat as returning nothing regardless of its
     // declared return type.
     public static CallAdapter ofType(
         TypeFunction type,
-        in bool isVoidResult = false,
+        in bool isConstructor = false,
     ) {
         import dmd.astenums: Tvoid;
         import dmd.typesem: nextOf;
@@ -311,7 +312,8 @@ public struct CallAdapter {
         adapter._referenceResult = type.isRef;
 
         auto returnType = type.nextOf;
-        adapter._isVoid = isVoidResult
+        adapter._resultIsReceiver = isConstructor;
+        adapter._isVoid = isConstructor
             || returnType is null || returnType.ty == Tvoid;
 
         if (adapter._referenceResult) {
@@ -323,6 +325,14 @@ public struct CallAdapter {
         }
 
         return adapter;
+    }
+
+    // Whether the call's value is the receiver the constructor was handed.
+    // Itanium and System V constructors return `void`, so whatever a native
+    // one leaves in the return register is not the receiver; the caller
+    // supplies it instead.
+    public bool resultIsReceiver() const {
+        return _resultIsReceiver;
     }
 
     // Whether the callee returns nothing a caller can read back - `void`,
