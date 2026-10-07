@@ -24,6 +24,11 @@ public FailurePlan assertPlanOf(in Checks checks) @safe pure nothrow @nogc {
     return planFor(checks.assertion, checks);
 }
 
+// `-check=nullderef` tests a dereference, the vtable read of a virtual call
+// and the value of a function pointer or delegate that is called. It tests
+// nothing for a `throw` or for the base of a pointer index: there the
+// program does what compiled D does. A `throw` of null faults in druntime,
+// and `&p[i]` is pointer arithmetic.
 public FailurePlan nullDerefPlanOf(in Checks checks) @safe pure nothrow @nogc {
     return planFor(checks.nullDeref, checks);
 }

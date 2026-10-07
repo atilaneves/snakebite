@@ -3715,3 +3715,21 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// A call of a `final` method on a null class reference faults only if the body reads the object.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: function call through null class reference `null`"),
+)) {
+    @("nullReceiver.finalMethodCallDoesNotFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C { final int f() { return 7; } }
+            void main() {
+                C c;
+                assert(c.f() == 7);
+            }
+        });
+    }
+}

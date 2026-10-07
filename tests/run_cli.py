@@ -1675,6 +1675,30 @@ FAULTS = [
      "int main() { int zero; return divide(1, zero); }\n",
      -signal.SIGFPE, "fatal: integer division by zero or overflow",
      "main.divide"),
+    ("call through a null function pointer",
+     "module main;\n"
+     "int call(int function() callee) {\n"
+     "    int unused = 1;\n"
+     "    return callee();\n"
+     "}\n"
+     "int main() { int function() callee; return call(callee); }\n",
+     -signal.SIGSEGV, "fatal: null pointer dereference", "main.call"),
+    ("call through a null delegate",
+     "module main;\n"
+     "int call(int delegate() callee) {\n"
+     "    int unused = 1;\n"
+     "    return callee();\n"
+     "}\n"
+     "int main() { int delegate() callee; return call(callee); }\n",
+     -signal.SIGSEGV, "fatal: null pointer dereference", "main.call"),
+    ("throw of a null reference",
+     "module main;\n"
+     "void raise(Throwable thrown) {\n"
+     "    int unused = 1;\n"
+     "    throw thrown;\n"
+     "}\n"
+     "int main() { Throwable thrown; raise(thrown); return 0; }\n",
+     -signal.SIGSEGV, "fatal: null pointer dereference", "main.raise"),
 ]
 
 
@@ -1696,6 +1720,25 @@ def test_guest_fault_ends_the_process_with_the_signal(
     assert result.stderr == (
         position if backend == "interpreter" else message
     ) + "\n", output(result)
+
+
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_virtual_call_on_null_receiver_evaluates_arguments_first(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        "module main;\n"
+        "import core.stdc.stdio;\n"
+        "class C { int value(int a) { return a; } }\n"
+        "int side() { fprintf(stderr, \"side\\n\"); return 1; }\n"
+        "int main() { C receiver; return receiver.value(side()); }\n",
+    )
+
+    result = run_sb(f"--backend={backend}", str(tmp_path / "app"), cwd=tmp_path)
+
+    assert result.returncode == -signal.SIGSEGV, output(result)
+    assert result.stderr.startswith("side\n"), output(result)
 
 
 def write_unlisted_c_project(app: Path) -> None:

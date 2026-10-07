@@ -136,3 +136,17 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// `&p[3]` of a null `int*` is address 12 and reads nothing.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: cannot index through null pointer `p`"),
+)) {
+    @("nullPointerAddress.indexConstant." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() { int* p; auto q = &p[3]; assert(cast(size_t) q == 12); }
+        });
+    }
+}
