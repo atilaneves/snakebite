@@ -198,7 +198,8 @@ private final class GuestException: Exception {
 import snakebite.nativelayout: bitfieldAccess;
 import snakebite.nativevalue: BitfieldAccess;
 import snakebite.backends.checkplan:
-    BoundsCheck, FailurePlan, hookOf, isUnanalysed, readsVtable;
+    BoundsCheck, FailurePlan, hookOf, isUnanalysed;
+import snakebite.frontend.dmd.dispatch: classReceiverOf, readsVtable;
 import snakebite.backends.calls: ValueCall;
 import snakebite.backends.haltprocess: isHalt;
 import snakebite.backends.exceptions: CAssertCall;
@@ -558,7 +559,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     import dmd.expression;
     import dmd.expressionsem: toInteger;
     import dmd.func: FuncDeclaration;
-    import dmd.funcsem: isVirtualMethod;
     import dmd.identifier: Identifier;
     import dmd.init: ExpInitializer;
     import dmd.location: Loc;
@@ -1581,8 +1581,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 auto callee = _callSelection.definitionOf(
                     named,
                     (declaration) => _program.linkedFunctionOf(declaration));
-                if (named.isThis !is null && named.isVirtualMethod
-                        && !site.directcall)
+                if (site.readsVtable(named))
                     return;
 
                 enqueue(callee);
@@ -6329,11 +6328,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // delegate carries its context, and a function pointer to a method
         // (`&C.f`) carries none, so that method runs with a null `this`.
         void* classReceiver;
-        auto aggregate = function_.isThis;
-        if (aggregate !is null && aggregate.isClassDeclaration !is null
-                && resolved !is null) {
-            auto dot = expression.e1.isDotVarExp;
-            auto receiver = dot is null ? expression.e1 : dot.e1;
+        auto receiver = resolved is null
+            ? null : classReceiverOf(expression, function_);
+        if (receiver !is null) {
             classReceiver = classReferenceOf(receiver);
             if (classReceiver is null && expression.readsVtable(function_)) {
                 // The vtable read is where the null receiver is met, after
@@ -6347,11 +6344,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 faultOnNullObject(classReceiver);
             }
 
-            // `super.f()` is statically bound. Every other virtual class
-            // call uses the declaration of the object held by the receiver,
-            // not the declaration dmd selected from its static type.
-            if (expression.readsVtable(function_)
-                    && receiver.isSuperExp is null) {
+            if (expression.readsVtable(function_)) {
                 const address = _virtualAddress(function_, classReceiver);
                 const target = _plans.guestTarget(address);
                 if (target.word is null)
