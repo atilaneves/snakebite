@@ -2346,9 +2346,25 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // loop's every test included - so its temporaries are given back as
     // soon as its truth is known.
     private bool conditionHolds(Expression condition) {
+        return truthOfFullExpression(
+            FullExpressionScope.Position.condition, condition);
+    }
+
+    private bool truthOfFullExpression(
+        in FullExpressionScope.Position position,
+        Expression expression,
+    ) {
+        if (FullExpressionScope.readsResultAfterEnd(position, expression)) {
+            void* address;
+            fullExpression(position, expression, {
+                address = addressOf(expression);
+            });
+            return truthOfStored(address, expression.type);
+        }
+
         bool result;
-        fullExpression(FullExpressionScope.Position.condition, condition, {
-            result = truthOf(condition);
+        fullExpression(position, expression, {
+            result = truthOf(expression);
         });
         return result;
     }
@@ -2629,12 +2645,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // any of them, and reads the same shared rule the bytecode compiler
     // does.
     private bool truthOf(Expression expression) {
-        import snakebite.nativelayout: TypeFacts, loadIntegral;
-        import snakebite.nativevalue: loadFloating;
-        import std.conv: text;
-
         auto type = expression.type;
-        const truth = TypeFacts.Truth.of(type);
 
         // Sized to `creal`, the widest condition value `Truth.of` ever
         // answers `supported` for - a plain real, an imaginary, or one
@@ -2645,22 +2656,31 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             "a condition value wider than a `creal` reached the scratch"
                 ~ " buffer");
         evaluate(expression, type, facts, buffer.ptr);
+        return truthOfStored(buffer.ptr, type);
+    }
+
+    private bool truthOfStored(in void* value, Type type) {
+        import snakebite.nativelayout: TypeFacts, loadIntegral;
+        import snakebite.nativevalue: loadFloating;
+
+        const truth = TypeFacts.Truth.of(type);
+        const buffer = cast(const(ubyte)*) value;
 
         if (truth.isFloat) {
-            if (loadFloating(buffer.ptr + truth.offset, truth.size) != 0)
+            if (loadFloating(buffer + truth.offset, truth.size) != 0)
                 return true;
             if (truth.secondOffset == TypeFacts.Truth.noSecondWord)
                 return false;
             return loadFloating(
-                buffer.ptr + truth.secondOffset, truth.size) != 0;
+                buffer + truth.secondOffset, truth.size) != 0;
         }
 
-        if (loadIntegral(buffer.ptr + truth.offset, truth.size, false) != 0)
+        if (loadIntegral(buffer + truth.offset, truth.size, false) != 0)
             return true;
         if (truth.secondOffset == TypeFacts.Truth.noSecondWord)
             return false;
         return loadIntegral(
-            buffer.ptr + truth.secondOffset, size_t.sizeof, false) != 0;
+            buffer + truth.secondOffset, size_t.sizeof, false) != 0;
     }
 
     // A dynamic array's two fields, for a caller that reads them rather
@@ -4325,9 +4345,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             case value:
                 bool right;
                 if (runsRight)
-                    fullExpression(
+                    right = truthOfFullExpression(
                         FullExpressionScope.Position.logicalOperand,
-                        expression.e2, { right = truthOf(expression.e2); });
+                        expression.e2);
                 const answer = runsRight ? right : left;
                 storeIntegral(_place, answer ? 1 : 0, _facts.size);
                 return;

@@ -6145,6 +6145,50 @@ static foreach (backend; Matrix!(
     }
 }
 
+// dmd ends the full expression of an `if` condition that names a field of a
+// temporary by taking the field's address, running the destructor, and only
+// then reading the field.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the field before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.ifConditionReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Z { int v; ~this() { v = 0; } }
+            Z mz(int v) { return Z(v); }
+            void main() {
+                bool taken;
+                if (mz(2).v)
+                    taken = true;
+                assert(!taken);
+            }
+        });
+    }
+}
+
+// The right operand of `&&` is a full expression of its own, and its truth
+// is read after the destructors of its temporaries, as in an `if` condition.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the field before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.logicalOperandReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Z { int v; ~this() { v = 0; } }
+            Z mz(int v) { return Z(v); }
+            void main() {
+                int one = 1;
+                const bool b = one && mz(2).v;
+                assert(!b);
+            }
+        });
+    }
+}
+
 // A `throw` expression nested in a larger expression ends its own full
 // expression: the temporaries of its operand die before the throw starts, so
 // a destructor that throws wins.

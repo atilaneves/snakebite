@@ -73,6 +73,40 @@ public struct FullExpressionScope {
         }
     }
 
+    // Whether the truth of a full expression at the position is read after
+    // the destructors of its temporaries ran, when the expression is an
+    // lvalue (`readsResultAfterEnd` below). The other positions are not
+    // covered.
+    public static bool testsResult(in Position position)
+        @safe @nogc nothrow pure
+    {
+        final switch (position) with (Position) {
+            case condition:
+            case logicalOperand:
+                return true;
+            case expressionStatement:
+            case loopIncrement:
+            case switchError:
+            case withOperand:
+            case returnOperand:
+            case throwOperand:
+            case switchOperand:
+            case assertMessage:
+                return false;
+        }
+    }
+
+    // dmd's glue code (`appendDtors`) ends a full expression whose result
+    // is an lvalue by taking its address, running the destructors and then
+    // reading the result. A backend resolves the address inside the full
+    // expression and reads the value after it ends.
+    public static bool readsResultAfterEnd(
+        in Position position,
+        imported!"dmd.expression".Expression result,
+    ) {
+        return testsResult(position) && isLvalueResult(result);
+    }
+
     public struct CallState {
         private const(void)* root;
         private FullExpressionKind kind;
@@ -150,4 +184,33 @@ public struct FullExpressionScope {
         return _kind == FullExpressionKind.value;
     }
 
+}
+
+// The expression kinds that dmd's glue code turns into a memory reference
+// (`elemIsLvalue`): a field, a dereference or an element, or a comma or
+// conditional expression whose results are such. A bit field is read through
+// a different element, and a call that returns `ref` through a call.
+bool isLvalueResult(imported!"dmd.expression".Expression result) {
+    import dmd.astenums: Taarray;
+    import dmd.typesem: toBasetype;
+
+    if (auto comma = result.isCommaExp)
+        return isLvalueResult(comma.e2);
+
+    if (auto conditional = result.isCondExp)
+        return isLvalueResult(conditional.e1)
+            && isLvalueResult(conditional.e2);
+
+    if (auto field = result.isDotVarExp) {
+        auto variable = field.var.isVarDeclaration;
+        return variable !is null && variable.isBitFieldDeclaration is null;
+    }
+
+    if (result.isPtrExp !is null)
+        return true;
+
+    if (auto element = result.isIndexExp)
+        return element.e1.type.toBasetype.ty != Taarray;
+
+    return false;
 }
