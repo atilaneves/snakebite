@@ -1641,6 +1641,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     override void visit(SwitchStatement statement) {
         import snakebite.nativelayout: TypeFacts;
 
+        if (throwIfStringSwitchInCtfeBlock(statement))
+            return;
+
         auto label = consumeLabel(statement); // auto: const(Identifier) will not implicitly convert back
         auto plan = switchPlan(statement);
         const facts = TypeFacts.of(statement.condition.type);
@@ -2230,7 +2233,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opJump, 0, 0, 0);
 
         _finished = false;
-        compileStatement(statement.ifbody);
+        inCtfeBlock({ compileStatement(statement.ifbody); });
         const bodyFinished = _finished;
 
         size_t endIndex = size_t.max;
@@ -4929,6 +4932,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     protected override void visitUnloweredNew(
         NewExp expression, NewPlan plan,
     ) {
+        if (plan.destination == NewPlan.Destination.lowering)
+            assert(0, "dmd lowers every heap `new` of a class that is not "
+                ~ "a `scope class`, outside a `ctfe` or `-betterC` scope");
+
         prepareNewDestination(expression);
         scope (exit) restoreNew;
 
@@ -5141,6 +5148,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _finished = true;
     }
 
+    extern(D) protected override void visitCtfeBlockError(
+        string message, string file, size_t line,
+    ) {
+        const never = reserveTemp(pointerFacts);
+        emit(&opConstant, never, addConstant(0), size_t.sizeof);
+        _assertSites ~= AssertSite(message, file, line);
+        emit(&opAssert, never, _assertSites.length - 1, size_t.sizeof);
+        _finished = true;
+    }
+
     override void visit(AssignExp expression) {
         compileAssign(expression, _destination);
     }
@@ -5203,6 +5220,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (_destination != discardResult)
             emit(&opLoadIndirect, _destination, arrayOffset, arrayValueSize);
+    }
+
+    protected override void visitUnloweredCat(CatExp expression) {
+        assert(0, "dmd lowers every `~` outside a `-betterC` scope "
+            ~ "(`trySetCatExpLowering`)");
     }
 
     override void visit(PostExp expression) {

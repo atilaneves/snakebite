@@ -10,8 +10,10 @@ import dmd.expression:
     ConstructExp, Expression, IdentityExp, LoweredAssignExp, NewExp, ThrowExp,
     TupleExp;
 import dmd.statement:
-    ExpStatement, IfStatement, ReturnStatement, SwitchErrorStatement,
-    ThrowStatement, WithStatement;
+    ExpStatement, IfStatement, ReturnStatement,
+    SwitchErrorStatement, SwitchStatement, ThrowStatement, WithStatement;
+import dmd.location: Loc;
+import dmd.typesem: isString;
 import snakebite.backends.fullexpression: FullExpressionScope;
 import snakebite.backends.identity: IdentityPlan, identityPlan;
 import snakebite.backends.logical: LogicalPlan, logicalPlan;
@@ -145,6 +147,57 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
 
     protected abstract void visitIf(IfStatement statement, in IfPlan plan);
 
+    // How many `if (__ctfe)` bodies the walk is inside. A callee is not
+    // inside the body that calls it, so a backend that walks callees with
+    // the same visitor resets this at a call.
+    protected uint ctfeBlockDepth;
+
+    // A backend walks the body of an `if (__ctfe)` block through this, so
+    // that the decision below knows where it is.
+    extern(D) protected final void inCtfeBlock(scope void delegate() walk) {
+        ++ctfeBlockDepth;
+        scope (exit)
+            --ctfeBlockDepth;
+
+        walk();
+    }
+
+    // dmd compiles the body of an `if (__ctfe)` block for compile time only
+    // and leaves some constructs in it without the lowering they get
+    // everywhere else. Run-time code gets into that body through a `case`
+    // label. Reaching such a construct there throws an `Error` that the
+    // guest can catch. Returns whether the construct was in such a body, in
+    // which case the backend has thrown and must not compile it.
+    extern(D) protected final bool throwIfUnloweredInCtfeBlock(
+        in string construct, in Loc loc,
+    ) {
+        import std.string: fromStringz;
+
+        if (ctfeBlockDepth == 0)
+            return false;
+
+        visitCtfeBlockError(
+            construct ~ " in the body of an if (__ctfe) block: dmd compiles "
+                ~ "that body for compile time only",
+            loc.filename.fromStringz.idup, loc.linnum);
+        return true;
+    }
+
+    extern(D) protected abstract void visitCtfeBlockError(
+        string message, string file, size_t line,
+    );
+
+    // dmd lowers a `switch` on a string only when it generates code, so the
+    // condition of one in an `if (__ctfe)` body is still a string.
+    protected final bool throwIfStringSwitchInCtfeBlock(
+        SwitchStatement statement,
+    ) {
+        if (!statement.condition.type.isString)
+            return false;
+
+        return throwIfUnloweredInCtfeBlock("string switch", statement.loc);
+    }
+
     protected abstract void visitWithOperand(WithStatement statement);
     protected abstract void visitWithBody(WithStatement statement);
 
@@ -157,13 +210,13 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     protected abstract void visitThrowTransfer(size_t thrown);
 
     // DMD's semantic pass leaves `lowering` null in a scope that needs no
-    // code generation, and dmd's glue cannot compile such an append. A
-    // backend can still compile it: an `if (__ctfe)` block with a `case`
-    // label is dead code at run time but has statements that a jump can
-    // reach. Reaching the append halts the guest.
+    // code generation, and dmd's glue cannot compile such an append. In an
+    // `if (__ctfe)` body that a `case` label reaches, the guest gets an
+    // `Error`; anywhere else it halts.
     final override void visit(CatAssignExp expression) {
         if (expression.lowering is null) {
-            visitHalt;
+            if (!throwIfUnloweredInCtfeBlock("~= append", expression.loc))
+                visitHalt;
             return;
         }
 
@@ -295,8 +348,11 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
             return;
         }
 
+        // dmd sets no lowering on a heap `new` in a scope that needs no code
+        // generation, and, except for a class, also under `-betterC`.
         if (expression.lowering is null) {
-            visitHalt;
+            if (!throwIfUnloweredInCtfeBlock("heap new", expression.loc))
+                visitUnloweredNew(expression, plan);
             return;
         }
 
@@ -416,16 +472,18 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     protected abstract void copyBytes(in size_t width);
 
     // `~` concatenation is always `_d_arraycatnTX`; dmd leaves `lowering`
-    // null only in a scope that needs no code generation, the same case
-    // `CatAssignExp` above halts for.
+    // null under `-betterC` (`trySetCatExpLowering`), where it uses no GC.
     final override void visit(CatExp expression) {
-        if (expression.lowering is null) {
-            visitHalt;
+        if (expression.lowering !is null) {
+            expression.lowering.accept(this);
             return;
         }
 
-        expression.lowering.accept(this);
+        if (!throwIfUnloweredInCtfeBlock("~ concatenation", expression.loc))
+            visitUnloweredCat(expression);
     }
+
+    protected abstract void visitUnloweredCat(CatExp expression);
 }
 
 

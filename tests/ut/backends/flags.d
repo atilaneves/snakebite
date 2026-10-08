@@ -888,3 +888,28 @@ static foreach (backend; Guests) {
         }, Expect.returned));
     }
 }
+
+
+static foreach (backend; Guests) {
+    @("flags.betterC.catInCtfeBlockThrowsError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shouldRun!backend(Row(["-betterC"], q{
+            int f(int x, string a, string b) {
+                switch (x) {
+                    if (__ctfe) {
+                        case 1:
+                            auto s = a ~ b;
+                            return cast(int) s.length;
+                    }
+                    default:
+                        return 0;
+                }
+            }
+            unittest { f(1, "a", "b"); }
+        }, Expect.raised(assertError,
+            "~ concatenation in the body of an if (__ctfe) block: dmd "
+            ~ "compiles that body for compile time only"),
+        Expect.returned));
+    }
+}

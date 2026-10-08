@@ -2936,3 +2936,146 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// What the guest gets when run-time code enters the body of an
+// `if (__ctfe)` block through a `case` label and reaches a construct that
+// dmd left without a lowering: an `Error` it can catch.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd 2.113.0's code generator crashes on a `case` in an "
+            ~ "`if (__ctfe)` block; ldc compiles it and the program "
+            ~ "exits with status 0"),
+    Omit!(Ctfe, Because.inexpressible, "`__ctfe` is true in CTFE"),
+)) {
+    @("heapNewInsideCtfeBlockThrowsError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeStatusOf!(backend, q{
+            int f(int x) {
+                switch (x) {
+                    if (__ctfe) {
+                        case 1:
+                            auto p = new int(3);
+                            return *p;
+                    }
+                    default:
+                        return 0;
+                }
+            }
+            int main() {
+                try
+                    return f(1);
+                catch (Error error)
+                    return error.msg == "heap new in the body of an "
+                        ~ "if (__ctfe) block: dmd compiles that body for "
+                        ~ "compile time only" ? 7 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd 2.113.0's code generator crashes on a `case` in an "
+            ~ "`if (__ctfe)` block; ldc compiles it and the program "
+            ~ "exits with status 0"),
+    Omit!(Ctfe, Because.inexpressible, "`__ctfe` is true in CTFE"),
+)) {
+    @("appendInsideCtfeBlockThrowsError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeStatusOf!(backend, q{
+            int f(int x) {
+                switch (x) {
+                    if (__ctfe) {
+                        case 1:
+                            int[] a;
+                            a ~= 1;
+                            return cast(int) a.length;
+                    }
+                    default:
+                        return 0;
+                }
+            }
+            int main() {
+                try
+                    return f(1);
+                catch (Error)
+                    return 7;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd 2.113.0's code generator crashes on a `case` in an "
+            ~ "`if (__ctfe)` block; ldc compiles it and the program "
+            ~ "exits with status 0"),
+    Omit!(Ctfe, Because.inexpressible, "`__ctfe` is true in CTFE"),
+)) {
+    @("stringSwitchInsideCtfeBlockIsNotCompiledWhenNotEntered." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f(int x, string s) {
+                switch (x) {
+                    if (__ctfe) {
+                        case 1:
+                            switch (s) {
+                                case "a": return 1;
+                                case "b": return 2;
+                                default: return 3;
+                            }
+                    }
+                    default:
+                        return 0;
+                }
+            }
+            int main() {
+                return f(0, "a");
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd 2.113.0's code generator crashes on a `case` in an "
+            ~ "`if (__ctfe)` block; ldc compiles it and the program "
+            ~ "exits with status 0"),
+    Omit!(Ctfe, Because.inexpressible, "`__ctfe` is true in CTFE"),
+)) {
+    @("stringSwitchInsideCtfeBlockThrowsError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeStatusOf!(backend, q{
+            int f(int x, string s) {
+                switch (x) {
+                    if (__ctfe) {
+                        case 1:
+                            switch (s) {
+                                case "a": return 1;
+                                case "b": return 2;
+                                default: return 3;
+                            }
+                    }
+                    default:
+                        return 0;
+                }
+            }
+            int main() {
+                try
+                    return f(1, "b");
+                catch (Error error)
+                    return error.msg == "string switch in the body of an "
+                        ~ "if (__ctfe) block: dmd compiles that body for "
+                        ~ "compile time only" ? 7 : 1;
+            }
+        });
+    }
+}
