@@ -1327,6 +1327,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _pendingLoopLabel = null;
         _controlFlow = ControlFlowState.init;
         _returned = ReturnedLvalue.init;
+        ctfeBlockDepth = 0;
         while (true) {
             body_.accept(this);
             if (!_controlFlow.hasGoto)
@@ -1852,6 +1853,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         private Identifier _pendingLoopLabel;
         private ControlFlowState _controlFlow;
         private ReturnedLvalue _returned;
+        private uint _ctfeBlockDepth;
         private size_t _activationMark;
 
         @disable this();
@@ -1869,6 +1871,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             _pendingLoopLabel = evaluator._pendingLoopLabel;
             _controlFlow = evaluator._controlFlow;
             _returned = evaluator._returned;
+            _ctfeBlockDepth = evaluator.ctfeBlockDepth;
             _activationMark = evaluator._activationAllocations.length;
         }
 
@@ -1883,6 +1886,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             _evaluator._pendingLoopLabel = _pendingLoopLabel;
             _evaluator._controlFlow = _controlFlow;
             _evaluator._returned = _returned;
+            _evaluator.ctfeBlockDepth = _ctfeBlockDepth;
             _evaluator.releaseActivationAllocations(_activationMark);
         }
     }
@@ -2451,6 +2455,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         auto plan = switchPlan(statement);
         if (!_controlFlow.seeking) {
+            if (throwIfStringSwitchInCtfeBlock(statement))
+                return;
+
             import snakebite.nativelayout: loadIntegral;
 
             const operandFacts = factsOf(statement.condition.type);
@@ -2634,7 +2641,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     protected override void visitIf(IfStatement statement, in IfPlan plan) {
         if (_controlFlow.seeking) {
             if (statement.ifbody !is null)
-                statement.ifbody.accept(this);
+                walkIfBody(statement, plan);
             if (_controlFlow.seeking && statement.elsebody !is null)
                 statement.elsebody.accept(this);
             return;
@@ -2642,10 +2649,21 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         const bodyRuns = plan.kind == IfPlan.Kind.condition
             && conditionHolds(statement.condition);
-        auto taken = bodyRuns ? statement.ifbody : statement.elsebody;
+        if (bodyRuns)
+            return walkIfBody(statement, plan);
 
-        if (taken !is null)
-            taken.accept(this);
+        if (statement.elsebody !is null)
+            statement.elsebody.accept(this);
+    }
+
+    private void walkIfBody(IfStatement statement, in IfPlan plan) {
+        if (statement.ifbody is null)
+            return;
+
+        if (plan.kind == IfPlan.Kind.ctfeBlock)
+            inCtfeBlock({ statement.ifbody.accept(this); });
+        else
+            statement.ifbody.accept(this);
     }
 
     override void visit(ForStatement statement) {
@@ -5428,6 +5446,14 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         return (*cast(const(char)[]*) buffer.ptr).idup;
     }
 
+    extern(D) protected override void visitCtfeBlockError(
+        string message, string file, size_t line,
+    ) {
+        import core.exception: AssertError;
+
+        throw GuestException.make(new AssertError(message, file, line));
+    }
+
     // dmd makes one for a `switch` default under `-release` or
     // `-checkaction=halt`, and for `assert(0)` with assertions off.
     protected override void visitHalt() {
@@ -5883,6 +5909,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import core.stdc.string: memcpy;
         import snakebite.nativelayout: storeIntegral;
 
+        if (plan.destination == NewPlan.Destination.lowering
+                || (expression.thisexp !is null
+                    && plan.destination != NewPlan.Destination.placement
+                    && plan.destination != NewPlan.Destination.stack))
+            return visit(cast(Expression) expression);
+
         if (plan.destination == NewPlan.Destination.stack) {
             assert(plan.objectKind == NewPlan.ObjectKind.class_);
             auto classType = expression.newtype.toBasetype.isTypeClass;
@@ -6311,6 +6343,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         return _shared.structLiteralPlans.insert(
             expression, planStructLiteral(expression));
+    }
+
+    protected override void visitUnloweredCat(CatExp expression) {
+        visit(cast(Expression) expression);
     }
 
     // `~=` appending a `dchar` (`CatDcharAssignExp`, `EXP.concatenateDcharAssign`)
