@@ -126,7 +126,7 @@ public struct TypeFacts {
     // see their own doc for why a call that finds nothing to force
     // needs no lock.
     public static TypeFacts of(Type type) {
-        import dmd.astenums: Tarray;
+        import dmd.astenums: Tarray, Tvector;
         import dmd.typesem:
             alignsize, isIntegral, isUnsigned, nextOf, size, toBasetype;
         import snakebite.frontend.compiler: forceIfNeeded;
@@ -149,11 +149,15 @@ public struct TypeFacts {
             );
         }
 
+        // A vector is not an integral value, whatever its element type:
+        // `isIntegral` answers for the element, and a vector is wider than
+        // any integral.
+        const scalar = type.ty != Tvector;
         return TypeFacts(
             type.size,
             type.alignsize,
-            type.isIntegral,
-            type.isUnsigned,
+            scalar && type.isIntegral,
+            scalar && type.isUnsigned,
         );
     }
 
@@ -1125,7 +1129,8 @@ private void storeValue(
     NativeData* nativeData = null,
 ) {
     import core.stdc.string: memcpy, memset;
-    import dmd.astenums: TY, Tarray, Tdelegate, Tpointer, Tsarray;
+    import dmd.astenums: TY, Tarray, Tdelegate, Tpointer, Tsarray, Tvector;
+    import dmd.mtype: Type;
     import dmd.expressionsem: toComplex, toImaginary, toInteger, toReal;
     import dmd.typesem: mutableOf, nextOf, size, toBasetype;
     import snakebite.frontend.compiler: newInFrontend;
@@ -1169,8 +1174,10 @@ private void storeValue(
         }
     }
 
-    if (auto vector = value.isVectorExp) {
-        storeValue(type.isTypeVector.basetype, vector.e1, place,
+    if (type.ty == Tvector) {
+        auto vector = value.isVectorExp;
+        storeValue(type.isTypeVector.basetype,
+            vector is null ? value : vector.e1, place,
             symbolAddress, nativeData);
         return;
     }
@@ -1182,8 +1189,11 @@ private void storeValue(
         if (!wholeArray || value.isStringExp is null) {
             const elementSize = array.next.size;
             auto literal = wholeArray ? value.isArrayLiteralExp : null;
+            // dmd's default initializer of a `void[N]` is the `ubyte` one.
+            auto storedElement = array.next.toBasetype.ty == TY.Tvoid
+                ? Type.tuns8 : array.next;
             foreach (i; 0 .. cast(size_t) array.dim.toInteger)
-                storeValue(array.next, literal is null ? value : literal[i],
+                storeValue(storedElement, literal is null ? value : literal[i],
                     bytes + i * elementSize, symbolAddress, nativeData);
             return;
         }

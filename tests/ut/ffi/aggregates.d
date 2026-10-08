@@ -335,3 +335,133 @@ static foreach (type; smallTypes) {
         }
     }
 }
+
+
+public extern(C) void[8] snakebite_ut_aggregates_void_array_echo(
+    void[8] value,
+) {
+    return value;
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call an external function without source"),
+)) {
+    @("voidStaticArray.echoedByValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(backend, q{
+            pragma(mangle, "snakebite_ut_aggregates_void_array_echo")
+            extern(C) void[8] nativeEcho(void[8]);
+            int answer() {
+                void[8] value = void;
+                auto bytes = cast(ubyte*) value.ptr;
+                foreach (i; 0 .. 8)
+                    bytes[i] = cast(ubyte) i;
+                auto echoed = nativeEcho(value);
+                return (cast(ubyte*) echoed.ptr)[7];
+            }
+        }, "answer");
+    }
+}
+
+
+public extern(C) real[1] snakebite_ut_aggregates_real_array_echo(
+    real[1] value,
+) {
+    return value;
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call an external function without source"),
+)) {
+    @("realStaticArray.echoedByValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(backend, q{
+            pragma(mangle, "snakebite_ut_aggregates_real_array_echo")
+            extern(C) real[1] nativeEcho(real[1]);
+            int answer() {
+                real[1] value = [7.0L];
+                return cast(int) nativeEcho(value)[0];
+            }
+        }, "answer");
+    }
+}
+
+
+private struct ZeroLengthField {
+    int[0] empty;
+    int value;
+}
+
+
+public extern(C) ZeroLengthField snakebite_ut_aggregates_zero_length_echo(
+    ZeroLengthField value,
+) {
+    return value;
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call an external function without source"),
+)) {
+    @("zeroLengthArrayField.echoedByValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(backend, q{
+            struct ZeroLengthField {
+                int[0] empty;
+                int value;
+            }
+            pragma(mangle, "snakebite_ut_aggregates_zero_length_echo")
+            extern(C) ZeroLengthField nativeEcho(ZeroLengthField);
+            int answer() {
+                ZeroLengthField value;
+                value.value = 7;
+                return nativeEcho(value).value;
+            }
+        }, "answer");
+    }
+}
+
+
+private struct NoreturnField {
+    noreturn never;
+    int value;
+}
+
+
+public extern(C) NoreturnField snakebite_ut_aggregates_noreturn_echo(
+    NoreturnField value,
+) {
+    return value;
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call an external function without source"),
+)) {
+    @("noreturnField.echoedByValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(backend, q{
+            struct NoreturnField {
+                noreturn never;
+                int value;
+            }
+            pragma(mangle, "snakebite_ut_aggregates_noreturn_echo")
+            extern(C) NoreturnField nativeEcho(NoreturnField);
+            int answer() {
+                NoreturnField value;
+                value.value = 7;
+                return nativeEcho(value).value;
+            }
+        }, "answer");
+    }
+}

@@ -272,7 +272,7 @@ private bool isX87OnlyAggregate(imported!"dmd.mtype".Type unbasedType) {
         return false;
 
     const bytes = type.size;
-    if (bytes == 0 || bytes > 16)
+    if (bytes == 0 || bytes > 16 || isDmdIntegerPairArray(type))
         return false;
 
     ArgumentPlan.ValueClass[2] classes = [
@@ -305,6 +305,24 @@ private bool isNonTriviallyCopyable(imported!"dmd.mtype".Type type) {
     return aggregate !is null && !aggregate.sym.isPOD();
 }
 
+// Whether `type` is a static array of one `real`, with no struct around
+// it. dmd's own code generator passes and returns it in two INTEGER
+// eightbytes, where its own `toArgTypes_sysv_x64` and ldc say X87 (verified
+// by disassembling `extern(C) real[1] f(real[1] x)` built by dmd and by ldc2;
+// a `struct { real[1] a; }` is X87 on both).
+private bool isDmdIntegerPairArray(imported!"dmd.mtype".Type unbasedType) {
+    version (DigitalMars) {
+        import dmd.astenums: Tfloat80, Timaginary80, Tsarray;
+        import dmd.typesem: baseElemOf, size, toBasetype;
+
+        auto type = unbasedType.toBasetype;
+        const element = type.baseElemOf.toBasetype.ty;
+        return type.ty == Tsarray && type.size == 16
+            && (element == Tfloat80 || element == Timaginary80);
+    } else
+        return false;
+}
+
 private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
     import dmd.astenums:
         Taarray, Tclass, Tfloat32, Tfloat64, Tfloat80, Tnull, Tpointer,
@@ -324,6 +342,13 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
         return plan;
 
     plan.stackAlignment = type.alignsize;
+
+    if (isDmdIntegerPairArray(type)) {
+        plan.registers[0] = Register(Register.Kind.integer, 8);
+        plan.registers[1] = Register(Register.Kind.integer, 8);
+        plan.count = 2;
+        return plan;
+    }
 
     if (isNonTriviallyCopyable(type)) {
         plan.registers[0] = Register(Register.Kind.pointer, 8);
@@ -497,8 +522,6 @@ private void classify(
     auto type = unbasedType.toBasetype;
 
     const bytes = type.size;
-    if (bytes == 0)
-        return;
     if (offset + bytes > 16) {
         memory = true;
         return;
@@ -538,7 +561,9 @@ private void classify(
         merge(classes, offset + 8, 8,
             ArgumentPlan.ValueClass.integer, memory);
         return;
-    case Tbool, Tchar, Twchar, Tdchar, Tint8, Tuns8, Tint16, Tuns16,
+    // `void` only occurs as the element of a `void[N]`, which both host
+    // compilers classify as `ubyte[N]`.
+    case Tvoid, Tbool, Tchar, Twchar, Tdchar, Tint8, Tuns8, Tint16, Tuns16,
         Tint32, Tuns32, Tint64, Tuns64, Tint128, Tuns128:
         merge(classes, offset, bytes, ArgumentPlan.ValueClass.integer,
             memory);
@@ -547,6 +572,13 @@ private void classify(
         auto array = type.isTypeSArray;
         assert(array !is null);
         const count = array.dim.toInteger;
+        // dmd's `toArgTypes_sysv_x64` and ldc both make an aggregate that
+        // holds a zero-length array MEMORY: it is an aggregate with no
+        // fields.
+        if (count == 0) {
+            memory = true;
+            return;
+        }
         foreach (i; 0 .. count)
             classify(type.nextOf, offset + i * type.nextOf.size,
                 classes, memory);
@@ -603,9 +635,12 @@ private void classify(
     case Tcomplex80:
         memory = true;
         return;
-    case Tvoid, Tfunction, Treference, Tident, Tnone, Terror, Tenum,
+    // Like dmd, ignore a member that cannot hold a value.
+    case Tnoreturn:
+        return;
+    case Tfunction, Treference, Tident, Tnone, Terror, Tenum,
         Tinstance, Ttypeof, Ttuple, Tslice, Treturn, Ttraits, Tmixin,
-        Ttag, Tnoreturn:
+        Ttag:
         assert(0);
     }
 }
