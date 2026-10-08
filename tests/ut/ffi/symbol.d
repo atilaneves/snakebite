@@ -11,7 +11,7 @@ import snakebite.dependencyimage: Optimise;
 import snakebite.backends.backend: Program;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
-import snakebite.frontend.imagesource: imageSource;
+import snakebite.frontend.imagesource: imageInputs, imageSource;
 import ut.backends;
 import std.file: setTimes, timeLastModified;
 import std.path: buildPath;
@@ -184,6 +184,22 @@ unittest {
 }
 
 
+// A source file that the program imports but does not own is an input of the
+// built image, so that changing it invalidates the cache.
+@("image.inputsNameImportedFiles")
+unittest {
+    // Program requires a mutable AST.
+    auto module_ = parseSnippet(q{
+        import core.thread.osthread: Thread;
+        Thread allocate() { return null; }
+    });
+    import std.algorithm: any, endsWith;
+
+    imageInputs(Program([module_]))
+        .any!(path => path.endsWith("osthread.d")).should == true;
+}
+
+
 // `store`'s first instantiation nests a root-owned type (`Thing`) two
 // levels deep: inside `Bucket`'s own template arguments, inside a delegate
 // parameter type. A walk that only follows pointer, array, and
@@ -341,18 +357,10 @@ unittest {
 }
 
 
-// The image source of a program with one root module. The walk of its AST
-// reads frontend state that the parse of another test, running beside this
-// one, can reset, so it parses and walks under the frontend lock.
+// The image source of a program with one root module.
 private string snippetImageSource(in string code) {
-    import snakebite.frontend.compiler: withCompilerLock;
-
-    string source;
-    withCompilerLock({
-        // Program requires a mutable AST.
-        source = imageSource(Program([parseSnippet(code)]));
-    });
-    return source;
+    // Program requires a mutable AST.
+    return imageSource(Program([parseSnippet(code)]));
 }
 
 
