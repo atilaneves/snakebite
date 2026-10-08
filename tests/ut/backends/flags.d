@@ -865,6 +865,31 @@ unittest {
 }
 
 
+// `-betterC` sets no lowering on a `~`, and dmd's glue never emits it. A
+// `case` in an `if (__ctfe)` block makes that block a jump target at run
+// time, so a backend still compiles the `~` in it.
+static foreach (backend; Guests) {
+    @("flags.betterC.catInCtfeBlockWithCase." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shouldRun!backend(Row(["-betterC"], q{
+            int f(int x, string a, string b) {
+                switch (x) {
+                    if (__ctfe) {
+                        case 1:
+                            auto s = a ~ b;
+                            return cast(int) s.length;
+                    }
+                    default:
+                        return 0;
+                }
+            }
+            unittest { assert(f(0, "a", "b") == 0); }
+        }, Expect.returned));
+    }
+}
+
+
 // Equal-valued enum members need only one case. DMD statementsem leaves the
 // default absent when it checks those members with assertions off in @system
 // code. An unmatched value then exits the switch, as native s2ir specifies.
@@ -890,6 +915,36 @@ static foreach (backend; Guests) {
                     throw new Exception("wrong case");
             }
         }, Expect.returned));
+    }
+}
+
+
+static foreach (backend; Guests) {
+    @("flags.betterC.catInCtfeBlockThrowsError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        foreach (flags; [
+            ["-betterC"],
+            ["-betterC", "-checkaction=halt"],
+            ["-betterC", "-release", "-check=assert=off"],
+        ])
+        shouldRun!backend(Row(flags, q{
+            int f(int x, string a, string b) {
+                switch (x) {
+                    if (__ctfe) {
+                        case 1:
+                            auto s = a ~ b;
+                            return cast(int) s.length;
+                    }
+                    default:
+                        return 0;
+                }
+            }
+            unittest { f(1, "a", "b"); }
+        }, Expect.raised(assertError,
+            "~ concatenation in the body of an if (__ctfe) block: dmd "
+            ~ "compiles that body for compile time only"),
+        Expect.returned));
     }
 }
 

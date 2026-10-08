@@ -8,6 +8,7 @@ import object: TypeInfo_Class;
 import snakebite.backends.argumentflow: Shape;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
+import snakebite.backends.ifplan: IfPlan;
 import snakebite.backends.logical: LogicalPlan;
 import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
 import snakebite.backends.switchplan:
@@ -1631,8 +1632,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileEffect(statement.exp);
     }
 
-    override void visit(IfStatement statement) {
-        compileIf(statement);
+    protected override void visitIf(IfStatement statement, in IfPlan plan) {
+        compileIf(statement, plan);
     }
 
     override void visit(ForStatement statement) {
@@ -1662,6 +1663,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // compiler's `Instruction` stream supports one.
     override void visit(SwitchStatement statement) {
         import snakebite.nativelayout: TypeFacts;
+
+        if (throwIfStringSwitchInCtfeBlock(statement))
+            return;
 
         auto label = consumeLabel(statement); // auto: const(Identifier) will not implicitly convert back
         auto plan = switchPlan(statement);
@@ -2208,18 +2212,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // never run, the same way an untaken `if` skips them at run time in
     // the interpreter. Finished (see `_finished`'s own doc) only when
     // there is an `else` and both branches are.
-    private void compileIf(IfStatement statement) {
-        // dmd's own glue (`s2ir.d`) never emits the true body of an
-        // `if (__ctfe) { ... }` block: `Scope.ctfeBlock` is set only for
-        // this exact shape, and its only effect is to leave statements
-        // in the body unlowered (e.g. a `.length` assign keeps no
-        // `_d_arraysetlengthT` call) because dmd's CTFE engine interprets
-        // the body directly instead. At run time the `if` never enters the
-        // body, but a `case` or `default` label in it is still a target
-        // for the `switch` that holds it, so such a body is compiled
-        // behind a jump. dmd rejects a `goto` to any other label in it.
-        if (statement.isIfCtfeBlock) {
-            if (statement.ifbody !is null && statement.ifbody.comeFrom)
+    private void compileIf(IfStatement statement, in IfPlan plan) {
+        if (plan.kind == IfPlan.Kind.ctfeBlock) {
+            if (plan.bodyHasLabels)
                 return compileCtfeBlockWithLabels(statement);
 
             if (statement.elsebody !is null)
@@ -2268,7 +2263,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opJump, 0, 0, 0);
 
         _finished = false;
-        compileStatement(statement.ifbody);
+        inCtfeBlock({ compileStatement(statement.ifbody); });
         const bodyFinished = _finished;
 
         size_t endIndex = size_t.max;
@@ -4005,7 +4000,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ": no `visit` override, and not in `UnreachableNodes`"));
     }
 
-    override void visit(DeclarationExp expression) {
+    protected override void visitDeclaration(DeclarationExp expression) {
         if (_destination != discardResult && _expressions.active())
             return compileDeclaration(expression);
         assert(_destination == discardResult,
@@ -5200,7 +5195,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _finished = true;
     }
 
-    override void visit(AssignExp expression) {
+    extern(D) protected override void visitCtfeBlockError(
+        string message, string file, size_t line,
+    ) {
+        const never = reserveTemp(pointerFacts);
+        emit(&opConstant, never, addConstant(0), size_t.sizeof);
+        _assertSites ~= AssertSite(message, file, line);
+        emit(&opAssert, never, _assertSites.length - 1, size_t.sizeof);
+        _finished = true;
+    }
+
+    protected override void visitUnloweredAssign(AssignExp expression) {
         compileAssign(expression, _destination);
     }
 

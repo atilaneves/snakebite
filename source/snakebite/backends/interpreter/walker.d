@@ -205,6 +205,7 @@ import snakebite.backends.haltprocess: isHalt;
 import snakebite.backends.exceptions: CAssertCall;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
+import snakebite.backends.ifplan: IfPlan;
 import snakebite.backends.logical: LogicalPlan;
 import snakebite.backends.comparison: ComparisonPlan;
 import snakebite.backends.controlflow: ControlFlowState,
@@ -1326,6 +1327,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _pendingLoopLabel = null;
         _controlFlow = ControlFlowState.init;
         _returned = ReturnedLvalue.init;
+        ctfeBlockDepth = 0;
         while (true) {
             body_.accept(this);
             if (!_controlFlow.hasGoto)
@@ -1861,6 +1863,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         private Identifier _pendingLoopLabel;
         private ControlFlowState _controlFlow;
         private ReturnedLvalue _returned;
+        private uint _ctfeBlockDepth;
         private size_t _activationMark;
 
         @disable this();
@@ -1878,6 +1881,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             _pendingLoopLabel = evaluator._pendingLoopLabel;
             _controlFlow = evaluator._controlFlow;
             _returned = evaluator._returned;
+            _ctfeBlockDepth = evaluator.ctfeBlockDepth;
             _activationMark = evaluator._activationAllocations.length;
         }
 
@@ -1892,6 +1896,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             _evaluator._pendingLoopLabel = _pendingLoopLabel;
             _evaluator._controlFlow = _controlFlow;
             _evaluator._returned = _returned;
+            _evaluator.ctfeBlockDepth = _ctfeBlockDepth;
             _evaluator.releaseActivationAllocations(_activationMark);
         }
     }
@@ -2460,6 +2465,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         auto plan = switchPlan(statement);
         if (!_controlFlow.seeking) {
+            if (throwIfStringSwitchInCtfeBlock(statement))
+                return;
+
             import snakebite.nativelayout: loadIntegral;
 
             const operandFacts = factsOf(statement.condition.type);
@@ -2645,21 +2653,32 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     // Only the branch that runs is walked: the other one never executes,
     // so nothing in it is ever evaluated, not even to be discarded.
-    override void visit(IfStatement statement) {
+    protected override void visitIf(IfStatement statement, in IfPlan plan) {
         if (_controlFlow.seeking) {
             if (statement.ifbody !is null)
-                statement.ifbody.accept(this);
+                walkIfBody(statement, plan);
             if (_controlFlow.seeking && statement.elsebody !is null)
                 statement.elsebody.accept(this);
             return;
         }
 
-        auto taken = conditionHolds(statement.condition)
-            ? statement.ifbody
-            : statement.elsebody;
+        const bodyRuns = plan.kind == IfPlan.Kind.condition
+            && conditionHolds(statement.condition);
+        if (bodyRuns)
+            return walkIfBody(statement, plan);
 
-        if (taken !is null)
-            taken.accept(this);
+        if (statement.elsebody !is null)
+            statement.elsebody.accept(this);
+    }
+
+    private void walkIfBody(IfStatement statement, in IfPlan plan) {
+        if (statement.ifbody is null)
+            return;
+
+        if (plan.kind == IfPlan.Kind.ctfeBlock)
+            inCtfeBlock({ statement.ifbody.accept(this); });
+        else
+            statement.ifbody.accept(this);
     }
 
     override void visit(ForStatement statement) {
@@ -3331,7 +3350,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     // Runs a local's initializer into the frame slot `layoutOf` already
     // gave it. `long sum = 0;` is a `DeclarationExp` here.
-    override void visit(DeclarationExp expression) {
+    protected override void visitDeclaration(DeclarationExp expression) {
         import snakebite.backends.declaration: forEachRuntimeVariable;
 
         forEachRuntimeVariable(expression.declaration, (variable) {
@@ -3404,7 +3423,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // assignment feeding a wider destination in a cast of its own, which is
     // a node this interpreter refuses rather than one it reaches this code
     // with.
-    override void visit(AssignExp expression) {
+    protected override void visitUnloweredAssign(AssignExp expression) {
         assign(expression);
     }
 
@@ -5440,6 +5459,14 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             });
 
         return (*cast(const(char)[]*) buffer.ptr).idup;
+    }
+
+    extern(D) protected override void visitCtfeBlockError(
+        string message, string file, size_t line,
+    ) {
+        import core.exception: AssertError;
+
+        throw GuestException.make(new AssertError(message, file, line));
     }
 
     // dmd makes one for a `switch` default under `-release` or
