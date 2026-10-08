@@ -14,8 +14,7 @@ See ai/CODING.md.
 
 ## Git worktrees
 
-Do work in a git worktree unless instructed otherwise. Do not use
-`/tmp`, and do not use a directory in this repo.
+Do work in a git worktree in .worktrees unless instructed otherwise.
 
 ## Testing
 
