@@ -3426,6 +3426,42 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
             return atomicLoad(cast(int*) pointer);
         }
         """, 42, NATIVE_AND_FILE_BACKENDS),
+    # `atomicLoad` has inline assembler, so only its native instance runs.
+    # Its body only moves a pointer, a class reference or an enum's base
+    # value, so the image compiles it over a stand-in for the root type.
+    "atomic_load_root_pointer": snippet_shape("""
+        import core.atomic: atomicLoad;
+        struct Pair { int first, second; }
+        shared Pair pair = Pair(3, 4);
+        int answer() {
+            shared(Pair*) pointer = &pair;
+            return atomicLoad(pointer).first * 10 + atomicLoad(pointer).second;
+        }
+        """, 34, NATIVE_AND_FILE_BACKENDS),
+    "atomic_load_root_class": snippet_shape("""
+        import core.atomic: atomicLoad;
+        class Node { int value; this(int value) { this.value = value; } }
+        int answer() {
+            shared Node node = cast(shared) new Node(7);
+            return atomicLoad(node).value;
+        }
+        """, 7, NATIVE_AND_FILE_BACKENDS),
+    "atomic_store_root_enum": snippet_shape("""
+        import core.atomic: atomicLoad, atomicStore;
+        enum Color : ubyte { red, green }
+        int answer() {
+            shared Color color = Color.red;
+            atomicStore(color, Color.green);
+            return atomicLoad(color) == Color.green ? 1 : 0;
+        }
+        """, 1, NATIVE_AND_FILE_BACKENDS),
+    # An instance without inline assembler keeps its guest body: the template
+    # decides from the enum at compile time, which its base type would change.
+    "root_enum_text": snippet_shape("""
+        import std.conv: text;
+        enum Color : ubyte { red, green }
+        int answer() { return text(Color.green) == "green" ? 1 : 0; }
+        """, 1, NATIVE_AND_FILE_BACKENDS),
 }
 
 
