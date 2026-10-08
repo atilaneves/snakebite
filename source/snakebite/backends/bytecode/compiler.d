@@ -6570,6 +6570,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileCall(CallExp expression, in size_t destOffset) {
         import snakebite.frontend.dmd.functions: unresolvedCalleeOf;
 
+        CallSelection.eachResolvedCalleePrefix(expression, &compileEffect);
         auto callee = expression.f;
         if (callee is null)
             callee = unresolvedCalleeOf(expression);
@@ -6601,7 +6602,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             callee, expression.arguments, expression.loc,
             expressionText(expression), hasThis,
             () => receiverOffsetOf(expression, callee, destOffset),
-            destOffset);
+            destOffset, expression);
     }
 
     // The address of `callee`'s own hidden `this` argument for `expression`
@@ -6730,6 +6731,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         bool hasThis,
         size_t delegate() thisOffsetOf,
         in size_t destOffset,
+        Expression site = null,
     ) {
         import dmd.astenums: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
@@ -6742,7 +6744,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         constructTemporary(callee,
             { emit(&opTemporarySuspend, 0, receiverOffset, 0); },
             { compileResolvedCallBody(callee, arguments, loc, exprText,
-                hasThis, receiverOffset, destOffset); },
+                hasThis, receiverOffset, destOffset, site); },
             { emit(&opTemporaryArm, 0, receiverOffset, 0); });
     }
 
@@ -6754,6 +6756,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         bool hasThis,
         size_t receiverOffset,
         size_t destOffset,
+        Expression site = null,
     ) {
         import dmd.astenums: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
@@ -6762,10 +6765,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto type = typeFunctionOf(callee);
 
         const hasNativeSymbol = _bytecode.hasNativeSymbol(callee);
-        const decision = _bytecode._callSelection.decisionOf(
+        const decision = CallSelection.atCallSite(_bytecode._callSelection.decisionOf(
             callee, &_bytecode.isGuestFunction, hasNativeSymbol,
             _bytecode.hasIndependentNativeSymbol(callee),
-        );
+        ), site);
         final switch (decision.route) with (CallSelection.Route) {
         case native:
             Arg[] initialArgs;

@@ -40,6 +40,11 @@ an error when the resolver finds no host address.
 
 A declaration that the code generator inlines takes the builtin route
 when a wrapper takes its full signature.
+This is also a call-site decision. DMD's `e2ir.callfunc` substitutes an
+intrinsic only when its callee is `OPvar`. A resolved call with a comma
+prefix, such as `(make(), bswap)(value)`, evaluates that prefix before its
+arguments and keeps the native route. A declaration-only cache does not
+prove that this call can use a wrapper or become a constant.
 `source/snakebite/backends/builtins.d` looks up a compiled wrapper by the
 declaration's own identifier (`function_.ident`, the same identifier
 dmd's own code generator keys on), parameter types, and result type.
@@ -85,11 +90,29 @@ operand width, while its emitted byte swap (`cdbswap`) uses the result
 width. Thus `ushort bswap(uint)` gives `0x3412` for literal `0x12345678u`
 and `0x7856` for a volatile load of that value in a default native build.
 The shared call-site rule folds constant byte swaps before argument
-execution. Its constant operands can include nested swaps or population
-counts, integral casts, scalar arithmetic, and a selected constant
-conditional branch. Scalar folding uses DMD's constant operations. The
-runtime wrapper keeps the result-width rule. No CTFE evaluator or guest
-runtime value is used to decide whether an operand is constant.
+execution. Its proof follows the scalar producer families that survive
+frontend optimization and become constant backend operations: numeric
+literals, nested swaps or population counts, `fabs`, `toPrec`, scalar casts,
+arithmetic, comparisons, comma expressions, and constant selection.
+Logical and conditional selection examines only the executed branch.
+Each inner result keeps its own declared width. For `fabs`, DMD's constant
+folder computes at operand width, then labels that constant with the
+declared result type. Its defined scalar proof therefore requires the
+same operand and result widths. A wider result can read old compiler
+child-pointer bytes from the constant storage. This is an instance of the
+arbitrary-signature, undefined-result limit above, not a scalar value to
+reproduce. Such a declaration keeps its runtime instruction wrapper.
+
+Scalar folding uses DMD's allocation-free `constfold` operations and
+private `UnionExp` values. It does not optimize the guest AST, expand
+declarations, or change frontend global flags. Faulting integer division
+stays on the execution path. Like `evalu8`, a floating operation that
+raises an exception, including an inexact conversion, stays on that path.
+The proof uses default rounding and restores the host thread's complete
+floating-point environment. Other floating intrinsic operations remain
+instructions in `evalu8`, not constant producers. The runtime wrapper
+keeps the result-width rule. No CTFE evaluator or guest runtime value is
+used to decide whether an operand is constant.
 
 A test whose `Native` arm is compiled by LDC cannot use `Native` as the
 oracle for such a function. It asserts the values of a native dmd run and

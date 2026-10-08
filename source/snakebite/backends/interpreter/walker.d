@@ -1272,12 +1272,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // or a builtin, regardless of which module owns it - never a
         // guest one, since there is no guest body to walk.
         auto body_ = function_.fbody;
-        const decision = _callSelection.decisionOf(
+        const decision = CallSelection.atCallSite(_callSelection.decisionOf(
             function_,
             (callee) => _program.isInterpreted(callee),
             hasNativeSymbol(function_),
             hasIndependentNativeSymbol(function_),
-        );
+        ), callSite);
         if (!callbackEntry) final switch (decision.route)
             with (CallSelection.Route) {
         case native:
@@ -1682,12 +1682,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         prepareContext(outerFunctionOf(callee));
         if (callee.isThis is null && layout.hiddenThis.variable !is null)
             calleeContextPlanOf(site, callee);
-        const decision = _callSelection.decisionOf(
+        const decision = CallSelection.atCallSite(_callSelection.decisionOf(
             callee,
             (function_) => _program.isInterpreted(function_),
             hasNativeSymbol(callee),
             hasIndependentNativeSymbol(callee),
-        );
+        ), site);
 
         if (decision.route == CallSelection.Route.guest
                 && typeFunctionOf(callee).parameterList.varargs
@@ -6303,6 +6303,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.frontend.dmd.functions: unresolvedCalleeOf;
         import std.conv: text;
 
+        CallSelection.eachResolvedCalleePrefix(expression,
+            (prefix) { runForEffect(prefix); });
         auto resolved = expression.f is null
             ? unresolvedCalleeOf(expression) : expression.f;
         auto callee = resolved is null

@@ -4216,6 +4216,18 @@ static foreach (backend; Matrix!(
             ulong bswap(ulong);
             byte _popcnt(short);
 
+            import core.math: fabs;
+            int calls;
+            struct S {
+                pragma(mangle, "abs") extern(C) static int bswap(int);
+            }
+            S make() { ++calls; return S(); }
+            int argument() {
+                assert(calls == 2);
+                ++calls;
+                return 0x12345678;
+            }
+
             void main() {
                 assert(bsf(8u) == 3);
                 assert(bsr(0x100000000UL) == 32);
@@ -4228,6 +4240,18 @@ static foreach (backend; Matrix!(
                 assert(bswap(-cast(uint) bswap(0x12345678u)) == 0xffff);
                 assert(bswap(cast(uint) _popcnt(cast(short) -1)) == 0);
                 assert(bswap(bswap(0x12345678u) ? 0x12345678u : 0u) == 0x3412);
+                assert(bswap(cast(uint)
+                    (bswap(0x12345678u) && bswap(0x12345678u))) == 0);
+                assert(bswap(cast(uint)
+                    (bswap(0x12345678u) || bswap(0x12345678u))) == 0);
+                assert(bswap(cast(uint) (bswap(0u) && ++calls)) == 0);
+                assert(calls == 0);
+                assert(bswap(cast(uint) fabs(-4660.0)) == 0);
+                assert(bswap(cast(uint) (fabs(-4660.0) / 3.0)) == 0x1106);
+                assert(make().bswap(0x12345678) == 0x12345678);
+                assert(calls == 1);
+                assert(make().bswap(argument()) == 0x12345678);
+                assert(calls == 3);
                 // dmd folds a constant byte swap at operand width, but
                 // its emitted instruction uses the result width.
                 uint input = 0x12345678u;

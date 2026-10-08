@@ -50,6 +50,40 @@ public struct CallSelection {
         public size_t destinationParameter = size_t.max;
     }
 
+    // e2ir substitutes an intrinsic only for an OPvar callee, not an
+    // expression that computes that callee (notably a comma prefix).
+    public static bool hasIntrinsicCallee(
+        imported!"dmd.expression".CallExp expression,
+    ) {
+        auto callee = expression.e1;
+        if (auto variable = callee.isVarExp)
+            return variable.var.isFuncDeclaration !is null;
+        return false;
+    }
+
+    public static Decision atCallSite(
+        in Decision decision, imported!"dmd.expression".Expression site,
+    ) {
+        auto call = site is null ? null : site.isCallExp;
+        return call !is null && !hasIntrinsicCallee(call)
+                && (decision.route == Route.builtin || decision.route == Route.vaStart)
+            ? Decision(Route.native) : decision;
+    }
+
+    public static void eachResolvedCalleePrefix(
+        imported!"dmd.expression".CallExp expression,
+        scope void delegate(imported!"dmd.expression".Expression) execute,
+    ) {
+        // Indirect calls evaluate their complete callee value themselves.
+        if (expression.f is null)
+            return;
+        auto callee = expression.e1;
+        while (auto comma = callee.isCommaExp) {
+            execute(comma.e1);
+            callee = comma.e2;
+        }
+    }
+
     // Read without a lock by every thread that runs guest code
     // (ADR-0006); a decision is built once per function.
     private SharedTable!(FuncDeclaration, Decision) _decisions;
@@ -325,28 +359,38 @@ public struct CallSelection {
         imported!"dmd.expression".CallExp expression, out ulong value,
     ) {
         import core.bitop: popcnt;
+        import core.stdc.fenv;
         import snakebite.backends.builtins: entryOf;
         import snakebite.backends.dmdintrinsics: swapTo;
         import snakebite.nativelayout: TypeFacts;
 
         auto function_ = expression.f;
         if (function_ is null || function_.fbody !is null
+                || !hasIntrinsicCallee(expression)
                 || expression.arguments is null
                 || expression.arguments.length != 1)
             return false;
         const identifier = function_.ident.toString;
-        if (identifier != "bswap" && identifier != "_popcnt")
+        if ((identifier != "bswap" && identifier != "_popcnt")
+                || !isInlinedByCodeGenerator(function_))
             return false;
         const name = identifier == "bswap" ? "bswap" : "_popcnt";
         auto operand = (*expression.arguments)[0];
-        ulong bits;
-        if (!integerConstantOf(operand, bits)
-                || !isInlinedByCodeGenerator(function_))
-            return false;
         ParameterType[1] parameters;
         ParameterType result;
         if (!signatureOf(function_, parameters[], result)
                 || entryOf(name, parameters[], result) is null)
+            return false;
+
+        // Native compilation uses its own FP environment. A proof must
+        // neither depend on nor change the guest's rounding or flags.
+        fenv_t environment;
+        if (feholdexcept(&environment) != 0)
+            return false;
+        scope(exit) fesetenv(&environment);
+        fesetround(FE_TONEAREST);
+        ulong bits;
+        if (!integerConstantOf(operand, bits))
             return false;
 
         switch (TypeFacts.of(operand.type).size) {
@@ -367,124 +411,215 @@ public struct CallSelection {
     private static bool integerConstantOf(
         imported!"dmd.expression".Expression expression, out ulong value,
     ) {
-        import dmd.expression: IntegerExp;
         import dmd.expressionsem: toInteger;
-        import snakebite.nativelayout: TypeFacts;
-
-        if (auto integer = expression.isIntegerExp) {
-            value = integer.toInteger;
-            return true;
-        }
-        if (auto cast_ = expression.isCastExp) {
-            if (cast_.lowering !is null
-                    || !TypeFacts.of(cast_.type).isIntegral
-                    || !integerConstantOf(cast_.e1, value))
-                return false;
-        } else if (auto call = expression.isCallExp) {
-            if (!foldedIntegerIntrinsic(call, value))
-                return false;
-        } else if (auto conditional = expression.isCondExp) {
-            ulong condition;
-            if (!integerConstantOf(conditional.econd, condition)
-                    || !integerConstantOf(condition != 0
-                        ? conditional.e1 : conditional.e2, value))
-                return false;
-        } else if (auto binary = expression.isBinExp) {
-            if (!binaryIntegerConstantOf(binary, value))
-                return false;
-        } else if (auto unary = expression.isUnaExp) {
-            if (!unaryIntegerConstantOf(unary, value))
-                return false;
-        } else
-            return false;
-
-        // A folded inner call is stored at its result width before a
-        // surrounding cast or intrinsic uses that value as its operand.
-        scope constant = new IntegerExp(expression.loc, value, expression.type);
-        value = constant.toInteger;
-        return true;
-    }
-
-    private static bool unaryIntegerConstantOf(
-        imported!"dmd.expression".UnaExp expression, out ulong value,
-    ) {
-        import dmd.constfold: Com, Neg, Not;
         import dmd.ctfeexpr: UnionExp;
-        import dmd.expression: IntegerExp;
-        import dmd.expressionsem: toInteger;
-        import dmd.tokens: EXP;
-        import snakebite.nativelayout: TypeFacts;
-
-        if (!TypeFacts.of(expression.type).isIntegral
-                || !integerConstantOf(expression.e1, value))
+        UnionExp constant;
+        if (!scalarConstantOf(expression, constant)
+                || constant.exp.isIntegerExp is null)
             return false;
-        scope operand = new IntegerExp(
-            expression.e1.loc, value, expression.e1.type);
-        UnionExp folded;
-        switch (expression.op) with (EXP) {
-            case negate: folded = Neg(expression.type, operand); break;
-            case tilde: folded = Com(expression.type, operand); break;
-            case not: folded = Not(expression.type, operand); break;
-            default: return false;
-        }
-        value = folded.exp.toInteger;
+        value = constant.exp.toInteger;
         return true;
     }
 
-    // The frontend folds literal arithmetic, but arithmetic around a
-    // code-generator intrinsic remains in the AST. Use DMD's scalar
-    // constant operations after folding its operands, not guest execution.
-    private static bool binaryIntegerConstantOf(
-        imported!"dmd.expression".BinExp expression, out ulong value,
+    // evalu8's scalar producers, after e2ir's intrinsic substitution:
+    // numeric leaves, arithmetic, comparisons, conversions and selection.
+    // Use DMD's allocation-free constant operations on private UnionExps;
+    // optimize() also expands declarations and allocates frontend objects.
+    private static bool scalarConstantOf(
+        imported!"dmd.expression".Expression expression,
+        out imported!"dmd.ctfeexpr".UnionExp constant,
     ) {
         import dmd.constfold;
-        import dmd.ctfeexpr: UnionExp;
-        import dmd.expression: IntegerExp;
-        import dmd.expressionsem: toInteger;
+        import dmd.ctfeexpr: UnionExp, emplaceExp;
+        import dmd.expression: IntegerExp, RealExp;
+        import dmd.expressionsem: toBool, toInteger;
+        import dmd.typesem: toBasetype, isIntegral, isReal, isUnsigned, size;
         import dmd.tokens: EXP;
-        import snakebite.nativelayout: TypeFacts;
+        import core.stdc.fenv;
 
-        if (!TypeFacts.of(expression.type).isIntegral)
+        auto type = expression.type.toBasetype;
+        if (!type.isIntegral && !type.isReal)
             return false;
-        ulong left, right;
-        if (!integerConstantOf(expression.e1, left)
-                || !integerConstantOf(expression.e2, right))
-            return false;
-        scope e1 = new IntegerExp(expression.e1.loc, left, expression.e1.type);
-        scope e2 = new IntegerExp(expression.e2.loc, right, expression.e2.type);
-        if (expression.op == EXP.div || expression.op == EXP.mod) {
-            // Faulting arithmetic must remain execution, not a frontend
-            // diagnostic emitted while an unexecuted call is selected.
-            const facts = TypeFacts.of(expression.type);
-            const minimum = facts.size == 8 ? long.min : int.min;
-            if (right == 0 || (!facts.isUnsigned && cast(long) left == minimum
-                    && cast(long) right == -1))
+        if (expression.isIntegerExp !is null || expression.isRealExp !is null) {
+            emplaceExp(&constant, expression);
+            normalizeScalar(constant, expression.type);
+            // Literal storage happens before evalu8 clears exception flags.
+            feclearexcept(FE_ALL_EXCEPT);
+            return true;
+        } else if (auto call = expression.isCallExp) {
+            ulong value;
+            if (foldedIntegerIntrinsic(call, value)) {
+                emplaceExp!IntegerExp(&constant, call.loc, value, call.type);
+            } else if (!foldedFloatingIntrinsic(call, constant))
                 return false;
+        } else if (auto conditional = expression.isCondExp) {
+            UnionExp condition;
+            if (!scalarConstantOf(conditional.econd, condition))
+                return false;
+            const truth = condition.exp.toBool.get;
+            if (fetestexcept(FE_ALL_EXCEPT)
+                    || !scalarConstantOf(truth
+                        ? conditional.e1 : conditional.e2, constant))
+                return false;
+        } else if (auto binary = expression.isBinExp) {
+            UnionExp left, right;
+            if (!scalarConstantOf(binary.e1, left))
+                return false;
+            if (binary.isLogicalExp !is null) {
+                const truth = left.exp.toBool.get;
+                if (fetestexcept(FE_ALL_EXCEPT))
+                    return false;
+                if (truth == (binary.op == EXP.orOr)) {
+                    emplaceExp!IntegerExp(&constant, binary.loc, truth, binary.type);
+                    return true;
+                }
+            }
+            if (!scalarConstantOf(binary.e2, right))
+                return false;
+            if ((binary.op == EXP.div || binary.op == EXP.mod)
+                    && type.isIntegral) {
+                const numerator = left.exp.toInteger;
+                const denominator = right.exp.toInteger;
+                const minimum = type.size == 8 ? long.min : int.min;
+                // Do not diagnose a fault while selecting an unexecuted call.
+                if (denominator == 0 || (!type.isUnsigned && numerator == minimum
+                        && denominator == -1))
+                    return false;
+            }
+            auto e1 = left.exp;
+            auto e2 = right.exp;
+            const loc = expression.loc;
+            auto resultType = expression.type;
+            feclearexcept(FE_ALL_EXCEPT);
+            switch (expression.op) with (EXP) {
+                case add: constant = Add(loc, resultType, e1, e2); break;
+                case min: constant = Min(loc, resultType, e1, e2); break;
+                case mul: constant = Mul(loc, resultType, e1, e2); break;
+                case div: constant = Div(loc, resultType, e1, e2); break;
+                case mod: constant = Mod(loc, resultType, e1, e2); break;
+                case leftShift: constant = Shl(loc, resultType, e1, e2); break;
+                case rightShift: constant = Shr(loc, resultType, e1, e2); break;
+                case unsignedRightShift: constant = Ushr(loc, resultType, e1, e2); break;
+                case and: constant = And(loc, resultType, e1, e2); break;
+                case or: constant = Or(loc, resultType, e1, e2); break;
+                case xor: constant = Xor(loc, resultType, e1, e2); break;
+                case equal, notEqual:
+                    constant = Equal(expression.op, loc, resultType, e1, e2); break;
+                case identity, notIdentity:
+                    constant = Identity(expression.op, loc, resultType, e1, e2); break;
+                case lessThan, lessOrEqual, greaterThan, greaterOrEqual:
+                    constant = Cmp(expression.op, loc, resultType, e1, e2); break;
+                case andAnd, orOr:
+                    emplaceExp!IntegerExp(&constant, loc, e2.toBool.get, resultType);
+                    break;
+                case comma: constant = right; break;
+                // Assignments, memory access, and library calls (PowExp)
+                // are not scalar backend constant operations.
+                default: return false;
+            }
+        } else if (auto unary = expression.isUnaExp) {
+            UnionExp operand;
+            if (!scalarConstantOf(unary.e1, operand))
+                return false;
+            feclearexcept(FE_ALL_EXCEPT);
+            if (auto cast_ = unary.isCastExp) {
+                if (cast_.lowering !is null)
+                    return false;
+                constant = Cast(unary.loc, unary.type, cast_.to, operand.exp);
+            } else switch (unary.op) with (EXP) {
+                case negate: constant = Neg(unary.type, operand.exp); break;
+                case tilde: constant = Com(unary.type, operand.exp); break;
+                case not: constant = Not(unary.type, operand.exp); break;
+                default: return false;
+            }
+        } else
+            return false;
+        if (constant.exp.isIntegerExp is null && constant.exp.isRealExp is null)
+            return false;
+        normalizeScalar(constant, expression.type);
+        return fetestexcept(FE_ALL_EXCEPT) == 0;
+    }
+
+    private static void normalizeScalar(
+        ref imported!"dmd.ctfeexpr".UnionExp constant,
+        imported!"dmd.mtype".Type type,
+    ) {
+        import core.volatile: volatileLoad;
+        import dmd.backend.cdef: Vconst;
+        import dmd.expressionsem: toInteger, toReal;
+        import dmd.astenums: TY;
+        import dmd.typesem: toBasetype;
+
+        // Inner producers must be stored at their own width before use.
+        constant.exp.type = type;
+        if (auto integer = constant.exp.isIntegerExp) {
+            integer.value = integer.toInteger;
+            return;
         }
-        UnionExp folded;
-        const loc = expression.loc;
-        auto resultType = expression.type;
-        switch (expression.op) with (EXP) {
-            case add: folded = Add(loc, resultType, e1, e2); break;
-            case min: folded = Min(loc, resultType, e1, e2); break;
-            case mul: folded = Mul(loc, resultType, e1, e2); break;
-            case div: folded = Div(loc, resultType, e1, e2); break;
-            case mod: folded = Mod(loc, resultType, e1, e2); break;
-            case leftShift: folded = Shl(loc, resultType, e1, e2); break;
-            case rightShift: folded = Shr(loc, resultType, e1, e2); break;
-            case unsignedRightShift: folded = Ushr(loc, resultType, e1, e2); break;
-            case and: folded = And(loc, resultType, e1, e2); break;
-            case or: folded = Or(loc, resultType, e1, e2); break;
-            case xor: folded = Xor(loc, resultType, e1, e2); break;
-            case equal, notEqual:
-                folded = Equal(expression.op, loc, resultType, e1, e2); break;
-            case identity, notIdentity:
-                folded = Identity(expression.op, loc, resultType, e1, e2); break;
-            case lessThan, lessOrEqual, greaterThan, greaterOrEqual:
-                folded = Cmp(expression.op, loc, resultType, e1, e2); break;
-            default: return false;
+        const base = type.toBasetype;
+        auto floating = constant.exp.isRealExp;
+        if (base.ty == TY.Tfloat32 || base.ty == TY.Tfloat64) {
+            // An immediate cast followed by widening can keep excess x87
+            // precision. Force the same memory stores as DMD's backend.
+            Vconst stored;
+            stored.Vdouble = cast(double) floating.toReal;
+            stored.Vullong = volatileLoad(&stored.Vullong);
+            if (base.ty == TY.Tfloat32) {
+                stored.Vfloat = cast(float) stored.Vdouble;
+                stored.Vuns = volatileLoad(&stored.Vuns);
+                floating.value = stored.Vfloat;
+            } else
+                floating.value = stored.Vdouble;
         }
-        value = folded.exp.toInteger;
+    }
+
+    private static bool foldedFloatingIntrinsic(
+        imported!"dmd.expression".CallExp expression,
+        out imported!"dmd.ctfeexpr".UnionExp constant,
+    ) {
+        import dmd.expression: RealExp;
+        import dmd.ctfeexpr: UnionExp, emplaceExp;
+        import dmd.expressionsem: toReal;
+        import dmd.root.ctfloat: CTFloat;
+        import core.stdc.fenv;
+        import snakebite.backends.builtins: entryOf;
+
+        // e2ir replaces toPrec with conversions, and evalu8 folds OPabs.
+        // The other floating intrinsic ops remain instructions.
+        auto function_ = expression.f;
+        if (function_ is null || function_.fbody !is null
+                || !hasIntrinsicCallee(expression)
+                || !isInlinedByCodeGenerator(function_)
+                || expression.arguments is null
+                || expression.arguments.length != 1)
+            return false;
+        const identifier = function_.ident.toString;
+        if (identifier != "fabs" && identifier != "toPrec")
+            return false;
+        const name = identifier == "fabs" ? "fabs" : "toPrec";
+        ParameterType[1] parameters;
+        ParameterType result;
+        if (!signatureOf(function_, parameters[], result)
+                || entryOf(name, parameters[], result) is null)
+            return false;
+        // OPabs writes at operand width, then paints the result type.
+        // A wider result can read the old elem's child-pointer bytes; that
+        // is not a defined scalar constant. Keep the instruction route.
+        if (name == "fabs" && parameters[0] != result)
+            return false;
+        UnionExp operand;
+        if (!scalarConstantOf((*expression.arguments)[0], operand)
+                || operand.exp.isRealExp is null)
+            return false;
+        feclearexcept(FE_ALL_EXCEPT);
+        if (name == "toPrec") {
+            constant = operand;
+            // e2ir's real -> float conversion goes through double.
+            normalizeScalar(constant, expression.type);
+            return fetestexcept(FE_ALL_EXCEPT) == 0;
+        }
+        emplaceExp!RealExp(&constant, expression.loc,
+            CTFloat.fabs(operand.exp.toReal), expression.type);
         return true;
     }
 
