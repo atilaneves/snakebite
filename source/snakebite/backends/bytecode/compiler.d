@@ -4000,7 +4000,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ": no `visit` override, and not in `UnreachableNodes`"));
     }
 
-    override void visit(DeclarationExp expression) {
+    protected override void visitDeclaration(DeclarationExp expression) {
         if (_destination != discardResult && _expressions.active())
             return compileDeclaration(expression);
         assert(_destination == discardResult,
@@ -5205,7 +5205,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _finished = true;
     }
 
-    override void visit(AssignExp expression) {
+    protected override void visitUnloweredAssign(AssignExp expression) {
         compileAssign(expression, _destination);
     }
 

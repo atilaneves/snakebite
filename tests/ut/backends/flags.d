@@ -923,7 +923,12 @@ static foreach (backend; Guests) {
     @("flags.betterC.catInCtfeBlockThrowsError." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        shouldRun!backend(Row(["-betterC"], q{
+        foreach (flags; [
+            ["-betterC"],
+            ["-betterC", "-checkaction=halt"],
+            ["-betterC", "-release", "-check=assert=off"],
+        ])
+        shouldRun!backend(Row(flags, q{
             int f(int x, string a, string b) {
                 switch (x) {
                     if (__ctfe) {

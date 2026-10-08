@@ -3351,7 +3351,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     // Runs a local's initializer into the frame slot `layoutOf` already
     // gave it. `long sum = 0;` is a `DeclarationExp` here.
-    override void visit(DeclarationExp expression) {
+    protected override void visitDeclaration(DeclarationExp expression) {
         import snakebite.backends.declaration: forEachRuntimeVariable;
 
         forEachRuntimeVariable(expression.declaration, (variable) {
@@ -3424,7 +3424,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // assignment feeding a wider destination in a cast of its own, which is
     // a node this interpreter refuses rather than one it reaches this code
     // with.
-    override void visit(AssignExp expression) {
+    protected override void visitUnloweredAssign(AssignExp expression) {
         assign(expression);
     }
 

@@ -4,10 +4,11 @@ module snakebite.backends.loweringvisitor;
 private:
 
 import dmd.expression:
-    ArrayLiteralExp, AssocArrayLiteralExp, CastExp, CatAssignExp, CatExp,
+    ArrayLiteralExp, AssignExp, AssocArrayLiteralExp, CastExp, CatAssignExp, CatExp,
     CmpExp, EqualExp, HaltExp, LogicalExp,
     CatElemAssignExp, CatDcharAssignExp,
-    ConstructExp, Expression, IdentityExp, LoweredAssignExp, NewExp, ThrowExp,
+    ConstructExp, DeclarationExp, Expression, IdentityExp, LoweredAssignExp,
+    NewExp, ThrowExp,
     TupleExp;
 import dmd.statement:
     ExpStatement, IfStatement, ReturnStatement,
@@ -325,10 +326,43 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
             return;
         }
 
+        if (ctfeBlockDepth != 0 && needsArrayCastHook(expression)
+                && throwIfUnloweredInCtfeBlock("array cast", expression.loc))
+            return;
+
         visitUnloweredCast(expression);
     }
 
+    // expressionSemantic replaces these casts with object.__ArrayCast only
+    // in a code-generation scope. Raw slice resizing would skip its check.
+    private static bool needsArrayCastHook(CastExp expression) {
+        import dmd.astenums: Tarray;
+        import dmd.typesem: nextOf, size, toBasetype;
+
+        auto source = expression.e1.type.toBasetype; // DMD needs mutable Type.
+        auto target = expression.type.toBasetype; // DMD needs mutable Type.
+        if (source.ty != Tarray || target.ty != Tarray
+                || expression.e1.isArrayLiteralExp !is null)
+            return false;
+
+        const sourceSize = source.nextOf.size;
+        const targetSize = target.nextOf.size;
+        return sourceSize != targetSize
+            && (targetSize == 0 || sourceSize % targetSize != 0);
+    }
+
     protected abstract void visitUnloweredCast(CastExp expression);
+
+    final override void visit(AssignExp expression) {
+        if (expression.e1.isArrayLengthExp !is null
+                && throwIfUnloweredInCtfeBlock(
+                    "array length assignment", expression.loc))
+            return;
+
+        visitUnloweredAssign(expression);
+    }
+
+    protected abstract void visitUnloweredAssign(AssignExp expression);
 
     // DMD lowers, for instance, dynamic-array length assignment to a native
     // druntime call so allocation, prefix preservation, and the array
@@ -346,7 +380,74 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
             return;
         }
 
+        if (throwIfArrayConstructionInCtfeBlock(expression))
+            return;
+
         visitUnloweredConstruct(expression);
+    }
+
+    // A declaration can read only the initializer's RHS. Keep this check
+    // before that shortcut as well as on direct construction expressions.
+    final override void visit(DeclarationExp expression) {
+        import snakebite.backends.declaration: forEachRuntimeVariable;
+
+        bool threw;
+        if (ctfeBlockDepth != 0)
+            forEachRuntimeVariable(expression.declaration, (variable) {
+                if (threw || variable.isDataseg || variable._init is null)
+                    return;
+                if (auto initializer = variable._init.isExpInitializer)
+                    if (auto construct = initializer.exp.isConstructExp)
+                        threw = throwIfArrayConstructionInCtfeBlock(construct);
+            });
+        if (!threw)
+            visitDeclaration(expression);
+    }
+
+    protected abstract void visitDeclaration(DeclarationExp expression);
+
+    private bool throwIfArrayConstructionInCtfeBlock(ConstructExp expression) {
+        return ctfeBlockDepth != 0 && expression.lowering is null
+            && needsArrayConstructionHook(expression)
+            && throwIfUnloweredInCtfeBlock("array construction", expression.loc);
+    }
+
+    // Match expressionSemantic's _d_arrayctor/_d_arraysetctor selection,
+    // including the forms which move elements and need no hook.
+    private static bool needsArrayConstructionHook(ConstructExp expression) {
+        import dmd.astenums: Tarray, Tsarray;
+        import dmd.expressionsem: isLvalue;
+        import dmd.typesem: baseElemOf, equivalent, nextOf, toBasetype;
+
+        auto target = expression.e1.type.toBasetype; // DMD needs mutable Type.
+        if (target.ty != Tsarray && target.ty != Tarray)
+            return false;
+
+        auto element = target.nextOf; // DMD type methods require mutable Type.
+        const structure = element.baseElemOf.isTypeStruct;
+        if (structure is null || (!structure.sym.postblit
+                && !structure.sym.hasCopyCtor && !structure.sym.dtor))
+            return false;
+        if (target.ty != Tsarray && expression.e1.isSliceExp is null)
+            return false;
+        if (auto variable = expression.e1.isVarExp)
+            if (variable.var.isVarDeclaration.isReference)
+                return false;
+
+        auto rhs = expression.e2;
+        auto source = rhs.type.toBasetype;
+        auto originalSource = source; // DMD needs mutable Type.
+        if (source.ty == Tarray)
+            if (auto cast_ = rhs.isCastExp)
+                if (cast_.e1.type.toBasetype.ty == Tsarray) {
+                    rhs = cast_.e1;
+                    source = rhs.type.toBasetype;
+                }
+
+        const arrayCopy = ((source.ty == Tarray && rhs.isArrayLiteralExp is null)
+                || (source.ty == Tsarray && rhs.isLvalue))
+            && element.equivalent(originalSource.nextOf);
+        return arrayCopy || element.equivalent(originalSource);
     }
 
     protected abstract void visitUnloweredConstruct(ConstructExp expression);
