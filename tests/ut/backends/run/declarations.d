@@ -1064,7 +1064,7 @@ static foreach (backend; Matrix!(
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE crashes on a vector variable"),
+        "dmd rejects reading a static vector variable at compile time"),
 )) {
     @("gsharedVectorWithInitialiserHoldsItsLanes." ~ backend.stringof)
     @Tags(backend.stringof)

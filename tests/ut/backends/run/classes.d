@@ -3737,7 +3737,7 @@ static foreach (backend; Matrix!(
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE crashes on a vector field of a class"),
+        "dmd's CTFE dies with a null pointer dereference on a vector field of a class"),
 )) {
     @("classWithIntegerVectorFieldIsDefaultInitialised." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -3760,7 +3760,7 @@ static foreach (backend; Matrix!(
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE crashes on a vector field of a class"),
+        "dmd rejects reading `holder.lanes.array` at compile time"),
 )) {
     @("classVectorFieldWithInitialiserHoldsItsLanes." ~ backend.stringof)
     @Tags(backend.stringof)
