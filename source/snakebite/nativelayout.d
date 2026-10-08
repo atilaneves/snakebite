@@ -636,7 +636,7 @@ public struct NativeData {
             scope (failure) _compileTimeValues.remove(value.value);
             for (auto declaration = value.originalClass;
                     declaration !is null; declaration = declaration.baseClass) {
-                size_t writtenEnd;
+                size_t writtenBitEnd;
                 foreach (field; declaration.fields) {
                     const index = value.findFieldIndexByName(field);
                     assert(index >= 0);
@@ -644,7 +644,7 @@ public struct NativeData {
                     auto element = (*value.value.elements)[index];
                     if (element is null)
                         continue;
-                    if (!fieldImageIncludes(field, writtenEnd))
+                    if (!fieldImageIncludes(field, writtenBitEnd))
                         continue;
                     if (field.isBitFieldDeclaration !is null) {
                         const access = bitfieldAccess(field);
@@ -954,11 +954,11 @@ public struct NativeData {
         import dmd.expressionsem: getConstInitializer;
         import snakebite.frontend.compiler: newInFrontend;
 
-        size_t writtenEnd;
+        size_t writtenBitEnd;
         foreach (field; declaration.fields) {
             if (field._init !is null && field._init.isVoidInitializer)
                 continue;
-            if (!fieldImageIncludes(field, writtenEnd))
+            if (!fieldImageIncludes(field, writtenBitEnd))
                 continue;
 
             const bytes = field._init is null
@@ -982,21 +982,20 @@ public struct NativeData {
 }
 
 // Like dmd's `membersToDt`, the first present union member owns its bytes.
-// Packed fields share bytes, but do not occupy their full declared type.
+// Packed siblings can share bytes, but not the bits of a selected member.
 private bool fieldImageIncludes(
     imported!"dmd.declaration".VarDeclaration field,
-    ref size_t writtenEnd,
+    ref size_t writtenBitEnd,
 ) {
     import dmd.typesem: size;
 
     const bitfield = field.isBitFieldDeclaration;
-    if (bitfield is null && field.offset < writtenEnd)
+    const start = field.offset * 8 + (bitfield is null ? 0 : bitfield.bitOffset);
+    if (start < writtenBitEnd)
         return false;
-    const end = bitfield is null
-        ? field.offset + field.type.size
-        : field.offset + (bitfield.bitOffset + bitfield.fieldWidth + 7) / 8;
-    if (end > writtenEnd)
-        writtenEnd = end;
+    writtenBitEnd = start + (bitfield is null
+        ? field.type.size * 8
+        : bitfield.fieldWidth);
     return true;
 }
 
@@ -1314,12 +1313,12 @@ private void storeValue(
 
     if (auto literal = value.isStructLiteralExp) {
         memset(place, 0, facts.size);
-        size_t writtenEnd;
+        size_t writtenBitEnd;
         foreach (i, element; *literal.elements) {
             if (element is null)
                 continue;
             auto field = literal.sd.fields[i];
-            if (!fieldImageIncludes(field, writtenEnd))
+            if (!fieldImageIncludes(field, writtenBitEnd))
                 continue;
             if (field.isBitFieldDeclaration !is null) {
                 const access = bitfieldAccess(field);

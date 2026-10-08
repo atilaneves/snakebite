@@ -5768,14 +5768,15 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// A direct anonymous union keeps the default of its first member.
+// A direct anonymous union keeps the default of its first member, even
+// when a later alternative is a bit field.
 static foreach (backend; Matrix!()) {
     @("classDefaultWithAnonymousUnion." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
             class C {
-                union { int i = 42; float f; }
+                union { int i = 42; float f; uint b : 3; }
                 int tag = 7;
             }
             void main() {
