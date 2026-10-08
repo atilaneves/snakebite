@@ -1325,6 +1325,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _function = function_;
         _pendingLoopLabel = null;
         _controlFlow = ControlFlowState.init;
+        _returned = ReturnedLvalue.init;
         while (true) {
             body_.accept(this);
             if (!_controlFlow.hasGoto)
@@ -1849,6 +1850,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         private FuncDeclaration _function;
         private Identifier _pendingLoopLabel;
         private ControlFlowState _controlFlow;
+        private ReturnedLvalue _returned;
         private size_t _activationMark;
 
         @disable this();
@@ -1865,6 +1867,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             _function = evaluator._function;
             _pendingLoopLabel = evaluator._pendingLoopLabel;
             _controlFlow = evaluator._controlFlow;
+            _returned = evaluator._returned;
             _activationMark = evaluator._activationAllocations.length;
         }
 
@@ -1878,6 +1881,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             _evaluator._function = _function;
             _evaluator._pendingLoopLabel = _pendingLoopLabel;
             _evaluator._controlFlow = _controlFlow;
+            _evaluator._returned = _returned;
             _evaluator.releaseActivationAllocations(_activationMark);
         }
     }
@@ -2302,7 +2306,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         void evaluateValue() {
             if (readsAfterEnd) {
                 _returned = ReturnedLvalue(
-                    true, addressOf(FullExpressionScope.lvalueOf(statement.exp)),
+                    addressOf(FullExpressionScope.lvalueOf(statement.exp)),
                     _place, _facts.size, _facts.alignment);
                 return;
             }
@@ -2332,7 +2336,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // The address of a returned lvalue, which the transfer reads after the
     // destructors of the operand ran.
     private struct ReturnedLvalue {
-        bool pending;
         const(void)* address;
         void* place;
         size_t size;
@@ -2353,6 +2356,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         Expression root,
         scope void delegate() evaluate,
     ) {
+        scope (failure)
+            if (position == FullExpressionScope.Position.returnOperand)
+                _returned = ReturnedLvalue.init;
         _temporaries.withExpression(position, root, evaluate);
     }
 
@@ -2362,7 +2368,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (_controlFlow.seeking)
             return;
 
-        if (_returned.pending) {
+        if (_returned.size != 0) {
             auto returned = _returned;
             _returned = ReturnedLvalue.init;
             // The read runs in a full expression of its own so that a
@@ -3554,8 +3560,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             CondExp expression,
             scope void* delegate(Expression) resolve,
         ) {
-            return resolve(evaluator.truthOf(expression.econd)
-                ? expression.e1 : expression.e2);
+            return resolve(FullExpressionScope.lvalueOf(
+                evaluator.truthOf(expression.econd)
+                    ? expression.e1 : expression.e2));
         }
 
         public void* storageStructLiteral(StructLiteralExp expression) {
@@ -5476,7 +5483,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             "dmd rejects `throw` of anything but a class object");
 
         if (readsAfterEnd)
-            return cast(size_t) addressOf(FullExpressionScope.lvalueOf(operand));
+            return cast(size_t) addressOf(
+                FullExpressionScope.lvalueOf(operand));
 
         const facts = factsOf(operand.type);
         align(size_t.sizeof) ubyte[size_t.sizeof] value = void;

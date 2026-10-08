@@ -85,7 +85,65 @@ public struct FullExpressionScope {
     ) const {
         return kindOf(position) == FullExpressionKind.value
             && opens(position) && !_ending
-            && isLvalueResult(lvalueOf(result));
+            && isLvalueResult(result) && hasOperandDestructors(result);
+    }
+
+    // `appendDtors` leaves the result unchanged when `varsInScope` has no
+    // destructor. Inner `toElemDtor` operands consume their own entries;
+    // declarations in a called function do not belong to this expression.
+    private static bool hasOperandDestructors(
+        imported!"dmd.expression".Expression result,
+    ) {
+        import dmd.astenums: STC;
+        import dmd.expression:
+            AssertExp, DeclarationExp, FuncExp, LogicalExp, ThrowExp;
+        import dmd.visitor: SemanticTimeTransitiveVisitor;
+        import snakebite.backends.loweringvisitor: LoweredExpressionTypes;
+
+        extern(C++) static final class Finder: SemanticTimeTransitiveVisitor {
+            alias visit = SemanticTimeTransitiveVisitor.visit;
+            bool found;
+
+            override void visit(DeclarationExp expression) {
+                auto variable = expression.declaration.isVarDeclaration;
+                if (variable is null || variable.isStatic
+                        || (variable.storage_class
+                            & (STC.manifest | STC.extern_ | STC.tls
+                                | STC.gshared)))
+                    return;
+                if (variable.needsScopeDtor)
+                    found = true;
+                if (!found && variable._init !is null) {
+                    auto initializer = variable._init.isExpInitializer;
+                    if (initializer !is null)
+                        initializer.exp.accept(this);
+                }
+            }
+
+            override void visit(LogicalExp expression) {
+                expression.e1.accept(this);
+            }
+
+            override void visit(AssertExp expression) {
+                expression.e1.accept(this);
+            }
+
+            override void visit(ThrowExp) {}
+            override void visit(FuncExp) {}
+
+            static foreach (E; LoweredExpressionTypes) {
+                override void visit(E expression) {
+                    if (expression.lowering !is null)
+                        expression.lowering.accept(this);
+                    else
+                        super.visit(expression);
+                }
+            }
+        }
+
+        scope finder = new Finder;
+        result.accept(finder);
+        return finder.found;
     }
 
     // The expression whose address a backend resolves for a result that
@@ -95,17 +153,20 @@ public struct FullExpressionScope {
     public static imported!"dmd.expression".Expression lvalueOf(
         imported!"dmd.expression".Expression result,
     ) {
-        import dmd.astenums: Tarray;
-        import dmd.typesem: nextOf, size, toBasetype;
+        import snakebite.backends.casts: classify;
+        import snakebite.nativevalue: CastKind;
+        import dmd.typesem: toBasetype;
 
         while (auto cast_ = result.isCastExp) {
-            auto from = cast_.e1.type.toBasetype;
-            auto to = cast_.to.toBasetype;
-            const keepsRepresentation = from.equals(to)
-                || (from.ty == Tarray && to.ty == Tarray
-                    && from.nextOf.size == to.nextOf.size);
-            if (!keepsRepresentation)
+            if (cast_.lowering !is null)
                 break;
+            if (!cast_.e1.type.toBasetype.equals(cast_.to.toBasetype)) {
+                const plan = classify(cast_.e1.type, cast_.type);
+                if (plan.kind != CastKind.copy
+                        && !(plan.kind == CastKind.classReference
+                            && plan.referenceOffset == 0))
+                    break;
+            }
             result = cast_.e1;
         }
         return result;
@@ -115,6 +176,7 @@ public struct FullExpressionScope {
         private const(void)* root;
         private FullExpressionKind kind;
         private size_t depth;
+        private bool ending;
     }
 
     private const(void)* _root;
@@ -168,9 +230,10 @@ public struct FullExpressionScope {
     }
 
     public CallState suspendCall() {
-        const state = CallState(_root, _kind, _depth);
+        const state = CallState(_root, _kind, _depth, _ending);
         _root = null;
         _depth = 0;
+        _ending = false;
         return state;
     }
 
@@ -178,6 +241,7 @@ public struct FullExpressionScope {
         _root = state.root;
         _kind = state.kind;
         _depth = state.depth;
+        _ending = state.ending;
     }
 
     // Whether running a full expression at the position starts a new one,
@@ -204,9 +268,12 @@ public struct FullExpressionScope {
 // (`elemIsLvalue`): a variable, a field, a dereference or an element, or a
 // conditional expression whose results are such. A bit field is read
 // through a different element, and a call that returns `ref` through a
-// call. dmd reads a thread-local variable before the destructors run, and
-// folds `__ctfe` to a constant.
+// call. With PIC, `el_picvar` obtains TLS storage through a call, which
+// `elemIsLvalue` excludes. dmd folds `__ctfe` to a constant.
 private bool isLvalueResult(imported!"dmd.expression".Expression result) {
+    result = FullExpressionScope.lvalueOf(result);
+    if (auto comma = result.isCommaExp)
+        return isLvalueResult(comma.e2);
     if (auto conditional = result.isCondExp)
         return isLvalueResult(conditional.e1)
             && isLvalueResult(conditional.e2);
@@ -224,8 +291,8 @@ private bool isLvalueResult(imported!"dmd.expression".Expression result) {
         return variable !is null && variable.isBitFieldDeclaration is null;
     }
 
-    if (result.isPtrExp !is null)
-        return true;
+    if (auto pointer = result.isPtrExp)
+        return FullExpressionScope.lvalueOf(pointer.e1).isCallExp is null;
 
     if (result.isIndexExp !is null)
         return true;

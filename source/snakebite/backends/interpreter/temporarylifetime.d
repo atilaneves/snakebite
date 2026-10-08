@@ -256,8 +256,8 @@ public struct TemporaryLifetime {
         const stackMark = _stack.mark;
         _floor = mark;
         scope(exit) {
+            scope(exit) _floor = previousFloor;
             releaseSince(mark, stackMark);
-            _floor = previousFloor;
         }
         action();
     }
@@ -325,8 +325,8 @@ public struct TemporaryLifetime {
     private void endExpression() {
         assert(_expressionDepth != 0);
         const state = _expressionStates[--_expressionDepth];
+        scope(exit) _floor = state.floor;
         releaseSince(state.mark, state.stackMark);
-        _floor = state.floor;
     }
 
     private void releaseSince(in size_t mark, in size_t stackMark) {

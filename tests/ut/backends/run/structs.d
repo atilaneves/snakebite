@@ -6163,6 +6163,29 @@ static foreach (backend; Matrix!(
                 if (mz(2).v)
                     taken = true;
                 assert(!taken);
+                if (cast(uint) mz(2).v)
+                    assert(false, "same-width integral cast");
+                int one = 1;
+                if (one ? cast(uint) mz(2).v : cast(uint) one)
+                    assert(false, "cast in conditional branch");
+                if (!cast(long) mz(2).v)
+                    assert(false, "width-changing cast reads before cleanup");
+                if (!cast(bool) mz(2).v)
+                    assert(false, "truth cast reads before cleanup");
+                bool nested;
+                struct Y {
+                    bool* result;
+                    ~this() {
+                        *result = check();
+                        assert(!check(), "second destructor call");
+                    }
+                }
+                { Y y = Y(&nested); }
+                assert(!nested, "first destructor call");
+            }
+            bool check() {
+                if (mz(2).v) return true;
+                return false;
             }
         });
     }
@@ -6184,6 +6207,10 @@ static foreach (backend; Matrix!(
                 int one = 1;
                 const bool b = one && mz(2).v;
                 assert(!b);
+                const bool c = !one || mz(2).v;
+                assert(!c, "logical or");
+                const int q = (one && mz(3).v) ? 5 : 6;
+                assert(q == 6, "conditional truth");
             }
         });
     }
@@ -6223,7 +6250,6 @@ static foreach (backend; Matrix!(
     unittest {
         0.shouldBeStatusOf!(backend, q{
             struct Z { int v; int* rp; ~this() { v = 0; if (rp) *rp = 0; } }
-            Z mz(int v) { return Z(v); }
             Z mp(int v, int* p) { return Z(v, p); }
             void main() {
                 int k = 1;
@@ -6246,9 +6272,8 @@ static foreach (backend; Matrix!(
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            struct Z { int v; int* rp; ~this() { v = 0; if (rp) *rp = 0; } }
+            struct Z { int v; ~this() { v = 0; } }
             Z mz(int v) { return Z(v); }
-            Z mp(int v, int* p) { return Z(v, p); }
             void main() {
                 int one = 1, k = 1;
                 bool taken;
@@ -6270,14 +6295,17 @@ static foreach (backend; Matrix!(
     unittest {
         0.shouldBeStatusOf!(backend, q{
             struct Z { int v; int* rp; ~this() { v = 0; if (rp) *rp = 0; } }
-            Z mz(int v) { return Z(v); }
             Z mp(int v, int* p) { return Z(v, p); }
+            int* pointer(int* p, int value) { return p; }
             void main() {
                 int k = 1;
                 bool taken;
                 if (*mp(1, &k).rp)
                     taken = true;
                 assert(!taken);
+                k = 1;
+                if (!*pointer(&k, mp(1, &k).v))
+                    assert(false, "call result is read before cleanup");
             }
         });
     }
@@ -6379,9 +6407,8 @@ static foreach (backend; Matrix!(
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            struct Z { int v; int* rp; ~this() { v = 0; if (rp) *rp = 0; } }
+            struct Z { int v; ~this() { v = 0; } }
             Z mz(int v) { return Z(v); }
-            Z mp(int v, int* p) { return Z(v, p); }
             void main() {
                 int chosen = -1;
                 switch (mz(2).v) {
@@ -6405,11 +6432,66 @@ static foreach (backend; Matrix!(
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            struct Z { int v; int* rp; ~this() { v = 0; if (rp) *rp = 0; } }
+            struct Z { int v; ~this() { v = 0; } }
             Z mz(int v) { return Z(v); }
-            Z mp(int v, int* p) { return Z(v, p); }
             int f() { return mz(2).v; }
-            void main() { assert(f() == 0); }
+            uint fu() { return mz(2).v; }
+            struct P { int* p; ~this() { p = null; } }
+            P mp(int* p) { return P(p); }
+            const(int)* fp(int* p) { return mp(p).p; }
+            void* fv(int* p) { return mp(p).p; }
+            void* conditionalPointer(int* p, bool first) {
+                return first ? cast(void*) mp(p).p : cast(void*) mp(p).p;
+            }
+            class Base {}
+            class Derived : Base {}
+            struct R { Derived value; ~this() { value = null; } }
+            R mr(Derived value) { return R(value); }
+            Base upcast(Derived value) { return mr(value).value; }
+            int h() { int k = 7; return k; }
+            struct C {
+                int v;
+                int* result;
+                ~this() { v = 0; *result = h(); }
+            }
+            int calledReturn(ref int result) {
+                int loc = 5;
+                return C(2, &result).v ? loc : loc;
+            }
+            struct T {
+                int v;
+                ~this() { throw new Exception("operand destructor"); }
+            }
+            T mt() { return T(2); }
+            int interruptedReturn() {
+                try { return mt().v; }
+                catch (Exception e) { assert(e.msg == "operand destructor"); }
+                return h();
+            }
+            void interruptedVoidReturn() {
+                try { interruptedReturn(); }
+                catch (Exception e) { assert(false, e.msg); }
+                return;
+            }
+            void main() {
+                assert(f() == 0);
+                assert(fu() == 0, "implicit integral cast");
+                int k = 1;
+                assert(fp(&k) is null, "qualified pointer cast");
+                assert(fv(&k) is null, "pointer cast");
+                assert(conditionalPointer(&k, true) is null,
+                    "pointer cast in first branch");
+                assert(conditionalPointer(&k, false) is null,
+                    "pointer cast in second branch");
+                assert(upcast(new Derived) is null, "zero-offset class cast");
+                int result;
+                assert(calledReturn(result) == 5, "pending caller return");
+                assert(result == 7, "destructor call return");
+                assert(interruptedReturn() == 7, "return after caught cleanup");
+                assert(interruptedReturn() == 7, "repeated cleanup exception");
+                interruptedVoidReturn();
+                foreach (i; 0 .. 32) f();
+            }
         });
     }
 }

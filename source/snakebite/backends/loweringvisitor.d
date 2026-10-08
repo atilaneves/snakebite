@@ -132,9 +132,10 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     // temporaries of the operand die when it has been evaluated, whether
     // the function returns a value or a `ref`.
     final override void visit(ReturnStatement statement) {
-        if (statement.exp is null)
-            visitReturnOperand(statement, false);
-        else {
+        if (statement.exp is null) {
+            enum readsAfterEnd = false;
+            visitReturnOperand(statement, readsAfterEnd);
+        } else {
             const afterEnd = readsResultAfterEnd(
                 FullExpressionScope.Position.returnOperand, statement.exp);
             fullExpression(FullExpressionScope.Position.returnOperand,

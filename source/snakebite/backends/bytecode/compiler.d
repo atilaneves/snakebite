@@ -7521,14 +7521,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const branchIndex = compiler._instructions.length;
             compiler.emit(&opBranchFalse, conditionOffset, 0, conditionWidth);
 
-            const thenOffset = resolve(expression.e1);
+            const thenOffset = resolve(
+                FullExpressionScope.lvalueOf(expression.e1));
             compiler.emit(&opCopy, result, thenOffset, size_t.sizeof);
             const jumpIndex = compiler._instructions.length;
             compiler.emit(&opJump, 0, 0, 0);
 
             compiler._instructions[branchIndex].source =
                 compiler._instructions.length;
-            const elseOffset = resolve(expression.e2);
+            const elseOffset = resolve(
+                FullExpressionScope.lvalueOf(expression.e2));
             compiler.emit(&opCopy, result, elseOffset, size_t.sizeof);
             compiler._instructions[jumpIndex].destination =
                 compiler._instructions.length;
