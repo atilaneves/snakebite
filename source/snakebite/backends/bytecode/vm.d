@@ -537,8 +537,22 @@ private struct DispatchState {
     FrameStack* frames;
     Activation* current;
     Activation* pending;
+    // The first handler of `current` that an exception that is no
+    // `Throwable` must still unwind, while a `finally` body of `current`
+    // runs. Zero at all other times.
+    size_t nextHandler;
     Vm* vm;
     DispatchState* parent;
+}
+
+// Thrown after guest code has resumed from a handler that took an exception
+// that cleanup threw while an exception that is no `Throwable` unwound. It
+// replaces the foreign exception, as the exception that cleanup threw does
+// in compiled D, and `dispatch` stops it.
+private class ForeignUnwindEnd : Throwable {
+    this() @safe pure nothrow @nogc {
+        super("foreign exception replaced");
+    }
 }
 
 private void dispatch(
@@ -568,28 +582,47 @@ private void dispatch(
     root.cleanupMark = frames.cleanupMark;
     root.frameMark = FrameStack.Mark.init;
     root.parent = null;
-    auto state = DispatchState(frames, null, null, vm,
+    auto state = DispatchState(frames, null, null, 0, vm,
         cast(DispatchState*) frames.backendEntry);
     // A halt must also discard a partially reserved activation.
     const frameMark = frames.mark;
-    scope(failure) {
+    scope(exit) frames.backendEntry = state.parent;
+    frames.backendEntry = &state;
+    bool returned;
+    bool thrown;
+    scope(exit) if (!returned) {
         frames.finishCleanups(root.cleanupMark, (in size_t) {});
         frames.release(frameMark);
     }
-    scope(exit) frames.backendEntry = state.parent;
-    frames.backendEntry = &state;
-    dispatchLoop(root.pc, &root, &state);
+    try {
+        // Only `finally` and `scope(exit)` run for an exception that is no
+        // `Throwable`, such as one a C++ callee throws, and `dispatchLoop`
+        // has not seen it. A `Throwable` has already run the cleanups of
+        // every activation by the time it leaves `dispatchLoop`.
+        scope(exit) if (!returned && !thrown && state.current !is null) {
+            auto resumed = handleException(
+                state.current, frames, null, vm, state.nextHandler);
+            if (resumed !is null) {
+                dispatchLoop(resumed.pc, resumed, &state);
+                throw new ForeignUnwindEnd;
+            }
+        }
+        scope(failure) thrown = true;
+        dispatchLoop(root.pc, &root, &state);
+        returned = true;
+    } catch (ForeignUnwindEnd) {
+        returned = true;
+    }
 }
 
 pragma(inline, true)
 private void dispatchLoop(
     const(Instruction)* pc,
-    Activation* root,
+    Activation* active,
     DispatchState* state,
 ) {
     // Cleanup writes the frame stack.
     auto frames = state.frames;
-    auto active = root;
 
     while (true) {
         try {
@@ -626,13 +659,15 @@ private void dispatchLoop(
 
 // Cleanup delegates must not capture the normal dispatch loop's state:
 // an escaped activation pointer forces a reload after every instruction.
+// A `null` throwable is an exception that is no `Throwable`: no handler
+// takes it, so it unwinds every activation, and the result is `null`.
 private Activation* handleException(
     Activation* active,
     FrameStack* frames,
     Throwable throwable,
     Vm* vm,
+    size_t firstHandler = 0,
 ) {
-    size_t firstHandler;
     while (true) {
         // A halt that ends a cell is not an error guest code handles: no
         // temporary's destructor, `catch` or `finally` sees it.
@@ -652,7 +687,7 @@ private Activation* handleException(
             ? UnwindPlan.init
             : exceptionPlanOf(
                 active.exceptionHandlers[firstHandler .. $], active.pc,
-                throwable.classinfo, handlerBuffer);
+                throwable is null ? null : throwable.classinfo, handlerBuffer);
         const step = plan.finalizers.length != 0
             ? plan.finalizers[0]
             : plan.handler;
@@ -661,17 +696,22 @@ private Activation* handleException(
         if (handler is null || (active.end !is null
                 && (handler.handler < active.start
                     || handler.handler >= active.end))) {
-            if (active.parent is null)
+            if (active.parent is null) {
+                if (throwable is null)
+                    return null;
                 throw throwable;
+            }
             active = popActivation(active, frames);
             firstHandler = 0;
             continue;
         }
 
         if (handler.cleanupEnd !is null) {
+            auto state = cast(DispatchState*) frames.backendEntry;
+            state.nextHandler = handler - active.exceptionHandlers.ptr + 1;
             try {
                 unwindFinally(throwable, () {
-                    (cast(DispatchState*) frames.backendEntry).current = active;
+                    state.current = active;
                     dispatch(handler.handler, active.frame,
                         active.returnPlace, active.constants,
                         active.callSites, active.assertSites,
@@ -681,6 +721,7 @@ private Activation* handleException(
             } catch (Throwable chained) {
                 throwable = chained;
             }
+            state.nextHandler = 0;
             firstHandler = handler - active.exceptionHandlers.ptr + 1;
             continue;
         }

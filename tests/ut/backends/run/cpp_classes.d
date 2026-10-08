@@ -710,3 +710,26 @@ static foreach (backend; Matrix!()) {
         }, q{ (new Counter).value }).should == "13";
     }
 }
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "dmd cannot link the C++ typeinfo of a catch clause, LDC can"),
+)) {
+    @("cppInterface.catchClauseOnCppInterface." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C++) interface Listener {
+                void notify();
+            }
+            void main() {
+                try {
+                    const value = 1;
+                    assert(value == 1);
+                } catch (Listener) {
+                    assert(0);
+                }
+            }
+        });
+    }
+}

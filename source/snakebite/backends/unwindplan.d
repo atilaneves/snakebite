@@ -79,7 +79,9 @@ public struct UnwindPlan {
 // Candidates are ordered from the innermost protected scope outwards.
 // Catch candidates for one scope stay in source order. A finalizer runs
 // before the next enclosing scope can handle the same exception. The plan
-// refers to `candidates`, which therefore outlive it.
+// refers to `candidates`, which therefore outlive it. A `null` `actual` is an
+// exception that is no `Throwable`: no catch takes it and every finalizer
+// runs.
 public UnwindPlan unwindPlanOf(
     return scope const(ExceptionCandidate)[] candidates,
     TypeInfo_Class actual,

@@ -15,6 +15,7 @@ public struct CatchPlan {
         import dmd.statement: Catch;
 
         public Catch syntax;
+        // `null` for a clause that no D throwable can match.
         public TypeInfo_Class type;
     }
 
@@ -28,8 +29,18 @@ public CatchPlan catchPlanOf(
 ) {
     CatchPlan plan;
     foreach (catch_; *statement.catches)
-        plan.clauses ~= CatchPlan.Clause(catch_, typeOf(catch_));
+        plan.clauses ~= CatchPlan.Clause(
+            catch_, catchesCppClass(catch_) ? null : typeOf(catch_));
     return plan;
+}
+
+// A C++ class matches by the C++ type of an in-flight C++ exception. A
+// `Throwable` is a D class, so it never matches such a clause, and the
+// clause has no `TypeInfo_Class` to match by.
+private bool catchesCppClass(imported!"dmd.statement".Catch catch_) {
+    import dmd.typesem: toBasetype;
+
+    return catch_.type.toBasetype.isClassHandle.isCPPclass;
 }
 
 public struct UnwindPlan {

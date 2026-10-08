@@ -107,6 +107,16 @@ private enum cppBindings = q{
     extern(C++) int read_copy_only(CopyOnly c);
     extern(C++) CopyOnly make_copy_only(int v);
 
+    extern(C++) struct Thrower {
+        int value;
+        this(ref const(Thrower) other);
+    }
+    extern(C++) int read_thrower(Thrower t);
+
+    alias IntCallback = extern(C++) int function(int);
+    extern(C++) int throw_after_read(NonPod n);
+    extern(C++) int catch_around(IntCallback callback, int v);
+
     extern(C++) struct PostBlit {
         int value;
         this(this) { count_copy(); }
@@ -546,6 +556,30 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             destructionResult.should == 1;
         }
     }
+}
+
+
+// Runs `runShape` on a thread of its own. A C++ exception that leaves a
+// `finally` body replaces the D exception in flight, and compiled D leaves
+// that D exception on the thread's exception stack for good. The thread
+// takes it away when it ends, so that no later test runs on a stack that
+// holds it.
+private Counts runShapeOnOwnThread(backend, Shape)(int v) {
+    import core.thread: Thread;
+
+    Counts counts;
+    Throwable failure;
+    auto thread = new Thread({
+        try
+            counts = runShape!(backend, Shape)(v);
+        catch (Throwable thrown)
+            failure = thrown;
+    });
+    thread.start;
+    thread.join;
+    if (failure !is null)
+        throw failure;
+    return counts;
 }
 
 
@@ -1121,5 +1155,75 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             };
         }
         runShape!(backend, Shape)(17).should == Counts(17, 0, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.exception.throughGuestFrame." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            r = catch_around(&throwingHandler, v);
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(1017, 1, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.exception.copyConstructorThrows." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            r = catch_around(&copyThrowingHandler, v);
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(1007, 1, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.exception.guestCatchTakesCleanupThrow." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            r = catch_around(&cleanupThrowCaughtHandler, v);
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(66, 1, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.exception.guestCatchAboveTakesCleanupThrow." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            r = catch_around(&cleanupThrowCaughtAboveHandler, v);
+            };
+        }
+        runShape!(backend, Shape)(17).should == Counts(66, 2, 0);
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.exception.finallyThrowingCppRunsOnce." ~ backend.stringof)
+    unittest {
+        static struct Shape {
+            enum body_ = q{
+            r = catch_around(&finallyThrowsHandler, v);
+            };
+        }
+        runShapeOnOwnThread!(backend, Shape)(17).should == Counts(1017, 1, 1);
     }
 }
