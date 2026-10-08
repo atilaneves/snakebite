@@ -1060,3 +1060,23 @@ static foreach (backend; Matrix!(
         sandbox.shouldEqualContent("trace", "second program;");
     }
 }
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE crashes on a vector variable"),
+)) {
+    @("gsharedVectorWithInitialiserHoldsItsLanes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.simd: int4;
+
+            __gshared int4 lanes = [5, 6, 7, 8];
+
+            int main() {
+                return lanes.array == [5, 6, 7, 8] ? 0 : 1;
+            }
+        });
+    }
+}

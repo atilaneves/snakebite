@@ -1129,7 +1129,8 @@ private void storeValue(
     NativeData* nativeData = null,
 ) {
     import core.stdc.string: memcpy, memset;
-    import dmd.astenums: TY, Tarray, Tdelegate, Tpointer, Tsarray;
+    import dmd.astenums: TY, Tarray, Tdelegate, Tpointer, Tsarray, Tvector;
+    import dmd.mtype: Type;
     import dmd.expressionsem: toComplex, toImaginary, toInteger, toReal;
     import dmd.typesem: mutableOf, nextOf, size, toBasetype;
     import snakebite.frontend.compiler: newInFrontend;
@@ -1173,8 +1174,10 @@ private void storeValue(
         }
     }
 
-    if (auto vector = value.isVectorExp) {
-        storeValue(type.isTypeVector.basetype, vector.e1, place,
+    if (type.ty == Tvector) {
+        auto vector = value.isVectorExp;
+        storeValue(type.isTypeVector.basetype,
+            vector is null ? value : vector.e1, place,
             symbolAddress, nativeData);
         return;
     }
@@ -1188,7 +1191,7 @@ private void storeValue(
             auto literal = wholeArray ? value.isArrayLiteralExp : null;
             // dmd's default initializer of a `void[N]` is the `ubyte` one.
             auto storedElement = array.next.toBasetype.ty == TY.Tvoid
-                ? imported!"dmd.mtype".Type.tuns8 : array.next;
+                ? Type.tuns8 : array.next;
             foreach (i; 0 .. cast(size_t) array.dim.toInteger)
                 storeValue(storedElement, literal is null ? value : literal[i],
                     bytes + i * elementSize, symbolAddress, nativeData);

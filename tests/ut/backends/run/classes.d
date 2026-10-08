@@ -3756,3 +3756,26 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE crashes on a vector field of a class"),
+)) {
+    @("classVectorFieldWithInitialiserHoldsItsLanes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.simd: int4;
+
+            class Holder {
+                int4 lanes = [1, 2, 3, 4];
+            }
+
+            int main() {
+                auto holder = new Holder;
+                return holder.lanes.array == [1, 2, 3, 4] ? 0 : 1;
+            }
+        });
+    }
+}
