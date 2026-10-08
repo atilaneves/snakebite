@@ -6,10 +6,11 @@ private:
 import dmd.dclass: ClassDeclaration;
 import dmd.declaration: Declaration, VarDeclaration;
 import dmd.expression:
-    AddAssignExp, AddExp, AssignExp, CallExp, CmpExp, DeclarationExp,
-    DelegateExp, DeleteExp, DotVarExp, EqualExp, Expression, FuncExp, IndexExp,
-    MinAssignExp, MinExp, NewExp, PostExp, SliceExp, StringExp, StructLiteralExp,
-    SymOffExp, ThisExp, TypeidExp, VarExp;
+    AddAssignExp, AddExp, AssignExp, CallExp, ClassReferenceExp, CmpExp,
+    DeclarationExp, DelegateExp, DeleteExp, DotVarExp, EqualExp, Expression,
+    FuncExp, IndexExp, MinAssignExp, MinExp, NewExp, PostExp,
+    SliceExp, StringExp, StructLiteralExp, SymOffExp, ThisExp, TypeidExp,
+    VarExp;
 import dmd.func: FuncDeclaration;
 import dmd.mtype: Type;
 import dmd.typesem: nextOf, toBasetype;
@@ -111,6 +112,13 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
             statement.exp.accept(this);
     }
 
+    // The frontend has already built this instance, and the value that it
+    // holds is the instance's fields, not a struct literal to plan.
+    override void visit(ClassReferenceExp expression) {
+        if (expression.type !is null)
+            _preparation.type(expression.type);
+    }
+
     override void visit(FuncExp expression) {
         if (expression.type !is null)
             _preparation.type(expression.type);
@@ -118,7 +126,8 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
     }
 
     static foreach (Node; ExpressionNodes!()) {
-        static if (!is(Node == DeclarationExp) && !is(Node == FuncExp))
+        static if (!is(Node == DeclarationExp) && !is(Node == FuncExp)
+                && !is(Node == ClassReferenceExp))
         override void visit(Node expression) {
             super.visit(expression);
             if (expression.type !is null)

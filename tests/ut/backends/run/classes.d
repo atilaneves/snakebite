@@ -1831,6 +1831,35 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A destructor calls a function whose `static __gshared` exception is built
+// at compile time and thrown when asked to.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot read a static variable"),
+)) {
+    @("destructorCallsFunctionWithStaticGsharedException." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int check(bool really) {
+                static __gshared e = new Exception("boom");
+                if (really) throw e;
+                return 1;
+            }
+            class K { ~this() { check(false); } }
+            void main() {
+                auto k = new K;
+                try {
+                    check(true);
+                    assert(false);
+                } catch (Exception e) {
+                    assert(e.msg == "boom");
+                }
+                destroy(k);
+            }
+        });
+    }
+}
+
 // Two reads of a `static immutable` class instance give the same object.
 static foreach (backend; Matrix!()) {
     @("compileTimeClassInStaticImmutableIsShared." ~ backend.stringof)
