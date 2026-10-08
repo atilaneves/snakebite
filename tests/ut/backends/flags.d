@@ -863,3 +863,38 @@ unittest {
     cMessageOf(BoundsCheck.slice).should == "array slice out of bounds";
     cMessageOf(BoundsCheck.sliceCopy).should == "array overflow";
 }
+
+
+// Equal-valued enum members need only one case. DMD statementsem leaves the
+// default absent when it checks those members with assertions off in @system
+// code. An unmatched value then exits the switch, as native s2ir specifies.
+static foreach (backend; Guests) {
+    @("flags.finalSwitchHasNoDefaultInRelease." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        enum program = q{
+            enum E { a, b, sameAsA = a }
+            int pick(E e) @system {
+                final switch (e) {
+                    case E.a: return 1;
+                    case E.b: return 2;
+                }
+                return 3;
+            }
+            unittest {
+                if (pick(E.a) != 1 || pick(E.b) != 2)
+                    throw new Exception("wrong case");
+            }
+        };
+        enum flags = ["-release", "-check=assert=off"];
+        shouldRun!backend(Row(flags, program, Expect.returned));
+        // DMD's CTFE visitSwitch asserts that a case or default was selected,
+        // even when semantic analysis intentionally left the default absent.
+        shouldRun!backend(Row(flags, program ~ q{
+            unittest {
+                if (pick(cast(E) 7) != 3)
+                    throw new Exception("did not exit switch");
+            }
+        }, Expect.returned, Expect.raised(assertError, failure)));
+    }
+}

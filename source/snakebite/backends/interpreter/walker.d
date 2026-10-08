@@ -212,7 +212,7 @@ import snakebite.backends.exceptionplan: CatchPlan, catchPlanOf;
 import snakebite.backends.aggregateinit: AggregateInitPlan;
 import snakebite.backends.unwindplan:
     ExceptionCandidate, ExceptionUnwindPlan = UnwindPlan;
-import snakebite.backends.switchplan: switchPlan, selectCase,
+import snakebite.backends.switchplan: SwitchPlan, switchPlan, selectCase,
     gotoCaseTarget, gotoDefaultTarget;
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
 import snakebite.cstack: CStack;
@@ -2388,10 +2388,15 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                     (case_) => asIntegral(case_.exp));
                 });
 
-            if (selected is null)
-                selected = plan.defaultTarget;
-            if (selected is null)
-                return;
+            if (selected is null) {
+                final switch (plan.noMatch) with (SwitchPlan.NoMatch) {
+                    case defaultTarget:
+                        selected = plan.defaultTarget;
+                        break;
+                    case exit:
+                        return;
+                }
+            }
 
             _controlFlow.seek(cast(void*) selected);
         }
