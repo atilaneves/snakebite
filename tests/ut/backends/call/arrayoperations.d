@@ -37,11 +37,11 @@ static foreach (backend; Matrix!()) {
     unittest {
         0.shouldBeStatusOf!(backend, helpers ~ q{
             void check(T, string op)() {
+                const b = filled!T(0);
+                const c = filled!T(11);
                 foreach (length; lengths) {
-                    auto a = filled!T(100);
+                    T[40] a;
                     a[] = cast(T) sentinel;
-                    const b = filled!T(0);
-                    const c = filled!T(11);
                     mixin("a[0 .. length] = b[0 .. length] " ~ op ~
                         " c[0 .. length];");
                     foreach (i; 0 .. length)
@@ -71,11 +71,11 @@ static foreach (backend; Matrix!()) {
     unittest {
         0.shouldBeStatusOf!(backend, helpers ~ q{
             void check(T, string op)() {
+                const b = filled!T(0);
+                const c = filled!T(11);
                 foreach (length; lengths) {
-                    auto a = filled!T(100);
+                    T[40] a;
                     a[] = cast(T) sentinel;
-                    const b = filled!T(0);
-                    const c = filled!T(11);
                     mixin("a[0 .. length] = b[0 .. length] " ~ op ~
                         " c[0 .. length];");
                     foreach (i; 0 .. length)
@@ -103,10 +103,10 @@ static foreach (backend; Matrix!()) {
     unittest {
         0.shouldBeStatusOf!(backend, helpers ~ q{
             void check(T, string op)() {
+                const b = filled!T(0);
                 foreach (length; lengths) {
-                    auto a = filled!T(100);
+                    T[40] a;
                     a[] = cast(T) sentinel;
-                    const b = filled!T(0);
                     mixin("a[0 .. length] = " ~ op ~ "b[0 .. length];");
                     foreach (i; 0 .. length)
                         assert(a[i] == cast(T) mixin(op ~ "b[i]"));
@@ -137,10 +137,11 @@ static foreach (backend; Matrix!()) {
     unittest {
         0.shouldBeStatusOf!(backend, helpers ~ q{
             void check(T, string op)() {
+                const original = filled!T(0);
+                const c = filled!T(11);
                 foreach (length; lengths) {
-                    auto a = filled!T(0);
-                    const original = filled!T(0);
-                    const c = filled!T(11);
+                    T[40] a;
+                    a[] = original[];
                     mixin("a[0 .. length] " ~ op ~ "= c[0 .. length];");
                     foreach (i; 0 .. length)
                         assert(a[i] == cast(T) mixin("original[i] " ~ op ~
@@ -174,10 +175,10 @@ static foreach (backend; Matrix!()) {
         0.shouldBeStatusOf!(backend, helpers ~ q{
             void check(T, string op)() {
                 const T scalar = valueOf!T(5);
+                const b = filled!T(0);
                 foreach (length; lengths) {
-                    auto a = filled!T(100);
+                    T[40] a;
                     a[] = cast(T) sentinel;
-                    const b = filled!T(0);
                     mixin("a[0 .. length] = b[0 .. length] " ~ op ~
                         " scalar;");
                     foreach (i; 0 .. length)
@@ -189,7 +190,8 @@ static foreach (backend; Matrix!()) {
                     foreach (i; length .. 40)
                         assert(a[i] == cast(T) sentinel);
 
-                    auto d = filled!T(0);
+                    T[40] d;
+                    d[] = b[];
                     mixin("d[0 .. length] " ~ op ~ "= scalar;");
                     foreach (i; 0 .. length)
                         assert(d[i] == cast(T) mixin("b[i] " ~ op ~ " scalar"));

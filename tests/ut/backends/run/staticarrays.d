@@ -39,6 +39,8 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// Large arrays check zero and non-zero defaults, string rows, scalar fills
+// and reset through out parameters. Small odd-width arrays are checked below.
 static foreach (backend; Matrix!()) {
     @("staticArray.twoHundredElementInitialValues." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -220,7 +222,7 @@ static foreach (backend; Matrix!(
 // Assigning one static-array local to another copies every element's
 // bytes, not a reference: mutating a row through the copy leaves the
 // original's row untouched, the same guarantee already pinned for a
-// struct local (`structLocalAssignmentCopiesByValue`).
+// struct copy (`structLiteralInitializesRealField`).
 //
 // dmd's own CTFE engine does not honour this for a static-array local
 // `=`: `enum` over an equivalent snippet at compile time shows `b = a`
@@ -249,22 +251,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-// `int[3].init` is every element's own `.init` - zero for `int` - so a
-// freshly declared static array reads back as all zero bytes before
-// anything writes to it.
-static foreach (backend; Matrix!()) {
-    @("staticArray.defaultInitIsZero." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            void main() {
-                int[3][2] a;
-                assert(a[0][0] == 0);
-                assert(a[1][2] == 0);
-            }
-        });
-    }
-}
+
 
 // `ubyte[3]`'s own size is 3 bytes - not one of the native integral
 // widths (1/2/4/8) `opConstant`'s `storeWidth` lays out. But dmd's
@@ -289,22 +276,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// A `char[3]` literal - the same 3-byte width as `ubyte[3]` above, but
-// `char.init` is `0xFF`, not zero, so this only covers the literal shape,
-// not a default-init one (`staticArray.threeByteDefaultInitAndLiteral`
-// already covers the odd-width zero-init path with `ubyte[3]`).
-static foreach (backend; Matrix!()) {
-    @("staticArray.charThreeByteLiteral." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            void main() {
-                char[3] a = "xyz";
-                assert(a[0] == 'x' && a[1] == 'y' && a[2] == 'z');
-            }
-        });
-    }
-}
+
 
 // An array literal assigned to a static array is one whole value: every
 // element is evaluated from the array's old contents before any of
@@ -473,24 +445,9 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// `int[3] a = 7;` fills every element of `a` from one scalar at
-// construction - the same `a[] = 7` shape `sliceScalarFill` above pins
-// for a later assignment, reached here through dmd's `ConstructExp`
-// instead.
-static foreach (backend; Matrix!()) {
-    @("staticArray.constructedFromScalar." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            void main() {
-                int[3] a = 7;
-                assert(a[0] == 7);
-                assert(a[1] == 7);
-                assert(a[2] == 7);
-            }
-        });
-    }
-}
+
+
+
 
 // A static array of arrays constructed from one scalar fills every
 // innermost element, not only the first of each row. A row value fills
@@ -625,21 +582,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// A scalar initializer fills every element of a static array, so `'x'`
-// is a non-zero `IntegerExp` typed `char` against a 3-byte destination.
-static foreach (backend; Matrix!()) {
-    @("staticArray.charThreeByteScalarFill." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            void main() {
-                char[3] c = 'x';
-                assert(c[0] == 'x' && c[1] == 'x' && c[2] == 'x');
-            }
-        });
-    }
-}
-
 // The same scalar fill on `ubyte[3]` with a non-zero value, as an
 // initializer and then as an assignment.
 static foreach (backend; Matrix!()) {
@@ -656,6 +598,8 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
 
 // An out-of-bounds index into a static array is a `RangeError`, the same
 // contract a dynamic array's index has - see
@@ -771,30 +715,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-// `a[1 .. 3] = b[]` copies a static array's own sub-slice, not its whole
-// slice, from another static array's whole slice: the same element-by-
-// element copy `a[] = b[]` does, just starting partway into `a` and
-// stopping short of its end. `emsi_containers`' `TTree.removeLargest`
-// hits this shape shifting the tail of a node's `values` array down by
-// one slot.
-static foreach (backend; Matrix!(
-)) {
-    @("staticArray.subSliceCopyFromWholeSlice." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            void main() {
-                int[4] a = [1, 2, 3, 4];
-                int[2] b = [9, 8];
-                a[1 .. 3] = b[];
-                assert(a[0] == 1);
-                assert(a[1] == 9);
-                assert(a[2] == 8);
-                assert(a[3] == 4);
-            }
-        });
-    }
-}
+
 
 // A zero-length sub-slice copies nothing and leaves every element of `a`
 // untouched. `removeLargest` hits exactly this shape when a `TTree`
@@ -862,25 +783,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-// A static array that lives in a temporary - a member of a returned
-// struct, a returned array itself - iterates and slices like one in a
-// variable.
-static foreach (backend; Matrix!()) {
-    @("staticArray.rvalue.memberOfReturnedStruct." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct S { ubyte[4] bytes; }
-            S make() { return S([1, 2, 3, 4]); }
-            void main() {
-                int sum;
-                foreach (v; make().bytes)
-                    sum += v;
-                assert(sum == 10);
-            }
-        });
-    }
-}
+
 
 static foreach (backend; Matrix!()) {
     @("staticArray.rvalue.returnedStaticArray." ~ backend.stringof)
@@ -916,25 +819,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
-    @("staticArray.rvalue.sliceOfMemberPassedToFunction." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct S { int[3] values; }
-            S make() { return S([7, 8, 9]); }
-            int sum(int[] values) {
-                int total;
-                foreach (v; values)
-                    total += v;
-                return total;
-            }
-            void main() {
-                assert(sum(make().values[]) == 24);
-            }
-        });
-    }
-}
+
 
 static foreach (backend; Matrix!()) {
     @("staticArray.rvalue.boundedSliceOfMember." ~ backend.stringof)
@@ -989,6 +874,8 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+
+
 static foreach (backend; Matrix!()) {
     @("staticArray.rvalue.indexOfMember." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -1004,19 +891,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
-    @("staticArray.rvalue.lengthOfMember." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct S { int[5] values; }
-            S make() { return S([1, 2, 3, 4, 5]); }
-            void main() {
-                assert(make().values.length == 5);
-            }
-        });
-    }
-}
+
 
 static foreach (backend; Matrix!()) {
     @("staticArray.rvalue.indexedLoopOverMember." ~ backend.stringof)

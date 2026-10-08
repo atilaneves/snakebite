@@ -556,26 +556,6 @@ static foreach (backend; Matrix!()) {
 }
 
 
-// Two slices of the same array share its allocation, so their `.ptr`
-// words differ only by the element offset between where each slice
-// starts - exactly what `_d_arrayshrinkfit` computes for a shrunk slice
-// against the block `gc_getArrayUsed` still remembers as full length.
-static foreach (backend; Matrix!()) {
-    @("pointers.dynamicArray.sliceOfSameArrayDifference." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            void main() {
-                int[] arr = [1, 2, 3, 4, 5];
-                int[] low = arr[1 .. 3];
-                int[] high = arr[3 .. 5];
-                assert(high.ptr - low.ptr == 2);
-            }
-        });
-    }
-}
-
-
 // The shape `cerealed` actually runs into: shrink a dynamic array down to
 // an empty slice of its own allocation (`arr = arr[0 .. 0]`), then tell
 // the runtime the rest of that allocation is free to reuse

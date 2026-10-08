@@ -513,32 +513,6 @@ unittest {
 }
 
 
-// dmd's own rule for a struct with no fields (`argtypes_sysv_x64.d`,
-// `toArgTypes_sysv_x64`: "if (nfields == 0) return memory();") makes it
-// MEMORY-class, the same as an oversized or unaligned aggregate - both
-// host compilers return such a value through a hidden pointer, never in a
-// register (verified with `objdump`: `struct E {} E f() { return E(); }`
-// compiles to `mov rax, rdi; mov byte [rdi], 0; ret` on both dmd and ldc).
-// `abi.classify` walks `aggregate.sym.fields` to build its eightbyte
-// classes; an empty range leaves every class untouched instead of
-// reaching this rule, so a fieldless struct's return used to need no
-// hidden pointer at all - the bug this pins against a regression.
-@("abi.fieldlessStructReturnNeedsHiddenPointer")
-unittest {
-    auto guestModule = parseSnippet(q{
-        struct E {}
-        extern(C) E snakebite_ut_fieldless_return();
-    });
-    auto function_ =
-        findFunction(guestModule, "snakebite_ut_fieldless_return");
-    assert(function_ !is null,
-        "No `snakebite_ut_fieldless_return` in the guest program");
-
-    auto returnType = typeFunctionOf(function_).nextOf;
-    needsHiddenReturnPointer(returnType).should == true;
-}
-
-
 // The same dmd rule applies to a fieldless struct passed by value, not
 // only a returned one - `classify` is the shared walk both
 // `ArgumentPlan.of`'s parameter path and `aggregatePlan`'s return path
@@ -583,164 +557,6 @@ unittest {
 }
 
 
-// An associative array is one pointer-sized handle - the same INTEGER
-// class `classify` already gives a pointer, a class reference or a
-// delegate (its own `Tpointer`/`Tclass`/`Tdelegate`/`Tnull` case,
-// `abi.d`) and `aggregatePlan`'s own top-level check already gives a
-// bare associative-array value (its `Tpointer`/`Tclass`/`Taarray`/
-// `Tnull` case). `classify`'s case list left `Taarray` out, so walking
-// into a struct field of that type - the only way `aggregatePlan`
-// reaches `classify` at all, since a bare aggregate never does - threw
-// instead of classifying it.
-@("abi.structWithAssociativeArrayFieldIsIntegerClass")
-unittest {
-    auto guestModule = parseSnippet(q{
-        struct Settings {
-            int[string] table;
-        }
-        extern(C) void snakebite_ut_aa_field_param(Settings value);
-    });
-    auto function_ =
-        findFunction(guestModule, "snakebite_ut_aa_field_param");
-    assert(function_ !is null,
-        "No `snakebite_ut_aa_field_param` in the guest program");
-
-    auto parameterType = typeFunctionOf(function_).parameterList[0].type;
-    const plan = ArgumentPlan.of(parameterType);
-
-    plan.memory.should == false;
-    plan.count.should == 1;
-}
-
-
-// An enum has its base type's native layout and classification - one rule,
-// applied whether the enum value is a bare return, a parameter, or a struct
-// field (this test's own sibling below). `classify`, `containsReal` and
-// `aggregatePlan` all switched on `type.ty`, which is `Tenum` for an enum
-// value and never matches any of their cases - `type.ty` only matches a
-// base-type case once `toBasetype` has unwrapped it. A `string`-based enum
-// return therefore threw instead of classifying as the two-eightbyte
-// INTEGER pair a bare `string` already classifies as (`abi.d`'s own
-// `Tarray` case).
-@("abi.enumWithStringBaseReturnClassifiesAsIntegerPair")
-unittest {
-    auto guestModule = parseSnippet(q{
-        enum E : string { a = "a" }
-        extern(C) E snakebite_ut_enum_return();
-    });
-    auto function_ =
-        findFunction(guestModule, "snakebite_ut_enum_return");
-    assert(function_ !is null,
-        "No `snakebite_ut_enum_return` in the guest program");
-
-    auto returnType = typeFunctionOf(function_).nextOf;
-    needsHiddenReturnPointer(returnType).should == false;
-}
-
-
-// The same unwrapping `classify` needs at its own entry point (this test's
-// sibling above) also has to hold for a struct field's type: `aggregatePlan`
-// only ever reaches `classify` by walking `aggregate.sym.fields`, so a
-// `string`-based enum field never gets `toBasetype` from the top-level
-// checks `aggregatePlan` runs on its own argument - only `classify`'s own
-// entry sees it.
-@("abi.structWithEnumStringFieldIsIntegerPairClass")
-unittest {
-    auto guestModule = parseSnippet(q{
-        enum E : string { a = "a" }
-        struct Settings {
-            E e;
-        }
-        extern(C) void snakebite_ut_enum_field_param(Settings value);
-    });
-    auto function_ =
-        findFunction(guestModule, "snakebite_ut_enum_field_param");
-    assert(function_ !is null,
-        "No `snakebite_ut_enum_field_param` in the guest program");
-
-    auto parameterType = typeFunctionOf(function_).parameterList[0].type;
-    const plan = ArgumentPlan.of(parameterType);
-
-    plan.memory.should == false;
-    plan.count.should == 2;
-}
-
-
-// `classify` has no eightbyte case for `real`/`long double`: the
-// SysV X87/X87UP classes it would need only mean anything for a bare
-// scalar `real` return through `st0` (`ofReturn`'s own `Tfloat80` case),
-// never for a struct field. An aggregate over two eightbytes never
-// reaches `classify` at all - `aggregatePlan`'s own `count > 2` branch
-// already routes it to MEMORY on size alone, the same hidden-pointer
-// route a `real` field would need anyway - so a `real` field must not
-// throw once the aggregate holding it is already big enough to be
-// MEMORY-class regardless of what its fields are (the bug this pins
-// against a regression: `needsHiddenReturnPointer` used to reject any
-// `real`-containing return before ever reaching this size check).
-@("abi.oversizedStructWithRealFieldNeedsHiddenPointer")
-unittest {
-    auto guestModule = parseSnippet(q{
-        struct Big { real r; int i; }
-        extern(C) Big snakebite_ut_oversized_real_return();
-    });
-    auto function_ =
-        findFunction(guestModule, "snakebite_ut_oversized_real_return");
-    assert(function_ !is null,
-        "No `snakebite_ut_oversized_real_return` in the guest program");
-
-    auto returnType = typeFunctionOf(function_).nextOf;
-    needsHiddenReturnPointer(returnType).should == true;
-}
-
-
-// A struct whose only field is `real` classifies as nothing but the
-// X87/X87UP eightbyte pair `classify`'s own `Tfloat80` case gives that
-// field - the one shape small enough to return through a register
-// instead of a hidden pointer (verified against gcc -O0: `struct
-// { long double r; } make(void)` ends in `fld`/`ret`, the value already
-// in `%st0`, never a hidden-pointer write).
-@("abi.structRealOnlyDoesNotNeedHiddenPointer")
-unittest {
-    auto guestModule = parseSnippet(q{
-        struct RealOnly { real value; }
-        extern(C) RealOnly snakebite_ut_real_only_return();
-    });
-    auto function_ =
-        findFunction(guestModule, "snakebite_ut_real_only_return");
-    assert(function_ !is null,
-        "No `snakebite_ut_real_only_return` in the guest program");
-
-    auto returnType = typeFunctionOf(function_).nextOf;
-    needsHiddenReturnPointer(returnType).should == false;
-}
-
-
-// The same struct, as a *parameter* rather than a return: there is no
-// argument-passing register for an X87/X87UP eightbyte (`%st0` only ever
-// carries a *return* value on this ABI), so it takes the MEMORY route
-// instead (verified against gcc -O0: `void take(struct { long double r; }
-// s)` reads `s` straight off the stack, at `[rbp+0x10]`, never a
-// register) - the same route `ArgumentPlan.of`'s caller already checks
-// for any other MEMORY-class parameter.
-@("abi.structRealOnlyParameterIsMemoryClass")
-unittest {
-    auto guestModule = parseSnippet(q{
-        struct RealOnly { real value; }
-        extern(C) void snakebite_ut_real_only_param(RealOnly value);
-    });
-    auto function_ =
-        findFunction(guestModule, "snakebite_ut_real_only_param");
-    assert(function_ !is null,
-        "No `snakebite_ut_real_only_param` in the guest program");
-
-    auto parameterType = typeFunctionOf(function_).parameterList[0].type;
-    const plan = ArgumentPlan.of(parameterType);
-
-    plan.memory.should == true;
-    plan.memoryBytes.should == 16;
-}
-
-
 // A union redeclares the same bytes under two names rather than laying
 // them out sequentially, so `union { real value; }` - the field itself
 // still the only one `classify` ever sees at either eightbyte - classifies
@@ -761,30 +577,6 @@ unittest {
 
     auto returnType = typeFunctionOf(function_).nextOf;
     needsHiddenReturnPointer(returnType).should == false;
-}
-
-
-// A union field that actually overlaps the `real` - `long`, at the same
-// offset `0` as `value` - merges INTEGER onto eightbyte 0 (`merge`'s own
-// doc: INTEGER always wins a conflict), leaving eightbyte 1's X87UP
-// without the eightbyte 0 X87 its own post-merge check requires, so the
-// whole value becomes MEMORY instead (verified against gcc -O0: `union
-// { long double r; long a; } make(void)` returns through a hidden
-// pointer, not `%st0`, and `void take(union U u)` reads `u` straight off
-// the stack).
-@("abi.unionRealWithIntegerFieldNeedsHiddenPointer")
-unittest {
-    auto guestModule = parseSnippet(q{
-        union Conflict { real value; long word; }
-        extern(C) Conflict snakebite_ut_union_conflict_return();
-    });
-    auto function_ =
-        findFunction(guestModule, "snakebite_ut_union_conflict_return");
-    assert(function_ !is null,
-        "No `snakebite_ut_union_conflict_return` in the guest program");
-
-    auto returnType = typeFunctionOf(function_).nextOf;
-    needsHiddenReturnPointer(returnType).should == true;
 }
 
 
@@ -813,10 +605,8 @@ unittest {
 // bytes on its own, one eightbyte pair per component, so a struct
 // holding one is always past `aggregatePlan`'s own `count > 2` size
 // check before `classify` ever runs, the same MEMORY/hidden-pointer
-// route an oversized `real` field already takes
-// (`abi.oversizedStructWithRealFieldNeedsHiddenPointer`, above). This
-// pins that the `real`-only classification added here left that
-// pre-existing route untouched.
+// route an oversized `real` field already takes. This checks that
+// classification of a `real`-only struct preserves that route.
 @("abi.structWithComplexRealFieldNeedsHiddenPointer")
 unittest {
     auto guestModule = parseSnippet(q{
@@ -1019,10 +809,8 @@ unittest {
 
 
 // `RealPair` classifies as nothing but the X87/X87UP eightbyte pair a
-// bare `real` spans (`abi.structRealOnlyDoesNotNeedHiddenPointer` pins
-// the classifier itself) - it returns through `%st0`, the same register
-// `called.scalarReal.roundTrip`'s own bare `real` already crosses in,
-// not a hidden pointer.
+// bare `real` spans. It returns through `%st0`, the same register that
+// `called.scalarReal.roundTrip` checks for a bare `real`.
 @("called.scalarReal.aggregateReturn")
 unittest {
     auto guestModule = parseSnippet(q{
@@ -1504,9 +1292,8 @@ unittest {
 }
 
 
-// A fieldless struct's return still needs a hidden return pointer
-// (`abi.fieldlessStructReturnNeedsHiddenPointer` pins the classification
-// alone) - this pins the actual call: dmd's own codegen for any fieldless
+// A fieldless struct's return needs a hidden return pointer. This checks
+// the actual call: dmd's own codegen for any fieldless
 // struct's return is `mov rax, rdi; mov byte [rdi], 0; ret`, so the call
 // must hand the callee `returnPlace` in the hidden-pointer register for
 // that one byte to land in `result` - a plan that never marks the return

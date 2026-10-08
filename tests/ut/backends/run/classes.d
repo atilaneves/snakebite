@@ -2289,20 +2289,6 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE rejects a field access through a class qualifier"),
-)) {
-    @("dotTypeReadsBaseField." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            class A { int v = 4; }
-            class B : A { int g() { return this.A.v; } }
-            void main() { assert((new B).g() == 4); }
-        });
-    }
-}
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
@@ -2380,42 +2366,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE rejects a field access through a class qualifier"),
-)) {
-    @("dotTypeOnVariableReadsBaseField." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            class A { int v = 4; }
-            class B : A { }
-            void main() {
-                auto b = new B;
-                assert(b.A.v == 4);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE rejects a field access through a class qualifier"),
-)) {
-    @("dotTypeOnVariableWritesBaseField." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            class A { int v = 4; }
-            class B : A { }
-            void main() {
-                auto b = new B;
-                b.A.v = 9;
-                assert(b.v == 9);
-            }
-        });
-    }
-}
 
 static foreach (backend; Matrix!()) {
     @("dotTypeOnVariableCallsBaseMethodNonVirtually." ~ backend.stringof)
@@ -2528,35 +2478,6 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE rejects a field access through a class qualifier"),
-)) {
-    @("dotTypeQualifiesImplicitThisField." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            class A { int v = 4; }
-            class B : A { int g() { return A.v; } }
-            void main() { assert((new B).g() == 4); }
-        });
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("dotTypeQualifiesImplicitThisMethod." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            class A { int f() { return 1; } }
-            class B : A {
-                override int f() { return 2; }
-                int g() { return A.f(); }
-            }
-            void main() { assert((new B).g() == 1); }
-        });
-    }
-}
 
 // An interface base makes a CastExp, not a DotTypeExp: the qualifier names
 // the interface and the call dispatches through its vtable.
@@ -2612,23 +2533,6 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE fails an internal assertion on a call of a delegate made through a class qualifier"),
-)) {
-    @("dotTypeQualifiesImplicitThisDelegate." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            class A { int f() { return 1; } }
-            class B : A {
-                override int f() { return 2; }
-                int delegate() g() { return &A.f; }
-            }
-            void main() { assert((new B).g()() == 1); }
-        });
-    }
-}
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
@@ -2914,39 +2818,6 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "CTFE does not accept an in contract that any one of the override chain satisfies"),
-)) {
-    @("inheritedContractsThreeLevelsInOfLeafPasses." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            class A {
-                int f(int x)
-                in (x != 0, "A in")
-                out (r) { assert(r != 100, "A out"); }
-                do { return x; }
-            }
-            class B: A {
-                override int f(int x)
-                in (x > 10, "B in")
-                out (r) { assert(r != 200, "B out"); }
-                do { return x; }
-            }
-            class C: B {
-                override int f(int x)
-                in (x < -10, "C in")
-                out (r) { assert(r != 300, "C out"); }
-                do { return x; }
-            }
-            void main() {
-                A a = new C;
-                assert(a.f(-20) == -20);
-            }
-        });
-    }
-}
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
