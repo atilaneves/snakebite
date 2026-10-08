@@ -595,6 +595,10 @@ static foreach (backend; Matrix!(
             struct Value {
                 int field = 42;
             }
+            struct NonPod {
+                int field;
+                ~this() {}
+            }
             struct InnerPointers { int* field; }
             struct PointerValue {
                 int prefix;
@@ -606,6 +610,11 @@ static foreach (backend; Matrix!(
                 auto structInfo = cast(TypeInfo_Struct) typeid(Value);
                 assert(*cast(int*) structInfo.m_init.ptr == 42);
                 assert(structInfo.rtInfo is null);
+                assert(structInfo.m_arg1 is typeid(int));
+                assert(structInfo.m_arg2 is null);
+                auto nonPodInfo = cast(TypeInfo_Struct) typeid(NonPod);
+                assert(nonPodInfo.m_arg1 is null);
+                assert(nonPodInfo.m_arg2 is null);
                 assert(typeid(PointerValue).rtInfo !is null);
                 auto runtimePointerMap = cast(size_t*)
                     typeid(PointerValue).rtInfo;
