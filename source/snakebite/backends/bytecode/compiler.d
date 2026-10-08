@@ -1852,10 +1852,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     //
     // `TypeFacts.Truth` decides which bytes of the compiled-in value
     // those are - the whole value for a pointer, a class reference, an
-    // associative array's handle, or an integral; only the pointer word
-    // for a dynamic array (a zero-length array over real storage is
-    // still `true`); both words, combined here with one `opBitOr`, for a
-    // delegate (`ptr !is null || funcptr !is null`) - so this backend
+    // associative array's handle, or an integral; both words, combined
+    // here with one `opBitOr`, for a dynamic array (`ptr`, `length`) or
+    // a delegate (`ptr`, `funcptr`) - so this backend
     // carries no case of its own for any of them; `conditionWidth` below
     // reports that same shared width back to this method's callers.
     private size_t compileCondition(Expression condition) {
@@ -6241,11 +6240,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // ness` packs a signedness bit into one of them for the four
         // kinds that need one, the same way `opCastWidenSigned`'s own
         // `source` field already carries a size rather than an offset.
-        // `copy`, `classReference`, and `zero` are not: a plain
-        // reinterpret needs no transformation at all, and the other
-        // two each need this compiler's own control flow, so they still
-        // emit their own bytecode
-        // below.
+        // `copy`, `classReference`, `zero`, and `truth` are not: a plain
+        // reinterpret needs no transformation at all, and the others
+        // each need this compiler's own control flow or condition
+        // code, so they emit their own bytecode below.
         final switch (plan.kind) with (CastKind) {
         case copy:
             return evalInto(expression.e1, destOffset, width);
@@ -6275,8 +6273,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         case truth: {
             const truthOffset = compileCondition(expression.e1);
             emit(&opCastToBool, truthOffset, 0, conditionWidth(expression.e1));
-            if (destOffset != truthOffset)
-                emit(&opCopy, destOffset, truthOffset, 1);
+            emit(&opCopy, destOffset, truthOffset, 1);
             return;
         }
 

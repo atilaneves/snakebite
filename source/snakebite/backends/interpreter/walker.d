@@ -2622,8 +2622,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     // `TypeFacts.Truth` decides which native bytes of `expression`'s
     // value make it true - the whole value for a pointer, a class
-    // reference, an associative array's handle, or an integral; only the
-    // pointer word for a dynamic array; either of a delegate's two words
+    // reference, an associative array's handle, or an integral; either
+    // of a dynamic array's two words (`ptr`, `length`) or of a delegate's
     // (`ptr`, `funcptr`) - so this method carries no case of its own for
     // any of them, and reads the same shared rule the bytecode compiler
     // does.

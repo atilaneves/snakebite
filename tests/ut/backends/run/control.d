@@ -2805,7 +2805,27 @@ static foreach (backend; Matrix!(
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE asserts on a class reference as a logical operand"),
+        "dmd's CTFE refuses to slice a null pointer"),
+)) {
+    @("sliceWithNullPointerAndNonzeroLengthIsTruthy." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int[] nullPointer = (cast(int*) null)[0 .. 1];
+                const viaOperand = nullPointer && true;
+                const viaCondition = nullPointer ? 1 : 0;
+                return viaOperand && viaCondition ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "dmd's interpreter leaves the class reference itself as the "
+        ~ "value of `reference && true`, so the result is not a `bool`"),
 )) {
     @("classReferenceIsTruthyOperandOfLogicalAnd." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -2845,7 +2865,7 @@ static foreach (backend; Matrix!()) {
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
-        "CTFE cannot cast a delegate to bool at compile time"),
+        "dmd's interpreter: cannot cast a delegate to bool at compile time"),
 )) {
     @("delegateIsTruthyOperandOfLogicalAnd." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -2865,7 +2885,8 @@ static foreach (backend; Matrix!(
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
-        "CTFE cannot cast an associative array to bool at compile time"),
+        "dmd's interpreter: cannot cast an associative array to bool at "
+        ~ "compile time"),
 )) {
     @("associativeArrayIsTruthyOperandOfLogicalAnd." ~ backend.stringof)
     @Tags(backend.stringof)
