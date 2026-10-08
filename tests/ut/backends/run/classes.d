@@ -3745,6 +3745,28 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A final override keeps its base's vtable slot, but calls through its own
+// declaration do not read that slot or the receiver.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: function call through null class reference `null`"),
+)) {
+    @("nullReceiver.finalOverrideCallDoesNotFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base { int value() { return 1; } }
+            class Derived: Base {
+                final override int value() { return 7; }
+            }
+            void main() {
+                Derived receiver;
+                assert(receiver.value() == 7);
+            }
+        });
+    }
+}
+
 // A call of a `final` method on a null class reference faults only if the body reads the object.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,

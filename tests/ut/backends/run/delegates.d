@@ -9,6 +9,30 @@ module ut.backends.run.delegates;
 import ut.backends;
 
 
+// Taking a final override's address binds its own body, without reading
+// the vtable of a null receiver.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE asserts in dinterpret.d when taking this null receiver's method address"),
+)) {
+    @("nullReceiver.finalOverrideDelegateDoesNotFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base { int value() { return 1; } }
+            class Derived: Base {
+                final override int value() { return 7; }
+            }
+            void main() {
+                Derived receiver;
+                auto callback = &receiver.value;
+                assert(callback() == 7);
+            }
+        });
+    }
+}
+
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot access delegate function pointers"),
