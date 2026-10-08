@@ -340,6 +340,7 @@ public const(imported!"snakebite.dependencyimage".DependencyImage)* prepareDepen
     in bool projectEntry = true,
 ) {
     import snakebite.backends: Program;
+    import snakebite.frontend.compiler: withCompilerLock;
     import snakebite.frontend.imagesource: imageSource, imageInputs;
     import snakebite.dependencyimage:
         DependencyImage, ProjectImageCache, prepareImage, defaultCompiler;
@@ -384,7 +385,11 @@ public const(imported!"snakebite.dependencyimage".DependencyImage)* prepareDepen
         return dependencyInputs;
     }
     const prepared = cache.prepare(*image,
-        () => imageSource(analysedProgram),
+        () {
+            string source;
+            withCompilerLock({ source = imageSource(analysedProgram); });
+            return source;
+        },
         () {
             if (sources.linkerFiles.length && isDubProject(directory)) {
                 import snakebite.dub: buildDubDependencies;

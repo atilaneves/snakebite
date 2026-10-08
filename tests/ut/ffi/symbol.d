@@ -173,13 +173,11 @@ unittest {
 // built image: only the text that is made for it.
 @("image.templateArgumentImports")
 unittest {
-    // Program requires a mutable AST.
-    auto module_ = parseSnippet(q{
+    const source = snippetImageSource(q{
         import core.lifetime: _d_newclassT;
         import core.thread.osthread: Thread;
         Thread allocate() { return _d_newclassT!Thread(); }
     });
-    const source = imageSource(Program([module_]));
     "import core.thread.osthread;".should.be in source;
 }
 
@@ -341,9 +339,8 @@ unittest {
 }
 
 
-// The image source of a program with one root module. The walk of its AST
-// reads frontend state that the parse of another test, running beside this
-// one, can reset, so it parses and walks under the frontend lock.
+// The image source of a program with one root module, parsed and walked
+// under one hold of the frontend lock so that no reset comes between them.
 private string snippetImageSource(in string code) {
     import snakebite.frontend.compiler: withCompilerLock;
 
@@ -456,9 +453,15 @@ static foreach (backend; Matrix!()) {
             mixin(code);
             answer.should == 17;
         } else {
-            auto module_ = parseSnippet(code);
-            auto program = Program([module_]);
-            imageSource(program);
+            import snakebite.frontend.compiler: withCompilerLock;
+
+            imported!"dmd.dmodule".Module module_;
+            Program program;
+            withCompilerLock({
+                module_ = parseSnippet(code);
+                program = Program([module_]);
+                imageSource(program);
+            });
             auto instance = Owned!backend(program);
             int result;
             instance.call(findFunction(module_, "answer"), &result, []);

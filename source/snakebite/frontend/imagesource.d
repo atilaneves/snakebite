@@ -4,11 +4,19 @@ module snakebite.frontend.imagesource;
 private:
 
 
+// The walk holds the frontend lock, which is recursive. A caller that also
+// parses `program` holds the lock across both, or a reset can come between.
 public string imageSource(imported!"snakebite.backends.backend".Program program) {
-    scope collector = new Collector(program);
-    foreach (module_; program.rootModules)
-        module_.accept(collector);
-    return collector.source;
+    import snakebite.frontend.compiler: withCompilerLock;
+
+    string source;
+    withCompilerLock({
+        scope collector = new Collector(program);
+        foreach (module_; program.rootModules)
+            module_.accept(collector);
+        source = collector.source;
+    });
+    return source;
 }
 
 
@@ -16,6 +24,7 @@ public string imageSource(imported!"snakebite.backends.backend".Program program)
 // invalidate its compiled template bodies even when their names stay the same.
 public string[] imageInputs(imported!"snakebite.backends.backend".Program program) {
     import dmd.dmodule: Module;
+    import snakebite.frontend.compiler: withCompilerLock;
     import std.algorithm: sort;
     import std.array: array;
     import std.file: exists;
@@ -32,8 +41,10 @@ public string[] imageInputs(imported!"snakebite.backends.backend".Program progra
         foreach (dependency; module_.aimports)
             collect(dependency);
     }
-    foreach (module_; program.rootModules)
-        collect(module_);
+    withCompilerLock({
+        foreach (module_; program.rootModules)
+            collect(module_);
+    });
     return paths.keys.sort.array;
 }
 
