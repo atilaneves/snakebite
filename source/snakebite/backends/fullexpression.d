@@ -172,7 +172,13 @@ public struct FullExpressionScope {
         _depth = state.depth;
     }
 
-    public bool active() const {
+    // Whether running a full expression at the position starts a new one,
+    // as opposed to being part of the one that is active.
+    public bool opens(in Position position) const @safe @nogc nothrow pure {
+        return endsWithin(position) || !active;
+    }
+
+    public bool active() const @safe @nogc nothrow pure {
         return _depth != 0;
     }
 

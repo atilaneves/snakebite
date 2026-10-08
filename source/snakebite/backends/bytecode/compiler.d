@@ -1858,15 +1858,27 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // a delegate (`ptr`, `funcptr`) - so this backend
     // carries no case of its own for any of them; `conditionWidth` below
     // reports that same shared width back to this method's callers.
-    private size_t compileCondition(Expression condition) {
+    private size_t compileCondition(
+        Expression condition,
+        in FullExpressionScope.Position position
+            = FullExpressionScope.Position.condition,
+    ) {
         import snakebite.nativelayout: TypeFacts;
 
         const truth = TypeFacts.Truth.of(condition.type);
 
         const facts = TypeFacts.of(condition.type);
         const valueOffset = reserveTemp(facts);
-        compileValue(FullExpressionScope.Position.condition,
-            condition, valueOffset, facts.size);
+        if (!_emittingCleanup && _expressions.opens(position)
+                && FullExpressionScope.readsResultAfterEnd(
+                    position, condition)) {
+            size_t address;
+            fullExpression(position, condition, {
+                address = compileAddress(condition);
+            });
+            emit(&opLoadIndirect, valueOffset, address, facts.size);
+        } else
+            compileValue(position, condition, valueOffset, facts.size);
         const offset = valueOffset + truth.offset;
 
         if (truth.isFloat) {
@@ -6172,13 +6184,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         // The left side did not decide the answer: the right side's own
         // truthiness does.
-        size_t rightOffset;
-        size_t rightWidth;
-        inFullExpression(FullExpressionScope.Position.logicalOperand,
-            expression.e2, {
-            rightOffset = compileCondition(expression.e2);
-            rightWidth = conditionWidth(expression.e2);
-        });
+        const rightOffset = compileCondition(
+            expression.e2, FullExpressionScope.Position.logicalOperand);
+        const rightWidth = conditionWidth(expression.e2);
         emit(&opCastToBool, rightOffset, 0, rightWidth);
         if (destOffset != rightOffset)
             emit(&opCopy, destOffset, rightOffset, 1);
