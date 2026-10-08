@@ -270,6 +270,52 @@ static foreach (backend; Matrix!(
 }
 
 
+// The constructor's first call is inside the destructor. Placement keeps
+// its storage on the stack while the D variadic arguments remain observable.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot cast the finalizer fixture to void*"),
+)) {
+    @("firstDestructorCallbackVariadicConstructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.memory: GC;
+            import core.vararg;
+            pragma(mangle, "callFinalizerTestCallback")
+            extern(C) void callFinalizerTestCallback(void*, Object);
+            struct Summer {
+                int total;
+                this(int first, ...) {
+                    assert(_arguments.length == 2);
+                    total = first;
+                    foreach (type; _arguments) {
+                        assert(type == typeid(int));
+                        total += va_arg!int(_argptr);
+                    }
+                }
+            }
+            class Resource {
+                int* result;
+                this(int* result) { this.result = result; }
+                ~this() {
+                    Summer summer;
+                    auto constructed = new (summer) Summer(1, 2, 3);
+                    *result = constructed.total;
+                }
+            }
+            void main() {
+                int result;
+                auto resource = new Resource(&result);
+                GC.clrAttr(cast(void*) resource, GC.BlkAttr.FINALIZE);
+                callFinalizerTestCallback(typeid(Resource).destructor, resource);
+                assert(result == 6);
+            }
+        });
+    }
+}
+
+
 // How many trips round the loop each of the two guest functions
 // `loopFunction` writes makes. The lookup budget below is measured over
 // the difference.

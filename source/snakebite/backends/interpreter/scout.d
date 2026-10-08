@@ -41,7 +41,7 @@ package struct Preparation {
     package void delegate(DeleteExp) deletion;
     package void delegate(StructLiteralExp) structLiteral;
     package void delegate(StringExp) stringLiteral;
-    package void delegate(FuncDeclaration) constructor;
+    package void delegate(NewExp) constructor;
     package void delegate(VarDeclaration) bitfield;
     package void delegate(TryCatchStatement) tryCatch;
     package void delegate(TryFinallyStatement) tryFinally;
@@ -215,7 +215,7 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
         import snakebite.backends.aggregateinit: NewPlan, planNew;
 
         if (expression.member !is null)
-            _preparation.constructor(expression.member);
+            _preparation.constructor(expression);
 
         const plan = planNew(expression);
         if (plan.destination == NewPlan.Destination.stack
