@@ -565,7 +565,7 @@ public struct NativeData {
     private void[] _available;
     // Read without a lock by every thread that runs guest code
     // (ADR-0006). A `shared`/`__gshared`/`immutable` variable's storage
-    // is published once it is initialised; until then only
+    // is published once it is resolved or initialised; until then only
     // `_pendingStatics`, which the initialising thread alone reads,
     // knows it, so an initializer that refers to its own variable finds
     // the storage.
@@ -794,6 +794,9 @@ public struct NativeData {
         import std.string: fromStringz;
 
         auto variable = definitionOf(declaration);
+        if (auto found = variable in _statics)
+            return *found;
+
         const facts = TypeFacts.of(variable.type);
         if (variable.isThreadLocalStorage)
             return _tls.current.slotFor(tlsDescriptorOf(variable));
@@ -802,12 +805,9 @@ public struct NativeData {
             // const would also make the referenced storage read-only here.
             auto address = _symbolAddress(variable);
             if (address !is null)
-                return address[0 .. facts.size];
+                return *_statics.insert(variable, address[0 .. facts.size]);
             assert(!isExtern(variable), variable.toChars.fromStringz);
         }
-
-        if (auto found = variable in _statics)
-            return *found;
 
         import snakebite.frontend.compiler: withCompilerLock;
 

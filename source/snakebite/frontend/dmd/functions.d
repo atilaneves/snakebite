@@ -61,10 +61,10 @@ public bool isRootOwned(
 public imported!"dmd.dmodule".Module moduleOf(
     imported!"dmd.dsymbol".Dsymbol declaration,
 ) {
-    import snakebite.frontend.compiler: withCompilerLock;
+    import snakebite.frontend.compiler: withCompilerQuery;
 
     imported!"dmd.dmodule".Module result;
-    withCompilerLock({ result = declaration.getModule; });
+    withCompilerQuery({ result = declaration.getModule; });
     return result;
 }
 
@@ -79,11 +79,11 @@ public struct FunctionContext {
 public FunctionContext contextOf(
     imported!"dmd.func".FuncDeclaration function_,
 ) {
-    import snakebite.frontend.compiler: withCompilerLock;
+    import snakebite.frontend.compiler: withCompilerQuery;
     import snakebite.frontend.dmd.delegates: outerFunctionOf;
 
     FunctionContext result;
-    withCompilerLock({
+    withCompilerQuery({
         result.module_ = function_.getModule;
         result.outerFunction = outerFunctionOf(function_);
         result.instantiated = function_.isInstantiated !is null;
