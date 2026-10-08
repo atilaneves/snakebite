@@ -3816,3 +3816,286 @@ static foreach (backend; Matrix!(
         );
     }
 }
+
+
+// A bodiless function in a module of the `std.math` package whose name
+// is an intrinsic's name is a native call unless dmd's code generator
+// inlines that exact declaration. Compiled D calls the C `isnan` here.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a guest module declaration cannot be mixed into the host module"),
+)) {
+    @("ffi.declarationNamedLikeAnIntrinsicCallsTheNativeFunction."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        auto module_ = parseSnippet(q{
+            module std.math.audit;
+
+            extern(C) int isnan(double);
+
+            void main() {
+                assert(isnan(double.nan) != 0);
+                assert(isnan(1.5) == 0);
+            }
+        });
+        auto program = Program([module_]);
+        auto backend_ = Owned!backend(program);
+
+        backend_.call(findFunction(module_, "main"), null, []);
+    }
+}
+
+
+// Runs `main` of a guest module the test names, which `Native` cannot do:
+// the module declaration cannot be mixed into the host module. Two guest
+// modules with one name conflict in one frontend, so each test and backend
+// gives its own.
+private void runMainOfModule(Backend)(string moduleName, string source) {
+    auto module_ = parseSnippet("module " ~ moduleName ~ ";\n" ~ source);
+    auto program = Program([module_]);
+    auto backend_ = Owned!Backend(program);
+
+    backend_.call(findFunction(module_, "main"), null, []);
+}
+
+
+// dmd's code generator inlines `std.math.sqrt` only for a floating point
+// operand; any other operand type is a native call.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a guest module declaration cannot be mixed into the host module"),
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE asserts in `dmd.builtin` for a `sqrt` of an integer"),
+)) {
+    @("ffi.stdMathSqrtOfAnIntegerCallsTheNativeFunction."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        runMainOfModule!backend(
+            "std.math.sqrtOfAnInteger" ~ backend.stringof, q{
+
+            pragma(mangle, "abs") extern(C) int sqrt(int);
+
+            void main() {
+                assert(sqrt(-4) == 4);
+            }
+        });
+    }
+}
+
+
+// `toPrec` is inlined for a `real` operand like the other `real`
+// intrinsics of `std.math`.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a guest module declaration cannot be mixed into the host module"),
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE has no case for `toPrec` in `dmd.builtin`"),
+)) {
+    @("ffi.stdMathToPrecOfARealIsInlined." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        runMainOfModule!backend(
+            "std.math.toPrecOfAReal" ~ backend.stringof, q{
+
+            real toPrec(real);
+
+            void main() {
+                assert(toPrec(1.5L) == 1.5L);
+            }
+        });
+    }
+}
+
+
+// dmd's code generator inlines only ten names of `core.math`, whatever
+// else dmd classifies by name.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a guest module declaration cannot be mixed into the host module"),
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE evaluates a call by name only in `core.math` " ~
+        "itself, and a guest module of that name conflicts with the " ~
+        "one in druntime"),
+)) {
+    @("ffi.coreMathDeclarationOutsideTheTableCallsTheNativeFunction."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        runMainOfModule!backend(
+            "core." ~ backend.stringof ~ ".floor.math", q{
+
+            extern(C) double floor(double);
+
+            void main() {
+                assert(floor(2.7) == 2.0);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a guest module declaration cannot be mixed into the host module"),
+)) {
+    @("ffi.stdMathSqrtOfEachFloatingTypeIsInlined." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        runMainOfModule!backend(
+            "std.math.sqrtOfEachType" ~ backend.stringof, q{
+
+            float sqrt(float);
+            double sqrt(double);
+            real sqrt(real);
+
+            void main() {
+                assert(sqrt(4.0f) == 2.0f);
+                assert(sqrt(4.0) == 2.0);
+                assert(sqrt(4.0L) == 2.0L);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a guest module declaration cannot be mixed into the host module"),
+)) {
+    @("ffi.stdMathFabsOfEachFloatingTypeIsInlined." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        runMainOfModule!backend(
+            "std.math.fabsOfEachType" ~ backend.stringof, q{
+
+            float fabs(float);
+            double fabs(double);
+            real fabs(real);
+
+            void main() {
+                assert(fabs(-2.0f) == 2.0f);
+                assert(fabs(-2.0) == 2.0);
+                assert(fabs(-2.0L) == 2.0L);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a guest module declaration cannot be mixed into the host module"),
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE has no source for `rint` or `rndtol` " ~
+        "(`dmd.builtin.isBuiltin` does not classify them)"),
+)) {
+    @("ffi.stdMathRealIntrinsicsAreInlined." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        runMainOfModule!backend(
+            "std.math.realIntrinsics" ~ backend.stringof, q{
+
+            real cos(real);
+            real sin(real);
+            real rint(real);
+            real yl2x(real, real);
+            real yl2xp1(real, real);
+            real ldexp(real, int);
+            long rndtol(real);
+
+            void main() {
+                assert(cos(0.0L) == 1.0L);
+                assert(sin(0.0L) == 0.0L);
+                assert(rint(2.5L) == 2.0L);
+                assert(yl2x(8.0L, 2.0L) == 6.0L);
+                assert(yl2xp1(3.0L, 2.0L) == 4.0L);
+                assert(ldexp(1.5L, 2) == 6.0L);
+                assert(rndtol(2.7L) == 3L);
+            }
+        });
+    }
+}
+
+
+// A `double` `cos` is not one of the `std.math` intrinsics: only a `real`
+// operand makes it one.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a guest module declaration cannot be mixed into the host module"),
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE evaluates a call named like a builtin with the " ~
+        "builtin, whatever symbol the declaration names"),
+)) {
+    @("ffi.stdMathCosOfADoubleCallsTheNativeFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        runMainOfModule!backend(
+            "std.math.cosOfADouble" ~ backend.stringof, q{
+
+            pragma(mangle, "floor") extern(C) double cos(double);
+
+            void main() {
+                assert(cos(2.7) == 2.0);
+            }
+        });
+    }
+}
+
+
+// dmd compares the operand type by identity, so a `const` operand is no
+// intrinsic.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a guest module declaration cannot be mixed into the host module"),
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE evaluates a call named like a builtin with the " ~
+        "builtin, whatever symbol the declaration names"),
+)) {
+    @("ffi.stdMathFabsOfAConstDoubleCallsTheNativeFunction."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        runMainOfModule!backend(
+            "std.math.fabsOfAConstDouble" ~ backend.stringof, q{
+
+            pragma(mangle, "floor") extern(C) double fabs(const double);
+
+            void main() {
+                assert(fabs(2.7) == 2.0);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a guest module declaration cannot be mixed into the host module"),
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE evaluates a call by name only in `core.math` " ~
+        "itself, and a guest module of that name conflicts with the " ~
+        "one in druntime"),
+)) {
+    @("ffi.coreMathIntrinsicsAreInlinedForEachFloatingType."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        runMainOfModule!backend(
+            "core." ~ backend.stringof ~ ".inlined.math", q{
+
+            float cos(float);
+            double sin(double);
+            double fabs(double);
+            float sqrt(float);
+
+            void main() {
+                assert(cos(0.0f) == 1.0f);
+                assert(sin(0.0) == 0.0);
+                assert(fabs(-2.0) == 2.0);
+                assert(sqrt(4.0f) == 2.0f);
+            }
+        });
+    }
+}

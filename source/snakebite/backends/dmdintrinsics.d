@@ -96,3 +96,10 @@ version (DigitalMars) {
     }
 } else
     static assert(false, "Builtin intrinsics need DMD or LDC as the host");
+
+
+// The operand is a value in memory, already narrowed to its own precision,
+// which is all that dmd's `toPrec` guarantees.
+public T toPrec(T)(in T x) @safe pure nothrow @nogc {
+    return x;
+}

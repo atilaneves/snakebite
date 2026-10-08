@@ -284,14 +284,16 @@ public struct CallSelection {
 
     // `function_`'s wrapper, when it is a bodiless declaration that dmd
     // inlines instead of calling. dmd has two lists of these. Its
-    // semantic pass classifies some (`dmd.builtin.isBuiltin`: `core.math.
-    // fabs`, `core.bitop.bswap`, ...) and its CTFE evaluator is for that
-    // list only, which this backend never calls at run time. Its code
-    // generator (`dmd.glue.toir.intrinsic_op`) inlines more, among them
-    // `core.math.rint` and `rndtol`, `core.volatile` and `core.simd`,
-    // without classifying them; `isCodeGeneratorIntrinsicModule` finds
-    // those by module. No host symbol exists for either kind. Any other
-    // bodiless declaration is a native call.
+    // semantic pass classifies some (`dmd.builtin.isBuiltin`: `core.bitop.
+    // bswap`, ...) by name alone, and its CTFE evaluator is for that list
+    // only, which this backend never calls at run time. Its code generator
+    // (`dmd.glue.toir.intrinsic_op`) inlines more, among them `core.
+    // volatile` and `core.simd`, without classifying them;
+    // `isCodeGeneratorIntrinsicModule` finds those by module. For the two
+    // math modules the code generator alone decides (`isMathIntrinsic`),
+    // since the classification takes names it does not inline. No host
+    // symbol exists for an inlined declaration. Any other bodiless
+    // declaration is a native call.
     //
     // A declaration of either kind that the table has no wrapper for stops
     // here, at the first decision, naming the intrinsic: sending it across
@@ -305,8 +307,12 @@ public struct CallSelection {
         import core.stdc.stdio: fprintf, stderr;
         import std.string: fromStringz;
 
-        const classified = isBuiltin(function_) != BUILTIN.unimp;
-        if (!classified && !isCodeGeneratorIntrinsicModule(function_))
+        const mathModule = mathModuleOf(function_);
+        const inlined = mathModule != MathModule.none
+            ? isMathIntrinsic(function_, mathModule)
+            : isBuiltin(function_) != BUILTIN.unimp
+                || isCodeGeneratorIntrinsicModule(function_);
+        if (!inlined)
             return Decision(Route.native);
 
         // dmd's own classification (`BUILTIN.popcnt` for the declared
@@ -332,6 +338,65 @@ public struct CallSelection {
             Route.builtin, entry, destinationParameterOf(name));
     }
 
+    private enum MathModule { none, stdMath, coreMath }
+
+    // Which of the two math rules of `dmd.glue.toir.intrinsic_op` applies to
+    // the module of `function_`: `std.math` and its submodules, or
+    // `core.math`.
+    private static MathModule mathModuleOf(FuncDeclaration function_) {
+        const module_ = function_.getModule;
+        if (module_ is null || module_.md is null)
+            return MathModule.none;
+        const packages = module_.md.packages;
+        if (packages.length == 0)
+            return MathModule.none;
+        const first = packages[0].toString;
+        if (packages.length == 2)
+            return first == "std" && packages[1].toString == "math"
+                ? MathModule.stdMath : MathModule.none;
+        if (module_.md.id.toString != "math")
+            return MathModule.none;
+        if (first == "std")
+            return MathModule.stdMath;
+        return first == "core" ? MathModule.coreMath : MathModule.none;
+    }
+
+    // `intrinsic_op` of dmd 2.113.0, as far as it concerns `std.math` and
+    // `core.math`. The glue module is not importable (the function is
+    // `package(dmd.glue)`), so this is a copy. The operand type decides, not
+    // the name alone: `core.math` takes any floating point operand;
+    // `std.math` takes `real`, and `float` and `double` only for `sqrt` and
+    // `fabs`.
+    private static bool isMathIntrinsic(
+        FuncDeclaration function_, in MathModule mathModule,
+    ) {
+        import dmd.astenums: TY;
+        import snakebite.frontend.dmd.functions: typeFunctionOf;
+
+        auto parameterList = typeFunctionOf(function_).parameterList;
+        if (parameterList.length == 0)
+            return false;
+        const name = function_.ident.toString;
+        switch (name) {
+            case "cos", "sin", "fabs", "rint", "sqrt", "yl2x", "ldexp",
+                    "rndtol", "yl2xp1", "toPrec":
+                break;
+            default:
+                return false;
+        }
+        // dmd tests the operand type by identity with its basic type
+        // singletons, so a qualified type is never one of them: no
+        // `toBasetype`.
+        const type = parameterList[0].type;
+        const unqualified = type.mod == 0;
+        const real_ = unqualified && type.ty == TY.Tfloat80;
+        const floating = unqualified
+            && (real_ || type.ty == TY.Tfloat32 || type.ty == TY.Tfloat64);
+        return mathModule == MathModule.coreMath
+            ? floating
+            : real_ || floating && (name == "sqrt" || name == "fabs");
+    }
+
     // dmd's code generator (`dmd.glue.toir.intrinsic_op`) inlines bodiless
     // functions of these modules by name.
     private static bool isCodeGeneratorIntrinsicModule(
@@ -343,7 +408,7 @@ public struct CallSelection {
                 || module_.md.packages[0].toString != "core")
             return false;
         const name = module_.md.id.toString;
-        return name == "math" || name == "volatile" || name == "simd";
+        return name == "volatile" || name == "simd";
     }
 
     // The concrete types `function_`'s parameters declare, the half of

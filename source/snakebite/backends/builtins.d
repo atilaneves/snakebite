@@ -105,7 +105,7 @@ private BuiltinCall widthEntryOf(T)(in string name)
 // `rint` and `rndtol` are intrinsics of dmd's code generator
 // (`dmd.glue.toir.intrinsic_op`) that its `BUILTIN` enum (`dmd.func`)
 // omits, so `CallSelection` asks this table for them by module and name.
-private enum oneArgumentNames = ["fabs", "sqrt", "sin", "cos", "rint"];
+private enum oneArgumentNames = ["fabs", "sqrt", "sin", "cos", "rint", "toPrec"];
 private enum sameTypeTwoArgumentNames = ["yl2x", "yl2xp1"];
 
 
