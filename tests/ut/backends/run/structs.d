@@ -6242,6 +6242,30 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A CTFE value of a nested struct keeps its explicit null context when copied
+// outside the declaring function. Reading its own field needs no live frame.
+static foreach (backend; Matrix!()) {
+    @("nestedStructInit.ctfeValueOutsideOwnerFrame." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            auto make() {
+                int captured = 1;
+                struct S {
+                    int tag;
+                    int get() { return captured; }
+                }
+                return S(7);
+            }
+            enum seed = make();
+            void main() {
+                auto value = seed;
+                assert(value.tag == 7);
+            }
+        });
+    }
+}
+
 // Reading the range with a loop: `joiner` over the `map!strip` of a
 // `splitter` result keeps a `MapResult` whose `_input` is `splitter`'s nested
 // `Result`, and `joiner`'s constructor assigns `typeof(_current).init`.

@@ -206,7 +206,11 @@ public AggregateInitPlan planStructLiteral(
 
     InitStep[] steps;
 
-    steps ~= vthisStepsOf(expression.sd);
+    // CTFE literals can include the hidden fields. Like dmd's e2ir, only
+    // acquire an implicit context when those fields are absent.
+    if (expression.elements is null
+        || expression.elements.length != expression.sd.fields.length)
+        steps ~= vthisStepsOf(expression.sd);
 
     if (expression.elements !is null)
         foreach (i, element; *expression.elements) {
