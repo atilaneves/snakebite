@@ -204,6 +204,7 @@ import snakebite.backends.haltprocess: isHalt;
 import snakebite.backends.exceptions: CAssertCall;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
+import snakebite.backends.ifplan: IfPlan;
 import snakebite.backends.logical: LogicalPlan;
 import snakebite.backends.comparison: ComparisonPlan;
 import snakebite.backends.controlflow: ControlFlowState,
@@ -2540,7 +2541,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     // Only the branch that runs is walked: the other one never executes,
     // so nothing in it is ever evaluated, not even to be discarded.
-    override void visit(IfStatement statement) {
+    protected override void visitIf(IfStatement statement, in IfPlan plan) {
         if (_controlFlow.seeking) {
             if (statement.ifbody !is null)
                 statement.ifbody.accept(this);
@@ -2549,9 +2550,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return;
         }
 
-        auto taken = conditionHolds(statement.condition)
-            ? statement.ifbody
-            : statement.elsebody;
+        const bodyRuns = plan.kind == IfPlan.Kind.condition
+            && conditionHolds(statement.condition);
+        auto taken = bodyRuns ? statement.ifbody : statement.elsebody;
 
         if (taken !is null)
             taken.accept(this);
@@ -5761,12 +5762,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import core.stdc.string: memcpy;
         import snakebite.nativelayout: storeIntegral;
 
-        if (plan.destination == NewPlan.Destination.lowering
-                || (expression.thisexp !is null
-                    && plan.destination != NewPlan.Destination.placement
-                    && plan.destination != NewPlan.Destination.stack))
-            return visit(cast(Expression) expression);
-
         if (plan.destination == NewPlan.Destination.stack) {
             assert(plan.objectKind == NewPlan.ObjectKind.class_);
             auto classType = expression.newtype.toBasetype.isTypeClass;
@@ -6195,10 +6190,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         return _shared.structLiteralPlans.insert(
             expression, planStructLiteral(expression));
-    }
-
-    protected override void visitUnloweredCat(CatExp expression) {
-        visit(cast(Expression) expression);
     }
 
     // `~=` appending a `dchar` (`CatDcharAssignExp`, `EXP.concatenateDcharAssign`)

@@ -10,11 +10,12 @@ import dmd.expression:
     ConstructExp, Expression, IdentityExp, LoweredAssignExp, NewExp, ThrowExp,
     TupleExp;
 import dmd.statement:
-    ExpStatement, ReturnStatement, SwitchErrorStatement, ThrowStatement,
-    WithStatement;
+    ExpStatement, IfStatement, ReturnStatement, SwitchErrorStatement,
+    ThrowStatement, WithStatement;
 import snakebite.backends.fullexpression: FullExpressionScope;
 import snakebite.backends.identity: IdentityPlan, identityPlan;
 import snakebite.backends.logical: LogicalPlan, logicalPlan;
+import snakebite.backends.ifplan: IfPlan, ifPlan;
 import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
 import snakebite.backends.aggregateinit: NewPlan, planNew;
 import dmd.visitor: Visitor;
@@ -137,6 +138,12 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     protected abstract void visitSwitchError(SwitchErrorStatement statement);
     protected abstract void visitReturnOperand(ReturnStatement statement);
     protected abstract void visitReturnTransfer(ReturnStatement statement);
+
+    final override void visit(IfStatement statement) {
+        visitIf(statement, ifPlan(statement));
+    }
+
+    protected abstract void visitIf(IfStatement statement, in IfPlan plan);
 
     protected abstract void visitWithOperand(WithStatement statement);
     protected abstract void visitWithBody(WithStatement statement);
@@ -289,7 +296,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
         }
 
         if (expression.lowering is null) {
-            visitUnloweredNew(expression, plan);
+            visitHalt;
             return;
         }
 
@@ -408,19 +415,17 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     protected abstract void storeAddress(in size_t byteOffset);
     protected abstract void copyBytes(in size_t width);
 
-    // `~` concatenation is always `_d_arraycatnTX`; the one shape without a
-    // `lowering` is a node this visitor does not otherwise support, the same
-    // fallback `CatAssignExp` above uses for its own unlowered form.
+    // `~` concatenation is always `_d_arraycatnTX`; dmd leaves `lowering`
+    // null only in a scope that needs no code generation, the same case
+    // `CatAssignExp` above halts for.
     final override void visit(CatExp expression) {
-        if (expression.lowering !is null) {
-            expression.lowering.accept(this);
+        if (expression.lowering is null) {
+            visitHalt;
             return;
         }
 
-        visitUnloweredCat(expression);
+        expression.lowering.accept(this);
     }
-
-    protected abstract void visitUnloweredCat(CatExp expression);
 }
 
 

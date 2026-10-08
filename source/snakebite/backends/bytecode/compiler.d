@@ -8,6 +8,7 @@ import object: TypeInfo_Class;
 import snakebite.backends.argumentflow: Shape;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
+import snakebite.backends.ifplan: IfPlan;
 import snakebite.backends.logical: LogicalPlan;
 import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
 import snakebite.backends.switchplan:
@@ -1603,8 +1604,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileEffect(statement.exp);
     }
 
-    override void visit(IfStatement statement) {
-        compileIf(statement);
+    protected override void visitIf(IfStatement statement, in IfPlan plan) {
+        compileIf(statement, plan);
     }
 
     override void visit(ForStatement statement) {
@@ -2178,18 +2179,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // never run, the same way an untaken `if` skips them at run time in
     // the interpreter. Finished (see `_finished`'s own doc) only when
     // there is an `else` and both branches are.
-    private void compileIf(IfStatement statement) {
-        // dmd's own glue (`s2ir.d`) never emits the true body of an
-        // `if (__ctfe) { ... }` block: `Scope.ctfeBlock` is set only for
-        // this exact shape, and its only effect is to leave statements
-        // in the body unlowered (e.g. a `.length` assign keeps no
-        // `_d_arraysetlengthT` call) because dmd's CTFE engine interprets
-        // the body directly instead. At run time the `if` never enters the
-        // body, but a `case` or `default` label in it is still a target
-        // for the `switch` that holds it, so such a body is compiled
-        // behind a jump. dmd rejects a `goto` to any other label in it.
-        if (statement.isIfCtfeBlock) {
-            if (statement.ifbody !is null && statement.ifbody.comeFrom)
+    private void compileIf(IfStatement statement, in IfPlan plan) {
+        if (plan.kind == IfPlan.Kind.ctfeBlock) {
+            if (plan.bodyHasLabels)
                 return compileCtfeBlockWithLabels(statement);
 
             if (statement.elsebody !is null)
@@ -4937,10 +4929,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     protected override void visitUnloweredNew(
         NewExp expression, NewPlan plan,
     ) {
-        if (plan.destination == NewPlan.Destination.lowering)
-            assert(0, "dmd lowers every heap `new` of a class that is not "
-                ~ "a `scope class`, outside a `ctfe` or `-betterC` scope");
-
         prepareNewDestination(expression);
         scope (exit) restoreNew;
 
@@ -5215,11 +5203,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (_destination != discardResult)
             emit(&opLoadIndirect, _destination, arrayOffset, arrayValueSize);
-    }
-
-    protected override void visitUnloweredCat(CatExp expression) {
-        assert(0, "dmd lowers every `~` outside a `-betterC` scope "
-            ~ "(`trySetCatExpLowering`)");
     }
 
     override void visit(PostExp expression) {
