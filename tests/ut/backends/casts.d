@@ -46,6 +46,98 @@ unittest {
 }
 
 
+@("kind.pointerToIntegral")
+unittest {
+    auto function_ = castFunctionOf(q{
+        ubyte cast_(int* value) { return cast(ubyte) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastKind.pointerToIntegral;
+}
+
+
+@("kind.pointerToFloat")
+unittest {
+    auto function_ = castFunctionOf(q{
+        double cast_(int* value) { return cast(double) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastKind.pointerToFloat;
+}
+
+
+@("kind.floatToPointer")
+unittest {
+    auto function_ = castFunctionOf(q{
+        int* cast_(double value) { return cast(int*) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastKind.floatToPointer;
+}
+
+
+@("kind.sarrayToVoidSliceLength")
+unittest {
+    auto function_ = castFunctionOf(q{
+        int[2] values;
+        void[] cast_() { return cast(void[]) values; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastKind.sarrayToSlice;
+    plan.staticLength.should == 8;
+}
+
+
+
+
+// The reverse of `kind.pointerToIntegral`: `size_t` and a pointer are both
+// `size_t.sizeof` bytes wide, so preserving the value's own bits across the
+// cast is the same plain move `copy` already covers for two equal-width
+// integrals - `alignUp`'s own `return cast(T) b;`, `core.stdc.stdarg`'s
+// only cast from a `size_t` to its own type parameter (issue: `core/stdc/
+// stdarg.d(69)`).
+@("kind.copy.sizeTToPointer")
+unittest {
+    auto function_ = castFunctionOf(q{
+        void* cast_(size_t value) { return cast(void*) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastKind.copy;
+}
+
+
+// A narrower integral cast to a pointer has to sign- or zero-extend into
+// the pointer's own width first, exactly as widening that same operand to
+// a wider integral would - the same `widenSigned`/`widenUnsigned` kinds an
+// integral destination already uses.
+@("kind.widenSigned.intToPointer")
+unittest {
+    auto function_ = castFunctionOf(q{
+        void* cast_(int value) { return cast(void*) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastKind.widenSigned;
+}
+
+
 @("kind.widenUnsigned.uintToPointer")
 unittest {
     auto function_ = castFunctionOf(q{

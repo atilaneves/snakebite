@@ -128,7 +128,7 @@ public struct TypeFacts {
     public static TypeFacts of(Type type) {
         import dmd.astenums: Tarray, Tvector;
         import dmd.typesem:
-            alignsize, isIntegral, isUnsigned, nextOf, size, toBasetype;
+            alignsize, isIntegral, isUnsigned, nextOf;
         import snakebite.frontend.compiler: forceIfNeeded;
 
         forceIfNeeded(() => resolved(type), () { forceResolved(type); });
@@ -136,7 +136,7 @@ public struct TypeFacts {
         // An enum value has the representation of its base type. Keeping
         // that representation here lets every byte-storage caller use the
         // same facts for enum values with floating or string bases.
-        type = type.toBasetype;
+        type = representationType(type);
 
         if (type.ty == Tarray) {
             forceIfNeeded(
@@ -145,7 +145,7 @@ public struct TypeFacts {
             );
             return TypeFacts(
                 arrayValueSize, size_t.alignof, false, false, true,
-                type.nextOf.size,
+                representationSize(type.nextOf),
             );
         }
 
@@ -154,11 +154,35 @@ public struct TypeFacts {
         // any integral.
         const scalar = type.ty != Tvector;
         return TypeFacts(
-            type.size,
+            representationSize(type),
             type.alignsize,
             scalar && type.isIntegral,
             scalar && type.isUnsigned,
         );
+    }
+
+    private static Type representationType(Type type) {
+        import dmd.typesem: toBasetype;
+        import snakebite.frontend.compiler: newInFrontend;
+
+        // DMD can cache a new qualified base even when the enum is resolved.
+        if (type.isTypeEnum !is null)
+            return newInFrontend!toBasetype(type);
+        return type;
+    }
+
+    private static auto representationSize(Type type) {
+        import dmd.typesem: size;
+        import snakebite.frontend.compiler: newInFrontend;
+
+        // Static-array size normalizes each nested element. An enum can
+        // still allocate a qualified base after its declaration is resolved.
+        auto element = type;
+        while (auto arrayType = element.isTypeSArray)
+            element = arrayType.next;
+        if (element.isTypeEnum !is null)
+            return newInFrontend!size(type);
+        return type.size;
     }
 
     // `of`, for a caller that only prepares what execution may ask for
@@ -331,10 +355,10 @@ public struct TypeFacts {
 
         public static Truth of(Type type) {
             import dmd.astenums: TY;
-            import dmd.typesem: size, toBasetype;
+            import dmd.typesem: size;
             import std.conv: text;
 
-            type = type.toBasetype;
+            type = representationType(type);
             final switch (type.ty) with (TY) {
                 // An imaginary value is one `float`/`double`/`real`-shaped
                 // component on its own - the same nonzero test a real one
@@ -616,6 +640,7 @@ public struct NativeData {
 
     private void* classValue(ClassReferenceExp value) {
         import core.stdc.string: memcpy;
+        import dmd.expressionsem: toInteger;
         import snakebite.frontend.compiler: withCompilerLock;
         version(unittest) import snakebite.sharedtable: assertCacheFillAllowed;
 
@@ -635,12 +660,21 @@ public struct NativeData {
             scope (failure) _compileTimeValues.remove(value.value);
             for (auto declaration = value.originalClass;
                     declaration !is null; declaration = declaration.baseClass) {
+                size_t writtenBitEnd;
                 foreach (field; declaration.fields) {
                     const index = value.findFieldIndexByName(field);
                     assert(index >= 0);
                     // Frontend expression APIs require mutable AST nodes.
                     auto element = (*value.value.elements)[index];
-                    if (element !is null)
+                    if (element is null)
+                        continue;
+                    if (!fieldImageIncludes(field, writtenBitEnd))
+                        continue;
+                    if (field.isBitFieldDeclaration !is null) {
+                        const access = bitfieldAccess(field);
+                        access.store(cast(ubyte*) address + access.offset,
+                            element.toInteger);
+                    } else
                         write(field.type, TypeFacts.of(field.type), element,
                             cast(ubyte*) address + field.offset);
                 }
@@ -944,8 +978,11 @@ public struct NativeData {
         import dmd.expressionsem: getConstInitializer;
         import snakebite.frontend.compiler: newInFrontend;
 
+        size_t writtenBitEnd;
         foreach (field; declaration.fields) {
             if (field._init !is null && field._init.isVoidInitializer)
+                continue;
+            if (!fieldImageIncludes(field, writtenBitEnd))
                 continue;
 
             const bytes = field._init is null
@@ -966,6 +1003,24 @@ public struct NativeData {
             memcpy(place + field.offset, bytes.ptr, bytes.length);
         }
     }
+}
+
+// Like dmd's `membersToDt`, the first present union member owns its bytes.
+// Packed siblings can share bytes, but not the bits of a selected member.
+private bool fieldImageIncludes(
+    imported!"dmd.declaration".VarDeclaration field,
+    ref size_t writtenBitEnd,
+) {
+    import dmd.typesem: size;
+
+    const bitfield = field.isBitFieldDeclaration;
+    const start = field.offset * 8 + (bitfield is null ? 0 : bitfield.bitOffset);
+    if (start < writtenBitEnd)
+        return false;
+    writtenBitEnd = start + (bitfield is null
+        ? field.type.size * 8
+        : bitfield.fieldWidth);
+    return true;
 }
 
 private alias SymbolAddress =
@@ -1282,17 +1337,13 @@ private void storeValue(
 
     if (auto literal = value.isStructLiteralExp) {
         memset(place, 0, facts.size);
-        // Like dmd's `membersToDt`: of fields that overlap, the first one
-        // with an element wins and the later ones are skipped.
-        size_t writtenEnd;
+        size_t writtenBitEnd;
         foreach (i, element; *literal.elements) {
             if (element is null)
                 continue;
             auto field = literal.sd.fields[i];
-            if (field.offset < writtenEnd && !field.isBitFieldDeclaration)
+            if (!fieldImageIncludes(field, writtenBitEnd))
                 continue;
-            if (field.offset + field.type.size > writtenEnd)
-                writtenEnd = field.offset + field.type.size;
             if (field.isBitFieldDeclaration !is null) {
                 const access = bitfieldAccess(field);
                 access.store(bytes + access.offset, element.toInteger);

@@ -354,7 +354,10 @@ private imported!"dmd.func".FuncDeclaration findFunction(
 
         // An instantiated template contributes its expanded declarations to
         // this module. An uninstantiated template is not part of the build.
+        // A failed speculative instance can remain after a gagged error.
         if (auto instance = member.isTemplateInstance) {
+            if (instance.errors)
+                continue;
             if (auto found = findFunction(instance.members, name))
                 return found;
         }

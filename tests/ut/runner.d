@@ -13,6 +13,7 @@ static import ut.backends.run.main,
     ut.backends.run.delegates,
     ut.backends.run.enums,
     ut.backends.run.exceptions,
+    ut.backends.run.finalizers,
     ut.backends.run.inlineasm,
     ut.backends.run.nativestack,
     ut.backends.run.operators,
@@ -81,21 +82,44 @@ static import ut.backends.run.main,
     ut.repl.cell,
     ut.repl.session,
     ut.process,
+    ut.frontend.functions,
     ut.frontend.memory,
     ut.frontend.checks;
 
+// unit-threaded removes its default sandbox root when a process starts.
+// A second test process must not remove this process's active sandboxes.
+static this() {
+    import unit_threaded.integration: Sandbox;
+
+    Sandbox.setPath(sandboxPath);
+}
+
+private string sandboxPath() {
+    import core.sys.posix.unistd: getpid;
+    import std.conv: text;
+    import std.path: buildPath;
+
+    return buildPath("tmp", "snakebite-ut", text(getpid()));
+}
+
+import unit_threaded.runner.runner: disableDefaultRunner, runTests;
+import unit_threaded.runner.factory: isWantedTest;
+import unit_threaded.runner.options: Options;
+import unit_threaded.runner.reflection: TestData, allTestData;
+import std.algorithm.iteration: filter;
+import std.algorithm.searching: canFind;
+import std.array: array;
+mixin disableDefaultRunner;
+
 // `bin/ut`: prepare the frontend for the selected tests, then run them.
 int run(string[] args) {
-    import unit_threaded;
     import snakebite.frontend.compiler: Snippets, initialize;
     import ut.backends: prewarmFrontend;
-    import unit_threaded.runner.options: Options;
-    import std.algorithm.iteration: filter;
-    import std.algorithm.searching: canFind;
-    import std.array: array;
     import std.stdio: writeln;
+    import std.file: rmdirRecurse;
     import ut: selectFrontendMemoryFromArguments;
 
+    scope(exit) rmdirRecurse(sandboxPath);
     args = selectFrontendMemoryFromArguments(args);
     const checkArena = args.canFind(checkArenaFlag);
     if (args.canFind("-h") || args.canFind("--help"))
@@ -103,14 +127,12 @@ int run(string[] args) {
     args = args.filter!(arg => arg != checkArenaFlag).array;
     initialize(Snippets.yes);
 
-    // Parse every snippet/program the selected tests need in one serial
-    // pass, before unit-threaded's own worker threads start. `args.dup`
-    // keeps `args` itself untouched: `Options`'s constructor strips
-    // recognised flags in place (getopt), and `runTests!(...)` below
-    // still needs the full, unstripped `args`.
-    prewarmFrontend(Options(args.dup).testsToRun);
+    // Prepare the selected ASTs before any guest test executes. This does
+    // not warm the first runtime calls made through forced finalization.
+    auto options = Options(args.dup); // The forced pass copies and changes the worker count.
+    prewarmFrontend(options.testsToRun);
 
-    const status = args.runTests!(
+    const status = runSelectedTests(options, allTestData!(
         "ut.backends.run.main",
         "ut.backends.run.addresses",
         "ut.backends.run.arrays",
@@ -123,6 +145,7 @@ int run(string[] args) {
         "ut.backends.run.delegates",
         "ut.backends.run.enums",
         "ut.backends.run.exceptions",
+        "ut.backends.run.finalizers",
         "ut.backends.run.inlineasm",
         "ut.backends.run.nativestack",
         "ut.backends.run.operators",
@@ -191,10 +214,37 @@ int run(string[] args) {
         "ut.repl.cell",
         "ut.repl.session",
         "ut.process",
+        "ut.frontend.functions",
         "ut.frontend.memory",
         "ut.frontend.checks",
-    );
+    ));
     return checkArena ? status | arenaStatus : status;
+}
+
+// A module-local @Serial still shares the heap with other test modules.
+// Run forced library-unload scans before starting any guest worker, not
+// after a parallel pass whose guest threads could still be ending.
+private int runSelectedTests(
+    Options options,
+    in TestData[] tests,
+) {
+    if (options.exit)
+        return runTests(options, tests);
+
+    const forced = tests.filter!(test =>
+        test.tags.canFind("forced-finalizers")
+        && isWantedTest(test, options.testsToRun)).array;
+    if (forced.length == 0)
+        return runTests(options, tests);
+
+    auto serialOptions = options; // The forced pass needs a mutable worker count.
+    serialOptions.numThreads = 1;
+    const forcedStatus = runTests(serialOptions, forced);
+    const remaining = tests.filter!(test =>
+        !test.tags.canFind("forced-finalizers")
+        && isWantedTest(test, options.testsToRun)).array;
+    return remaining.length == 0 ? forcedStatus
+        : forcedStatus | runTests(options, remaining);
 }
 
 private enum checkArenaFlag = "--check-arena";

@@ -24,10 +24,10 @@ public struct ReplOptions {
 // `bin/sb-repl`: evaluate D snippets, interactively or from a pipe.
 public int run(string[] args) {
     import snakebite.frontend.compiler:
-        compilerPath, FrontendFlags, initialize, Snippets, withScratchFrontend;
+        compilerPath, FrontendFlags, initialize, Snippets;
     import snakebite.dependencyimage: DependencyImage;
     import snakebite.dub: fetchProject;
-    import snakebite.project: loadProject, prepareDependencies, sourceSet;
+    import snakebite.project: prepareStartupDependencies, sourceSet;
     import snakebite.gc: selectFrontendMemory;
     import snakebite.repl: Repl;
     import std.algorithm.iteration: map;
@@ -79,12 +79,8 @@ public int run(string[] args) {
             // The frontend analyses what the cells reach, as they reach
             // it; the whole project only when its image must be built, and
             // that analysis leaves nothing behind for the cells to reuse.
-            dependencyImage = withScratchFrontend(
-                () => prepareDependencies(
-                    projectDirectory, projectSources,
-                    () => loadProject(projectDirectory, projectSources).program,
-                    projectEntry: false,
-                ),
+            dependencyImage = prepareStartupDependencies(
+                projectDirectory, projectSources,
             );
             const inProject = (string path) => compilerPath(path, projectDirectory);
             importPaths = projectSources.importPaths.map!inProject.array
