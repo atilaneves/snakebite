@@ -24,6 +24,9 @@
 * D has modules and types within types, do not use C-like naming
   conventions like `Foo` and `FooEnum`, instead place enums inside the
   corresponding class/struct so that one uses `Foo.Enum` instead.
+* Do not use "magic literals" like `foo(true, 0, 42, "bar")`. It's
+  impossible to know what those values are from the calling context.
+  Either name them with a variable or add a comment.
 
 ## Production code (in `source`)
 
