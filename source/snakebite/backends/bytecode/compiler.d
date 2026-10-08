@@ -715,6 +715,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // returned storage, for `visitReturnTransfer` to return.
     private size_t _returnOffset;
 
+    // Where the address of a returned lvalue is, until the transfer reads
+    // the value after the destructors of the operand ran.
+    private enum noReturnAddress = size_t.max;
+    private size_t _returnAddress = noReturnAddress;
+
     private Instruction[] _instructions;
     private long[] _constants;
     private CallSite[] _callSites;
@@ -1541,7 +1546,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _finished = bodyFinished || cleanupFinished;
     }
 
-    protected override void visitReturnOperand(ReturnStatement statement) {
+    protected override void visitReturnOperand(
+        ReturnStatement statement, bool readsAfterEnd,
+    ) {
         // A `void` return's own expression, when it has one, is only the
         // synthetic `0` dmd appends to `main` - nowhere to write it, so it
         // is discarded the same way the interpreter discards it.
@@ -1558,11 +1565,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // finally can go on to use its own temporaries without disturbing
         // the value already on its way out.
         _returnOffset = reserveTemp(_returnFacts);
-        evalInto(statement.exp, _returnOffset, _returnFacts.size);
+        if (readsAfterEnd)
+            _returnAddress = compileAddress(
+                FullExpressionScope.lvalueOf(statement.exp));
+        else
+            evalInto(statement.exp, _returnOffset, _returnFacts.size);
     }
 
     protected override void visitReturnTransfer(ReturnStatement statement) {
         const returnOffset = _returnOffset;
+        if (_returnAddress != noReturnAddress) {
+            emit(&opLoadIndirect, returnOffset, _returnAddress,
+                _returnFacts.size);
+            _returnAddress = noReturnAddress;
+        }
         runPendingFinallyBodies(unwindPlanOf(
             _scopePaths.enclosing(statement)));
         if (_finished)
@@ -1578,7 +1594,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _finished = true;
     }
 
-    protected override size_t visitThrowOperand(Expression expression) {
+    protected override size_t visitThrowOperand(
+        Expression expression, bool readsAfterEnd,
+    ) {
         import dmd.astenums: Tclass;
 
         if (!(expression !is null
@@ -1586,13 +1604,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             assert(0,
                 "`throwSemantic` only accepts a `Throwable` class reference");
 
+        if (readsAfterEnd)
+            return compileAddress(FullExpressionScope.lvalueOf(expression));
+
         const facts = TypeFacts.of(expression.type);
         const offset = reserveTemp(facts);
         evalInto(expression, offset, facts.size);
         return offset;
     }
 
-    protected override void visitThrowTransfer(size_t offset) {
+    protected override void visitThrowTransfer(
+        Expression, size_t offset, bool readsAfterEnd,
+    ) {
+        if (readsAfterEnd) {
+            const thrown = reserveTemp(pointerFacts);
+            emit(&opLoadIndirect, thrown, offset, pointerFacts.size);
+            offset = thrown;
+        }
         emit(&opThrow, offset, 0, 0, 0);
         _finished = true;
     }
@@ -1857,15 +1885,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // a delegate (`ptr`, `funcptr`) - so this backend
     // carries no case of its own for any of them; `conditionWidth` below
     // reports that same shared width back to this method's callers.
-    private size_t compileCondition(Expression condition) {
+    private size_t compileCondition(
+        Expression condition,
+        in FullExpressionScope.Position position
+            = FullExpressionScope.Position.condition,
+    ) {
         import snakebite.nativelayout: TypeFacts;
 
         const truth = TypeFacts.Truth.of(condition.type);
 
         const facts = TypeFacts.of(condition.type);
         const valueOffset = reserveTemp(facts);
-        compileValue(FullExpressionScope.Position.condition,
-            condition, valueOffset, facts.size);
+        compileValue(position, condition, valueOffset, facts.size);
         const offset = valueOffset + truth.offset;
 
         if (truth.isFloat) {
@@ -2541,6 +2572,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t destination,
         in size_t width,
     ) {
+        if (_expressions.readsResultAfterEnd(position, expression)) {
+            size_t address;
+            fullExpression(position, expression, {
+                address = compileAddress(
+                    FullExpressionScope.lvalueOf(expression));
+            });
+            emit(&opLoadIndirect, destination, address, width);
+            return;
+        }
+
         inFullExpression(position, expression,
             { evalInto(expression, destination, width); },
         );
@@ -2557,6 +2598,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return compile();
 
         fullExpression(position, expression, compile);
+    }
+
+    extern(D) protected override bool readsResultAfterEnd(
+        in FullExpressionScope.Position position,
+        Expression result,
+    ) {
+        return _expressions.readsResultAfterEnd(position, result);
     }
 
     extern(D) protected override void withFullExpression(
@@ -6171,13 +6219,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         // The left side did not decide the answer: the right side's own
         // truthiness does.
-        size_t rightOffset;
-        size_t rightWidth;
-        inFullExpression(FullExpressionScope.Position.logicalOperand,
-            expression.e2, {
-            rightOffset = compileCondition(expression.e2);
-            rightWidth = conditionWidth(expression.e2);
-        });
+        const rightOffset = compileCondition(
+            expression.e2, FullExpressionScope.Position.logicalOperand);
+        const rightWidth = conditionWidth(expression.e2);
         emit(&opCastToBool, rightOffset, 0, rightWidth);
         if (destOffset != rightOffset)
             emit(&opCopy, destOffset, rightOffset, 1);
@@ -7459,14 +7503,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const branchIndex = compiler._instructions.length;
             compiler.emit(&opBranchFalse, conditionOffset, 0, conditionWidth);
 
-            const thenOffset = resolve(expression.e1);
+            const thenOffset = resolve(
+                FullExpressionScope.lvalueOf(expression.e1));
             compiler.emit(&opCopy, result, thenOffset, size_t.sizeof);
             const jumpIndex = compiler._instructions.length;
             compiler.emit(&opJump, 0, 0, 0);
 
             compiler._instructions[branchIndex].source =
                 compiler._instructions.length;
-            const elseOffset = resolve(expression.e2);
+            const elseOffset = resolve(
+                FullExpressionScope.lvalueOf(expression.e2));
             compiler.emit(&opCopy, result, elseOffset, size_t.sizeof);
             compiler._instructions[jumpIndex].destination =
                 compiler._instructions.length;
