@@ -181,7 +181,8 @@ Target[] dubTarget(string compiler, string config, string objectSet,
             "python3 $project/build/host_exports.py $out "
                 ~ escapeShellCommand(arguments) ~ " $in",
             Target("build/host_exports.d"),
-            [Target("build/host_exports.py"), Target("build/host-exports.map")]
+            [Target("build/host_exports.py"), Target("build/host-exports.map"),
+                Target(buildOptions.dCompiler)]
                 ~ info.packages[0].files
                     .filter!(path => path.endsWith(".d"))
                     .map!(path => Target(path)).array,

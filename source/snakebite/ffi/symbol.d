@@ -44,10 +44,10 @@ public struct Resolver {
     // `name`'s address, but only when a genuine, independent native copy
     // answers it: the dependency image, or an already-loaded shared
     // object. Never the running executable's own copy - the tier
-    // `symbolAddress` only reaches as its last resort. A caller that must
-    // never bind to snakebite's own instantiation of a template a guest
-    // program also instantiates (`CallSelection.buildDecision`,
-    // ADR-0008's open question) asks here instead of `resolve`.
+    // `symbolAddress` only reaches as its last resort. Call selection asks
+    // here when it needs an independent body, not a designated host test
+    // fixture (ADR-0008). Ordinary host templates are private, but that
+    // export boundary does not make an executable fixture independent.
     public void* resolveIndependent(in char[] name) {
         if (auto cached = _independentAddresses.find(cast(string) name))
             return *cached;
@@ -118,22 +118,15 @@ private void* sharedObjectAddress(in char[] name) {
 // executable's own copy of `name`. `null` means the symbol is not there to
 // call.
 //
-// The executable goes last because snakebite itself instantiates plenty of
-// the same templates a guest program calls, `dirEntries` in
-// `snakebite.project` among them (ADR-0008, ADR-0009): `--export-dynamic`
-// exports that instance's symbol from `bin/sb` too, with whichever closure
-// layout the host compiler happened to give its nested functions. A guest
-// backend that bound to it would read that closure with its own layout
-// instead. Searching every already-loaded library first, before the
-// executable, keeps a guest call away from a host-side instantiation
-// whenever a genuine native copy - in the image, in druntime, in phobos, in
-// a dependency's own C library - already answers the same name.
+// The executable fallback serves only designated test fixtures and the
+// process-settings symbol `rt_options` (ADR-0008). Ordinary host templates
+// remain private: their closures need not match a guest backend's layout.
+// Libraries still go first so a fixture cannot replace an independent
+// library definition with the same name.
 //
-// A caller for whom even that last resort is unsafe - a guest call
-// through a template instance, which may have no native copy anywhere but
-// the executable's own mismatched-layout one - asks `Resolver.
-// resolveIndependent` instead, which stops at `sharedObjectAddress` and
-// never reaches here.
+// A caller that needs an independent native body asks
+// `Resolver.resolveIndependent` instead. It excludes executable fixtures
+// even when their names match, and keeps its answers in a separate cache.
 private void* symbolAddress(in char[] name) {
     if (auto address = sharedObjectAddress(name))
         return address;

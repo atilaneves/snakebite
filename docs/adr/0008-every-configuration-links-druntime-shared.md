@@ -4,9 +4,9 @@ status: accepted
 
 # Every configuration links druntime and phobos shared
 
-No snakebite configuration links druntime shared today. `dub.sdl` and
-`reggaefile.d` link it statically, with `--export-dynamic` so `dlsym`
-finds the host's symbols. The dependency image (ADR-0007) is a D
+Before this decision, snakebite configurations linked druntime
+statically, with `--export-dynamic` so `dlsym` found the host's symbols.
+The dependency image (ADR-0007) is a D
 shared object loaded into the process. Two facts force every
 configuration to link druntime and phobos shared instead.
 
@@ -34,10 +34,22 @@ globals duplicate.
 
 ## Consequences
 
-`--export-dynamic` stays: it is what lets `dlsym` reach a symbol
-`bin/sb`/`bin/ut`/`bin/at` itself defines, the executable-only tier
-below. CI, and any packaging step, must ship or locate the
-`libdruntime` and `libphobos2` shared objects.
+CI, and any packaging step, must ship or locate the `libdruntime` and
+`libphobos2` shared objects.
+
+The executable export maps limit `--export-dynamic` to exact names.
+Production hosts (`bin/sb`, `bin/sb-repl`, and `bin/bench`) export only
+`rt_options`. This process-settings exception lets shared druntime use
+the host's GC settings. Hiding it changes the selected cleanup policy.
+
+Test hosts add only the native fixtures designated in
+`build/host_exports.d`: `bin/ut` uses the unit-test manifest, and `bin/at`
+uses the acceptance-test manifest. The same compiler that builds each
+host produces the fixtures' exact linker names. The manifest is not a
+module scan or a guest-language whitelist. All other host definitions,
+including ordinary Phobos template instances, remain private. Otherwise,
+a shared library can bind its internal calls to a host copy whose layout
+differs, even when the resolver searches libraries first.
 
 A guest-declared symbol resolves in this order: the dependency
 image (ADR-0007), then every shared object the process already has
@@ -45,26 +57,15 @@ loaded (`dlsym(RTLD_NEXT, ...)` - valid because the resolver itself
 is linked into the executable, never into a shared object, so
 "next" means every already-loaded library and nothing in the
 executable), and only as a last resort the executable itself
-(`dlsym` on the handle from `dlopen(null, RTLD_NOLOAD)`). The
-executable goes last because snakebite instantiates plenty of the
-same templates a guest program also calls - `dirEntries` in
-`snakebite.project` among them - and `--export-dynamic` exports that
-instance's symbol from `bin/sb` too, with whichever closure layout
-the host compiler happened to give its nested functions; a guest
-backend that bound to it would read that closure with its own layout
-instead. Searching every already-loaded library before the
-executable keeps a guest call away from a host-side instantiation
-whenever a genuine, independent native copy - the image, druntime,
-phobos, a dependency's own C library - already answers the same
-name.
+(`dlsym` on the handle from `dlopen(null, RTLD_NOLOAD)`). The executable
+fallback serves designated test fixtures, plus `rt_options`, not ordinary
+host templates. Library-first order still prevents a test fixture from
+replacing an independent library definition with the same name.
 
-That order does not, by itself, save a root-owned template
-instantiation that has no independent native copy anywhere: a
-dependency-less project's own call to `dirEntries` instantiates it
-only inside `bin/sb`, so the executable-only tier still answers for
-it, and `CallSelection.buildDecision`
-(`source/snakebite/backends/calls.d`) still reuses that answer for
-the root-owned call, by design, for any template a native symbol
-resolves for. Telling that answer apart from a genuine independent
-copy is a call-routing question, not a symbol-resolution order
-one, and is not solved here.
+`Resolver.resolveIndependent` searches only the dependency image and
+loaded libraries. Call selection uses it when a call needs an independent
+native body: an executable fixture is not such a body, even if its name
+matches. Its cache stays separate from the full resolver cache because
+the two searches can give different answers for the same name. The export
+boundary does not change this routing rule or make a root-owned body a
+host body.
