@@ -302,6 +302,51 @@ unittest {
 }
 
 
+// The array-copy query in an unlowered compile-time body can be the first
+// query that makes an immutable variant of its element type.
+static foreach (shape; AliasSeq!("array", "element"))
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd 2.113.0 crashes on a case inside if (__ctfe) (dmd bug 23996)"),
+)) {
+    @("arenaHoldsNoGCPointers.arrayConstructionInCtfeBlock."
+        ~ shape ~ "." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        arenaReportLock.lock;
+        scope(exit) arenaReportLock.unlock;
+        enum expected = is(backend == Ctfe) ? 1 : 0;
+        expected.shouldBeStatusOf!(backend,
+            "enum ownershipBackend = \"" ~ backend.stringof ~ "\";"
+            ~ "enum copyElement = " ~ (shape == "element" ? "true" : "false") ~ ";"
+            ~ q{
+            struct FreshElement { int value; this(this) {} }
+            int choose(int choice) {
+                FreshElement[2] source;
+                switch (choice) {
+                    if (__ctfe) {
+                        case 1:
+                            static if (copyElement)
+                                FreshElement[2] copy = source[0];
+                            else
+                                FreshElement[2] copy = source;
+                            return 1;
+                    }
+                    default: return 0;
+                }
+            }
+            int main() {
+                try
+                    return choose(1);
+                catch (Error)
+                    return 0;
+            }
+        });
+        arenaReport.should == "";
+    }
+}
+
+
 // A collection frees nothing the AST uses, and marks none of it: code
 // dmd compiled before the collection runs correctly after it.
 static foreach (backend; Matrix!()) {

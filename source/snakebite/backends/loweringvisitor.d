@@ -24,6 +24,7 @@ import snakebite.backends.aggregateinit: NewPlan, planNew;
 import dmd.visitor: Visitor;
 import dmd.mtype: Type;
 import snakebite.nativelayout: TypeFacts;
+import snakebite.frontend.compiler: newInFrontend;
 import std.meta: AliasSeq;
 
 
@@ -209,7 +210,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     protected final bool throwIfStringSwitchInCtfeBlock(
         SwitchStatement statement,
     ) {
-        if (!statement.condition.type.isString)
+        if (!newInFrontend!isString(statement.condition.type))
             return false;
 
         return throwIfUnloweredInCtfeBlock("string switch", statement.loc);
@@ -339,14 +340,14 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
         import dmd.astenums: Tarray;
         import dmd.typesem: nextOf, size, toBasetype;
 
-        auto source = expression.e1.type.toBasetype; // DMD needs mutable Type.
-        auto target = expression.type.toBasetype; // DMD needs mutable Type.
+        auto source = newInFrontend!toBasetype(expression.e1.type);
+        auto target = newInFrontend!toBasetype(expression.type);
         if (source.ty != Tarray || target.ty != Tarray
                 || expression.e1.isArrayLiteralExp !is null)
             return false;
 
-        const sourceSize = source.nextOf.size;
-        const targetSize = target.nextOf.size;
+        const sourceSize = newInFrontend!size(source.nextOf);
+        const targetSize = newInFrontend!size(target.nextOf);
         return sourceSize != targetSize
             && (targetSize == 0 || sourceSize % targetSize != 0);
     }
@@ -419,12 +420,12 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
         import dmd.expressionsem: isLvalue;
         import dmd.typesem: baseElemOf, equivalent, nextOf, toBasetype;
 
-        auto target = expression.e1.type.toBasetype; // DMD needs mutable Type.
+        auto target = newInFrontend!toBasetype(expression.e1.type);
         if (target.ty != Tsarray && target.ty != Tarray)
             return false;
 
         auto element = target.nextOf; // DMD type methods require mutable Type.
-        const structure = element.baseElemOf.isTypeStruct;
+        const structure = newInFrontend!baseElemOf(element).isTypeStruct;
         if (structure is null || (!structure.sym.postblit
                 && !structure.sym.hasCopyCtor && !structure.sym.dtor))
             return false;
@@ -435,19 +436,19 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
                 return false;
 
         auto rhs = expression.e2;
-        auto source = rhs.type.toBasetype;
+        auto source = newInFrontend!toBasetype(rhs.type);
         auto originalSource = source; // DMD needs mutable Type.
         if (source.ty == Tarray)
             if (auto cast_ = rhs.isCastExp)
-                if (cast_.e1.type.toBasetype.ty == Tsarray) {
+                if (newInFrontend!toBasetype(cast_.e1.type).ty == Tsarray) {
                     rhs = cast_.e1;
-                    source = rhs.type.toBasetype;
+                    source = newInFrontend!toBasetype(rhs.type);
                 }
 
         const arrayCopy = ((source.ty == Tarray && rhs.isArrayLiteralExp is null)
-                || (source.ty == Tsarray && rhs.isLvalue))
-            && element.equivalent(originalSource.nextOf);
-        return arrayCopy || element.equivalent(originalSource);
+                || (source.ty == Tsarray && newInFrontend!isLvalue(rhs)))
+            && newInFrontend!equivalent(element, originalSource.nextOf);
+        return arrayCopy || newInFrontend!equivalent(element, originalSource);
     }
 
     protected abstract void visitUnloweredConstruct(ConstructExp expression);
