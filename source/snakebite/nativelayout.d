@@ -740,6 +740,16 @@ public struct NativeData {
         return bytes;
     }
 
+    public const(void)[] value(Type type, in void[] representation) {
+        import core.stdc.string: memcpy;
+
+        const facts = TypeFacts.of(type);
+        assert(representation.length == facts.size);
+        auto bytes = reserve(facts);
+        memcpy(bytes.ptr, representation.ptr, bytes.length);
+        return bytes;
+    }
+
     private void[] reserve(in TypeFacts facts) {
         import snakebite.frontend.compiler: withCompilerLock;
 

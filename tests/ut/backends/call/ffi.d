@@ -4002,6 +4002,8 @@ static foreach (backend; Matrix!(
             double fabs(real);
             double fabs(float);
 
+            union Bits { double value; ulong bits; }
+
             float fromDouble(double value) { return fabs(value); }
             double fromReal(real value) { return fabs(value); }
             double fromFloat(float value) { return fabs(value); }
@@ -4013,13 +4015,25 @@ static foreach (backend; Matrix!(
                 assert(fabs(-4660.0L) == -0x1p-741);
                 assert(fromReal(-4660.0L) == 4660);
                 assert(fromFloat(-4660.0f) == 0x1.16468p-1044);
+                Bits signaling;
+                signaling.value = fabs(-0x1.ffe000000000002p0L);
+                assert(signaling.bits == 0xfff0000000000010UL);
             }
         });
         runMainOfModule!backend(
-            "std.math.fabsClearedExponent" ~ backend.stringof, q{
+            "core.fabsClearedExponent." ~ backend.stringof ~ ".math", q{
             real fabs(double);
+            double fabs(real);
+            real toPrec(double);
+            union Bits { real value; ushort[8] words; }
             void main() {
                 assert(fabs(-4660.0) == 0x4.0b234p-16385L);
+                Bits nested;
+                nested.value = fabs(fabs(-4660.0L));
+                assert(nested.words[4] == 0);
+                assert(toPrec(fabs(-4660.0L)) == -0x1p-741L);
+                nested.value = fabs(-fabs(-0x1.ffe000000000002p0L));
+                assert(nested.words[0] == 0x10 && nested.words[3] == 0x7ff0);
             }
         });
     }

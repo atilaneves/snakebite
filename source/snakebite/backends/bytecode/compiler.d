@@ -3991,6 +3991,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileConstant(expression);
     }
 
+    extern(D) override void visitConstantBytes(Expression expression, in void[] bytes) {
+        requireDestination(expression);
+        emitBytes(_bytecode._nativeData.value(_valueType, bytes));
+    }
+
     // `1.0f + 0.0fi`: dmd's own constant folding already reduces
     // `complex`-literal arithmetic to one `ComplexExp` (`EXP.complex80`
     // regardless of the actual `cfloat`/`cdouble`/`creal` width - only

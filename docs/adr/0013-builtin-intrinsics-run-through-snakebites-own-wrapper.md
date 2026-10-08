@@ -106,15 +106,26 @@ the declared result only when all its value bytes have known values. This
 includes double to float and real to float or double. `el_una` clears the
 node before it sets the child pointer. A double fold replaces the complete
 pointer, so a real result reads the double bits with the cleared exponent
-bytes. Direct floating calls and nested integer producers use the same
-proof.
+bytes. Direct floating calls and nested scalar producers use the same
+proof. A known result view stays in native storage until a numeric consumer
+needs it. Both backends copy a direct result without conversion. This keeps
+signaling NaNs, their payloads, and signed zero, and does not add exception
+flags for result transport. A new `fabs` node writes only its operand width,
+not the tail of an inner result. Floating casts and `toPrec` read the stored
+operand at its own width. Identity conversions and negation keep the raw
+representation; genuine numeric conversions retain their exception checks.
 
 A float fold with a double or real result also reads the remaining
 compiler child-pointer bytes. The proof does not invent those bytes; it
 leaves that call on the instruction path. This is a proof limit, not an
 owner-approved language exception or a claim that all mixed signatures
-have undefined results. Exact parity for these two constant shapes is not
-proved.
+have undefined results. There is a known stable mismatch: native DMD's
+constant `real fabs(float)` result for `-4660.0f` is positive and less than
+one, while the instruction path gives 4660. This predicate does not require
+matching compiler addresses. The stale backend representation is not a
+guest uninitialized read. Exact parity for these two constant shapes is not
+proved, and the known mismatch blocks acceptance until the contract is
+resolved. An upstream report alone does not authorize a scope exception.
 
 Scalar folding uses DMD's allocation-free `constfold` operations and
 private `UnionExp` values. It does not optimize the guest AST, expand

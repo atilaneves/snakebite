@@ -2761,6 +2761,13 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _nativeData.write(_type, _facts, expression, _place);
     }
 
+    extern(D) override void visitConstantBytes(Expression expression, in void[] bytes) {
+        import core.stdc.string: memcpy;
+
+        assert(bytes.length == _facts.size);
+        memcpy(_place, bytes.ptr, bytes.length);
+    }
+
     // `1.0f + 0.0fi`: dmd's own constant folding already reduces
     // `complex`-literal arithmetic to one `ComplexExp` (`EXP.complex80`
     // regardless of the actual `cfloat`/`cdouble`/`creal` width - only

@@ -172,17 +172,24 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     final override void visit(CallExp expression) {
         import snakebite.backends.calls: CallSelection;
 
-        import dmd.ctfeexpr: UnionExp;
-
-        UnionExp constant;
+        CallSelection.ScalarConstant constant;
         if (CallSelection.foldedScalarIntrinsic(expression, constant)) {
-            constant.exp.accept(this);
+            if (constant.hasStorage) {
+                import snakebite.nativelayout: TypeFacts;
+
+                visitConstantBytes(expression,
+                    constant.bytes(TypeFacts.of(expression.type).size));
+            } else
+                constant.expression.accept(this);
             return;
         }
         visitUnfoldedCall(expression);
     }
 
     protected abstract void visitUnfoldedCall(CallExp expression);
+
+    extern(D) protected abstract void visitConstantBytes(
+        Expression expression, in void[] bytes);
 
     final override void visit(EqualExp expression) {
         if (expression.lowering !is null) {

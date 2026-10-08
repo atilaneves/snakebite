@@ -354,7 +354,7 @@ public struct CallSelection {
 
     public static bool foldedScalarIntrinsic(
         imported!"dmd.expression".CallExp expression,
-        out imported!"dmd.ctfeexpr".UnionExp constant,
+        out ScalarConstant constant,
     ) {
         import core.stdc.fenv;
         import dmd.ctfeexpr: emplaceExp;
@@ -362,7 +362,7 @@ public struct CallSelection {
 
         ulong value;
         if (foldedIntegerIntrinsic(expression, value)) {
-            emplaceExp!IntegerExp(&constant, expression.loc, value, expression.type);
+            emplaceExp!IntegerExp(&constant.value, expression.loc, value, expression.type);
             return true;
         }
         fenv_t environment;
@@ -372,6 +372,39 @@ public struct CallSelection {
         fesetround(FE_TONEAREST);
         return foldedFloatingIntrinsic(expression, constant)
             && fetestexcept(FE_ALL_EXCEPT) == 0;
+    }
+
+    // Backend constants can have a nonnumeric result view. RealExp alone
+    // cannot carry a signaling NaN through a narrower native store.
+    public struct ScalarConstant {
+        private imported!"dmd.ctfeexpr".UnionExp value;
+        private imported!"dmd.backend.cdef".Vconst storage;
+        private ParameterType representation;
+        public bool hasStorage;
+
+        public const(void)[] bytes(in size_t width) return {
+            assert(hasStorage && width <= storage.sizeof);
+            return (cast(const(void)*) &storage)[0 .. width];
+        }
+
+        public imported!"dmd.expression".Expression expression() {
+            assert(!hasStorage);
+            return value.exp;
+        }
+
+        private imported!"dmd.expression".Expression exp() {
+            if (hasStorage) {
+                auto floating = value.exp.isRealExp;
+                final switch (representation) with (ParameterType) {
+                    case float_: floating.value = storage.Vfloat; break;
+                    case double_: floating.value = storage.Vdouble; break;
+                    case real_: floating.value = storage.Vreal; break;
+                    case ubyte_, ushort_, short_, int_, uint_, long_, ulong_,
+                            vector_, pointer_, void_: assert(0);
+                }
+            }
+            return value.exp;
+        }
     }
 
     // DMD's backend constant folder (`evalu8`, OPbswap) uses the operand
@@ -434,8 +467,7 @@ public struct CallSelection {
         imported!"dmd.expression".Expression expression, out ulong value,
     ) {
         import dmd.expressionsem: toInteger;
-        import dmd.ctfeexpr: UnionExp;
-        UnionExp constant;
+        ScalarConstant constant;
         if (!scalarConstantOf(expression, constant)
                 || constant.exp.isIntegerExp is null)
             return false;
@@ -449,10 +481,10 @@ public struct CallSelection {
     // optimize() also expands declarations and allocates frontend objects.
     private static bool scalarConstantOf(
         imported!"dmd.expression".Expression expression,
-        out imported!"dmd.ctfeexpr".UnionExp constant,
+        out ScalarConstant constant,
     ) {
         import dmd.constfold;
-        import dmd.ctfeexpr: UnionExp, emplaceExp;
+        import dmd.ctfeexpr: emplaceExp;
         import dmd.expression: IntegerExp, RealExp;
         import dmd.expressionsem: toBool, toInteger;
         import dmd.typesem: toBasetype, isIntegral, isReal, isUnsigned, size;
@@ -463,7 +495,7 @@ public struct CallSelection {
         if (!type.isIntegral && !type.isReal)
             return false;
         if (expression.isIntegerExp !is null || expression.isRealExp !is null) {
-            emplaceExp(&constant, expression);
+            emplaceExp(&constant.value, expression);
             normalizeScalar(constant, expression.type);
             // Literal storage happens before evalu8 clears exception flags.
             feclearexcept(FE_ALL_EXCEPT);
@@ -471,11 +503,11 @@ public struct CallSelection {
         } else if (auto call = expression.isCallExp) {
             ulong value;
             if (foldedIntegerIntrinsic(call, value)) {
-                emplaceExp!IntegerExp(&constant, call.loc, value, call.type);
+                emplaceExp!IntegerExp(&constant.value, call.loc, value, call.type);
             } else if (!foldedFloatingIntrinsic(call, constant))
                 return false;
         } else if (auto conditional = expression.isCondExp) {
-            UnionExp condition;
+            ScalarConstant condition;
             if (!scalarConstantOf(conditional.econd, condition))
                 return false;
             const truth = condition.exp.toBool.get;
@@ -484,7 +516,7 @@ public struct CallSelection {
                         ? conditional.e1 : conditional.e2, constant))
                 return false;
         } else if (auto binary = expression.isBinExp) {
-            UnionExp left, right;
+            ScalarConstant left, right;
             if (!scalarConstantOf(binary.e1, left))
                 return false;
             if (binary.isLogicalExp !is null) {
@@ -492,7 +524,7 @@ public struct CallSelection {
                 if (fetestexcept(FE_ALL_EXCEPT))
                     return false;
                 if (truth == (binary.op == EXP.orOr)) {
-                    emplaceExp!IntegerExp(&constant, binary.loc, truth, binary.type);
+                    emplaceExp!IntegerExp(&constant.value, binary.loc, truth, binary.type);
                     return true;
                 }
             }
@@ -514,25 +546,25 @@ public struct CallSelection {
             auto resultType = expression.type;
             feclearexcept(FE_ALL_EXCEPT);
             switch (expression.op) with (EXP) {
-                case add: constant = Add(loc, resultType, e1, e2); break;
-                case min: constant = Min(loc, resultType, e1, e2); break;
-                case mul: constant = Mul(loc, resultType, e1, e2); break;
-                case div: constant = Div(loc, resultType, e1, e2); break;
-                case mod: constant = Mod(loc, resultType, e1, e2); break;
-                case leftShift: constant = Shl(loc, resultType, e1, e2); break;
-                case rightShift: constant = Shr(loc, resultType, e1, e2); break;
-                case unsignedRightShift: constant = Ushr(loc, resultType, e1, e2); break;
-                case and: constant = And(loc, resultType, e1, e2); break;
-                case or: constant = Or(loc, resultType, e1, e2); break;
-                case xor: constant = Xor(loc, resultType, e1, e2); break;
+                case add: constant.value = Add(loc, resultType, e1, e2); break;
+                case min: constant.value = Min(loc, resultType, e1, e2); break;
+                case mul: constant.value = Mul(loc, resultType, e1, e2); break;
+                case div: constant.value = Div(loc, resultType, e1, e2); break;
+                case mod: constant.value = Mod(loc, resultType, e1, e2); break;
+                case leftShift: constant.value = Shl(loc, resultType, e1, e2); break;
+                case rightShift: constant.value = Shr(loc, resultType, e1, e2); break;
+                case unsignedRightShift: constant.value = Ushr(loc, resultType, e1, e2); break;
+                case and: constant.value = And(loc, resultType, e1, e2); break;
+                case or: constant.value = Or(loc, resultType, e1, e2); break;
+                case xor: constant.value = Xor(loc, resultType, e1, e2); break;
                 case equal, notEqual:
-                    constant = Equal(expression.op, loc, resultType, e1, e2); break;
+                    constant.value = Equal(expression.op, loc, resultType, e1, e2); break;
                 case identity, notIdentity:
-                    constant = Identity(expression.op, loc, resultType, e1, e2); break;
+                    constant.value = Identity(expression.op, loc, resultType, e1, e2); break;
                 case lessThan, lessOrEqual, greaterThan, greaterOrEqual:
-                    constant = Cmp(expression.op, loc, resultType, e1, e2); break;
+                    constant.value = Cmp(expression.op, loc, resultType, e1, e2); break;
                 case andAnd, orOr:
-                    emplaceExp!IntegerExp(&constant, loc, e2.toBool.get, resultType);
+                    emplaceExp!IntegerExp(&constant.value, loc, e2.toBool.get, resultType);
                     break;
                 case comma: constant = right; break;
                 // Assignments, memory access, and library calls (PowExp)
@@ -540,30 +572,53 @@ public struct CallSelection {
                 default: return false;
             }
         } else if (auto unary = expression.isUnaExp) {
-            UnionExp operand;
+            ScalarConstant operand;
             if (!scalarConstantOf(unary.e1, operand))
                 return false;
+            if (operand.hasStorage && unary.op == EXP.negate) {
+                constant = operand;
+                applyFloatingSign(constant.storage, constant.representation,
+                    FloatingSign.negate);
+                return true;
+            }
+            if (auto cast_ = unary.isCastExp) {
+                if (cast_.lowering !is null)
+                    return false;
+                if (operand.hasStorage && type.isReal) {
+                    ParameterType result;
+                    if (!parameterTypeOf(type, result))
+                        return false;
+                    constant = operand;
+                    feclearexcept(FE_ALL_EXCEPT);
+                    convertFloatingStorage(constant.storage,
+                        constant.representation, result);
+                    constant.representation = result;
+                    constant.value.exp.type = expression.type;
+                    return fetestexcept(FE_ALL_EXCEPT) == 0;
+                }
+            }
+            auto e1 = operand.exp;
             feclearexcept(FE_ALL_EXCEPT);
             if (auto cast_ = unary.isCastExp) {
                 if (cast_.lowering !is null)
                     return false;
-                constant = Cast(unary.loc, unary.type, cast_.to, operand.exp);
+                constant.value = Cast(unary.loc, unary.type, cast_.to, e1);
             } else switch (unary.op) with (EXP) {
-                case negate: constant = Neg(unary.type, operand.exp); break;
-                case tilde: constant = Com(unary.type, operand.exp); break;
-                case not: constant = Not(unary.type, operand.exp); break;
+                case negate: constant.value = Neg(unary.type, e1); break;
+                case tilde: constant.value = Com(unary.type, e1); break;
+                case not: constant.value = Not(unary.type, e1); break;
                 default: return false;
             }
         } else
             return false;
-        if (constant.exp.isIntegerExp is null && constant.exp.isRealExp is null)
+        if (constant.value.exp.isIntegerExp is null && constant.value.exp.isRealExp is null)
             return false;
         normalizeScalar(constant, expression.type);
         return fetestexcept(FE_ALL_EXCEPT) == 0;
     }
 
     private static void normalizeScalar(
-        ref imported!"dmd.ctfeexpr".UnionExp constant,
+        ref ScalarConstant constant,
         imported!"dmd.mtype".Type type,
     ) {
         import core.volatile: volatileLoad;
@@ -573,7 +628,9 @@ public struct CallSelection {
         import dmd.typesem: toBasetype;
 
         // Inner producers must be stored at their own width before use.
-        constant.exp.type = type;
+        constant.value.exp.type = type;
+        if (constant.hasStorage)
+            return;
         if (auto integer = constant.exp.isIntegerExp) {
             integer.value = integer.toInteger;
             return;
@@ -597,15 +654,16 @@ public struct CallSelection {
 
     private static bool foldedFloatingIntrinsic(
         imported!"dmd.expression".CallExp expression,
-        out imported!"dmd.ctfeexpr".UnionExp constant,
+        out ScalarConstant constant,
     ) {
         import dmd.expression: RealExp;
-        import dmd.ctfeexpr: UnionExp, emplaceExp;
+        import dmd.ctfeexpr: emplaceExp;
         import dmd.expressionsem: toReal;
-        import dmd.root.ctfloat: CTFloat;
         import dmd.backend.cdef: Vconst;
         import core.stdc.fenv;
+        import core.stdc.string: memcpy;
         import snakebite.backends.builtins: entryOf;
+        import snakebite.nativelayout: TypeFacts;
 
         // e2ir replaces toPrec with conversions, and evalu8 folds OPabs.
         // The other floating intrinsic ops remain instructions.
@@ -632,37 +690,100 @@ public struct CallSelection {
         if (name == "fabs" && parameters[0] == ParameterType.float_
                 && result != ParameterType.float_)
             return false;
-        UnionExp operand;
+        ScalarConstant operand;
         if (!scalarConstantOf((*expression.arguments)[0], operand)
-                || operand.exp.isRealExp is null)
+                || operand.value.exp.isRealExp is null)
             return false;
-        feclearexcept(FE_ALL_EXCEPT);
-        if (name == "toPrec") {
-            constant = operand;
-            // e2ir's real -> float conversion goes through double.
-            normalizeScalar(constant, expression.type);
-            return fetestexcept(FE_ALL_EXCEPT) == 0;
-        }
         Vconst stored;
         stored.Vreal = 0;
-        const magnitude = CTFloat.fabs(operand.exp.toReal);
-        final switch (parameters[0]) with (ParameterType) {
-            case float_: stored.Vfloat = cast(float) magnitude; break;
-            case double_: stored.Vdouble = cast(double) magnitude; break;
-            case real_: stored.Vreal = magnitude; break;
-            case ubyte_, ushort_, short_, int_, uint_, long_, ulong_,
-                    vector_, pointer_, void_: return false;
+        if (operand.hasStorage) {
+            const width = TypeFacts.of((*expression.arguments)[0].type).size;
+            memcpy(&stored, operand.bytes(width).ptr, width);
+        } else {
+            const value = operand.exp.toReal;
+            final switch (parameters[0]) with (ParameterType) {
+                case float_: stored.Vfloat = cast(float) value; break;
+                case double_: stored.Vdouble = cast(double) value; break;
+                case real_: stored.Vreal = value; break;
+                case ubyte_, ushort_, short_, int_, uint_, long_, ulong_,
+                        vector_, pointer_, void_: return false;
+            }
         }
-        real value;
+        // evalu8 clears flags after reading its operands, before OPabs.
+        feclearexcept(FE_ALL_EXCEPT);
+        if (name == "toPrec")
+            convertFloatingStorage(stored, parameters[0], result);
+        else
+            applyFloatingSign(stored, parameters[0], FloatingSign.magnitude);
+        constant.storage = stored;
+        constant.representation = result;
+        constant.hasStorage = true;
+        emplaceExp!RealExp(&constant.value, expression.loc, 0.0L, expression.type);
+        return fetestexcept(FE_ALL_EXCEPT) == 0;
+    }
+
+    private enum FloatingSign { magnitude, negate }
+
+    private static void applyFloatingSign(
+        ref imported!"dmd.backend.cdef".Vconst storage,
+        in ParameterType representation, in FloatingSign operation,
+    ) {
+        size_t signByte;
+        final switch (representation) with (ParameterType) {
+            case float_: signByte = float.sizeof - 1; break;
+            case double_: signByte = double.sizeof - 1; break;
+            case real_: signByte = real.mant_dig / 8 + 1; break;
+            case ubyte_, ushort_, short_, int_, uint_, long_, ulong_,
+                    vector_, pointer_, void_: assert(0);
+        }
+        auto bytes = cast(ubyte*) &storage;
+        final switch (operation) with (FloatingSign) {
+            case magnitude: bytes[signByte] &= 0x7f; break;
+            case negate: bytes[signByte] ^= 0x80; break;
+        }
+    }
+
+    // e2ir's floating conversion nodes read the native operand directly.
+    // Widening a signaling NaN to a temporary real first would quiet it
+    // before evalu8 checks the actual conversion's exception flags.
+    private static void convertFloatingStorage(
+        ref imported!"dmd.backend.cdef".Vconst storage,
+        in ParameterType source, in ParameterType result,
+    ) {
+        import core.volatile: volatileLoad;
+
+        final switch (source) with (ParameterType) {
+            case float_:
+                if (result != float_) {
+                    storage.Vdouble = storage.Vfloat;
+                    storage.Vullong = volatileLoad(&storage.Vullong);
+                }
+                break;
+            case double_: break;
+            case real_:
+                if (result != real_) {
+                    storage.Vdouble = cast(double) storage.Vreal;
+                    storage.Vullong = volatileLoad(&storage.Vullong);
+                }
+                break;
+            case ubyte_, ushort_, short_, int_, uint_, long_, ulong_,
+                    vector_, pointer_, void_: assert(0);
+        }
         final switch (result) with (ParameterType) {
-            case float_: value = stored.Vfloat; break;
-            case double_: value = stored.Vdouble; break;
-            case real_: value = stored.Vreal; break;
+            case float_:
+                if (source != float_) {
+                    storage.Vfloat = cast(float) storage.Vdouble;
+                    storage.Vuns = volatileLoad(&storage.Vuns);
+                }
+                break;
+            case double_: break;
+            case real_:
+                if (source != real_)
+                    storage.Vreal = storage.Vdouble;
+                break;
             case ubyte_, ushort_, short_, int_, uint_, long_, ulong_,
-                    vector_, pointer_, void_: return false;
+                    vector_, pointer_, void_: assert(0);
         }
-        emplaceExp!RealExp(&constant, expression.loc, value, expression.type);
-        return true;
     }
 
     // `intrinsic_op` of dmd 2.113.0 (`dmd.glue.toir`), row by row. The
