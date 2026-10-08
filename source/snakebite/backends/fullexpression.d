@@ -202,16 +202,10 @@ public struct FullExpressionScope {
 
 // The expression kinds that dmd's glue code turns into a memory reference
 // (`elemIsLvalue`): a variable, a field, a dereference or an element, or a
-// comma or conditional expression whose results are such. A bit field is
-// read through a different element, and a call that returns `ref` through a
+// conditional expression whose results are such. A bit field is read
+// through a different element, and a call that returns `ref` through a
 // call. dmd reads a thread-local variable before the destructors run.
 private bool isLvalueResult(imported!"dmd.expression".Expression result) {
-    import dmd.astenums: Taarray;
-    import dmd.typesem: toBasetype;
-
-    if (auto comma = result.isCommaExp)
-        return isLvalueResult(comma.e2);
-
     if (auto conditional = result.isCondExp)
         return isLvalueResult(conditional.e1)
             && isLvalueResult(conditional.e2);
@@ -229,8 +223,8 @@ private bool isLvalueResult(imported!"dmd.expression".Expression result) {
     if (result.isPtrExp !is null)
         return true;
 
-    if (auto element = result.isIndexExp)
-        return element.e1.type.toBasetype.ty != Taarray;
+    if (result.isIndexExp !is null)
+        return true;
 
     return false;
 }
