@@ -2356,7 +2356,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _temporaries.withExpression(position, root, evaluate);
     }
 
-    protected override void visitReturnTransfer(ReturnStatement) {
+    protected override void visitReturnTransfer(ReturnStatement statement) {
         import core.stdc.string: memcpy;
 
         if (_controlFlow.seeking)
@@ -2365,14 +2365,19 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (_returned.pending) {
             auto returned = _returned;
             _returned = ReturnedLvalue.init;
-            if (returned.place !is null) {
-                memcpy(returned.place, returned.address, returned.size);
-            } else {
+            // The read runs in a full expression of its own so that a
+            // fault in it has the guest line of the operand.
+            fullExpression(FullExpressionScope.Position.returnOperand,
+                statement.exp, {
+                if (returned.place !is null) {
+                    memcpy(returned.place, returned.address, returned.size);
+                    return;
+                }
                 // A discarded result is still read: the read can fault.
                 auto scratch = _frames.push(
                     returned.size, cast(uint) returned.alignment);
                 memcpy(scratch.base, returned.address, returned.size);
-            }
+            });
         }
 
         _controlFlow.returnFromFunction;
@@ -5495,13 +5500,15 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     protected override void visitThrowTransfer(
-        size_t thrown, bool readsAfterEnd,
+        Expression operand, size_t thrown, bool readsAfterEnd,
     ) {
         if (_controlFlow.seeking)
             return;
 
         if (readsAfterEnd)
-            thrown = thrownObject(cast(void*) thrown, size_t.sizeof);
+            fullExpression(FullExpressionScope.Position.throwOperand, operand, {
+                thrown = thrownObject(cast(void*) thrown, size_t.sizeof);
+            });
 
         throw GuestException.make(cast(Throwable) cast(void*) thrown);
     }

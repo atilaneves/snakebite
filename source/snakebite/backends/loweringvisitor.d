@@ -109,7 +109,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
         size_t thrown;
         fullExpression(FullExpressionScope.Position.throwOperand,
             operand, { thrown = visitThrowOperand(operand, afterEnd); });
-        visitThrowTransfer(thrown, afterEnd);
+        visitThrowTransfer(operand, thrown, afterEnd);
     }
 
     // The initialiser of the `with` handle is a full expression of its own:
@@ -165,7 +165,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     protected abstract size_t visitThrowOperand(
         Expression operand, bool readsAfterEnd);
     protected abstract void visitThrowTransfer(
-        size_t thrown, bool readsAfterEnd);
+        Expression operand, size_t thrown, bool readsAfterEnd);
 
     // DMD's semantic pass leaves `lowering` null in a scope that needs no
     // code generation, and dmd's glue cannot compile such an append. A

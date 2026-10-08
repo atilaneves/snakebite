@@ -1614,7 +1614,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     protected override void visitThrowTransfer(
-        size_t offset, bool readsAfterEnd,
+        Expression, size_t offset, bool readsAfterEnd,
     ) {
         if (readsAfterEnd) {
             const thrown = reserveTemp(pointerFacts);

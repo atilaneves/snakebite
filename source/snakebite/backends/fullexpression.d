@@ -215,8 +215,8 @@ private bool isLvalueResult(imported!"dmd.expression".Expression result) {
         import snakebite.frontend.dmd.delegates: isCtfeVariable;
 
         auto declaration = variable.var.isVarDeclaration;
-        return declaration !is null && !declaration.isThreadlocal
-            && !isCtfeVariable(declaration);
+        return declaration !is null && !isCtfeVariable(declaration)
+            && !declaration.isThreadlocal;
     }
 
     if (auto field = result.isDotVarExp) {
