@@ -6122,6 +6122,83 @@ static foreach (backend; Matrix!(
     }
 }
 
+// The right operand of `&&` and `||` is a full expression: its temporaries
+// die when it ends, before the next operand runs and before the condition
+// chooses a branch.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `log` cannot be read at compile time"),
+)) {
+    @("fullExpression.logicalRightOperand." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            string log;
+            struct T { int v; ~this() { log ~= "d"; log ~= cast(char)('0' + v); } }
+            T mk(int v) { return T(v); }
+            void main() {
+                if (mk(1).v && mk(2).v && mk(3).v)
+                    log ~= "t";
+                assert(log == "d2d3d1t", log);
+            }
+        });
+    }
+}
+
+// A `throw` expression nested in a larger expression ends its own full
+// expression: the temporaries of its operand die before the throw starts, so
+// a destructor that throws wins.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `log` cannot be read at compile time"),
+)) {
+    @("fullExpression.nestedThrowExpression." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            string log;
+            struct X { int v; ~this() {
+                log ~= "x";
+                throw new Exception("dtor");
+            } }
+            X mkx() { return X(9); }
+            int pick(bool ok) {
+                return ok ? 1 : throw new Exception(mkx().v ? "a" : "b");
+            }
+            void main() {
+                try { pick(false); }
+                catch (Exception e) { log ~= "<"; log ~= e.msg; log ~= ">"; }
+                assert(log == "x<dtor>", log);
+            }
+        });
+    }
+}
+
+// The message of a failed `assert` is a full expression: its temporaries die
+// before the assertion error is made, so a destructor that throws wins.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `log` cannot be read at compile time"),
+)) {
+    @("fullExpression.assertMessage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            string log;
+            struct X { string s; ~this() {
+                log ~= "x";
+                throw new Exception("dtor");
+            } }
+            X mkx() { return X("m"); }
+            void main() {
+                try { assert(false, mkx().s); }
+                catch (Throwable e) { log ~= "<"; log ~= e.msg; log ~= ">"; }
+                assert(log == "x<dtor>", log);
+            }
+        });
+    }
+}
+
 // The temporaries of a call whose argument throws die during unwinding, last constructed first.
 
 

@@ -15,9 +15,8 @@ public enum FullExpressionKind {
 public struct FullExpressionScope {
     // The places where dmd's glue code (`toElemDtor`) ends a full
     // expression: the destructors of the temporaries made inside it run
-    // there. A backend names the position, and `kindOf` gives the answer
-    // for all of them. The right operand of `&&` and `||` also ends one in
-    // dmd and is not listed: a backend decides it alone.
+    // there. A backend names the position, and `kindOf` and `endsWithin`
+    // give the answer for all of them.
     public enum Position {
         expressionStatement,
         loopIncrement,
@@ -27,6 +26,8 @@ public struct FullExpressionScope {
         withOperand,
         condition,
         switchOperand,
+        logicalOperand,
+        assertMessage,
     }
 
     public static FullExpressionKind kindOf(in Position position)
@@ -42,7 +43,33 @@ public struct FullExpressionScope {
             case throwOperand:
             case condition:
             case switchOperand:
+            case logicalOperand:
+            case assertMessage:
                 return FullExpressionKind.value;
+        }
+    }
+
+    // Whether the position ends a full expression that is part of a larger
+    // one: the right operand of `&&` and `||`, the operand of a `throw`
+    // expression and the message of an `assert`, as dmd's glue code does.
+    // The temporaries of the enclosing expression stay alive, and the ones
+    // made inside the operand die when the operand ends.
+    public static bool endsWithin(in Position position)
+        @safe @nogc nothrow pure
+    {
+        final switch (position) with (Position) {
+            case throwOperand:
+            case logicalOperand:
+            case assertMessage:
+                return true;
+            case expressionStatement:
+            case loopIncrement:
+            case switchError:
+            case withOperand:
+            case returnOperand:
+            case condition:
+            case switchOperand:
+                return false;
         }
     }
 
@@ -57,7 +84,22 @@ public struct FullExpressionScope {
     private size_t _depth;
 
     public void run(
-        FullExpressionKind kind,
+        in Position position,
+        const(void)* root,
+        scope void delegate() begin,
+        scope void delegate() evaluate,
+        scope void delegate() end,
+    ) {
+        if (!endsWithin(position))
+            return run(kindOf(position), root, begin, evaluate, end);
+
+        const state = suspendCall;
+        scope (exit) resumeCall(state);
+        run(kindOf(position), root, begin, evaluate, end);
+    }
+
+    private void run(
+        in FullExpressionKind kind,
         const(void)* root,
         scope void delegate() begin,
         scope void delegate() evaluate,

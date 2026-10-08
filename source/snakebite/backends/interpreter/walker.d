@@ -204,6 +204,7 @@ import snakebite.backends.haltprocess: isHalt;
 import snakebite.backends.exceptions: CAssertCall;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
+import snakebite.backends.logical: LogicalPlan;
 import snakebite.backends.comparison: ComparisonPlan;
 import snakebite.backends.controlflow: ControlFlowState,
     ScopeFrame, ScopePaths, scopePathsOf;
@@ -216,7 +217,7 @@ import snakebite.backends.switchplan: switchPlan, selectCase,
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
 import snakebite.cstack: CStack;
 import snakebite.backends.fullexpression:
-    FullExpressionKind, FullExpressionScope;
+    FullExpressionScope;
 import snakebite.backends.temporary: canRetainTemporaries;
 
 // The state one program's evaluators share, whichever thread they run
@@ -2320,11 +2321,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     extern(D) protected override void withFullExpression(
-        in FullExpressionKind kind,
+        in FullExpressionScope.Position position,
         Expression root,
         scope void delegate() evaluate,
     ) {
-        _temporaries.withExpression(kind, root, evaluate);
+        _temporaries.withExpression(position, root, evaluate);
     }
 
     protected override void visitReturnTransfer(ReturnStatement) {
@@ -4299,28 +4300,38 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         }
     }
 
-    override void visit(LogicalExp expression) {
+    protected override void visitLogical(
+        LogicalExp expression, in LogicalPlan plan,
+    ) {
         import snakebite.nativelayout: storeIntegral;
 
         const left = truthOf(expression.e1);
+        const runsRight = plan.andAnd ? left : !left;
 
-        // D allows a `void` right side in a statement context, making
-        // the whole expression `void`: dmd guards a conditionally
-        // constructed temporary's destructor call with the condition
-        // that selected it (`__cond6 && __slT4.~this()`), so the right
-        // side runs for its effect and there is no value to produce.
-        if (expression.e2.type.ty == Tvoid) {
-            const runsRight = expression.op == EXP.andAnd ? left : !left;
-            if (runsRight)
-                runForEffect(expression.e2);
-            return;
+        // dmd guards a conditionally constructed temporary's destructor
+        // call with the condition that selected it
+        // (`__cond6 && __slT4.~this()`), so a `void` right side runs for its
+        // effect only. A `noreturn` one never completes, so the answer is
+        // the left side's.
+        final switch (plan.right) with (LogicalPlan.Right) {
+            case effect:
+                if (runsRight)
+                    fullExpression(
+                        FullExpressionScope.Position.logicalOperand,
+                        expression.e2, { runForEffect(expression.e2); });
+                if (plan.hasValue)
+                    storeIntegral(_place, left ? 1 : 0, _facts.size);
+                return;
+            case value:
+                bool right;
+                if (runsRight)
+                    fullExpression(
+                        FullExpressionScope.Position.logicalOperand,
+                        expression.e2, { right = truthOf(expression.e2); });
+                const answer = runsRight ? right : left;
+                storeIntegral(_place, answer ? 1 : 0, _facts.size);
+                return;
         }
-
-        const answer = expression.op == EXP.andAnd
-            ? left && truthOf(expression.e2)
-            : left || truthOf(expression.e2);
-
-        storeIntegral(_place, answer ? 1 : 0, _facts.size);
     }
 
     // dmd's usual arithmetic conversions give both operands the same type.
@@ -5304,7 +5315,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.nativelayout: arrayValueSize;
 
         align(size_t.sizeof) ubyte[arrayValueSize] buffer = void;
-        evaluate(message, message.type, buffer.ptr);
+        fullExpression(FullExpressionScope.Position.assertMessage, message, {
+            evaluate(message, message.type, buffer.ptr);
+        });
 
         return (*cast(const(char)[]*) buffer.ptr).idup;
     }
