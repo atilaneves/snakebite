@@ -626,20 +626,32 @@ static foreach (backend; Matrix!(
         const source = buildPath(directory, "probe.d");
         source.write(q{
             import core.simd;
-            void main() {
+            void main(string[] args) {
+                if (args.length == 1)
+                    return;
                 float4 a = 1, b = 2;
+                if (args.length == 3) {
+                    float4 c = cast(float4) __simd(XMM.SQRTPS, a);
+                    return;
+                }
                 float4 c = cast(float4) __simd(XMM.ADDPS, a, b);
             }
         });
         static if (is(backend == Interpreter)) enum name = "interpreter";
         else enum name = "bytecode";
-        const result = execute([
+        const command = [
             "timeout", "60", buildPath(getcwd, "bin", "sb"),
             "-b", name, directory,
-        ]);
+        ];
+        execute(command).status.should == 0;
+        const result = execute(command ~ ["--", "call"]);
         result.status.should.not == 0;
         "declared by `__simd`: it is not in this process"
             .should.be in result.output;
+        const unary = execute(command ~ ["--", "call", "unary"]);
+        unary.status.should.not == 0;
+        "core.simd.__simd has no wrapper for the opcode"
+            .should.be in unary.output;
     }
 }
 

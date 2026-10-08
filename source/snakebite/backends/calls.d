@@ -436,7 +436,7 @@ public struct CallSelection {
         auto resultType = type.next.toBasetype;
         if (resultType.ty == TY.Tvoid)
             result = ParameterType.void_;
-        else if (!parameterTypeOf(resultType, false, result))
+        else if (!parameterTypeOf(resultType, result))
             return false;
 
         // `const` fails: `ParameterList.length` and `opIndex` are not
@@ -448,59 +448,51 @@ public struct CallSelection {
                 return false;
             ParameterType parameterType;
             if (!parameterTypeOf(
-                    parameter.type.toBasetype, false, parameterType))
+                    parameter.type.toBasetype, parameterType))
                 return false;
             parameters ~= parameterType;
         }
         return true;
     }
 
-    // `pointee` is for the type that a pointer parameter points to.
     private static bool parameterTypeOf(
         imported!"dmd.mtype".Type type,
-        in bool pointee,
         out ParameterType result,
     ) {
         import dmd.astenums: TY;
-        import dmd.typesem: nextOf, size, toBasetype;
+        import dmd.typesem: size;
 
         // The wrappers of `core.simd` move this many bytes.
         enum vectorSize = 16;
 
         final switch (type.ty) with (TY) {
-            case Tfloat32: result = ParameterType.float_; return !pointee;
-            case Tfloat64: result = ParameterType.double_; return !pointee;
-            case Tfloat80: result = ParameterType.real_; return !pointee;
-            case Tuns8:
-                result = pointee
-                    ? ParameterType.ubytePointer_ : ParameterType.ubyte_;
-                return true;
+            case Tfloat32: result = ParameterType.float_; return true;
+            case Tfloat64: result = ParameterType.double_; return true;
+            case Tfloat80: result = ParameterType.real_; return true;
+            case Tint8, Tuns8, Tbool, Tchar:
+                result = ParameterType.ubyte_; return true;
+            case Tint16:
+                result = ParameterType.short_; return true;
             case Tuns16:
-                result = pointee
-                    ? ParameterType.ushortPointer_ : ParameterType.ushort_;
-                return true;
-            case Tint32: result = ParameterType.int_; return !pointee;
-            case Tint64: result = ParameterType.long_; return !pointee;
-            case Tuns32:
-                result = pointee
-                    ? ParameterType.uintPointer_ : ParameterType.uint_;
-                return true;
+            case Twchar:
+                result = ParameterType.ushort_; return true;
+            case Tint32: result = ParameterType.int_; return true;
+            case Tint64: result = ParameterType.long_; return true;
+            case Tuns32, Tdchar:
+                result = ParameterType.uint_; return true;
             case Tuns64:
-                result = pointee
-                    ? ParameterType.ulongPointer_ : ParameterType.ulong_;
-                return true;
-            case Tvoid: result = ParameterType.voidPointer_; return pointee;
+                result = ParameterType.ulong_; return true;
+            case Tvoid: return false;
             case Tvector:
                 result = ParameterType.vector_;
-                return !pointee && type.size == vectorSize;
+                return type.size == vectorSize;
             case Tpointer:
-                return !pointee && parameterTypeOf(
-                    type.nextOf.toBasetype, true, result);
+                result = ParameterType.pointer_; return true;
             case Tarray, Tsarray, Taarray, Treference, Tfunction,
                 Tident, Tclass, Tstruct, Tenum, Tdelegate, Tnone,
-                Tint8, Tint16, Timaginary32,
+                Timaginary32,
                 Timaginary64, Timaginary80, Tcomplex32, Tcomplex64,
-                Tcomplex80, Tbool, Tchar, Twchar, Tdchar, Terror,
+                Tcomplex80, Terror,
                 Tinstance, Ttypeof, Ttuple, Tslice, Treturn, Tnull,
                 Tint128, Tuns128, Ttraits, Tmixin, Tnoreturn, Ttag:
                 return false;

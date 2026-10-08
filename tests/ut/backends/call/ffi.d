@@ -4001,18 +4001,24 @@ static foreach (backend; Matrix!(
             real sin(real);
             real rint(real);
             real yl2x(real, real);
+            real yl2x(real, float);
             real yl2xp1(real, real);
             real ldexp(real, int);
-            long rndtol(real);
+            short rndtol(real);
 
             void main() {
                 assert(cos(0.0L) == 1.0L);
                 assert(sin(0.0L) == 0.0L);
                 assert(rint(2.5L) == 2.0L);
                 assert(yl2x(8.0L, 2.0L) == 6.0L);
+                assert(yl2x(8.0L, 2.0f) == 6.0L);
                 assert(yl2xp1(3.0L, 2.0L) == 4.0L);
                 assert(ldexp(1.5L, 2) == 6.0L);
                 assert(rndtol(2.7L) == 3L);
+                assert(rndtol(2.5L) == 2);
+                assert(rndtol(-3.5L) == -4);
+                assert(rndtol(3e10L) == short.min);
+                assert(rndtol(real.nan) == short.min);
             }
         });
     }
@@ -4087,14 +4093,22 @@ static foreach (backend; Matrix!(
 
             float cos(float);
             double sin(double);
+            double sin(float);
             double fabs(double);
-            float sqrt(float);
+            real sqrt(float);
+            int rndtol(double);
+            ushort rndtol(float);
 
             void main() {
                 assert(cos(0.0f) == 1.0f);
                 assert(sin(0.0) == 0.0);
                 assert(fabs(-2.0) == 2.0);
                 assert(sqrt(4.0f) == 2.0f);
+                assert(sin(1.1f) == 0.891207370876009319);
+                assert(sqrt(1.1f) == 1.04880885953631127307L);
+                assert(rndtol(2.5) == 2);
+                assert(rndtol(3e10) == int.min);
+                assert(rndtol(float.nan) == cast(ushort) short.min);
             }
         });
     }
@@ -4193,10 +4207,22 @@ static foreach (backend; Matrix!(
 
             int bsf(uint);
             int bsr(ulong);
+            short bsf(short);
+            ulong bsr(long);
+            short bswap(short);
+            ushort bswap(uint);
+            ulong bswap(ulong);
+            byte _popcnt(short);
 
             void main() {
                 assert(bsf(8u) == 3);
                 assert(bsr(0x100000000UL) == 32);
+                assert(bsf(cast(short) 8) == 3);
+                assert(bsr(1L << 40) == 40);
+                assert(bswap(cast(short) 0x1234) == 0x3412);
+                assert(bswap(0x12345678u) == 0x7856);
+                assert(bswap(0x1234567890abcdefUL) == 0xefcdab9078563412UL);
+                assert(_popcnt(cast(short) -1) == 16);
             }
         });
     }
@@ -4216,12 +4242,66 @@ static foreach (backend; Matrix!(
             "core." ~ backend.stringof ~ ".inlinedBts.bitop", q{
 
             int bts(ulong*, ulong);
+            bool bts(uint*, uint);
+            byte btc(uint*, uint);
+            short btr(uint*, uint);
 
             void main() {
                 ulong word = 1;
                 assert(bts(&word, 3) == 0);
                 assert(bts(&word, 3) != 0);
                 assert(word == 9);
+                uint[4] words;
+                uint index = 35;
+                assert(!bts(words.ptr, index));
+                assert(words[1] == 8);
+                assert(btc(words.ptr, index) == 1);
+                assert(btr(words.ptr, index) == 0);
+                assert(words[1] == 0);
+            }
+        });
+    }
+}
+
+
+// A volatile operation uses the loaded result or stored value type, not
+// the pointer's element type. Signed and floating values keep their bits.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a guest module declaration cannot be mixed into the host module"),
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE cannot interpret a bodiless volatileStore"),
+)) {
+    @("ffi.volatileAccessUsesValueWidth." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        runMainOfModule!backend(
+            "core." ~ backend.stringof ~ ".valueWidth.volatile", q{
+            byte volatileLoad(byte*);
+            byte volatileStore(byte*, byte);
+            float volatileLoad(void*);
+            float volatileStore(void*, float);
+            real volatileLoad(real*);
+            void volatileStore(real*, real);
+            alias Bytes = __vector(ubyte[16]);
+            Bytes volatileLoad(Bytes*);
+            void volatileStore(Bytes*, Bytes);
+
+            void main() {
+                byte[3] bytes = [11, 0, 33];
+                assert(volatileStore(&bytes[1], cast(byte) -7) == -7);
+                assert(volatileLoad(&bytes[1]) == -7);
+                assert(bytes[0] == 11 && bytes[2] == 33);
+                float value;
+                assert(volatileStore(cast(void*) &value, -1.5f) == -1.5f);
+                assert(volatileLoad(cast(void*) &value) == -1.5f);
+                real extended;
+                volatileStore(&extended, 1.5L);
+                assert(volatileLoad(&extended) == 1.5L);
+                Bytes vector;
+                volatileStore(&vector, cast(Bytes) 0x9a);
+                auto loaded = volatileLoad(&vector);
+                assert(loaded.array[0] == 0x9a && loaded.array[15] == 0x9a);
             }
         });
     }
