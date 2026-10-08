@@ -2753,6 +2753,9 @@ static foreach (backend; Matrix!(
                 }
 
                 int answer() {
+                    auto info = cast(TypeInfo_Struct) typeid(VectorValue);
+                    assert(info.m_arg1 is typeid(__vector(double[2])));
+                    assert(info.m_arg2 is null);
                     VectorValue value;
                     value.lanes.array[0] = 3.0;
                     value.lanes.array[1] = 17.0;

@@ -139,10 +139,14 @@ public struct RuntimeTypes {
         if (auto cached = type in _types)
             return *cached;
 
-        import snakebite.frontend.compiler: withCompilerLock;
+        import snakebite.frontend.compiler: newInFrontend, withCompilerLock;
+        import dmd.typesem: merge2;
 
         TypeInfo info;
         withCompilerLock({
+            // The frontend's argument classifier can return unmerged types.
+            // TypeInfo identity follows genTypeInfo's canonical type.
+            type = newInFrontend!merge2(type);
             if (auto cached = type in _types)
                 info = *cached;
             else
