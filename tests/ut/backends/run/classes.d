@@ -1834,7 +1834,7 @@ static foreach (backend; Matrix!()) {
 // A destructor calls a function whose `static __gshared` exception is built
 // at compile time and thrown when asked to.
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot read a static variable"),
 )) {
     @("destructorCallsFunctionWithStaticGsharedException." ~ backend.stringof)
     @Tags(backend.stringof)

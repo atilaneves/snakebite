@@ -7,9 +7,10 @@ import dmd.dclass: ClassDeclaration;
 import dmd.declaration: Declaration, VarDeclaration;
 import dmd.expression:
     AddAssignExp, AddExp, AssignExp, CallExp, ClassReferenceExp, CmpExp,
-    DeclarationExp, DelegateExp, DeleteExp, DotVarExp, EqualExp, Expression, FuncExp, IndexExp,
-    MinAssignExp, MinExp, NewExp, PostExp, SliceExp, StringExp, StructLiteralExp,
-    SymOffExp, ThisExp, TypeidExp, VarExp;
+    DeclarationExp, DelegateExp, DeleteExp, DotVarExp, EqualExp, Expression,
+    FuncExp, IndexExp, MinAssignExp, MinExp, NewExp, PostExp,
+    SliceExp, StringExp, StructLiteralExp, SymOffExp, ThisExp, TypeidExp,
+    VarExp;
 import dmd.func: FuncDeclaration;
 import dmd.mtype: Type;
 import dmd.typesem: nextOf, toBasetype;
