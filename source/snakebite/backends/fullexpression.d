@@ -51,9 +51,9 @@ public struct FullExpressionScope {
 
     // Whether the position ends a full expression that is part of a larger
     // one: the right operand of `&&` and `||`, the operand of a `throw`
-    // expression and the message of an `assert`, as dmd's glue code does. The temporaries of the enclosing
-    // expression stay alive, and the ones made inside the operand die when
-    // the operand ends.
+    // expression and the message of an `assert`, as dmd's glue code does.
+    // The temporaries of the enclosing expression stay alive, and the ones
+    // made inside the operand die when the operand ends.
     public static bool endsWithin(in Position position)
         @safe @nogc nothrow pure
     {
