@@ -233,7 +233,13 @@ private CastPlan classifyPointer(
 ) {
     final switch (destKind) with (TypeKind) {
     case integral:
-        return CastPlan(CastKind.pointerToIntegral, sourceFacts, destFacts);
+        // dmd's `toElemCast` treats pointers as target-width unsigned
+        // integers: a same-width cast paints the type without a value read.
+        return CastPlan(
+            sourceFacts.size == destFacts.size
+                ? CastKind.copy : CastKind.pointerToIntegral,
+            sourceFacts, destFacts,
+        );
     case floating:
         return CastPlan(CastKind.pointerToFloat, sourceFacts, destFacts);
     case dynamicArray:

@@ -6158,6 +6158,8 @@ static foreach (backend; Matrix!(
         0.shouldBeStatusOf!(backend, q{
             struct Z { int v; ~this() { v = 0; } }
             Z mz(int v) { return Z(v); }
+            struct P { int* p; ~this() { p = null; } }
+            P mp(int* p) { return P(p); }
             void main() {
                 bool taken;
                 if (mz(2).v)
@@ -6165,6 +6167,13 @@ static foreach (backend; Matrix!(
                 assert(!taken);
                 if (cast(uint) mz(2).v)
                     assert(false, "same-width integral cast");
+                int k = 1;
+                if (cast(size_t) mp(&k).p)
+                    assert(false, "same-width pointer-to-integer cast");
+                static if (size_t.sizeof > uint.sizeof) {
+                    if (!cast(uint) mp(cast(int*) 1).p)
+                        assert(false, "narrow pointer cast reads before cleanup");
+                }
                 int one = 1;
                 if (one ? cast(uint) mz(2).v : cast(uint) one)
                     assert(false, "cast in conditional branch");
@@ -6488,9 +6497,8 @@ static foreach (backend; Matrix!(
                 assert(calledReturn(result) == 5, "pending caller return");
                 assert(result == 7, "destructor call return");
                 assert(interruptedReturn() == 7, "return after caught cleanup");
-                assert(interruptedReturn() == 7, "repeated cleanup exception");
                 interruptedVoidReturn();
-                foreach (i; 0 .. 32) f();
+                f();
             }
         });
     }

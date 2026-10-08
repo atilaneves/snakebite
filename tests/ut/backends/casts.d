@@ -103,7 +103,7 @@ unittest {
 @("kind.pointerToIntegral")
 unittest {
     auto function_ = castFunctionOf(q{
-        ulong cast_(int* value) { return cast(ulong) value; }
+        ubyte cast_(int* value) { return cast(ubyte) value; }
     });
     auto cast_ = castOf(function_);
 
