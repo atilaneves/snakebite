@@ -7,6 +7,9 @@ import snakebite.exception: SnakebiteException;
 import std.array: array;
 import std.file: SpanMode, dirEntries;
 import std.process: execute;
+import core.thread: Thread;
+import snakebite.frontend.compiler: parseSnippet;
+import snakebite.project: prepareStartupDependencies, sourceSet;
 
 
 // `bin/at` is built with ldc2, so `defaultCompiler` is ldc2 here. The image
@@ -89,6 +92,68 @@ unittest {
         [objectPath], optimise: Optimise.no);
     alias Answer = extern(C) int function();
     (cast(Answer) image.resolve("answer"))().should == 42;
+}
+
+
+private bool _startupAnalysisReset;
+private size_t _startupWorkerCalls;
+private Throwable _startupWorkerFailure;
+
+extern(C) void snakebite_startup_image_worker() {
+    ++_startupWorkerCalls;
+    try {
+        // The root exists only in the scratch registration, not on an import
+        // path. A successful import here would mean image load preceded reset.
+        try
+            parseSnippet("import startup_analysis_root;");
+        catch (Exception)
+            _startupAnalysisReset = true;
+
+        auto worker = new Thread({
+            try
+                parseSnippet("module startup_image_worker_module; enum value = 42;");
+            catch (Throwable failure)
+                _startupWorkerFailure = failure;
+        });
+        worker.start;
+        worker.join;
+    } catch (Throwable failure) {
+        _startupWorkerFailure = failure;
+    }
+}
+
+
+// Image constructors can wait for frontend work. Use the real startup and
+// image-load path: a lock held across load would prevent the join, and a
+// reset after load would remove the worker's module. Scratch cannot share
+// a process with another test's live frontend session.
+@Tags("alone")
+@("image.startupAnalysisEndsBeforeImageConstructor")
+unittest {
+    const sandbox = Sandbox();
+    sandbox.writeFile("project/startup_analysis_root.d",
+        "module startup_analysis_root; int answer() { return 42; }");
+    sandbox.writeFile("constructor.c", q{
+        extern void *dlsym(void *, const char *);
+        __attribute__((constructor)) static void on_load(void) {
+            void (*action)(void) = dlsym(0, "snakebite_startup_image_worker");
+            if (action) action();
+        }
+    });
+    const objectPath = sandbox.inSandboxPath("constructor.o");
+    const compiled = execute(["cc", "-c", "-fPIC",
+        sandbox.inSandboxPath("constructor.c"), "-o", objectPath]);
+    compiled.status.should == 0;
+    const directory = sandbox.inSandboxPath("project");
+    auto sources = sourceSet(directory, [], []);
+    sources.linkerFiles = [objectPath];
+    const image = prepareStartupDependencies(directory, sources, Optimise.no);
+    (image !is null).should == true;
+    _startupWorkerCalls.should == 1;
+    _startupAnalysisReset.should == true;
+    if (_startupWorkerFailure !is null)
+        throw _startupWorkerFailure;
+    parseSnippet("import startup_image_worker_module; static assert(value == 42);");
 }
 
 
