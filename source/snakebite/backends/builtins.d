@@ -36,35 +36,84 @@ public extern(C) void startVariadicEntry(
 // `sin(float)` and `sin(double)` both classify as `BUILTIN.sin`, and
 // `bswap(uint)`/`bswap(ulong)` both classify as `BUILTIN.bswap`. Only the
 // types that a wrapper of this table takes have a member.
+// `void_` only describes a result.
 public enum ParameterType {
-    float_, double_, real_, ubyte_, ushort_, int_, uint_, ulong_, vector_,
-    ubytePointer_, ushortPointer_, uintPointer_, ulongPointer_, voidPointer_,
+    float_, double_, real_, ubyte_, ushort_, int_, uint_, long_, ulong_,
+    vector_, ubytePointer_, ushortPointer_, uintPointer_, ulongPointer_,
+    voidPointer_, void_,
 }
 
 
 // `name` is a string key, not dmd's `BUILTIN` enum value, so this
 // module and the bytecode VM that calls into it need no DMD frontend
 // import path (CODING.md, "Code organisation"). `null` means that no
-// wrapper takes this name with these parameter types.
-public BuiltinCall entryOf(in string name, in ParameterType[] types)
-@safe pure nothrow @nogc {
-    assert(types.length > 0);
-    final switch (types[0]) with (ParameterType) {
-        case float_: return widthEntryOf!float(name);
-        case double_: return widthEntryOf!double(name);
-        case real_: return widthEntryOf!real(name);
+// wrapper takes this name with exactly these parameter types and this
+// result type: a wrapper writes its result at the size of its own result
+// type, and reads each argument at the size of its own parameter type.
+public BuiltinCall entryOf(
+    in string name, in ParameterType[] parameters, in ParameterType result,
+) @safe pure nothrow @nogc {
+    if (parameters.length == 0)
+        return null;
+    final switch (parameters[0]) with (ParameterType) {
+        case float_: return widthEntryOf!float(name, parameters, result);
+        case double_: return widthEntryOf!double(name, parameters, result);
+        case real_: return widthEntryOf!real(name, parameters, result);
         case ubyte_: return null;
-        case ushort_: return integerEntryOf!ushort(name);
-        case int_: return simdEntryOf(name, types[1 .. $]);
-        case uint_: return integerEntryOf!uint(name);
-        case ulong_: return integerEntryOf!ulong(name);
+        case ushort_: return integerEntryOf!ushort(name, parameters, result);
+        case int_: return simdEntryOf(name, parameters[1 .. $], result);
+        case uint_: return integerEntryOf!uint(name, parameters, result);
+        case long_: return null;
+        case ulong_: return integerEntryOf!ulong(name, parameters, result);
         case vector_: return null;
-        case ubytePointer_: return volatileEntryOf!ubyte(name);
-        case ushortPointer_: return volatileEntryOf!ushort(name);
-        case uintPointer_: return volatileEntryOf!uint(name);
-        case ulongPointer_: return volatileEntryOf!ulong(name);
-        case voidPointer_: return name == "__prefetch" ? &prefetchEntry : null;
+        case ubytePointer_:
+            return pointerEntryOf!ubyte(name, parameters, result);
+        case ushortPointer_:
+            return pointerEntryOf!ushort(name, parameters, result);
+        case uintPointer_:
+            return pointerEntryOf!uint(name, parameters, result);
+        case ulongPointer_:
+            return pointerEntryOf!ulong(name, parameters, result);
+        case voidPointer_:
+            return name == "__prefetch"
+                && parameters.takes(voidPointer_, ubyte_)
+                && result == void_
+                ? &prefetchEntry : null;
+        case void_: return null;
     }
+}
+
+
+private bool takes(
+    in ParameterType[] parameters, in ParameterType[] expected...
+) @safe pure nothrow @nogc {
+    return parameters == expected;
+}
+
+
+private template typeOf(T) {
+    static if (is(T == float))
+        enum typeOf = ParameterType.float_;
+    else static if (is(T == double))
+        enum typeOf = ParameterType.double_;
+    else static if (is(T == real))
+        enum typeOf = ParameterType.real_;
+    else static if (is(T == ubyte))
+        enum typeOf = ParameterType.ubyte_;
+    else static if (is(T == ushort))
+        enum typeOf = ParameterType.ushort_;
+    else static if (is(T == int))
+        enum typeOf = ParameterType.int_;
+    else static if (is(T == uint))
+        enum typeOf = ParameterType.uint_;
+    else static if (is(T == long))
+        enum typeOf = ParameterType.long_;
+    else static if (is(T == ulong))
+        enum typeOf = ParameterType.ulong_;
+    else static if (is(T == void))
+        enum typeOf = ParameterType.void_;
+    else
+        static assert(false, "no ParameterType for " ~ T.stringof);
 }
 
 
@@ -77,24 +126,48 @@ public size_t destinationParameterOf(in string name) @safe pure nothrow @nogc {
 }
 
 
-private BuiltinCall widthEntryOf(T)(in string name)
-@safe pure nothrow @nogc {
+// A floating point result is any of the three types: dmd's code generator
+// converts the operation's own result to the declared one, so `float
+// sin(real)` is a `sin` narrowed once, as `cast(float) sin(x)`.
+private BuiltinCall widthEntryOf(T)(
+    in string name, in ParameterType[] parameters, in ParameterType result,
+) @safe pure nothrow @nogc {
+    enum self = typeOf!T;
     switch (name) {
         static foreach (oneArgumentName; oneArgumentNames)
             case oneArgumentName:
-                return &entry!(oneArgumentName, T, T);
+                return parameters.takes(self)
+                    ? floatingResultEntryOf!(oneArgumentName, T)(result)
+                    : null;
         static foreach (twoArgumentName; sameTypeTwoArgumentNames)
             case twoArgumentName:
-                return &entry!(twoArgumentName, T, T, T);
+                return parameters.takes(self, self)
+                    ? floatingResultEntryOf!(twoArgumentName, T, T)(result)
+                    : null;
         case "ldexp":
             // `ldexp`'s second argument is always `int`, never the
             // call's own floating point type - the one intrinsic here
             // whose arguments do not all share one type.
-            return &entry!("ldexp", T, T, int);
+            return parameters.takes(self, ParameterType.int_)
+                ? floatingResultEntryOf!("ldexp", T, int)(result)
+                : null;
         case "rndtol":
-            return &entry!("rndtol", long, T);
+            return parameters.takes(self) && result == ParameterType.long_
+                ? &entry!("rndtol", long, T) : null;
         default:
             return null;
+    }
+}
+
+
+private BuiltinCall floatingResultEntryOf(string name, Params...)(
+    in ParameterType result,
+) @safe pure nothrow @nogc {
+    switch (result) with (ParameterType) {
+        case float_: return &entry!(name, float, Params);
+        case double_: return &entry!(name, double, Params);
+        case real_: return &entry!(name, real, Params);
+        default: return null;
     }
 }
 
@@ -109,15 +182,49 @@ private enum oneArgumentNames = ["fabs", "sqrt", "sin", "cos", "rint", "toPrec"]
 private enum sameTypeTwoArgumentNames = ["yl2x", "yl2xp1"];
 
 
-// `core.volatile`'s accesses, keyed by the pointer's own element type.
-private BuiltinCall volatileEntryOf(T)(in string name)
-@safe pure nothrow @nogc {
+// The accesses of `core.volatile` and `core.bitop`, and the bit test
+// operations of `core.bitop`, keyed by the pointer's own element type.
+private BuiltinCall pointerEntryOf(T)(
+    in string name, in ParameterType[] parameters, in ParameterType result,
+) @safe pure nothrow @nogc {
+    enum element = typeOf!T;
+    enum pointer = pointerTypeOf!T;
     switch (name) {
-        case "volatileLoad": return &entry!("volatileLoad", T, T*);
-        case "volatileStore": return &entry!("volatileStore", void, T*, T);
-        default: return null;
+        case "volatileLoad":
+            return parameters.takes(pointer) && result == element
+                ? &entry!("volatileLoad", T, T*) : null;
+        case "volatileStore":
+            return parameters.takes(pointer, element)
+                    && result == ParameterType.void_
+                ? &entry!("volatileStore", void, T*, T) : null;
+        static if (is(T == ulong))
+            static foreach (bitTestName; bitTestNames)
+                case bitTestName:
+                    return parameters.takes(pointer, element)
+                            && result == ParameterType.int_
+                        ? &entry!(bitTestName, int, T*, T) : null;
+        default:
+            return null;
     }
 }
+
+
+private template pointerTypeOf(T) {
+    static if (is(T == ubyte))
+        enum pointerTypeOf = ParameterType.ubytePointer_;
+    else static if (is(T == ushort))
+        enum pointerTypeOf = ParameterType.ushortPointer_;
+    else static if (is(T == uint))
+        enum pointerTypeOf = ParameterType.uintPointer_;
+    else static if (is(T == ulong))
+        enum pointerTypeOf = ParameterType.ulongPointer_;
+    else
+        static assert(false, "no pointer ParameterType for " ~ T.stringof);
+}
+
+
+// `size_t` is the pointee and the bit number in `core.bitop`.
+private enum bitTestNames = ["btc", "btr", "bts"];
 
 
 // `core.simd.__prefetch` takes the same encoding `core.simd.prefetch`
@@ -152,16 +259,17 @@ private enum MoveOpcode : int {
 }
 
 
-private BuiltinCall simdEntryOf(in string name, in ParameterType[] types)
-@safe pure nothrow @nogc {
-    if (types.length == 1 && types[0] == ParameterType.vector_) {
-        if (name == "__simd")
+private BuiltinCall simdEntryOf(
+    in string name, in ParameterType[] rest, in ParameterType result,
+) @safe pure nothrow @nogc {
+    with (ParameterType) {
+        if (result != vector_)
+            return null;
+        if (name == "__simd" && rest.takes(vector_))
             return &loadEntry;
-        return null;
+        if (name == "__simd_sto" && rest.takes(vector_, vector_))
+            return &storeEntry;
     }
-    if (types.length == 2 && types[0] == ParameterType.vector_
-            && types[1] == ParameterType.vector_ && name == "__simd_sto")
-        return &storeEntry;
     return null;
 }
 
@@ -215,9 +323,12 @@ private void requireMoveOpcode(in int opcode, in bool store)
 }
 
 
-private BuiltinCall integerEntryOf(T)(in string name)
-@safe pure nothrow @nogc {
+private BuiltinCall integerEntryOf(T)(
+    in string name, in ParameterType[] parameters, in ParameterType result,
+) @safe pure nothrow @nogc {
     import core.bitop;
+
+    enum self = typeOf!T;
 
     switch (name) {
         // `bswap` has no `ushort` overload (`core.bitop` declares only
@@ -233,24 +344,40 @@ private BuiltinCall integerEntryOf(T)(in string name)
                 typeof(mixin("core.bitop." ~ integerName ~ "(T.init)")) == T
             ))
                 case integerName:
-                    return &entry!(integerName, T, T);
+                    return parameters.takes(self) && result == self
+                        ? &entry!(integerName, T, T) : null;
+        // The result type is the one `core.bitop` declares for the
+        // overload: `_popcnt(ushort)` returns `ushort`, the others `int`.
         static foreach (integerName; ownReturnTypeIntegerNames)
             static if (__traits(compiles,
                 mixin("core.bitop." ~ integerName ~ "(T.init)")))
                 case integerName:
-                    return &entry!(integerName, int, T);
+                    return parameters.takes(self)
+                            && result == typeOf!(typeof(
+                                mixin("core.bitop." ~ integerName
+                                    ~ "(T.init)")))
+                        ? &entry!(integerName, typeof(
+                            mixin("core.bitop." ~ integerName ~ "(T.init)")),
+                            T)
+                        : null;
+        static if (is(T == uint) || is(T == ulong))
+            static foreach (integerName; bitScanNames)
+                case integerName:
+                    return parameters.takes(self)
+                            && result == ParameterType.int_
+                        ? &entry!(integerName, int, T) : null;
         default:
             return null;
     }
 }
 
 
-// Every `core.bitop` intrinsic snakebite has a builtin wrapper for.
-// `bsf` and `bsr` also classify (`BUILTIN.bsf`/`BUILTIN.bsr`), but both
-// have real bodies in `core.bitop`, and `CallSelection` only asks for a
-// wrapper of a function with no body: `bswap` and `_popcnt`.
+// Every `core.bitop` intrinsic on an integer value that snakebite has a
+// builtin wrapper for. `CallSelection` only asks for a wrapper of a
+// function with no body, and `core.bitop` gives `bsf` and `bsr` one.
 private enum sameTypeIntegerNames = ["bswap"];
 private enum ownReturnTypeIntegerNames = ["_popcnt"];
+private enum bitScanNames = ["bsf", "bsr"];
 
 
 // Every entry this table serves is one concept: read each argument at

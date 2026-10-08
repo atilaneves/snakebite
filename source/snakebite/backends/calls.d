@@ -282,156 +282,173 @@ public struct CallSelection {
         return function_.mangledNameOf == "alloca";
     }
 
-    // `function_`'s wrapper, when it is a bodiless declaration that dmd
-    // inlines instead of calling. dmd has two lists of these. Its
-    // semantic pass classifies some (`dmd.builtin.isBuiltin`: `core.bitop.
-    // bswap`, ...) by name alone, and its CTFE evaluator is for that list
-    // only, which this backend never calls at run time. Its code generator
-    // (`dmd.glue.toir.intrinsic_op`) inlines more, among them `core.
-    // volatile` and `core.simd`, without classifying them;
-    // `isCodeGeneratorIntrinsicModule` finds those by module. For the two
-    // math modules the code generator alone decides (`isMathIntrinsic`),
-    // since the classification takes names it does not inline. No host
-    // symbol exists for an inlined declaration. Any other bodiless
-    // declaration is a native call.
+    // `function_`'s wrapper, when it is a bodiless declaration that dmd's
+    // code generator inlines instead of calling (`isInlinedByCodeGenerator`)
+    // and a wrapper takes exactly its signature. No host symbol exists for
+    // an inlined declaration, and any other bodiless declaration is a
+    // native call: the host's own symbol, or dmd's link error without one.
     //
-    // A declaration of either kind that the table has no wrapper for stops
-    // here, at the first decision, naming the intrinsic: sending it across
-    // the barrier would end in an unrelated "symbol not found" at its
-    // first execution.
+    // dmd's `dmd.builtin.isBuiltin` is no part of this decision: it
+    // classifies names for CTFE, some of which the code generator does not
+    // inline, and this backend never calls the CTFE evaluator at run time.
+    //
+    // A declaration that dmd inlines but no wrapper takes (an instruction
+    // whose wrapper does not exist, or a result type that dmd converts
+    // unspecified) is a native call too. A wrapper writes its result at its
+    // own size, so a wrapper never serves a declaration it differs from.
     private static Decision builtinDecision(FuncDeclaration function_) {
-        import dmd.builtin: isBuiltin;
         import snakebite.backends.builtins:
             destinationParameterOf, entryOf;
-        import std.conv: text;
-        import core.stdc.stdio: fprintf, stderr;
-        import std.string: fromStringz;
 
-        const mathModule = mathModuleOf(function_);
-        const inlined = mathModule != MathModule.none
-            ? isMathIntrinsic(function_, mathModule)
-            : isBuiltin(function_) != BUILTIN.unimp
-                || isCodeGeneratorIntrinsicModule(function_);
-        if (!inlined)
+        if (!isInlinedByCodeGenerator(function_))
             return Decision(Route.native);
 
-        // dmd's own classification (`BUILTIN.popcnt` for the declared
-        // identifier `_popcnt`, for one) does not always echo the
-        // identifier back as its bare name, but the table's key is
-        // every one of those identifiers - the same one dmd's own
-        // `determine_builtin` keys on (`dmd/builtin.d`: `id3 = fd.
-        // ident`) - so `function_.ident` is the lookup key, not `kind`.
+        ParameterType[] parameters;
+        ParameterType result;
+        const keyed = signatureOf(function_, parameters, result);
+        // dmd's own `determine_builtin` keys on `fd.ident`, too (`dmd/
+        // builtin.d`): the identifier is the table's key, not the symbol.
         const name = function_.ident.toString.idup;
-        ParameterType[] types;
-        const keyed = parameterTypesOf(function_, types);
-        auto entry = keyed ? entryOf(name, types) : null;
-        if (entry is null) {
-            // A release build halts without the assertion's message.
-            const message = text("no builtin wrapper for `",
-                function_.toPrettyChars.fromStringz, "`");
-            fprintf(stderr, "snakebite: %.*s\n",
-                cast(int) message.length, message.ptr);
-            assert(false, message);
-        }
-
-        return Decision(
-            Route.builtin, entry, destinationParameterOf(name));
+        auto entry = keyed ? entryOf(name, parameters, result) : null;
+        return entry is null
+            ? Decision(Route.native)
+            : Decision(Route.builtin, entry, destinationParameterOf(name));
     }
 
-    private enum MathModule { none, stdMath, coreMath }
-
-    // Which of the two math rules of `dmd.glue.toir.intrinsic_op` applies to
-    // the module of `function_`: `std.math` and its submodules, or
-    // `core.math`.
-    private static MathModule mathModuleOf(FuncDeclaration function_) {
-        const module_ = function_.getModule;
-        if (module_ is null || module_.md is null)
-            return MathModule.none;
-        const packages = module_.md.packages;
-        if (packages.length == 0)
-            return MathModule.none;
-        const first = packages[0].toString;
-        if (packages.length == 2)
-            return first == "std" && packages[1].toString == "math"
-                ? MathModule.stdMath : MathModule.none;
-        if (module_.md.id.toString != "math")
-            return MathModule.none;
-        if (first == "std")
-            return MathModule.stdMath;
-        return first == "core" ? MathModule.coreMath : MathModule.none;
-    }
-
-    // `intrinsic_op` of dmd 2.113.0, as far as it concerns `std.math` and
-    // `core.math`. The glue module is not importable (the function is
-    // `package(dmd.glue)`), so this is a copy. The operand type decides, not
-    // the name alone: `core.math` takes any floating point operand;
-    // `std.math` takes `real`, and `float` and `double` only for `sqrt` and
-    // `fabs`.
-    private static bool isMathIntrinsic(
-        FuncDeclaration function_, in MathModule mathModule,
+    // `intrinsic_op` of dmd 2.113.0 (`dmd.glue.toir`), row by row. The
+    // function is `package(dmd.glue)` and cannot be called, so this is a
+    // copy. The code generator compares the type of the first parameter by
+    // identity with its basic type singletons, so a qualified type matches
+    // none of them: no `toBasetype` before the `.ty` tests below.
+    private static bool isInlinedByCodeGenerator(
+        FuncDeclaration declaration,
     ) {
         import dmd.astenums: TY;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
-        auto parameterList = typeFunctionOf(function_).parameterList;
-        if (parameterList.length == 0)
+        auto function_ = declaration.toAliasFunc;
+        if (function_.isDeprecated)
             return false;
+        const module_ = function_.getModule;
+        if (module_ is null || module_.md is null)
+            return false;
+        const packages = module_.md.packages;
+        if (packages.length == 0)
+            return false;
+
         const name = function_.ident.toString;
+        auto parameterList = typeFunctionOf(function_).parameterList;
+        const operand = parameterList.length > 0
+            ? parameterList[0].type : null;
+        const unqualified = operand !is null && operand.mod == 0;
+        const real_ = unqualified && operand.ty == TY.Tfloat80;
+        const float_ = unqualified && operand.ty == TY.Tfloat32;
+        const double_ = unqualified && operand.ty == TY.Tfloat64;
+        const floating = real_ || float_ || double_;
+
+        const first = packages[0].toString;
+        const last = module_.md.id.toString;
+        // Any module of `std.math.*`; every other two-package module is
+        // only for `core.stdc.stdarg.va_start`, which `isVaStart` finds.
+        const stdMath = packages.length == 2
+            ? first == "std" && packages[1].toString == "math"
+            : first == "std" && last == "math";
+        if (packages.length == 2 && !stdMath)
+            return false;
+
+        bool inlined;
+        bool x87Only;
+        bool bitInstruction;
+        if (stdMath) {
+            inlined = (real_ || name == "sqrt")
+                ? floating && isMathRow(name, x87Only)
+                : name == "fabs" && (float_ || double_);
+        } else if (first != "core") {
+            return false;
+        } else if (last == "math") {
+            inlined = floating && isMathRow(name, x87Only);
+        } else if (last == "simd") {
+            switch (name) {
+                case "__prefetch", "__simd_sto", "__simd", "__simd_ib":
+                    inlined = true;
+                    break;
+                default:
+                    break;
+            }
+        } else if (last == "bitop") {
+            switch (name) {
+                case "bsf", "bsr", "btc", "btr", "bts":
+                    inlined = true;
+                    bitInstruction = true;
+                    break;
+                case "volatileLoad", "volatileStore", "inp", "inpl", "inpw",
+                        "outp", "outpl", "outpw", "bswap", "_popcnt":
+                    inlined = true;
+                    break;
+                default:
+                    break;
+            }
+        } else if (last == "volatile") {
+            inlined = name == "volatileLoad" || name == "volatileStore";
+        }
+
+        // The backend of dmd has no x87 or bit instructions for AArch64.
+        version (AArch64)
+            return inlined && !x87Only && !bitInstruction;
+        else
+            return inlined;
+    }
+
+    // The names of `core.math` that dmd's code generator inlines, and
+    // whether the instruction exists on x87 only.
+    private static bool isMathRow(in const(char)[] name, ref bool x87Only) {
+        x87Only = name != "fabs" && name != "yl2x";
         switch (name) {
             case "cos", "sin", "fabs", "rint", "sqrt", "yl2x", "ldexp",
                     "rndtol", "yl2xp1", "toPrec":
-                break;
+                return true;
             default:
                 return false;
         }
-        // dmd tests the operand type by identity with its basic type
-        // singletons, so a qualified type is never one of them: no
-        // `toBasetype`.
-        const type = parameterList[0].type;
-        const unqualified = type.mod == 0;
-        const real_ = unqualified && type.ty == TY.Tfloat80;
-        const floating = unqualified
-            && (real_ || type.ty == TY.Tfloat32 || type.ty == TY.Tfloat64);
-        return mathModule == MathModule.coreMath
-            ? floating
-            : real_ || floating && (name == "sqrt" || name == "fabs");
     }
 
-    // dmd's code generator (`dmd.glue.toir.intrinsic_op`) inlines bodiless
-    // functions of these modules by name.
-    private static bool isCodeGeneratorIntrinsicModule(
+    // The concrete types `function_` declares for its parameters and its
+    // result: the lookup key of `snakebite.backends.builtins.entryOf`,
+    // which the name alone does not give. `false` when the signature has a
+    // type that no wrapper takes, or a parameter or result that does not
+    // have the plain value layout a wrapper reads and writes.
+    private static bool signatureOf(
         FuncDeclaration function_,
+        out ParameterType[] parameters,
+        out ParameterType result,
     ) {
-        const module_ = function_.getModule;
-        if (module_ is null || module_.md is null
-                || module_.md.packages.length != 1
-                || module_.md.packages[0].toString != "core")
-            return false;
-        const name = module_.md.id.toString;
-        return name == "volatile" || name == "simd";
-    }
-
-    // The concrete types `function_`'s parameters declare, the half of
-    // `snakebite.backends.builtins.entryOf`'s lookup key that the name
-    // alone does not give. `false` when a parameter has a type that no
-    // wrapper takes.
-    private static bool parameterTypesOf(
-        FuncDeclaration function_, out ParameterType[] types,
-    ) {
+        import dmd.astenums: STC, TY, VarArg;
         import dmd.typesem: toBasetype;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
+        auto type = typeFunctionOf(function_);
+        if (type.isRef || type.parameterList.varargs != VarArg.none)
+            return false;
+        auto resultType = type.next.toBasetype;
+        if (resultType.ty == TY.Tvoid)
+            result = ParameterType.void_;
+        else if (!parameterTypeOf(resultType, false, result))
+            return false;
+
         // `const` fails: `ParameterList.length` and `opIndex` are not
         // `const` methods.
-        auto parameterList = typeFunctionOf(function_).parameterList;
+        auto parameterList = type.parameterList;
         foreach (i; 0 .. parameterList.length) {
-            ParameterType type;
-            if (!parameterTypeOf(
-                    parameterList[i].type.toBasetype, false, type))
+            auto parameter = parameterList[i];
+            if (parameter.storageClass & (STC.ref_ | STC.out_ | STC.lazy_))
                 return false;
-            types ~= type;
+            ParameterType parameterType;
+            if (!parameterTypeOf(
+                    parameter.type.toBasetype, false, parameterType))
+                return false;
+            parameters ~= parameterType;
         }
-        return types.length > 0;
+        return true;
     }
 
     // `pointee` is for the type that a pointer parameter points to.
@@ -441,7 +458,10 @@ public struct CallSelection {
         out ParameterType result,
     ) {
         import dmd.astenums: TY;
-        import dmd.typesem: nextOf, toBasetype;
+        import dmd.typesem: nextOf, size, toBasetype;
+
+        // The wrappers of `core.simd` move this many bytes.
+        enum vectorSize = 16;
 
         final switch (type.ty) with (TY) {
             case Tfloat32: result = ParameterType.float_; return !pointee;
@@ -456,6 +476,7 @@ public struct CallSelection {
                     ? ParameterType.ushortPointer_ : ParameterType.ushort_;
                 return true;
             case Tint32: result = ParameterType.int_; return !pointee;
+            case Tint64: result = ParameterType.long_; return !pointee;
             case Tuns32:
                 result = pointee
                     ? ParameterType.uintPointer_ : ParameterType.uint_;
@@ -465,13 +486,15 @@ public struct CallSelection {
                     ? ParameterType.ulongPointer_ : ParameterType.ulong_;
                 return true;
             case Tvoid: result = ParameterType.voidPointer_; return pointee;
-            case Tvector: result = ParameterType.vector_; return !pointee;
+            case Tvector:
+                result = ParameterType.vector_;
+                return !pointee && type.size == vectorSize;
             case Tpointer:
                 return !pointee && parameterTypeOf(
                     type.nextOf.toBasetype, true, result);
             case Tarray, Tsarray, Taarray, Treference, Tfunction,
                 Tident, Tclass, Tstruct, Tenum, Tdelegate, Tnone,
-                Tint8, Tint16, Tint64, Timaginary32,
+                Tint8, Tint16, Timaginary32,
                 Timaginary64, Timaginary80, Tcomplex32, Tcomplex64,
                 Tcomplex80, Tbool, Tchar, Twchar, Tdchar, Terror,
                 Tinstance, Ttypeof, Ttuple, Tslice, Treturn, Tnull,
