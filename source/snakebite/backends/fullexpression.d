@@ -204,15 +204,19 @@ public struct FullExpressionScope {
 // (`elemIsLvalue`): a variable, a field, a dereference or an element, or a
 // conditional expression whose results are such. A bit field is read
 // through a different element, and a call that returns `ref` through a
-// call. dmd reads a thread-local variable before the destructors run.
+// call. dmd reads a thread-local variable before the destructors run, and
+// folds `__ctfe` to a constant.
 private bool isLvalueResult(imported!"dmd.expression".Expression result) {
     if (auto conditional = result.isCondExp)
         return isLvalueResult(conditional.e1)
             && isLvalueResult(conditional.e2);
 
     if (auto variable = result.isVarExp) {
+        import snakebite.frontend.dmd.delegates: isCtfeVariable;
+
         auto declaration = variable.var.isVarDeclaration;
-        return declaration !is null && !declaration.isThreadlocal;
+        return declaration !is null && !declaration.isThreadlocal
+            && !isCtfeVariable(declaration);
     }
 
     if (auto field = result.isDotVarExp) {
