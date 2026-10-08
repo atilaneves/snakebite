@@ -128,7 +128,7 @@ public struct TypeFacts {
     public static TypeFacts of(Type type) {
         import dmd.astenums: Tarray, Tvector;
         import dmd.typesem:
-            alignsize, isIntegral, isUnsigned, nextOf, size, toBasetype;
+            alignsize, isIntegral, isUnsigned, nextOf;
         import snakebite.frontend.compiler: forceIfNeeded;
 
         forceIfNeeded(() => resolved(type), () { forceResolved(type); });
@@ -136,7 +136,7 @@ public struct TypeFacts {
         // An enum value has the representation of its base type. Keeping
         // that representation here lets every byte-storage caller use the
         // same facts for enum values with floating or string bases.
-        type = type.toBasetype;
+        type = representationType(type);
 
         if (type.ty == Tarray) {
             forceIfNeeded(
@@ -145,7 +145,7 @@ public struct TypeFacts {
             );
             return TypeFacts(
                 arrayValueSize, size_t.alignof, false, false, true,
-                type.nextOf.size,
+                representationSize(type.nextOf),
             );
         }
 
@@ -154,11 +154,35 @@ public struct TypeFacts {
         // any integral.
         const scalar = type.ty != Tvector;
         return TypeFacts(
-            type.size,
+            representationSize(type),
             type.alignsize,
             scalar && type.isIntegral,
             scalar && type.isUnsigned,
         );
+    }
+
+    private static Type representationType(Type type) {
+        import dmd.typesem: toBasetype;
+        import snakebite.frontend.compiler: newInFrontend;
+
+        // DMD can cache a new qualified base even when the enum is resolved.
+        if (type.isTypeEnum !is null)
+            return newInFrontend!toBasetype(type);
+        return type;
+    }
+
+    private static auto representationSize(Type type) {
+        import dmd.typesem: size;
+        import snakebite.frontend.compiler: newInFrontend;
+
+        // Static-array size normalizes each nested element. An enum can
+        // still allocate a qualified base after its declaration is resolved.
+        auto element = type;
+        while (auto arrayType = element.isTypeSArray)
+            element = arrayType.next;
+        if (element.isTypeEnum !is null)
+            return newInFrontend!size(type);
+        return type.size;
     }
 
     // `of`, for a caller that only prepares what execution may ask for
@@ -331,10 +355,10 @@ public struct TypeFacts {
 
         public static Truth of(Type type) {
             import dmd.astenums: TY;
-            import dmd.typesem: size, toBasetype;
+            import dmd.typesem: size;
             import std.conv: text;
 
-            type = type.toBasetype;
+            type = representationType(type);
             final switch (type.ty) with (TY) {
                 // An imaginary value is one `float`/`double`/`real`-shaped
                 // component on its own - the same nonzero test a real one
