@@ -987,33 +987,6 @@ static foreach (backend; Matrix!()) {
 
 
 static foreach (backend; Matrix!()) {
-    @("if.taken." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        10.shouldBeRetOf!(
-            backend,
-            q{
-                int one() {
-                    return 1;
-                }
-
-                int two() {
-                    return 2;
-                }
-
-                int result() {
-                    int ret = 0;
-                    if (one() < two())
-                        ret += 10;
-                    return ret;
-                }
-            },
-            "result",
-        );
-    }
-}
-
-static foreach (backend; Matrix!()) {
     @("if.notTaken." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

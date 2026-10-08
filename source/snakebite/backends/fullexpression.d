@@ -73,15 +73,116 @@ public struct FullExpressionScope {
         }
     }
 
+    // dmd's glue code (`appendDtors`) ends a full expression whose value
+    // is wanted and whose result is an lvalue by taking its address,
+    // running the destructors and then reading the result. A backend
+    // resolves the address inside the full expression and reads the value
+    // after it ends. The answer is false inside the destructors that end a
+    // full expression, and for a position that is part of the active one.
+    public bool readsResultAfterEnd(
+        in Position position,
+        imported!"dmd.expression".Expression result,
+    ) const {
+        return kindOf(position) == FullExpressionKind.value
+            && opens(position) && !_ending
+            && isLvalueResult(result) && hasOperandDestructors(result);
+    }
+
+    // `appendDtors` leaves the result unchanged when `varsInScope` has no
+    // destructor. Inner `toElemDtor` operands consume their own entries;
+    // declarations in a called function do not belong to this expression.
+    private static bool hasOperandDestructors(
+        imported!"dmd.expression".Expression result,
+    ) {
+        import dmd.astenums: STC;
+        import dmd.expression:
+            AssertExp, DeclarationExp, FuncExp, LogicalExp, ThrowExp;
+        import dmd.visitor: SemanticTimeTransitiveVisitor;
+        import snakebite.backends.loweringvisitor: LoweredExpressionTypes;
+
+        extern(C++) static final class Finder: SemanticTimeTransitiveVisitor {
+            alias visit = SemanticTimeTransitiveVisitor.visit;
+            bool found;
+
+            override void visit(DeclarationExp expression) {
+                auto variable = expression.declaration.isVarDeclaration;
+                if (variable is null || variable.isStatic
+                        || (variable.storage_class
+                            & (STC.manifest | STC.extern_ | STC.tls
+                                | STC.gshared)))
+                    return;
+                if (variable.needsScopeDtor)
+                    found = true;
+                if (!found && variable._init !is null) {
+                    auto initializer = variable._init.isExpInitializer;
+                    if (initializer !is null)
+                        initializer.exp.accept(this);
+                }
+            }
+
+            override void visit(LogicalExp expression) {
+                expression.e1.accept(this);
+            }
+
+            override void visit(AssertExp expression) {
+                expression.e1.accept(this);
+            }
+
+            override void visit(ThrowExp) {}
+            override void visit(FuncExp) {}
+
+            static foreach (E; LoweredExpressionTypes) {
+                override void visit(E expression) {
+                    if (expression.lowering !is null)
+                        expression.lowering.accept(this);
+                    else
+                        super.visit(expression);
+                }
+            }
+        }
+
+        scope finder = new Finder;
+        result.accept(finder);
+        return finder.found;
+    }
+
+    // The expression whose address a backend resolves for a result that
+    // `readsResultAfterEnd`: dmd's glue code does not copy the value for a
+    // cast that keeps the representation, such as `string` to
+    // `const(char)[]`.
+    public static imported!"dmd.expression".Expression lvalueOf(
+        imported!"dmd.expression".Expression result,
+    ) {
+        import snakebite.backends.casts: classify;
+        import snakebite.nativevalue: CastKind;
+        import dmd.typesem: toBasetype;
+
+        while (auto cast_ = result.isCastExp) {
+            if (cast_.lowering !is null)
+                break;
+            if (!cast_.e1.type.toBasetype.equals(cast_.to.toBasetype)) {
+                const plan = classify(cast_.e1.type, cast_.type);
+                if (plan.kind != CastKind.copy
+                        && !(plan.kind == CastKind.classReference
+                            && plan.referenceOffset == 0))
+                    break;
+            }
+            result = cast_.e1;
+        }
+        return result;
+    }
+
     public struct CallState {
         private const(void)* root;
         private FullExpressionKind kind;
         private size_t depth;
+        private bool ending;
     }
 
     private const(void)* _root;
     private FullExpressionKind _kind;
     private size_t _depth;
+    private bool _ending;
 
     public void run(
         in Position position,
@@ -119,16 +220,20 @@ public struct FullExpressionScope {
         if (outer)
             begin();
         scope (exit) {
-            if (outer)
+            if (outer) {
+                _ending = true;
+                scope (exit) _ending = false;
                 end();
+            }
         }
         evaluate();
     }
 
     public CallState suspendCall() {
-        const state = CallState(_root, _kind, _depth);
+        const state = CallState(_root, _kind, _depth, _ending);
         _root = null;
         _depth = 0;
+        _ending = false;
         return state;
     }
 
@@ -136,9 +241,16 @@ public struct FullExpressionScope {
         _root = state.root;
         _kind = state.kind;
         _depth = state.depth;
+        _ending = state.ending;
     }
 
-    public bool active() const {
+    // Whether running a full expression at the position starts a new one,
+    // as opposed to being part of the one that is active.
+    public bool opens(in Position position) const @safe @nogc nothrow pure {
+        return endsWithin(position) || !active;
+    }
+
+    public bool active() const @safe @nogc nothrow pure {
         return _depth != 0;
     }
 
@@ -150,4 +262,40 @@ public struct FullExpressionScope {
         return _kind == FullExpressionKind.value;
     }
 
+}
+
+// The expression kinds that dmd's glue code turns into a memory reference
+// (`elemIsLvalue`): a variable, a field, a dereference or an element, or a
+// conditional expression whose results are such. A bit field is read
+// through a different element, and a call that returns `ref` through a
+// call. With PIC, `el_picvar` obtains TLS storage through a call, which
+// `elemIsLvalue` excludes. dmd folds `__ctfe` to a constant.
+private bool isLvalueResult(imported!"dmd.expression".Expression result) {
+    result = FullExpressionScope.lvalueOf(result);
+    if (auto comma = result.isCommaExp)
+        return isLvalueResult(comma.e2);
+    if (auto conditional = result.isCondExp)
+        return isLvalueResult(conditional.e1)
+            && isLvalueResult(conditional.e2);
+
+    if (auto variable = result.isVarExp) {
+        import snakebite.frontend.dmd.delegates: isCtfeVariable;
+
+        auto declaration = variable.var.isVarDeclaration;
+        return declaration !is null && !isCtfeVariable(declaration)
+            && !declaration.isThreadlocal;
+    }
+
+    if (auto field = result.isDotVarExp) {
+        auto variable = field.var.isVarDeclaration;
+        return variable !is null && variable.isBitFieldDeclaration is null;
+    }
+
+    if (auto pointer = result.isPtrExp)
+        return FullExpressionScope.lvalueOf(pointer.e1).isCallExp is null;
+
+    if (result.isIndexExp !is null)
+        return true;
+
+    return false;
 }

@@ -140,13 +140,17 @@ public bool gagged(scope void delegate() action) {
     return found;
 }
 
-// Run `action`, then put the frontend back in the state `initialize` left
-// it in: every module `action` parsed is gone, and so is what the frontend
-// printed while it ran, unless `action` throws. For an analysis whose only
-// product is `action`'s own result, such as the program a dependency image
-// is built from, so that what the process compiles afterwards does not
-// depend on whether that analysis ran.
+// Exclusive startup analysis only: no live frontend session may exist.
+// Holds the frontend lock through analysis, reset, and stderr restoration.
+// Reset clears all modules and source caches; it does not restore an earlier
+// session. fd 2 capture is process-wide, so unrelated stderr writers must also
+// be absent. `action` must return only host-owned data, not frontend objects,
+// and must not wait for another thread that needs frontend access. In
+// particular, build and load dependency images only after this call returns.
+// Successful analysis output is discarded; failure output is replayed.
 public T withScratchFrontend(T)(scope T delegate() action) {
+    compiler.mutex.lock;
+    scope(exit) compiler.mutex.unlock;
     auto captured = capturedStderr;
     scope(failure) captured.replay;
     scope(exit) compiler.reset;

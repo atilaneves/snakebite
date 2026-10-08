@@ -3,13 +3,14 @@
 # dependencies = ["pytest==8.4.1", "pytest-xdist==3.8.0"]
 # ///
 
-# End-to-end tests of the `bin/sb` command line. They start the built
+# End-to-end tests of the host command lines. They start the built
 # binary as a child process, so they live here and not in `bin/ut`.
 
 import json
 import os
 import re
 import secrets
+import select
 import shutil
 import signal
 import stat
@@ -33,6 +34,48 @@ FILE_BACKENDS = ["bytecode", "interpreter"]
 # reference compiler, and run as an executable. The expectations are what
 # compiled D does, not what a backend happens to do.
 PROGRAM_BACKENDS = ["native", *FILE_BACKENDS]
+
+
+# A second runner must not delete files owned by a runner that is still live.
+# The test list is larger than the pipe buffer, so the first runner stays
+# live until we drain its output. No test helper or extra guest program runs.
+@pytest.mark.parametrize(
+    "flags", [[], ["--check-arena"], ["--lowmem", "--check-arena"]],
+)
+def test_unit_runner_keeps_other_runner_sandbox(
+    tmp_path: Path, flags: list[str],
+) -> None:
+    runner = Path.cwd() / "bin" / "ut"
+    assert runner.is_file(), "bin/ut does not exist; run `ninja bin/ut` first"
+    parent = subprocess.Popen(
+        [str(runner), *flags, "--list"], cwd=tmp_path,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, pipesize=4096,
+    )
+    try:
+        assert parent.stdout is not None
+        assert select.select([parent.stdout], [], [], 30)[0], "runner did not start"
+        assert os.read(parent.stdout.fileno(), 1), "runner printed no tests"
+        assert parent.poll() is None, "runner ended before the isolation check"
+        root = tmp_path / "tmp" / "snakebite-ut" / str(parent.pid)
+        marker = root / "active.txt"
+        marker.write_text("still active")
+
+        child = subprocess.run(
+            [str(runner), *flags, "--single", "ut.process.hostRuntimeOptions"],
+            cwd=tmp_path, capture_output=True, check=False, text=True, timeout=30,
+        )
+
+        assert child.returncode == 0, output(child)
+        assert marker.read_text() == "still active"
+        assert list(root.parent.iterdir()) == [root]
+        stdout, _ = parent.communicate(timeout=30)
+        assert parent.returncode == 0, stdout
+        assert not root.exists()
+        assert root.parent.is_dir()
+    finally:
+        if parent.poll() is None:
+            parent.kill()
+        parent.communicate(timeout=30)
 
 
 @pytest.mark.parametrize("backend", FILE_BACKENDS)

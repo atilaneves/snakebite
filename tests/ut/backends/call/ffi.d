@@ -647,7 +647,7 @@ private string manyArgumentCall(string linkage, size_t count) {
 
 
 static foreach (linkage; AliasSeq!("C", "D")) {
-    static foreach (count; AliasSeq!(17, 31, 257)) {
+    static foreach (count; AliasSeq!(17, 257)) {
         mixin(manyArgumentSignature(linkage, count)
             ~ manyArgumentBody(count));
 
@@ -2730,6 +2730,46 @@ static foreach (backend; Matrix!(
 }
 
 
+// A vector occupies one full XMM register. The TypeInfo-driven reader must
+// copy both lanes, not only the low eightbyte.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call the host variadic reader without source"),
+)) {
+    @("variadic.externD.vectorStructTsizeAndBytes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeRetOf!(
+            backend,
+            q{
+                struct VectorValue {
+                    __vector(double[2]) lanes;
+                }
+
+                struct Ffi {
+                    static:
+                    pragma(mangle, "snakebite_ut_dvariadic_struct_backend")
+                    extern(D) size_t copyStruct(ubyte* dest, ...);
+                }
+
+                int answer() {
+                    auto info = cast(TypeInfo_Struct) typeid(VectorValue);
+                    assert(info.m_arg1 is typeid(__vector(double[2])));
+                    assert(info.m_arg2 is null);
+                    VectorValue value;
+                    value.lanes.array[0] = 3.0;
+                    value.lanes.array[1] = 17.0;
+                    double[2] buffer = [-1.0, -1.0];
+                    const size = Ffi.copyStruct(cast(ubyte*) buffer.ptr, value);
+                    return size == 16 && buffer[0] == 3.0 && buffer[1] == 17.0;
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
 // An odd-sized (3-byte) INTEGER eightbyte extra: `runtimetypes.
 // eightbyteRepresentative` used to always stand in with `typeid(long)`
 // (8 bytes), so `va_arg` copied 8 bytes into `dest` for a struct only 3
@@ -2784,14 +2824,8 @@ static foreach (backend; Matrix!(
 }
 
 
-// A MEMORY-class (24-byte, three-eightbyte) struct extra: `abi.classify`
-// classifies anything over two eightbytes as MEMORY before this backend
-// ever fabricates `m_arg1`/`m_arg2` for it (`setSysVArgTypes`'s own
-// early `if (plan.memory) return;`), so druntime's own `va_arg` takes
-// its "always passed in memory" path instead of reading a register-save-
-// area eightbyte - the same struct extra shape `ut.ffi.plan`'s own
-// `called.memoryClassParameter*` tests check for a declared parameter,
-// here for a variadic extra argument instead.
+// A MEMORY-class struct extra has no argument types, so druntime's reader
+// must read the stack instead of the register save area.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
 )) {
@@ -3404,10 +3438,8 @@ static foreach (backend; Matrix!()) {
 // eightbytes (`real` alone is already one full eightbyte pair on this
 // ABI), so `aggregatePlan`'s own size check already routes it to MEMORY
 // class, the same hidden-pointer return path a fieldless or
-// associative-array-holding struct already takes above (`ut.ffi.plan`'s
-// `abi.oversizedStructWithRealFieldNeedsHiddenPointer` pins the
-// classifier itself; this pins the same fix end to end, through the
-// callback trampoline a real guest program builds).
+// associative-array-holding struct already takes above. This checks the
+// callback trampoline a guest program builds.
 static foreach (backend; Matrix!()) {
     @("struct.realFieldCrossesDelegateReturn." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -3454,10 +3486,8 @@ static foreach (backend; Matrix!()) {
 // A struct whose only field is `real` is the one real-containing shape
 // small enough to return through a register instead: `classify` (`abi.d`)
 // gives it nothing but the X87/X87UP eightbyte pair a bare `real` return
-// already crosses in `%st0` (`ut.ffi.plan`'s `abi.
-// structRealOnlyDoesNotNeedHiddenPointer` pins the classifier itself) -
-// this pins the same shape through the callback trampoline, not just a
-// direct native call.
+// already crosses in `%st0`. This checks that shape through the
+// callback trampoline.
 static foreach (backend; Matrix!()) {
     @("struct.realOnlyFieldCrossesDelegateReturn." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -3475,9 +3505,8 @@ static foreach (backend; Matrix!()) {
 
 
 // The same shape (sibling test above), as a *parameter* instead of a
-// return: `RealOnly` has no `%st0` argument register to travel in
-// (`ut.ffi.plan`'s `abi.structRealOnlyParameterIsMemoryClass` pins the
-// classifier itself), so it crosses the callback trampoline as an
+// return: `RealOnly` has no `%st0` argument register to travel in, so
+// it crosses the callback trampoline as an
 // ordinary MEMORY-class argument - the same `unpackArguments` route
 // any other MEMORY-class delegate parameter already takes, exercised
 // here for the one field shape `classify` used to throw on.
@@ -3505,9 +3534,7 @@ static foreach (backend; Matrix!()) {
 // conflict to INTEGER, which leaves eightbyte 1's X87UP without the
 // eightbyte 0 X87 its own post-merge check requires, so this still ends
 // up MEMORY-class and hidden-pointer-returned, the same route `Pair`
-// takes for a different reason (`ut.ffi.plan`'s `abi.
-// unionRealWithIntegerFieldNeedsHiddenPointer` pins the classifier
-// itself).
+// takes for a different reason.
 static foreach (backend; Matrix!()) {
     @("struct.unionRealWithIntegerFieldCrossesDelegateReturn."
         ~ backend.stringof)

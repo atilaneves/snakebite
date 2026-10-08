@@ -198,7 +198,8 @@ private final class GuestException: Exception {
 import snakebite.nativelayout: bitfieldAccess;
 import snakebite.nativevalue: BitfieldAccess;
 import snakebite.backends.checkplan:
-    BoundsCheck, FailurePlan, hookOf, isUnanalysed, readsVtable;
+    BoundsCheck, FailurePlan, hookOf, isUnanalysed;
+import snakebite.frontend.dmd.dispatch: classReceiverOf, readsVtable;
 import snakebite.backends.calls: ValueCall;
 import snakebite.backends.haltprocess: isHalt;
 import snakebite.backends.exceptions: CAssertCall;
@@ -212,7 +213,7 @@ import snakebite.backends.exceptionplan: CatchPlan, catchPlanOf;
 import snakebite.backends.aggregateinit: AggregateInitPlan;
 import snakebite.backends.unwindplan:
     ExceptionCandidate, ExceptionUnwindPlan = UnwindPlan;
-import snakebite.backends.switchplan: switchPlan, selectCase,
+import snakebite.backends.switchplan: SwitchPlan, switchPlan, selectCase,
     gotoCaseTarget, gotoDefaultTarget;
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
 import snakebite.cstack: CStack;
@@ -558,7 +559,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     import dmd.expression;
     import dmd.expressionsem: toInteger;
     import dmd.func: FuncDeclaration;
-    import dmd.funcsem: isVirtualMethod;
     import dmd.identifier: Identifier;
     import dmd.init: ExpInitializer;
     import dmd.location: Loc;
@@ -1325,6 +1325,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _function = function_;
         _pendingLoopLabel = null;
         _controlFlow = ControlFlowState.init;
+        _returned = ReturnedLvalue.init;
         while (true) {
             body_.accept(this);
             if (!_controlFlow.hasGoto)
@@ -1582,8 +1583,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 auto callee = _callSelection.definitionOf(
                     named,
                     (declaration) => _program.linkedFunctionOf(declaration));
-                if (named.isThis !is null && named.isVirtualMethod
-                        && !site.directcall)
+                if (site.readsVtable(named))
                     return;
 
                 enqueue(callee);
@@ -1613,12 +1613,14 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                     prepareDefault(expression.type);
             }),
             (expression) => attempt({ _nativeData.stringData(expression); }),
-            (constructor) => attempt({
+            (site) => attempt({
+                auto constructor = site.member;
                 auto definition = _callSelection.definitionOf(
                     constructor,
                     (declaration) => _program.linkedFunctionOf(declaration));
-                layoutOf(constructor);
-                callShapeOf(constructor);
+                // Construction keys its plans by the original member,
+                // while the linked definition supplies the reachable body.
+                prepareCall(site, site.arguments, constructor);
                 enqueue(definition);
             }),
             (field) => attempt({ bitfieldPlanOf(field); }),
@@ -1678,11 +1680,20 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         CallExp site,
         FuncDeclaration callee,
     ) {
+        prepareCall(site, site.arguments, callee);
+    }
+
+    extern(D) private void prepareCall(
+        Expression site,
+        Expressions* arguments,
+        FuncDeclaration callee,
+    ) {
         const layout = layoutOf(callee);
         callShapeOf(callee);
         prepareContext(outerFunctionOf(callee));
-        if (callee.isThis is null && layout.hiddenThis.variable !is null)
-            calleeContextPlanOf(site, callee);
+        if (site.isCallExp !is null && callee.isThis is null
+                && layout.hiddenThis.variable !is null)
+            calleeContextPlanOf(site.isCallExp, callee);
         const decision = CallSelection.atCallSite(_callSelection.decisionOf(
             callee,
             (function_) => _program.isInterpreted(function_),
@@ -1694,7 +1705,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 && typeFunctionOf(callee).parameterList.varargs
                     == VarArg.variadic) {
             const hasTypes = layout.variadicTypes != size_t.max;
-            variadicCallPlanOf(site.arguments,
+            variadicCallPlanOf(arguments,
                 hasTypes + layout.parameters.length);
         }
         if (decision.route != CallSelection.Route.native
@@ -1705,7 +1716,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // asked by execution of any call to it, and `decision` may not ask.
         if (isNativeVariadic(callee)) {
             auto adapter = CallAdapter.Arguments.of(
-                typeFunctionOf(callee), site.arguments);
+                typeFunctionOf(callee), arguments);
             cachedCallPlan(site, callee,
                 () => adapter.prepare(*_plans, callee));
         } else
@@ -1854,6 +1865,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         private FuncDeclaration _function;
         private Identifier _pendingLoopLabel;
         private ControlFlowState _controlFlow;
+        private ReturnedLvalue _returned;
         private size_t _activationMark;
 
         @disable this();
@@ -1870,6 +1882,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             _function = evaluator._function;
             _pendingLoopLabel = evaluator._pendingLoopLabel;
             _controlFlow = evaluator._controlFlow;
+            _returned = evaluator._returned;
             _activationMark = evaluator._activationAllocations.length;
         }
 
@@ -1883,6 +1896,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             _evaluator._function = _function;
             _evaluator._pendingLoopLabel = _pendingLoopLabel;
             _evaluator._controlFlow = _controlFlow;
+            _evaluator._returned = _returned;
             _evaluator.releaseActivationAllocations(_activationMark);
         }
     }
@@ -2279,7 +2293,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             statement._body.accept(this);
     }
 
-    protected override void visitReturnOperand(ReturnStatement statement) {
+    protected override void visitReturnOperand(
+        ReturnStatement statement, bool readsAfterEnd,
+    ) {
         if (_controlFlow.seeking)
             return;
 
@@ -2303,6 +2319,13 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         }
 
         void evaluateValue() {
+            if (readsAfterEnd) {
+                _returned = ReturnedLvalue(
+                    addressOf(FullExpressionScope.lvalueOf(statement.exp)),
+                    _place, _facts.size, _facts.alignment);
+                return;
+            }
+
             // `_type`/`_facts` are already this function's return type
             // and its facts, set together on entry (`executeRaw`) or by
             // the last `evaluate`, so this callback needs no fresh type
@@ -2325,17 +2348,58 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         );
     }
 
+    // The address of a returned lvalue, which the transfer reads after the
+    // destructors of the operand ran.
+    private struct ReturnedLvalue {
+        const(void)* address;
+        void* place;
+        size_t size;
+        size_t alignment;
+    }
+
+    private ReturnedLvalue _returned;
+
+    extern(D) protected override bool readsResultAfterEnd(
+        in FullExpressionScope.Position position,
+        Expression result,
+    ) {
+        return _temporaries.readsResultAfterEnd(position, result);
+    }
+
     extern(D) protected override void withFullExpression(
         in FullExpressionScope.Position position,
         Expression root,
         scope void delegate() evaluate,
     ) {
+        scope (failure)
+            if (position == FullExpressionScope.Position.returnOperand)
+                _returned = ReturnedLvalue.init;
         _temporaries.withExpression(position, root, evaluate);
     }
 
-    protected override void visitReturnTransfer(ReturnStatement) {
+    protected override void visitReturnTransfer(ReturnStatement statement) {
+        import core.stdc.string: memcpy;
+
         if (_controlFlow.seeking)
             return;
+
+        if (_returned.size != 0) {
+            auto returned = _returned;
+            _returned = ReturnedLvalue.init;
+            // The read runs in a full expression of its own so that a
+            // fault in it has the guest line of the operand.
+            fullExpression(FullExpressionScope.Position.returnOperand,
+                statement.exp, {
+                if (returned.place !is null) {
+                    memcpy(returned.place, returned.address, returned.size);
+                    return;
+                }
+                // A discarded result is still read: the read can fault.
+                auto scratch = _frames.push(
+                    returned.size, cast(uint) returned.alignment);
+                memcpy(scratch.base, returned.address, returned.size);
+            });
+        }
 
         _controlFlow.returnFromFunction;
     }
@@ -2351,9 +2415,25 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // loop's every test included - so its temporaries are given back as
     // soon as its truth is known.
     private bool conditionHolds(Expression condition) {
+        return truthOfFullExpression(
+            FullExpressionScope.Position.condition, condition);
+    }
+
+    private bool truthOfFullExpression(
+        in FullExpressionScope.Position position,
+        Expression expression,
+    ) {
+        if (readsResultAfterEnd(position, expression)) {
+            void* address;
+            fullExpression(position, expression, {
+                address = addressOf(FullExpressionScope.lvalueOf(expression));
+            });
+            return truthOfStored(address, expression.type);
+        }
+
         bool result;
-        fullExpression(FullExpressionScope.Position.condition, condition, {
-            result = truthOf(condition);
+        fullExpression(position, expression, {
+            result = truthOf(expression);
         });
         return result;
     }
@@ -2385,18 +2465,43 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         auto plan = switchPlan(statement);
         if (!_controlFlow.seeking) {
-            Statement selected;
-            fullExpression(FullExpressionScope.Position.switchOperand,
-                statement.condition, {
-                const condition = asIntegral(statement.condition);
-                selected = selectCase(plan, condition,
-                    (case_) => asIntegral(case_.exp));
+            import snakebite.nativelayout: loadIntegral;
+
+            const operandFacts = factsOf(statement.condition.type);
+            long condition;
+            if (readsResultAfterEnd(
+                    FullExpressionScope.Position.switchOperand,
+                    statement.condition)) {
+                void* address;
+                fullExpression(FullExpressionScope.Position.switchOperand,
+                    statement.condition, {
+                    address = addressOf(FullExpressionScope.lvalueOf(
+                        statement.condition));
+                });
+                condition = loadIntegral(
+                    address, operandFacts.size, !operandFacts.isUnsigned);
+            } else
+                fullExpression(FullExpressionScope.Position.switchOperand,
+                    statement.condition, {
+                    condition = asIntegral(statement.condition);
                 });
 
-            if (selected is null)
-                selected = plan.defaultTarget;
-            if (selected is null)
-                return;
+            Statement selected = selectCase(plan, condition, (case_) {
+                long value;
+                fullExpression(FullExpressionScope.Position.switchOperand,
+                    case_.exp, { value = asIntegral(case_.exp); });
+                return value;
+            });
+
+            if (selected is null) {
+                final switch (plan.noMatch) with (SwitchPlan.NoMatch) {
+                    case defaultTarget:
+                        selected = plan.defaultTarget;
+                        break;
+                    case exit:
+                        return;
+                }
+            }
 
             _controlFlow.seek(cast(void*) selected);
         }
@@ -2634,12 +2739,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // any of them, and reads the same shared rule the bytecode compiler
     // does.
     private bool truthOf(Expression expression) {
-        import snakebite.nativelayout: TypeFacts, loadIntegral;
-        import snakebite.nativevalue: loadFloating;
-        import std.conv: text;
-
         auto type = expression.type;
-        const truth = TypeFacts.Truth.of(type);
 
         // Sized to `creal`, the widest condition value `Truth.of` ever
         // answers `supported` for - a plain real, an imaginary, or one
@@ -2650,22 +2750,31 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             "a condition value wider than a `creal` reached the scratch"
                 ~ " buffer");
         evaluate(expression, type, facts, buffer.ptr);
+        return truthOfStored(buffer.ptr, type);
+    }
+
+    private bool truthOfStored(in void* value, Type type) {
+        import snakebite.nativelayout: TypeFacts, loadIntegral;
+        import snakebite.nativevalue: loadFloating;
+
+        const truth = TypeFacts.Truth.of(type);
+        const buffer = cast(const(ubyte)*) value;
 
         if (truth.isFloat) {
-            if (loadFloating(buffer.ptr + truth.offset, truth.size) != 0)
+            if (loadFloating(buffer + truth.offset, truth.size) != 0)
                 return true;
             if (truth.secondOffset == TypeFacts.Truth.noSecondWord)
                 return false;
             return loadFloating(
-                buffer.ptr + truth.secondOffset, truth.size) != 0;
+                buffer + truth.secondOffset, truth.size) != 0;
         }
 
-        if (loadIntegral(buffer.ptr + truth.offset, truth.size, false) != 0)
+        if (loadIntegral(buffer + truth.offset, truth.size, false) != 0)
             return true;
         if (truth.secondOffset == TypeFacts.Truth.noSecondWord)
             return false;
         return loadIntegral(
-            buffer.ptr + truth.secondOffset, size_t.sizeof, false) != 0;
+            buffer + truth.secondOffset, size_t.sizeof, false) != 0;
     }
 
     // A dynamic array's two fields, for a caller that reads them rather
@@ -3478,8 +3587,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             CondExp expression,
             scope void* delegate(Expression) resolve,
         ) {
-            return resolve(evaluator.truthOf(expression.econd)
-                ? expression.e1 : expression.e2);
+            return resolve(FullExpressionScope.lvalueOf(
+                evaluator.truthOf(expression.econd)
+                    ? expression.e1 : expression.e2));
         }
 
         public void* storageStructLiteral(StructLiteralExp expression) {
@@ -4337,9 +4447,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             case value:
                 bool right;
                 if (runsRight)
-                    fullExpression(
+                    right = truthOfFullExpression(
                         FullExpressionScope.Position.logicalOperand,
-                        expression.e2, { right = truthOf(expression.e2); });
+                        expression.e2);
                 const answer = runsRight ? right : left;
                 storeIntegral(_place, answer ? 1 : 0, _facts.size);
                 return;
@@ -5327,9 +5437,19 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.nativelayout: arrayValueSize;
 
         align(size_t.sizeof) ubyte[arrayValueSize] buffer = void;
-        fullExpression(FullExpressionScope.Position.assertMessage, message, {
-            evaluate(message, message.type, buffer.ptr);
-        });
+        if (readsResultAfterEnd(
+                FullExpressionScope.Position.assertMessage, message)) {
+            const(void)* address;
+            fullExpression(FullExpressionScope.Position.assertMessage,
+                message, {
+                address = addressOf(FullExpressionScope.lvalueOf(message));
+            });
+            buffer[] = (cast(const(ubyte)*) address)[0 .. arrayValueSize];
+        } else
+            fullExpression(FullExpressionScope.Position.assertMessage,
+                message, {
+                evaluate(message, message.type, buffer.ptr);
+            });
 
         return (*cast(const(char)[]*) buffer.ptr).idup;
     }
@@ -5380,34 +5500,50 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         });
     }
 
-    protected override size_t visitThrowOperand(Expression operand) {
-        import snakebite.nativelayout: loadIntegral;
-        import std.conv: text;
-
+    protected override size_t visitThrowOperand(
+        Expression operand, bool readsAfterEnd,
+    ) {
         if (_controlFlow.seeking)
             return 0;
 
         assert(operand.type.toBasetype.ty == Tclass,
             "dmd rejects `throw` of anything but a class object");
 
+        if (readsAfterEnd)
+            return cast(size_t) addressOf(
+                FullExpressionScope.lvalueOf(operand));
+
         const facts = factsOf(operand.type);
         align(size_t.sizeof) ubyte[size_t.sizeof] value = void;
         evaluate(operand, operand.type, facts, value.ptr);
 
+        return thrownObject(value.ptr, facts.size);
+    }
+
+    // The fault is here and not at the transfer when the operand is
+    // evaluated inside its full expression: only that has a guest line.
+    private size_t thrownObject(in void* reference, in size_t size) {
+        import snakebite.nativelayout: loadIntegral;
+
         auto guest = cast(Throwable) cast(void*) loadIntegral(
-            value.ptr, facts.size, false,
+            reference, size, false,
         );
-        // The fault is here and not at the transfer: only the full expression
-        // of the operand has a guest line.
         if (guest is null)
             faultOnNullObject(cast(void*) guest);
 
         return cast(size_t) cast(void*) guest;
     }
 
-    protected override void visitThrowTransfer(size_t thrown) {
+    protected override void visitThrowTransfer(
+        Expression operand, size_t thrown, bool readsAfterEnd,
+    ) {
         if (_controlFlow.seeking)
             return;
+
+        if (readsAfterEnd)
+            fullExpression(FullExpressionScope.Position.throwOperand, operand, {
+                thrown = thrownObject(cast(void*) thrown, size_t.sizeof);
+            });
 
         throw GuestException.make(cast(Throwable) cast(void*) thrown);
     }
@@ -6343,11 +6479,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // delegate carries its context, and a function pointer to a method
         // (`&C.f`) carries none, so that method runs with a null `this`.
         void* classReceiver;
-        auto aggregate = function_.isThis;
-        if (aggregate !is null && aggregate.isClassDeclaration !is null
-                && resolved !is null) {
-            auto dot = expression.e1.isDotVarExp;
-            auto receiver = dot is null ? expression.e1 : dot.e1;
+        auto receiver = resolved is null
+            ? null : classReceiverOf(expression, function_);
+        if (receiver !is null) {
             classReceiver = classReferenceOf(receiver);
             if (classReceiver is null && expression.readsVtable(function_)) {
                 // The vtable read is where the null receiver is met, after
@@ -6361,11 +6495,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 faultOnNullObject(classReceiver);
             }
 
-            // `super.f()` is statically bound. Every other virtual class
-            // call uses the declaration of the object held by the receiver,
-            // not the declaration dmd selected from its static type.
-            if (expression.readsVtable(function_)
-                    && receiver.isSuperExp is null) {
+            if (expression.readsVtable(function_)) {
                 const address = _virtualAddress(function_, classReceiver);
                 const target = _plans.guestTarget(address);
                 if (target.word is null)

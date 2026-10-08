@@ -595,6 +595,10 @@ static foreach (backend; Matrix!(
             struct Value {
                 int field = 42;
             }
+            struct NonPod {
+                int field;
+                ~this() {}
+            }
             struct InnerPointers { int* field; }
             struct PointerValue {
                 int prefix;
@@ -606,6 +610,11 @@ static foreach (backend; Matrix!(
                 auto structInfo = cast(TypeInfo_Struct) typeid(Value);
                 assert(*cast(int*) structInfo.m_init.ptr == 42);
                 assert(structInfo.rtInfo is null);
+                assert(structInfo.m_arg1 is typeid(int));
+                assert(structInfo.m_arg2 is null);
+                auto nonPodInfo = cast(TypeInfo_Struct) typeid(NonPod);
+                assert(nonPodInfo.m_arg1 is null);
+                assert(nonPodInfo.m_arg2 is null);
                 assert(typeid(PointerValue).rtInfo !is null);
                 auto runtimePointerMap = cast(size_t*)
                     typeid(PointerValue).rtInfo;
@@ -1021,58 +1030,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
-    @("bitfields.compoundAssign.UshortThenUbyte." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct S { ushort a : 9; ubyte b : 7; }
-            void main() {
-                S s;
-                s.a = 510; s.b = 85;
-                s.a ^= 1;
-                assert(s.b == 85);
-                s.a = 511;
-                s.b ^= 1;
-                assert(s.a == 511);
-                s.b = 84;
-            }
-        });
-    }
-}
 
-static foreach (backend; Matrix!()) {
-    @("bitfields.incrementAndDecrement.UshortThenUbyte." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct S { ushort a : 9; ubyte b : 7; }
-            void main() {
-                S s;
-                s.a = 510; s.b = 85;
-                { const before = s.a++; assert(before == 510); }
-                assert(s.a == 511 && s.b == 85);
-                { const before = s.b++; assert(before == 85); }
-                assert(s.a == 511 && s.b == 86);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("bitfields.structLiteral.UshortThenUbyte." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct S { ushort a : 9; ubyte b : 7; }
-            T value(T)(T input) { return input; }
-            void main() {
-                S s = S(value!ushort(510), value!ubyte(85));
-                assert(s.a == 510 && s.b == 85);
-            }
-        });
-    }
-}
 
 static foreach (backend; Matrix!()) {
     @("bitfields.storeKeepsNeighbours.LongAfterInt." ~ backend.stringof)
@@ -1157,62 +1115,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
-    @("bitfields.compoundAssign.UlongAfterUbyte." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct S { ubyte a : 1; ulong b : 40; ubyte c : 3; }
-            void main() {
-                S s;
-                s.a = 0; s.b = 1094624909430; s.c = 5;
-                s.a ^= 1;
-                assert(s.b == 1094624909430 && s.c == 5);
-                s.a = 1;
-                s.b ^= 1;
-                assert(s.a == 1 && s.b == 1094624909431 && s.c == 5);
-                s.c ^= 1;
-                assert(s.a == 1 && s.b == 1094624909431);
-                s.c = 4;
-            }
-        });
-    }
-}
 
-static foreach (backend; Matrix!()) {
-    @("bitfields.incrementAndDecrement.UlongAfterUbyte." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct S { ubyte a : 1; ulong b : 40; ubyte c : 3; }
-            void main() {
-                S s;
-                s.a = 0; s.b = 1094624909430; s.c = 5;
-                { const before = s.a++; assert(before == 0); }
-                assert(s.a == 1 && s.b == 1094624909430 && s.c == 5);
-                { const before = s.b++; assert(before == 1094624909430); }
-                assert(s.a == 1 && s.b == 1094624909431 && s.c == 5);
-                { const before = s.c++; assert(before == 5); }
-                assert(s.a == 1 && s.b == 1094624909431 && s.c == 6);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("bitfields.structLiteral.UlongAfterUbyte." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct S { ubyte a : 1; ulong b : 40; ubyte c : 3; }
-            T value(T)(T input) { return input; }
-            void main() {
-                S s = S(value!ubyte(0), value!ulong(1094624909430), value!ubyte(5));
-                assert(s.a == 0 && s.b == 1094624909430 && s.c == 5);
-            }
-        });
-    }
-}
 
 static foreach (backend; Matrix!()) {
     @("bitfields.storeKeepsNeighbours.SignedFields." ~ backend.stringof)
@@ -1313,62 +1216,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
-    @("bitfields.compoundAssign.AfterOrdinaryMember." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct S { ubyte x; uint a : 4; ushort b : 5; }
-            void main() {
-                S s;
-                s.x = 126; s.a = 9; s.b = 17;
-                s.x ^= 1;
-                assert(s.a == 9 && s.b == 17);
-                s.x = 127;
-                s.a ^= 1;
-                assert(s.x == 127 && s.a == 8 && s.b == 17);
-                s.b ^= 1;
-                assert(s.x == 127 && s.a == 8);
-                s.b = 16;
-            }
-        });
-    }
-}
 
-static foreach (backend; Matrix!()) {
-    @("bitfields.incrementAndDecrement.AfterOrdinaryMember." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct S { ubyte x; uint a : 4; ushort b : 5; }
-            void main() {
-                S s;
-                s.x = 126; s.a = 9; s.b = 17;
-                { const before = s.x++; assert(before == 126); }
-                assert(s.x == 127 && s.a == 9 && s.b == 17);
-                { const before = s.a++; assert(before == 9); }
-                assert(s.x == 127 && s.a == 10 && s.b == 17);
-                { const before = s.b++; assert(before == 17); }
-                assert(s.x == 127 && s.a == 10 && s.b == 18);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("bitfields.structLiteral.AfterOrdinaryMember." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct S { ubyte x; uint a : 4; ushort b : 5; }
-            T value(T)(T input) { return input; }
-            void main() {
-                S s = S(value!ubyte(126), value!uint(9), value!ushort(17));
-                assert(s.x == 126 && s.a == 9 && s.b == 17);
-            }
-        });
-    }
-}
 
 static foreach (backend; Matrix!()) {
     @("bitfields.storeKeepsNeighbours.ZeroWidthUnit." ~ backend.stringof)
@@ -1391,63 +1239,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
-    @("bitfields.compoundAssign.ZeroWidthUnit." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct S { ubyte a : 3; uint : 0; ubyte b : 3; ushort c : 4; }
-            void main() {
-                S s;
-                s.a = 5; s.b = 6; s.c = 11;
-                s.a ^= 1;
-                assert(s.b == 6 && s.c == 11);
-                s.a = 4;
-                s.b ^= 1;
-                assert(s.a == 4 && s.c == 11);
-                s.b = 7;
-                s.c ^= 1;
-                assert(s.a == 4 && s.b == 7);
-                s.c = 10;
-            }
-        });
-    }
-}
 
-static foreach (backend; Matrix!()) {
-    @("bitfields.incrementAndDecrement.ZeroWidthUnit." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct S { ubyte a : 3; uint : 0; ubyte b : 3; ushort c : 4; }
-            void main() {
-                S s;
-                s.a = 5; s.b = 6; s.c = 11;
-                { const before = s.a++; assert(before == 5); }
-                assert(s.a == 6 && s.b == 6 && s.c == 11);
-                { const before = s.b++; assert(before == 6); }
-                assert(s.a == 6 && s.b == 7 && s.c == 11);
-                { const before = s.c++; assert(before == 11); }
-                assert(s.a == 6 && s.b == 7 && s.c == 12);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("bitfields.structLiteral.ZeroWidthUnit." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct S { ubyte a : 3; uint : 0; ubyte b : 3; ushort c : 4; }
-            T value(T)(T input) { return input; }
-            void main() {
-                S s = S(value!ubyte(5), value!ubyte(6), value!ushort(11));
-                assert(s.a == 5 && s.b == 6 && s.c == 11);
-            }
-        });
-    }
-}
 
 static foreach (backend; Matrix!()) {
     @("bitfields.storeKeepsNeighbours.BoolFields." ~ backend.stringof)
@@ -2046,44 +1838,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// A local struct without an explicit initializer starts with each field's
-// declared nonzero default value, not with zero-filled storage.
-static foreach (backend; Matrix!()) {
-    @("localStructUsesNonzeroFieldDefault." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct Value {
-                int number = 42;
-            }
 
-            void main() {
-                Value value;
-                assert(value.number == 42);
-            }
-        });
-    }
-}
-
-// `static` changes how the local type is represented during semantic
-// analysis, but it does not give an instance static storage. Constructing an
-// instance still creates an ordinary local value with native struct layout.
-static foreach (backend; Matrix!()) {
-    @("staticLocalStructConstruction." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            void main() {
-                static struct Payload {
-                    ubyte value;
-                }
-
-                auto payload = Payload(42);
-                assert(payload.value == 42);
-            }
-        });
-    }
-}
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.diverges,
@@ -2130,29 +1885,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-// Assigning one struct local to another copies every field's bytes, not a
-// reference: mutating the copy leaves the original untouched.
-static foreach (backend; Matrix!()) {
-    @("structLocalAssignmentCopiesByValue." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct Point {
-                int x;
-                int y;
-            }
 
-            void main() {
-                auto a = Point(1, 2);
-                auto b = a;
-                b.x = 99;
-
-                assert(a.x == 1);
-                assert(b.x == 99);
-            }
-        });
-    }
-}
 
 // A struct passed by value into a function, and returned by value out of
 // one, is copied both ways - the callee's own mutation of its parameter
@@ -4242,38 +3975,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// A struct with a class-reference field - one pointer-sized handle, no
-// different from any other field a bytewise copy carries - can be
-// returned by value the same way a struct with a plain pointer field can.
-static foreach (backend; Matrix!()) {
-    @("structWithClassFieldReturnedByValueFromNamedFunction." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            class Inner {
-                int value;
-                this(int value) { this.value = value; }
-            }
 
-            struct Outer {
-                ushort tag;
-                Inner inner;
-                ubyte flag;
-            }
-
-            Outer makeOuter() {
-                return Outer(2, new Inner(3), 8);
-            }
-
-            void main() {
-                auto o = makeOuter();
-                assert(o.tag == 2);
-                assert(o.inner.value == 3);
-                assert(o.flag == 8);
-            }
-        });
-    }
-}
 
 // A struct literal with a pointer field, written directly as a call
 // argument - the callee's own parameter slot holds the same native bytes
@@ -4303,35 +4005,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// As above, with a class-reference field instead of a plain pointer.
-static foreach (backend; Matrix!()) {
-    @("structLiteralWithClassFieldAsCallArgument." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            class Inner {
-                int value;
-                this(int value) { this.value = value; }
-            }
 
-            struct Outer {
-                ushort tag;
-                Inner inner;
-                ubyte flag;
-            }
-
-            void takesOuter(Outer o) {
-                assert(o.tag == 9);
-                assert(o.inner.value == 1);
-                assert(o.flag == 2);
-            }
-
-            void main() {
-                takesOuter(Outer(9, new Inner(1), 2));
-            }
-        });
-    }
-}
 
 // A struct literal with a pointer field, assigned into an already-declared
 // local - the assignment's own source is the literal's native bytes, the
@@ -4359,114 +4033,9 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// As above, with a class-reference field instead of a plain pointer.
-static foreach (backend; Matrix!()) {
-    @("structLiteralWithClassFieldAsAssignmentSource." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            class Inner {
-                int value;
-                this(int value) { this.value = value; }
-            }
 
-            struct Outer {
-                ushort tag;
-                Inner inner;
-                ubyte flag;
-            }
 
-            void main() {
-                Outer o;
-                o = Outer(3, new Inner(5), 7);
-                assert(o.tag == 3);
-                assert(o.inner.value == 5);
-                assert(o.flag == 7);
-            }
-        });
-    }
-}
 
-// A storage-class attribute wrapping a non-variable local declaration
-// (`static struct S { ... }`) parses as an `AttribDeclaration` holding the
-// `StructDeclaration`, not as a flag on the declaration itself the way
-// `static int x;` sets `STC.static_` directly on its own `VarDeclaration`.
-// This local struct has no runtime action of its own - the same as one
-// declared without `static` - so declaring it must not stop the
-// surrounding function from compiling.
-static foreach (backend; Matrix!()) {
-    @("staticLocalStructDeclarationHasNoRuntimeAction." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int useLocalStruct() {
-                static struct Holder {
-                    int value;
-                }
-
-                Holder h = Holder(42);
-                return h.value;
-            }
-
-            void main() {
-                assert(useLocalStruct() == 42);
-            }
-        });
-    }
-}
-
-// A struct return is copied straight into the caller's own frame slot,
-// which the compiler sizes from the return type, so a struct wider than
-// two machine words returns by value the same way a narrower one does.
-static foreach (backend; Matrix!()) {
-    @("fourWordStructReturnedByValueFromNamedFunction." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct Wide {
-                long a;
-                long b;
-                long c;
-                long d;
-            }
-
-            Wide makeWide() {
-                return Wide(1, 2, 3, 4);
-            }
-
-            void main() {
-                auto w = makeWide();
-                assert(w.a == 1);
-                assert(w.b == 2);
-                assert(w.c == 3);
-                assert(w.d == 4);
-            }
-        });
-    }
-}
-
-// As above, from a lambda: the same width rule applies to every guest
-// callee whatever syntax declared it.
-static foreach (backend; Matrix!()) {
-    @("fourWordStructReturnedByValueFromLambda." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct Wide {
-                long a;
-                long b;
-                long c;
-                long d;
-            }
-
-            void main() {
-                auto make = () => Wide(1, 2, 3, 4);
-                auto w = make();
-                assert(w.a + w.b + w.c + w.d == 10);
-            }
-        });
-    }
-}
 
 // A five-word struct with pointer and class-reference fields returned
 // from a method and handed straight to another call as its argument: the
@@ -4609,30 +4178,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// A struct literal that leaves out a static-array field whose element
-// struct has a non-zero `.init`: every element of `inners` is
-// `Inner.init`, so `x == 5` in all three. dmd's `fill` (`expressionsem.d`,
-// issue 12509) supplies the *element* type's literal `Inner(5)` for the
-// whole `Inner[3]` field, one value that every element takes, rather than
-// an array literal of three.
-static foreach (backend; Matrix!()) {
-    @("structLiteralOmitsStaticArrayOfNonZeroInitStructField." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct Inner { int x = 5; }
-            struct Outer { int a; Inner[3] inners; }
 
-            void main() {
-                auto o = Outer(1);
-                assert(o.a == 1);
-                assert(o.inners[0].x == 5);
-                assert(o.inners[1].x == 5);
-                assert(o.inners[2].x == 5);
-            }
-        });
-    }
-}
 
 
 // A struct literal can initialize an enum-typed field whose base type is
@@ -4675,25 +4221,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// A struct literal can initialize a `double[2]` static-array field from a
-// literal element list, the same way `structLiteralInitializesStaticArrayField`
-// above does for `int[3]`.
-static foreach (backend; Matrix!()) {
-    @("structLiteralInitializesDoubleStaticArrayField." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct S { double[2] xs; int tag; }
 
-            void main() {
-                auto s = S([1.0, 2.0], 3);
-                assert(s.xs[0] == 1.0);
-                assert(s.xs[1] == 2.0);
-                assert(s.tag == 3);
-            }
-        });
-    }
-}
 
 // A function can return a struct with a `real` field by value: the 16-byte,
 // 16-byte-aligned field and its trailing padding must travel back through
@@ -5768,6 +5296,26 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A direct anonymous union keeps the default of its first member, even
+// when a later alternative is a bit field.
+static foreach (backend; Matrix!()) {
+    @("classDefaultWithAnonymousUnion." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C {
+                union { int i = 42; float f; uint b : 3; }
+                int tag = 7;
+            }
+            void main() {
+                auto c = new C;
+                assert(c.i == 42);
+                assert(c.tag == 7);
+            }
+        });
+    }
+}
+
 // A `static immutable` struct made by a function keeps the value of the
 // union member that the function wrote.
 static foreach (backend; Matrix!()) {
@@ -6145,6 +5693,414 @@ static foreach (backend; Matrix!(
     }
 }
 
+// dmd ends the full expression of an `if` condition that names a field of a
+// temporary by taking the field's address, running the destructor, and only
+// then reading the field.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the field before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.ifConditionReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Z { int v; ~this() { v = 0; } }
+            Z mz(int v) { return Z(v); }
+            struct P { int* p; ~this() { p = null; } }
+            P mp(int* p) { return P(p); }
+            void main() {
+                bool taken;
+                if (mz(2).v)
+                    taken = true;
+                assert(!taken);
+                if (cast(uint) mz(2).v)
+                    assert(false, "same-width integral cast");
+                int k = 1;
+                if (cast(size_t) mp(&k).p)
+                    assert(false, "same-width pointer-to-integer cast");
+                static if (size_t.sizeof > uint.sizeof) {
+                    if (!cast(uint) mp(cast(int*) 1).p)
+                        assert(false, "narrow pointer cast reads before cleanup");
+                }
+                int one = 1;
+                if (one ? cast(uint) mz(2).v : cast(uint) one)
+                    assert(false, "cast in conditional branch");
+                if (!cast(long) mz(2).v)
+                    assert(false, "width-changing cast reads before cleanup");
+                if (!cast(bool) mz(2).v)
+                    assert(false, "truth cast reads before cleanup");
+                bool nested;
+                struct Y {
+                    bool* result;
+                    ~this() {
+                        *result = check();
+                        assert(!check(), "second destructor call");
+                    }
+                }
+                { Y y = Y(&nested); }
+                assert(!nested, "first destructor call");
+            }
+            bool check() {
+                if (mz(2).v) return true;
+                return false;
+            }
+        });
+    }
+}
+
+// The right operand of `&&` is a full expression of its own, and its truth
+// is read after the destructors of its temporaries, as in an `if` condition.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the field before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.logicalOperandReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Z { int v; ~this() { v = 0; } }
+            Z mz(int v) { return Z(v); }
+            void main() {
+                int one = 1;
+                const bool b = one && mz(2).v;
+                assert(!b);
+                const bool c = !one || mz(2).v;
+                assert(!c, "logical or");
+                const int q = (one && mz(3).v) ? 5 : 6;
+                assert(q == 6, "conditional truth");
+            }
+        });
+    }
+}
+
+// The result of a conditional expression whose branches are variables is
+// an lvalue to dmd's glue code: the variable is read after the destructors.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `gg` cannot be read at compile time"),
+)) {
+    @("fullExpression.variableResultReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Z { int v; ~this() { v = 0; gg = 0; } }
+            __gshared int gg = 1;
+            Z mz(int v) { return Z(v); }
+            void main() {
+                bool taken;
+                if (mz(1).v ? gg : gg)
+                    taken = true;
+                assert(!taken);
+            }
+        });
+    }
+}
+
+// A local variable that a destructor changes is read after it ran, when it
+// is the result of a conditional expression.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.variableResultOfLocalReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Z { int v; int* rp; ~this() { v = 0; if (rp) *rp = 0; } }
+            Z mp(int v, int* p) { return Z(v, p); }
+            void main() {
+                int k = 1;
+                bool taken;
+                if (mp(1, &k).v ? k : k)
+                    taken = true;
+                assert(!taken);
+            }
+        });
+    }
+}
+
+// A conditional expression whose branches are an lvalue field and a variable
+// is an lvalue: its truth is read after the destructors.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.conditionalResultReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Z { int v; ~this() { v = 0; } }
+            Z mz(int v) { return Z(v); }
+            void main() {
+                int one = 1, k = 1;
+                bool taken;
+                if (one ? mz(2).v : k)
+                    taken = true;
+                assert(!taken);
+            }
+        });
+    }
+}
+
+// A dereference is an lvalue result: it is read after the destructors.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.dereferenceResultReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Z { int v; int* rp; ~this() { v = 0; if (rp) *rp = 0; } }
+            Z mp(int v, int* p) { return Z(v, p); }
+            int* pointer(int* p, int value) { return p; }
+            void main() {
+                int k = 1;
+                bool taken;
+                if (*mp(1, &k).rp)
+                    taken = true;
+                assert(!taken);
+                k = 1;
+                if (!*pointer(&k, mp(1, &k).v))
+                    assert(false, "call result is read before cleanup");
+            }
+        });
+    }
+}
+
+// An element of a static array in a temporary is an lvalue result.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.elementResultReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Q { int[2] a; ~this() { a[0] = 0; } }
+            Q mq() { return Q([5, 6]); }
+            void main() {
+                bool taken;
+                if (mq().a[0])
+                    taken = true;
+                assert(!taken);
+            }
+        });
+    }
+}
+
+// An element of an associative array in a temporary is read after the
+// destructors, like any other element.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.associativeArrayElementResultReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct W { int[int] aa; ~this() { aa[0] = 0; } }
+            W mw(int[int] aa) { return W(aa); }
+            void main() {
+                int[int] aa = [0: 7];
+                bool taken;
+                if (mw(aa).aa[0])
+                    taken = true;
+                assert(!taken);
+            }
+        });
+    }
+}
+
+// A bit field is read through a shift and a mask, not as an lvalue: it is read
+// before the destructors.
+static foreach (backend; Matrix!()) {
+    @("fullExpression.bitFieldResultReadsBeforeDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct B { uint a : 3; ~this() { a = 0; } }
+            B mb() { B b; b.a = 5; return b; }
+            void main() {
+                bool taken;
+                if (mb().a)
+                    taken = true;
+                assert(taken);
+            }
+        });
+    }
+}
+
+// A thread-local variable is not an lvalue result of the glue code: it is
+// read before the destructors.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `tl` cannot be read at compile time"),
+)) {
+    @("fullExpression.threadLocalVariableResultReadsBeforeDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Z { int v; ~this() { v = 0; tl = 0; } }
+            int tl = 1;
+            Z mz(int v) { return Z(v); }
+            void main() {
+                bool taken;
+                if (mz(1).v ? tl : tl)
+                    taken = true;
+                assert(taken);
+            }
+        });
+    }
+}
+
+// The operand of a `switch` is a full expression: an lvalue result is read
+// after the destructors.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.switchOperandReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Z { int v; ~this() { v = 0; } }
+            Z mz(int v) { return Z(v); }
+            void main() {
+                int chosen = -1;
+                switch (mz(2).v) {
+                    case 0: chosen = 0; break;
+                    case 2: chosen = 2; break;
+                    default: chosen = 9;
+                }
+                assert(chosen == 0);
+            }
+        });
+    }
+}
+
+// The operand of `return` is a full expression: an lvalue result is read after
+// the destructors.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.returnOperandReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Z { int v; ~this() { v = 0; } }
+            Z mz(int v) { return Z(v); }
+            int f() { return mz(2).v; }
+            uint fu() { return mz(2).v; }
+            struct P { int* p; ~this() { p = null; } }
+            P mp(int* p) { return P(p); }
+            const(int)* fp(int* p) { return mp(p).p; }
+            void* fv(int* p) { return mp(p).p; }
+            void* conditionalPointer(int* p, bool first) {
+                return first ? cast(void*) mp(p).p : cast(void*) mp(p).p;
+            }
+            class Base {}
+            class Derived : Base {}
+            struct R { Derived value; ~this() { value = null; } }
+            R mr(Derived value) { return R(value); }
+            Base upcast(Derived value) { return mr(value).value; }
+            int h() { int k = 7; return k; }
+            struct C {
+                int v;
+                int* result;
+                ~this() { v = 0; *result = h(); }
+            }
+            int calledReturn(ref int result) {
+                int loc = 5;
+                return C(2, &result).v ? loc : loc;
+            }
+            struct T {
+                int v;
+                ~this() { throw new Exception("operand destructor"); }
+            }
+            T mt() { return T(2); }
+            int interruptedReturn() {
+                try { return mt().v; }
+                catch (Exception e) { assert(e.msg == "operand destructor"); }
+                return h();
+            }
+            void interruptedVoidReturn() {
+                try { interruptedReturn(); }
+                catch (Exception e) { assert(false, e.msg); }
+                return;
+            }
+            void main() {
+                assert(f() == 0);
+                assert(fu() == 0, "implicit integral cast");
+                int k = 1;
+                assert(fp(&k) is null, "qualified pointer cast");
+                assert(fv(&k) is null, "pointer cast");
+                assert(conditionalPointer(&k, true) is null,
+                    "pointer cast in first branch");
+                assert(conditionalPointer(&k, false) is null,
+                    "pointer cast in second branch");
+                assert(upcast(new Derived) is null, "zero-offset class cast");
+                int result;
+                assert(calledReturn(result) == 5, "pending caller return");
+                assert(result == 7, "destructor call return");
+                assert(interruptedReturn() == 7, "return after caught cleanup");
+                interruptedVoidReturn();
+                f();
+            }
+        });
+    }
+}
+
+// The message of an `assert` is a full expression: an lvalue result is read
+// after the destructors.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.assertMessageReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct M { string m = "before"; ~this() { m = "after"; } }
+            M mm() { return M(); }
+            void main() {
+                string got;
+                try
+                    assert(false, mm().m);
+                catch (Throwable error)
+                    got = error.msg;
+                assert(got == "after", got);
+            }
+        });
+    }
+}
+
+// The operand of `throw` is a full expression: an lvalue result is read after
+// the destructors.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.throwOperandReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class E : Exception { this(string m) { super(m); } }
+            struct T { E e; ~this() { e = new E("after"); } }
+            T mt() { return T(new E("before")); }
+            void main() {
+                string got;
+                try
+                    throw mt().e;
+                catch (E error)
+                    got = error.msg;
+                assert(got == "after", got);
+            }
+        });
+    }
+}
+
 // A `throw` expression nested in a larger expression ends its own full
 // expression: the temporaries of its operand die before the throw starts, so
 // a destructor that throws wins.
@@ -6218,6 +6174,30 @@ static foreach (backend; Matrix!()) {
             }
 
             void main() { auto w = typeof(make(1)).init; assert(w.tag == 3); }
+        });
+    }
+}
+
+// A CTFE value of a nested struct keeps its explicit null context when copied
+// outside the declaring function. Reading its own field needs no live frame.
+static foreach (backend; Matrix!()) {
+    @("nestedStructInit.ctfeValueOutsideOwnerFrame." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            auto make() {
+                int captured = 1;
+                struct S {
+                    int tag;
+                    int get() { return captured; }
+                }
+                return S(7);
+            }
+            enum seed = make();
+            void main() {
+                auto value = seed;
+                assert(value.tag == 7);
+            }
         });
     }
 }

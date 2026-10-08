@@ -205,7 +205,7 @@ public DelegateTarget delegateTargetOf(
     VarDeclaration contextPair = null,
 ) {
     import dmd.astenums: Tdelegate, Tstruct;
-    import dmd.funcsem: isVirtualMethod;
+    import snakebite.frontend.dmd.dispatch: usesVtable;
     import dmd.typesem: toBasetype;
 
     if (function_ is null || type.toBasetype.ty != Tdelegate)
@@ -214,9 +214,9 @@ public DelegateTarget delegateTargetOf(
     if (function_.isThis !is null)
         return DelegateTarget(function_, false, null, receiver,
             receiver !is null && receiver.type.toBasetype.ty == Tstruct,
-            receiver !is null && receiver.isSuperExp is null
-                && receiver.isDotTypeExp is null
-                && function_.isVirtualMethod, contextPair);
+            receiver !is null && usesVtable(function_,
+                receiver.isSuperExp !is null || receiver.isDotTypeExp !is null),
+            contextPair);
 
     if (!hasHiddenThis(function_))
         return DelegateTarget(function_, false, null);

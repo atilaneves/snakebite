@@ -64,6 +64,11 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
         scope void delegate() evaluate,
     );
 
+    extern(D) protected abstract bool readsResultAfterEnd(
+        in FullExpressionScope.Position position,
+        Expression result,
+    );
+
     extern(D) protected final void fullExpression(
         in FullExpressionScope.Position position,
         Expression root,
@@ -99,10 +104,12 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     }
 
     private void throwOperand(Expression operand) {
+        const afterEnd = readsResultAfterEnd(
+            FullExpressionScope.Position.throwOperand, operand);
         size_t thrown;
         fullExpression(FullExpressionScope.Position.throwOperand,
-            operand, { thrown = visitThrowOperand(operand); });
-        visitThrowTransfer(thrown);
+            operand, { thrown = visitThrowOperand(operand, afterEnd); });
+        visitThrowTransfer(operand, thrown, afterEnd);
     }
 
     // The initialiser of the `with` handle is a full expression of its own:
@@ -125,17 +132,26 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     // temporaries of the operand die when it has been evaluated, whether
     // the function returns a value or a `ref`.
     final override void visit(ReturnStatement statement) {
-        if (statement.exp is null)
-            visitReturnOperand(statement);
-        else
+        if (statement.exp is null) {
+            enum readsAfterEnd = false;
+            visitReturnOperand(statement, readsAfterEnd);
+        } else {
+            const afterEnd = readsResultAfterEnd(
+                FullExpressionScope.Position.returnOperand, statement.exp);
             fullExpression(FullExpressionScope.Position.returnOperand,
-                statement.exp, { visitReturnOperand(statement); });
+                statement.exp, { visitReturnOperand(statement, afterEnd); });
+        }
         visitReturnTransfer(statement);
     }
 
     protected abstract void visitExpressionStatement(ExpStatement statement);
     protected abstract void visitSwitchError(SwitchErrorStatement statement);
-    protected abstract void visitReturnOperand(ReturnStatement statement);
+    // With `readsAfterEnd` the operand is an lvalue that dmd reads after the
+    // destructors of its temporaries ran: the backend resolves its address
+    // here and moves the value in `visitReturnTransfer`. A `ref` return
+    // yields the address either way.
+    protected abstract void visitReturnOperand(
+        ReturnStatement statement, bool readsAfterEnd);
     protected abstract void visitReturnTransfer(ReturnStatement statement);
 
     protected abstract void visitWithOperand(WithStatement statement);
@@ -145,9 +161,12 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     // object it made. The handle is a plain number because a destructor of
     // an operand temporary can run during a collection, where a throw must
     // not allocate. The shared visitor passes it to `visitThrowTransfer`
-    // once the full expression has ended.
-    protected abstract size_t visitThrowOperand(Expression operand);
-    protected abstract void visitThrowTransfer(size_t thrown);
+    // once the full expression has ended. With `readsAfterEnd` the handle
+    // is the address of the object reference, which the transfer reads.
+    protected abstract size_t visitThrowOperand(
+        Expression operand, bool readsAfterEnd);
+    protected abstract void visitThrowTransfer(
+        Expression operand, size_t thrown, bool readsAfterEnd);
 
     // DMD's semantic pass leaves `lowering` null in a scope that needs no
     // code generation, and dmd's glue cannot compile such an append. A
