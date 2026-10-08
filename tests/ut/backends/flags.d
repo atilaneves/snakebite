@@ -13,7 +13,8 @@ module ut.backends.flags;
 import snakebite.backends.backend: Program;
 import snakebite.backends.checkplan: BoundsCheck, cMessageOf;
 import snakebite.backends.haltprocess: Halted, HostActions;
-import snakebite.frontend.compiler: checksOf, FrontendFlags, parseSnippet;
+import snakebite.frontend.compiler:
+    checksOf, FrontendFlags, parseRootModules, parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import std.conv: text;
 import ut.backends;
@@ -30,6 +31,52 @@ private alias NoCtfe = Omit!(Ctfe, Because.diverges,
 
 private alias Guests = Matrix!(NoNative);
 private alias Compiled = Matrix!(NoNative, NoCtfe);
+
+// C array compound literals decay to pointers without a heap allocation.
+static foreach (backend; Matrix!(Omit!(Native, Because.inexpressible,
+        "the Native mixin cannot parse C source; dmd compiled and ran this C fixture"))) {
+    @("flags.importCArrayCompoundLiteralYieldsPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        enum path = "/snakebite_array_literal_storage.c";
+        auto modules = parseRootModules([path], [], FrontendFlags.init,
+            [path: q{
+                int value(int n) { return n; }
+                int check(void) {
+                    int *p = (int[2]){value(7), value(9)};
+                    return p[0] + p[1];
+                }
+            }]);
+        auto program = Program(modules);
+        auto evaluator = Owned!backend(program);
+        int result;
+        evaluator.call(findFunction(modules[0], "check"), &result, []);
+        result.should == 16;
+    }
+}
+
+// DIP1000 gives a nonescaping scope initializer temporary backing storage.
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+        "GC.query calls gc_query, which has no source for CTFE"))) {
+    @("flags.scopeArrayLiteralHasNoGcBacking." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        enum code = q{
+            import core.memory : GC;
+            int value() { return 7; }
+            void main() {
+                scope int[] values = [value()];
+                assert(GC.query(values.ptr).base is null, "literal has GC backing");
+                assert(values[0] == 7, "literal element changed");
+            }
+        };
+        static if (is(backend == Native))
+            0.shouldBeStatusOf!(backend, code);
+        else
+            ranOn!backend(["-preview=dip1000"], code ~ " unittest { main(); }")
+                .should == Expect.returned;
+    }
+}
 
 
 // What a run of the program did. CTFE reports a throwable as a diagnostic,

@@ -19,6 +19,7 @@ import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
 import snakebite.backends.aggregateinit: NewPlan, planNew;
 import dmd.visitor: Visitor;
 import dmd.mtype: Type;
+import dmd.func: FuncDeclaration;
 import snakebite.nativelayout: TypeFacts;
 import std.meta: AliasSeq;
 
@@ -321,76 +322,65 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
 
     protected abstract void visitTupleElement(Expression expression);
 
-    // A lowered literal's own `_d_arrayliteralTX` call needs somewhere to
-    // put its result before this visitor can read the address back out of
-    // it, so `withTemporaryDestination` substitutes a temporary of the
-    // lowering's own type for the surrounding destination while `run`
-    // evaluates the call and every element into it, then restores the
-    // surrounding destination once `run` returns.
-    //
-    // `evaluateElement`, `storeConstant`, `storeAddress`, and `copyBytes`
-    // are ordinary execution primitives that carry no array-literal
-    // knowledge of their own, but they are valid only inside
-    // `withTemporaryDestination`'s `run` delegate, since all four act on
-    // the temporary it opened:
-    // - `evaluateElement` writes the element at a byte offset from the
-    //   address the temporary *holds* (the pointer `_d_arrayliteralTX`
-    //   returned into it), not from the temporary's own address.
-    // - `storeConstant` writes a constant at a byte offset into the
-    //   *surrounding* destination that `withTemporaryDestination` saved,
-    //   not into the temporary.
-    // - `storeAddress` copies the temporary's own *value* - the pointer
-    //   `_d_arrayliteralTX` returned - to a byte offset in that surrounding
-    //   destination.
-    // - `copyBytes` copies bytes from the address the temporary holds into
-    //   that surrounding destination.
-    // A backend runs each one immediately (the interpreter) or emits an op
-    // for the VM to run later (the bytecode compiler). Deciding the element
-    // count, the per-element byte offsets, and whether the result is a
-    // dynamic array, a pointer, or a static array stays here, shared,
-    // instead of being re-derived by each backend.
+    // Stage every element before publishing the result: an element can
+    // read the old destination. The pointer temporary holds either a call
+    // frame address or the frontend lowering's allocation result.
     final override void visit(ArrayLiteralExp expression) {
-        import dmd.astenums: Tpointer;
-        import dmd.typesem: nextOf, toBasetype;
+        import dmd.mtype: Type;
+        import dmd.typesem: pointerTo;
+        import snakebite.backends.arrayliteral: ArrayLiteralPlan, planArrayLiteral;
         import snakebite.nativelayout:
-            arrayLengthOffset, arrayPointerOffset;
+            arrayLengthOffset, arrayPointerOffset, isStoredLiteral;
 
-        if (expression.lowering !is null) {
-            requireLiteralDestination(expression);
-            const temporaryFacts = TypeFacts.of(expression.lowering.type);
-            withTemporaryDestination(
-                    expression.lowering.type, temporaryFacts, {
+        // Element types must remain mutable for DMD.
+        auto plan = planArrayLiteral(expression, currentFunction);
+        requireLiteralDestination(expression);
+        if (isStoredLiteral(expression))
+            return visitStoredArrayLiteral(expression);
+
+        auto pointerType = Type.tvoid.pointerTo;
+        withTemporaryDestination(pointerType, TypeFacts.of(pointerType), {
+            final switch (plan.storage) {
+            case ArrayLiteralPlan.Storage.empty:
+                clearTemporaryPointer;
+                break;
+            case ArrayLiteralPlan.Storage.temporary:
+                reserveLiteralStorage(expression);
+                break;
+            case ArrayLiteralPlan.Storage.lowering:
+                assert(expression.lowering !is null,
+                    "DMD lowers nonempty heap array literals");
                 expression.lowering.accept(this);
+                break;
+            }
 
-                const count = expression.elements is null
-                    ? 0 : expression.elements.length;
-                auto elementType = expression.type.nextOf;
-                const elementFacts = TypeFacts.of(elementType);
-                foreach (i; 0 .. count)
-                    evaluateElement(
-                        expression[i], elementType, elementFacts,
-                        i * elementFacts.size,
-                    );
+            foreach (i; 0 .. plan.count)
+                evaluateElement(expression[i], plan.elementType,
+                    plan.elementFacts, i * plan.elementFacts.size);
 
-                const facts = TypeFacts.of(expression.type);
-                if (facts.isDynamicArray) {
-                    storeConstant(count, arrayLengthOffset);
-                    storeAddress(arrayPointerOffset);
-                } else if (expression.type.toBasetype.ty == Tpointer)
-                    storeAddress(0);
-                else
-                    copyBytes(facts.size);
-            });
-            return;
-        }
-
-        visitUnloweredArrayLiteral(expression);
+            final switch (plan.result) {
+            case ArrayLiteralPlan.Result.slice:
+                storeConstant(plan.count, arrayLengthOffset);
+                storeAddress(arrayPointerOffset);
+                break;
+            case ArrayLiteralPlan.Result.pointer:
+                storeAddress(0);
+                break;
+            case ArrayLiteralPlan.Result.value:
+                if (plan.bytes != 0)
+                    copyBytes(plan.bytes);
+                break;
+            }
+        });
     }
 
-    protected abstract void visitUnloweredArrayLiteral(
+    protected abstract void visitStoredArrayLiteral(
         ArrayLiteralExp expression);
+    protected abstract void clearTemporaryPointer();
+    protected abstract void reserveLiteralStorage(ArrayLiteralExp expression);
+    protected abstract FuncDeclaration currentFunction();
 
-    // Called before a lowered literal's temporary is set up, so a backend
+    // Called before a literal's temporary is set up, so a backend
     // whose result can be discarded gives the stores below a destination.
     protected void requireLiteralDestination(ArrayLiteralExp expression) {
     }

@@ -5541,78 +5541,21 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         return SliceView(base + lo * stride, cast(size_t) (hi - lo));
     }
 
-    // `_d_arrayliteralTX`, the druntime hook real compiled D calls for a
-    // heap array literal, has no `FuncDeclaration` and no call node: dmd's
-    // `e2ir.d` conjures it by name only once it has already decided to
-    // lower an `ArrayLiteralExp` this way, so there is nothing here to
-    // interpret or call through. What that lowering does, though, is
-    // exactly what a tree-walking evaluator can do on its own: allocate
-    // room for the elements and evaluate each one into its slot. The room
-    // this evaluator allocates is a GC block, the same storage
-    // `staticSlotOf` already hands a `static` variable - a frame slot
-    // would vanish with the call that made it, and this literal's
-    // elements need to survive at least as long as whatever slice they
-    // are assigned to, `static` or not.
-    //
-    // The shared LoweringVisitor routes array literals without a lowering
-    // here. Lowered literals use the allocation result as their element
-    // storage and are completed below.
-    protected override void visitUnloweredArrayLiteral(
+    protected override void visitStoredArrayLiteral(
             ArrayLiteralExp expression) {
-        import snakebite.nativelayout: isStoredLiteral;
+        _nativeData.write(_type, _facts, expression, _place);
+    }
 
-        if (isStoredLiteral(expression)) {
-            _nativeData.write(_type, _facts, expression, _place);
-            return;
-        }
-        import snakebite.nativelayout:
-            arrayLengthOffset, arrayPointerOffset, storeIntegral;
-        import std.conv: text;
+    protected override void clearTemporaryPointer() {
+        *cast(void**) _place = null;
+    }
 
-        // A static array's elements are its own bytes, written straight
-        // into `_place` - unlike a dynamic array literal, nothing is
-        // allocated, because the destination already is the storage:
-        // `newCapacity`'s `static immutable multTable`, on the `~=`
-        // lowering's own chain, is one of these - dmd's own CTFE engine
-        // has already run its `(){ ... }()` initialiser and left this
-        // evaluator a plain literal of the result to place, the same as
-        // any other static's initializer (`staticSlotOf`).
-        const kind = _type.toBasetype.ty;
-        if (kind == Tsarray) {
-            auto elementType = _type.nextOf;
-            const elementFacts = factsOf(elementType);
-            const length = expression.elements is null
-                ? 0 : expression.elements.length;
-            auto bytes = cast(ubyte*) _place;
+    protected override void reserveLiteralStorage(ArrayLiteralExp expression) {
+        *cast(void**) _place = _frameBase + _layout.arrayLiteralOffset(expression);
+    }
 
-            foreach (i; 0 .. length)
-                evaluate(
-                    expression[i], elementType, elementFacts,
-                    bytes + i * elementFacts.size);
-            return;
-        }
-
-        assert(kind == Tarray);
-
-        auto elementType = _type.nextOf;
-        const elementFacts = factsOf(elementType);
-        const length = expression.elements is null
-            ? 0 : expression.elements.length;
-
-        ubyte* elements = null;
-        if (length > 0) {
-            const blockSize = elementFacts.size * length;
-            auto block = new void[](blockSize);
-            foreach (i; 0 .. length)
-                evaluate(
-                    expression[i], elementType, elementFacts,
-                    cast(ubyte*) block.ptr + i * elementFacts.size);
-            elements = cast(ubyte*) block.ptr;
-        }
-
-        auto bytes = cast(ubyte*) _place;
-        storeIntegral(bytes + arrayLengthOffset, length, size_t.sizeof);
-        *cast(ubyte**) (bytes + arrayPointerOffset) = elements;
+    protected override FuncDeclaration currentFunction() {
+        return _function;
     }
 
     private struct TemporaryDestination {

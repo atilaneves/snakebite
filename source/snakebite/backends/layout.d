@@ -24,6 +24,7 @@ package struct FrameLayout {
     import snakebite.nativelayout: alignUp, TypeFacts;
     import dmd.declaration: VarDeclaration;
     import dmd.func: FuncDeclaration;
+    import dmd.expression: ArrayLiteralExp;
     import dmd.mtype: DmdParameter = Parameter, Type, TypeFunction;
 
     package size_t size;
@@ -91,6 +92,15 @@ package struct FrameLayout {
         package bool retainsTemporaries;
     }
     private VariableSlot[VarDeclaration] _slotOf;
+
+    // DMD gives each temporary array literal one slot for the guest call.
+    private size_t[ArrayLiteralExp] _arrayLiteralOffset;
+
+    package size_t arrayLiteralOffset(
+        ArrayLiteralExp expression,
+    ) const {
+        return _arrayLiteralOffset[expression];
+    }
 
     // How many layouts `of` has built on this thread. A build walks the
     // whole function body, so a backend that is meant to build each
@@ -192,7 +202,7 @@ package struct FrameLayout {
         // walk, so this is a no-op for it, the same as the `variables is
         // null` case above.
         if (function_.fbody !is null) {
-            scope collector = new LocalsCollector(&layout);
+            scope collector = new LocalsCollector(&layout, function_);
             function_.fbody.accept(collector);
             // DMD assigns the out-contract result in the lowered body,
             // but does not introduce it with a DeclarationExp.
@@ -495,7 +505,8 @@ import dmd.visitor: SemanticTimeTransitiveVisitor;
 extern(C++) private final class LocalsCollector:
     SemanticTimeTransitiveVisitor {
     import dmd.declaration: VarDeclaration;
-    import dmd.expression: DeclarationExp, Expression, NewExp;
+    import dmd.expression: ArrayLiteralExp, DeclarationExp, Expression, NewExp;
+    import dmd.func: FuncDeclaration;
     import snakebite.backends.loweringvisitor: LoweredExpressionTypes;
     import dmd.statement:
         Catch, CompoundStatement, DoStatement, ExpStatement, ForStatement,
@@ -506,9 +517,11 @@ extern(C++) private final class LocalsCollector:
     alias visit = SemanticTimeTransitiveVisitor.visit;
 
     private FrameLayout* _layout;
+    private FuncDeclaration _function;
 
-    public this(FrameLayout* layout) {
+    public this(FrameLayout* layout, FuncDeclaration function_) {
         _layout = layout;
+        _function = function_;
     }
 
     override void visit(Statement statement) {
@@ -653,6 +666,19 @@ extern(C++) private final class LocalsCollector:
             collectDeclarations(expression.lowering);
             static if (is(Node == NewExp))
                 collectDeclarations(expression.argprefix);
+            static if (is(Node == ArrayLiteralExp)) {
+                import snakebite.backends.arrayliteral:
+                    ArrayLiteralPlan, planArrayLiteral;
+                import snakebite.nativelayout: isStoredLiteral, TypeFacts;
+
+                const plan = planArrayLiteral(expression, _function);
+                if (plan.storage == ArrayLiteralPlan.Storage.temporary
+                        && !isStoredLiteral(expression)
+                        && expression !in _layout._arrayLiteralOffset)
+                    _layout._arrayLiteralOffset[expression] =
+                        _layout.reserveSlot(TypeFacts(
+                            plan.bytes, plan.elementFacts.alignment)).offset;
+            }
         }
     }
 
