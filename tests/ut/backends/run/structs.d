@@ -5768,6 +5768,26 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A direct anonymous union keeps the default of its first member, even
+// when a later alternative is a bit field.
+static foreach (backend; Matrix!()) {
+    @("classDefaultWithAnonymousUnion." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C {
+                union { int i = 42; float f; uint b : 3; }
+                int tag = 7;
+            }
+            void main() {
+                auto c = new C;
+                assert(c.i == 42);
+                assert(c.tag == 7);
+            }
+        });
+    }
+}
+
 // A `static immutable` struct made by a function keeps the value of the
 // union member that the function wrote.
 static foreach (backend; Matrix!()) {
@@ -6626,6 +6646,30 @@ static foreach (backend; Matrix!()) {
             }
 
             void main() { auto w = typeof(make(1)).init; assert(w.tag == 3); }
+        });
+    }
+}
+
+// A CTFE value of a nested struct keeps its explicit null context when copied
+// outside the declaring function. Reading its own field needs no live frame.
+static foreach (backend; Matrix!()) {
+    @("nestedStructInit.ctfeValueOutsideOwnerFrame." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            auto make() {
+                int captured = 1;
+                struct S {
+                    int tag;
+                    int get() { return captured; }
+                }
+                return S(7);
+            }
+            enum seed = make();
+            void main() {
+                auto value = seed;
+                assert(value.tag == 7);
+            }
         });
     }
 }

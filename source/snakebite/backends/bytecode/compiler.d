@@ -6500,25 +6500,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
-    // Whether `expression` has to reach `callee` through the receiver's
-    // own dynamic type rather than `callee` itself - `override`s a base
-    // class's or an interface's method, and dmd left this call able to
-    // reach any of them. `expression.directcall` is dmd's own answer for
-    // whether it already proved otherwise (a `final` method, a call
-    // through `super`, ...); a constructor is never virtual to begin
-    // with, so `callee.isVirtualMethod` already excludes it without this
-    // needing its own check.
-    private bool isVirtualCall(CallExp expression, FuncDeclaration callee) {
-        import dmd.astenums: Tclass;
-        import snakebite.backends.checkplan: readsVtable;
-
-        if (!expression.readsVtable(callee))
-            return false;
-
-        auto dot = expression.e1.isDotVarExp;
-        return dot !is null && dot.e1.type.toBasetype.ty == Tclass;
-    }
-
     // A call reached through the receiver's own dynamic type: `callee`
     // only names dmd's statically-resolved target, the method a base
     // class or an interface declares, never the guest override that
@@ -6537,9 +6518,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import dmd.astenums: STC, Tvoid, VarArg;
         import snakebite.backends.calls: arityMismatches;
+        import snakebite.frontend.dmd.dispatch: classReceiverOf;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
-        auto dot = expression.e1.isDotVarExp;
+        auto receiver = classReceiverOf(expression, callee);
 
         auto calleeType = typeFunctionOf(callee);
         if (arityMismatches(calleeType.parameterList, expression.arguments,
@@ -6555,7 +6537,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             assert(0, "a `void` call is only ever evaluated for effect");
 
         const objectOffset = reserveTemp(pointerFacts);
-        evalInto(dot.e1, objectOffset, size_t.sizeof);
+        evalInto(receiver, objectOffset, size_t.sizeof);
 
         const calleeSlotOffset = reserveTemp(pointerFacts);
         auto calleeLayout = FrameLayout.ofParameters(calleeType, true);
@@ -6616,6 +6598,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // for a call run at statement level, whose result (`void` or
     // otherwise) is discarded.
     private void compileCall(CallExp expression, in size_t destOffset) {
+        import snakebite.frontend.dmd.dispatch: readsVtable;
         import snakebite.frontend.dmd.functions: unresolvedCalleeOf;
 
         auto callee = expression.f;
@@ -6631,7 +6614,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return compileIndirectCall(expression, destOffset);
 
         callee = _bytecode.definitionOf(callee);
-        if (isVirtualCall(expression, callee))
+        if (expression.readsVtable(callee))
             return compileVirtualCall(expression, callee, destOffset);
 
         // `hasHiddenThis` reflects `needThis()`: true for an ordinary

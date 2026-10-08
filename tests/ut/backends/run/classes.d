@@ -1783,16 +1783,26 @@ static foreach (backend; Matrix!(
     }
 }
 
-// A class field default is also evaluated once by the frontend, so all instances share the object.
+// A class field default retains packed fields, including a field whose
+// storage unit starts after the first byte and the ordinary field after it.
 static foreach (backend; Matrix!()) {
     @("compileTimeClassInClassFieldDefault." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            class C { int v; this(int x) { v = x; } }
-            class D { C c = new C(3); }
+            class C {
+                uint a : 9;
+                ubyte b : 3;
+                ubyte tag = 7;
+                this(int x) { a = x; b = 5; tag += 4; }
+            }
+            class D { C c = new C(257); }
             void main() {
-                assert((new D).c.v == 3);
+                auto c = (new D).c;
+                assert(c.a == 257);
+                assert(c.b == 5);
+                assert(c.tag == 11);
+                assert((new C(257)).tag == 11);
             }
         });
     }
@@ -3740,6 +3750,28 @@ static foreach (backend; Matrix!()) {
                 const second = cast(MockStore) other.store;
                 return first.names == ["a", "b"] && derived.root == "/root"
                     && second.names == ["c"] && other.root == "/other" ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A final override keeps its base's vtable slot, but calls through its own
+// declaration do not read that slot or the receiver.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: function call through null class reference `null`"),
+)) {
+    @("nullReceiver.finalOverrideCallDoesNotFault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base { int value() { return 1; } }
+            class Derived: Base {
+                final override int value() { return 7; }
+            }
+            void main() {
+                Derived receiver;
+                assert(receiver.value() == 7);
             }
         });
     }
