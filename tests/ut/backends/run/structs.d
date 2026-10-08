@@ -6192,6 +6192,8 @@ static foreach (backend; Matrix!(
 // The result of a conditional expression whose branches are variables is
 // an lvalue to dmd's glue code: the variable is read after the destructors.
 static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `gg` cannot be read at compile time"),
 )) {
     @("fullExpression.variableResultReadsAfterDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -6213,6 +6215,8 @@ static foreach (backend; Matrix!(
 // A local variable that a destructor changes is read after it ran, when it
 // is the result of a conditional expression.
 static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
 )) {
     @("fullExpression.variableResultOfLocalReadsAfterDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -6235,6 +6239,8 @@ static foreach (backend; Matrix!(
 // A conditional expression whose branches are an lvalue field and a variable
 // is an lvalue: its truth is read after the destructors.
 static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
 )) {
     @("fullExpression.conditionalResultReadsAfterDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -6256,6 +6262,8 @@ static foreach (backend; Matrix!(
 
 // A dereference is an lvalue result: it is read after the destructors.
 static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
 )) {
     @("fullExpression.dereferenceResultReadsAfterDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -6277,6 +6285,8 @@ static foreach (backend; Matrix!(
 
 // An element of a static array in a temporary is an lvalue result.
 static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
 )) {
     @("fullExpression.elementResultReadsAfterDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -6297,6 +6307,8 @@ static foreach (backend; Matrix!(
 // An element of an associative array in a temporary is read after the
 // destructors, like any other element.
 static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
 )) {
     @("fullExpression.associativeArrayElementResultReadsAfterDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -6317,8 +6329,7 @@ static foreach (backend; Matrix!(
 
 // A bit field is read through a shift and a mask, not as an lvalue: it is read
 // before the destructors.
-static foreach (backend; Matrix!(
-)) {
+static foreach (backend; Matrix!()) {
     @("fullExpression.bitFieldResultReadsBeforeDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -6338,6 +6349,8 @@ static foreach (backend; Matrix!(
 // A thread-local variable is not an lvalue result of the glue code: it is
 // read before the destructors.
 static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `tl` cannot be read at compile time"),
 )) {
     @("fullExpression.threadLocalVariableResultReadsBeforeDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -6359,6 +6372,8 @@ static foreach (backend; Matrix!(
 // The operand of a `switch` is a full expression: an lvalue result is read
 // after the destructors.
 static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
 )) {
     @("fullExpression.switchOperandReadsAfterDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -6383,6 +6398,8 @@ static foreach (backend; Matrix!(
 // The operand of `return` is a full expression: an lvalue result is read after
 // the destructors.
 static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
 )) {
     @("fullExpression.returnOperandReadsAfterDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -6400,6 +6417,8 @@ static foreach (backend; Matrix!(
 // The message of an `assert` is a full expression: an lvalue result is read
 // after the destructors.
 static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
 )) {
     @("fullExpression.assertMessageReadsAfterDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -6422,6 +6441,8 @@ static foreach (backend; Matrix!(
 // The operand of `throw` is a full expression: an lvalue result is read after
 // the destructors.
 static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
 )) {
     @("fullExpression.throwOperandReadsAfterDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
