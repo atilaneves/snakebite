@@ -83,6 +83,7 @@ static import ut.backends.run.main,
     ut.repl.cell,
     ut.repl.session,
     ut.process,
+    ut.frontend.functions,
     ut.frontend.memory,
     ut.frontend.checks;
 
@@ -195,6 +196,7 @@ int run(string[] args) {
         "ut.repl.cell",
         "ut.repl.session",
         "ut.process",
+        "ut.frontend.functions",
         "ut.frontend.memory",
         "ut.frontend.checks",
     );

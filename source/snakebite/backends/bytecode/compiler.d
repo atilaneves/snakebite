@@ -11,7 +11,7 @@ import snakebite.backends.identity: IdentityPlan;
 import snakebite.backends.logical: LogicalPlan;
 import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
 import snakebite.backends.switchplan:
-    switchPlan, gotoCaseTarget, gotoDefaultTarget;
+    SwitchPlan, switchPlan, gotoCaseTarget, gotoDefaultTarget;
 import snakebite.backends.fullexpression:
     FullExpressionScope;
 import snakebite.backends.controlflow:
@@ -1655,11 +1655,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // replaced by one `CaseStatement` per value in the range, chained by
     // fallthrough - this compiler never sees that node either.
     //
-    // dmd also always resolves `hasDefault`/`sdefault` before semantic
-    // returns: a `switch` with no `default:` of its own gets one
-    // synthesised (an `assert(0)`, or a call to `object.__switch_error`),
-    // so `statement.sdefault` is never null here, final or not.
-    //
     // Case dispatch is a linear chain of equality tests against the
     // already-evaluated condition, each branching straight into its own
     // case's body once that body's own position is known (see
@@ -1690,13 +1685,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             jumpToCase(case_, branchIndex);
         }
 
-        assert(plan.defaultTarget !is null);
-
         const defaultJumpIndex = _instructions.length;
         emit(&opJump, 0, 0, 0);
-        jumpToDefault(statement, defaultJumpIndex);
-
         _breakables ~= Breakable(label, null, _scopePaths.enclosing(statement));
+        final switch (plan.noMatch) with (SwitchPlan.NoMatch) {
+            case defaultTarget:
+                jumpToDefault(statement, defaultJumpIndex);
+                break;
+            case exit:
+                _breakables[$ - 1].pendingBreakJumps ~= defaultJumpIndex;
+                break;
+        }
         _switchStack ~= statement;
         compileSwitchBody(statement._body);
         const bodyFinished = _finished;
@@ -6496,25 +6495,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
-    // Whether `expression` has to reach `callee` through the receiver's
-    // own dynamic type rather than `callee` itself - `override`s a base
-    // class's or an interface's method, and dmd left this call able to
-    // reach any of them. `expression.directcall` is dmd's own answer for
-    // whether it already proved otherwise (a `final` method, a call
-    // through `super`, ...); a constructor is never virtual to begin
-    // with, so `callee.isVirtualMethod` already excludes it without this
-    // needing its own check.
-    private bool isVirtualCall(CallExp expression, FuncDeclaration callee) {
-        import dmd.astenums: Tclass;
-        import snakebite.backends.checkplan: readsVtable;
-
-        if (!expression.readsVtable(callee))
-            return false;
-
-        auto dot = expression.e1.isDotVarExp;
-        return dot !is null && dot.e1.type.toBasetype.ty == Tclass;
-    }
-
     // A call reached through the receiver's own dynamic type: `callee`
     // only names dmd's statically-resolved target, the method a base
     // class or an interface declares, never the guest override that
@@ -6533,9 +6513,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import dmd.astenums: STC, Tvoid, VarArg;
         import snakebite.backends.calls: arityMismatches;
+        import snakebite.frontend.dmd.dispatch: classReceiverOf;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
-        auto dot = expression.e1.isDotVarExp;
+        auto receiver = classReceiverOf(expression, callee);
 
         auto calleeType = typeFunctionOf(callee);
         if (arityMismatches(calleeType.parameterList, expression.arguments,
@@ -6551,7 +6532,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             assert(0, "a `void` call is only ever evaluated for effect");
 
         const objectOffset = reserveTemp(pointerFacts);
-        evalInto(dot.e1, objectOffset, size_t.sizeof);
+        evalInto(receiver, objectOffset, size_t.sizeof);
 
         const calleeSlotOffset = reserveTemp(pointerFacts);
         auto calleeLayout = FrameLayout.ofParameters(calleeType, true);
@@ -6612,6 +6593,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // for a call run at statement level, whose result (`void` or
     // otherwise) is discarded.
     private void compileCall(CallExp expression, in size_t destOffset) {
+        import snakebite.frontend.dmd.dispatch: readsVtable;
         import snakebite.frontend.dmd.functions: unresolvedCalleeOf;
 
         auto callee = expression.f;
@@ -6627,7 +6609,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return compileIndirectCall(expression, destOffset);
 
         callee = _bytecode.definitionOf(callee);
-        if (isVirtualCall(expression, callee))
+        if (expression.readsVtable(callee))
             return compileVirtualCall(expression, callee, destOffset);
 
         // `hasHiddenThis` reflects `needThis()`: true for an ordinary

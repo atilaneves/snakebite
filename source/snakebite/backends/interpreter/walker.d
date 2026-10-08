@@ -198,7 +198,8 @@ private final class GuestException: Exception {
 import snakebite.nativelayout: bitfieldAccess;
 import snakebite.nativevalue: BitfieldAccess;
 import snakebite.backends.checkplan:
-    BoundsCheck, FailurePlan, hookOf, isUnanalysed, readsVtable;
+    BoundsCheck, FailurePlan, hookOf, isUnanalysed;
+import snakebite.frontend.dmd.dispatch: classReceiverOf, readsVtable;
 import snakebite.backends.calls: ValueCall;
 import snakebite.backends.haltprocess: isHalt;
 import snakebite.backends.exceptions: CAssertCall;
@@ -212,7 +213,7 @@ import snakebite.backends.exceptionplan: CatchPlan, catchPlanOf;
 import snakebite.backends.aggregateinit: AggregateInitPlan;
 import snakebite.backends.unwindplan:
     ExceptionCandidate, ExceptionUnwindPlan = UnwindPlan;
-import snakebite.backends.switchplan: switchPlan, selectCase,
+import snakebite.backends.switchplan: SwitchPlan, switchPlan, selectCase,
     gotoCaseTarget, gotoDefaultTarget;
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
 import snakebite.cstack: CStack;
@@ -558,7 +559,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     import dmd.expression;
     import dmd.expressionsem: toInteger;
     import dmd.func: FuncDeclaration;
-    import dmd.funcsem: isVirtualMethod;
     import dmd.identifier: Identifier;
     import dmd.init: ExpInitializer;
     import dmd.location: Loc;
@@ -1582,8 +1582,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 auto callee = _callSelection.definitionOf(
                     named,
                     (declaration) => _program.linkedFunctionOf(declaration));
-                if (named.isThis !is null && named.isVirtualMethod
-                        && !site.directcall)
+                if (site.readsVtable(named))
                     return;
 
                 enqueue(callee);
@@ -1613,12 +1612,14 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                     prepareDefault(expression.type);
             }),
             (expression) => attempt({ _nativeData.stringData(expression); }),
-            (constructor) => attempt({
+            (site) => attempt({
+                auto constructor = site.member;
                 auto definition = _callSelection.definitionOf(
                     constructor,
                     (declaration) => _program.linkedFunctionOf(declaration));
-                layoutOf(constructor);
-                callShapeOf(constructor);
+                // Construction keys its plans by the original member,
+                // while the linked definition supplies the reachable body.
+                prepareCall(site, site.arguments, constructor);
                 enqueue(definition);
             }),
             (field) => attempt({ bitfieldPlanOf(field); }),
@@ -1679,10 +1680,19 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         FuncDeclaration callee,
     ) {
         const layout = layoutOf(callee);
-        callShapeOf(callee);
-        prepareContext(outerFunctionOf(callee));
         if (callee.isThis is null && layout.hiddenThis.variable !is null)
             calleeContextPlanOf(site, callee);
+        prepareCall(site, site.arguments, callee);
+    }
+
+    extern(D) private void prepareCall(
+        Expression site,
+        Expressions* arguments,
+        FuncDeclaration callee,
+    ) {
+        const layout = layoutOf(callee);
+        callShapeOf(callee);
+        prepareContext(outerFunctionOf(callee));
         const decision = _callSelection.decisionOf(
             callee,
             (function_) => _program.isInterpreted(function_),
@@ -1694,7 +1704,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 && typeFunctionOf(callee).parameterList.varargs
                     == VarArg.variadic) {
             const hasTypes = layout.variadicTypes != size_t.max;
-            variadicCallPlanOf(site.arguments,
+            variadicCallPlanOf(arguments,
                 hasTypes + layout.parameters.length);
         }
         if (decision.route != CallSelection.Route.native
@@ -1705,7 +1715,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // asked by execution of any call to it, and `decision` may not ask.
         if (isNativeVariadic(callee)) {
             auto adapter = CallAdapter.Arguments.of(
-                typeFunctionOf(callee), site.arguments);
+                typeFunctionOf(callee), arguments);
             cachedCallPlan(site, callee,
                 () => adapter.prepare(*_plans, callee));
         } else
@@ -2478,10 +2488,15 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 return value;
             });
 
-            if (selected is null)
-                selected = plan.defaultTarget;
-            if (selected is null)
-                return;
+            if (selected is null) {
+                final switch (plan.noMatch) with (SwitchPlan.NoMatch) {
+                    case defaultTarget:
+                        selected = plan.defaultTarget;
+                        break;
+                    case exit:
+                        return;
+                }
+            }
 
             _controlFlow.seek(cast(void*) selected);
         }
@@ -6450,11 +6465,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // delegate carries its context, and a function pointer to a method
         // (`&C.f`) carries none, so that method runs with a null `this`.
         void* classReceiver;
-        auto aggregate = function_.isThis;
-        if (aggregate !is null && aggregate.isClassDeclaration !is null
-                && resolved !is null) {
-            auto dot = expression.e1.isDotVarExp;
-            auto receiver = dot is null ? expression.e1 : dot.e1;
+        auto receiver = resolved is null
+            ? null : classReceiverOf(expression, function_);
+        if (receiver !is null) {
             classReceiver = classReferenceOf(receiver);
             if (classReceiver is null && expression.readsVtable(function_)) {
                 // The vtable read is where the null receiver is met, after
@@ -6468,11 +6481,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 faultOnNullObject(classReceiver);
             }
 
-            // `super.f()` is statically bound. Every other virtual class
-            // call uses the declaration of the object held by the receiver,
-            // not the declaration dmd selected from its static type.
-            if (expression.readsVtable(function_)
-                    && receiver.isSuperExp is null) {
+            if (expression.readsVtable(function_)) {
                 const address = _virtualAddress(function_, classReceiver);
                 const target = _plans.guestTarget(address);
                 if (target.word is null)

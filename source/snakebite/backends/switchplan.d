@@ -3,8 +3,16 @@ module snakebite.backends.switchplan;
 private:
 
 package struct SwitchPlan {
+    enum NoMatch { defaultTarget, exit }
+
     imported!"dmd.statement".CaseStatement[] cases;
     imported!"dmd.statement".DefaultStatement defaultTarget;
+
+    NoMatch noMatch() const @safe @nogc nothrow pure scope {
+        // statementsem can omit the default for an exhaustive final enum
+        // switch with assertions off. Native s2ir then uses the break block.
+        return defaultTarget is null ? NoMatch.exit : NoMatch.defaultTarget;
+    }
 }
 
 // Semantic analysis has converted string switches to integer dispatch and

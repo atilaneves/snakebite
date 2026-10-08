@@ -616,6 +616,7 @@ public struct NativeData {
 
     private void* classValue(ClassReferenceExp value) {
         import core.stdc.string: memcpy;
+        import dmd.expressionsem: toInteger;
         import snakebite.frontend.compiler: withCompilerLock;
         version(unittest) import snakebite.sharedtable: assertCacheFillAllowed;
 
@@ -635,12 +636,21 @@ public struct NativeData {
             scope (failure) _compileTimeValues.remove(value.value);
             for (auto declaration = value.originalClass;
                     declaration !is null; declaration = declaration.baseClass) {
+                size_t writtenBitEnd;
                 foreach (field; declaration.fields) {
                     const index = value.findFieldIndexByName(field);
                     assert(index >= 0);
                     // Frontend expression APIs require mutable AST nodes.
                     auto element = (*value.value.elements)[index];
-                    if (element !is null)
+                    if (element is null)
+                        continue;
+                    if (!fieldImageIncludes(field, writtenBitEnd))
+                        continue;
+                    if (field.isBitFieldDeclaration !is null) {
+                        const access = bitfieldAccess(field);
+                        access.store(cast(ubyte*) address + access.offset,
+                            element.toInteger);
+                    } else
                         write(field.type, TypeFacts.of(field.type), element,
                             cast(ubyte*) address + field.offset);
                 }
@@ -944,8 +954,11 @@ public struct NativeData {
         import dmd.expressionsem: getConstInitializer;
         import snakebite.frontend.compiler: newInFrontend;
 
+        size_t writtenBitEnd;
         foreach (field; declaration.fields) {
             if (field._init !is null && field._init.isVoidInitializer)
+                continue;
+            if (!fieldImageIncludes(field, writtenBitEnd))
                 continue;
 
             const bytes = field._init is null
@@ -966,6 +979,24 @@ public struct NativeData {
             memcpy(place + field.offset, bytes.ptr, bytes.length);
         }
     }
+}
+
+// Like dmd's `membersToDt`, the first present union member owns its bytes.
+// Packed siblings can share bytes, but not the bits of a selected member.
+private bool fieldImageIncludes(
+    imported!"dmd.declaration".VarDeclaration field,
+    ref size_t writtenBitEnd,
+) {
+    import dmd.typesem: size;
+
+    const bitfield = field.isBitFieldDeclaration;
+    const start = field.offset * 8 + (bitfield is null ? 0 : bitfield.bitOffset);
+    if (start < writtenBitEnd)
+        return false;
+    writtenBitEnd = start + (bitfield is null
+        ? field.type.size * 8
+        : bitfield.fieldWidth);
+    return true;
 }
 
 private alias SymbolAddress =
@@ -1282,17 +1313,13 @@ private void storeValue(
 
     if (auto literal = value.isStructLiteralExp) {
         memset(place, 0, facts.size);
-        // Like dmd's `membersToDt`: of fields that overlap, the first one
-        // with an element wins and the later ones are skipped.
-        size_t writtenEnd;
+        size_t writtenBitEnd;
         foreach (i, element; *literal.elements) {
             if (element is null)
                 continue;
             auto field = literal.sd.fields[i];
-            if (field.offset < writtenEnd && !field.isBitFieldDeclaration)
+            if (!fieldImageIncludes(field, writtenBitEnd))
                 continue;
-            if (field.offset + field.type.size > writtenEnd)
-                writtenEnd = field.offset + field.type.size;
             if (field.isBitFieldDeclaration !is null) {
                 const access = bitfieldAccess(field);
                 access.store(bytes + access.offset, element.toInteger);
