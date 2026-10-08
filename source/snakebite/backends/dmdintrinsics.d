@@ -166,17 +166,20 @@ public int bitTest(string name, T)(void* address, in T index) nothrow @nogc {
 
 // dmd chooses the IN width from the result and the OUT width from the
 // stored value. The name's suffix does not select the instruction width.
+// On x86-64 its size override selects AX for both two- and four-byte
+// values (cdport). A four-byte IN result has unspecified upper bits.
 public Value portInput(Value, Port)(in Port port) nothrow @nogc {
     const address = cast(ushort) port;
     Value result = void;
     version (DigitalMars) {
         enum register = Value.sizeof == 1 ? "AL" : Value.sizeof == 2 ? "AX" : "EAX";
-        mixin("asm nothrow @nogc { mov DX, address; in " ~ register
+        enum operand = Value.sizeof == 1 ? "AL" : "AX";
+        mixin("asm nothrow @nogc { mov DX, address; in " ~ operand
             ~ ", DX; mov result, " ~ register ~ "; }");
     } else version (LDC) {
-        asm nothrow @nogc {
-            "in %1, %0" : "={ax}" (result) : "{dx}" (address);
-        }
+        enum instruction = Value.sizeof == 4 ? "in %1, %%ax" : "in %1, %0";
+        mixin("asm nothrow @nogc { \"" ~ instruction
+            ~ "\" : \"={ax}\" (result) : \"{dx}\" (address); }");
     }
     return result;
 }
@@ -186,12 +189,13 @@ public Value portOutput(Value, Port)(in Port port, in Value value) nothrow @nogc
     const address = cast(ushort) port;
     version (DigitalMars) {
         enum register = Value.sizeof == 1 ? "AL" : Value.sizeof == 2 ? "AX" : "EAX";
+        enum operand = Value.sizeof == 1 ? "AL" : "AX";
         mixin("asm nothrow @nogc { mov DX, address; mov " ~ register
-            ~ ", value; out DX, " ~ register ~ "; }");
+            ~ ", value; out DX, " ~ operand ~ "; }");
     } else version (LDC) {
-        asm nothrow @nogc {
-            "out %0, %1" : : "{ax}" (value), "{dx}" (address);
-        }
+        enum instruction = Value.sizeof == 4 ? "out %%ax, %1" : "out %0, %1";
+        mixin("asm nothrow @nogc { \"" ~ instruction
+            ~ "\" : : \"{ax}\" (value), \"{dx}\" (address); }");
     }
     return value;
 }
