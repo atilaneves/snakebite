@@ -1612,12 +1612,14 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                     prepareDefault(expression.type);
             }),
             (expression) => attempt({ _nativeData.stringData(expression); }),
-            (constructor) => attempt({
+            (site) => attempt({
+                auto constructor = site.member;
                 auto definition = _callSelection.definitionOf(
                     constructor,
                     (declaration) => _program.linkedFunctionOf(declaration));
-                layoutOf(constructor);
-                callShapeOf(constructor);
+                // Construction keys its plans by the original member,
+                // while the linked definition supplies the reachable body.
+                prepareCall(site, site.arguments, constructor);
                 enqueue(definition);
             }),
             (field) => attempt({ bitfieldPlanOf(field); }),
@@ -1678,10 +1680,19 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         FuncDeclaration callee,
     ) {
         const layout = layoutOf(callee);
-        callShapeOf(callee);
-        prepareContext(outerFunctionOf(callee));
         if (callee.isThis is null && layout.hiddenThis.variable !is null)
             calleeContextPlanOf(site, callee);
+        prepareCall(site, site.arguments, callee);
+    }
+
+    extern(D) private void prepareCall(
+        Expression site,
+        Expressions* arguments,
+        FuncDeclaration callee,
+    ) {
+        const layout = layoutOf(callee);
+        callShapeOf(callee);
+        prepareContext(outerFunctionOf(callee));
         const decision = _callSelection.decisionOf(
             callee,
             (function_) => _program.isInterpreted(function_),
@@ -1693,7 +1704,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 && typeFunctionOf(callee).parameterList.varargs
                     == VarArg.variadic) {
             const hasTypes = layout.variadicTypes != size_t.max;
-            variadicCallPlanOf(site.arguments,
+            variadicCallPlanOf(arguments,
                 hasTypes + layout.parameters.length);
         }
         if (decision.route != CallSelection.Route.native
@@ -1704,7 +1715,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // asked by execution of any call to it, and `decision` may not ask.
         if (isNativeVariadic(callee)) {
             auto adapter = CallAdapter.Arguments.of(
-                typeFunctionOf(callee), site.arguments);
+                typeFunctionOf(callee), arguments);
             cachedCallPlan(site, callee,
                 () => adapter.prepare(*_plans, callee));
         } else
