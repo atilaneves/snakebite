@@ -73,24 +73,30 @@ private CastPlan classifyByKind(
     in TypeFacts sourceFacts,
     in TypeFacts destFacts,
 ) {
+    import dmd.astenums: Tbool;
+
+    // Whatever the source is, a `bool` destination asks for its truth,
+    // which `TypeFacts.Truth` states once for every type dmd lets
+    // convert to `bool`: dmd's `toBoolean` (`expressionsem.d`) checks
+    // `Type.isBoolean` on each operand of `&&` and `||`, and dmd's
+    // optimizer then builds the `CastExp` to `bool` for `x && true`
+    // out of that checked operand without any cast check of its own.
+    if (destType.ty == Tbool)
+        return CastPlan(CastKind.truth, sourceFacts, destFacts);
+
     final switch (sourceKind) with (TypeKind) {
     case nullValue:
         return CastPlan(CastKind.zero, sourceFacts, destFacts);
     case integral:
-        return classifyIntegral(
-            destKind, destType, sourceFacts, destFacts);
+        return classifyIntegral(destKind, sourceFacts, destFacts);
     case floating:
-        return classifyFloating(
-            destKind, destType, sourceFacts, destFacts);
+        return classifyFloating(destKind, sourceFacts, destFacts);
     case imaginary:
-        return classifyImaginary(
-            destKind, destType, sourceFacts, destFacts);
+        return classifyImaginary(destKind, sourceFacts, destFacts);
     case complex:
-        return classifyComplex(
-            destKind, destType, sourceFacts, destFacts);
+        return classifyComplex(destKind, sourceFacts, destFacts);
     case pointer, functionPointer:
-        return classifyPointer(
-            destKind, destType, sourceFacts, destFacts);
+        return classifyPointer(destKind, sourceFacts, destFacts);
     case classReference:
         return classifyClass(
             destKind, sourceType, destType, sourceFacts, destFacts);
@@ -114,17 +120,10 @@ private CastPlan classifyByKind(
 }
 
 private CastPlan classifyIntegral(
-    TypeKind destKind,
-    imported!"dmd.mtype".Type destType,
-    in TypeFacts sourceFacts,
-    in TypeFacts destFacts,
+    TypeKind destKind, in TypeFacts sourceFacts, in TypeFacts destFacts,
 ) {
-    import dmd.astenums: Tbool;
-
     final switch (destKind) with (TypeKind) {
     case integral:
-        if (destType.ty == Tbool)
-            return CastPlan(CastKind.toBool, sourceFacts, destFacts);
         if (destFacts.size == sourceFacts.size)
             return CastPlan(CastKind.copy, sourceFacts, destFacts);
         if (destFacts.size < sourceFacts.size)
@@ -155,20 +154,11 @@ private CastPlan classifyIntegral(
 }
 
 private CastPlan classifyFloating(
-    TypeKind destKind,
-    imported!"dmd.mtype".Type destType,
-    in TypeFacts sourceFacts,
-    in TypeFacts destFacts,
+    TypeKind destKind, in TypeFacts sourceFacts, in TypeFacts destFacts,
 ) {
-    import dmd.astenums: Tbool;
-
     final switch (destKind) with (TypeKind) {
     case integral:
-        return CastPlan(
-            destType.ty == Tbool
-                ? CastKind.floatToBool : CastKind.floatToIntegral,
-            sourceFacts, destFacts,
-        );
+        return CastPlan(CastKind.floatToIntegral, sourceFacts, destFacts);
     case floating:
         return CastPlan(
             sourceFacts.size == destFacts.size
@@ -188,20 +178,11 @@ private CastPlan classifyFloating(
 }
 
 private CastPlan classifyImaginary(
-    TypeKind destKind,
-    imported!"dmd.mtype".Type destType,
-    in TypeFacts sourceFacts,
-    in TypeFacts destFacts,
+    TypeKind destKind, in TypeFacts sourceFacts, in TypeFacts destFacts,
 ) {
-    import dmd.astenums: Tbool;
-
     final switch (destKind) with (TypeKind) {
     case integral:
-        return CastPlan(
-            destType.ty == Tbool
-                ? CastKind.floatToBool : CastKind.zero,
-            sourceFacts, destFacts,
-        );
+        return CastPlan(CastKind.zero, sourceFacts, destFacts);
     case floating:
         return CastPlan(CastKind.zero, sourceFacts, destFacts);
     case imaginary:
@@ -222,20 +203,11 @@ private CastPlan classifyImaginary(
 }
 
 private CastPlan classifyComplex(
-    TypeKind destKind,
-    imported!"dmd.mtype".Type destType,
-    in TypeFacts sourceFacts,
-    in TypeFacts destFacts,
+    TypeKind destKind, in TypeFacts sourceFacts, in TypeFacts destFacts,
 ) {
-    import dmd.astenums: Tbool;
-
     final switch (destKind) with (TypeKind) {
     case integral:
-        return CastPlan(
-            destType.ty == Tbool
-                ? CastKind.complexToBool : CastKind.complexToIntegral,
-            sourceFacts, destFacts,
-        );
+        return CastPlan(CastKind.complexToIntegral, sourceFacts, destFacts);
     case floating:
         return CastPlan(CastKind.complexToReal, sourceFacts, destFacts);
     case imaginary:
@@ -257,20 +229,11 @@ private CastPlan classifyComplex(
 }
 
 private CastPlan classifyPointer(
-    TypeKind destKind,
-    imported!"dmd.mtype".Type destType,
-    in TypeFacts sourceFacts,
-    in TypeFacts destFacts,
+    TypeKind destKind, in TypeFacts sourceFacts, in TypeFacts destFacts,
 ) {
-    import dmd.astenums: Tbool;
-
     final switch (destKind) with (TypeKind) {
     case integral:
-        return CastPlan(
-            destType.ty == Tbool
-                ? CastKind.toBool : CastKind.pointerToIntegral,
-            sourceFacts, destFacts,
-        );
+        return CastPlan(CastKind.pointerToIntegral, sourceFacts, destFacts);
     case floating:
         return CastPlan(CastKind.pointerToFloat, sourceFacts, destFacts);
     case dynamicArray:

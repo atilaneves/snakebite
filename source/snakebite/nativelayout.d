@@ -297,15 +297,12 @@ public struct TypeFacts {
     //
     // * A floating value is true when nonzero, compared as a float, at
     //   `size` bytes from the value's own start.
-    // * A dynamic array is true by its pointer word alone (`ptr !is
-    //   null`) - a zero-length array over real storage is still true -
-    //   so only `arrayPointerOffset` is tested, never the length word.
-    //   (A length with a null pointer is not pinned either way: dmd
-    //   2.112 and ldc2 1.42 disagree on it, and no guest program either
-    //   backend can run builds that value.)
+    // * A dynamic array is true when either of its two words (`ptr`,
+    //   `length`) is nonzero: a zero-length slice over real storage is
+    //   true, and so is a null pointer with a nonzero length (dmd
+    //   compiles both so; `ldc2` tests the pointer alone).
     // * A delegate is true when either of its two words (`ptr`,
-    //   `funcptr`) is nonzero - the one shape here with a second word
-    //   to test, at `secondOffset`.
+    //   `funcptr`) is nonzero.
     // * A pointer, a class reference, an associative array's one
     //   pointer-sized handle, and every integral (`bool`, `char`, an
     //   enum with an integral base, ...) are already exactly one native
@@ -352,7 +349,10 @@ public struct TypeFacts {
                 }
 
                 case Tarray:
-                    return Truth(false, arrayPointerOffset, size_t.sizeof);
+                    return Truth(
+                        false, arrayPointerOffset, size_t.sizeof,
+                        arrayLengthOffset,
+                    );
 
                 case Tdelegate:
                     return Truth(

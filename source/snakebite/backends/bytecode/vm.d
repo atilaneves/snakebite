@@ -2112,16 +2112,11 @@ private const(Instruction)* runCastAs(CastKind kind, Decoded)(
             CastLayout(kind, 0, execution.width),
             execution.source, execution.destination,
         );
-    else static if (kind == floatToBool)
-        applyCastAs!kind(
-            CastLayout(kind, execution.sourceWidth, 0),
-            execution.source, execution.destination,
-        );
     else
-        // complexToBool, complexToReal, complexToImaginary, complexWidth,
-        // realToComplex, imaginaryToComplex, floatWidth, toBool, narrow,
-        // widenSigned, widenUnsigned: `applyCastAs` needs nothing beyond
-        // the two plain sizes.
+        // complexToReal, complexToImaginary, complexWidth, realToComplex,
+        // imaginaryToComplex, floatWidth, narrow, widenSigned,
+        // widenUnsigned: `applyCastAs` needs nothing beyond the two
+        // plain sizes.
         applyCastAs!kind(
             CastLayout(kind, execution.sourceWidth, execution.width),
             execution.source, execution.destination,
@@ -2152,7 +2147,7 @@ private bool castUnsigned(in size_t packed) @safe pure nothrow @nogc {
     return (packed & (1UL << 63)) != 0;
 }
 
-// As `opCastAs`, but for `narrow`/`widenSigned`/`widenUnsigned`/`toBool`
+// As `opCastAs`, but for `narrow`/`widenSigned`/`widenUnsigned`
 // only, and with both sizes template parameters instead of `width`/
 // `sourceWidth` - the same idea as `opCopyFixed!size` above for a
 // fixed-width `opCopy`: every D integral width is one of `1`/`2`/`4`/

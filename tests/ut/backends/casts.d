@@ -74,7 +74,7 @@ unittest {
 }
 
 
-@("kind.toBool")
+@("kind.truth")
 unittest {
     auto function_ = castFunctionOf(q{
         bool cast_(int value) { return cast(bool) value; }
@@ -83,7 +83,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastKind.toBool;
+    plan.kind.should == CastKind.truth;
 }
 
 
@@ -202,23 +202,6 @@ unittest {
     const plan = classify(cast_.e1.type, cast_.type);
 
     plan.kind.should == CastKind.widenUnsigned;
-}
-
-
-// `cast(bool)` on a pointer is a dmd frontend-legal cast (unlike a class
-// reference or a delegate, both of which dmd itself refuses to cast to
-// `bool`), and tests the same nonzero bytes `kind.toBool`'s integral
-// operand already does.
-@("kind.toBool.pointer")
-unittest {
-    auto function_ = castFunctionOf(q{
-        bool cast_(int* value) { return cast(bool) value; }
-    });
-    auto cast_ = castOf(function_);
-
-    const plan = classify(cast_.e1.type, cast_.type);
-
-    plan.kind.should == CastKind.toBool;
 }
 
 
@@ -415,21 +398,6 @@ unittest {
 }
 
 
-// `complex`/`imaginary` are deprecated but still full members of the
-// language `classify` has to answer for (coordinator probe items 1-5, 8).
-@("kind.complexToBool")
-unittest {
-    auto function_ = castFunctionOf(q{
-        bool cast_(cdouble value) { return cast(bool) value; }
-    });
-    auto cast_ = castOf(function_);
-
-    const plan = classify(cast_.e1.type, cast_.type);
-
-    plan.kind.should == CastKind.complexToBool;
-}
-
-
 @("kind.complexToReal")
 unittest {
     auto function_ = castFunctionOf(q{
@@ -596,21 +564,6 @@ unittest {
     const plan = classify(cast_.e1.type, cast_.type);
 
     plan.kind.should == CastKind.floatWidth;
-}
-
-
-// An imaginary value's own nonzero test is the identical byte operation
-// a real operand's `cast(bool)` already is.
-@("kind.floatToBool.imaginaryToBool")
-unittest {
-    auto function_ = castFunctionOf(q{
-        bool cast_(idouble value) { return cast(bool) value; }
-    });
-    auto cast_ = castOf(function_);
-
-    const plan = classify(cast_.e1.type, cast_.type);
-
-    plan.kind.should == CastKind.floatToBool;
 }
 
 

@@ -2801,3 +2801,104 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE refuses to slice a null pointer"),
+)) {
+    @("sliceWithNullPointerAndNonzeroLengthIsTruthy." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int[] nullPointer = (cast(int*) null)[0 .. 1];
+                const viaOperand = nullPointer && true;
+                const viaCondition = nullPointer ? 1 : 0;
+                return viaOperand && viaCondition ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "dmd's interpreter leaves the class reference itself as the "
+        ~ "value of `reference && true`, so the result is not a `bool`"),
+)) {
+    @("classReferenceIsTruthyOperandOfLogicalAnd." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Thing {
+            }
+
+            int main() {
+                Thing present = new Thing;
+                Thing absent = null;
+                const both = present && true;
+                const neither = absent && true;
+                return both && !neither ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("sliceIsTruthyOperandOfLogicalOr." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int[] present = [1];
+                int[] absent = null;
+                const either = present || false;
+                const neither = absent || false;
+                return either && !neither ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's interpreter: cannot cast a delegate to bool at compile time"),
+)) {
+    @("delegateIsTruthyOperandOfLogicalAnd." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int delegate() present = () => 1;
+                int delegate() absent = null;
+                const both = present && true;
+                const neither = absent && true;
+                return both && !neither ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's interpreter: cannot cast an associative array to bool at "
+        ~ "compile time"),
+)) {
+    @("associativeArrayIsTruthyOperandOfLogicalAnd." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int[int] present = [1: 2];
+                int[int] absent = null;
+                const both = present && true;
+                const neither = absent && true;
+                return both && !neither ? 0 : 1;
+            }
+        });
+    }
+}

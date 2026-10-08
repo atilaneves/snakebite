@@ -2622,8 +2622,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     // `TypeFacts.Truth` decides which native bytes of `expression`'s
     // value make it true - the whole value for a pointer, a class
-    // reference, an associative array's handle, or an integral; only the
-    // pointer word for a dynamic array; either of a delegate's two words
+    // reference, an associative array's handle, or an integral; either
+    // of a dynamic array's two words (`ptr`, `length`) or of a delegate's
     // (`ptr`, `funcptr`) - so this method carries no case of its own for
     // any of them, and reads the same shared rule the bytecode compiler
     // does.
@@ -4830,6 +4830,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return;
         }
 
+        // The operand's truth is the one a condition tests.
+        case truth:
+            storeIntegral(_place, truthOf(expression.e1) ? 1 : 0, _facts.size);
+            return;
+
         // Every kind below is only a transformation of the operand's
         // own already-evaluated (or already-addressed) bytes into
         // `_place`'s - `applyCast` is the one place that carries each
@@ -4837,7 +4842,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // the bytecode VM's own per-`CastKind` `opCastAs` ops reach
         // for; this interpreter only ever decides where the operand's
         // bytes already live.
-        case complexToBool:
         case complexToReal:
         case complexToImaginary:
         case complexToIntegral:
@@ -4947,24 +4951,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return;
         }
 
-        // dmd classifies `bool` as `integral | unsigned` (`mtype.d`), so
-        // this has to be its own kind rather than an ordinary
-        // integral-to-integral narrowing: D specifies `cast(bool) x` as
-        // `x != 0`, not "keep the low byte" - `cast(bool) 256` is `true`
-        // in D, not the `false` a truncation would store. `classify` also
-        // reaches this kind for a pointer operand (`cast(bool) somePtr`),
-        // which `asIntegral` itself refuses (`Type.isIntegral` is false
-        // for `Tpointer`), so this reads the operand's raw bytes directly
-        // instead - the same bytes `asPointer` would read for a pointer,
-        // or `asIntegral` for an integral, just without either one's own
-        // gate on the operand's type.
-        case toBool: {
-            align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
-            evaluate(expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
-            applyCast(layoutOf(plan), buffer.ptr, _place);
-            return;
-        }
-
         // `applyCast` sign- or zero-extends the operand to 64 bits per
         // its own signedness, then stores the destination's low bytes
         // of that value - correct whichever way the width changes,
@@ -4998,7 +4984,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         case integralToFloat:
         case floatToIntegral:
         case floatToPointer:
-        case floatToBool:
         case floatWidth: {
             align(real.alignof) ubyte[real.sizeof] buffer = void;
             evaluate(
