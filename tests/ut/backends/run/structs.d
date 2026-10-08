@@ -5768,6 +5768,25 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A direct anonymous union keeps the default of its first member.
+static foreach (backend; Matrix!()) {
+    @("classDefaultWithAnonymousUnion." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C {
+                union { int i = 42; float f; }
+                int tag = 7;
+            }
+            void main() {
+                auto c = new C;
+                assert(c.i == 42);
+                assert(c.tag == 7);
+            }
+        });
+    }
+}
+
 // A `static immutable` struct made by a function keeps the value of the
 // union member that the function wrote.
 static foreach (backend; Matrix!()) {

@@ -1783,16 +1783,26 @@ static foreach (backend; Matrix!(
     }
 }
 
-// A class field default is also evaluated once by the frontend, so all instances share the object.
+// A class field default retains packed fields, including a field whose
+// storage unit starts after the first byte and the ordinary field after it.
 static foreach (backend; Matrix!()) {
     @("compileTimeClassInClassFieldDefault." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            class C { int v; this(int x) { v = x; } }
-            class D { C c = new C(3); }
+            class C {
+                uint a : 9;
+                ubyte b : 3;
+                ubyte tag = 7;
+                this(int x) { a = x; b = 5; tag += 4; }
+            }
+            class D { C c = new C(257); }
             void main() {
-                assert((new D).c.v == 3);
+                auto c = (new D).c;
+                assert(c.a == 257);
+                assert(c.b == 5);
+                assert(c.tag == 11);
+                assert((new C(257)).tag == 11);
             }
         });
     }
