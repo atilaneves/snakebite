@@ -606,9 +606,10 @@ static foreach (backend; Matrix!(
 }
 
 
-// A call of a compiler intrinsic that no wrapper covers ends the run at
-// the call's first decision and names the intrinsic. Compiled D has the
-// instruction, and dmd's CTFE gives its own message.
+// A call of a compiler intrinsic that no wrapper covers is a native call of
+// a symbol that the process does not have, and the run ends naming the
+// intrinsic. Compiled D has the instruction, and dmd's CTFE gives its own
+// message.
 static foreach (backend; Matrix!(
     Omit!(Native, Because.inexpressible,
         "compiled D inlines the instruction"),
@@ -637,7 +638,8 @@ static foreach (backend; Matrix!(
             "-b", name, directory,
         ]);
         result.status.should.not == 0;
-        "no builtin wrapper for `core.simd.__simd`".should.be in result.output;
+        "declared by `__simd`: it is not in this process"
+            .should.be in result.output;
     }
 }
 
