@@ -77,6 +77,28 @@ def test_unit_runner_keeps_other_runner_sandbox(
             parent.kill()
         parent.communicate(timeout=30)
 
+# The boundary also covers data and TLS, not only function calls. Compare
+# the actual ELF table, so an omitted linker flag cannot pass this check.
+@pytest.mark.parametrize("binary", ["ut", "at", "sb", "sb-repl", "bench"])
+def test_host_dynamic_exports_are_exact(binary: str) -> None:
+    root = Path(__file__).resolve().parent.parent
+    map_path = root / (
+        f".reggae/{binary}-host-exports.map" if binary in {"ut", "at"}
+        else "build/host-exports.map"
+    )
+    script = re.sub(r"/\*.*?\*/", "", map_path.read_text(), flags=re.S)
+    global_section = script.split("global:", 1)[1].split("local:", 1)[0]
+    expected = {entry.strip() for entry in global_section.split(";") if entry.strip()}
+    assert all(not set(name) & set("*?[]") for name in expected)
+    if binary not in {"ut", "at"}:
+        assert expected == {"rt_options"}
+    result = subprocess.run(
+        ["nm", "-D", "--defined-only", "--format=posix", str(root / "bin" / binary)],
+        capture_output=True, text=True, check=True,
+    )
+    actual = {line.split()[0] for line in result.stdout.splitlines()}
+    assert actual == expected
+
 
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
 def test_module_constructor_uses_project_directory(

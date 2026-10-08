@@ -1,5 +1,24 @@
 module ut.backends.call.arrays;
 
+// Three puts grow the native Phobos Appender through its nested allocation
+// lambda. Host and library copies can have different closure layouts.
+static foreach (backend; Matrix!()) {
+    @("arrays.phobosAppenderThreeStrings." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.array: appender;
+            void main() {
+                auto output = appender!(string[])();
+                output.put("a");
+                output.put("b");
+                output.put("c");
+                assert(output.data == ["a", "b", "c"]);
+            }
+        });
+    }
+}
+
 
 import ut.backends;
 

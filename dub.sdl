@@ -32,9 +32,8 @@ configuration "unittest" {
     targetType "executable"
     targetName "ut"
     targetPath "bin"
-    // A non-root guest declaration runs as the native symbol the host
-    // already links, druntime template instantiations included, so the
-    // executable's own symbols must be visible to `dlsym`.
+    // Reggae replaces this map with the compiler-derived, explicit native
+    // fixture manifest. Host template copies stay private to the host.
     lflags "--export-dynamic" "--version-script=$PACKAGE_DIR/build/host-exports.map" platform="linux"
 
     mainSourceFile "tests/main.d"
@@ -80,7 +79,7 @@ configuration "sb" {
     targetType "executable"
     targetName "sb"
     targetPath "bin"
-    lflags "--export-dynamic" "--version-script=$PACKAGE_DIR/build/host-exports.map" platform="linux"
+    lflags "--export-dynamic-symbol=rt_options" "--version-script=$PACKAGE_DIR/build/host-exports.map" platform="linux"
 
     mainSourceFile "source/snakebite/main.d"
     dependency "readline" version="0.3.0"
@@ -92,7 +91,7 @@ configuration "sb-repl" {
     targetType "executable"
     targetName "sb-repl"
     targetPath "bin"
-    lflags "--export-dynamic" "--version-script=$PACKAGE_DIR/build/host-exports.map" platform="linux"
+    lflags "--export-dynamic-symbol=rt_options" "--version-script=$PACKAGE_DIR/build/host-exports.map" platform="linux"
 
     mainSourceFile "source/snakebite/repl/main.d"
     importPaths "."
@@ -106,7 +105,7 @@ configuration "bench" {
     targetType "executable"
     targetName "bench"
     targetPath "bin"
-    lflags "--export-dynamic" "--version-script=$PACKAGE_DIR/build/host-exports.map" platform="linux"
+    lflags "--export-dynamic-symbol=rt_options" "--version-script=$PACKAGE_DIR/build/host-exports.map" platform="linux"
 
     mainSourceFile "bench/main.d"
     sourcePaths "bench"

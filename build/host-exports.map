@@ -1,16 +1,8 @@
-/* What a snakebite host executable exports to the guest and to the
-   shared druntime. Everything stays visible (a guest declaration runs as
-   the native symbol the host already links), except dmd's own copies of
-   druntime's allocation hooks (dmd.root.rmem): a guest, or the shared
-   druntime itself, resolving one of those by name gets druntime's, as
-   compiled D does. */
+/* Shared druntime reads the process GC settings through rt_options.
+   Host template and lambda copies must not interpose on loaded D code. */
 {
     global:
-        *;
+        rt_options;
     local:
-        _d_allocmemory;
-        _d_newclass;
-        _d_allocclass;
-        _d_newitemT;
-        _d_newitemiT;
+        *;
 };
