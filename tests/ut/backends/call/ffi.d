@@ -4099,3 +4099,182 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// dmd's code generator converts the result of a `std.math` `real`
+// intrinsic to the declared floating point result type, so `toPrec` of a
+// `real` that returns `float` is a narrowing.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a guest module declaration cannot be mixed into the host module"),
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE has no case for `toPrec` in `dmd.builtin`"),
+)) {
+    @("ffi.stdMathToPrecOfARealToAFloatNarrows." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        runMainOfModule!backend(
+            "std.math.toPrecToFloat" ~ backend.stringof, q{
+
+            float toPrec(real);
+
+            void main() {
+                assert(toPrec(1.1L) == 1.1f);
+            }
+        });
+    }
+}
+
+
+// dmd's code generator does not inline a deprecated function
+// (`intrinsic_op`), so the call is native.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a guest module declaration cannot be mixed into the host module"),
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE evaluates a call named like a builtin with the " ~
+        "builtin, whatever symbol the declaration names"),
+)) {
+    @("ffi.deprecatedStdMathDeclarationCallsTheNativeFunction."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        runMainOfModule!backend(
+            "std.math.deprecatedFabs" ~ backend.stringof, q{
+
+            deprecated pragma(mangle, "floor") extern(C) double fabs(double);
+
+            deprecated void main() {
+                assert(fabs(2.7) == 2.0);
+            }
+        });
+    }
+}
+
+
+// A wrapper takes the one operand its instruction takes: a second operand
+// makes the declaration a native call.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a guest module declaration cannot be mixed into the host module"),
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE evaluates a call named like a builtin with the " ~
+        "builtin, whatever symbol the declaration names"),
+)) {
+    @("ffi.stdMathSinOfTwoOperandsCallsTheNativeFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        runMainOfModule!backend(
+            "std.math.sinOfTwoOperands" ~ backend.stringof, q{
+
+            pragma(mangle, "atan2l") extern(C) real sin(real, real);
+
+            void main() {
+                assert(sin(0.0L, 1.0L) == 0.0L);
+            }
+        });
+    }
+}
+
+
+// dmd's code generator inlines the `core.bitop` instructions of any module
+// `core.*.*.bitop`, not only of `core.bitop` itself.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a guest module declaration cannot be mixed into the host module"),
+    Omit!(Ctfe, Because.inexpressible,
+        "a bodiless function has no source for dmd's CTFE"),
+)) {
+    @("ffi.bitScanIsInlinedInAnyModuleNamedBitop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        runMainOfModule!backend(
+            "core." ~ backend.stringof ~ ".inlined.bitop", q{
+
+            int bsf(uint);
+            int bsr(ulong);
+
+            void main() {
+                assert(bsf(8u) == 3);
+                assert(bsr(0x100000000UL) == 32);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a guest module declaration cannot be mixed into the host module"),
+    Omit!(Ctfe, Because.inexpressible,
+        "a bodiless function has no source for dmd's CTFE"),
+)) {
+    @("ffi.bitTestAndSetIsInlined." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        runMainOfModule!backend(
+            "core." ~ backend.stringof ~ ".inlinedBts.bitop", q{
+
+            int bts(ulong*, ulong);
+
+            void main() {
+                ulong word = 1;
+                assert(bts(&word, 3) == 0);
+                assert(bts(&word, 3) != 0);
+                assert(word == 9);
+            }
+        });
+    }
+}
+
+
+// dmd's code generator inlines the function an alias names
+// (`intrinsic_op` resolves it), not the alias.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a guest module declaration cannot be mixed into the host module"),
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE has no case for `rint` in `dmd.builtin`"),
+)) {
+    @("ffi.intrinsicCalledThroughAnAliasIsInlined." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        runMainOfModule!backend(
+            "std.math.aliased" ~ backend.stringof, q{
+
+            real rint(real);
+            alias round = rint;
+            real round(int value) { return value; }
+
+            void main() {
+                assert(round(2.5L) == 2.0L);
+            }
+        });
+    }
+}
+
+
+// dmd classifies a `sin` of the module `std.bitop` as a builtin by name for
+// CTFE (`dmd.builtin.determine_builtin` reads `std.bitop` as a math
+// module), but its code generator inlines nothing there.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a guest module declaration cannot be mixed into the host module"),
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE evaluates a call named like a builtin with the " ~
+        "builtin, whatever symbol the declaration names"),
+)) {
+    @("ffi.classifiedButNotInlinedDeclarationCallsTheNativeFunction."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        runMainOfModule!backend("std.bitop", q{
+
+            pragma(mangle, "floor") extern(C) double sin(double);
+
+            void main() {
+                assert(sin(2.7) == 2.0);
+            }
+        });
+    }
+}

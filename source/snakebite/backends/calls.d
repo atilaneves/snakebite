@@ -11,7 +11,7 @@ public struct CallSelection {
     // storage with the original until one side grows.
     @disable this(this);
 
-    import dmd.func: BUILTIN, FuncDeclaration;
+    import dmd.func: FuncDeclaration;
 
     import snakebite.backends.builtins:
         BuiltinCall, ParameterType, startVariadicEntry;
@@ -292,10 +292,11 @@ public struct CallSelection {
     // classifies names for CTFE, some of which the code generator does not
     // inline, and this backend never calls the CTFE evaluator at run time.
     //
-    // A declaration that dmd inlines but no wrapper takes (an instruction
-    // whose wrapper does not exist, or a result type that dmd converts
-    // unspecified) is a native call too. A wrapper writes its result at its
-    // own size, so a wrapper never serves a declaration it differs from.
+    // A declaration that dmd inlines and no wrapper takes is a native call
+    // too: a wrapper reads and writes at the sizes of its own signature, so
+    // it never serves a declaration whose signature differs. dmd gives such
+    // a declaration an unspecified result, or an instruction (`inp`,
+    // `outp`, `__simd_ib`) that has no wrapper.
     private static Decision builtinDecision(FuncDeclaration function_) {
         import snakebite.backends.builtins:
             destinationParameterOf, entryOf;
@@ -320,13 +321,16 @@ public struct CallSelection {
     // copy. The code generator compares the type of the first parameter by
     // identity with its basic type singletons, so a qualified type matches
     // none of them: no `toBasetype` before the `.ty` tests below.
+    //
+    // `intrinsic_op` first resolves an alias to its function
+    // (`toAliasFunc`). The call plan only sees the resolved function,
+    // because the frontend resolves the alias when it picks the overload.
     private static bool isInlinedByCodeGenerator(
-        FuncDeclaration declaration,
+        FuncDeclaration function_,
     ) {
         import dmd.astenums: TY;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
-        auto function_ = declaration.toAliasFunc;
         if (function_.isDeprecated)
             return false;
         const module_ = function_.getModule;
