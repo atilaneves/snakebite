@@ -656,6 +656,7 @@ public struct CallSelection {
         import core.stdc.fenv;
         import core.stdc.string: memcpy;
         import snakebite.backends.builtins: entryOf;
+        import snakebite.backends.dmdintrinsics: magnitudeTo;
         import snakebite.nativelayout: TypeFacts;
 
         // e2ir replaces toPrec with conversions, and evalu8 folds OPabs.
@@ -675,13 +676,6 @@ public struct CallSelection {
         ParameterType result;
         if (!signatureOf(function_, parameters[], result)
                 || entryOf(name, parameters[], result) is null)
-            return false;
-        // OPabs writes at operand width, then paints the result type.
-        // Only widening float retains bytes of el_una's child pointer.
-        // A double write replaces that pointer; the cleared E2 supplies
-        // the zero exponent bytes when the declared result is real.
-        if (name == "fabs" && parameters[0] == ParameterType.float_
-                && result != ParameterType.float_)
             return false;
         ScalarConstant operand;
         if (!scalarConstantOf((*expression.arguments)[0], operand)
@@ -706,6 +700,12 @@ public struct CallSelection {
         feclearexcept(FE_ALL_EXCEPT);
         if (name == "toPrec")
             convertFloatingStorage(stored, parameters[0], result);
+        // The owner's #628 exception replaces only stale child-pointer
+        // float widening with DMD's emitted instructions. Cleared storage
+        // already gives the zero-extended XMM double view.
+        else if (parameters[0] == ParameterType.float_
+                && result == ParameterType.real_)
+            stored.Vreal = magnitudeTo!real(stored.Vfloat);
         else
             applyFloatingSign(stored, parameters[0], FloatingSign.magnitude);
         constant.storage = stored;

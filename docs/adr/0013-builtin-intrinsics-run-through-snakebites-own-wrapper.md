@@ -66,7 +66,9 @@ supported intrinsic signatures.
 
 ### The result is dmd's result
 
-The guest is always analysed as dmd code (`version (DigitalMars)`, with
+The intrinsic reference is DMD 2.113.0 on Linux x86-64, with the narrow
+owner-approved constant-fabs exception below. The guest is always analysed
+as dmd code (`version (DigitalMars)`, with
 `D_SIMD`). One guest program must therefore give one result in the
 dmd-built `bin/ut` and in the LDC-built `bin/sb` and `bin/at`, and that
 result is the one that dmd gives. A wrapper does not call whatever the
@@ -115,17 +117,36 @@ not the tail of an inner result. Floating casts and `toPrec` read the stored
 operand at its own width. Identity conversions and negation keep the raw
 representation; genuine numeric conversions retain their exception checks.
 
-A float fold with a double or real result also reads the remaining
-compiler child-pointer bytes. The proof does not invent those bytes; it
-leaves that call on the instruction path. This is a proof limit, not an
-owner-approved language exception or a claim that all mixed signatures
-have undefined results. There is a known stable mismatch: native DMD's
-constant `real fabs(float)` result for `-4660.0f` is positive and less than
-one, while the instruction path gives 4660. This predicate does not require
-matching compiler addresses. The stale backend representation is not a
-guest uninitialized read. Exact parity for these two constant shapes is not
-proved, and the known mismatch blocks acceptance until the contract is
-resolved. An upstream report alone does not authorize a scope exception.
+### Approved constant-fabs reference exception
+
+On #628/#433, 2026-10-08, the owner approved exactly two constant shapes:
+`double fabs(float)` and `real fabs(float)`. They use the pinned DMD
+2.113.0 **nonconstant emitted-instruction** result, not that compiler's
+constant-folding bytes. Double reads the zero-extended float magnitude
+bits, not a numeric double conversion. Real uses numeric x87 magnitude.
+The shared scalar producer proof applies the same rule to direct calls
+and nested constant consumers. It does not leave a known constant on the
+instruction path merely because the old fold leaked a pointer.
+
+DMD's `el_una` stores its child pointer in E1, which shares storage with
+`Vconst`. `evalu8`'s float `OPabs` fold replaces only four bytes, then paints
+the node with the declared wider result type and frees the child. The upper
+four pointer bytes survive. A real result also reads the cleared exponent
+bytes. Native constant `real fabs(-4660.0f)` is thus positive and less than
+one; repeated builds vary in their pointer bytes. This is a stale compiler
+representation, not a guest uninitialized read. The approved reference
+intentionally changes that stable predicate: the real result is 4660.
+No compiler-pointer bytes are copied or guessed.
+
+This is not a general mixed-width exception. Narrowing, initialized
+double-to-real constant views, signaling NaNs, payloads, and floating-point
+flags keep the exact existing reference. The seven initialized constant
+width pairs and every nonconstant instruction rule stay unchanged.
+Exception-producing constant conversions still use the execution path.
+[DMD issue #23998](https://github.com/dlang/dmd/issues/23998) records the
+defect and recommends complete result
+initialization consistent with emitted instructions for these two shapes;
+it does not expand this owner approval or claim an upstream repair.
 
 Scalar folding uses DMD's allocation-free `constfold` operations and
 private `UnionExp` values. It does not optimize the guest AST, expand

@@ -4015,6 +4015,9 @@ static foreach (backend; Matrix!(
                 assert(fabs(-4660.0L) == -0x1p-741);
                 assert(fromReal(-4660.0L) == 4660);
                 assert(fromFloat(-4660.0f) == 0x1.16468p-1044);
+                Bits widened;
+                widened.value = fabs(-4660.0f);
+                assert(widened.bits == 0x4591a000UL);
                 Bits signaling;
                 signaling.value = fabs(-0x1.ffe000000000002p0L);
                 assert(signaling.bits == 0xfff0000000000010UL);
@@ -4024,10 +4027,14 @@ static foreach (backend; Matrix!(
             "core.fabsClearedExponent." ~ backend.stringof ~ ".math", q{
             real fabs(double);
             double fabs(real);
+            real fabs(float);
             real toPrec(double);
             union Bits { real value; ushort[8] words; }
             void main() {
                 assert(fabs(-4660.0) == 0x4.0b234p-16385L);
+                // Only float widening uses the approved instruction reference.
+                assert(fabs(-4660.0f) == 4660.0L);
+                assert(fabs(fabs(-4660.0f)) == -0x1p-741);
                 Bits nested;
                 nested.value = fabs(fabs(-4660.0L));
                 assert(nested.words[4] == 0);
