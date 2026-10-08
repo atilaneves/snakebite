@@ -6192,17 +6192,14 @@ static foreach (backend; Matrix!(
 // The result of a conditional expression whose branches are variables is
 // an lvalue to dmd's glue code: the variable is read after the destructors.
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE reads the result before the destructor of the temporary runs"),
 )) {
     @("fullExpression.variableResultReadsAfterDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            struct Z { int v; int* rp; ~this() { v = 0; gg = 0; if (rp) *rp = 0; } }
+            struct Z { int v; ~this() { v = 0; gg = 0; } }
             __gshared int gg = 1;
             Z mz(int v) { return Z(v); }
-            Z mp(int v, int* p) { return Z(v, p); }
             void main() {
                 bool taken;
                 if (mz(1).v ? gg : gg)
@@ -6216,15 +6213,12 @@ static foreach (backend; Matrix!(
 // A local variable that a destructor changes is read after it ran, when it
 // is the result of a conditional expression.
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE reads the result before the destructor of the temporary runs"),
 )) {
     @("fullExpression.variableResultOfLocalReadsAfterDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            struct Z { int v; int* rp; ~this() { v = 0; gg = 0; if (rp) *rp = 0; } }
-            __gshared int gg = 1;
+            struct Z { int v; int* rp; ~this() { v = 0; if (rp) *rp = 0; } }
             Z mz(int v) { return Z(v); }
             Z mp(int v, int* p) { return Z(v, p); }
             void main() {
@@ -6241,15 +6235,12 @@ static foreach (backend; Matrix!(
 // A conditional expression whose branches are an lvalue field and a variable
 // is an lvalue: its truth is read after the destructors.
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE reads the result before the destructor of the temporary runs"),
 )) {
     @("fullExpression.conditionalResultReadsAfterDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            struct Z { int v; int* rp; ~this() { v = 0; gg = 0; if (rp) *rp = 0; } }
-            __gshared int gg = 1;
+            struct Z { int v; int* rp; ~this() { v = 0; if (rp) *rp = 0; } }
             Z mz(int v) { return Z(v); }
             Z mp(int v, int* p) { return Z(v, p); }
             void main() {
@@ -6265,15 +6256,12 @@ static foreach (backend; Matrix!(
 
 // A dereference is an lvalue result: it is read after the destructors.
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE reads the result before the destructor of the temporary runs"),
 )) {
     @("fullExpression.dereferenceResultReadsAfterDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            struct Z { int v; int* rp; ~this() { v = 0; gg = 0; if (rp) *rp = 0; } }
-            __gshared int gg = 1;
+            struct Z { int v; int* rp; ~this() { v = 0; if (rp) *rp = 0; } }
             Z mz(int v) { return Z(v); }
             Z mp(int v, int* p) { return Z(v, p); }
             void main() {
@@ -6289,8 +6277,6 @@ static foreach (backend; Matrix!(
 
 // An element of a static array in a temporary is an lvalue result.
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE reads the result before the destructor of the temporary runs"),
 )) {
     @("fullExpression.elementResultReadsAfterDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -6311,8 +6297,6 @@ static foreach (backend; Matrix!(
 // An element of an associative array in a temporary is read after the
 // destructors, like any other element.
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE reads the result before the destructor of the temporary runs"),
 )) {
     @("fullExpression.associativeArrayElementResultReadsAfterDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -6334,8 +6318,6 @@ static foreach (backend; Matrix!(
 // A bit field is read through a shift and a mask, not as an lvalue: it is read
 // before the destructors.
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE reads the result before the destructor of the temporary runs"),
 )) {
     @("fullExpression.bitFieldResultReadsBeforeDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -6356,8 +6338,6 @@ static foreach (backend; Matrix!(
 // A thread-local variable is not an lvalue result of the glue code: it is
 // read before the destructors.
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE reads the result before the destructor of the temporary runs"),
 )) {
     @("fullExpression.threadLocalVariableResultReadsBeforeDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -6379,15 +6359,12 @@ static foreach (backend; Matrix!(
 // The operand of a `switch` is a full expression: an lvalue result is read
 // after the destructors.
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE reads the result before the destructor of the temporary runs"),
 )) {
     @("fullExpression.switchOperandReadsAfterDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            struct Z { int v; int* rp; ~this() { v = 0; gg = 0; if (rp) *rp = 0; } }
-            __gshared int gg = 1;
+            struct Z { int v; int* rp; ~this() { v = 0; if (rp) *rp = 0; } }
             Z mz(int v) { return Z(v); }
             Z mp(int v, int* p) { return Z(v, p); }
             void main() {
@@ -6406,15 +6383,12 @@ static foreach (backend; Matrix!(
 // The operand of `return` is a full expression: an lvalue result is read after
 // the destructors.
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE reads the result before the destructor of the temporary runs"),
 )) {
     @("fullExpression.returnOperandReadsAfterDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            struct Z { int v; int* rp; ~this() { v = 0; gg = 0; if (rp) *rp = 0; } }
-            __gshared int gg = 1;
+            struct Z { int v; int* rp; ~this() { v = 0; if (rp) *rp = 0; } }
             Z mz(int v) { return Z(v); }
             Z mp(int v, int* p) { return Z(v, p); }
             int f() { return mz(2).v; }
@@ -6426,8 +6400,6 @@ static foreach (backend; Matrix!(
 // The message of an `assert` is a full expression: an lvalue result is read
 // after the destructors.
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE reads the result before the destructor of the temporary runs"),
 )) {
     @("fullExpression.assertMessageReadsAfterDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -6450,8 +6422,6 @@ static foreach (backend; Matrix!(
 // The operand of `throw` is a full expression: an lvalue result is read after
 // the destructors.
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE reads the result before the destructor of the temporary runs"),
 )) {
     @("fullExpression.throwOperandReadsAfterDestructor." ~ backend.stringof)
     @Tags(backend.stringof)

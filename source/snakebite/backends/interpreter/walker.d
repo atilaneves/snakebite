@@ -2274,7 +2274,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             statement._body.accept(this);
     }
 
-    protected override void visitReturnOperand(ReturnStatement statement) {
+    protected override void visitReturnOperand(
+        ReturnStatement statement, bool readsAfterEnd,
+    ) {
         if (_controlFlow.seeking)
             return;
 
@@ -2298,6 +2300,13 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         }
 
         void evaluateValue() {
+            if (readsAfterEnd) {
+                _returned = ReturnedLvalue(
+                    addressOf(FullExpressionScope.lvalueOf(statement.exp)),
+                    _place, _facts.size);
+                return;
+            }
+
             // `_type`/`_facts` are already this function's return type
             // and its facts, set together on entry (`executeRaw`) or by
             // the last `evaluate`, so this callback needs no fresh type
@@ -2320,6 +2329,23 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         );
     }
 
+    // The address of a returned lvalue, which the transfer reads after the
+    // destructors of the operand ran.
+    private struct ReturnedLvalue {
+        const(void)* address;
+        void* place;
+        size_t size;
+    }
+
+    private ReturnedLvalue _returned;
+
+    extern(D) protected override bool readsResultAfterEnd(
+        in FullExpressionScope.Position position,
+        Expression result,
+    ) {
+        return _temporaries.readsResultAfterEnd(position, result);
+    }
+
     extern(D) protected override void withFullExpression(
         in FullExpressionScope.Position position,
         Expression root,
@@ -2329,8 +2355,16 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     protected override void visitReturnTransfer(ReturnStatement) {
+        import core.stdc.string: memcpy;
+
         if (_controlFlow.seeking)
             return;
+
+        if (_returned.address !is null) {
+            if (_returned.place !is null)
+                memcpy(_returned.place, _returned.address, _returned.size);
+            _returned = ReturnedLvalue.init;
+        }
 
         _controlFlow.returnFromFunction;
     }
@@ -2354,10 +2388,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         in FullExpressionScope.Position position,
         Expression expression,
     ) {
-        if (FullExpressionScope.readsResultAfterEnd(position, expression)) {
+        if (readsResultAfterEnd(position, expression)) {
             void* address;
             fullExpression(position, expression, {
-                address = addressOf(expression);
+                address = addressOf(FullExpressionScope.lvalueOf(expression));
             });
             return truthOfStored(address, expression.type);
         }
@@ -2396,13 +2430,33 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         auto plan = switchPlan(statement);
         if (!_controlFlow.seeking) {
-            Statement selected;
-            fullExpression(FullExpressionScope.Position.switchOperand,
-                statement.condition, {
-                const condition = asIntegral(statement.condition);
-                selected = selectCase(plan, condition,
-                    (case_) => asIntegral(case_.exp));
+            import snakebite.nativelayout: loadIntegral;
+
+            const operandFacts = factsOf(statement.condition.type);
+            long condition;
+            if (readsResultAfterEnd(
+                    FullExpressionScope.Position.switchOperand,
+                    statement.condition)) {
+                void* address;
+                fullExpression(FullExpressionScope.Position.switchOperand,
+                    statement.condition, {
+                    address = addressOf(FullExpressionScope.lvalueOf(
+                        statement.condition));
                 });
+                condition = loadIntegral(
+                    address, operandFacts.size, !operandFacts.isUnsigned);
+            } else
+                fullExpression(FullExpressionScope.Position.switchOperand,
+                    statement.condition, {
+                    condition = asIntegral(statement.condition);
+                });
+
+            Statement selected = selectCase(plan, condition, (case_) {
+                long value;
+                fullExpression(FullExpressionScope.Position.switchOperand,
+                    case_.exp, { value = asIntegral(case_.exp); });
+                return value;
+            });
 
             if (selected is null)
                 selected = plan.defaultTarget;
@@ -5335,9 +5389,19 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.nativelayout: arrayValueSize;
 
         align(size_t.sizeof) ubyte[arrayValueSize] buffer = void;
-        fullExpression(FullExpressionScope.Position.assertMessage, message, {
-            evaluate(message, message.type, buffer.ptr);
-        });
+        if (readsResultAfterEnd(
+                FullExpressionScope.Position.assertMessage, message)) {
+            const(void)* address;
+            fullExpression(FullExpressionScope.Position.assertMessage,
+                message, {
+                address = addressOf(FullExpressionScope.lvalueOf(message));
+            });
+            buffer[] = (cast(const(ubyte)*) address)[0 .. arrayValueSize];
+        } else
+            fullExpression(FullExpressionScope.Position.assertMessage,
+                message, {
+                evaluate(message, message.type, buffer.ptr);
+            });
 
         return (*cast(const(char)[]*) buffer.ptr).idup;
     }
@@ -5388,34 +5452,47 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         });
     }
 
-    protected override size_t visitThrowOperand(Expression operand) {
-        import snakebite.nativelayout: loadIntegral;
-        import std.conv: text;
-
+    protected override size_t visitThrowOperand(
+        Expression operand, bool readsAfterEnd,
+    ) {
         if (_controlFlow.seeking)
             return 0;
 
         assert(operand.type.toBasetype.ty == Tclass,
             "dmd rejects `throw` of anything but a class object");
 
+        if (readsAfterEnd)
+            return cast(size_t) addressOf(FullExpressionScope.lvalueOf(operand));
+
         const facts = factsOf(operand.type);
         align(size_t.sizeof) ubyte[size_t.sizeof] value = void;
         evaluate(operand, operand.type, facts, value.ptr);
 
+        return thrownObject(value.ptr, facts.size);
+    }
+
+    // The fault is here and not at the transfer when the operand is
+    // evaluated inside its full expression: only that has a guest line.
+    private size_t thrownObject(in void* reference, in size_t size) {
+        import snakebite.nativelayout: loadIntegral;
+
         auto guest = cast(Throwable) cast(void*) loadIntegral(
-            value.ptr, facts.size, false,
+            reference, size, false,
         );
-        // The fault is here and not at the transfer: only the full expression
-        // of the operand has a guest line.
         if (guest is null)
             faultOnNullObject(cast(void*) guest);
 
         return cast(size_t) cast(void*) guest;
     }
 
-    protected override void visitThrowTransfer(size_t thrown) {
+    protected override void visitThrowTransfer(
+        size_t thrown, bool readsAfterEnd,
+    ) {
         if (_controlFlow.seeking)
             return;
+
+        if (readsAfterEnd)
+            thrown = thrownObject(cast(void*) thrown, size_t.sizeof);
 
         throw GuestException.make(cast(Throwable) cast(void*) thrown);
     }

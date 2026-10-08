@@ -103,6 +103,13 @@ public struct TemporaryLifetime {
         action();
     }
 
+    public bool readsResultAfterEnd(
+        in FullExpressionScope.Position position,
+        Expression result,
+    ) const {
+        return _expressions.readsResultAfterEnd(position, result);
+    }
+
     public void withExpression(
         in FullExpressionScope.Position position,
         Expression root,
