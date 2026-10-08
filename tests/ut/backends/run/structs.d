@@ -6189,6 +6189,289 @@ static foreach (backend; Matrix!(
     }
 }
 
+// The result of a conditional expression whose branches are variables is
+// an lvalue to dmd's glue code: the variable is read after the destructors.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.variableResultReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Z { int v; int* rp; ~this() { v = 0; gg = 0; if (rp) *rp = 0; } }
+            __gshared int gg = 1;
+            Z mz(int v) { return Z(v); }
+            Z mp(int v, int* p) { return Z(v, p); }
+            void main() {
+                bool taken;
+                if (mz(1).v ? gg : gg)
+                    taken = true;
+                assert(!taken);
+            }
+        });
+    }
+}
+
+// A local variable that a destructor changes is read after it ran, when it
+// is the result of a conditional expression.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.variableResultOfLocalReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Z { int v; int* rp; ~this() { v = 0; gg = 0; if (rp) *rp = 0; } }
+            __gshared int gg = 1;
+            Z mz(int v) { return Z(v); }
+            Z mp(int v, int* p) { return Z(v, p); }
+            void main() {
+                int k = 1;
+                bool taken;
+                if (mp(1, &k).v ? k : k)
+                    taken = true;
+                assert(!taken);
+            }
+        });
+    }
+}
+
+// A conditional expression whose branches are an lvalue field and a variable
+// is an lvalue: its truth is read after the destructors.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.conditionalResultReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Z { int v; int* rp; ~this() { v = 0; gg = 0; if (rp) *rp = 0; } }
+            __gshared int gg = 1;
+            Z mz(int v) { return Z(v); }
+            Z mp(int v, int* p) { return Z(v, p); }
+            void main() {
+                int one = 1, k = 1;
+                bool taken;
+                if (one ? mz(2).v : k)
+                    taken = true;
+                assert(!taken);
+            }
+        });
+    }
+}
+
+// A dereference is an lvalue result: it is read after the destructors.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.dereferenceResultReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Z { int v; int* rp; ~this() { v = 0; gg = 0; if (rp) *rp = 0; } }
+            __gshared int gg = 1;
+            Z mz(int v) { return Z(v); }
+            Z mp(int v, int* p) { return Z(v, p); }
+            void main() {
+                int k = 1;
+                bool taken;
+                if (*mp(1, &k).rp)
+                    taken = true;
+                assert(!taken);
+            }
+        });
+    }
+}
+
+// An element of a static array in a temporary is an lvalue result.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.elementResultReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Q { int[2] a; ~this() { a[0] = 0; } }
+            Q mq() { return Q([5, 6]); }
+            void main() {
+                bool taken;
+                if (mq().a[0])
+                    taken = true;
+                assert(!taken);
+            }
+        });
+    }
+}
+
+// An element of an associative array in a temporary is read after the
+// destructors, like any other element.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.associativeArrayElementResultReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct W { int[int] aa; ~this() { aa[0] = 0; } }
+            W mw(int[int] aa) { return W(aa); }
+            void main() {
+                int[int] aa = [0: 7];
+                bool taken;
+                if (mw(aa).aa[0])
+                    taken = true;
+                assert(!taken);
+            }
+        });
+    }
+}
+
+// A bit field is read through a shift and a mask, not as an lvalue: it is read
+// before the destructors.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.bitFieldResultReadsBeforeDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct B { uint a : 3; ~this() { a = 0; } }
+            B mb() { B b; b.a = 5; return b; }
+            void main() {
+                bool taken;
+                if (mb().a)
+                    taken = true;
+                assert(taken);
+            }
+        });
+    }
+}
+
+// A thread-local variable is not an lvalue result of the glue code: it is
+// read before the destructors.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.threadLocalVariableResultReadsBeforeDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Z { int v; ~this() { v = 0; tl = 0; } }
+            int tl = 1;
+            Z mz(int v) { return Z(v); }
+            void main() {
+                bool taken;
+                if (mz(1).v ? tl : tl)
+                    taken = true;
+                assert(taken);
+            }
+        });
+    }
+}
+
+// The operand of a `switch` is a full expression: an lvalue result is read
+// after the destructors.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.switchOperandReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Z { int v; int* rp; ~this() { v = 0; gg = 0; if (rp) *rp = 0; } }
+            __gshared int gg = 1;
+            Z mz(int v) { return Z(v); }
+            Z mp(int v, int* p) { return Z(v, p); }
+            void main() {
+                int chosen = -1;
+                switch (mz(2).v) {
+                    case 0: chosen = 0; break;
+                    case 2: chosen = 2; break;
+                    default: chosen = 9;
+                }
+                assert(chosen == 0);
+            }
+        });
+    }
+}
+
+// The operand of `return` is a full expression: an lvalue result is read after
+// the destructors.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.returnOperandReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Z { int v; int* rp; ~this() { v = 0; gg = 0; if (rp) *rp = 0; } }
+            __gshared int gg = 1;
+            Z mz(int v) { return Z(v); }
+            Z mp(int v, int* p) { return Z(v, p); }
+            int f() { return mz(2).v; }
+            void main() { assert(f() == 0); }
+        });
+    }
+}
+
+// The message of an `assert` is a full expression: an lvalue result is read
+// after the destructors.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.assertMessageReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct M { string m = "before"; ~this() { m = "after"; } }
+            M mm() { return M(); }
+            void main() {
+                string got;
+                try
+                    assert(false, mm().m);
+                catch (Throwable error)
+                    got = error.msg;
+                assert(got == "after", got);
+            }
+        });
+    }
+}
+
+// The operand of `throw` is a full expression: an lvalue result is read after
+// the destructors.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE reads the result before the destructor of the temporary runs"),
+)) {
+    @("fullExpression.throwOperandReadsAfterDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class E : Exception { this(string m) { super(m); } }
+            struct T { E e; ~this() { e = new E("after"); } }
+            T mt() { return T(new E("before")); }
+            void main() {
+                string got;
+                try
+                    throw mt().e;
+                catch (E error)
+                    got = error.msg;
+                assert(got == "after", got);
+            }
+        });
+    }
+}
+
 // A `throw` expression nested in a larger expression ends its own full
 // expression: the temporaries of its operand die before the throw starts, so
 // a destructor that throws wins.
