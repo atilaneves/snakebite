@@ -2302,8 +2302,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         void evaluateValue() {
             if (readsAfterEnd) {
                 _returned = ReturnedLvalue(
-                    addressOf(FullExpressionScope.lvalueOf(statement.exp)),
-                    _place, _facts.size);
+                    true, addressOf(FullExpressionScope.lvalueOf(statement.exp)),
+                    _place, _facts.size, _facts.alignment);
                 return;
             }
 
@@ -2332,9 +2332,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // The address of a returned lvalue, which the transfer reads after the
     // destructors of the operand ran.
     private struct ReturnedLvalue {
+        bool pending;
         const(void)* address;
         void* place;
         size_t size;
+        size_t alignment;
     }
 
     private ReturnedLvalue _returned;
@@ -2360,10 +2362,17 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (_controlFlow.seeking)
             return;
 
-        if (_returned.address !is null) {
-            if (_returned.place !is null)
-                memcpy(_returned.place, _returned.address, _returned.size);
+        if (_returned.pending) {
+            auto returned = _returned;
             _returned = ReturnedLvalue.init;
+            if (returned.place !is null) {
+                memcpy(returned.place, returned.address, returned.size);
+            } else {
+                // A discarded result is still read: the read can fault.
+                auto scratch = _frames.push(
+                    returned.size, cast(uint) returned.alignment);
+                memcpy(scratch.base, returned.address, returned.size);
+            }
         }
 
         _controlFlow.returnFromFunction;
