@@ -275,6 +275,58 @@ static foreach (aggregate; ["class", "struct"]) {
     }
 }
 
+// The first destructor call must use prepared answers for both constant and
+// runtime operands. Ordinary calls and their callee effects must still run.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call a runtime TypeInfo destructor"),
+)) {
+    @("firstDestructorCallbackIntrinsicPlans." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.memory: GC;
+            import core.math: fabs;
+            import core.bitop: bswap, popcnt;
+            import core.stdc.string: memset;
+            import core.stdc.stdlib: abs;
+            pragma(mangle, "callFinalizerTestCallback")
+            extern(C) void callFinalizerTestCallback(void*, Object);
+            int identity(int value) { return value; }
+            int function(int) select(ref int effects) {
+                ++effects;
+                return &identity;
+            }
+            class Resource {
+                int* result;
+                double operand;
+                this(int* result) {
+                    this.result = result;
+                    operand = -4.0;
+                }
+                ~this() {
+                    ubyte[4] bytes;
+                    memset(bytes.ptr, 1, bytes.length);
+                    assert(bytes[0] == 1 && bytes[3] == 1);
+                    assert(fabs(-3.0) == 3.0 && fabs(operand) == 4.0);
+                    assert(bswap(bswap(0x12345678u)) == 0x12345678u);
+                    assert(popcnt(cast(uint) abs(-7)) == 3);
+                    int effects;
+                    assert(select(effects)(7) == 7);
+                    *result = effects;
+                }
+            }
+            void main() {
+                int result;
+                auto resource = new Resource(&result);
+                GC.clrAttr(cast(void*) resource, GC.BlkAttr.FINALIZE);
+                callFinalizerTestCallback(typeid(Resource).destructor, resource);
+                assert(result == 1);
+            }
+        });
+    }
+}
+
 
 // How many trips round the loop each of the two guest functions
 // `loopFunction` writes makes. The lookup budget below is measured over

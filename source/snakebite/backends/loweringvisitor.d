@@ -173,7 +173,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
         import snakebite.backends.calls: CallSelection;
 
         CallSelection.ScalarConstant constant;
-        if (CallSelection.foldedScalarIntrinsic(expression, constant)) {
+        if (callSelection.foldedScalarIntrinsic(expression, constant)) {
             if (constant.hasStorage) {
                 import snakebite.nativelayout: TypeFacts;
 
@@ -187,6 +187,9 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     }
 
     protected abstract void visitUnfoldedCall(CallExp expression);
+
+    extern(D) protected abstract imported!"snakebite.backends.calls".CallSelection*
+        callSelection();
 
     extern(D) protected abstract void visitConstantBytes(
         Expression expression, in void[] bytes);

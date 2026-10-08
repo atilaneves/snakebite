@@ -20,7 +20,7 @@ public struct CallSelection {
     // Every call site resolves to exactly one of these. `guest` and
     // `native` are the two routes `usesGuestBody` always answered;
     // `builtin` is the third one this backend adds for a bodiless
-    // function that is a compiler intrinsic (`builtinDecision`) -
+    // function that is a compiler intrinsic (`buildIntrinsicPlan`) -
     // `core.math.fabs` and friends, which have no host symbol FFI could
     // ever resolve (they compile to an inline instruction, not a call). `snakebite.backends.builtins` holds the
     // wrapper `builtinEntry` calls for that route.
@@ -87,6 +87,40 @@ public struct CallSelection {
     // Read without a lock by every thread that runs guest code
     // (ADR-0006); a decision is built once per function.
     private SharedTable!(FuncDeclaration, Decision) _decisions;
+
+    // Routing and constant proofs use the same finished signature. A prepared
+    // callback must not walk frontend ownership again, even for a nonconstant
+    // operand or a declaration that has no matching wrapper.
+    private struct IntrinsicPlan {
+        Decision call = Decision(Route.native);
+        const(ParameterType)[] parameters;
+        ParameterType result;
+    }
+
+    private SharedTable!(FuncDeclaration, IntrinsicPlan) _intrinsics;
+
+    public void prepareIntrinsic(FuncDeclaration function_) {
+        if (function_.fbody is null)
+            intrinsicPlanOf(function_);
+    }
+
+    private IntrinsicPlan intrinsicPlanOf(FuncDeclaration function_) {
+        import snakebite.frontend.compiler: withCompilerQuery;
+        import snakebite.frontend.dmd.functions: moduleOf;
+
+        if (auto cached = function_ in _intrinsics)
+            return *cached;
+
+        version(unittest) {
+            import snakebite.sharedtable: assertCacheFillAllowed;
+            assertCacheFillAllowed!"intrinsic classification";
+        }
+        IntrinsicPlan plan;
+        withCompilerQuery({
+            plan = buildIntrinsicPlan(function_, moduleOf(function_));
+        });
+        return *_intrinsics.insert(function_, plan);
+    }
 
     // Read without a lock, like `_decisions`; see `definitionOf`.
     private SharedTable!(FuncDeclaration, FuncDeclaration) _definitions;
@@ -216,7 +250,7 @@ public struct CallSelection {
     }
 
     // Guest execution and symbol resolution are outside the parent snapshot.
-    private static Decision buildDecision(
+    private Decision buildDecision(
         FuncDeclaration function_,
         lazy bool hasNativeSymbol,
         lazy bool hasIndependentNativeSymbol,
@@ -234,7 +268,7 @@ public struct CallSelection {
             return isVaStart(function_, context)
                 ? Decision(Route.vaStart, &startVariadicEntry)
                 : isAlloca(function_) ? Decision(Route.alloca)
-                : builtinDecision(function_, context.module_);
+                : intrinsicPlanOf(function_).call;
 
         const type = typeFunctionOf(function_);
         if (type.parameterList.varargs == VarArg.variadic && hasNativeSymbol)
@@ -322,7 +356,7 @@ public struct CallSelection {
     // it never serves a declaration whose signature differs. dmd gives such
     // a declaration an unspecified result, or a raw SIMD instruction
     // (`__simd_ib`) that has no wrapper.
-    private static Decision builtinDecision(FuncDeclaration function_,
+    private static IntrinsicPlan buildIntrinsicPlan(FuncDeclaration function_,
         in imported!"dmd.dmodule".Module module_,
     ) {
         import snakebite.backends.builtins:
@@ -330,7 +364,7 @@ public struct CallSelection {
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         if (!isInlinedByCodeGenerator(function_, module_))
-            return Decision(Route.native);
+            return IntrinsicPlan.init;
 
         auto parameters = new ParameterType[
             typeFunctionOf(function_).parameterList.length];
@@ -341,11 +375,14 @@ public struct CallSelection {
         const name = function_.ident.toString.idup;
         auto entry = keyed ? entryOf(name, parameters, result) : null;
         return entry is null
-            ? Decision(Route.native)
-            : Decision(Route.builtin, entry, destinationParameterOf(name));
+            ? IntrinsicPlan.init
+            : IntrinsicPlan(
+                Decision(Route.builtin, entry, destinationParameterOf(name)),
+                parameters, result,
+            );
     }
 
-    public static bool foldedScalarIntrinsic(
+    public bool foldedScalarIntrinsic(
         imported!"dmd.expression".CallExp expression,
         out ScalarConstant constant,
     ) {
@@ -403,12 +440,11 @@ public struct CallSelection {
     // DMD's backend constant folder (`evalu8`, OPbswap) uses the operand
     // width; `cdbswap` uses the result width for a nonconstant operand.
     // The call site must keep that distinction before argument evaluation.
-    public static bool foldedIntegerIntrinsic(
+    private bool foldedIntegerIntrinsic(
         imported!"dmd.expression".CallExp expression, out ulong value,
     ) {
         import core.bitop: popcnt;
         import core.stdc.fenv;
-        import snakebite.backends.builtins: entryOf;
         import snakebite.backends.dmdintrinsics: swapTo;
         import snakebite.nativelayout: TypeFacts;
 
@@ -419,15 +455,12 @@ public struct CallSelection {
                 || expression.arguments.length != 1)
             return false;
         const identifier = function_.ident.toString;
-        if ((identifier != "bswap" && identifier != "_popcnt")
-                || !isInlinedByCodeGenerator(function_))
+        if (identifier != "bswap" && identifier != "_popcnt")
             return false;
         const name = identifier == "bswap" ? "bswap" : "_popcnt";
         auto operand = (*expression.arguments)[0];
-        ParameterType[1] parameters;
-        ParameterType result;
-        if (!signatureOf(function_, parameters[], result)
-                || entryOf(name, parameters[], result) is null)
+        const plan = intrinsicPlanOf(function_);
+        if (plan.call.route != Route.builtin || plan.parameters.length != 1)
             return false;
 
         // Native compilation uses its own FP environment. A proof must
@@ -456,7 +489,7 @@ public struct CallSelection {
         return true;
     }
 
-    private static bool integerConstantOf(
+    private bool integerConstantOf(
         imported!"dmd.expression".Expression expression, out ulong value,
     ) {
         import dmd.expressionsem: toInteger;
@@ -472,7 +505,7 @@ public struct CallSelection {
     // numeric leaves, arithmetic, comparisons, conversions and selection.
     // Use DMD's allocation-free constant operations on private UnionExps;
     // optimize() also expands declarations and allocates frontend objects.
-    private static bool scalarConstantOf(
+    private bool scalarConstantOf(
         imported!"dmd.expression".Expression expression,
         out ScalarConstant constant,
     ) {
@@ -645,7 +678,7 @@ public struct CallSelection {
         }
     }
 
-    private static bool foldedFloatingIntrinsic(
+    private bool foldedFloatingIntrinsic(
         imported!"dmd.expression".CallExp expression,
         out ScalarConstant constant,
     ) {
@@ -655,7 +688,6 @@ public struct CallSelection {
         import dmd.backend.cdef: Vconst;
         import core.stdc.fenv;
         import core.stdc.string: memcpy;
-        import snakebite.backends.builtins: entryOf;
         import snakebite.backends.dmdintrinsics: magnitudeTo;
         import snakebite.nativelayout: TypeFacts;
 
@@ -668,15 +700,14 @@ public struct CallSelection {
                 || expression.arguments.length != 1)
             return false;
         const identifier = function_.ident.toString;
-        if ((identifier != "fabs" && identifier != "toPrec")
-                || !isInlinedByCodeGenerator(function_))
+        if (identifier != "fabs" && identifier != "toPrec")
             return false;
         const name = identifier == "fabs" ? "fabs" : "toPrec";
-        ParameterType[1] parameters;
-        ParameterType result;
-        if (!signatureOf(function_, parameters[], result)
-                || entryOf(name, parameters[], result) is null)
+        const plan = intrinsicPlanOf(function_);
+        if (plan.call.route != Route.builtin || plan.parameters.length != 1)
             return false;
+        const parameters = plan.parameters;
+        const result = plan.result;
         ScalarConstant operand;
         if (!scalarConstantOf((*expression.arguments)[0], operand)
                 || operand.value.exp.isRealExp is null)
@@ -700,7 +731,7 @@ public struct CallSelection {
         feclearexcept(FE_ALL_EXCEPT);
         if (name == "toPrec")
             convertFloatingStorage(stored, parameters[0], result);
-        // The owner's #628 exception replaces only stale child-pointer
+        // The owner's exception replaces only stale child-pointer
         // float widening with DMD's emitted instructions. Cleared storage
         // already gives the zero-extended XMM double view.
         else if (parameters[0] == ParameterType.float_
@@ -788,14 +819,6 @@ public struct CallSelection {
     // `intrinsic_op` first resolves an alias to its function
     // (`toAliasFunc`). The call plan only sees the resolved function,
     // because the frontend resolves the alias when it picks the overload.
-    private static bool isInlinedByCodeGenerator(
-        FuncDeclaration function_,
-    ) {
-        import snakebite.frontend.dmd.functions: moduleOf;
-
-        return isInlinedByCodeGenerator(function_, moduleOf(function_));
-    }
-
     private static bool isInlinedByCodeGenerator(
         FuncDeclaration function_, in imported!"dmd.dmodule".Module module_,
     ) {

@@ -110,6 +110,10 @@ public void withCompilerLock(
 public void withCompilerQuery(scope void delegate() query) {
     import snakebite.gc: resumeFrontend, suspendFrontend;
 
+    version(unittest) {
+        import snakebite.sharedtable: assertCacheFillAllowed;
+        assertCacheFillAllowed!"frontend metadata query";
+    }
     compiler.mutex.lock;
     scope(exit) compiler.mutex.unlock;
 

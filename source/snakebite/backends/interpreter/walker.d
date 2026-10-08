@@ -1574,6 +1574,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         }
         scope scout = new BodyScout(Preparation(
             (site, named) => attempt({
+                _callSelection.prepareIntrinsic(named);
                 // Execution plans the definition that the linker finds for
                 // a declaration, and asks for it at each call, a virtual
                 // one included: it asks about the declaration that dmd
@@ -1709,6 +1710,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 () => adapter.prepare(*_plans, callee));
         } else
             callPlanOf(site, callee);
+    }
+
+    extern(D) protected override CallSelection* callSelection() {
+        return _callSelection;
     }
 
     // The facts that execution asks for about the type of a node, its base

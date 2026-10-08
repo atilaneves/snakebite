@@ -696,6 +696,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     alias visit = LoweringVisitor.visit;
 
+    extern(D) protected override CallSelection* callSelection() {
+        return &_bytecode._callSelection;
+    }
+
     extern(D):
 
     private Bytecode _bytecode;
