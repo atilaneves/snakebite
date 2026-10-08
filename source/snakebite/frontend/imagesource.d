@@ -4,8 +4,9 @@ module snakebite.frontend.imagesource;
 private:
 
 
-// The walk holds the frontend lock, which is recursive. A caller that also
-// parses `program` holds the lock across both, or a reset can come between.
+// Takes the frontend lock: a parse on another thread appends template
+// instances to the member list of a root module it does not own, and that
+// must not happen while this walk iterates the list.
 public string imageSource(imported!"snakebite.backends.backend".Program program) {
     import snakebite.frontend.compiler: withCompilerLock;
 
@@ -20,6 +21,8 @@ public string imageSource(imported!"snakebite.backends.backend".Program program)
 }
 
 
+// Takes the frontend lock for the same reason as `imageSource`.
+//
 // Cache inputs include imported source files: changing a dependency must
 // invalidate its compiled template bodies even when their names stay the same.
 public string[] imageInputs(imported!"snakebite.backends.backend".Program program) {

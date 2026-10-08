@@ -11,7 +11,7 @@ import snakebite.dependencyimage: Optimise;
 import snakebite.backends.backend: Program;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
-import snakebite.frontend.imagesource: imageSource;
+import snakebite.frontend.imagesource: imageInputs, imageSource;
 import ut.backends;
 import std.file: setTimes, timeLastModified;
 import std.path: buildPath;
@@ -173,12 +173,30 @@ unittest {
 // built image: only the text that is made for it.
 @("image.templateArgumentImports")
 unittest {
-    const source = snippetImageSource(q{
+    // Program requires a mutable AST.
+    auto module_ = parseSnippet(q{
         import core.lifetime: _d_newclassT;
         import core.thread.osthread: Thread;
         Thread allocate() { return _d_newclassT!Thread(); }
     });
+    const source = imageSource(Program([module_]));
     "import core.thread.osthread;".should.be in source;
+}
+
+
+// A source file that the program imports but does not own is an input of the
+// built image, so that changing it invalidates the cache.
+@("image.inputsNameImportedFiles")
+unittest {
+    // Program requires a mutable AST.
+    auto module_ = parseSnippet(q{
+        import core.thread.osthread: Thread;
+        Thread allocate() { return null; }
+    });
+    import std.algorithm: any, endsWith;
+
+    imageInputs(Program([module_]))
+        .any!(path => path.endsWith("osthread.d")).should == true;
 }
 
 
@@ -339,17 +357,10 @@ unittest {
 }
 
 
-// The image source of a program with one root module, parsed and walked
-// under one hold of the frontend lock so that no reset comes between them.
+// The image source of a program with one root module.
 private string snippetImageSource(in string code) {
-    import snakebite.frontend.compiler: withCompilerLock;
-
-    string source;
-    withCompilerLock({
-        // Program requires a mutable AST.
-        source = imageSource(Program([parseSnippet(code)]));
-    });
-    return source;
+    // Program requires a mutable AST.
+    return imageSource(Program([parseSnippet(code)]));
 }
 
 
@@ -453,15 +464,9 @@ static foreach (backend; Matrix!()) {
             mixin(code);
             answer.should == 17;
         } else {
-            import snakebite.frontend.compiler: withCompilerLock;
-
-            imported!"dmd.dmodule".Module module_;
-            Program program;
-            withCompilerLock({
-                module_ = parseSnippet(code);
-                program = Program([module_]);
-                imageSource(program);
-            });
+            auto module_ = parseSnippet(code);
+            auto program = Program([module_]);
+            imageSource(program);
             auto instance = Owned!backend(program);
             int result;
             instance.call(findFunction(module_, "answer"), &result, []);
