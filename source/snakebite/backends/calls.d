@@ -118,21 +118,9 @@ public struct CallSelection {
     // `builtin`, the wrapper to call - `usesGuestBody` below is the one
     // narrower, route-only caller still reaches for.
     //
-    // No frontend lock here at all (measured: 7,721 acquisitions, 61.3s
-    // wait, in a parallel `bin/ut` run before this fix) - every dmd
-    // field `buildDecision` reads (`fbody`, `type`, `parent`, `vtbl`'s
-    // `isInstantiated`/`isFuncLiteralDeclaration` classification) is set
-    // by dmd's ordinary declaration/type semantic (phase 1), not lazily
-    // deferred to a body walk (`semantic3`) the way `functionNeedsClosure`/
-    // `hasHiddenThis`'s own fields are - a `FuncDeclaration` this ever
-    // sees has already had its own signature resolved by whatever
-    // frontend pass made it a valid call target in the first place, so
-    // there is no dmd forward reference here to force at all, only a
-    // cache miss to fill. `_decisions` is a `SharedTable`, which brings
-    // its own insert lock (ADR-0006), so nothing about this cache needs
-    // the frontend one - the same reasoning `snakebite.backends.
-    // interpreter.walker`'s `Cache.build` already applies to its own
-    // caches.
+    // Cache hits do not enter the frontend. A cold decision snapshots its
+    // parent-chain facts under the frontend lock: another module's semantic
+    // pass can change a shared package parent after this callee is complete.
     public Decision decisionOf(
         FuncDeclaration function_,
         scope bool delegate(FuncDeclaration) isGuest,
@@ -227,9 +215,7 @@ public struct CallSelection {
             && function_.fbody !is null && !hasNativeSymbol;
     }
 
-    // Every dmd query a function's decision needs, resolved once and
-    // never again - no lock, `decisionOf`'s own doc explains why none of
-    // these reads needs one.
+    // Guest execution and symbol resolution are outside the parent snapshot.
     private static Decision buildDecision(
         FuncDeclaration function_,
         lazy bool hasNativeSymbol,
@@ -237,17 +223,18 @@ public struct CallSelection {
         scope bool delegate(FuncDeclaration) isGuest,
     ) {
         import dmd.astenums: VarArg;
-        import snakebite.frontend.dmd.functions: typeFunctionOf;
-        import snakebite.frontend.dmd.delegates: outerFunctionOf;
+        import snakebite.frontend.dmd.functions: contextOf, typeFunctionOf;
+
+        const context = contextOf(function_);
 
         // A declaration without a body can only describe a native call or
         // a builtin - never a guest one, since there is no guest body to
         // run.
         if (function_.fbody is null)
-            return isVaStart(function_)
+            return isVaStart(function_, context)
                 ? Decision(Route.vaStart, &startVariadicEntry)
                 : isAlloca(function_) ? Decision(Route.alloca)
-                : builtinDecision(function_);
+                : builtinDecision(function_, context.module_);
 
         const type = typeFunctionOf(function_);
         if (type.parameterList.varargs == VarArg.variadic && hasNativeSymbol)
@@ -255,7 +242,7 @@ public struct CallSelection {
 
         // This includes siblings and deeper nested callees: every static
         // chain points into frames whose offsets belong to this backend.
-        if (outerFunctionOf(function_) !is null)
+        if (context.outerFunction !is null)
             return Decision(Route.guest);
 
         // A function literal in an imported aggregate has a body but no
@@ -269,7 +256,7 @@ public struct CallSelection {
         // The host compiler's druntime implements `va_copy` as an
         // intrinsic, so the process has no symbol for it, but the frontend's
         // druntime gives it a body.
-        if (isVaCopy(function_))
+        if (isVaCopy(function_, context))
             return Decision(Route.guest);
 
         // A root-owned body must run as guest even when its linker name
@@ -283,7 +270,7 @@ public struct CallSelection {
         // carry the host compiler's frame layout, not this backend's -
         // reusing it for a guest call reads that closure with the wrong
         // layout. A missing independent symbol leaves the guest body.
-        const prefers = function_.isInstantiated() !is null
+        const prefers = context.instantiated
             ? !hasIndependentNativeSymbol : isGuest(function_);
         return Decision(prefers ? Route.guest : Route.native);
     }
@@ -291,18 +278,22 @@ public struct CallSelection {
     // The test dmd's own glue applies (`dmd.glue.toir.intrinsic_op`) to
     // find `core.stdc.stdarg.va_start`, which `dmd.builtin` does not
     // classify: a template instance named `va_start` in that module.
-    private static bool isVaStart(FuncDeclaration function_) {
-        const module_ = function_.getModule;
+    private static bool isVaStart(FuncDeclaration function_,
+        in imported!"snakebite.frontend.dmd.functions".FunctionContext context,
+    ) {
+        const module_ = context.module_;
         return function_.ident.toString == "va_start"
-            && function_.toParent.isTemplateInstance !is null
+            && context.templateParent
             && module_ !is null && module_.md !is null
             && module_.md.toString == "core.stdc.stdarg";
     }
 
-    private static bool isVaCopy(FuncDeclaration function_) {
-        const module_ = function_.getModule;
+    private static bool isVaCopy(FuncDeclaration function_,
+        in imported!"snakebite.frontend.dmd.functions".FunctionContext context,
+    ) {
+        const module_ = context.module_;
         return function_.ident.toString == "va_copy"
-            && function_.toParent.isTemplateInstance is null
+            && !context.templateParent
             && module_ !is null && module_.md !is null
             && module_.md.toString == "core.stdc.stdarg";
     }
@@ -331,12 +322,14 @@ public struct CallSelection {
     // it never serves a declaration whose signature differs. dmd gives such
     // a declaration an unspecified result, or a raw SIMD instruction
     // (`__simd_ib`) that has no wrapper.
-    private static Decision builtinDecision(FuncDeclaration function_) {
+    private static Decision builtinDecision(FuncDeclaration function_,
+        in imported!"dmd.dmodule".Module module_,
+    ) {
         import snakebite.backends.builtins:
             destinationParameterOf, entryOf;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
-        if (!isInlinedByCodeGenerator(function_))
+        if (!isInlinedByCodeGenerator(function_, module_))
             return Decision(Route.native);
 
         auto parameters = new ParameterType[
@@ -670,12 +663,12 @@ public struct CallSelection {
         auto function_ = expression.f;
         if (function_ is null || function_.fbody !is null
                 || !hasIntrinsicCallee(expression)
-                || !isInlinedByCodeGenerator(function_)
                 || expression.arguments is null
                 || expression.arguments.length != 1)
             return false;
         const identifier = function_.ident.toString;
-        if (identifier != "fabs" && identifier != "toPrec")
+        if ((identifier != "fabs" && identifier != "toPrec")
+                || !isInlinedByCodeGenerator(function_))
             return false;
         const name = identifier == "fabs" ? "fabs" : "toPrec";
         ParameterType[1] parameters;
@@ -798,12 +791,19 @@ public struct CallSelection {
     private static bool isInlinedByCodeGenerator(
         FuncDeclaration function_,
     ) {
+        import snakebite.frontend.dmd.functions: moduleOf;
+
+        return isInlinedByCodeGenerator(function_, moduleOf(function_));
+    }
+
+    private static bool isInlinedByCodeGenerator(
+        FuncDeclaration function_, in imported!"dmd.dmodule".Module module_,
+    ) {
         import dmd.astenums: TY;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         if (function_.isDeprecated)
             return false;
-        const module_ = function_.getModule;
         if (module_ is null || module_.md is null)
             return false;
         const packages = module_.md.packages;

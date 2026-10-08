@@ -134,6 +134,10 @@ public FuncDeclaration outerFunctionOf(Dsymbol symbol) {
     while (parent !is null) {
         if (auto function_ = parent.isFuncDeclaration)
             return function_;
+        // A module cannot nest in a function. Do not read package parents:
+        // scopeCreateGlobal can change them during another module's semantic.
+        if (parent.isModule !is null)
+            return null;
         parent = parent.toParent2();
     }
     return null;
