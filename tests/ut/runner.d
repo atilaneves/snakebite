@@ -87,6 +87,22 @@ static import ut.backends.run.main,
     ut.frontend.memory,
     ut.frontend.checks;
 
+// unit-threaded removes its default sandbox root when a process starts.
+// A second test process must not remove this process's active sandboxes.
+static this() {
+    import unit_threaded.integration: Sandbox;
+
+    Sandbox.setPath(sandboxPath);
+}
+
+private string sandboxPath() {
+    import core.sys.posix.unistd: getpid;
+    import std.conv: text;
+    import std.path: buildPath;
+
+    return buildPath("tmp", "snakebite-ut", text(getpid()));
+}
+
 // `bin/ut`: prepare the frontend for the selected tests, then run them.
 int run(string[] args) {
     import unit_threaded;
@@ -97,8 +113,10 @@ int run(string[] args) {
     import std.algorithm.searching: canFind;
     import std.array: array;
     import std.stdio: writeln;
+    import std.file: rmdirRecurse;
     import ut: selectFrontendMemoryFromArguments;
 
+    scope(exit) rmdirRecurse(sandboxPath);
     args = selectFrontendMemoryFromArguments(args);
     const checkArena = args.canFind(checkArenaFlag);
     if (args.canFind("-h") || args.canFind("--help"))
