@@ -235,6 +235,41 @@ static foreach (aggregate; ["class", "struct"]) {
 }
 
 
+// Even an empty struct `with` takes the address of its operand. No other
+// use of Payload* can prepare the hidden pointer before this callback.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot cast the finalizer fixture to void*"),
+)) {
+    @("firstDestructorCallbackStructWith." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.memory: GC;
+            pragma(mangle, "callFinalizerTestCallback")
+            extern(C) void callFinalizerTestCallback(void*, Object);
+            struct Payload { int value; }
+            class Resource {
+                Payload payload;
+                int* result;
+                this(int* result) { this.result = result; }
+                ~this() {
+                    with (payload) {}
+                    ++*result;
+                }
+            }
+            void main() {
+                int result;
+                auto resource = new Resource(&result);
+                GC.clrAttr(cast(void*) resource, GC.BlkAttr.FINALIZE);
+                callFinalizerTestCallback(typeid(Resource).destructor, resource);
+                assert(result == 1);
+            }
+        });
+    }
+}
+
+
 // How many trips round the loop each of the two guest functions
 // `loopFunction` writes makes. The lookup budget below is measured over
 // the difference.
