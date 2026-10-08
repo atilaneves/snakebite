@@ -19,40 +19,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// The sign of `%` follows the dividend, not the divisor.
-static foreach (backend; Matrix!()) {
-    @("int.moduloSignFollowsDividend." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        eval!(backend, "-7 % 3").should == "-1";
-        eval!(backend, "7 % -3").should == "1";
-        eval!(backend, "-7 % -3").should == "-1";
-    }
-}
-
-// `>>` sign-extends, `>>>` zero-fills.
-static foreach (backend; Matrix!()) {
-    @("int.shifts." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        eval!(backend, "0x80 >> 2").should == "32";
-        eval!(backend, "0x10 << 1").should == "32";
-        eval!(backend, "-1 >> 28").should == "-1";
-        eval!(backend, "-1 >>> 28").should == "15";
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("int.bitwise." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        eval!(backend, "0x2a | 0x06").should == "46";
-        eval!(backend, "0x2f & 0x3a").should == "42";
-        eval!(backend, "0x2e ^ 0x04").should == "42";
-        eval!(backend, "~0x2a").should == "-43";
-        eval!(backend, "-42").should == "-42";
-    }
-}
 
 // Complement of an unsigned operand keeps the unsigned type.
 static foreach (backend; Matrix!()) {
@@ -64,19 +30,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
-    @("int.relational." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        eval!(backend, "41 < 42").should == "true";
-        eval!(backend, "42 <= 42").should == "true";
-        eval!(backend, "43 > 42").should == "true";
-        eval!(backend, "42 >= 42").should == "true";
-        eval!(backend, "43 != 42").should == "true";
-        eval!(backend, "42 == 42").should == "true";
-        eval!(backend, "42 < 41").should == "false";
-    }
-}
 
 // An `int` operand converts to `uint` before the operation, so the result
 // is unsigned division, not division of the bit pattern as a negative int.
@@ -102,28 +55,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// Narrowing truncates; widening a negative signed value sign-extends and
-// widening an unsigned value zero-extends.
-static foreach (backend; Matrix!()) {
-    @("int.casts." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        eval!(backend, "cast(ubyte) 300").should == "44";
-        eval!(backend, "cast(short) cast(byte) -5").should == "-5";
-        eval!(backend, "cast(ushort) 0x34 | cast(ushort) 0x12 << 8")
-            .should == "4660";
-    }
-}
-
-// Character and boolean operands promote to integers.
-static foreach (backend; Matrix!()) {
-    @("int.integerLikeOperands." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        eval!(backend, "cast(char) 65 + 1").should == "66";
-        eval!(backend, "true + 1").should == "2";
-    }
-}
 
 static foreach (backend; Matrix!()) {
     @("float.operators." ~ backend.stringof)

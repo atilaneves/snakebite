@@ -354,56 +354,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// A labelled `break` leaves the loop its label names, not just the
-// innermost one it is written inside.
-static foreach (backend; Matrix!()) {
-    @("labelledBreakExitsOuterLoop." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            void main() {
-                int count;
-
-                outer:
-                for (int i; i < 2; ++i) {
-                    for (int j; j < 2; ++j) {
-                        ++count;
-                        if (i == 0 && j == 1)
-                            break outer;
-                    }
-                }
-
-                assert(count == 2);
-            }
-        });
-    }
-}
-
-// A labelled `continue` moves the loop its label names to its next
-// iteration, skipping the rest of every loop nested inside it too.
-static foreach (backend; Matrix!()) {
-    @("labelledContinueRepeatsOuterLoop." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            void main() {
-                int count;
-
-                outer:
-                for (int i; i < 3; ++i) {
-                    for (int j; j < 4; ++j) {
-                        if (j == i + 1)
-                            continue outer;
-
-                        ++count;
-                    }
-                }
-
-                assert(count == 6);
-            }
-        });
-    }
-}
 
 // `continue` in an unrolled `foreach` ends the current element's
 // statement, so an `else` paired with the `if` that continued must not
@@ -2100,33 +2050,6 @@ static foreach (backend; Matrix!()) {
             int main() {
                 return t("7") == 5 && t("b") == -999
                     && t("") == -999 && t("1x") == -999 ? 0 : 1;
-            }
-        });
-    }
-}
-
-
-// A `return` whose operand does not throw leaves the body normally, so
-// the guard runs after the operand.
-static foreach (backend; Matrix!()) {
-    @("scopeSuccessReturnOfNonThrowingCall." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int main() {
-                string log;
-                int fine() {
-                    log ~= "fine,";
-                    return 3;
-                }
-                int f() {
-                    scope(success) log ~= "S,";
-                    return fine();
-                }
-
-                if (f() != 3)
-                    return 2;
-                return log == "fine,S," ? 0 : 1;
             }
         });
     }

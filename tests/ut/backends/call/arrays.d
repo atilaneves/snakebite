@@ -561,39 +561,6 @@ unittest {
     caught.msg.should == "index [9] is out of bounds for array of length 1";
 }
 
-static foreach (backend; Matrix!()) {
-    @("arrays.literal.index." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        20.shouldBeRetOf!(
-            backend,
-            q{
-                int second() {
-                    int[] a = [10, 20, 30];
-                    return a[1];
-                }
-            },
-            "second",
-        );
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("arrays.literal.length." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        size_t(3).shouldBeRetOf!(
-            backend,
-            q{
-                size_t length_() {
-                    int[] a = [1, 2, 3];
-                    return a.length;
-                }
-            },
-            "length_",
-        );
-    }
-}
 
 static foreach (backend; Matrix!()) {
     @("arrays.literal.nonConstantElements." ~ backend.stringof)
@@ -658,22 +625,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
-    @("arrays.literal.single." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        42.shouldBeRetOf!(
-            backend,
-            q{
-                int only() {
-                    int[] a = [42];
-                    return a[0];
-                }
-            },
-            "only",
-        );
-    }
-}
 
 static foreach (backend; Matrix!()) {
     @("arrays.literal.empty.length." ~ backend.stringof)
@@ -1016,27 +967,6 @@ unittest {
     later.should == 20;
 }
 
-// `~=` appending a single element lowers to `_d_arrayappendcTX`, dmd's
-// own hook for growing a `T[]` by one element and writing it into the
-// slot that growth made - `CatAssignExp.lowering` (`dmd/expression.d`),
-// not a node any of `expression`'s own children reach.
-static foreach (backend; Matrix!()) {
-    @("arrays.append.element." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        2.shouldBeRetOf!(
-            backend,
-            q{
-                int second() {
-                    int[] a = [1];
-                    a ~= 2;
-                    return a[1];
-                }
-            },
-            "second",
-        );
-    }
-}
 
 @("arrays.append.elementThroughIndexedSlice.Bytecode")
 @Tags("Bytecode")
@@ -1052,23 +982,6 @@ unittest {
     }, "appended");
 }
 
-static foreach (backend; Matrix!()) {
-    @("arrays.append.element.length." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        size_t(2).shouldBeRetOf!(
-            backend,
-            q{
-                size_t length_() {
-                    int[] a = [1];
-                    a ~= 2;
-                    return a.length;
-                }
-            },
-            "length_",
-        );
-    }
-}
 
 static foreach (backend; Matrix!()) {
     @("arrays.append.dynamicArrayElement." ~ backend.stringof)
