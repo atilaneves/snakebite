@@ -200,6 +200,33 @@ public auto newInFrontend(alias dmdSymbol, Args...)(auto ref Args arguments) {
     });
 }
 
+// CTFE copies and constant folding can produce literals after DMD's GC
+// check attached allocation lowering. Storage and escape decisions remain
+// with the caller; DMD supplies the real, element-typed druntime call.
+public imported!"dmd.expression".Expression arrayLiteralLowering(
+    imported!"dmd.expression".ArrayLiteralExp expression,
+    imported!"dmd.dmodule".Module module_,
+) {
+    import core.atomic: atomicLoad, MemoryOrder;
+    import dmd.dsymbolsem: scopeCreateGlobal;
+    import dmd.expressionsem: lowerArrayLiteral;
+    import dmd.globals: global;
+
+    if (auto lowering = atomicLoad!(MemoryOrder.acq)(expression.lowering))
+        return lowering;
+
+    return compiler.inside(() {
+        if (expression.lowering !is null)
+            return expression.lowering;
+        auto sc = scopeCreateGlobal(module_, global.errorSink);
+        scope (exit) {
+            sc = sc.pop();
+            sc.pop();
+        }
+        return lowerArrayLiteral(expression, sc);
+    });
+}
+
 // `source` parsed as one statement, the way the REPL probes a cell. The
 // caller holds the frontend lock and reads the result before it lets go:
 // the diagnostics are dmd's own until the next parse.

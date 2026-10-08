@@ -532,9 +532,10 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
                 reserveLiteralStorage(expression);
                 break;
             case ArrayLiteralPlan.Storage.lowering:
-                assert(expression.lowering !is null,
-                    "DMD lowers nonempty heap array literals");
-                expression.lowering.accept(this);
+                import snakebite.frontend.compiler: arrayLiteralLowering;
+
+                arrayLiteralLowering(expression, currentFunction.getModule)
+                    .accept(this);
                 break;
             }
 

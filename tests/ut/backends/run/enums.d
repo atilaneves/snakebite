@@ -118,12 +118,32 @@ static foreach (backend; Matrix!()) {
                 a = "xx",
             }
 
+            int[] vals() { return [1, 2]; }
+
+            int[] materialize() {
+                enum a = vals();
+                auto b = a;
+                assert(b[1] == 2);
+                b[0] = 9;
+                auto c = a;
+                assert(c[0] == 1);
+                return b;
+            }
+
             void main() {
                 string raw = "hi";
                 Greeting value = cast(Greeting) raw;
                 assert(value.length == 2);
                 assert(value[0] == 'h');
                 assert(value[1] == 'i');
+
+                auto first = materialize();
+                auto second = materialize();
+                second[1] = 8;
+                assert(first[0] == 9 && first[1] == 2);
+                enum folded = ([3, 4] ~ [5])[1 .. 3];
+                auto copy = folded;
+                assert(copy == [4, 5]);
             }
         });
     }

@@ -9,6 +9,48 @@ module ut.backends.run.arrays;
 import ut.backends;
 
 
+// A materialized CTFE array can escape its function and hold the only
+// references to runtime allocations. Its backing block must be scanned.
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+        "GC.query calls gc_query, which has no source for CTFE"))) {
+    @("ctfeArrayRetainsRuntimeReferences." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.memory: GC;
+
+            int[][] vals() {
+                auto a = new int[][2];
+                a[0] = [1];
+                a[1] = [2];
+                return a;
+            }
+
+            int[][] materialize() {
+                enum a = vals();
+                auto b = a;
+                assert(b[0][0] == 1 && b[1][0] == 2);
+                b[0] = [17];
+                b[1] = [19];
+                return b;
+            }
+
+            void main() {
+                auto a = materialize();
+                auto b = materialize();
+                b[0][0] = 23;
+                const block = GC.query(a.ptr);
+                assert(block.base !is null);
+                assert((block.attr & GC.BlkAttr.NO_SCAN) == 0);
+                GC.collect();
+                assert(a[0][0] == 17 && a[1][0] == 19);
+                assert(b[0][0] == 23 && b[1][0] == 19);
+            }
+        });
+    }
+}
+
+
 static foreach (backend; Matrix!()) {
     @("sliceFillWithArrayElement." ~ backend.stringof)
     @Tags(backend.stringof)
