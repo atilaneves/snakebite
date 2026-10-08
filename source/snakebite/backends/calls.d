@@ -352,6 +352,28 @@ public struct CallSelection {
             : Decision(Route.builtin, entry, destinationParameterOf(name));
     }
 
+    public static bool foldedScalarIntrinsic(
+        imported!"dmd.expression".CallExp expression,
+        out imported!"dmd.ctfeexpr".UnionExp constant,
+    ) {
+        import core.stdc.fenv;
+        import dmd.ctfeexpr: emplaceExp;
+        import dmd.expression: IntegerExp;
+
+        ulong value;
+        if (foldedIntegerIntrinsic(expression, value)) {
+            emplaceExp!IntegerExp(&constant, expression.loc, value, expression.type);
+            return true;
+        }
+        fenv_t environment;
+        if (feholdexcept(&environment) != 0)
+            return false;
+        scope(exit) fesetenv(&environment);
+        fesetround(FE_TONEAREST);
+        return foldedFloatingIntrinsic(expression, constant)
+            && fetestexcept(FE_ALL_EXCEPT) == 0;
+    }
+
     // DMD's backend constant folder (`evalu8`, OPbswap) uses the operand
     // width; `cdbswap` uses the result width for a nonconstant operand.
     // The call site must keep that distinction before argument evaluation.
@@ -581,6 +603,7 @@ public struct CallSelection {
         import dmd.ctfeexpr: UnionExp, emplaceExp;
         import dmd.expressionsem: toReal;
         import dmd.root.ctfloat: CTFloat;
+        import dmd.backend.cdef: Vconst;
         import core.stdc.fenv;
         import snakebite.backends.builtins: entryOf;
 
@@ -603,9 +626,11 @@ public struct CallSelection {
                 || entryOf(name, parameters[], result) is null)
             return false;
         // OPabs writes at operand width, then paints the result type.
-        // A wider result can read the old elem's child-pointer bytes; that
-        // is not a defined scalar constant. Keep the instruction route.
-        if (name == "fabs" && parameters[0] != result)
+        // Only widening float retains bytes of el_una's child pointer.
+        // A double write replaces that pointer; the cleared E2 supplies
+        // the zero exponent bytes when the declared result is real.
+        if (name == "fabs" && parameters[0] == ParameterType.float_
+                && result != ParameterType.float_)
             return false;
         UnionExp operand;
         if (!scalarConstantOf((*expression.arguments)[0], operand)
@@ -618,8 +643,25 @@ public struct CallSelection {
             normalizeScalar(constant, expression.type);
             return fetestexcept(FE_ALL_EXCEPT) == 0;
         }
-        emplaceExp!RealExp(&constant, expression.loc,
-            CTFloat.fabs(operand.exp.toReal), expression.type);
+        Vconst stored;
+        stored.Vreal = 0;
+        const magnitude = CTFloat.fabs(operand.exp.toReal);
+        final switch (parameters[0]) with (ParameterType) {
+            case float_: stored.Vfloat = cast(float) magnitude; break;
+            case double_: stored.Vdouble = cast(double) magnitude; break;
+            case real_: stored.Vreal = magnitude; break;
+            case ubyte_, ushort_, short_, int_, uint_, long_, ulong_,
+                    vector_, pointer_, void_: return false;
+        }
+        real value;
+        final switch (result) with (ParameterType) {
+            case float_: value = stored.Vfloat; break;
+            case double_: value = stored.Vdouble; break;
+            case real_: value = stored.Vreal; break;
+            case ubyte_, ushort_, short_, int_, uint_, long_, ulong_,
+                    vector_, pointer_, void_: return false;
+        }
+        emplaceExp!RealExp(&constant, expression.loc, value, expression.type);
         return true;
     }
 

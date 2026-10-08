@@ -123,9 +123,8 @@ public size_t destinationParameterOf(in string name) @safe pure nothrow @nogc {
 }
 
 
-// A floating point result is any of the three types: dmd's code generator
-// converts the operation's own result to the declared one, so `float
-// sin(real)` is a `sin` narrowed once, as `cast(float) sin(x)`.
+// The result type selects the store width. Most floating operations convert
+// numerically; fabs can instead keep the operand's bit view in XMM.
 private BuiltinCall widthEntryOf(T)(
     in string name, in ParameterType[] parameters, in ParameterType result,
 ) @safe pure nothrow @nogc {
@@ -521,7 +520,9 @@ private extern(C) void entry(string name, Result, Params...)(
             || is(Params[0] == real)) {
         // x87 works at extended precision. A wider declared result must
         // not first pass through the operand's narrower result overload.
-        static if (name == "sqrt" && is(Result == Params[0]))
+        static if (name == "fabs")
+            *cast(Result*) returnPlace = magnitudeTo!Result(values[0]);
+        else static if (name == "sqrt" && is(Result == Params[0]))
             *cast(Result*) returnPlace = call(values);
         else static if (Params.length == 1)
             *cast(Result*) returnPlace = cast(Result) call(cast(real) values[0]);

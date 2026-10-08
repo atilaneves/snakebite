@@ -61,9 +61,8 @@ layout, the same way they call a resolved native plan.
 A missing full-signature entry keeps the ordinary native route. It does
 not fail while the call is selected or an unexecuted body is loaded. A
 reached call without a host symbol gives the resolver's missing-symbol
-diagnostic. This route does not define a result for arbitrary signatures
-for which DMD itself gives no defined result. The accepted raw-SIMD
-exception below is distinct from the supported intrinsic signatures.
+diagnostic. The accepted raw-SIMD exception below is distinct from the
+supported intrinsic signatures.
 
 ### The result is dmd's result
 
@@ -78,7 +77,12 @@ current rounding mode with an x87 integer store, so the guest gets 2.
 
 `source/snakebite/backends/dmdintrinsics.d` holds the native instruction
 definitions that the wrappers call. Floating operations use DMD's
-instruction precision and convert once to the declared floating result.
+instruction precision. For `fabs` with float or double operands and
+results, `xmmabs` clears the operand's sign bit without a numeric result
+conversion. A narrower result reads the low bytes; a wider double result
+reads the zero-extended float bits. An operation with a real operand or
+result uses x87 and stores numerically at the declared result width.
+Other floating operations convert once to the declared floating result.
 `rndtol` uses an x87 integer store at the declared result width, including
 the 16- and 32-bit indefinite result on overflow. Wrappers write only the
 declared result width. Volatile access uses the load result or stored
@@ -96,12 +100,21 @@ literals, nested swaps or population counts, `fabs`, `toPrec`, scalar casts,
 arithmetic, comparisons, comma expressions, and constant selection.
 Logical and conditional selection examines only the executed branch.
 Each inner result keeps its own declared width. For `fabs`, DMD's constant
-folder computes at operand width, then labels that constant with the
-declared result type. Its defined scalar proof therefore requires the
-same operand and result widths. A wider result can read old compiler
-child-pointer bytes from the constant storage. This is an instance of the
-arbitrary-signature, undefined-result limit above, not a scalar value to
-reproduce. Such a declaration keeps its runtime instruction wrapper.
+folder computes at operand width, then labels that storage with the
+declared result type, without a numeric conversion. The shared proof reads
+the declared result only when all its value bytes have known values. This
+includes double to float and real to float or double. `el_una` clears the
+node before it sets the child pointer. A double fold replaces the complete
+pointer, so a real result reads the double bits with the cleared exponent
+bytes. Direct floating calls and nested integer producers use the same
+proof.
+
+A float fold with a double or real result also reads the remaining
+compiler child-pointer bytes. The proof does not invent those bytes; it
+leaves that call on the instruction path. This is a proof limit, not an
+owner-approved language exception or a claim that all mixed signatures
+have undefined results. Exact parity for these two constant shapes is not
+proved.
 
 Scalar folding uses DMD's allocation-free `constfold` operations and
 private `UnionExp` values. It does not optimize the guest AST, expand

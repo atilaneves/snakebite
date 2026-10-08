@@ -3984,6 +3984,48 @@ static foreach (backend; Matrix!(
 }
 
 
+// Constant OPabs stores at operand width; XMM keeps that bit view, but
+// x87 stores a numeric result. CTFE instead converts all results numerically.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a guest module declaration cannot be mixed into the host module"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE converts mixed-width fabs numerically, not as DMD instructions"),
+)) {
+    @("ffi.stdMathFabsKeepsTheDeclaredResultLayout." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        runMainOfModule!backend(
+            "std.math.fabsResultLayout" ~ backend.stringof, q{
+            import core.bitop: bswap;
+            float fabs(double);
+            double fabs(real);
+            double fabs(float);
+
+            float fromDouble(double value) { return fabs(value); }
+            double fromReal(real value) { return fabs(value); }
+            double fromFloat(float value) { return fabs(value); }
+
+            void main() {
+                assert(bswap(cast(uint) fabs(-4660.0)) == 0);
+                assert(fabs(-4660.0) == 0);
+                assert(fromDouble(-4660.0) == 0);
+                assert(fabs(-4660.0L) == -0x1p-741);
+                assert(fromReal(-4660.0L) == 4660);
+                assert(fromFloat(-4660.0f) == 0x1.16468p-1044);
+            }
+        });
+        runMainOfModule!backend(
+            "std.math.fabsClearedExponent" ~ backend.stringof, q{
+            real fabs(double);
+            void main() {
+                assert(fabs(-4660.0) == 0x4.0b234p-16385L);
+            }
+        });
+    }
+}
+
+
 static foreach (backend; Matrix!(
     Omit!(Native, Because.inexpressible,
         "a guest module declaration cannot be mixed into the host module"),

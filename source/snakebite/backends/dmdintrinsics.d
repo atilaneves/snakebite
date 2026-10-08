@@ -105,6 +105,29 @@ public T toPrec(T)(in T x) @safe pure nothrow @nogc {
 }
 
 
+// xmmabs masks the operand in XMM without a conversion. An x87 result
+// instead uses FABS followed by a store at the declared result width.
+public Result magnitudeTo(Result, T)(in T x) pure nothrow @nogc {
+    static if (!is(T == real) && !is(Result == real)) {
+        union Stored {
+            double double_;
+            float float_;
+        }
+        Stored stored;
+        stored.double_ = 0;
+        static if (is(T == double))
+            stored.double_ = fabs(x);
+        else
+            stored.float_ = fabs(x);
+        static if (is(Result == double))
+            return stored.double_;
+        else
+            return stored.float_;
+    } else
+        return cast(Result) fabs(cast(real) x);
+}
+
+
 // FISTP converts at the destination width. Converting to long first would
 // wrap an out-of-range int or short instead of returning integer indefinite.
 public Result roundedTo(Result, T)(in T x) pure nothrow @nogc {

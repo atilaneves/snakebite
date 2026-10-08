@@ -172,10 +172,11 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     final override void visit(CallExp expression) {
         import snakebite.backends.calls: CallSelection;
 
-        ulong value;
-        if (CallSelection.foldedIntegerIntrinsic(expression, value)) {
-            scope constant = new IntegerExp(expression.loc, value, expression.type);
-            constant.accept(this);
+        import dmd.ctfeexpr: UnionExp;
+
+        UnionExp constant;
+        if (CallSelection.foldedScalarIntrinsic(expression, constant)) {
+            constant.exp.accept(this);
             return;
         }
         visitUnfoldedCall(expression);
