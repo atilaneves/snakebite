@@ -890,6 +890,35 @@ static foreach (backend; Guests) {
 }
 
 
+// Equal-valued enum members need only one case. DMD statementsem leaves the
+// default absent when it checks those members with assertions off in @system
+// code. An unmatched value then exits the switch, as native s2ir specifies.
+private enum finalSwitchWithoutDefault = q{
+    enum E { a, b, sameAsA = a }
+    int pick(E e) @system {
+        final switch (e) {
+            case E.a: return 1;
+            case E.b: return 2;
+        }
+        return 3;
+    }
+};
+
+static foreach (backend; Guests) {
+    @("flags.finalSwitchHasNoDefaultInRelease." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shouldRun!backend(Row(
+            ["-release", "-check=assert=off"], finalSwitchWithoutDefault ~ q{
+            unittest {
+                if (pick(E.a) != 1 || pick(E.b) != 2)
+                    throw new Exception("wrong case");
+            }
+        }, Expect.returned));
+    }
+}
+
+
 static foreach (backend; Guests) {
     @("flags.betterC.catInCtfeBlockThrowsError." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -911,5 +940,25 @@ static foreach (backend; Guests) {
             "~ concatenation in the body of an if (__ctfe) block: dmd "
             ~ "compiles that body for compile time only"),
         Expect.returned));
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    NoNative,
+    Omit!(Ctfe, Because.inexpressible,
+        "DMD's CTFE asserts in visitSwitch when no case or default matches; "
+        ~ "catching that host assertion leaves its compiler state incomplete"),
+)) {
+    @("flags.finalSwitchWithoutDefaultExitsOnNoMatch." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shouldRun!backend(Row(
+            ["-release", "-check=assert=off"], finalSwitchWithoutDefault ~ q{
+            unittest {
+                if (pick(cast(E) 7) != 3)
+                    throw new Exception("did not exit switch");
+            }
+        }, Expect.returned));
     }
 }

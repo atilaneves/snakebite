@@ -12,7 +12,7 @@ import snakebite.backends.ifplan: IfPlan;
 import snakebite.backends.logical: LogicalPlan;
 import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
 import snakebite.backends.switchplan:
-    switchPlan, gotoCaseTarget, gotoDefaultTarget;
+    SwitchPlan, switchPlan, gotoCaseTarget, gotoDefaultTarget;
 import snakebite.backends.fullexpression:
     FullExpressionScope;
 import snakebite.backends.controlflow:
@@ -1656,11 +1656,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // replaced by one `CaseStatement` per value in the range, chained by
     // fallthrough - this compiler never sees that node either.
     //
-    // dmd also always resolves `hasDefault`/`sdefault` before semantic
-    // returns: a `switch` with no `default:` of its own gets one
-    // synthesised (an `assert(0)`, or a call to `object.__switch_error`),
-    // so `statement.sdefault` is never null here, final or not.
-    //
     // Case dispatch is a linear chain of equality tests against the
     // already-evaluated condition, each branching straight into its own
     // case's body once that body's own position is known (see
@@ -1694,13 +1689,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             jumpToCase(case_, branchIndex);
         }
 
-        assert(plan.defaultTarget !is null);
-
         const defaultJumpIndex = _instructions.length;
         emit(&opJump, 0, 0, 0);
-        jumpToDefault(statement, defaultJumpIndex);
-
         _breakables ~= Breakable(label, null, _scopePaths.enclosing(statement));
+        final switch (plan.noMatch) with (SwitchPlan.NoMatch) {
+            case defaultTarget:
+                jumpToDefault(statement, defaultJumpIndex);
+                break;
+            case exit:
+                _breakables[$ - 1].pendingBreakJumps ~= defaultJumpIndex;
+                break;
+        }
         _switchStack ~= statement;
         compileSwitchBody(statement._body);
         const bodyFinished = _finished;
