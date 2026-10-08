@@ -19,39 +19,46 @@ third route instead, the builtin route below.
 
 ## Decision
 
+Updated for the owner's decision on #628 of 2026-10-08: finish support for
+hand-written intrinsic declarations and match native DMD. This replaces
+the former CTFE-name and whole-module classification rule.
+
 `CallSelection.buildDecision`
 (`source/snakebite/backends/calls.d`) finds the compiler intrinsics
-among the bodiless declarations. dmd has two lists of them, and the
-decision uses both:
-
-- `dmd.builtin.isBuiltin` classifies the ones that its semantic pass and
-  its CTFE evaluator know (`fabs`, `sqrt`, `sin`, `cos`, `ldexp`, `yl2x`,
-  `yl2xp1`, `bswap`, `_popcnt`). dmd's own CTFE evaluator,
-  `dmd.builtin.eval_builtin`, is never called at run time.
-- `dmd.glue.toir.intrinsic_op` lists the ones that its code generator
-  inlines. It has more, among them `core.math.rint` and `rndtol`, all of
-  `core.volatile`, and `core.simd.__prefetch`, `__simd`, `__simd_ib` and
-  `__simd_sto`. `isBuiltin` answers `BUILTIN.unimp` for these. The glue
-  module is not part of this build, so the decision finds them by module
-  (`core.math`, `core.volatile`, `core.simd`) and takes every bodiless
-  declaration of those modules.
+among the bodiless declarations. Its shared classifier copies the rows
+of `dmd.glue.toir.intrinsic_op` in DMD 2.113.0, which is package-private
+and cannot be called here. It checks the module package and identifier,
+the function identifier, deprecated status, and the first operand type
+where DMD checks it. Aliases are already resolved at the call site. The
+rule covers DMD's math, bitop, volatile, and SIMD rows, not every
+declaration in those modules. `dmd.builtin.isBuiltin` is a CTFE
+classifier, not part of call selection. `eval_builtin` is never called
+at run time.
 
 Any other bodiless declaration keeps rule 3's routing: a barrier call, or
 an error when the resolver finds no host address.
 
-A declaration of either list takes the builtin route.
+A declaration that the code generator inlines takes the builtin route
+when a wrapper takes its full signature.
 `source/snakebite/backends/builtins.d` looks up a compiled wrapper by the
 declaration's own identifier (`function_.ident`, the same identifier
-dmd's own `determine_builtin` keys on) and the types of its parameters.
-The identifier alone is not a unique key: `sin(float)` and `sin(double)`
-both classify as `BUILTIN.sin`. The wrapper is a plain compiled snakebite
+dmd's own code generator keys on), parameter types, and result type.
+The key includes parameter count. Parameters must be plain values, not
+`ref`, `out`, or `lazy`; the function must not be variadic or return by
+`ref`. Base types determine the wrapper's native-layout widths. A vector
+must be 16 bytes. The identifier alone is not a unique key:
+`sin(float)` and `sin(double)` need different operand reads, and
+`float sin(real)` and `double sin(real)` need different result writes.
+The wrapper is a plain compiled snakebite
 function. Both backends call it directly, on arguments already in native
 layout, the same way they call a resolved native plan.
 
-A declaration of either list that the wrapper table has no entry for ends
-the run at the call's first decision, with a message that names the
-intrinsic. It does not go across the barrier, where it would fail at its
-first execution with a message about a missing symbol.
+A missing full-signature entry keeps the ordinary native route. It does
+not fail while the call is selected or an unexecuted body is loaded. A
+reached call without a host symbol gives the resolver's missing-symbol
+diagnostic. This route does not define a result for arbitrary signatures
+for which DMD itself gives no defined result. The accepted raw-SIMD
+exception below is distinct from the supported intrinsic signatures.
 
 ### The result is dmd's result
 
@@ -62,16 +69,27 @@ result is the one that dmd gives. A wrapper does not call whatever the
 host compiler's own `core.math` does. For example `rndtol(2.5)` is 2 with
 dmd, which rounds in the current rounding mode, and 3 with LDC, whose
 `core.math.rndtol` is `llround`. The wrapper under LDC rounds in the
-current rounding mode (`llvm_llrint`), so the guest gets 2.
+current rounding mode with an x87 integer store, so the guest gets 2.
 
-`source/snakebite/backends/dmdintrinsics.d` holds the definitions that
-the wrappers call. Under dmd they are dmd's own `core.math`. Under LDC
-they are what dmd emits: the x87 instruction on a `real` that is narrowed
-once when the result is not a `real` (`sin`, `cos`, `ldexp`, `yl2x`,
-`yl2xp1`), the SSE or x87 square root instruction, and `llvm_llrint`.
-The wrapper writes its result at the type that the guest's declaration
-returns, never at the type that the host's intrinsic returns: LDC
-declares only the `real` overload of `yl2x`.
+`source/snakebite/backends/dmdintrinsics.d` holds the native instruction
+definitions that the wrappers call. Floating operations use DMD's
+instruction precision and convert once to the declared floating result.
+`rndtol` uses an x87 integer store at the declared result width, including
+the 16- and 32-bit indefinite result on overflow. Wrappers write only the
+declared result width. Volatile access uses the load result or stored
+value width; it does not infer the access width from the pointee type.
+
+Constant folding and emitted instructions can differ for hand-written
+signatures. DMD's backend constant folder (`evalu8`, `OPbswap`) uses the
+operand width, while its emitted byte swap (`cdbswap`) uses the result
+width. Thus `ushort bswap(uint)` gives `0x3412` for literal `0x12345678u`
+and `0x7856` for a volatile load of that value in a default native build.
+The shared call-site rule folds constant byte swaps before argument
+execution. Its constant operands can include nested swaps or population
+counts, integral casts, scalar arithmetic, and a selected constant
+conditional branch. Scalar folding uses DMD's constant operations. The
+runtime wrapper keeps the result-width rule. No CTFE evaluator or guest
+runtime value is used to decide whether an operand is constant.
 
 A test whose `Native` arm is compiled by LDC cannot use `Native` as the
 oracle for such a function. It asserts the values of a native dmd run and
@@ -92,16 +110,19 @@ The wrapper table has those six opcodes. The first operand of
 `__simd_sto` is the memory that the instruction writes, so the call takes
 that parameter by address (`Decision.destinationParameter`). `__simd`
 with another opcode or another overload, `__simd_ib`, and `__simd_sto`
-with another opcode have no wrapper (see "Open").
+with another opcode fall under the exception below.
 
-### Open
+### Accepted raw-SIMD exception
 
 Direct calls of `core.simd.__simd`, `__simd_ib` and `__simd_sto` from a
-guest program, other than the six moves above, have no wrapper. dmd needs
-a constant opcode for each call (`glue/e2ir.d`), so a complete wrapper
-needs one case for each of the about 265 `XMM` members for each operand
-shape, and a second implementation for an LDC host, which has no
-`__simd`.
+guest program, other than the six moves above, are out of scope by the
+owner's decision on #433/#627 of 2026-10-07 and 2026-10-08. LDC has no
+such raw intrinsics. This is an explicit exception to the load-time
+failure rule: an unexecuted call does not fail the load. A backend stops
+when it reaches the call, with a clear message that names the call.
+A missing wrapper shape uses the native resolver diagnostic; a covered
+wrapper shape with another opcode gives an opcode diagnostic naming the
+intrinsic. General raw-SIMD support is not an open requirement here.
 
 ## Considered options
 
@@ -127,8 +148,8 @@ A bodiless declaration now has three possible outcomes, not two: guest
 body, barrier call, or builtin wrapper. `CONTEXT.md`'s "Call selection"
 entry names all three.
 
-`source/snakebite/backends/builtins.d` is the one place that keeps
-snakebite's own list of covered intrinsics. Adding one means adding an
-entry there, not a special case in `CallSelection`. The bytecode VM
+`source/snakebite/backends/builtins.d` holds the covered signatures;
+`CallSelection` holds the shared DMD code-generator and call-site rules.
+Adding a wrapper does not make a declaration an intrinsic. The bytecode VM
 imports only `BuiltinCall` from `builtins.d`, never a dmd frontend
 type (CODING.md, "Code organisation").

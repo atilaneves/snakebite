@@ -4222,11 +4222,16 @@ static foreach (backend; Matrix!(
                 assert(bsf(cast(short) 8) == 3);
                 assert(bsr(1L << 40) == 40);
                 assert(bswap(cast(short) 0x1234) == 0x3412);
+                assert(bswap(0x12345678u) == 0x3412);
+                assert(bswap(cast(uint) bswap(0x12345678u)) == 0);
+                assert(bswap(cast(uint) (bswap(0x12345678u) + 1)) == 0);
+                assert(bswap(-cast(uint) bswap(0x12345678u)) == 0xffff);
+                assert(bswap(cast(uint) _popcnt(cast(short) -1)) == 0);
+                assert(bswap(bswap(0x12345678u) ? 0x12345678u : 0u) == 0x3412);
                 // dmd folds a constant byte swap at operand width, but
                 // its emitted instruction uses the result width.
                 uint input = 0x12345678u;
                 assert(bswap(volatileLoad(&input)) == 0x7856);
-                assert(bswap(0x1234567890abcdefUL) == 0xefcdab9078563412UL);
                 assert(_popcnt(cast(short) -1) == 16);
             }
         });

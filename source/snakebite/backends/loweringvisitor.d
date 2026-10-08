@@ -5,7 +5,7 @@ private:
 
 import dmd.expression:
     ArrayLiteralExp, AssocArrayLiteralExp, CastExp, CatAssignExp, CatExp,
-    CmpExp, EqualExp, HaltExp, LogicalExp,
+    CallExp, CmpExp, EqualExp, HaltExp, IntegerExp, LogicalExp,
     CatElemAssignExp, CatDcharAssignExp,
     ConstructExp, Expression, IdentityExp, LoweredAssignExp, NewExp, ThrowExp,
     TupleExp;
@@ -168,6 +168,20 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     }
 
     protected abstract void visitHalt();
+
+    final override void visit(CallExp expression) {
+        import snakebite.backends.calls: CallSelection;
+
+        ulong value;
+        if (CallSelection.foldedIntegerIntrinsic(expression, value)) {
+            scope constant = new IntegerExp(expression.loc, value, expression.type);
+            constant.accept(this);
+            return;
+        }
+        visitUnfoldedCall(expression);
+    }
+
+    protected abstract void visitUnfoldedCall(CallExp expression);
 
     final override void visit(EqualExp expression) {
         if (expression.lowering !is null) {

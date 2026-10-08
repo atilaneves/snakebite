@@ -5117,7 +5117,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             width == size_t.max ? _width : width);
     }
 
-    override void visit(CallExp expression) {
+    protected override void visitUnfoldedCall(CallExp expression) {
         if (_destination != discardResult && isRefCall(expression)) {
             const addressOffset = compileAddress(expression);
             emit(&opLoadIndirect, _destination, addressOffset, _width);

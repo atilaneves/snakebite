@@ -6292,7 +6292,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // Calls always go through the FFI call adapter. It copies a reference's
     // value into `_place` for this ordinary expression path; `addressOf`
     // uses `refCallAddress` when the expression itself is an lvalue.
-    override void visit(CallExp expression) {
+    protected override void visitUnfoldedCall(CallExp expression) {
         _executeCallExpression(expression, _place);
     }
 

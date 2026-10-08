@@ -295,16 +295,18 @@ public struct CallSelection {
     // A declaration that dmd inlines and no wrapper takes is a native call
     // too: a wrapper reads and writes at the sizes of its own signature, so
     // it never serves a declaration whose signature differs. dmd gives such
-    // a declaration an unspecified result, or an instruction (`inp`,
-    // `outp`, `__simd_ib`) that has no wrapper.
+    // a declaration an unspecified result, or a raw SIMD instruction
+    // (`__simd_ib`) that has no wrapper.
     private static Decision builtinDecision(FuncDeclaration function_) {
         import snakebite.backends.builtins:
             destinationParameterOf, entryOf;
+        import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         if (!isInlinedByCodeGenerator(function_))
             return Decision(Route.native);
 
-        ParameterType[] parameters;
+        auto parameters = new ParameterType[
+            typeFunctionOf(function_).parameterList.length];
         ParameterType result;
         const keyed = signatureOf(function_, parameters, result);
         // dmd's own `determine_builtin` keys on `fd.ident`, too (`dmd/
@@ -314,6 +316,176 @@ public struct CallSelection {
         return entry is null
             ? Decision(Route.native)
             : Decision(Route.builtin, entry, destinationParameterOf(name));
+    }
+
+    // DMD's backend constant folder (`evalu8`, OPbswap) uses the operand
+    // width; `cdbswap` uses the result width for a nonconstant operand.
+    // The call site must keep that distinction before argument evaluation.
+    public static bool foldedIntegerIntrinsic(
+        imported!"dmd.expression".CallExp expression, out ulong value,
+    ) {
+        import core.bitop: popcnt;
+        import snakebite.backends.builtins: entryOf;
+        import snakebite.backends.dmdintrinsics: swapTo;
+        import snakebite.nativelayout: TypeFacts;
+
+        auto function_ = expression.f;
+        if (function_ is null || function_.fbody !is null
+                || expression.arguments is null
+                || expression.arguments.length != 1)
+            return false;
+        const identifier = function_.ident.toString;
+        if (identifier != "bswap" && identifier != "_popcnt")
+            return false;
+        const name = identifier == "bswap" ? "bswap" : "_popcnt";
+        auto operand = (*expression.arguments)[0];
+        ulong bits;
+        if (!integerConstantOf(operand, bits)
+                || !isInlinedByCodeGenerator(function_))
+            return false;
+        ParameterType[1] parameters;
+        ParameterType result;
+        if (!signatureOf(function_, parameters[], result)
+                || entryOf(name, parameters[], result) is null)
+            return false;
+
+        switch (TypeFacts.of(operand.type).size) {
+            case 2:
+                value = name == "bswap" ? swapTo!ushort(bits)
+                    : popcnt(cast(ushort) bits); break;
+            case 4:
+                value = name == "bswap" ? swapTo!uint(bits)
+                    : popcnt(cast(uint) bits); break;
+            case 8:
+                value = name == "bswap" ? swapTo!ulong(bits)
+                    : popcnt(bits); break;
+            default: return false;
+        }
+        return true;
+    }
+
+    private static bool integerConstantOf(
+        imported!"dmd.expression".Expression expression, out ulong value,
+    ) {
+        import dmd.expression: IntegerExp;
+        import dmd.expressionsem: toInteger;
+        import snakebite.nativelayout: TypeFacts;
+
+        if (auto integer = expression.isIntegerExp) {
+            value = integer.toInteger;
+            return true;
+        }
+        if (auto cast_ = expression.isCastExp) {
+            if (cast_.lowering !is null
+                    || !TypeFacts.of(cast_.type).isIntegral
+                    || !integerConstantOf(cast_.e1, value))
+                return false;
+        } else if (auto call = expression.isCallExp) {
+            if (!foldedIntegerIntrinsic(call, value))
+                return false;
+        } else if (auto conditional = expression.isCondExp) {
+            ulong condition;
+            if (!integerConstantOf(conditional.econd, condition)
+                    || !integerConstantOf(condition != 0
+                        ? conditional.e1 : conditional.e2, value))
+                return false;
+        } else if (auto binary = expression.isBinExp) {
+            if (!binaryIntegerConstantOf(binary, value))
+                return false;
+        } else if (auto unary = expression.isUnaExp) {
+            if (!unaryIntegerConstantOf(unary, value))
+                return false;
+        } else
+            return false;
+
+        // A folded inner call is stored at its result width before a
+        // surrounding cast or intrinsic uses that value as its operand.
+        scope constant = new IntegerExp(expression.loc, value, expression.type);
+        value = constant.toInteger;
+        return true;
+    }
+
+    private static bool unaryIntegerConstantOf(
+        imported!"dmd.expression".UnaExp expression, out ulong value,
+    ) {
+        import dmd.constfold: Com, Neg, Not;
+        import dmd.ctfeexpr: UnionExp;
+        import dmd.expression: IntegerExp;
+        import dmd.expressionsem: toInteger;
+        import dmd.tokens: EXP;
+        import snakebite.nativelayout: TypeFacts;
+
+        if (!TypeFacts.of(expression.type).isIntegral
+                || !integerConstantOf(expression.e1, value))
+            return false;
+        scope operand = new IntegerExp(
+            expression.e1.loc, value, expression.e1.type);
+        UnionExp folded;
+        switch (expression.op) with (EXP) {
+            case negate: folded = Neg(expression.type, operand); break;
+            case tilde: folded = Com(expression.type, operand); break;
+            case not: folded = Not(expression.type, operand); break;
+            default: return false;
+        }
+        value = folded.exp.toInteger;
+        return true;
+    }
+
+    // The frontend folds literal arithmetic, but arithmetic around a
+    // code-generator intrinsic remains in the AST. Use DMD's scalar
+    // constant operations after folding its operands, not guest execution.
+    private static bool binaryIntegerConstantOf(
+        imported!"dmd.expression".BinExp expression, out ulong value,
+    ) {
+        import dmd.constfold;
+        import dmd.ctfeexpr: UnionExp;
+        import dmd.expression: IntegerExp;
+        import dmd.expressionsem: toInteger;
+        import dmd.tokens: EXP;
+        import snakebite.nativelayout: TypeFacts;
+
+        if (!TypeFacts.of(expression.type).isIntegral)
+            return false;
+        ulong left, right;
+        if (!integerConstantOf(expression.e1, left)
+                || !integerConstantOf(expression.e2, right))
+            return false;
+        scope e1 = new IntegerExp(expression.e1.loc, left, expression.e1.type);
+        scope e2 = new IntegerExp(expression.e2.loc, right, expression.e2.type);
+        if (expression.op == EXP.div || expression.op == EXP.mod) {
+            // Faulting arithmetic must remain execution, not a frontend
+            // diagnostic emitted while an unexecuted call is selected.
+            const facts = TypeFacts.of(expression.type);
+            const minimum = facts.size == 8 ? long.min : int.min;
+            if (right == 0 || (!facts.isUnsigned && cast(long) left == minimum
+                    && cast(long) right == -1))
+                return false;
+        }
+        UnionExp folded;
+        const loc = expression.loc;
+        auto resultType = expression.type;
+        switch (expression.op) with (EXP) {
+            case add: folded = Add(loc, resultType, e1, e2); break;
+            case min: folded = Min(loc, resultType, e1, e2); break;
+            case mul: folded = Mul(loc, resultType, e1, e2); break;
+            case div: folded = Div(loc, resultType, e1, e2); break;
+            case mod: folded = Mod(loc, resultType, e1, e2); break;
+            case leftShift: folded = Shl(loc, resultType, e1, e2); break;
+            case rightShift: folded = Shr(loc, resultType, e1, e2); break;
+            case unsignedRightShift: folded = Ushr(loc, resultType, e1, e2); break;
+            case and: folded = And(loc, resultType, e1, e2); break;
+            case or: folded = Or(loc, resultType, e1, e2); break;
+            case xor: folded = Xor(loc, resultType, e1, e2); break;
+            case equal, notEqual:
+                folded = Equal(expression.op, loc, resultType, e1, e2); break;
+            case identity, notIdentity:
+                folded = Identity(expression.op, loc, resultType, e1, e2); break;
+            case lessThan, lessOrEqual, greaterThan, greaterOrEqual:
+                folded = Cmp(expression.op, loc, resultType, e1, e2); break;
+            default: return false;
+        }
+        value = folded.exp.toInteger;
+        return true;
     }
 
     // `intrinsic_op` of dmd 2.113.0 (`dmd.glue.toir`), row by row. The
@@ -423,7 +595,7 @@ public struct CallSelection {
     // have the plain value layout a wrapper reads and writes.
     private static bool signatureOf(
         FuncDeclaration function_,
-        out ParameterType[] parameters,
+        scope ParameterType[] parameters,
         out ParameterType result,
     ) {
         import dmd.astenums: STC, TY, VarArg;
@@ -431,7 +603,8 @@ public struct CallSelection {
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         auto type = typeFunctionOf(function_);
-        if (type.isRef || type.parameterList.varargs != VarArg.none)
+        if (type.isRef || type.parameterList.varargs != VarArg.none
+                || parameters.length != type.parameterList.length)
             return false;
         auto resultType = type.next.toBasetype;
         if (resultType.ty == TY.Tvoid)
@@ -450,7 +623,7 @@ public struct CallSelection {
             if (!parameterTypeOf(
                     parameter.type.toBasetype, parameterType))
                 return false;
-            parameters ~= parameterType;
+            parameters[i] = parameterType;
         }
         return true;
     }
