@@ -30,13 +30,8 @@ private extern(C) int invokeDVariadicCallback(
 // or misplace the struct extra argument that follows it in the integer
 // register file - not silently pass.
 //
-// This same shape - one declared `struct` parameter, then extras of
-// `int` and `struct` type, `_arguments` checked from inside the callee -
-// also runs as a `bin/ut` test (`tests/ut/backends/call/ffi.d`'s own
-// `variadic.externD.lengthFirstTypeAndSums`), with an otherwise
-// identical callee dmd builds instead: dmd's own `_arguments` shape (one
-// pointer to the `TypeInfo_Tuple`) is unaffected by this step, so that
-// test already covers the dmd host without needing ldc2 to build it.
+// The unit tests cover the DMD host. A vector extra here also checks that
+// LDC's druntime reads the full XMM register through guest TypeInfo.
 private struct AtVariadicPoint {
     int x;
     int y;
@@ -49,13 +44,18 @@ private extern(D) int snakebite_at_dvariadic_probe(
 ) {
     import core.vararg;
 
-    assert(_arguments.length == 3, "wrong _arguments.length");
+    assert(_arguments.length == 4, "wrong _arguments.length");
     assert(_arguments[0] is typeid(int), "wrong _arguments[0]");
 
     int total = point.x + point.y;
     foreach (i; 0 .. _arguments.length) {
         if (_arguments[i] is typeid(int))
             total += va_arg!int(_argptr);
+        else if (_arguments[i].tsize == 16) {
+            double[2] lanes = [-1.0, -1.0];
+            va_arg(_argptr, _arguments[i], lanes.ptr);
+            assert(lanes[0] == 3.0 && lanes[1] == 17.0);
+        }
         else {
             AtVariadicPoint extra;
             va_arg(_argptr, _arguments[i], &extra);
@@ -71,6 +71,7 @@ private enum snippet = q{
         int x;
         int y;
     }
+    struct VectorValue { __vector(double[2]) lanes; }
 
     pragma(mangle, "snakebite_at_dvariadic_probe")
     extern(D) int probe(GuestPoint point, ...);
@@ -82,7 +83,10 @@ private enum snippet = q{
         GuestPoint extra;
         extra.x = 5;
         extra.y = 6;
-        return probe(point, 1, 2, extra);
+        VectorValue vector;
+        vector.lanes.array[0] = 3.0;
+        vector.lanes.array[1] = 17.0;
+        return probe(point, 1, 2, extra, vector);
     }
 };
 
