@@ -428,3 +428,40 @@ static foreach (backend; Matrix!(
         }, "answer");
     }
 }
+
+
+private struct NoreturnField {
+    noreturn never;
+    int value;
+}
+
+
+public extern(C) NoreturnField snakebite_ut_aggregates_noreturn_echo(
+    NoreturnField value,
+) {
+    return value;
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call an external function without source"),
+)) {
+    @("noreturnField.echoedByValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(backend, q{
+            struct NoreturnField {
+                noreturn never;
+                int value;
+            }
+            pragma(mangle, "snakebite_ut_aggregates_noreturn_echo")
+            extern(C) NoreturnField nativeEcho(NoreturnField);
+            int answer() {
+                NoreturnField value;
+                value.value = 7;
+                return nativeEcho(value).value;
+            }
+        }, "answer");
+    }
+}
