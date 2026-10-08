@@ -5,8 +5,11 @@ import ut;
 import snakebite.dependencyimage: Optimise, defaultCompiler, prepareImage;
 import snakebite.exception: SnakebiteException;
 import std.array: array;
-import std.file: SpanMode, dirEntries;
-import std.process: execute;
+import std.conv: text;
+import std.file: SpanMode, dirEntries, exists, rmdirRecurse, thisExePath;
+import std.path: absolutePath;
+import std.process: Config, environment, execute;
+import std.string: replace;
 import core.thread: Thread;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.project: prepareStartupDependencies, sourceSet;
@@ -99,7 +102,7 @@ private bool _startupAnalysisReset;
 private size_t _startupWorkerCalls;
 private Throwable _startupWorkerFailure;
 
-extern(C) void snakebite_startup_image_worker() {
+private extern(C) void startupImageWorker() {
     ++_startupWorkerCalls;
     try {
         // The root exists only in the scratch registration, not on an import
@@ -126,20 +129,37 @@ extern(C) void snakebite_startup_image_worker() {
 // Image constructors can wait for frontend work. Use the real startup and
 // image-load path: a lock held across load would prevent the join, and a
 // reset after load would remove the worker's module. Scratch cannot share
-// a process with another test's live frontend session.
+// a process with another test's live frontend session. Bound the entire child
+// process so a blocked frontend worker cannot hang the acceptance runner.
 @Tags("alone")
 @("image.startupAnalysisEndsBeforeImageConstructor")
 unittest {
     const sandbox = Sandbox();
+    enum childMarker = "SNAKEBITE_STARTUP_IMAGE_PROBE";
+    if (environment.get(childMarker) != "1") {
+        // The parent owns the child working directory, including files left
+        // by a process killed while building or loading the image.
+        scope(exit) if (sandbox.sandboxPath.exists)
+            sandbox.sandboxPath.rmdirRecurse;
+        const result = execute([
+            "timeout", "--kill-after=5", "60", thisExePath, "-s",
+            "at.ffi.image.image.startupAnalysisEndsBeforeImageConstructor",
+        ], [childMarker: "1"], Config.none, size_t.max,
+            sandbox.sandboxPath.absolutePath);
+        result.status.shouldEqual(0, text("Startup image probe failed (exit ",
+            result.status, "): ", result.output));
+        return;
+    }
     sandbox.writeFile("project/startup_analysis_root.d",
         "module startup_analysis_root; int answer() { return 42; }");
+    // Pass the address within this process: no executable export is needed.
     sandbox.writeFile("constructor.c", q{
-        extern void *dlsym(void *, const char *);
+        #include <stdint.h>
         __attribute__((constructor)) static void on_load(void) {
-            void (*action)(void) = dlsym(0, "snakebite_startup_image_worker");
-            if (action) action();
+            void (*action)(void) = (void (*)(void))(uintptr_t)@ACTION@;
+            action();
         }
-    });
+    }.replace("@ACTION@", text(cast(size_t) &startupImageWorker)));
     const objectPath = sandbox.inSandboxPath("constructor.o");
     const compiled = execute(["cc", "-c", "-fPIC",
         sandbox.inSandboxPath("constructor.c"), "-o", objectPath]);
