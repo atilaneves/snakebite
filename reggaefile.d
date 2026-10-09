@@ -5,9 +5,9 @@ import reggae.build: Build, Target;
 import reggae.rules.dub: CompilationMode;
 import reggae.rules.dub.runtime: dubBuild;
 import reggae.types: CompilerFlags;
-import std.algorithm: canFind, filter, map, startsWith;
+import std.algorithm: canFind, endsWith, filter, map, startsWith;
 import std.array: array;
-import std.process: environment, executeShell;
+import std.process: environment, executeShell, escapeShellCommand;
 import std.path: baseName, stripExtension;
 import std.string: chomp;
 
@@ -74,7 +74,7 @@ Target registryImageObject() {
             "$project/registry_slot.so",
             "cc -shared -fPIC -nostdlib -o $out $in",
             Target(registrySlotSource),
-        )],
+        ), Target("build/host-exports.map")],
     );
 }
 
@@ -83,12 +83,13 @@ Target registryImageObject() {
 // executable. They are implicit inputs of an empty object that only
 // `bin/ut` links, so that `ninja bin/ut` makes them and no other target
 // needs a C or C++ compiler for them.
-Target testFixtureObject() {
+Target testFixtureObject(in string objectSet, Target exportMap,
+                         Target[] libraries) {
     return Target(
-        "$project/test_fixtures.o",
+        "$project/" ~ objectSet ~ "_host_exports.o",
         "cc -x c -c /dev/null -o $out",
         Target[].init,
-        testFixtureLibraries,
+        libraries ~ exportMap,
     );
 }
 
@@ -107,7 +108,7 @@ Target[] testFixtureLibraries() {
     ];
 }
 
-Target dubTarget(string compiler, string config, string objectSet,
+Target[] dubTarget(string compiler, string config, string objectSet,
                  string output, CompilerFlags flags = CompilerFlags()) {
     auto buildOptions = options.dup;
     buildOptions.dubObjsDir = "$builddir/.reggae/objs/bin/"
@@ -158,24 +159,54 @@ Target dubTarget(string compiler, string config, string objectSet,
     // into the same link line as the D-compiled ones.
     info.packages[0].files ~= assembledSources.map!assembledObjectPath.array
         ~ assembledObjectPath(registryImageSource);
-    if (config == "unittest")
-        info.packages[0].files ~= "$project/test_fixtures.o";
+    const testHost = config == "unittest" || config == "acceptance-test";
+    if (testHost)
+        info.packages[0].files ~= "$project/" ~ objectSet ~ "_host_exports.o";
 
+    auto exportMap = Target("build/host-exports.map");
+    if (testHost) {
+        string[] arguments = [buildOptions.dCompiler, "-c", "-o-", "-unittest"];
+        if (config == "acceptance-test")
+            arguments ~= compiler == "dmd"
+                ? "-version=SnakebiteAcceptanceHostExports"
+                : "-d-version=SnakebiteAcceptanceHostExports";
+        foreach (package_; info.packages) {
+            arguments ~= package_.importPaths.map!(path => "-I" ~ path).array;
+            arguments ~= package_.stringImportPaths.map!(path => "-J" ~ path).array;
+            arguments ~= package_.versionFlags(buildOptions.dCompiler.baseName).array;
+            arguments ~= package_.dflags;
+        }
+        exportMap = Target(
+            "$project/.reggae/" ~ output ~ "-host-exports.map",
+            "python3 $project/build/host_exports.py $out "
+                ~ escapeShellCommand(arguments) ~ " $in",
+            Target("build/host_exports.d"),
+            [Target("build/host_exports.py"), Target("build/host-exports.map"),
+                Target(buildOptions.dCompiler)]
+                ~ info.packages[0].files
+                    .filter!(path => path.endsWith(".d"))
+                    .map!(path => Target(path)).array,
+        );
+        info.packages[0].lflags = info.packages[0].lflags
+            .map!(flag => flag.canFind("--version-script=")
+                ? "-L--version-script=" ~ exportMap.rawOutputs[0] : flag).array;
+    }
     auto target = dubBuild(buildOptions, info, CompilationMode.options, flags);
     target.rawOutputs[0] = "bin/" ~ output;
-    return target;
+    return testHost
+        ? [target, testFixtureObject(objectSet, exportMap,
+            config == "unittest" ? testFixtureLibraries : [])] : [target];
 }
 
 Build reggaeBuild() {
     Target[] targets = assembledSources.map!assembledObject.array ~ [
         registryImageObject,
-        testFixtureObject,
-        dubTarget("dmd", "unittest", "unittest", "ut"),
-        dubTarget("ldc2", "acceptance-test", "release", "at", CompilerFlags("-release", "-O", "-flto=thin")),
-        dubTarget("ldc2", "sb", "release", "sb", CompilerFlags("-release", "-O", "-flto=thin")),
-        dubTarget("ldc2", "sb-repl", "release", "sb-repl", CompilerFlags("-release", "-O", "-flto=thin")),
-        dubTarget("ldc2", "bench", "release", "bench", CompilerFlags("-release", "-O", "-flto=thin")),
-    ];
+    ]
+        ~ dubTarget("dmd", "unittest", "unittest", "ut")
+        ~ dubTarget("ldc2", "acceptance-test", "release", "at", CompilerFlags("-release", "-O", "-flto=thin"))
+        ~ dubTarget("ldc2", "sb", "release", "sb", CompilerFlags("-release", "-O", "-flto=thin"))
+        ~ dubTarget("ldc2", "sb-repl", "release", "sb-repl", CompilerFlags("-release", "-O", "-flto=thin"))
+        ~ dubTarget("ldc2", "bench", "release", "bench", CompilerFlags("-release", "-O", "-flto=thin"));
     return Build(targets);
 }
 

@@ -142,6 +142,24 @@ unittest {
 // into the test binary.
 export extern(C) int snakebite_symbol_executable_only_test() { return 733; }
 
+// `export` does not designate a native fixture. This includes data and TLS,
+// whose addresses must obey the same host boundary as function addresses.
+export extern(C) int snakebite_symbol_unlisted_function() { return 811; }
+export __gshared int snakebite_symbol_unlisted_data = 812;
+export int snakebite_symbol_unlisted_tls = 813;
+
+@("symbolAddress.unlistedHostDefinitionsArePrivate")
+unittest {
+    Resolver resolver;
+    resolver.resolve(snakebite_symbol_unlisted_function.mangleof)
+        .should == null;
+    resolver.resolveIndependent(snakebite_symbol_unlisted_function.mangleof)
+        .should == null;
+    resolver.resolve(snakebite_symbol_unlisted_data.mangleof).should == null;
+    resolver.resolveThreadLocal(snakebite_symbol_unlisted_tls.mangleof)
+        .should == null;
+}
+
 @("symbolAddress.fallsBackToExecutableWhenNothingElseHasIt")
 unittest {
     Resolver resolver;
@@ -767,4 +785,3 @@ unittest {
     prepare(generatorB);
     builds.should == 2;
 }
-
