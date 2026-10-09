@@ -38,8 +38,6 @@ configuration "unittest" {
 
     mainSourceFile "tests/main.d"
     sourcePaths "tests"
-    excludedSourceFiles "tests/nodecoverage/controls.d"
-    excludedSourceFiles "tests/nodecoverage/addednode.d"
     sourcePaths "bench"
     excludedSourceFiles "bench/main.d"
     importPaths "tests"

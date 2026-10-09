@@ -4,7 +4,6 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
 build/reggae.sh
 ninja
-python3 build/check_nodecoverage.py --controls
 # One worker keeps the full-suite time stable under strace.
 build/ut-without-build-tools.sh -j 1
 # The default thread count runs tests on several threads at once, which
