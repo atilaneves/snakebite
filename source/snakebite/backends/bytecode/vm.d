@@ -247,12 +247,14 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind) {
 
     private const(Instruction)* _pc;
     private ubyte* _frame;
+    private size_t _cleanupMark;
 
     public this(
         const(Instruction)* pc, Activation* activation, DispatchState* state,
     ) pure nothrow @nogc {
         _pc = pc;
         _frame = activation.frame;
+        _cleanupMark = activation.cleanupMark;
         this.returnPlace = activation.returnPlace;
         this.constants = activation.constants;
         this.callSites = activation.callSites;
@@ -800,7 +802,8 @@ public alias opTemporarySuspend =
 private const(Instruction)* runTemporarySuspend(Decoded)(
     ref Decoded execution,
 ) {
-    execution.frames.suspendCleanup(*cast(ubyte**) execution.source);
+    execution.frames.suspendCleanup(*cast(ubyte**) execution.source,
+        execution._cleanupMark);
     return execution.next;
 }
 
@@ -811,7 +814,8 @@ public alias opTemporaryArm =
 private const(Instruction)* runTemporaryArm(Decoded)(
     ref Decoded execution,
 ) {
-    execution.frames.armCleanup(*cast(ubyte**) execution.source);
+    execution.frames.armCleanup(*cast(ubyte**) execution.source,
+        execution._cleanupMark);
     return execution.next;
 }
 
@@ -822,7 +826,8 @@ public alias opTemporaryArmAddress =
 private const(Instruction)* runTemporaryArmAddress(Decoded)(
     ref Decoded execution,
 ) {
-    execution.frames.armCleanup(execution.source);
+    execution.frames.armCleanup(execution.source,
+        execution._cleanupMark);
     return execution.next;
 }
 

@@ -995,3 +995,71 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+static foreach (backend; Matrix!()) {
+    @("structCopy.failedReturnedLocalDestroyedOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        5.shouldBeStatusOf!(backend, q{
+            struct S {
+                int* destroyed;
+                long[4] values;
+                this(int* count) { destroyed = count; values[0] = 5; }
+                ~this() { if (destroyed) *destroyed += cast(int) values[0]; }
+            }
+            S make(int* count, bool fail) {
+                auto result = S(count);
+                if (fail) throw new Exception("fail");
+                return result;
+            }
+            int main() {
+                int count;
+                try { make(&count, true); }
+                catch (Exception) {}
+                return count;
+            }
+        });
+    }
+}
+
+
+// Nested returns keep failed-result cleanup separate from live caller locals.
+static foreach (backend; Matrix!()) {
+    @("structCopy.nestedReturnCleanupKeepsCallerOwnership." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S {
+                int* destroyed;
+                long[4] values;
+                this(int* count, int value) {
+                    destroyed = count;
+                    values[0] = value;
+                }
+                ~this() { if (destroyed) *destroyed += cast(int) values[0]; }
+            }
+            S make(int* count, bool fail) {
+                auto result = S(count, 5);
+                if (fail) throw new Exception("fail");
+                return result;
+            }
+            S relay(int* count, bool fail) { return make(count, fail); }
+            int main() {
+                int count;
+                {
+                    auto outer = S(&count, 7);
+                    try { relay(&count, true); }
+                    catch (Exception error) {
+                        if (error.msg != "fail" || count != 5) return 1;
+                    }
+                    {
+                        auto result = relay(&count, false);
+                        if (count != 5 || result.values[0] != 5) return 2;
+                    }
+                    if (count != 10 || outer.values[0] != 7) return 3;
+                }
+                return count == 17 ? 0 : 4;
+            }
+        });
+    }
+}

@@ -149,12 +149,12 @@ public struct FrameStack {
         _cleanups.registerTemporary(address, site);
     }
 
-    public void armCleanup(ubyte* address) {
-        _cleanups.arm(address);
+    public void armCleanup(ubyte* address, in size_t first = 0) {
+        _cleanups.arm(address, first);
     }
 
-    public void suspendCleanup(ubyte* address) {
-        _cleanups.suspend(address);
+    public void suspendCleanup(ubyte* address, in size_t first = 0) {
+        _cleanups.suspend(address, first);
     }
 
     public void finishCleanups(

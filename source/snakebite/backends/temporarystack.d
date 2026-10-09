@@ -106,18 +106,20 @@ public struct TemporaryStack {
         }
     }
 
-    pragma(inline, true) public void arm(void* address) @nogc {
-        if (_entries.length && _entries.back.address is address
+    // An aliased return place can have a caller record. A callee constructor
+    // must only change records registered by its own call.
+    pragma(inline, true) public void arm(void* address, in size_t first = 0) @nogc {
+        if (_entries.length > first && _entries.back.address is address
                 && !(_entries.back._state & Entry.trackedFlag)) {
             _entries.back._state = Entry.ready;
             return;
         }
-        armTracked(address);
+        armTracked(address, first);
     }
 
-    private void armTracked(void* address) @nogc {
+    private void armTracked(void* address, in size_t first) @nogc {
         size_t next = noEntry;
-        foreach_reverse (index; 0 .. _entries.length) {
+        foreach_reverse (index; first .. _entries.length) {
             if (!_entries[index]._consumed && _entries[index].address is address) {
                 if (_entries[index].armed)
                     return;
@@ -305,17 +307,17 @@ public struct TemporaryStack {
         _orders[index].node = noEntry;
     }
 
-    pragma(inline, true) public void suspend(void* address) @nogc {
-        if (_entries.length && _entries.back.address is address
+    pragma(inline, true) public void suspend(void* address, in size_t first = 0) @nogc {
+        if (_entries.length > first && _entries.back.address is address
                 && !(_entries.back._state & Entry.trackedFlag)) {
             _entries.back._state = Entry.startedFlag;
             return;
         }
-        suspendTracked(address);
+        suspendTracked(address, first);
     }
 
-    private void suspendTracked(void* address) @nogc {
-        foreach_reverse (index; 0 .. _entries.length)
+    private void suspendTracked(void* address, in size_t first) @nogc {
+        foreach_reverse (index; first .. _entries.length)
             if (!_entries[index]._consumed && _entries[index].address is address) {
                 start(index);
                 if (_entries[index].armed && _orders.length != 0)
