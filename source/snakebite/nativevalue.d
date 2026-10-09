@@ -4,6 +4,9 @@ module snakebite.nativevalue;
 private:
 
 
+import snakebite.internalfailure: internalFailure;
+
+
 // Integral values in guest storage use the same byte order and widths as
 // compiled D values. Callers validate a width before reaching this module;
 // the assertions keep invalid calls from becoming silent memory corruption
@@ -18,7 +21,7 @@ pragma(inline, true) public void storeIntegral(
         case 2: *cast(ushort*) place = cast(ushort) value; return;
         case 4: *cast(uint*) place = cast(uint) value; return;
         case 8: *cast(ulong*) place = value; return;
-        default: assert(0, "no native layout for this integral width");
+        default: internalFailure("no native layout for this integral width");
     }
 }
 
@@ -45,9 +48,9 @@ pragma(inline, true) public long loadSigned(
         case 2: return *cast(const(short)*) place;
         case 4: return *cast(const(int)*) place;
         case 8: return *cast(const(long)*) place;
-        default: assert(0, "no native layout for this integral width");
+        default: internalFailure("no native layout for this integral width");
     }
-    assert(0);
+    internalFailure();
     return 0;
 }
 
@@ -60,9 +63,9 @@ pragma(inline, true) public ulong loadUnsigned(
         case 2: return *cast(const(ushort)*) place;
         case 4: return *cast(const(uint)*) place;
         case 8: return *cast(const(ulong)*) place;
-        default: assert(0, "no native layout for this integral width");
+        default: internalFailure("no native layout for this integral width");
     }
-    assert(0);
+    internalFailure();
     return 0;
 }
 
@@ -446,7 +449,7 @@ public enum delegateValueSize = 2 * (void*).sizeof;
 // except `copy`, `classReference`, `zero`, and `truth`: each of
 // those needs a backend's own control flow (a plain move, a class
 // reference adjustment, a zero fill, or the condition code), so
-// `applyCast`'s own `final switch` hits `assert(0)` on any of the
+// `applyCast`'s own `final switch` hits `internalFailure()` on any of the
 // four - both backends' `compileCast`/`visitUnloweredCast` switches
 // handle them directly and never reach `applyCast` with one.
 public enum CastKind {
@@ -711,15 +714,14 @@ public void applyCast(
 ) @nogc nothrow {
     final switch (layout.kind) with (CastKind) {
     case copy:
-        assert(0, "applyCast: copy is a backend's own plain move");
+        internalFailure("applyCast: copy is a backend's own plain move");
     case classReference:
-        assert(0,
-            "applyCast: classReference needs a backend's own reference "
+        internalFailure("applyCast: classReference needs a backend's own reference "
             ~ "adjustment");
     case zero:
-        assert(0, "applyCast: zero needs a backend's own zero fill");
+        internalFailure("applyCast: zero needs a backend's own zero fill");
     case truth:
-        assert(0, "applyCast: truth needs a backend's own condition code");
+        internalFailure("applyCast: truth needs a backend's own condition code");
     case integralToFloat:
         return applyCastAs!integralToFloat(layout, source, destination);
     case floatToIntegral:

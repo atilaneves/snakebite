@@ -4,6 +4,9 @@ module snakebite.ffi.callback;
 private:
 
 
+import snakebite.internalfailure: internalFailure;
+
+
 import core.sync.mutex: Mutex;
 import snakebite.ffi.plan: CallPlan, prepareCallback;
 import snakebite.ffi.sysv:
@@ -208,7 +211,7 @@ private Slot* slotOf(in const(void)* entry) {
             return &chunk.slots[offset / callbackEntryBytes];
     }
 
-    assert(0, "the entry belongs to a chunk of the pool");
+    internalFailure("the entry belongs to a chunk of the pool");
 }
 
 

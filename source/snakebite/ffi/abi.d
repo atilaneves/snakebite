@@ -3,6 +3,9 @@ module snakebite.ffi.abi;
 
 private:
 
+
+import snakebite.internalfailure: internalFailure;
+
 // This module classifies one value's System V AMD64 ABI shape -
 // `ArgumentPlan` and `Register` - and the two host-compiler switches
 // below (`reversedDParameters`, `contextPrecedesHiddenReturnPointer`) a
@@ -490,9 +493,9 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
             case x87, x87up:
                 // Ruled out above: every path here already forced
                 // `memory` for either class.
-                assert(false);
+                internalFailure();
             case memory:
-                assert(false);
+                internalFailure();
         }
     }
     return plan;
@@ -641,7 +644,7 @@ private void classify(
     case Tfunction, Treference, Tident, Tnone, Terror, Tenum,
         Tinstance, Ttypeof, Ttuple, Tslice, Treturn, Ttraits, Tmixin,
         Ttag:
-        assert(0);
+        internalFailure();
     }
 }
 

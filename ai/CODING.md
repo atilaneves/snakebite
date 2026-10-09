@@ -99,16 +99,16 @@ This means there is no need to marshall or unmarshall when doing FFI.
 - Do not add `unsupported` (or similarly named) to a plan enum. Every
   member must be a real outcome, or a `final switch` over it proves
   nothing.
-- Do not throw from a catch-all visit. Make it `assert(0)`:
-  ```d
-  // wrong
-  override void visit(Expression e) {
-      throw new Exception("interpreter cannot ...");
-  }
-  // right
-  override void visit(Expression) { assert(0); }
-  ```
-  Unreachable: the closed dispatch handles every node.
+- Report host internal failures with
+  `snakebite.internalfailure.internalFailure(message)`. It prints the
+  message and the call site's source location, then ends the process with
+  a normal failure status. It works in `pure`, `nothrow`, and `@nogc` code,
+  including release builds with assertions disabled.
+- Use this shared function in catch-all visits. Include the node kind in
+  the message. A terminal report does not prove that a node is unreachable
+  and does not permit a new refusal of valid guest code.
+- Keep `static assert` for compile-time checks. Guest assertions and the
+  trapping instruction for a guest halt keep their guest semantics.
 
 A new rejection site, `unsupported` member, throwing catch-all, or
 per-backend copy of a decision that belongs in the shared layer is a

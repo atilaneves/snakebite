@@ -2,6 +2,9 @@ module snakebite.frontend.dmd.functions;
 
 private:
 
+
+import snakebite.internalfailure: internalFailure;
+
 // The module-level function called `name`, or null if there is none.
 public imported!"dmd.func".FuncDeclaration findFunction(
     imported!"dmd.dmodule".Module module_,
@@ -111,7 +114,7 @@ public bool bodyIsSelected(
 // `function_`'s type as the function type it must be. A `FuncDeclaration`
 // whose type is not a `TypeFunction` would be a malformed AST, not a guest
 // construct a backend has chosen not to support, so this halts on it as
-// the internal error it is rather than reporting a refusal. `assert(false)`
+// the internal error it is rather than reporting a refusal. `internalFailure()`
 // rather than `assert(cond)`: the latter is elided by `-release`, leaving a
 // null for the caller to dereference, and a silent null here is worse than
 // a stop.
@@ -122,8 +125,7 @@ public imported!"dmd.mtype".TypeFunction typeFunctionOf(
 
     auto type = function_.type.isTypeFunction;
     if (type is null)
-        assert(false,
-            text("`", function_.toString, "` has non-function type `",
+        internalFailure(text("`", function_.toString, "` has non-function type `",
                 function_.type.toString, "`"));
 
     return type;

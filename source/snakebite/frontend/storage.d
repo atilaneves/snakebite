@@ -3,6 +3,9 @@ module snakebite.frontend.storage;
 private:
 
 
+import snakebite.internalfailure: internalFailure;
+
+
 import dmd.expression:
     AssignExp, BinAssignExp, CatAssignExp, Expression, IndexExp, MemorySet,
     SymOffExp;
@@ -226,7 +229,7 @@ public struct StorageResolver(Result, Adapter) {
                 Tdchar, Terror, Tinstance, Ttypeof, Ttuple, Tslice, Treturn,
                 Tnull, Tvector, Tint128, Tuns128, Ttraits, Tmixin,
                 Tnoreturn, Ttag:
-                assert(0, text("`", index.toString, "` indexes a `",
+                internalFailure(text("`", index.toString, "` indexes a `",
                     indexBase.toString, "`: dmd lowers associative array ",
                     "indexing to a call, indexes a vector through a cast to ",
                     "a static array and an aggregate through `opIndex`"));
@@ -322,6 +325,6 @@ public TypeInfo typeInfoObjectOf(Types)(
 
     auto interfaceInfo = cast(TypeInfo_Interface) info;
     if (interfaceInfo is null)
-        assert(0, "the runtime type of an interface is a `TypeInfo_Interface`");
+        internalFailure("the runtime type of an interface is a `TypeInfo_Interface`");
     return interfaceInfo.info;
 }

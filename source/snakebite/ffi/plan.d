@@ -8,6 +8,9 @@ import snakebite.ffi.symbol: Resolver;
 private:
 
 
+import snakebite.internalfailure: internalFailure;
+
+
 // Everything about calling one already-compiled function that does not
 // change between calls: where the code is, and what each of its arguments
 // and its result must become to travel in a register.
@@ -684,7 +687,7 @@ public struct CallPlan {
                 memcpy(&result, src, move.copyBytes);
                 return result;
             }
-            case copy16: assert(false, "16-byte load uses memcpy");
+            case copy16: internalFailure("16-byte load uses memcpy");
         }
     }
 
@@ -719,8 +722,8 @@ public struct CallPlan {
             case byte2: *cast(ushort*) place = cast(ushort) value; break;
             case byte4: *cast(uint*) place = cast(uint) value; break;
             case byte8: *cast(size_t*) place = value; break;
-            case partial: assert(false, "a partial result is copied");
-            case copy16: assert(false, "16-byte result uses memcpy");
+            case partial: internalFailure("a partial result is copied");
+            case copy16: internalFailure("16-byte result uses memcpy");
         }
     }
 
@@ -1056,7 +1059,7 @@ public struct CallPlan {
                     case 2: return Load.zero16;
                     case 4: return Load.zero32;
                     case 8: return Load.word64;
-                    default: assert(false, "unsupported unsigned size");
+                    default: internalFailure("unsupported unsigned size");
                 }
 
             case signed:
@@ -1065,7 +1068,7 @@ public struct CallPlan {
                     case 2: return Load.sign16;
                     case 4: return Load.sign32;
                     case 8: return Load.word64;
-                    default: assert(false, "unsupported signed size");
+                    default: internalFailure("unsupported signed size");
                 }
 
             case integer:
@@ -1084,13 +1087,13 @@ public struct CallPlan {
                 return register.size == 4 ? Load.zero32 : Load.copy;
 
             case x87:
-                assert(false, "an x87 result has no argument load");
+                internalFailure("an x87 result has no argument load");
 
             case sseup:
-                assert(false, "SSEUP shares its preceding register");
+                internalFailure("SSEUP shares its preceding register");
 
             case none:
-                assert(false, "a `void` argument has nothing to pass");
+                internalFailure("a `void` argument has nothing to pass");
         }
     }
 
@@ -1115,7 +1118,7 @@ public struct CallPlan {
             case 8: return Store.byte8;
             case 16: return Store.copy16;
             case 3, 5, 6, 7: return Store.partial;
-            default: assert(false, "unsupported result register size");
+            default: internalFailure("unsupported result register size");
         }
     }
 

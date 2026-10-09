@@ -4,6 +4,9 @@ module snakebite.backends.runtimetypes;
 private:
 
 
+import snakebite.internalfailure: internalFailure;
+
+
 // DMD emits no linked metadata for guest declarations. Keep their fallback
 // metadata and its identity for the backend's lifetime, while reusing real
 // host metadata whenever it is available.
@@ -165,11 +168,11 @@ public struct RuntimeTypes {
 
         auto type = declared.toBasetype.mutableOf.unSharedOf;
         if (type.ty != Tclass)
-            assert(0, "a class type has a class type once its qualifiers go");
+            internalFailure("a class type has a class type once its qualifiers go");
 
         auto info = cast(TypeInfo_Class) get(type);
         if (info is null)
-            assert(0, "the runtime type of a class is a `TypeInfo_Class`");
+            internalFailure("the runtime type of a class is a `TypeInfo_Class`");
 
         return info;
     }
@@ -293,11 +296,11 @@ public struct RuntimeTypes {
                 case Tint128, Tuns128, Treference, Tident, Tnone, Terror,
                     Tinstance, Ttypeof, Tslice, Treturn, Ttraits, Tmixin,
                     Ttag:
-                    assert(0);
+                    internalFailure();
 
                 case Tclass, Tstruct, Tenum, Tfunction, Tdelegate,
                     Tpointer, Tsarray, Taarray, Tvector, Ttuple, Tarray:
-                    assert(0);
+                    internalFailure();
             }
         }
         return info;
