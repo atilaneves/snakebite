@@ -80,8 +80,8 @@ Target frontendInventoryGate() {
     assert(frontend.length != 0, "cannot locate the DMD frontend source tree");
     return Target.phony(
         "frontend-node-contract",
-        "python3 $project/build/frontend_inventory.py " ~ escapeShellCommand(frontend),
-        [Target("build/frontend_inventory.py"),
+        "python3 $project/build/check_nodecoverage.py " ~ "--frontend " ~ escapeShellCommand(frontend),
+        [Target("build/check_nodecoverage.py"),
          Target("build/nodecoverage/frontend-source-hashes.txt")],
     );
 }

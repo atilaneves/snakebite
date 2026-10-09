@@ -1,18 +1,53 @@
 #!/usr/bin/env python3
-"""Run success and named compile-fail controls for the node coverage gate."""
+"""Check frontend node coverage freshness, with optional compile-fail controls."""
 
 import argparse
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
 
-from frontend_inventory import verify, verify_forwarding
-
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def verify(frontend: Path, manifest: Path) -> None:
+    expected = dict(
+        (name, digest)
+        for digest, name in (line.split(maxsplit=1) for line in manifest.read_text().splitlines())
+    )
+    actual = {
+        str(path.relative_to(frontend)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(frontend.rglob("*.d"))
+    }
+    if actual != expected:
+        added = sorted(actual.keys() - expected.keys())
+        removed = sorted(expected.keys() - actual.keys())
+        changed = sorted(name for name in actual.keys() & expected.keys()
+                         if actual[name] != expected[name])
+        detail = "; ".join(f"{kind}: {', '.join(names)}" for kind, names in
+                           (("added", added), ("removed", removed), ("changed", changed))
+                           if names)
+        raise ValueError("node coverage: stale frontend fingerprint; " + detail)
+
+
+def verify_forwarding(frontend: Path, contract: Path) -> None:
+    # Source hashes first fix the syntax this bounded extraction accepts.
+    pattern = re.compile(
+        r"void visit\(AST(?:Codegen)?\.(\w+) [se]\) "
+        r"\{ visit\(cast\(AST(?:Codegen)?\.(\w+)\)[se]\); \}")
+    edges = {}
+    for name in ("visitor/package.d", "visitor/parsetime.d"):
+        edges.update(pattern.findall((frontend / name).read_text()))
+    records = re.findall(r"Forward!\((\w+),\s*(\w+)\)", contract.read_text())
+    if not records:
+        raise ValueError("node coverage: no forwarding records found")
+    for node, target in records:
+        if edges.get(node) != target:
+            raise ValueError(f"node coverage: wrong frontend forwarding edge: {node} -> {target}")
 
 
 def compile_controls(compiler: str, frontend: Path) -> None:
@@ -22,8 +57,8 @@ def compile_controls(compiler: str, frontend: Path) -> None:
         "-I" + str(ROOT / "source"), "-I" + str(ROOT / "vendor/dmd-backend"),
         "-I" + str(frontend.parent), "-J" + str(frontend / "res"),
         "-J" + str(frontend.parents[2] / "generated/dub"),
-        str(ROOT / "build/nodecoverage/controls.d"),
-        str(ROOT / "build/nodecoverage/addednode.d"),
+        str(ROOT / "tests/nodecoverage/controls.d"),
+        str(ROOT / "tests/nodecoverage/addednode.d"),
     ]
     controls = {
         "": "",
@@ -78,6 +113,20 @@ def fingerprint_controls() -> None:
                 raise RuntimeError(f"{name}: fingerprint unexpectedly accepted")
 
 
+def forwarding_controls(frontend: Path) -> None:
+    with tempfile.TemporaryDirectory(prefix="nodecoverage-edge-") as directory:
+        wrong = Path(directory) / "wrong.d"
+        wrong.write_text("Forward!(AddAssignExp, BinExp)")
+        try:
+            verify_forwarding(frontend, wrong)
+        except ValueError as error:
+            if "wrong frontend forwarding edge: AddAssignExp -> BinExp" not in str(error):
+                raise
+            print("WrongFrontendEdge: expected source-edge failure verified")
+        else:
+            raise RuntimeError("WrongFrontendEdge: invalid source edge accepted")
+
+
 def locate_frontend() -> Path:
     result = subprocess.run(["dub", "describe", "--config=unittest"],
                             cwd=ROOT, text=True, capture_output=True, check=True)
@@ -93,6 +142,8 @@ def locate_frontend() -> Path:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--controls", action="store_true",
+                        help="run positive and negative coverage controls")
     parser.add_argument("--compiler", default=os.environ.get("DC", "dmd"))
     parser.add_argument("--frontend", type=Path)
     args = parser.parse_args()
@@ -100,17 +151,9 @@ def main() -> int:
         frontend = args.frontend or locate_frontend()
         verify(frontend, ROOT / "build/nodecoverage/frontend-source-hashes.txt")
         verify_forwarding(frontend, ROOT / "source/snakebite/backends/nodecoverage.d")
-        with tempfile.TemporaryDirectory(prefix="nodecoverage-edge-") as directory:
-            wrong = Path(directory) / "wrong.d"
-            wrong.write_text("Forward!(AddAssignExp, BinExp)")
-            try:
-                verify_forwarding(frontend, wrong)
-            except ValueError as error:
-                if "wrong frontend forwarding edge: AddAssignExp -> BinExp" not in str(error):
-                    raise
-                print("WrongFrontendEdge: expected source-edge failure verified")
-            else:
-                raise RuntimeError("WrongFrontendEdge: invalid source edge accepted")
+        if not args.controls:
+            return 0
+        forwarding_controls(frontend)
         compile_controls(args.compiler, frontend)
         fingerprint_controls()
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:

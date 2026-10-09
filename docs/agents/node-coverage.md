@@ -24,7 +24,7 @@ The 163 visitor types omit `CTFEExp`: that class has no own `accept` and
 inherits `Expression.accept`. It stays visible in the pending audit.
 The distinct nested parse-only classes of `ASTBase` are excluded.
 
-`build/nodecoverage/node-source-inventory.json` records the separate
+`docs/agents/node-source-inventory.json` records the separate
 whole-source lexical scan used to establish these two export modules.
 That scan examined every pinned frontend `.d` file. It is a bounded
 lexical inventory, not a D parser: aliases, mixins, conditional declarations
@@ -33,7 +33,7 @@ independent cross-check. Neither scan establishes semantic reachability.
 
 `frontend-source-hashes.txt` pins the names and SHA-256 hashes of all 271
 frontend D files, including files that have no runtime-family class.
-`frontend_inventory.py` checks the whole source tree on each Ninja build.
+`build/check_nodecoverage.py` checks the whole source tree on each Ninja build.
 A new module, deleted file, changed field or flag, or changed semantic code
 fails with `stale frontend fingerprint`. This is stronger freshness
 checking than a class count or field schema alone. It is not evidence that
@@ -111,15 +111,17 @@ remaining proofs.
 
 ## Verification and frontend update procedure
 
-Run `python3 build/check_nodecoverage.py` for the positive compile and
-named negative controls. It checks a missing exact leaf, a missing checked
+Run `python3 build/check_nodecoverage.py --controls` for the positive compile
+and named negative controls. It checks a missing exact leaf, a missing checked
 mode adapter, a wrong ancestor target, a cycle, duplicate records, a missing
 exact forwarding destination, both universe mismatch directions, and a
 class in an added module. It also checks source freshness failure for a
 changed file, a new schema member and a new module. The controls use the
 production templates and verifier. Negative compiles must fail with the
 named node-coverage diagnostic; an unrelated import failure does not pass.
-CI runs these controls after the build. Existing guest fixtures, followed
+The fixtures are in `tests/nodecoverage/` and are excluded from the normal
+unit test build. CI runs these controls after the build. Existing guest
+fixtures, followed
 by full `bin/ut`, check retained runtime behavior. No new behavior test or
 `Omit` was needed for a structural change.
 
