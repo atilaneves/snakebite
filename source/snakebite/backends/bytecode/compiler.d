@@ -4032,32 +4032,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileConstant(expression);
     }
 
-    // `int4 v = 1;`/`cast(int4) 1`: dmd's own semantic pass (`dcast.d`)
-    // rewrites either shape to this node, `e1` already cast to the
-    // vector's own element type, and its meaning is "every lane gets
-    // this one value" - filling the first lane and then copying those
-    // same bytes to every remaining one. `int4 v = cast(int4)
-    // someInt4Sarray;` reaches this node too, with `e1` a matching-size
-    // static array instead (`dcast.d`'s `T[n] <-- __vector(U[m])`, in
-    // reverse): a plain reinterpret of the array's own bytes, not a
-    // broadcast of a single "element".
     override void visit(VectorExp expression) {
-        import dmd.astenums: Tsarray;
-        import dmd.typesem: toBasetype;
-        import snakebite.nativelayout: TypeFacts;
+        import snakebite.backends.vectorinit: planVectorInit;
 
         requireDestination(expression);
-
-        if (expression.e1.type.toBasetype.ty == Tsarray) {
-            evalInto(expression.e1, _destination, _width);
-            return;
-        }
-
-        const elementFacts = TypeFacts.of(expression.e1.type);
-        evalInto(expression.e1, _destination, elementFacts.size);
-        foreach (i; 1 .. _width / elementFacts.size)
-            emit(&opCopy, _destination + i * elementFacts.size,
-                _destination, elementFacts.size);
+        const plan = planVectorInit(expression);
+        evalInto(expression.e1, _destination, plan.sourceFacts.size);
+        foreach (i; 1 .. plan.count)
+            emit(&opCopy, _destination + i * plan.sourceFacts.size,
+                _destination, plan.sourceFacts.size);
     }
 
     // `someVector.array`: dmd's own semantic pass (`typesem.d`'s

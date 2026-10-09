@@ -866,6 +866,55 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A vector converts a scalar to its lane type once, then repeats that value.
+// Discarding the vector still evaluates the scalar.
+static foreach (backend; Matrix!()) {
+    @("vectorConstruction.scalarEvaluatedOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.simd: int4, ubyte16;
+
+            void main() {
+                int calls;
+                int next() { return ++calls + 256; }
+                const ubyte16 bytes = cast(ubyte16) next();
+                assert(calls == 1);
+                foreach (lane; bytes.array) assert(lane == 1);
+                cast(void) cast(int4) next();
+                assert(calls == 2);
+            }
+        });
+    }
+}
+
+// Equal-size array and string conversions preserve bytes even when source
+// and destination lane widths differ, including an enum array source.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not reinterpret static array bytes as vector lanes"),
+)) {
+    @("vectorConstruction.arrayBytes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.simd: ubyte16;
+            enum Words : int[4] {
+                pattern = [0x01010101, 0x02020202, 0x03030303, 0x04040404],
+            }
+
+            void main() {
+                const Words words = Words.pattern;
+                auto bytes = cast(ubyte16) words;
+                foreach (i, lane; bytes.array) assert(lane == i / 4 + 1);
+                const char[16] text = "abcdefghijklmnop";
+                auto letters = cast(ubyte16) text;
+                foreach (i, lane; letters.array) assert(lane == 'a' + i);
+            }
+        });
+    }
+}
+
 // Delegates order as one unsigned integer whose high word is the function
 // pointer and whose low word is the context.
 static foreach (backend; Matrix!(
