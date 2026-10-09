@@ -402,12 +402,10 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             return null;
         const(void)* word;
         const hasNativeSymbol = _plans.hasNativeSymbol(method);
-        const isVariadicGuest =
-            _callSelection.isVariadicGuest(method, hasNativeSymbol);
         if (_callSelection.usesNativeVariadicAddress(
                 method, hasNativeSymbol))
             return _plans.addressOf(method);
-        if (isVariadicGuest || _callSelection.usesGuestBody(method, &isGuestFunction,
+        if (_callSelection.usesGuestBody(method, &isGuestFunction,
                 hasNativeSymbol, hasIndependentNativeSymbol(method))) {
             word = compileFunction(method);
             registerGuestWord(method, cast(const(Function)*) word);

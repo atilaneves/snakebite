@@ -448,11 +448,9 @@ private struct Shared {
 
         const(void)* word;
         const hasNativeSymbol = plans.hasNativeSymbol(method);
-        const isVariadicGuest =
-            callSelection.isVariadicGuest(method, hasNativeSymbol);
         if (callSelection.usesNativeVariadicAddress(method, hasNativeSymbol))
             return plans.addressOf(method);
-        if (isVariadicGuest || callSelection.usesGuestBody(method,
+        if (callSelection.usesGuestBody(method,
                 (callee) => program.isInterpreted(callee),
                 hasNativeSymbol,
                 plans.hasIndependentNativeSymbol(method))) {
