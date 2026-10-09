@@ -83,17 +83,22 @@ static foreach (backend; Matrix!()) {
 
 
 // ADR-0009 keeps a dependency's own body when its exact native symbol is
-// absent. Direct calls and callable addresses must select that same body.
+// absent. Direct calls and callable addresses must select that same body,
+// including a D dependency body with C linkage.
 static foreach (backend; Matrix!()) {
     @("nonRootOwned.missingNativeUsesOwnBody." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         static if (is(backend == Native)) {
             int fortyTwo() { return 42; }
+            int cFortyTwo() { return 42; }
             const direct = fortyTwo();
             auto pointer = &fortyTwo;
             direct.should == 42;
             pointer().should == 42;
+            cFortyTwo().should == 42;
+            auto cPointer = &cFortyTwo;
+            cPointer().should == 42;
         } else {
             auto modules = parseSnippets([
                 q{
@@ -101,6 +106,9 @@ static foreach (backend; Matrix!()) {
                     import routing_helper;
                     int answer() {
                         assert(fortyTwo() == 42);
+                        assert(cFortyTwo() == 42);
+                        auto cPointer = &cFortyTwo;
+                        assert(cPointer() == 42);
                         auto pointer = &fortyTwo;
                         return pointer();
                     }
@@ -108,6 +116,7 @@ static foreach (backend; Matrix!()) {
                 q{
                     module routing_helper;
                     int fortyTwo() { return 42; }
+                    extern(C) int cFortyTwo() { return 42; }
                 },
             ]);
             auto program = Program([modules[0]]);

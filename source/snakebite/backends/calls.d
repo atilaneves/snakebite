@@ -260,6 +260,7 @@ public struct CallSelection {
         import snakebite.frontend.dmd.functions: contextOf, typeFunctionOf;
 
         const context = contextOf(function_);
+        import snakebite.frontend.dmd.functions: bodyIsSelected;
 
         // A declaration without a body can only describe a native call or
         // a builtin - never a guest one, since there is no guest body to
@@ -269,6 +270,10 @@ public struct CallSelection {
                 ? Decision(Route.vaStart, &startVariadicEntry)
                 : isAlloca(function_) ? Decision(Route.alloca)
                 : intrinsicPlanOf(function_).call;
+
+        const rootOwned = isGuest(function_);
+        if (!bodyIsSelected(context.module_, rootOwned))
+            return Decision(Route.native);
 
         const type = typeFunctionOf(function_);
         if (type.parameterList.varargs == VarArg.variadic && hasNativeSymbol)
@@ -284,7 +289,7 @@ public struct CallSelection {
         // when the linker cannot resolve that symbol.
         if (function_.isFuncLiteralDeclaration !is null
                 && function_.fbody !is null
-                && (isGuest(function_) || !hasNativeSymbol))
+                && (rootOwned || !hasNativeSymbol))
             return Decision(Route.guest);
 
         // The host compiler's druntime implements `va_copy` as an
