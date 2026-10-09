@@ -2568,19 +2568,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t destination,
         in size_t width,
     ) {
-        if (_expressions.readsResultAfterEnd(position, expression)) {
-            size_t address;
-            fullExpression(position, expression, {
-                address = compileAddress(
-                    FullExpressionScope.lvalueOf(expression));
-            });
-            emit(&opLoadIndirect, destination, address, width);
-            return;
-        }
+        if (_emittingCleanup)
+            return evalInto(expression, destination, width);
 
-        inFullExpression(position, expression,
+        fullExpressionValue!size_t(position, expression,
             { evalInto(expression, destination, width); },
-        );
+            (operand) { return compileAddress(operand); },
+            (address) { emit(&opLoadIndirect, destination, address, width); });
     }
 
     // A destructor expression compiled into a cleanup runs inside the full
@@ -6611,7 +6605,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileResolvedCall(
             callee, expression.arguments, expression.loc,
             expressionText(expression), hasThis,
-            () => receiverOffsetOf(expression, callee, destOffset),
+            () => receiverOffsetOf(expression, callee),
             destOffset, expression);
     }
 
@@ -6622,9 +6616,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // guest branches alike call this at most once, only when `callee`
     // actually reserves a slot for it.
     private size_t receiverOffsetOf(
-        CallExp expression, FuncDeclaration callee, in size_t destOffset,
+        CallExp expression, FuncDeclaration callee,
     ) {
-        const first = firstContextOffsetOf(expression, callee, destOffset);
+        const first = firstContextOffsetOf(expression, callee);
         const plan = pairPlanOf(_function, callee, expression.vthis2);
         return plan.variable is null ? first : storeContextPair(plan, first);
     }
@@ -6686,40 +6680,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `receiverOffsetOf` without the pair a dual-context callee adds
     // around it.
     private size_t firstContextOffsetOf(
-        CallExp expression, FuncDeclaration callee, in size_t destOffset,
+        CallExp expression, FuncDeclaration callee,
     ) {
-        // A lambda or nested function reading `this` implicitly names an
-        // outer member function's own hidden `this`, reached through the
-        // static chain rather than through `expression.e1` - the same
-        // reach `contextAddressOf` gives any other captured variable.
-        if (callee.isThis is null)
+        import snakebite.frontend.dmd.dispatch: CallReceiver, receiverOf;
+
+        // DMD expressions must stay mutable for backend evaluation.
+        auto receiver = receiverOf(expression, callee);
+        final switch (receiver.kind) with (CallReceiver.Kind) {
+        case enclosing:
             return contextOffsetOf(calleeContextSourceOf(_function, callee));
-
-        // An ordinary bound method call wraps its receiver in a
-        // `DotVarExp` (`expression.e1.isDotVarExp.e1`); `super(args)`/
-        // `this(args)` constructor delegation instead leaves `expression.e1`
-        // a bare `ThisExp`/`SuperExp` with no wrapper, the receiver being
-        // this very function's own hidden `this` - `compileAddress`
-        // resolves either shape, its own `ThisExp`/`SuperExp` case falling
-        // back to `hiddenThisOffset` the same way the plain fallback below
-        // does.
-        auto dot = expression.e1.isDotVarExp;
-        auto receiver = dot is null ? expression.e1 : dot.e1;
-
-        if (receiver.type.toBasetype.isTypeClass !is null) {
+        case classValue:
             const object = reserveTemp(pointerFacts);
-            evalInto(receiver, object, size_t.sizeof);
+            evalInto(receiver.expression, object, size_t.sizeof);
             return object;
+        case aggregateAddress:
+            return compileAddress(receiver.expression);
+        case implicitThis:
+            return hiddenThisOffset;
         }
-
-        if (dot !is null || receiver.isThisExp !is null
-                || receiver.isSuperExp !is null)
-            return compileAddress(receiver);
-
-        // An ordinary method called with no explicit receiver at all
-        // (`foo()` from inside another member of the same class) - sugar
-        // for `this.foo()`.
-        return hiddenThisOffset;
     }
 
     // Compiles a call to `callee` with `arguments` already resolved -

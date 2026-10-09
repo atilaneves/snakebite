@@ -24,25 +24,18 @@ import snakebite.backends.switchplan: gotoCaseTarget, gotoDefaultTarget;
 import snakebite.frontend.dmd.functions: unresolvedCalleeOf;
 import snakebite.nativelayout: initializerValueOf;
 import std.meta: staticIndexOf;
+import snakebite.backends.interpreter.preparedfacts: PreparedFacts;
 
 
-// What the interpreter fills while it prepares a callback, in place of
-// when execution first needs it. Execution of a destructor that the GC
-// finalizer runs can neither allocate from the GC nor wait for a lock that
-// another thread can hold while it waits for the GC.
+// Call readiness and control flow need the function currently being walked.
+// Node-local facts belong to PreparedFacts instead of these execution hooks.
 package struct Preparation {
     package void delegate(CallExp, FuncDeclaration) call;
     package void delegate(FuncDeclaration) reference;
     package void delegate(VarDeclaration) variable;
-    package void delegate(Type) type;
-    package void delegate(Type) zeroInitialized;
-    package void delegate(Type) typeInfo;
     package void delegate(ClassDeclaration) stackClass;
     package void delegate(DeleteExp) deletion;
-    package void delegate(StructLiteralExp) structLiteral;
-    package void delegate(StringExp) stringLiteral;
     package void delegate(NewExp) constructor;
-    package void delegate(VarDeclaration) bitfield;
     package void delegate(TryCatchStatement) tryCatch;
     package void delegate(TryFinallyStatement) tryFinally;
     package void delegate(TryFinallyStatement, Statement) gotoOutOf;
@@ -79,9 +72,11 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
     alias visit = SemanticTimeTransitiveVisitor.visit;
 
     private Preparation _preparation;
+    private PreparedFacts* _facts;
     package ScopePaths* scopePaths;
 
-    package extern(D) this(Preparation preparation) {
+    package extern(D) this(PreparedFacts* facts, Preparation preparation) {
+        _facts = facts;
         _preparation = preparation;
     }
 
@@ -91,13 +86,13 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
     // reference walks when it is prepared.
     override void visit(DeclarationExp expression) {
         if (expression.type !is null)
-            _preparation.type(expression.type);
+            _facts.prepareType(expression.type);
         auto variable = expression.declaration.isVarDeclaration;
         if (variable is null)
             return;
 
-        _preparation.type(variable.type);
-        _preparation.zeroInitialized(variable.type);
+        _facts.prepareType(variable.type);
+        _facts.prepareZeroInitialized(variable.type);
         _preparation.variable(variable);
         if (variable._init !is null)
             if (auto initializer = variable._init.isExpInitializer)
@@ -117,7 +112,7 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
     // need not occur in the original operand or the body.
     override void visit(WithStatement statement) {
         if (statement.wthis !is null) {
-            _preparation.type(statement.wthis.type);
+            _facts.prepareType(statement.wthis.type);
             initializerValueOf(statement.wthis._init.isExpInitializer)
                 .accept(this);
         } else
@@ -130,12 +125,12 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
     // holds is the instance's fields, not a struct literal to plan.
     override void visit(ClassReferenceExp expression) {
         if (expression.type !is null)
-            _preparation.type(expression.type);
+            _facts.prepareType(expression.type);
     }
 
     override void visit(FuncExp expression) {
         if (expression.type !is null)
-            _preparation.type(expression.type);
+            _facts.prepareType(expression.type);
         _preparation.reference(expression.fd);
     }
 
@@ -145,7 +140,7 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
         override void visit(Node expression) {
             super.visit(expression);
             if (expression.type !is null)
-                _preparation.type(expression.type);
+                _facts.prepareType(expression.type);
             handle(expression);
             static if (staticIndexOf!(Node, LoweredExpressionTypes) >= 0) {
                 if (expression.lowering !is null)
@@ -194,18 +189,18 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
 
     // The one address of a literal's text is made at its first use.
     private extern(D) void handle(StringExp expression) {
-        _preparation.stringLiteral(expression);
+        _facts.prepareString(expression);
     }
 
     // The layout of a bit field is worked out at its first access.
     private extern(D) void handle(DotVarExp expression) {
         auto field = expression.var.isVarDeclaration;
         if (field !is null && field.isBitFieldDeclaration !is null)
-            _preparation.bitfield(field);
+            _facts.prepareBitfield(field);
     }
 
     private extern(D) void handle(StructLiteralExp expression) {
-        _preparation.structLiteral(expression);
+        _facts.prepareLiteral(expression);
     }
 
     // A `scope` class instance lives in the frame, and its runtime
@@ -232,7 +227,7 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
         import dmd.dtemplate: isType;
 
         if (auto type = isType(expression.obj))
-            _preparation.typeInfo(type);
+            _facts.prepareTypeInfo(type);
     }
 
     // Execution of each of these asks for the size of the element or the
@@ -286,7 +281,7 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
 
         auto base = operand.type.toBasetype;
         if (base.ty == Tpointer || base.ty == Tarray || base.ty == Tsarray)
-            _preparation.type(base.nextOf);
+            _facts.prepareType(base.nextOf);
     }
 
     private extern(D) void reference(Declaration declaration) {

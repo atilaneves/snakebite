@@ -46,6 +46,11 @@ The single component that turns a mangled symbol name into a host
 address.
 _Avoid_: symbol lookup, loader
 
+**Full expression**:
+A guest expression together with the temporary values whose lifetimes end
+when that expression finishes. Its result can be read after those temporary
+values are destroyed.
+
 **Control transfer**:
 A return, break, continue, or goto that changes which guest statement
 executes next, after required cleanup. A control transfer from cleanup
@@ -61,9 +66,18 @@ to call; ADR-0013 defines its builtin route and signature contract.
 The pinned native DMD result that defines a compiler intrinsic's guest
 result. ADR-0013 records the owner's narrow constant-fabs exception.
 
+**Call receiver**:
+The object or enclosing context supplied to a callee as its hidden argument.
+A direct call obtains it from its receiver expression or its caller; a delegate
+carries it with the function value.
+
 **Call arguments**:
 The values supplied to a call: hidden context and type information,
 declared parameter values or references, and any variadic extra values.
+
+**Prepared facts**:
+Information computed before a guest callback runs, so its execution can use
+that information without asking frontend questions or building it on first use.
 
 **Thread state**:
 The data one host thread owns while it runs guest code on a backend,

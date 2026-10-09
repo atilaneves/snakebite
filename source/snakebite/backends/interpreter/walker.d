@@ -3,7 +3,7 @@ module snakebite.backends.interpreter.walker;
 
 private:
 
-import snakebite.nativelayout: typeFacts, tryTypeFacts, truthFacts;
+import snakebite.nativelayout: tryTypeFacts, truthFacts;
 
 
 
@@ -201,7 +201,7 @@ private final class GuestException: Exception {
     }
 }
 
-import snakebite.nativelayout: bitfieldAccess;
+import snakebite.backends.interpreter.preparedfacts: PreparedFacts;
 import snakebite.nativevalue: BitfieldAccess;
 import snakebite.backends.checkplan:
     BoundsCheck, FailurePlan, hookOf, isUnanalysed;
@@ -317,17 +317,7 @@ private struct Shared {
     // `visit(TryCatchStatement)` reaches it and reused by every throw
     // that later unwinds through it.
     SharedTable!(Catch, TypeInfo_Class) catchTypes;
-    // Every dmd `Type` any evaluator has ever asked dmd about, keyed by
-    // the `Type` node itself: `Type.size`/`alignsize`/`isIntegral`/
-    // `isUnsigned` are pure functions of the type, re-entering dmd's
-    // semantic-analysis machinery every call, so this asks each of them
-    // once per distinct `Type`. Not per-function like `layouts`: a `Type`
-    // such as `int` is dmd's own shared, interned instance, so the same
-    // entry serves every function that mentions it.
-    SharedTable!(Type, TypeFacts) typeFacts;
-    // Where each bit field lives and how it is read and written, planned
-    // once from its declaration.
-    SharedTable!(VarDeclaration, BitfieldAccess) bitfields;
+    PreparedFacts facts;
     // The reverse of `callableAddress`: a real callable address any
     // evaluator handed out for a guest function, back to the declaration
     // it stands for, so a call through that same address - made by any
@@ -338,13 +328,11 @@ private struct Shared {
     // Each one is built once per node, by the first evaluator that reaches
     // it or by the preparation of a callback, and read without a lock
     // after that: a destructor that the GC finalizer runs cannot allocate.
-    SharedTable!(StructLiteralExp, AggregateInitPlan) structLiteralPlans;
     SharedTable!(TryCatchStatement, TryCatchPlan) tryCatchPlans;
     SharedTable!(TryFinallyStatement, ExceptionCandidate[]) finallyCandidates;
     SharedTable!(FinallyKey, bool) finallyRuns;
     SharedTable!(FuncDeclaration, ScopePaths) scopePaths;
     SharedTable!(CallSiteKey, const(CallPlan)*) callSitePlans;
-    SharedTable!(CallSiteKey, ContextSource) calleeContexts;
     SharedTable!(const(void)*, VariadicCallPlan) variadicCallPlans;
     // The guest functions whose preparation is complete, and how to
     // prepare one more.
@@ -369,6 +357,7 @@ private struct Shared {
             &callableAddress,
             &classRuntimeInfo,
             (type, loc) => nativeData.initialValue(type, loc));
+        facts = PreparedFacts(&nativeData, &runtimeTypes);
     }
 
     private FuncDeclaration definitionOf(FuncDeclaration function_) {
@@ -535,7 +524,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.backends.closureplan: ClosurePlan, Hop;
     import snakebite.backends.dualcontext:
-        ContextSource, PairPlan, calleeContextSourceOf, contextSourceOf,
+        ContextSource, PairPlan, contextSourceOf,
         pairPlanOf;
     import snakebite.backends.interpreter.scout: BodyScout, Preparation;
     import snakebite.backends.classinfo;
@@ -660,17 +649,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
     private CalleeContextSlot[16] _recentCalleeContexts;
 
-    private Cache!(Type, TypeFacts) _typeFacts;
+    version(unittest) private size_t _typeLookups;
     // The function whose body the preparation walks.
     private FuncDeclaration _preparing;
     // The functions that this thread prepares and has not finished: the
     // preparation of one function reaches the entry of another.
     private bool[FuncDeclaration] _started;
-    // What a variable's storage or a struct's default value may weigh for
-    // preparation to build it before the program reaches it: a reference
-    // in code that never runs must cost what it costs without preparation.
-    private enum preparedBytesLimit = 64 * 1024;
-    private Cache!(VarDeclaration, BitfieldAccess) _bitfields;
     // The plans of the bit fields most recently used, found by the
     // address of the declaration, so that a loop over a few bit fields
     // does not hash on each access.
@@ -684,7 +668,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // The most recently asked-about `Type` and its facts: dmd interns
     // basic types, so a loop revisiting the same `int` node hits this
     // every time - a pointer compare instead of an AA hash lookup - and
-    // only falls through to `_typeFacts` on an actual change of type.
+    // only asks the fact owner on an actual change of type.
     private Type _cachedType;
     private TypeFacts _cachedFacts;
     // The hash lookups this evaluator makes through another type's
@@ -747,9 +731,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _staticChains =
             Cache!(StaticChainKey, Hop[])(&shared_.staticChains);
         _catchTypes = Cache!(Catch, TypeInfo_Class)(&shared_.catchTypes);
-        _typeFacts = Cache!(Type, TypeFacts)(&shared_.typeFacts);
-        _bitfields =
-            Cache!(VarDeclaration, BitfieldAccess)(&shared_.bitfields);
         _frames = FrameStack(defaultFrameCapacity);
         _interpreterStack = InterpreterStack(interpreterStackBytes);
         _temporaries = TemporaryLifetime(&destroyTemporary);
@@ -985,7 +966,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // answer about a type stops being kept.
     version(unittest)
     extern(D) final size_t typeLookups() @safe @nogc nothrow pure const scope {
-        return _typeFacts.lookups;
+        return _typeLookups;
     }
 
     version(unittest)
@@ -1181,13 +1162,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (type is _cachedType)
             return _cachedFacts;
 
-        if (auto cached = type in _typeFacts) {
-            _cachedType = type;
-            _cachedFacts = *cached;
-            return _cachedFacts;
-        }
-
-        const facts = *_typeFacts.build(type, () => typeFacts(type));
+        version(unittest) ++_typeLookups;
+        const facts = _shared.facts.typeOf(type);
         _cachedType = type;
         _cachedFacts = facts;
         return facts;
@@ -1580,7 +1556,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             catch (Exception) {
             }
         }
-        scope scout = new BodyScout(Preparation(
+        scope scout = new BodyScout(&_shared.facts, Preparation(
             (site, named) => attempt({
                 _callSelection.prepareIntrinsic(named);
                 // Execution plans the definition that the linker finds for
@@ -1604,9 +1580,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 enqueue(function_);
             }),
             (variable) => attempt({ prepareVariable(variable); }),
-            (type) => attempt({ prepareType(type); }),
-            (type) => attempt({ prepareZeroInitialized(type); }),
-            (type) => attempt({ _runtimeTypes.get(type); }),
             (declaration) => attempt({ classRuntimeInfo(declaration); }),
             (expression) => attempt({
                 import snakebite.backends.deleteplan: planDelete;
@@ -1614,12 +1587,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
                 planOf(*_plans, planDelete(expression).hook);
             }),
-            (expression) => attempt({
-                structLiteralPlanOf(expression);
-                if (expression.useStaticInit)
-                    prepareDefault(expression.type);
-            }),
-            (expression) => attempt({ _nativeData.stringData(expression); }),
             (site) => attempt({
                 auto constructor = site.member;
                 auto definition = _callSelection.definitionOf(
@@ -1630,7 +1597,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 prepareCall(site, site.arguments, constructor);
                 enqueue(definition);
             }),
-            (field) => attempt({ bitfieldPlanOf(field); }),
             (statement) => attempt({ tryCatchPlanOf(statement); }),
             (statement) => attempt({
                 finallyCandidatesOf(statement);
@@ -1676,7 +1642,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         layoutOf(function_);
         callShapeOf(function_);
         closurePlanOf(function_);
-        prepareFacts(function_.type.nextOf);
+        _shared.facts.prepareType(function_.type.nextOf);
         if (function_.fbody !is null) {
             scout.scopePaths = scopesOf(function_);
             function_.fbody.accept(scout);
@@ -1734,71 +1700,15 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         return _callSelection;
     }
 
-    // The facts that execution asks for about the type of a node, its base
-    // type's, and nothing below them: a pointer is as large as any other
-    // pointer, whatever it points to.
-    extern(D) private void prepareType(Type type) {
-        import dmd.typesem: toBasetype;
-
-        if (!hasValueFacts(type))
-            return;
-
-        prepareFacts(type);
-        auto base = type.toBasetype;
-        if (base !is type && hasValueFacts(base))
-            prepareFacts(base);
-    }
-
-    private static bool hasValueFacts(Type type) {
-        return type !is null && type.ty != Tfunction && type.ty != Ttuple
-            && type.ty != Terror;
-    }
-
-    extern(D) private void prepareFacts(Type type) {
-        if (!hasValueFacts(type) || type in _typeFacts)
-            return;
-
-        TypeFacts facts;
-        if (tryTypeFacts(type, facts))
-            _typeFacts.build(type, () => facts);
-    }
-
-    // The default bytes of a struct, or of the struct that a static array
-    // repeats: execution copies them when it stores the initializer symbol
-    // of the struct. A struct that is larger than
-    // `preparedBytesLimit` stays for execution, which is the one that knows
-    // whether the value is needed.
-    extern(D) private void prepareZeroInitialized(Type type) {
-        import dmd.typesem: baseElemOf, toBasetype;
-
-        auto element = type.baseElemOf.toBasetype;
-        if (element.isTypeStruct !is null)
-            prepareDefault(element);
-    }
-
-    extern(D) private void prepareDefault(Type type) {
-        TypeFacts facts;
-        if (tryTypeFacts(type, facts) && facts.size <= preparedBytesLimit)
-            _nativeData.initialValue(type, Loc.initial);
-    }
-
     extern(D) private void prepareVariable(VarDeclaration variable) {
         // `__ctfe` has no parent, and asking dmd where it lives reports
         // that as an error. Execution folds a read of it to `false`.
         if (isCtfeVariable(variable) || variable.parent is null)
             return;
 
-        if (variable.isThreadlocal || variable.isDataseg) {
-            TypeFacts facts;
-            if (!tryTypeFacts(variable.type, facts)
-                    || facts.size > preparedBytesLimit)
-                return;
-
-            if (variable.isThreadlocal)
-                _nativeData.tlsDescriptorOf(variable);
-            else
-                _nativeData.storageOf(variable);
-        } else
+        if (variable.isThreadlocal || variable.isDataseg)
+            _shared.facts.prepareStorage(variable);
+        else
             prepareContext(outerFunctionOf(variable));
     }
 
@@ -2427,18 +2337,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         in FullExpressionScope.Position position,
         Expression expression,
     ) {
-        if (readsResultAfterEnd(position, expression)) {
-            void* address;
-            fullExpression(position, expression, {
-                address = addressOf(FullExpressionScope.lvalueOf(expression));
-            });
-            return truthOfStored(address, expression.type);
-        }
-
         bool result;
-        fullExpression(position, expression, {
-            result = truthOf(expression);
-        });
+        fullExpressionValue!(void*)(position, expression,
+            { result = truthOf(expression); },
+            (operand) { return addressOf(operand); },
+            (address) { result = truthOfStored(address, expression.type); });
         return result;
     }
 
@@ -2476,21 +2379,13 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
             const operandFacts = factsOf(statement.condition.type);
             long condition;
-            if (readsResultAfterEnd(
-                    FullExpressionScope.Position.switchOperand,
-                    statement.condition)) {
-                void* address;
-                fullExpression(FullExpressionScope.Position.switchOperand,
-                    statement.condition, {
-                    address = addressOf(FullExpressionScope.lvalueOf(
-                        statement.condition));
-                });
-                condition = loadIntegral(
-                    address, operandFacts.size, !operandFacts.isUnsigned);
-            } else
-                fullExpression(FullExpressionScope.Position.switchOperand,
-                    statement.condition, {
-                    condition = asIntegral(statement.condition);
+            fullExpressionValue!(void*)(FullExpressionScope.Position.switchOperand,
+                statement.condition,
+                { condition = asIntegral(statement.condition); },
+                (operand) { return addressOf(operand); },
+                (address) {
+                    condition = loadIntegral(
+                        address, operandFacts.size, !operandFacts.isUnsigned);
                 });
 
             Statement selected = selectCase(plan, condition, (case_) {
@@ -5279,9 +5174,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (recent.field is field)
             return &recent.plan;
 
-        auto plan = field in _bitfields;
-        if (plan is null)
-            plan = _bitfields.build(field, () => bitfieldAccess(field));
+        auto plan = _shared.facts.bitfieldOf(field);
         *recent = BitfieldSlot(field, *plan);
         return plan;
     }
@@ -5438,18 +5331,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.nativelayout: arrayValueSize;
 
         align(size_t.sizeof) ubyte[arrayValueSize] buffer = void;
-        if (readsResultAfterEnd(
-                FullExpressionScope.Position.assertMessage, message)) {
-            const(void)* address;
-            fullExpression(FullExpressionScope.Position.assertMessage,
-                message, {
-                address = addressOf(FullExpressionScope.lvalueOf(message));
-            });
-            buffer[] = (cast(const(ubyte)*) address)[0 .. arrayValueSize];
-        } else
-            fullExpression(FullExpressionScope.Position.assertMessage,
-                message, {
-                evaluate(message, message.type, buffer.ptr);
+        fullExpressionValue!(void*)(FullExpressionScope.Position.assertMessage,
+            message,
+            { evaluate(message, message.type, buffer.ptr); },
+            (operand) { return addressOf(operand); },
+            (address) {
+                buffer[] = (cast(const(ubyte)*) address)[0 .. arrayValueSize];
             });
 
         return (*cast(const(char)[]*) buffer.ptr).idup;
@@ -6276,25 +6163,13 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         import snakebite.backends.aggregateinit: applyStep;
 
-        auto plan = structLiteralPlanOf(expression);
+        auto plan = _shared.facts.structLiteralOf(expression);
         if (plan.zeroFill)
             memset(_place, 0, _facts.size);
 
         auto hooks = AggregateInitHooks(this, cast(ubyte*) _place);
         foreach (step; plan.steps)
             applyStep(hooks, step);
-    }
-
-    private AggregateInitPlan* structLiteralPlanOf(
-        StructLiteralExp expression,
-    ) {
-        import snakebite.backends.aggregateinit: planStructLiteral;
-
-        if (auto cached = expression in _shared.structLiteralPlans)
-            return cached;
-
-        return _shared.structLiteralPlans.insert(
-            expression, planStructLiteral(expression));
     }
 
     protected override void visitUnloweredCat(CatExp expression) {
@@ -6838,23 +6713,20 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         FuncDeclaration function_,
         void* classReceiver,
     ) {
-        if (function_.isThis !is null) {
-            auto dot = expression.e1.isDotVarExp;
-            const classDeclaration =
-                cast(ClassDeclaration) function_.isThis.isClassDeclaration;
-            if (classDeclaration !is null)
-                return cast(size_t) classReceiver;
-            if (dot is null)
-                internalFailure("a struct member reached with no receiver "
-                    ~ "expression is called through a value");
-            return cast(size_t) addressOf(dot.e1);
-        }
+        import snakebite.frontend.dmd.dispatch: CallReceiver, receiverOf;
 
-        // A nested callee's `vthis` is its enclosing context. A
-        // delegate supplies this context directly because it may
-        // outlive the call that created it; a direct call finds it
-        // by walking the current static chain.
-        return callContextOf(*calleeContextPlanOf(expression, function_));
+        // DMD expressions must stay mutable for backend evaluation.
+        auto receiver = receiverOf(expression, function_);
+        final switch (receiver.kind) with (CallReceiver.Kind) {
+        case enclosing:
+            return callContextOf(*calleeContextPlanOf(expression, function_));
+        case classValue:
+            return cast(size_t) classReceiver;
+        case aggregateAddress:
+            return cast(size_t) addressOf(receiver.expression);
+        case implicitThis:
+            return thisValueOf(_function.vthis);
+        }
     }
 
     extern(D) private const(ContextSource)* calleeContextPlanOf(
@@ -6868,17 +6740,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (key == recent.key)
             return recent.plan;
 
-        if (auto found = _shared.calleeContexts.find(key)) {
-            *recent = CalleeContextSlot(key, found);
-            return found;
-        }
-
-        // Inherited contracts need their base frame layout even when no
-        // call runs that base body. Finalization cannot build it on demand.
-        // `auto`: the shared plan builder takes mutable frontend nodes.
+        // Preparation supplies its caller; execution supplies the active one.
         auto caller = _preparing is null ? _function : _preparing;
-        const plan = _shared.calleeContexts.insert(
-            key, calleeContextSourceOf(caller, callee));
+        const plan = _shared.facts.contextOf(expression, caller, callee);
         *recent = CalleeContextSlot(key, plan);
         return plan;
     }
