@@ -2909,31 +2909,16 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _nativeData.write(_type, _facts, expression, _place);
     }
 
-    // `int4 v = 1;`/`cast(int4) 1`: dmd's own semantic pass (`dcast.d`)
-    // rewrites either shape to this node, `e1` already cast to the
-    // vector's own element type, and its meaning is "every lane gets
-    // this one value" - filling the first lane by evaluating `e1`
-    // straight into `_place` and then copying those same bytes to every
-    // remaining lane. `int4 v = cast(int4) someInt4Sarray;` reaches this
-    // node too, with `e1` a matching-size static array instead: dmd's
-    // own `dcast.d` (`T[n] <-- __vector(U[m])`... in reverse) wraps
-    // that shape here rather than the scalar element cast, and its
-    // meaning is a plain reinterpret of the array's own bytes, not a
-    // broadcast of a single "element".
     override void visit(VectorExp expression) {
         import core.stdc.string: memcpy;
+        import snakebite.backends.vectorinit: planVectorInit;
 
-        if (expression.e1.type.toBasetype.ty == Tsarray) {
-            evaluate(expression.e1, expression.e1.type,
-                factsOf(expression.e1.type), _place);
-            return;
-        }
-
-        const elementFacts = factsOf(expression.e1.type);
-        evaluate(expression.e1, expression.e1.type, elementFacts, _place);
+        const plan = planVectorInit(expression);
+        evaluate(expression.e1, expression.e1.type, plan.sourceFacts, _place);
         auto bytes = cast(ubyte*) _place;
-        foreach (i; 1 .. _facts.size / elementFacts.size)
-            memcpy(bytes + i * elementFacts.size, bytes, elementFacts.size);
+        foreach (i; 1 .. plan.count)
+            memcpy(bytes + i * plan.sourceFacts.size, bytes,
+                plan.sourceFacts.size);
     }
 
     // `someVector.array`: dmd's own semantic pass (`typesem.d`'s
