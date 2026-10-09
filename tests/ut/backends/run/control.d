@@ -1598,6 +1598,14 @@ static foreach (backend; Matrix!(
                     default:
                         if (__ctfe) {
                             case 1:
+                                int[2] values = [5, 6];
+                                int[2] copy = values;
+                                int[] slice = copy[];
+                                auto words = cast(uint[]) slice;
+                                auto bytes = cast(ubyte[]) slice;
+                                slice.length = 0;
+                                assert(words.length == 2 && bytes.length == 8);
+                                assert(slice.length == 0 && copy[1] == 6);
                                 return 11;
                         }
                         return 12;
@@ -2821,6 +2829,294 @@ static foreach (backend; Matrix!(
                 const both = present && true;
                 const neither = absent && true;
                 return both && !neither ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A `case` inside an `if (__ctfe)` block is a jump target at run time, so
+// the block compiles even though it never runs through its `if`. dmd leaves
+// the statements of that block unlowered: a heap `new` has no
+// `_d_newitemT` call there.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd 2.113.0's code generator crashes on a `case` in an "
+            ~ "`if (__ctfe)` block (dmd bug 23996)"),
+)) {
+    @("heapNewInsideCtfeBlockWithCase." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f(int x) {
+                switch (x) {
+                    if (__ctfe) {
+                        case 1:
+                            auto p = new int(3);
+                            return *p;
+                    }
+                    default:
+                        return 0;
+                }
+            }
+            int main() {
+                return f(0);
+            }
+        });
+    }
+}
+
+
+// What the guest gets when run-time code enters the body of an
+// `if (__ctfe)` block through a `case` label and reaches a construct that
+// dmd left without a lowering: an `Error` it can catch.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd 2.113.0's code generator crashes on a `case` in an "
+            ~ "`if (__ctfe)` block (dmd bug 23996)"),
+    Omit!(Ctfe, Because.inexpressible, "`__ctfe` is true in CTFE"),
+)) {
+    @("heapNewInsideCtfeBlockThrowsError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeStatusOf!(backend, q{
+            int cleaned;
+            int callee() { auto p = new int(3); return *p; }
+            void failing() { throw new Exception("callee"); }
+            int f(int x) {
+                switch (x) {
+                    if (__ctfe) {
+                        case 1:
+                            if (callee() != 3) return 2;
+                            try failing();
+                            catch (Exception) {}
+                            auto p = new int(3);
+                            return *p;
+                    }
+                    default:
+                        return 0;
+                }
+            }
+            int main() {
+                try {
+                    try return f(1);
+                    catch (Exception) { return 2; }
+                    finally { ++cleaned; }
+                } catch (Error error) {
+                    return cleaned == 1 && callee() == 3 && f(0) == 0
+                        && error.msg == "heap new in the body of an "
+                        ~ "if (__ctfe) block: dmd compiles that body for "
+                        ~ "compile time only" ? 7 : 1;
+                }
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd 2.113.0's code generator crashes on a `case` in an "
+            ~ "`if (__ctfe)` block (dmd bug 23996)"),
+    Omit!(Ctfe, Because.inexpressible, "`__ctfe` is true in CTFE"),
+)) {
+    @("appendInsideCtfeBlockThrowsError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeStatusOf!(backend, q{
+            int f(int x) {
+                switch (x) {
+                    if (__ctfe) {
+                        case 1:
+                            int[] a;
+                            a ~= 1;
+                            return cast(int) a.length;
+                    }
+                    default:
+                        return 0;
+                }
+            }
+            int main() {
+                try
+                    return f(1);
+                catch (Error)
+                    return 7;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd 2.113.0's code generator crashes on a `case` in an "
+            ~ "`if (__ctfe)` block (dmd bug 23996)"),
+)) {
+    @("stringSwitchInsideCtfeBlockIsNotCompiledWhenNotEntered." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f(int x, string s) {
+                switch (x) {
+                    if (__ctfe) {
+                        case 1:
+                            switch (s) {
+                                case "a": return 1;
+                                case "b": return 2;
+                                default: return 3;
+                            }
+                    }
+                    default:
+                        return 0;
+                }
+            }
+            int main() {
+                return f(0, "a");
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd 2.113.0's code generator crashes on a `case` in an "
+            ~ "`if (__ctfe)` block (dmd bug 23996)"),
+    Omit!(Ctfe, Because.inexpressible, "`__ctfe` is true in CTFE"),
+)) {
+    @("stringSwitchInsideCtfeBlockThrowsError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeStatusOf!(backend, q{
+            enum E : string { a = "a", b = "b" }
+            int f(int x, E s) {
+                switch (x) {
+                    if (__ctfe) {
+                        case 1:
+                            final switch (s) {
+                                case E.a: return 1;
+                                case E.b: return 2;
+                            }
+                    }
+                    default:
+                        return 0;
+                }
+            }
+            int main() {
+                try
+                    return f(1, E.b);
+                catch (Error error)
+                    return error.msg == "string switch in the body of an "
+                        ~ "if (__ctfe) block: dmd compiles that body for "
+                        ~ "compile time only" ? 7 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd 2.113.0 crashes on a case inside if (__ctfe) (dmd bug 23996)"),
+    Omit!(Ctfe, Because.inexpressible, "__ctfe is true in CTFE"),
+)) {
+    @("lengthAssignmentInsideCtfeBlockThrowsError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeStatusOf!(backend, q{
+            int f(int x, size_t n) {
+                switch (x) {
+                    if (__ctfe) {
+                        case 1:
+                            int[] a;
+                            a.length = n;
+                            return cast(int) a.length;
+                    }
+                    default: return 0;
+                }
+            }
+            int main() {
+                try
+                    return f(1, 3);
+                catch (Error error)
+                    return error.msg == "array length assignment in the body "
+                        ~ "of an if (__ctfe) block: dmd compiles that body for "
+                        ~ "compile time only" ? 7 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd 2.113.0 crashes on a case inside if (__ctfe) (dmd bug 23996)"),
+    Omit!(Ctfe, Because.inexpressible, "__ctfe is true in CTFE"),
+)) {
+    @("arrayConstructionInsideCtfeBlockThrowsError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeStatusOf!(backend, q{
+            int copies;
+            struct S { int x; this(this) { ++copies; } }
+            int f(int x) {
+                S[2] a;
+                switch (x) {
+                    if (__ctfe) {
+                        case 1:
+                            S[2] b = a;
+                            return copies;
+                        case 2:
+                            S[2] c = a[0];
+                            return copies;
+                    }
+                    default: return 0;
+                }
+            }
+            int check(int x) {
+                try
+                    return f(x);
+                catch (Error error)
+                    return error.msg == "array construction in the body "
+                        ~ "of an if (__ctfe) block: dmd compiles that body for "
+                        ~ "compile time only" ? 7 : 1;
+            }
+            int main() {
+                return f(0) == 0 && check(1) == 7 && check(2) == 7 ? 7 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd 2.113.0 crashes on a case inside if (__ctfe) (dmd bug 23996)"),
+    Omit!(Ctfe, Because.inexpressible, "__ctfe is true in CTFE"),
+)) {
+    @("arrayCastInsideCtfeBlockThrowsError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeStatusOf!(backend, q{
+            int f(int x) {
+                ubyte[3] storage;
+                ubyte[] a = storage[];
+                switch (x) {
+                    if (__ctfe) {
+                        case 1:
+                            auto b = cast(uint[]) a;
+                            return cast(int) b.length;
+                    }
+                    default: return 0;
+                }
+            }
+            int main() {
+                try
+                    return f(1);
+                catch (Error error)
+                    return error.msg == "array cast in the body "
+                        ~ "of an if (__ctfe) block: dmd compiles that body for "
+                        ~ "compile time only" ? 7 : 1;
             }
         });
     }
