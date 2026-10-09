@@ -10,6 +10,9 @@ module snakebite.arena;
 private:
 
 
+import snakebite.internalfailure: internalFailure;
+
+
 // dmd's own alignment (`allocmemoryNoFree`): enough for any scalar D has,
 // `real` and SIMD vectors included.
 public enum arenaAlignment = 16;
@@ -127,7 +130,7 @@ private bool tryBytesAfter(in void* pointer, out size_t bytes) nothrow @nogc {
         bytes = bytesBefore(pointer, top);
         return true;
     }
-    assert(0, "not arena memory");
+    internalFailure("not arena memory");
 }
 
 

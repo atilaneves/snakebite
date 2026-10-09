@@ -24,6 +24,9 @@ module snakebite.gc;
 
 private:
 
+
+import snakebite.internalfailure: internalFailure;
+
 import core.gc.gcinterface: GC;
 
 
@@ -138,7 +141,7 @@ debug private void findStack() nothrow @nogc {
     void* low;
     size_t size;
     if (pthread_getattr_np(pthread_self, &attributes) != 0)
-        assert(0, "no stack bounds");
+        internalFailure("no stack bounds");
     pthread_attr_getstack(&attributes, &low, &size);
     pthread_attr_destroy(&attributes);
     _stackLow = cast(size_t) low;
@@ -157,7 +160,7 @@ debug private void addStackWord(in StackWord entry) nothrow @nogc {
         const length = _stackWords.length == 0 ? 1024 : 2 * _stackWords.length;
         auto grown = cast(StackWord*) realloc(_stackWords.ptr, length * StackWord.sizeof);
         if (grown is null)
-            assert(0, "out of memory");
+            internalFailure("out of memory");
         _stackWords = grown[0 .. length];
     }
     _stackWords[_stackWordCount++] = entry;

@@ -4,6 +4,9 @@ module snakebite.frontend.dmd.mangle;
 private:
 
 
+import snakebite.internalfailure: internalFailure;
+
+
 // A function's type is not complete until dmd has run semantic on its
 // body when the type is inferred: `auto`/`auto ref` return types, and
 // attribute inference (`pure`, `nothrow`, `@nogc`, `@safe`, `scope`/
@@ -69,7 +72,7 @@ public void completeFunctionType(
             if (!newInFrontend!functionSemantic(function_)) {
                 import std.string: fromStringz;
 
-                assert(0, "dmd failed to complete " ~
+                internalFailure("dmd failed to complete " ~
                     function_.toChars.fromStringz.idup ~
                     "'s semantic before mangling: " ~ diagnosticMessage);
             }

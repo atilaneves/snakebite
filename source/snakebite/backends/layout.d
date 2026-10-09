@@ -4,6 +4,9 @@ module snakebite.backends.layout;
 private:
 
 
+import snakebite.internalfailure: internalFailure;
+
+
 import snakebite.backends.argumentflow: Shape, Signature;
 import snakebite.exception: SnakebiteException;
 
@@ -364,7 +367,7 @@ package struct FrameLayout {
 
         auto slot = slotOf(variable);
         if (slot is null)
-            assert(0, text("`", variable.toString,
+            internalFailure(text("`", variable.toString,
                 "` is not a parameter or local of this frame"));
 
         return slot.offset;

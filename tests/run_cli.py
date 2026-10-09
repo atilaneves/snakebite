@@ -123,6 +123,70 @@ def test_unit_runner_keeps_other_runner_sandbox(
             parent.kill()
         parent.communicate(timeout=30)
 
+
+# A host invariant failure must report its call site even when release
+# assertions are disabled. This driver imports no DMD frontend modules.
+@pytest.mark.parametrize("mode", ["message", "default", "pure", "native"])
+def test_release_internal_failure(tmp_path: Path, mode: str) -> None:
+    root = Path(__file__).resolve().parent.parent
+    driver = tmp_path / "internal_failure_driver.d"
+    driver.write_text(
+        "module internal_failure_driver;\n"
+        "import snakebite.internalfailure: internalFailure;\n"
+        "import snakebite.nativevalue: loadIntegral;\n"
+        "noreturn pureFailure() @safe pure nothrow @nogc {\n"
+        '    internalFailure("pure caller failed");\n'
+        "}\n"
+        "void main(string[] args) {\n"
+        '    if (args[1] == "message") internalFailure("driver failed");\n'
+        '    if (args[1] == "default") internalFailure();\n'
+        '    if (args[1] == "pure") pureFailure();\n'
+        '    if (args[1] == "native") loadIntegral(null, 3, false);\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    binary = tmp_path / "internal-failure"
+    compiled = subprocess.run(
+        ["ldc2", "-release", "-O", "-flto=thin", "-gcc=clang",
+         "-link-defaultlib-shared", "-preview=dip1000",
+         f"-I{root / 'source'}", f"-of={binary}", str(driver),
+         str(root / "source/snakebite/internalfailure.d"),
+         str(root / "source/snakebite/nativevalue.d")],
+        cwd=tmp_path, capture_output=True, text=True, check=False, timeout=120,
+    )
+    assert compiled.returncode == 0, output(compiled)
+    result = subprocess.run(
+        [str(binary), mode], cwd=tmp_path, capture_output=True,
+        text=True, check=False, timeout=30,
+    )
+    assert result.returncode > 0, output(result)
+    expected = {
+        "message": (f"{driver}:8:", "driver failed"),
+        "default": (f"{driver}:9:", "internal invariant failed"),
+        "pure": (f"{driver}:5:", "pure caller failed"),
+        "native": ("snakebite/nativevalue.d:", "no native layout"),
+    }
+    location, message = expected[mode]
+    assert "snakebite: internal failure at " in result.stderr, output(result)
+    assert location in result.stderr, output(result)
+    assert message in result.stderr, output(result)
+
+
+@pytest.mark.parametrize("backend", ["Bytecode", "Interpreter"])
+@pytest.mark.parametrize("node", ["statement", "expression"])
+def test_unhandled_node_internal_failure(
+    tmp_path: Path, backend: str, node: str,
+) -> None:
+    runner = Path.cwd() / "bin" / "ut"
+    result = subprocess.run(
+        [str(runner), "--single", f"ut.backends.run.main.internalFailure.node.{backend}.{node}"],
+        cwd=tmp_path, capture_output=True, text=True, check=False, timeout=30,
+    )
+    assert result.returncode > 0, output(result)
+    assert f"{node.capitalize()} " in result.stderr, output(result)
+    assert "no `visit` override" in result.stderr, output(result)
+    assert "snakebite/backends/loweringvisitor.d:" in result.stderr, output(result)
+
 # The boundary also covers data and TLS, not only function calls. Compare
 # the actual ELF table, so an omitted linker flag cannot pass this check.
 @pytest.mark.parametrize("binary", ["ut", "at", "sb", "sb-repl", "bench"])

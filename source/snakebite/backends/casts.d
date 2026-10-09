@@ -4,6 +4,9 @@ module snakebite.backends.casts;
 private:
 
 
+import snakebite.internalfailure: internalFailure;
+
+
 import snakebite.nativelayout: TypeFacts;
 import snakebite.nativevalue: CastKind, CastLayout;
 
@@ -115,7 +118,7 @@ private CastPlan classifyByKind(
         return classifyFatValue(
             destKind, sourceFacts, destFacts);
     case other:
-        assert(0, "DMD rejects this cast type pair");
+        internalFailure("DMD rejects this cast type pair");
     }
 }
 
@@ -149,7 +152,7 @@ private CastPlan classifyIntegral(
         );
     case dynamicArray, staticArray, associativeArray, classReference,
         structure, delegateValue, nullValue, vector, other:
-        assert(0, "DMD rejects this cast type pair");
+        internalFailure("DMD rejects this cast type pair");
     }
 }
 
@@ -173,7 +176,7 @@ private CastPlan classifyFloating(
         return CastPlan(CastKind.floatToPointer, sourceFacts, destFacts);
     case dynamicArray, staticArray, associativeArray, classReference,
         structure, delegateValue, nullValue, vector, other:
-        assert(0, "DMD rejects this cast type pair");
+        internalFailure("DMD rejects this cast type pair");
     }
 }
 
@@ -198,7 +201,7 @@ private CastPlan classifyImaginary(
     case dynamicArray, staticArray, associativeArray, classReference,
         structure, delegateValue,
         nullValue, vector, other:
-        assert(0, "DMD rejects this cast type pair");
+        internalFailure("DMD rejects this cast type pair");
     }
 }
 
@@ -224,7 +227,7 @@ private CastPlan classifyComplex(
     case dynamicArray, staticArray, associativeArray, classReference,
         structure, delegateValue,
         nullValue, vector, other:
-        assert(0, "DMD rejects this cast type pair");
+        internalFailure("DMD rejects this cast type pair");
     }
 }
 
@@ -251,7 +254,7 @@ private CastPlan classifyPointer(
     case pointer, functionPointer, classReference, associativeArray:
         return CastPlan(CastKind.copy, sourceFacts, destFacts);
     case staticArray, structure, delegateValue, nullValue, vector, other:
-        assert(0, "DMD rejects this cast type pair");
+        internalFailure("DMD rejects this cast type pair");
     }
 }
 
@@ -276,7 +279,7 @@ private CastPlan classifyClass(
     case dynamicArray, staticArray, classReference, structure,
         delegateValue, floating, imaginary, complex, integral, nullValue,
         vector, other:
-        assert(0, "DMD rejects this cast type pair");
+        internalFailure("DMD rejects this cast type pair");
     }
 }
 
@@ -288,7 +291,7 @@ private CastPlan classifyAssociativeArray(
         return CastPlan(CastKind.copy, sourceFacts, destFacts);
     case dynamicArray, staticArray, structure, delegateValue, floating,
         imaginary, complex, integral, nullValue, vector, other:
-        assert(0, "DMD rejects this cast type pair");
+        internalFailure("DMD rejects this cast type pair");
     }
 }
 
@@ -303,7 +306,7 @@ private CastPlan classifyDelegate(
     case dynamicArray, staticArray, associativeArray, classReference,
         structure, floating, imaginary, complex, integral, nullValue, vector,
         other:
-        assert(0, "DMD rejects this cast type pair");
+        internalFailure("DMD rejects this cast type pair");
     }
 }
 
@@ -322,7 +325,7 @@ private CastPlan classifyDynamicArray(
     case staticArray, associativeArray, classReference, structure,
         delegateValue, floating, imaginary, complex, integral, nullValue,
         vector, other:
-        assert(0, "DMD rejects this cast type pair");
+        internalFailure("DMD rejects this cast type pair");
     }
 }
 
@@ -359,10 +362,10 @@ private CastPlan classifyStaticArray(
     case staticArray, structure, vector:
         if (sourceFacts.size == destFacts.size)
             return CastPlan(CastKind.copy, sourceFacts, destFacts);
-        assert(0, "DMD rejects this cast type pair");
+        internalFailure("DMD rejects this cast type pair");
     case associativeArray, classReference, delegateValue, floating,
         imaginary, complex, integral, nullValue, other:
-        assert(0, "DMD rejects this cast type pair");
+        internalFailure("DMD rejects this cast type pair");
     }
 }
 
@@ -373,11 +376,11 @@ private CastPlan classifyFatValue(
     case staticArray, structure, vector:
         if (sourceFacts.size == destFacts.size)
             return CastPlan(CastKind.copy, sourceFacts, destFacts);
-        assert(0, "DMD rejects this cast type pair");
+        internalFailure("DMD rejects this cast type pair");
     case dynamicArray, associativeArray, pointer, functionPointer,
         classReference, delegateValue, floating, imaginary, complex,
         integral, nullValue, other:
-        assert(0, "DMD rejects this cast type pair");
+        internalFailure("DMD rejects this cast type pair");
     }
 }
 

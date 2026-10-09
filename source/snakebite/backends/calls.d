@@ -4,6 +4,9 @@ module snakebite.backends.calls;
 private:
 
 
+import snakebite.internalfailure: internalFailure;
+
+
 // Delegate values use native callback entries, so captured guest contexts
 // do not change whether the receiving function executes as guest or host.
 public struct CallSelection {
@@ -438,7 +441,7 @@ public struct CallSelection {
                     case double_: floating.value = storage.Vdouble; break;
                     case real_: floating.value = storage.Vreal; break;
                     case ubyte_, ushort_, short_, int_, uint_, long_, ulong_,
-                            vector_, pointer_, void_: assert(0);
+                            vector_, pointer_, void_: internalFailure();
                 }
             }
             return value.exp;
@@ -766,7 +769,7 @@ public struct CallSelection {
             case double_: signByte = double.sizeof - 1; break;
             case real_: signByte = real.mant_dig / 8 + 1; break;
             case ubyte_, ushort_, short_, int_, uint_, long_, ulong_,
-                    vector_, pointer_, void_: assert(0);
+                    vector_, pointer_, void_: internalFailure();
         }
         auto bytes = cast(ubyte*) &storage;
         final switch (operation) with (FloatingSign) {
@@ -799,7 +802,7 @@ public struct CallSelection {
                 }
                 break;
             case ubyte_, ushort_, short_, int_, uint_, long_, ulong_,
-                    vector_, pointer_, void_: assert(0);
+                    vector_, pointer_, void_: internalFailure();
         }
         final switch (result) with (ParameterType) {
             case float_:
@@ -814,7 +817,7 @@ public struct CallSelection {
                     storage.Vreal = storage.Vdouble;
                 break;
             case ubyte_, ushort_, short_, int_, uint_, long_, ulong_,
-                    vector_, pointer_, void_: assert(0);
+                    vector_, pointer_, void_: internalFailure();
         }
     }
 

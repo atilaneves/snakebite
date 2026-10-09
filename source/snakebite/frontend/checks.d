@@ -4,6 +4,9 @@ module snakebite.frontend.checks;
 private:
 
 
+import snakebite.internalfailure: internalFailure;
+
+
 import dmd.astenums: CHECKACTION, CHECKENABLE;
 import dmd.globals: Param;
 
@@ -289,7 +292,7 @@ public struct Checks {
             case arrayBounds:
                 return "--boundscheck=" ~ ldcBounds;
             case nullDeref:
-                assert(0, "LDC has no null dereference check");
+                internalFailure("LDC has no null dereference check");
         }
     }
 
@@ -302,7 +305,7 @@ public struct Checks {
             case on: return "on";
             case safeonly: return "safeonly";
             case off: return "off";
-            case _default: assert(0, "bounds check was not resolved");
+            case _default: internalFailure("bounds check was not resolved");
         }
     }
 }

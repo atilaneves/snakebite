@@ -4,6 +4,9 @@ module snakebite.backends.guestmodules;
 private:
 
 
+import snakebite.internalfailure: internalFailure;
+
+
 // What compiled D does with the modules of a program, done for the root
 // modules of a guest program: druntime owns the phases. Each root module gets
 // a `ModuleInfo` record whose constructor, destructor, thread-local
@@ -1049,7 +1052,7 @@ private struct Image {
         alias Slot = extern(C) void** function();
         auto slot = cast(Slot) dlsym(image._handle, "snakebite_registry_slot");
         if (slot is null)
-            assert(0, "the registry image exports its slot");
+            internalFailure("the registry image exports its slot");
 
         image._slot = slot();
         ++_images;

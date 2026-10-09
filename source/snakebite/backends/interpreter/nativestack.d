@@ -4,6 +4,9 @@ module snakebite.backends.interpreter.nativestack;
 private:
 
 
+import snakebite.internalfailure: internalFailure;
+
+
 import core.thread: Thread;
 import core.thread.context: StackContext;
 
@@ -111,7 +114,7 @@ public struct InterpreterStack {
             return;
         const unmapped = munmap(_guard, _size + pageSize);
         if (unmapped != 0)
-            assert(0, "could not release the interpreter's native stack");
+            internalFailure("could not release the interpreter's native stack");
     }
 
     // Runs `action` on this stack. Not reentrant: a caller whose context
