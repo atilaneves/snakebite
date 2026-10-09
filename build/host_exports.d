@@ -133,7 +133,7 @@ mixin Export!(ffi, "snakebite_ut_mixed_reversed_after_eight_doubles", "mixedStru
 mixin Export!(ffi, "snakebite_ut_many_strings", "manyArguments.strings");
 mixin Export!(ffi, "snakebite_ut_many_callback", "manyArguments.callback");
 static foreach (linkage; ["C", "D"]) {
-    static foreach (count; ["17", "31", "257"]) {
+    static foreach (count; ["17", "257"]) {
         mixin Export!(ffi, "many" ~ linkage ~ count, "manyArguments." ~ linkage ~ count);
     }
 }
