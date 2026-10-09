@@ -2,8 +2,8 @@ module ut.backends.call.routing;
 
 
 // A root-owned callee is interpreted. A non-root declaration uses native
-// code when that code exists; a synthesized template instance with no native
-// symbol uses the exact body DMD produced for it. Names and packages do not
+// code when that code exists; a callee with no native symbol uses the exact
+// body DMD produced for it. Names and packages do not
 // decide how a call runs.
 
 
@@ -11,7 +11,7 @@ import ut.backends;
 import snakebite.backends.backend: Program;
 import snakebite.frontend.compiler: parseSnippet, parseSnippets;
 import snakebite.frontend.dmd.functions: findFunction;
-import std.algorithm.searching: canFind, startsWith;
+import std.algorithm.searching: canFind;
 
 
 // A root-owned declaration whose name copies druntime's `_d_*` convention
@@ -82,35 +82,52 @@ static foreach (backend; Matrix!()) {
 }
 
 
-// A callee in a module outside `Program.rootModules` is executed
-// natively even though it has `extern(D)` linkage and a body the
-// interpreter could walk. No native build of `routing_helper` exists, so
-// the call must fail at the FFI boundary, naming the symbol it needed -
-// walking the body instead would answer 42 and pass silently.
-@("nonRootOwned.bodyIsNotWalked.Interpreter")
-@Tags("Interpreter")
-unittest {
-    auto modules = parseSnippets([
-        q{
-            module routing_root;
-            import routing_helper;
-            int answer() { return fortyTwo(); }
-        },
-        q{
-            module routing_helper;
+// ADR-0009 keeps a dependency's own body when its exact native symbol is
+// absent. Direct calls and callable addresses must select that same body,
+// including a D dependency body with C linkage.
+static foreach (backend; Matrix!()) {
+    @("nonRootOwned.missingNativeUsesOwnBody." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        static if (is(backend == Native)) {
             int fortyTwo() { return 42; }
-        },
-    ]);
-    auto program = Program([modules[0]]);
-    auto function_ = findFunction(modules[0], "answer");
+            extern(C) int cFortyTwo() { return 42; }
+            const direct = fortyTwo();
+            auto pointer = &fortyTwo;
+            direct.should == 42;
+            pointer().should == 42;
+            cFortyTwo().should == 42;
+            auto cPointer = &cFortyTwo;
+            cPointer().should == 42;
+        } else {
+            auto modules = parseSnippets([
+                q{
+                    module routing_root;
+                    import routing_helper;
+                    int answer() {
+                        assert(fortyTwo() == 42);
+                        assert(cFortyTwo() == 42);
+                        auto cPointer = &cFortyTwo;
+                        assert(cPointer() == 42);
+                        auto pointer = &fortyTwo;
+                        return pointer();
+                    }
+                },
+                q{
+                    module routing_helper;
+                    int fortyTwo() { return 42; }
+                    extern(C) int cFortyTwo() { return 42; }
+                },
+            ]);
+            auto program = Program([modules[0]]);
+            auto function_ = findFunction(modules[0], "answer");
 
-    int result;
-    auto interpreter_ = Owned!Interpreter(program);
-    const thrown = interpreter_
-        .call(function_, &result, [])
-        .shouldThrow;
-
-    thrown.msg.startsWith("ffi cannot resolve the symbol").should == true;
+            int result;
+            auto backend_ = Owned!backend(program);
+            backend_.call(function_, &result, []);
+            result.should == 42;
+        }
+    }
 }
 
 
