@@ -858,8 +858,10 @@ int fullDBody() { try { throw new Exception("full D"); } catch (Exception error)
         body += 'exit(0);'
     elif case == "tls-start":
         constructor += 'entered = new Semaphore; release = new Semaphore;'
-        thread_constructor += 'if (blockChild && !Thread.getThis.isDaemon) { entered.notify; release.wait; fputs("TLS_RELEASED\\n", stderr); }'
-        body += 'blockChild = true; auto t = new Thread({ fputs("CHILD_END\\n", stderr); }); t.start; entered.wait; auto helper = new Thread({ Thread.sleep(20.msecs); release.notify; }); helper.isDaemon = true; helper.start; assert(rt_term());'
+        thread_constructor += 'if (Thread.getThis is owner) { entered.notify; release.wait; fputs("TLS_RELEASED\\n", stderr); }'
+        # rt_term must join the helper too: its TLS destructors need the module
+        # data that druntime frees after it joins the non-daemon threads.
+        body += 'auto t = new Thread({ fputs("CHILD_END\\n", stderr); }); owner = t; t.start; entered.wait; auto helper = new Thread({ Thread.sleep(20.msecs); release.notify; }); helper.start; assert(rt_term());'
     elif case == "daemon":
         constructor += 'entered = new Semaphore; release = new Semaphore;'
         body += 'auto t = new Thread({ entered.notify; release.wait; fputs("CHILD_END\\n", stderr); }); t.isDaemon = true; t.start; entered.wait; assert(rt_term());'
@@ -1005,9 +1007,6 @@ DAEMON_ENDS = {
 DAEMON_STATUS = {"return": 0, "exit": 3, "throw": 1}
 
 
-@pytest.mark.skip(
-    reason="bin/sb ends with SIGSEGV when a guest daemon thread is alive at the end of the process",
-)
 @pytest.mark.parametrize("backend", ENDS_PROCESS)
 @pytest.mark.parametrize("end", DAEMON_ENDS)
 def test_daemon_thread_runs_until_the_process_ends(
