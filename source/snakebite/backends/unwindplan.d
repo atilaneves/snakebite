@@ -10,6 +10,22 @@ import snakebite.internalfailure: internalFailure;
 import object: Throwable, TypeInfo_Class;
 
 
+// Whether a guest `catch` naming `expected` accepts a throwable whose own
+// runtime type is `actual` - the same relation the bytecode VM already
+// reads straight off native `TypeInfo_Class` objects for a compiled catch
+// clause (`vm.findHandler`), now shared with the interpreter's own
+// `matchesThrowable` for the one case it still needs a `TypeInfo_Class`
+// comparison at all: a native throwable, which has no guest declaration
+// for an AST-level comparison to fall back to. `expected` is `null` for a
+// catch clause this backend never resolved a runtime type for; such a
+// clause matches nothing.
+public bool catchMatches(
+    const TypeInfo_Class expected, const TypeInfo_Class actual,
+) @safe @nogc nothrow pure {
+    return expected !is null && actual !is null && expected.isBaseOf(actual);
+}
+
+
 // `throwable` is `null` while an exception that is no `Throwable` unwinds,
 // and then it is already in flight.
 public void unwindFinally(
@@ -109,8 +125,6 @@ public UnwindPlan unwindPlanOf(
     TypeInfo_Class actual,
     size_t startCandidate = 0,
 ) @safe {
-    import snakebite.backends.exceptions: catchMatches;
-
     UnwindPlan plan;
     plan.nextCandidate = startCandidate;
     plan.finalizers = UnwindPlan.Finalizers(
