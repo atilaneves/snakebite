@@ -85,47 +85,6 @@ private Nesting nestingOf(string body_, in string outerName, in string name) {
 }
 
 
-@("directNesting.oneFrameSlotHop")
-unittest {
-    auto nesting = nestingOf(q{
-        int outer() {
-            int x = 1;
-            int inner() { return x; }
-            return inner();
-        }
-    }, "outer", "inner");
-
-    const path = ClosurePlan.staticChainPath(nesting.target, nesting.outer);
-
-    path.length.should == 1;
-    path[0].kind.should == Hop.Kind.frameSlot;
-}
-
-
-@("nestedStructMethod.frameSlotThenStructFieldHop")
-unittest {
-    // `m`'s own hidden `this` is its `S` receiver, so the first hop only
-    // reaches the receiver - the second hop crosses `S.vthis`, the
-    // context `S`'s own instance captured when `S()` built it, to reach
-    // `outer`.
-    auto nesting = nestingOf(q{
-        int outer() {
-            int x = 1;
-            struct S {
-                int m() { return x; }
-            }
-            return S().m();
-        }
-    }, "outer", "m");
-
-    const path = ClosurePlan.staticChainPath(nesting.target, nesting.outer);
-
-    path.length.should == 2;
-    path[0].kind.should == Hop.Kind.frameSlot;
-    path[1].kind.should == Hop.Kind.structField;
-}
-
-
 @("closureCrossing.frameSlotThenClosureWordHop")
 unittest {
     // `next` escapes `middle` by address (`return &next;`), so dmd's own

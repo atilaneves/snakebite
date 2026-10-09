@@ -16,12 +16,13 @@ import dmd.mtype: Type;
 import dmd.typesem: nextOf, toBasetype;
 import dmd.statement:
     ExpStatement, GotoCaseStatement, GotoDefaultStatement, GotoStatement,
-    Statement, TryCatchStatement, TryFinallyStatement;
+    Statement, TryCatchStatement, TryFinallyStatement, WithStatement;
 import dmd.visitor: SemanticTimeTransitiveVisitor;
 import snakebite.backends.controlflow: ScopePaths;
 import snakebite.backends.loweringvisitor: LoweredExpressionTypes;
 import snakebite.backends.switchplan: gotoCaseTarget, gotoDefaultTarget;
 import snakebite.frontend.dmd.functions: unresolvedCalleeOf;
+import snakebite.nativelayout: initializerValueOf;
 import std.meta: staticIndexOf;
 
 
@@ -40,7 +41,7 @@ package struct Preparation {
     package void delegate(DeleteExp) deletion;
     package void delegate(StructLiteralExp) structLiteral;
     package void delegate(StringExp) stringLiteral;
-    package void delegate(FuncDeclaration) constructor;
+    package void delegate(NewExp) constructor;
     package void delegate(VarDeclaration) bitfield;
     package void delegate(TryCatchStatement) tryCatch;
     package void delegate(TryFinallyStatement) tryFinally;
@@ -110,6 +111,19 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
     override void visit(ExpStatement statement) {
         if (statement.exp !is null)
             statement.exp.accept(this);
+    }
+
+    // A struct `with` executes an address initializer whose pointer type
+    // need not occur in the original operand or the body.
+    override void visit(WithStatement statement) {
+        if (statement.wthis !is null) {
+            _preparation.type(statement.wthis.type);
+            initializerValueOf(statement.wthis._init.isExpInitializer)
+                .accept(this);
+        } else
+            statement.exp.accept(this);
+        if (statement._body !is null)
+            statement._body.accept(this);
     }
 
     // The frontend has already built this instance, and the value that it
@@ -201,7 +215,7 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
         import snakebite.backends.aggregateinit: NewPlan, planNew;
 
         if (expression.member !is null)
-            _preparation.constructor(expression.member);
+            _preparation.constructor(expression);
 
         const plan = planNew(expression);
         if (plan.destination == NewPlan.Destination.stack

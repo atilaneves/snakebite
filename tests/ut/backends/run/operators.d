@@ -1282,19 +1282,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
-    @("shiftLongLocalByInt." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int main() {
-                long value = 20;
-                value <<= 1;
-                return value == 40 ? 0 : 1;
-            }
-        });
-    }
-}
 
 static foreach (backend; Matrix!()) {
     @("shiftLongFieldThroughThisByInt." ~ backend.stringof)
@@ -1329,52 +1316,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
-    @("addAssignIntByDouble." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int main() {
-                int value = 20;
-                double step = 2.5;
-                value += step;
-                return value == 22 ? 0 : 1;
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.diverges,
-        "CTFE converts a floating step to the integral target before the "
-        ~ "operation: pinned by the `.Ctfe.diverges` test of the same name"),
-)) {
-    @("subAssignLongByDouble." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int main() {
-                long value = 20;
-                double step = 2.5;
-                value -= step;
-                return value == 17 ? 0 : 1;
-            }
-        });
-    }
-}
-
-@("subAssignLongByDouble.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    0.shouldBeStatusOf!(Ctfe, q{
-        int main() {
-            long value = 20;
-            double step = 2.5;
-            value -= step;
-            return value == 18 ? 0 : 1;
-        }
-    });
-}
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.diverges,

@@ -8,7 +8,9 @@ module ut.frontend.memory;
 
 import core.memory: GC;
 import core.sync.mutex: Mutex;
-import snakebite.frontend.compiler: arenaReport, parseSnippet;
+import dmd.typesem: arrayOf, constOf, immutableOf, sarrayOf, sharedOf;
+import snakebite.frontend.compiler: arenaReport, newInFrontend, parseSnippet;
+import snakebite.nativelayout: TypeFacts;
 import ut.backends;
 
 
@@ -227,6 +229,119 @@ unittest {
         pthread_join(thread, null).should == 0;
         scope(exit) closureFrame[0] = null;
 
+        arenaReport.should == "";
+    }
+}
+
+
+// A qualified enum can need a new qualified base even after its declaration
+// is resolved. Reading its representation must not leave that base on the GC.
+static foreach (shape; AliasSeq!("direct", "staticArray", "dynamicArray")) {
+    @("arenaHoldsNoGCPointers.qualifiedEnumRepresentation." ~ shape)
+    unittest {
+        auto module_ = parseSnippet(
+            "module arenaQualifiedEnumRepresentation" ~ shape ~ ";" ~ q{
+                struct Payload { int value; }
+                enum Choice : Payload { one = Payload(1) }
+            },
+        );
+        arenaReportLock.lock;
+        scope(exit) arenaReportLock.unlock;
+        size_t checked;
+        foreach (member; *module_.members) {
+            if (auto declaration = member.isEnumDeclaration) {
+                ++checked;
+                static foreach (qualify; AliasSeq!(constOf, immutableOf, sharedOf)) {{
+                    auto qualified = newInFrontend!qualify(declaration.type);
+                    static if (shape != "direct") {
+                        qualified = newInFrontend!sarrayOf(qualified, 2);
+                        qualified = newInFrontend!sarrayOf(qualified, 3);
+                    }
+                    static if (shape == "dynamicArray")
+                        qualified = newInFrontend!arrayOf(qualified);
+                    const facts = TypeFacts.of(qualified);
+                    static if (shape == "direct")
+                        facts.size.should == int.sizeof;
+                    else static if (shape == "staticArray")
+                        facts.size.should == 6 * int.sizeof;
+                    else {
+                        facts.size.should == 2 * size_t.sizeof;
+                        facts.elementSize.should == 6 * int.sizeof;
+                    }
+                    arenaReport.should == "";
+                }}
+            }
+        }
+        checked.should == 1;
+    }
+}
+
+
+// A pointer-based enum is a condition. Reading its truth bytes can be the
+// first query that needs its qualified base.
+@("arenaHoldsNoGCPointers.qualifiedEnumTruth")
+unittest {
+    auto module_ = parseSnippet(q{
+        module arenaQualifiedEnumTruth;
+        struct Payload { int value; }
+        enum Choice : Payload* { one = null }
+    });
+    arenaReportLock.lock;
+    scope(exit) arenaReportLock.unlock;
+    size_t checked;
+    foreach (member; *module_.members) {
+        if (auto declaration = member.isEnumDeclaration) {
+            ++checked;
+            auto qualified = newInFrontend!constOf(declaration.type);
+            const truth = TypeFacts.Truth.of(qualified);
+            truth.size.should == size_t.sizeof;
+            arenaReport.should == "";
+        }
+    }
+    checked.should == 1;
+}
+
+
+// The array-copy query in an unlowered compile-time body can be the first
+// query that makes an immutable variant of its element type.
+static foreach (shape; AliasSeq!("array", "element"))
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd 2.113.0 crashes on a case inside if (__ctfe) (dmd bug 23996)"),
+)) {
+    @("arenaHoldsNoGCPointers.arrayConstructionInCtfeBlock."
+        ~ shape ~ "." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        arenaReportLock.lock;
+        scope(exit) arenaReportLock.unlock;
+        enum expected = is(backend == Ctfe) ? 1 : 0;
+        expected.shouldBeStatusOf!(backend,
+            "enum ownershipBackend = \"" ~ backend.stringof ~ "\";"
+            ~ "enum copyElement = " ~ (shape == "element" ? "true" : "false") ~ ";"
+            ~ q{
+            struct FreshElement { int value; this(this) {} }
+            int choose(int choice) {
+                FreshElement[2] source;
+                switch (choice) {
+                    if (__ctfe) {
+                        case 1:
+                            static if (copyElement)
+                                FreshElement[2] copy = source[0];
+                            else
+                                FreshElement[2] copy = source;
+                            return 1;
+                    }
+                    default: return 0;
+                }
+            }
+            int main() {
+                try
+                    return choose(1);
+                catch (Error)
+                    return 0;
+            }
+        });
         arenaReport.should == "";
     }
 }

@@ -4,23 +4,28 @@ module snakebite.backends.loweringvisitor;
 private:
 
 import dmd.expression:
-    ArrayLiteralExp, AssocArrayLiteralExp, CastExp, CatAssignExp, CatExp,
+    ArrayLiteralExp, AssignExp, AssocArrayLiteralExp, CastExp, CatAssignExp, CatExp,
     CmpExp, EqualExp, HaltExp, LogicalExp,
     CatElemAssignExp, CatDcharAssignExp,
-    ConstructExp, Expression, IdentityExp, LoweredAssignExp, NewExp, ThrowExp,
+    ConstructExp, DeclarationExp, Expression, IdentityExp, LoweredAssignExp,
+    NewExp, ThrowExp,
     TupleExp;
 import dmd.statement:
-    ExpStatement, ReturnStatement, SwitchErrorStatement, ThrowStatement,
-    WithStatement;
+    ExpStatement, IfStatement, ReturnStatement,
+    SwitchErrorStatement, SwitchStatement, ThrowStatement, WithStatement;
+import dmd.location: Loc;
+import dmd.typesem: isString;
 import snakebite.backends.fullexpression: FullExpressionScope;
 import snakebite.backends.identity: IdentityPlan, identityPlan;
 import snakebite.backends.logical: LogicalPlan, logicalPlan;
+import snakebite.backends.ifplan: IfPlan, ifPlan;
 import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
 import snakebite.backends.aggregateinit: NewPlan, planNew;
 import dmd.visitor: Visitor;
 import dmd.mtype: Type;
 import dmd.func: FuncDeclaration;
 import snakebite.nativelayout: TypeFacts;
+import snakebite.frontend.compiler: newInFrontend;
 import std.meta: AliasSeq;
 
 
@@ -65,6 +70,11 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
         scope void delegate() evaluate,
     );
 
+    extern(D) protected abstract bool readsResultAfterEnd(
+        in FullExpressionScope.Position position,
+        Expression result,
+    );
+
     extern(D) protected final void fullExpression(
         in FullExpressionScope.Position position,
         Expression root,
@@ -100,10 +110,12 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     }
 
     private void throwOperand(Expression operand) {
+        const afterEnd = readsResultAfterEnd(
+            FullExpressionScope.Position.throwOperand, operand);
         size_t thrown;
         fullExpression(FullExpressionScope.Position.throwOperand,
-            operand, { thrown = visitThrowOperand(operand); });
-        visitThrowTransfer(thrown);
+            operand, { thrown = visitThrowOperand(operand, afterEnd); });
+        visitThrowTransfer(operand, thrown, afterEnd);
     }
 
     // The initialiser of the `with` handle is a full expression of its own:
@@ -126,18 +138,84 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     // temporaries of the operand die when it has been evaluated, whether
     // the function returns a value or a `ref`.
     final override void visit(ReturnStatement statement) {
-        if (statement.exp is null)
-            visitReturnOperand(statement);
-        else
+        if (statement.exp is null) {
+            enum readsAfterEnd = false;
+            visitReturnOperand(statement, readsAfterEnd);
+        } else {
+            const afterEnd = readsResultAfterEnd(
+                FullExpressionScope.Position.returnOperand, statement.exp);
             fullExpression(FullExpressionScope.Position.returnOperand,
-                statement.exp, { visitReturnOperand(statement); });
+                statement.exp, { visitReturnOperand(statement, afterEnd); });
+        }
         visitReturnTransfer(statement);
     }
 
     protected abstract void visitExpressionStatement(ExpStatement statement);
     protected abstract void visitSwitchError(SwitchErrorStatement statement);
-    protected abstract void visitReturnOperand(ReturnStatement statement);
+    // With `readsAfterEnd` the operand is an lvalue that dmd reads after the
+    // destructors of its temporaries ran: the backend resolves its address
+    // here and moves the value in `visitReturnTransfer`. A `ref` return
+    // yields the address either way.
+    protected abstract void visitReturnOperand(
+        ReturnStatement statement, bool readsAfterEnd);
     protected abstract void visitReturnTransfer(ReturnStatement statement);
+
+    final override void visit(IfStatement statement) {
+        visitIf(statement, ifPlan(statement));
+    }
+
+    protected abstract void visitIf(IfStatement statement, in IfPlan plan);
+
+    // How many `if (__ctfe)` bodies the walk is inside. A callee is not
+    // inside the body that calls it, so a backend that walks callees with
+    // the same visitor resets this at a call.
+    protected uint ctfeBlockDepth;
+
+    // A backend walks the body of an `if (__ctfe)` block through this, so
+    // that the decision below knows where it is.
+    extern(D) protected final void inCtfeBlock(scope void delegate() walk) {
+        ++ctfeBlockDepth;
+        scope (exit)
+            --ctfeBlockDepth;
+
+        walk();
+    }
+
+    // dmd compiles the body of an `if (__ctfe)` block for compile time only
+    // and leaves some constructs in it without the lowering they get
+    // everywhere else. Run-time code gets into that body through a `case`
+    // label. Reaching such a construct there throws an `Error` that the
+    // guest can catch. Returns whether the construct was in such a body, in
+    // which case the backend has thrown and must not compile it.
+    extern(D) protected final bool throwIfUnloweredInCtfeBlock(
+        in string construct, in Loc loc,
+    ) {
+        import std.string: fromStringz;
+
+        if (ctfeBlockDepth == 0)
+            return false;
+
+        visitCtfeBlockError(
+            construct ~ " in the body of an if (__ctfe) block: dmd compiles "
+                ~ "that body for compile time only",
+            loc.filename.fromStringz.idup, loc.linnum);
+        return true;
+    }
+
+    extern(D) protected abstract void visitCtfeBlockError(
+        string message, string file, size_t line,
+    );
+
+    // dmd lowers a `switch` on a string only when it generates code, so the
+    // condition of one in an `if (__ctfe)` body is still a string.
+    protected final bool throwIfStringSwitchInCtfeBlock(
+        SwitchStatement statement,
+    ) {
+        if (!newInFrontend!isString(statement.condition.type))
+            return false;
+
+        return throwIfUnloweredInCtfeBlock("string switch", statement.loc);
+    }
 
     protected abstract void visitWithOperand(WithStatement statement);
     protected abstract void visitWithBody(WithStatement statement);
@@ -146,18 +224,21 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     // object it made. The handle is a plain number because a destructor of
     // an operand temporary can run during a collection, where a throw must
     // not allocate. The shared visitor passes it to `visitThrowTransfer`
-    // once the full expression has ended.
-    protected abstract size_t visitThrowOperand(Expression operand);
-    protected abstract void visitThrowTransfer(size_t thrown);
+    // once the full expression has ended. With `readsAfterEnd` the handle
+    // is the address of the object reference, which the transfer reads.
+    protected abstract size_t visitThrowOperand(
+        Expression operand, bool readsAfterEnd);
+    protected abstract void visitThrowTransfer(
+        Expression operand, size_t thrown, bool readsAfterEnd);
 
     // DMD's semantic pass leaves `lowering` null in a scope that needs no
-    // code generation, and dmd's glue cannot compile such an append. A
-    // backend can still compile it: an `if (__ctfe)` block with a `case`
-    // label is dead code at run time but has statements that a jump can
-    // reach. Reaching the append halts the guest.
+    // code generation, and dmd's glue cannot compile such an append. In an
+    // `if (__ctfe)` body that a `case` label reaches, the guest gets an
+    // `Error`; anywhere else it halts.
     final override void visit(CatAssignExp expression) {
         if (expression.lowering is null) {
-            visitHalt;
+            if (!throwIfUnloweredInCtfeBlock("~= append", expression.loc))
+                visitHalt;
             return;
         }
 
@@ -247,10 +328,43 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
             return;
         }
 
+        if (ctfeBlockDepth != 0 && needsArrayCastHook(expression)
+                && throwIfUnloweredInCtfeBlock("array cast", expression.loc))
+            return;
+
         visitUnloweredCast(expression);
     }
 
+    // expressionSemantic replaces these casts with object.__ArrayCast only
+    // in a code-generation scope. Raw slice resizing would skip its check.
+    private static bool needsArrayCastHook(CastExp expression) {
+        import dmd.astenums: Tarray;
+        import dmd.typesem: nextOf, size, toBasetype;
+
+        auto source = newInFrontend!toBasetype(expression.e1.type);
+        auto target = newInFrontend!toBasetype(expression.type);
+        if (source.ty != Tarray || target.ty != Tarray
+                || expression.e1.isArrayLiteralExp !is null)
+            return false;
+
+        const sourceSize = newInFrontend!size(source.nextOf);
+        const targetSize = newInFrontend!size(target.nextOf);
+        return sourceSize != targetSize
+            && (targetSize == 0 || sourceSize % targetSize != 0);
+    }
+
     protected abstract void visitUnloweredCast(CastExp expression);
+
+    final override void visit(AssignExp expression) {
+        if (expression.e1.isArrayLengthExp !is null
+                && throwIfUnloweredInCtfeBlock(
+                    "array length assignment", expression.loc))
+            return;
+
+        visitUnloweredAssign(expression);
+    }
+
+    protected abstract void visitUnloweredAssign(AssignExp expression);
 
     // DMD lowers, for instance, dynamic-array length assignment to a native
     // druntime call so allocation, prefix preservation, and the array
@@ -268,7 +382,74 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
             return;
         }
 
+        if (throwIfArrayConstructionInCtfeBlock(expression))
+            return;
+
         visitUnloweredConstruct(expression);
+    }
+
+    // A declaration can read only the initializer's RHS. Keep this check
+    // before that shortcut as well as on direct construction expressions.
+    final override void visit(DeclarationExp expression) {
+        import snakebite.backends.declaration: forEachRuntimeVariable;
+
+        bool threw;
+        if (ctfeBlockDepth != 0)
+            forEachRuntimeVariable(expression.declaration, (variable) {
+                if (threw || variable.isDataseg || variable._init is null)
+                    return;
+                if (auto initializer = variable._init.isExpInitializer)
+                    if (auto construct = initializer.exp.isConstructExp)
+                        threw = throwIfArrayConstructionInCtfeBlock(construct);
+            });
+        if (!threw)
+            visitDeclaration(expression);
+    }
+
+    protected abstract void visitDeclaration(DeclarationExp expression);
+
+    private bool throwIfArrayConstructionInCtfeBlock(ConstructExp expression) {
+        return ctfeBlockDepth != 0 && expression.lowering is null
+            && needsArrayConstructionHook(expression)
+            && throwIfUnloweredInCtfeBlock("array construction", expression.loc);
+    }
+
+    // Match expressionSemantic's _d_arrayctor/_d_arraysetctor selection,
+    // including the forms which move elements and need no hook.
+    private static bool needsArrayConstructionHook(ConstructExp expression) {
+        import dmd.astenums: Tarray, Tsarray;
+        import dmd.expressionsem: isLvalue;
+        import dmd.typesem: baseElemOf, equivalent, nextOf, toBasetype;
+
+        auto target = newInFrontend!toBasetype(expression.e1.type);
+        if (target.ty != Tsarray && target.ty != Tarray)
+            return false;
+
+        auto element = target.nextOf; // DMD type methods require mutable Type.
+        const structure = newInFrontend!baseElemOf(element).isTypeStruct;
+        if (structure is null || (!structure.sym.postblit
+                && !structure.sym.hasCopyCtor && !structure.sym.dtor))
+            return false;
+        if (target.ty != Tsarray && expression.e1.isSliceExp is null)
+            return false;
+        if (auto variable = expression.e1.isVarExp)
+            if (variable.var.isVarDeclaration.isReference)
+                return false;
+
+        auto rhs = expression.e2;
+        auto source = newInFrontend!toBasetype(rhs.type);
+        auto originalSource = source; // DMD needs mutable Type.
+        if (source.ty == Tarray)
+            if (auto cast_ = rhs.isCastExp)
+                if (newInFrontend!toBasetype(cast_.e1.type).ty == Tsarray) {
+                    rhs = cast_.e1;
+                    source = newInFrontend!toBasetype(rhs.type);
+                }
+
+        const arrayCopy = ((source.ty == Tarray && rhs.isArrayLiteralExp is null)
+                || (source.ty == Tsarray && newInFrontend!isLvalue(rhs)))
+            && newInFrontend!equivalent(element, originalSource.nextOf);
+        return arrayCopy || newInFrontend!equivalent(element, originalSource);
     }
 
     protected abstract void visitUnloweredConstruct(ConstructExp expression);
@@ -289,8 +470,11 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
             return;
         }
 
+        // dmd sets no lowering on a heap `new` in a scope that needs no code
+        // generation, and, except for a class, also under `-betterC`.
         if (expression.lowering is null) {
-            visitUnloweredNew(expression, plan);
+            if (!throwIfUnloweredInCtfeBlock("heap new", expression.loc))
+                visitUnloweredNew(expression, plan);
             return;
         }
 
@@ -398,16 +582,16 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     protected abstract void storeAddress(in size_t byteOffset);
     protected abstract void copyBytes(in size_t width);
 
-    // `~` concatenation is always `_d_arraycatnTX`; the one shape without a
-    // `lowering` is a node this visitor does not otherwise support, the same
-    // fallback `CatAssignExp` above uses for its own unlowered form.
+    // `~` concatenation is always `_d_arraycatnTX`; dmd leaves `lowering`
+    // null under `-betterC` (`trySetCatExpLowering`), where it uses no GC.
     final override void visit(CatExp expression) {
         if (expression.lowering !is null) {
             expression.lowering.accept(this);
             return;
         }
 
-        visitUnloweredCat(expression);
+        if (!throwIfUnloweredInCtfeBlock("~ concatenation", expression.loc))
+            visitUnloweredCat(expression);
     }
 
     protected abstract void visitUnloweredCat(CatExp expression);

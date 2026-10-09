@@ -327,10 +327,9 @@ private string dmdFlagsForOption(in string option) {
 }
 
 
-// The analysed program is an input of the dependency image only when the
-// image has to be built: on a cache hit `program` never runs, and on a miss
-// it runs once. A caller that has not run the frontend yet (the REPL) passes
-// the analysis itself; one that has (bin/sb) passes the result.
+// Collects image data from a live program without resetting the frontend.
+// `program` runs at most once, only when cache validation needs image source.
+// For startup without a live program, use `prepareStartupDependencies`.
 public const(imported!"snakebite.dependencyimage".DependencyImage)* prepareDependencies(
     in string directory,
     in SourceSet sources,
@@ -339,8 +338,61 @@ public const(imported!"snakebite.dependencyimage".DependencyImage)* prepareDepen
         = imported!"snakebite.dependencyimage".Optimise.yes,
     in bool projectEntry = true,
 ) {
-    import snakebite.backends: Program;
+    return prepareDependencies(directory, sources,
+        () => dependencyAnalysis(program()), optimise, projectEntry);
+}
+
+
+// Startup only: no live frontend session may exist. Analysis is exclusive
+// and resets all frontend modules and caches, not an entry snapshot. Only
+// host-owned image data leaves analysis. Image build and load run afterwards,
+// so constructors can wait for workers that use the frontend. A clean cache
+// hit does not analyse or reset. Unrelated stderr writers must be absent
+// during analysis because diagnostic capture redirects process-wide fd 2.
+public const(imported!"snakebite.dependencyimage".DependencyImage)* prepareStartupDependencies(
+    in string directory,
+    SourceSet sources,
+    in imported!"snakebite.dependencyimage".Optimise optimise
+        = imported!"snakebite.dependencyimage".Optimise.yes,
+) {
+    import snakebite.frontend.compiler: withScratchFrontend;
+
+    return prepareDependencies(directory, sources,
+        () => withScratchFrontend(
+            () => dependencyAnalysis(loadProject(directory, sources).program)),
+        optimise, false);
+}
+
+
+private struct DependencyAnalysis {
+    string source;
+    string[] inputs;
+    bool deferStartup;
+}
+
+
+private DependencyAnalysis dependencyAnalysis(
+    imported!"snakebite.backends".Program program,
+) {
+    import snakebite.frontend.compiler: withCompilerLock;
     import snakebite.frontend.imagesource: imageSource, imageInputs;
+
+    DependencyAnalysis result;
+    withCompilerLock({
+        result = DependencyAnalysis(imageSource(program), imageInputs(program),
+            program.hasCEntryPoint && !program.checks.betterC);
+    });
+    return result;
+}
+
+
+private const(imported!"snakebite.dependencyimage".DependencyImage)* prepareDependencies(
+    in string directory,
+    in SourceSet sources,
+    scope DependencyAnalysis delegate() analyse,
+    in imported!"snakebite.dependencyimage".Optimise optimise,
+    in bool projectEntry,
+) {
     import snakebite.dependencyimage:
         DependencyImage, ProjectImageCache, prepareImage, defaultCompiler;
     import std.path: buildPath;
@@ -349,11 +401,11 @@ public const(imported!"snakebite.dependencyimage".DependencyImage)* prepareDepen
     import std.json: JSONValue;
     import std.process: environment;
 
-    Program analysed;
+    DependencyAnalysis analysed;
     bool analysedOnce;
-    Program analysedProgram() {
+    DependencyAnalysis analysis() {
         if (!analysedOnce) {
-            analysed = program();
+            analysed = analyse();
             analysedOnce = true;
         }
         return analysed;
@@ -371,20 +423,8 @@ public const(imported!"snakebite.dependencyimage".DependencyImage)* prepareDepen
     auto cache = ProjectImageCache(buildPath(imageDirectory, "project.json"),
         settings, sources.files);
     auto image = new DependencyImage;
-    // Computed once and reused by both the build step and the input list
-    // below: both only run on a cache miss, but the program does not change
-    // between them, so there is no reason to walk its dependencies twice.
-    string[] dependencyInputs;
-    bool dependencyInputsComputed;
-    string[] cachedDependencyInputs() {
-        if (!dependencyInputsComputed) {
-            dependencyInputs = imageInputs(analysedProgram);
-            dependencyInputsComputed = true;
-        }
-        return dependencyInputs;
-    }
     const prepared = cache.prepare(*image,
-        () => imageSource(analysedProgram),
+        () => analysis.source,
         () {
             if (sources.linkerFiles.length && isDubProject(directory)) {
                 import snakebite.dub: buildDubDependencies;
@@ -394,18 +434,17 @@ public const(imported!"snakebite.dependencyimage".DependencyImage)* prepareDepen
             }
         },
         source => prepareImage(source, imageDirectory, defaultCompiler,
-            cachedDependencyInputs(), sources.importPaths,
+            analysis.inputs, sources.importPaths,
             sources.stringImportPaths,
             sources.flags.compilerArguments,
             sources.linkerFiles, sources.linkerFlags,
             optimise: optimise,
-            deferStartup: projectEntry && analysedProgram.hasCEntryPoint
-                && !analysedProgram.checks.betterC),
+            deferStartup: projectEntry && analysis.deferStartup),
         sources.linkerFiles.length != 0,
         () {
             import snakebite.dub: dubInputs;
 
-            return cachedDependencyInputs() ~ sources.linkerFiles
+            return analysis.inputs ~ sources.linkerFiles
                 ~ (isDubProject(directory)
                     ? dubInputs(directory, sources.dubDescription) : null);
         });
