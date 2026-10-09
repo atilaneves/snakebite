@@ -137,6 +137,14 @@ public struct InterpreterStack {
     {
         const activation = Activation(&active);
         auto context = currentContext;
+        if (context is null) {
+            // libc can call guest exit handlers after thread_term cleared
+            // the main thread's context. There is no scanner to redirect,
+            // but guest calls still need the interpreter's native stack.
+            auto call = Call(action);
+            snakebite_interpreter_call_on_stack(top, &runWithoutScanner, &call);
+            return;
+        }
         void* mark;
         assert(
             cast(ubyte*) &mark < cast(ubyte*) context.bstack,
@@ -297,6 +305,11 @@ private extern(C) void runOnStack(void* context) {
     setScanLock(false);
     // Locks again on the way out, before `%rsp` leaves this stack.
     const leaving = ScanLock.init;
+    (*cast(Call*) context).action();
+}
+
+
+private extern(C) void runWithoutScanner(void* context) {
     (*cast(Call*) context).action();
 }
 

@@ -1005,9 +1005,6 @@ DAEMON_ENDS = {
 DAEMON_STATUS = {"return": 0, "exit": 3, "throw": 1}
 
 
-@pytest.mark.skip(
-    reason="bin/sb ends with SIGSEGV when a guest daemon thread is alive at the end of the process",
-)
 @pytest.mark.parametrize("backend", ENDS_PROCESS)
 @pytest.mark.parametrize("end", DAEMON_ENDS)
 def test_daemon_thread_runs_until_the_process_ends(
