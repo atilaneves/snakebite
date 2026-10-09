@@ -4,6 +4,9 @@ module snakebite.backends.dualcontext;
 private:
 
 
+import snakebite.internalfailure: internalFailure;
+
+
 // A function with two contexts, such as a member function template
 // instantiated with an alias to a nested function, takes one hidden
 // argument: the address of a `void*[2]`, as dmd's own code generator passes
@@ -119,8 +122,7 @@ public PairPlan pairPlanOf(
         return PairPlan.init;
 
     if (pair is null)
-        assert(0,
-            "dmd declares the pair for each call of a dual-context function");
+        internalFailure("dmd declares the pair for each call of a dual-context function");
     return PairPlan(
         pair,
         DualContext.receiverWord * size_t.sizeof,
@@ -175,7 +177,7 @@ private ContextSource overriderSourceOf(
     const isBase = owner.isThis.isClassDeclaration.isBaseOf(
         caller.isThis.isClassDeclaration, &adjustment);
     if (!isBase)
-        assert(0, "an overridden method belongs to a base of the overrider");
+        internalFailure("an overridden method belongs to a base of the overrider");
 
     const closure = ClosurePlan.of(owner);
     const layout = FrameLayout.of(owner);
@@ -245,7 +247,7 @@ private ContextSource receiverSourceOf(
                 return receiverFrom(member, fields);
 
             if (!aggregate.isNested || aggregate.vthis is null)
-                assert(0, "an aggregate on the path to an enclosing this "
+                internalFailure("an aggregate on the path to an enclosing this "
                     ~ "is nested or derives from the owner");
             fields ~= aggregate.fieldTowards(owner);
         } else
@@ -257,6 +259,6 @@ private ContextSource receiverSourceOf(
         symbol = next;
     }
 
-    assert(0, "dmd's code generator gives a path from the caller to the "
+    internalFailure("dmd's code generator gives a path from the caller to the "
         ~ "this of the aggregate that owns the alias, or reports an error");
 }

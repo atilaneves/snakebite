@@ -4,6 +4,9 @@ module snakebite.backends.builtins;
 private:
 
 
+import snakebite.internalfailure: internalFailure;
+
+
 // The value-passing convention every backend already uses for a native
 // call (`snakebite.ffi.call.CallInvoker`, `snakebite.backends.bytecode.
 // vm`'s own `executeCallPlan`): each argument is a pointer to its own
@@ -415,7 +418,7 @@ private void requireMoveOpcode(in int opcode, in bool store)
     }
     fprintf(stderr, "snakebite: core.simd.%s has no wrapper for the opcode "
         ~ "0x%x\n", store ? "__simd_sto".ptr : "__simd".ptr, opcode);
-    assert(0);
+    internalFailure();
 }
 
 

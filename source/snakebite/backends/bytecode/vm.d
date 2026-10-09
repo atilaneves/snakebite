@@ -4,6 +4,9 @@ module snakebite.backends.bytecode.vm;
 private:
 
 
+import snakebite.internalfailure: internalFailure;
+
+
 extern(C) void executeCallPlan(
     const(void)* opaquePlan,
     void* returnPlace,
@@ -1259,7 +1262,7 @@ private const(Instruction)* callFunction(bool redirected = false, Decoded)(
     else if (site.hasContext && callee.contextOffset == size_t.max) {
         foreach (i, arg; site.args[1 .. $]) {
             if (i >= callee.parameterOffsets.length)
-                assert(0, "a callee with the signature of the value has a "
+                internalFailure("a callee with the signature of the value has a "
                     ~ "parameter for each argument");
             memcpy(activation.frame + callee.parameterOffsets[i],
                 execution.storage(arg.callerOffset), arg.width);

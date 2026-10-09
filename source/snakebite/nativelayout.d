@@ -4,6 +4,9 @@ module snakebite.nativelayout;
 private:
 
 
+import snakebite.internalfailure: internalFailure;
+
+
 import snakebite.nativevalue:
     BitfieldAccess,
     nativeArrayLengthOffset = arrayLengthOffset,
@@ -406,7 +409,7 @@ public struct TypeFacts {
                     Tvoid, Tfunction, Treference, Tident, Tnone, Terror,
                     Tinstance, Ttypeof, Ttuple, Tslice, Treturn, Ttraits,
                     Tmixin, Ttag:
-                    assert(0, text("`", type.toString, "` cannot be a ",
+                    internalFailure(text("`", type.toString, "` cannot be a ",
                         "condition: semantic rejects it, and `toBasetype` ",
                         "leaves no enum"));
             }
@@ -1470,7 +1473,7 @@ private void storeValue(
             Tchar, Twchar, Tdchar, Terror, Tinstance, Ttypeof, Ttuple,
             Tslice, Treturn, Tnull, Tvector, Tint128, Tuns128, Ttraits,
             Tmixin, Tnoreturn, Ttag:
-            assert(0, text("no native layout for the constant `",
+            internalFailure(text("no native layout for the constant `",
                 value.toString, "` of type `", type.toString, "`: the ",
                 "cases above handle every constant dmd folds to"));
     }
@@ -1495,7 +1498,7 @@ private void storeValue(
 public BitfieldAccess bitfieldAccess(imported!"dmd.declaration".VarDeclaration field) {
     auto bitfield = field.isBitFieldDeclaration;
     if (bitfield is null)
-        assert(0, "a bit field access needs a bit field declaration");
+        internalFailure("a bit field access needs a bit field declaration");
 
     const facts = TypeFacts.of(field.type);
     const unitBits = facts.size * 8;
@@ -1510,7 +1513,7 @@ public BitfieldAccess bitfieldAccess(imported!"dmd.declaration".VarDeclaration f
     const alignedUnit = first / unitBits * facts.size;
     const alignedShift = first - alignedUnit * 8;
     if (alignedShift + bitfield.fieldWidth > unitBits)
-        assert(0, "a bit field does not fit a unit of its type");
+        internalFailure("a bit field does not fit a unit of its type");
     return BitfieldAccess(
         alignedUnit, cast(uint) facts.size, cast(uint) alignedShift,
         bitfield.fieldWidth, !facts.isUnsigned);

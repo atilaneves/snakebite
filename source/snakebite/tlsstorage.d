@@ -4,6 +4,9 @@ module snakebite.tlsstorage;
 private:
 
 
+import snakebite.internalfailure: internalFailure;
+
+
 // A thread-local guest variable's compile-time-constant description
 // (issue #40, ADR-0006, finding 1.3): the identity `TlsSlots.slotFor`
 // keys this thread's own copy by, and the bytes every thread's copy
@@ -99,7 +102,7 @@ public struct TlsSlots {
 
             entry.bytes = calloc(1, descriptor.size ? descriptor.size : 1);
             if (entry.bytes is null)
-                assert(0, "out of memory for a thread-local variable");
+                internalFailure("out of memory for a thread-local variable");
             memcpy(entry.bytes, descriptor.templateBytes, descriptor.size);
             if (descriptor.size)
                 GC.addRange(entry.bytes, descriptor.size);
@@ -136,7 +139,7 @@ public struct TlsSlots {
         const length = _table.length ? _table.length * 2 : 8;
         auto memory = cast(Entry*) calloc(length, Entry.sizeof);
         if (memory is null)
-            assert(0, "out of memory for a thread-local table");
+            internalFailure("out of memory for a thread-local table");
         auto bigger = memory[0 .. length];
         foreach (entry; _table)
             if (entry.key !is null)

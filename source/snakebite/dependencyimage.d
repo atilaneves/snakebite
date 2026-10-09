@@ -4,6 +4,9 @@ module snakebite.dependencyimage;
 private:
 
 
+import snakebite.internalfailure: internalFailure;
+
+
 // Whether the image build spends time on compiler optimisation. Real
 // `bin/sb` use keeps it on: a guest run pays the image's run time, not
 // just its build time. A test that only checks behaviour pays build time
@@ -493,7 +496,7 @@ private string compilerPath(in string compiler) {
             return candidate.absolutePath;
     }
     require(false, "Image compiler not found on PATH: " ~ compiler);
-    assert(0);
+    internalFailure();
 }
 
 

@@ -4,6 +4,9 @@ module snakebite.cstack;
 private:
 
 
+import snakebite.internalfailure: internalFailure;
+
+
 // A growable stack on the C heap, for state that a destructor run by the GC
 // finalizer must push and pop: the GC forbids an allocation there, and
 // shrinking a GC array and appending to it again allocates each time.
@@ -40,7 +43,7 @@ public struct CStack(T, bool scanned = false) {
         const capacity = _capacity ? _capacity * 2 : 64;
         auto grown = cast(T*) calloc(capacity, T.sizeof);
         if (grown is null)
-            assert(0, "out of memory for a stack");
+            internalFailure("out of memory for a stack");
         static if (scanned) {
             import core.memory: GC;
 
@@ -68,14 +71,14 @@ public struct CStack(T, bool scanned = false) {
 
     public void pop() {
         if (_length == 0)
-            assert(0, "pop of an empty stack");
+            internalFailure("pop of an empty stack");
         --_length;
     }
 
     // Drops every item from `length` on.
     public void truncate(in size_t length) {
         if (length > _length)
-            assert(0, "truncate beyond the end of a stack");
+            internalFailure("truncate beyond the end of a stack");
         _length = length;
     }
 
@@ -87,7 +90,7 @@ public struct CStack(T, bool scanned = false) {
 
     public ref inout(T) back() inout {
         if (_length == 0)
-            assert(0, "back of an empty stack");
+            internalFailure("back of an empty stack");
         return _items[_length - 1];
     }
 
@@ -101,7 +104,7 @@ public struct CStack(T, bool scanned = false) {
 
     public inout(T)[] opSlice(in size_t from, in size_t to) inout {
         if (to > _length || from > to)
-            assert(0, "slice past the end of a stack");
+            internalFailure("slice past the end of a stack");
         return _items[from .. to];
     }
 }

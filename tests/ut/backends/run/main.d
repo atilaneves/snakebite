@@ -3,8 +3,15 @@ module ut.backends.run.main;
 
 import ut.backends;
 import snakebite.backends.backend: Program, run;
-import snakebite.frontend.compiler: parseSnippet;
+import snakebite.frontend.compiler: parseSnippet, newInFrontend, withCompilerLock;
 import std.meta: AliasSeq;
+import dmd.expression: ErrorExp;
+import dmd.location: Loc;
+import dmd.mtype: Type;
+import dmd.statement: ErrorStatement, ExpStatement;
+import dmd.globals: global;
+import snakebite.frontend.dmd.functions: findFunction;
+
 
 
 static foreach (backend; Matrix!()) {
@@ -370,5 +377,36 @@ static foreach (backend; Matrix!(
                 return sum == 5050 ? 0 : 1;
             }
         });
+    }
+}
+
+// These child-only fixtures inject invalid frontend state after semantic
+// analysis. No valid guest program must be refused to test host reporting.
+static foreach (backend; AliasSeq!(Bytecode, Interpreter)) {
+    static foreach (node; AliasSeq!("statement", "expression")) {
+        @HiddenTest
+        @("internalFailure.node." ~ backend.stringof ~ "." ~ node)
+        unittest {
+            auto module_ = parseSnippet(q{
+                module internal_failure_fixture;
+                void fail() {}
+            });
+            auto function_ = findFunction(module_, "fail");
+            withCompilerLock({
+                static if (node == "statement") {
+                    const savedErrors = global.gaggedErrors;
+                    scope(exit) global.gaggedErrors = savedErrors;
+                    ++global.gaggedErrors;
+                    function_.fbody = newInFrontend!ErrorStatement;
+                } else {
+                    auto expression = newInFrontend!ErrorExp;
+                    expression.type = Type.tint32;
+                    function_.fbody = newInFrontend!ExpStatement(
+                        Loc.initial, expression);
+                }
+            });
+            auto host = Owned!backend(Program([module_]));
+            host.call(function_, null, []);
+        }
     }
 }

@@ -3,6 +3,9 @@ module snakebite.framestack;
 
 private:
 
+
+import snakebite.internalfailure: internalFailure;
+
 import snakebite.backends.temporarystack: TemporaryStack;
 import snakebite.cstack: CStack;
 import snakebite.hostthreads: heapDelete, heapNew;
@@ -127,10 +130,10 @@ public struct FrameStack {
             heapDelete(_tls);
         if (_base !is null) {
             const unmapped = munmap(_base, _reservation + pageSize);
-            // `assert(0)` still halts under `-release`; the call must not
+            // `internalFailure()` still halts under `-release`; the call must not
             // sit inside an `assert` condition, which `-release` removes.
             if (unmapped != 0)
-                assert(0, "could not release the frame stack reservation");
+                internalFailure("could not release the frame stack reservation");
         }
     }
 

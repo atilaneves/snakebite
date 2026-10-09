@@ -3,6 +3,9 @@ module snakebite.backends.interpreter.walker;
 
 private:
 
+
+import snakebite.internalfailure: internalFailure;
+
 import std.conv: text;
 import snakebite.callarguments: CallArguments;
 
@@ -1345,7 +1348,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         enum alignment = 16;
         auto block = malloc(size + alignment);
         if (block is null)
-            assert(0, "out of memory for alloca");
+            internalFailure("out of memory for alloca");
         // A stack holds pointers to GC objects, so the GC scans this block
         // as it scans a stack. `GC.addRange` does not allocate.
         GC.addRange(block, size + alignment);
@@ -1511,7 +1514,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             cast(const(void)*) &call.function_,
         ];
         callPlan(plan, null, arguments);
-        assert(0);
+        internalFailure();
     }
 
     // The re-entry a pool entry (ADR-0003) reaches when host code calls a
@@ -1921,13 +1924,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         foreach (parameter; layout.parameters)
             values[count++] = frameBase + parameter.offset;
         return arguments;
-    }
-
-    override void visit(Statement statement) {
-        import std.conv: text;
-
-        assert(0, text("Statement ", statement.stmt,
-            ": no `visit` override, and not in `UnreachableNodes`"));
     }
 
     // An `import` inside a function body binds names, and dmd's semantic
@@ -2879,13 +2875,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         return *cast(void**) buffer.ptr;
     }
 
-    override void visit(Expression expression) {
-        import std.conv: text;
-
-        assert(0, text("Expression ", expression.op,
-            ": no `visit` override, and not in `UnreachableNodes`"));
-    }
-
     override void visit(IntegerExp expression) {
         _nativeData.write(_type, _facts, expression, _place);
     }
@@ -3009,7 +2998,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             delegateContextOffset, delegateFunctionOffset, storeIntegral;
 
         if (target.function_ is null)
-            assert(0, "a delegate expression names a function and has a "
+            internalFailure("a delegate expression names a function and has a "
                 ~ "delegate type");
 
         auto context = cast(size_t) 0;
@@ -3184,7 +3173,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private ubyte* contextOf(FuncDeclaration owner) {
         auto base = tryContextOf(owner);
         if (base is null)
-            assert(0, "a variable's owner is an enclosing function of its "
+            internalFailure("a variable's owner is an enclosing function of its "
                 ~ "user");
 
         return base;
@@ -3273,7 +3262,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return slot.isReturnPlace ? *cast(ubyte**) address : address;
         }
         if (owner is null)
-            assert(0, "a local variable has an enclosing function");
+            internalFailure("a local variable has an enclosing function");
 
         const layout = layoutOf(owner);
         auto address = contextOf(owner) + layout.offsetOf(variable);
@@ -3305,7 +3294,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         auto variable = declaration.isVarDeclaration;
         if (variable is null)
-            assert(0, "function and TypeInfo addresses are `SymOffExp`s and "
+            internalFailure("function and TypeInfo addresses are `SymOffExp`s and "
                 ~ "the storage resolver sends only variables here");
 
         if (variable.isDataseg)
@@ -3337,7 +3326,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto slot = layout.slotOf(variable);
         if (slot is null) {
             if (owner is null)
-                assert(0, "a local variable has an enclosing function");
+                internalFailure("a local variable has an enclosing function");
 
             base = contextOf(owner);
             layout = layoutOf(owner);
@@ -3978,7 +3967,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                         || op == "%")
                     return storeFloatingAssign!op(expression, resolvedTarget);
                 else
-                    assert(0, text("`", expression.toString, "`: dmd ",
+                    internalFailure(text("`", expression.toString, "`: dmd ",
                         "rejects bitwise and shift operators on floating ",
                         "operands"));
 
@@ -3988,7 +3977,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                     return storeComplexAssign!op(
                         expression, plan, resolvedTarget);
                 else
-                    assert(0, text("`", expression.toString, "`: dmd ",
+                    internalFailure(text("`", expression.toString, "`: dmd ",
                         "rejects bitwise and shift operators on complex ",
                         "operands"));
 
@@ -4004,7 +3993,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             }
 
             case pointerDifference:
-                assert(0, text("`", expression.toString, "`: `-=` cannot ",
+                internalFailure(text("`", expression.toString, "`: `-=` cannot ",
                     "store a pointer difference in a pointer"));
         }
     }
@@ -4219,7 +4208,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             case vector:
                 return storeVectorPost(expression, plan);
             case pointerDifference:
-                assert(0, text("`", expression.toString, "`: a postfix ",
+                internalFailure(text("`", expression.toString, "`: a postfix ",
                     "`++`/`--` has the type of its operand"));
         }
     }
@@ -4325,11 +4314,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                             loadFloating(a, laneSize),
                             loadFloating(b, laneSize), laneSize), laneSize);
                     else
-                        assert(0, text("`", expression.toString, "`: dmd ",
+                        internalFailure(text("`", expression.toString, "`: dmd ",
                             "rejects bitwise operators on floating lanes"));
                     break;
                 case complex, pointerOffset, pointerDifference, vector:
-                    assert(0, text("`", expression.toString, "` has a lane ",
+                    internalFailure(text("`", expression.toString, "` has a lane ",
                         "that is neither integral nor floating"));
             }
         }
@@ -4378,7 +4367,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             case lessOrEqual: return storeCmpExp!"<="(expression, plan);
             case greaterThan: return storeCmpExp!">"(expression, plan);
             case greaterOrEqual: return storeCmpExp!">="(expression, plan);
-            default: assert(0);
+            default: internalFailure();
         }
     }
 
@@ -4399,7 +4388,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 return;
             }
             case complex, dynamicArray, staticArray:
-                assert(0, text("`", expression.toString, "` cannot reach ",
+                internalFailure(text("`", expression.toString, "` cannot reach ",
                     "the backend: D does not order complex values, and dmd ",
                     "lowers array ordering to `__cmp`"));
             case vector:
@@ -4609,7 +4598,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 }
                 case complex, reference, vector, dynamicArray, staticArray,
                     delegate_:
-                    assert(0, text("`", expression.toString, "` has a ",
+                    internalFailure(text("`", expression.toString, "` has a ",
                         "vector lane that is neither integral nor floating"));
             }
             storeIntegral(cast(ubyte*) _place + i * resultLaneSize,
@@ -4762,7 +4751,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                         _facts.size);
                     return;
                 } else
-                    assert(0, text("`", expression.toString, "`: dmd ",
+                    internalFailure(text("`", expression.toString, "`: dmd ",
                         "rejects bitwise and shift operators on floating ",
                         "operands"));
 
@@ -4778,7 +4767,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                         plan.operands, plan.facts.size / 2);
                     return;
                 } else
-                    assert(0, text("`", expression.toString, "`: dmd ",
+                    internalFailure(text("`", expression.toString, "`: dmd ",
                         "rejects bitwise and shift operators on complex ",
                         "operands"));
 
@@ -4807,7 +4796,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                     storeIntegral(_place, cast(size_t) result, _facts.size);
                     return;
                 } else
-                    assert(0, text("`", expression.toString, "`: D only ",
+                    internalFailure(text("`", expression.toString, "`: D only ",
                         "adds an offset to a pointer or subtracts one"));
 
             case pointerDifference:
@@ -4818,7 +4807,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                         _facts.size);
                     return;
                 } else
-                    assert(0, text("`", expression.toString, "`: D only ",
+                    internalFailure(text("`", expression.toString, "`: D only ",
                         "subtracts one pointer from another"));
         }
     }
@@ -4844,7 +4833,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 Twchar, Tdchar, Terror, Tinstance, Ttypeof, Ttuple, Tslice,
                 Treturn, Tnull, Tvector, Tint128, Tuns128, Ttraits, Tmixin,
                 Tnoreturn, Ttag:
-                assert(0, text("`", expression.toString, "` of type `",
+                internalFailure(text("`", expression.toString, "` of type `",
                     type.toString, "` is not a floating operand"));
         }
 
@@ -4877,7 +4866,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                         _facts.size);
                     return;
                 } else
-                    assert(0, text("`", expression.toString, "`: dmd ",
+                    internalFailure(text("`", expression.toString, "`: dmd ",
                         "rejects `~` on a floating operand"));
 
             case complex:
@@ -4888,7 +4877,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                     negateComplex(_place, value.ptr, plan.facts.size / 2);
                     return;
                 } else
-                    assert(0, text("`", expression.toString, "`: dmd ",
+                    internalFailure(text("`", expression.toString, "`: dmd ",
                         "rejects `~` on a complex operand"));
 
             case vector: {
@@ -4912,12 +4901,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                                 storeFloating(lane,
                                     -loadFloating(lane, laneSize), laneSize);
                             else
-                                assert(0, text("`", expression.toString,
+                                internalFailure(text("`", expression.toString,
                                     "`: dmd rejects `~` on floating lanes"));
                             break;
                         case complex, pointerOffset, pointerDifference,
                             vector:
-                            assert(0, text("`", expression.toString, "` has ",
+                            internalFailure(text("`", expression.toString, "` has ",
                                 "a lane that is neither integral nor ",
                                 "floating"));
                     }
@@ -4926,7 +4915,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             }
 
             case pointerOffset, pointerDifference:
-                assert(0, text("`", expression.toString, "`: D has no ",
+                internalFailure(text("`", expression.toString, "`: D has no ",
                     "unary arithmetic on a pointer"));
         }
     }
@@ -5430,7 +5419,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto failure = assertFailureOf(expression, _function);
         final switch (plan.kind) with (FailurePlan.Kind) {
             case ignore:
-                assert(0);
+                internalFailure();
             case halt:
                 haltRun;
             case cAssert:
@@ -5685,7 +5674,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 Tdchar, Terror, Tinstance, Ttypeof, Ttuple, Tslice, Treturn,
                 Tnull, Tvector, Tint128, Tuns128, Ttraits, Tmixin,
                 Tnoreturn, Ttag:
-                assert(0, text("`", expression.toString, "` slices a `",
+                internalFailure(text("`", expression.toString, "` slices a `",
                     sourceType.toString, "`: semantic slices only a ",
                     "pointer or an array at run time, a vector through its ",
                     "`.array` and an aggregate through `opSlice`"));
@@ -6052,7 +6041,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.backends.calls: arityMismatches;
 
         if (arityMismatches(type.parameterList, arguments, allowExtra))
-            assert(0, "dmd checks a call's arity; a variadic call allows "
+            internalFailure("dmd checks a call's arity; a variadic call allows "
                 ~ "extra arguments");
 
         auto preparation = CallAdapter.Arguments.of(
@@ -6375,7 +6364,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // a backend has its `lowering`.
     protected override void visitUnloweredAssocArrayLiteral(
             AssocArrayLiteralExp expression) {
-        assert(0, "dmd lowers every associative-array literal in semantic");
+        internalFailure("dmd lowers every associative-array literal in semantic");
     }
 
     override void visit(DotTypeExp expression) {
@@ -6620,7 +6609,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import core.volatile: volatileLoad;
 
         volatileLoad(cast(size_t*) object);
-        assert(0, "a null object faults at the header read");
+        internalFailure("a null object faults at the header read");
     }
 
     private void* _virtualAddress(
@@ -6725,7 +6714,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (!isIndirectDelegateCall(callee.type)) {
             auto deref = callee.isPtrExp;
             if (deref is null)
-                assert(0, "dmd wraps a call through a function pointer in a "
+                internalFailure("dmd wraps a call through a function pointer in a "
                     ~ "`PtrExp`");
 
             auto function_ = cast(FuncDeclaration) asPointer(deref.e1);
@@ -6812,7 +6801,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             ? arityMismatches(parameterList, arguments, allowExtra)
             : valueCall.mismatches(arguments);
         if (mismatch)
-            assert(0, "dmd checks a call's arity; a variadic call allows "
+            internalFailure("dmd checks a call's arity; a variadic call allows "
                 ~ "extra arguments");
 
         // The arguments of a call through a value sit in a frame that is as
@@ -6868,7 +6857,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             if (classDeclaration !is null)
                 return cast(size_t) classReceiver;
             if (dot is null)
-                assert(0, "a struct member reached with no receiver "
+                internalFailure("a struct member reached with no receiver "
                     ~ "expression is called through a value");
             return cast(size_t) addressOf(dot.e1);
         }
@@ -7114,7 +7103,7 @@ private ulong combine(string op)(
 ) {
     static if (op == "<<" || op == ">>" || op == ">>>")
         // dmd rejects a vector shift and a shift has its own `ShiftPlan`.
-        assert(0);
+        internalFailure();
     else static if (op == "/" || op == "%")
         return divided!op(a, b, sharedSignedness(aFacts, bFacts), aFacts.size);
     else
