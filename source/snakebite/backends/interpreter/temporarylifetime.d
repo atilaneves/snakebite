@@ -65,6 +65,7 @@ public struct TemporaryLifetime {
 
     private CStack!Temporary _temporaries;
     private TemporaryStack _stack;
+    private size_t _callMark;
     private FrameStack _frames;
     private size_t _floor;
     private FullExpressionScope _expressions;
@@ -98,6 +99,9 @@ public struct TemporaryLifetime {
 
     pragma(inline, true)
     private void nestedCall(scope Action action) {
+        const previousMark = _callMark;
+        _callMark = _stack.mark;
+        scope (exit) _callMark = previousMark;
         const state = _expressions.suspendCall;
         scope (exit) _expressions.resumeCall(state);
         action();
@@ -161,7 +165,7 @@ public struct TemporaryLifetime {
             const payload = _temporaries.length;
             _temporaries.push(Temporary(null, _frames.mark, base, destructor));
             _stack.registerTemporary(base, payload);
-        }, evaluate, { _stack.arm(base); });
+        }, evaluate, { _stack.arm(base, _callMark); });
     }
 
     // The initialisation of a variable that can point into the temporaries
@@ -226,12 +230,12 @@ public struct TemporaryLifetime {
     // Suspends destruction while a constructor is writing its destination.
     // A failed constructor therefore leaves no completed value to destroy.
     public void suspendConstructor(in void* address) {
-        _stack.suspend(cast(void*) address);
+        _stack.suspend(cast(void*) address, _callMark);
     }
 
     // Arms the matching declaration after its constructor returns.
     public void armConstructor(in void* address) {
-        _stack.arm(cast(void*) address);
+        _stack.arm(cast(void*) address, _callMark);
     }
 
     private ubyte* reserve(

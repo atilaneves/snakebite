@@ -217,6 +217,19 @@ public auto newInFrontend(alias dmdSymbol, Args...)(auto ref Args arguments) {
     });
 }
 
+// The target query can create TypeTuple nodes while it classifies a return.
+public bool returnsOnStack(
+    imported!"dmd.func".FuncDeclaration function_,
+) {
+    import dmd.target: target;
+    import snakebite.frontend.dmd.functions: typeFunctionOf;
+
+    return compiler.inside(() {
+        return target.isReturnOnStack(
+            typeFunctionOf(function_), function_.needThis());
+    });
+}
+
 // CTFE copies and constant folding can produce literals after DMD's GC
 // check attached allocation lowering. Storage and escape decisions remain
 // with the caller; DMD supplies the real, element-typed druntime call.

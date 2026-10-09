@@ -250,12 +250,14 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind) {
 
     private const(Instruction)* _pc;
     private ubyte* _frame;
+    private size_t _cleanupMark;
 
     public this(
         const(Instruction)* pc, Activation* activation, DispatchState* state,
     ) pure nothrow @nogc {
         _pc = pc;
         _frame = activation.frame;
+        _cleanupMark = activation.cleanupMark;
         this.returnPlace = activation.returnPlace;
         this.constants = activation.constants;
         this.callSites = activation.callSites;
@@ -412,6 +414,7 @@ public struct Function {
     package size_t cursorOffset = size_t.max;
     package size_t declaredParameters;
     package const(Signature)* signature;
+    package imported!"snakebite.backends.returnplace".ReturnPlace returnPlace;
 }
 
 
@@ -466,6 +469,8 @@ public struct Vm {
         foreach (argument; arguments)
             memcpy(frame.base + argument.offset, argument.source,
                 argument.width);
+        returnPlace = function_.returnPlace.bind(
+            &_frames, frame.base, returnPlace);
         initializeClosure(&function_, frame.base, &_frames);
         auto pc = function_.instructions.ptr;
         dispatch(
@@ -800,7 +805,8 @@ public alias opTemporarySuspend =
 private const(Instruction)* runTemporarySuspend(Decoded)(
     ref Decoded execution,
 ) {
-    execution.frames.suspendCleanup(*cast(ubyte**) execution.source);
+    execution.frames.suspendCleanup(*cast(ubyte**) execution.source,
+        execution._cleanupMark);
     return execution.next;
 }
 
@@ -811,7 +817,8 @@ public alias opTemporaryArm =
 private const(Instruction)* runTemporaryArm(Decoded)(
     ref Decoded execution,
 ) {
-    execution.frames.armCleanup(*cast(ubyte**) execution.source);
+    execution.frames.armCleanup(*cast(ubyte**) execution.source,
+        execution._cleanupMark);
     return execution.next;
 }
 
@@ -822,7 +829,8 @@ public alias opTemporaryArmAddress =
 private const(Instruction)* runTemporaryArmAddress(Decoded)(
     ref Decoded execution,
 ) {
-    execution.frames.armCleanup(execution.source);
+    execution.frames.armCleanup(execution.source,
+        execution._cleanupMark);
     return execution.next;
 }
 
@@ -1279,7 +1287,9 @@ private const(Instruction)* callFunction(bool redirected = false, Decoded)(
     activation.pc = activation.start = callee.instructions.ptr;
     activation.end = null;
     activation.resume = null;
-    activation.returnPlace = site.returnWidth == 0 ? null : execution.destination;
+    activation.returnPlace = callee.returnPlace.bind(
+        execution.frames, activation.frame,
+        site.returnWidth == 0 ? null : execution.destination);
     activation.constants = callee.constants;
     activation.callSites = callee.callSites;
     activation.assertSites = callee.assertSites;
@@ -1315,7 +1325,8 @@ private const(Instruction)* runReturn(Decoded)(
 ) {
     import core.stdc.string: memcpy;
 
-    if (execution.returnPlace !is null)
+    if (execution.returnPlace !is null
+            && execution.returnPlace != execution.source)
         memcpy(execution.returnPlace, execution.source, execution.width);
     return null;
 }
