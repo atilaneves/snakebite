@@ -65,6 +65,10 @@ result. ADR-0013 records the owner's narrow constant-fabs exception.
 The values supplied to a call: hidden context and type information,
 declared parameter values or references, and any variadic extra values.
 
+**Prepared facts**:
+Information computed before a guest callback runs, so its execution can use
+that information without asking frontend questions or building it on first use.
+
 **Thread state**:
 The data one host thread owns while it runs guest code on a backend,
 including its copies of thread-local guest variables. Fibers on the same
