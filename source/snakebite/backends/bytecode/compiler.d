@@ -4802,24 +4802,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opLoadIndirect, _destination, addressOffset, _width);
     }
 
-    // `[a, b, c]`. Every element is evaluated in order into the block this
-    // allocates, even when every one of them happens to be a constant - dmd
-    // already folds a genuinely compile-time-constant literal into
-    // something this compiler need never see as an `ArrayLiteralExp` at
-    // all, so one that does reach here may have an element like `x + 1`
-    // that only evaluating can produce.
-    //
-    // The shared LoweringVisitor routes array literals without a lowering
-    // here. Lowered literals use the allocation result as their element
-    // storage and are completed below.
-    protected override void visitUnloweredArrayLiteral(
+    protected override void visitStoredArrayLiteral(
             ArrayLiteralExp expression) {
-        requireDestination(expression);
-        import snakebite.nativelayout: isStoredLiteral;
+        compileConstant(expression);
+    }
 
-        if (isStoredLiteral(expression))
-            return compileConstant(expression);
-        compileArrayLiteral(expression, _destination);
+    protected override void clearTemporaryPointer() {
+        emit(&opConstant, _destination, addConstant(0), size_t.sizeof);
+    }
+
+    protected override void reserveLiteralStorage(ArrayLiteralExp expression) {
+        const offset = _layout.arrayLiteralOffset(expression);
+        emit(&opFrameAddress, _destination, offset, size_t.sizeof);
+    }
+
+    protected override FuncDeclaration currentFunction() {
+        return _function;
     }
 
     protected override void requireLiteralDestination(
@@ -7842,114 +7840,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         );
         emit(&opCall, resultOffset, siteIndex, 0);
     }
-
-    // `[a, b, c]`: allocates one block through druntime for every element,
-    // then evaluates each element expression directly into its own slot in
-    // it - never constant-folded bytes copied in bulk, since an element
-    // like `x + 1` only evaluating can produce. `[]` needs no allocation at
-    // all: a null pointer and a zero length already are an empty dynamic
-    // array's own two words.
-    //
-    // The length and pointer are built up in a temporary, not `destOffset`
-    // itself, and copied out to `destOffset` only once every element is
-    // done: an element expression can read `destOffset`'s own variable
-    // (`a = [a[1], a[0]]`), and until the whole literal is ready that
-    // variable's old value is the only correct thing living there.
-    private void compileArrayLiteral(
-        ArrayLiteralExp expression, in size_t destOffset,
-    ) {
-        import dmd.astenums: Tsarray;
-        import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
-
-        if (expression.type.toBasetype.ty == Tsarray)
-            return compileStaticArrayLiteral(expression, destOffset);
-
-        const facts = TypeFacts.of(expression.type);
-        assert(facts.isDynamicArray);
-
-        const elementFacts = TypeFacts.of(expression.type.nextOf);
-
-        const count =
-            expression.elements is null ? 0 : expression.elements.length;
-
-        if (count == 0) {
-            emit(&opConstant, destOffset + arrayLengthOffset,
-                addConstant(0), size_t.sizeof);
-            emit(&opConstant, destOffset + arrayPointerOffset,
-                addConstant(0), size_t.sizeof);
-            return;
-        }
-
-        const lengthOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, lengthOffset,
-            addConstant(cast(long) count), size_t.sizeof);
-
-        const pointerOffset = reserveTemp(pointerFacts);
-        const sizeOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, sizeOffset,
-            addConstant(cast(long) (count * elementFacts.size)),
-            size_t.sizeof);
-
-        emitAllocate(sizeOffset, pointerOffset);
-
-        foreach (i; 0 .. count) {
-            auto element = expression[i];
-            const elementOffset = reserveTemp(elementFacts);
-            evalInto(element, elementOffset, elementFacts.size);
-
-            const addressOffset = reserveTemp(pointerFacts);
-            emit(&opCopy, addressOffset, pointerOffset, size_t.sizeof);
-            if (i != 0) {
-                const byteOffsetOffset = reserveTemp(pointerFacts);
-                emit(&opConstant, byteOffsetOffset,
-                    addConstant(cast(long) (i * elementFacts.size)),
-                    size_t.sizeof);
-                emit(&opAdd, addressOffset, byteOffsetOffset, size_t.sizeof);
-            }
-            emit(&opStoreIndirect, addressOffset, elementOffset,
-                elementFacts.size);
-        }
-
-        emit(&opCopy, destOffset + arrayLengthOffset, lengthOffset,
-            size_t.sizeof);
-        emit(&opCopy, destOffset + arrayPointerOffset, pointerOffset,
-            size_t.sizeof);
-    }
-
-    // Static array literals need no heap allocation lowering. DMD's
-    // native code generator builds their elements in stack storage.
-    //
-    // Every element is evaluated into a temporary first, then the whole
-    // temporary copied to `destOffset` in one go - the same reason
-    // `compileArrayLiteral` above builds a dynamic array literal's
-    // elements in fresh storage rather than `destOffset` itself. An
-    // element expression can read `destOffset`'s own variable (`a =
-    // [a[1], a[0]]`), and until every element is evaluated, that
-    // variable's old contents are the only correct thing for such a read
-    // to see.
-    private void compileStaticArrayLiteral(
-        ArrayLiteralExp expression, in size_t destOffset,
-    ) {
-        auto sarrayType = expression.type.toBasetype.isTypeSArray;
-        const elementFacts = TypeFacts.of(sarrayType.next);
-
-        const count =
-            expression.elements is null ? 0 : expression.elements.length;
-        if (count == 0)
-            return;
-
-        const facts = TypeFacts.of(expression.type);
-        const tempOffset = reserveTemp(facts);
-        foreach (i; 0 .. count) {
-            auto element = expression[i];
-            evalInto(
-                element, tempOffset + i * elementFacts.size,
-                elementFacts.size,
-            );
-        }
-        emit(&opCopy, destOffset, tempOffset, count * elementFacts.size);
-    }
-
 
 }
 
