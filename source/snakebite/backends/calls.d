@@ -257,10 +257,10 @@ public struct CallSelection {
         scope bool delegate(FuncDeclaration) isGuest,
     ) {
         import dmd.astenums: VarArg;
-        import snakebite.frontend.dmd.functions: contextOf, typeFunctionOf;
+        import snakebite.frontend.dmd.functions:
+            bodyIsSelected, contextOf, typeFunctionOf;
 
         const context = contextOf(function_);
-        import snakebite.frontend.dmd.functions: bodyIsSelected;
 
         // A declaration without a body can only describe a native call or
         // a builtin - never a guest one, since there is no guest body to
@@ -311,7 +311,6 @@ public struct CallSelection {
         // layout. A missing independent symbol leaves the guest body.
         // An ordinary dependency uses its own frontend body when its exact
         // native symbol is absent (ADR-0009, decision 3).
-        const rootOwned = isGuest(function_);
         const prefers = context.instantiated
             ? !hasIndependentNativeSymbol
             : rootOwned || !hasNativeSymbol;

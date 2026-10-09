@@ -98,7 +98,7 @@ public FunctionContext contextOf(
 // their module. Header declarations share that module's source selection.
 // D dependency bodies remain available for exact-symbol fallback.
 public bool bodyIsSelected(
-    imported!"dmd.dmodule".Module module_,
+    const(imported!"dmd.dmodule".Module) module_,
     in bool rootOwned,
 ) {
     import dmd.astenums: FileType;
