@@ -8,7 +8,8 @@ import reggae.types: CompilerFlags;
 import std.algorithm: canFind, endsWith, filter, map, startsWith;
 import std.array: array;
 import std.process: environment, executeShell, escapeShellCommand;
-import std.path: baseName, stripExtension;
+import std.path: baseName, stripExtension, buildPath;
+import std.file: exists;
 import std.string: chomp;
 
 string ldcPath() {
@@ -65,6 +66,26 @@ Target assembledObject(in string source) {
 enum registrySlotSource = "source/snakebite/backends/registry_slot.c";
 enum registryImageSource = "source/snakebite/backends/registry_image_amd64.S";
 
+// New source files must invalidate the pinned inventory too. A phony
+// prerequisite checks the whole frontend tree on each supported build.
+Target frontendInventoryGate() {
+    string frontend;
+    foreach (package_; configToDubInfo["unittest"].packages) {
+        foreach (path; package_.importPaths) {
+            const candidate = buildPath(path, "dmd");
+            if (buildPath(candidate, "expression.d").exists)
+                frontend = candidate;
+        }
+    }
+    assert(frontend.length != 0, "cannot locate the DMD frontend source tree");
+    return Target.phony(
+        "frontend-node-contract",
+        "python3 $project/build/check_nodecoverage.py " ~ "--frontend " ~ escapeShellCommand(frontend),
+        [Target("build/check_nodecoverage.py"),
+         Target("build/nodecoverage/frontend-source-hashes.txt")],
+    );
+}
+
 Target registryImageObject() {
     return Target(
         assembledObjectPath(registryImageSource),
@@ -74,7 +95,7 @@ Target registryImageObject() {
             "$project/registry_slot.so",
             "cc -shared -fPIC -nostdlib -o $out $in",
             Target(registrySlotSource),
-        ), Target("build/host-exports.map")],
+        ), Target("build/host-exports.map"), frontendInventoryGate],
     );
 }
 

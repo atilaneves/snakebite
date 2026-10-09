@@ -10,6 +10,10 @@ import std.conv: text;
 import snakebite.callarguments: CallArguments;
 
 
+private alias RuntimeEvaluators = imported!"std.meta".AliasSeq!(
+    Evaluator!false, Evaluator!true,
+);
+
 // Walks dmd's AST directly. The one invariant: a result is never boxed
 // into a host-side representation - every expression is evaluated
 // straight into a caller-designated native address, in native layout.
@@ -26,8 +30,8 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     // Each native stack needs independent execution state: a suspended Fiber
     // must not leave its active frame or expression state in another Fiber.
     // Entries are owned and released by their host thread (ADR-0006).
-    private PerThread!(Evaluator!false, true) _evaluators;
-    private PerThread!(Evaluator!true, true) _checkedEvaluators;
+    private PerThread!(RuntimeEvaluators[0], true) _evaluators;
+    private PerThread!(RuntimeEvaluators[1], true) _checkedEvaluators;
     // `-check=nullderef` is the one flag that the evaluator reads at its
     // dereference sites; the checked evaluator is a separate type so that
     // an unchecked one runs no code for it.
@@ -46,10 +50,10 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
 
         _checksNullDeref = nullDerefPlanOf(program.checks).kind
             != FailurePlan.Kind.ignore;
-        _evaluators = PerThread!(Evaluator!false, true)(
-            () => heapNew!(Evaluator!false)(_shared));
-        _checkedEvaluators = PerThread!(Evaluator!true, true)(
-            () => heapNew!(Evaluator!true)(_shared));
+        _evaluators = PerThread!(RuntimeEvaluators[0], true)(
+            () => heapNew!(RuntimeEvaluators[0])(_shared));
+        _checkedEvaluators = PerThread!(RuntimeEvaluators[1], true)(
+            () => heapNew!(RuntimeEvaluators[1])(_shared));
         _shared.prepare = (function_) {
             prepareOnEvaluator(function_);
         };
@@ -7244,6 +7248,7 @@ private struct Cache(Key, Value) {
 // module, whereas a module-scope `static assert` runs again in every unit
 // that imports it.
 private void assertEveryNodeHandled() {
-    static assert(
-        imported!"snakebite.backends.nodecoverage".AssertEveryNodeHandled!(Evaluator!false));
+    static foreach (Evaluator; RuntimeEvaluators)
+        static assert(
+            imported!"snakebite.backends.nodecoverage".AssertEveryNodeHandled!Evaluator);
 }
