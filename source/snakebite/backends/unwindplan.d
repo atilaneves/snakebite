@@ -4,6 +4,9 @@ module snakebite.backends.unwindplan;
 private:
 
 
+import snakebite.internalfailure: internalFailure;
+
+
 import object: TypeInfo_Class;
 
 
@@ -60,7 +63,7 @@ public struct UnwindPlan {
                         return step(index);
                     ++seen;
                 }
-            assert(0, "no such finalizer");
+            internalFailure("no such finalizer");
         }
 
         private Step step(in size_t index) const @safe @nogc nothrow pure {

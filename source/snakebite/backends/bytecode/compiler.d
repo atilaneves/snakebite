@@ -3,6 +3,9 @@ module snakebite.backends.bytecode.compiler;
 
 private:
 
+
+import snakebite.internalfailure: internalFailure;
+
 import dmd.mtype: Type;
 import object: TypeInfo_Class;
 import snakebite.backends.argumentflow: Shape;
@@ -530,7 +533,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         import std.conv: text;
 
         if (function_ is null)
-            assert(0, "callers pass a resolved function");
+            internalFailure("callers pass a resolved function");
 
         const(Function)* result;
         withCompilerLock({
@@ -575,7 +578,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 
             auto body_ = function_.fbody;
             if (body_ is null)
-                assert(0, "`CallSelection` routes a bodyless function to "
+                internalFailure("`CallSelection` routes a bodyless function to "
                     ~ "FFI or a builtin, never to the compiler");
 
             auto layout = FrameLayout.of(function_);
@@ -959,9 +962,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // `CaseStatement` is the bug this guards; `reachable` exists to
         // stop it happening in the first place.
         if (_pendingCaseJumps.length != 0)
-            assert(0, "every `case` a jump targets was compiled");
+            internalFailure("every `case` a jump targets was compiled");
         if (_pendingDefaultJumps.length != 0)
-            assert(0, "every `default` a jump targets was compiled");
+            internalFailure("every `default` a jump targets was compiled");
 
         removeEmptyLifetimes;
         resolveBranches();
@@ -970,7 +973,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         foreach (pending; _exceptionHandlers) {
             if (!(pending._handler < _instructions.length
                     || pending._cleanupEnd != size_t.max))
-                assert(0, "a catch handler is followed by the code after "
+                internalFailure("a catch handler is followed by the code after "
                     ~ "the statement, or by the function's closing "
                     ~ "instruction");
 
@@ -1204,7 +1207,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             if (!(*target < _instructions.length
                     || (*target == _instructions.length
                         && isCleanupEndBranch(index, *target))))
-                assert(0, text("branch target ", *target,
+                internalFailure(text("branch target ", *target,
                     " is out of range in `", _function.toString, "`"));
 
             *target = cast(size_t) instructionAt(*target);
@@ -1291,13 +1294,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     extern(C++):
-
-    override void visit(Statement statement) {
-        import std.conv: text;
-
-        assert(0, text("Statement ", statement.stmt,
-            ": no `visit` override, and not in `UnreachableNodes`"));
-    }
 
     override void visit(CompoundStatement statement) {
         compileStatements(statement.statements);
@@ -1606,8 +1602,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (!(expression !is null
                 && expression.type.toBasetype.ty == Tclass))
-            assert(0,
-                "`throwSemantic` only accepts a `Throwable` class reference");
+            internalFailure("`throwSemantic` only accepts a `Throwable` class reference");
 
         if (readsAfterEnd)
             return compileAddress(FullExpressionScope.lvalueOf(expression));
@@ -1739,7 +1734,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     override void visit(DefaultStatement statement) {
         if (_switchStack.length == 0)
-            assert(0, "`visitDefault` rejects a `default` outside a `switch`");
+            internalFailure("`visitDefault` rejects a `default` outside a `switch`");
 
         recordDefaultTarget(_switchStack[$ - 1]);
         _finished = false;
@@ -1784,7 +1779,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     override void visit(GotoStatement statement) {
         if (!(statement.label !is null && statement.label.statement !is null))
-            assert(0, "semantic3 rejects a `goto` to an undefined label");
+            internalFailure("semantic3 rejects a `goto` to an undefined label");
 
         auto target = statement.label.statement;
         // Finalizer bodies stay mutable DMD statements for code generation.
@@ -1823,12 +1818,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     override void visit(BreakStatement statement) {
         if (_breakables.length == 0)
-            assert(0,
-                "`visitBreak` rejects a `break` outside a loop or `switch`");
+            internalFailure("`visitBreak` rejects a `break` outside a loop or `switch`");
 
         const target = findBreakableIndex(statement.ident);
         if (target == size_t.max)
-            assert(0, "`visitBreak` rejects a `break` to an unknown label");
+            internalFailure("`visitBreak` rejects a `break` to an unknown label");
 
         runPendingFinallyBodies(unwindPlanOf(
             _scopePaths.enclosing(statement), _breakables[target].scopePath,
@@ -2030,7 +2024,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         final switch (plan.kind) with (FailurePlan.Kind) {
             case ignore:
-                assert(0);
+                internalFailure();
             case halt:
                 emit(&opAssert, conditionOffset, haltSite, width);
                 break;
@@ -2396,12 +2390,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private void compileContinue(ContinueStatement statement) {
         if (_loops.length == 0)
-            assert(0, "`visitContinue` rejects a `continue` outside a loop");
+            internalFailure("`visitContinue` rejects a `continue` outside a loop");
 
         const index = findLoopIndex(statement.ident);
         if (index == size_t.max)
-            assert(0,
-                "`visitContinue` rejects a `continue` to an unknown label");
+            internalFailure("`visitContinue` rejects a `continue` to an unknown label");
 
         runPendingFinallyBodies(unwindPlanOf(
             _scopePaths.enclosing(statement), _loops[index].scopePath,
@@ -2897,7 +2890,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const path = ClosurePlan.staticChainPath(_function, owner);
         if (path is null)
-            assert(0, "dmd rejects a reference to a frame the function has "
+            internalFailure("dmd rejects a reference to a frame the function has "
                 ~ "no context chain to (`checkNestedReference`)");
 
         auto result = reserveTemp(pointerFacts);
@@ -2943,8 +2936,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         if (owner is null)
-            assert(0,
-                "a local variable belongs to a function");
+            internalFailure("a local variable belongs to a function");
 
         auto context = contextAddressOf(owner);
         const closurePlan = closurePlanOf(owner);
@@ -2961,8 +2953,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const layout = FrameLayout.of(owner);
         if (!layout.hasSlot(variable))
-            assert(0,
-                "a frame layout reserves a slot for each of its locals");
+            internalFailure("a frame layout reserves a slot for each of its locals");
 
         context = addPointerOffset(context, layout.offsetOf(variable));
         if (layout.isRef(variable))
@@ -2984,23 +2975,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return _layout.offsetOf(variable);
 
         if (owner is null)
-            assert(0,
-                "a local variable belongs to a function");
+            internalFailure("a local variable belongs to a function");
 
         auto context = contextAddressOf(owner);
         const closurePlan = closurePlanOf(owner);
         if (closurePlan.needsClosure) {
             const closure = closurePlan.layout;
             if (!closure.hasSlot(variable))
-                assert(0,
-                    "a closure's layout holds every variable captured from it");
+                internalFailure("a closure's layout holds every variable captured from it");
             return addPointerOffset(context, closure.slotOf(variable).offset);
         }
 
         const layout = FrameLayout.of(owner);
         if (!layout.hasSlot(variable))
-            assert(0,
-                "a frame layout reserves a slot for each of its locals");
+            internalFailure("a frame layout reserves a slot for each of its locals");
         return addPointerOffset(context, layout.offsetOf(variable));
     }
 
@@ -3033,7 +3021,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ? cast() _layout.hiddenThis.variable
             : variable;
         if (hiddenThis is null)
-            assert(0, "a function that reads `this` reserves a slot for it");
+            internalFailure("a function that reads `this` reserves a slot for it");
 
         const hidden = hiddenSlotOffset(hiddenThis);
         return receiverOffsetFrom(
@@ -3064,22 +3052,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t contextThisOffset(VarDeclaration hiddenThis) {
         auto owner = outerFunctionOf(hiddenThis);
         if (owner is null)
-            assert(0, "a `this` variable belongs to a function");
+            internalFailure("a `this` variable belongs to a function");
 
         auto context = contextAddressOf(owner);
         const closurePlan = closurePlanOf(owner);
         if (closurePlan.needsClosure) {
             const closure = closurePlan.layout;
             if (!closure.hasSlot(hiddenThis))
-                assert(0,
-                    "a closure's layout holds every `this` captured from it");
+                internalFailure("a closure's layout holds every `this` captured from it");
 
             context = addPointerOffset(context, closure.slotOf(hiddenThis).offset);
         } else {
             const layout = FrameLayout.of(owner);
             if (!layout.hasSlot(hiddenThis))
-                assert(0,
-                    "an owner's frame layout reserves a slot for its `this`");
+                internalFailure("an owner's frame layout reserves a slot for its `this`");
 
             context = addPointerOffset(context, layout.offsetOf(hiddenThis));
         }
@@ -3527,7 +3513,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return compileVectorCompoundAssign(
                     expression, plan, targetOffset, destOffset);
             case pointerDifference:
-                assert(0, text("`", expressionText(expression), "`: `-=` ",
+                internalFailure(text("`", expressionText(expression), "`: `-=` ",
                     "cannot store a pointer difference in a pointer"));
         }
 
@@ -3613,7 +3599,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             case mod, modAssign:
                 return &opComplex!(ComplexOperation.modulo);
             default:
-                assert(0, text("`", expressionText(expression), "`: dmd ",
+                internalFailure(text("`", expressionText(expression), "`: dmd ",
                     "rejects bitwise and shift operators on complex ",
                     "operands"));
         }
@@ -3755,7 +3741,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     destination, sourceWidth, width);
                 return;
             case vector, pointerDifference:
-                assert(0, "a vector or pointer target is never promoted");
+                internalFailure("a vector or pointer target is never promoted");
         }
     }
 
@@ -3850,7 +3836,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     sarrayToPointer, sliceToPointer, pointerToArray,
                     pointerToIntegral, delegateToPointer, reinterpretSlice,
                     narrow, widenSigned, widenUnsigned:
-                assert(0, "this kind does not take a packed operand pair");
+                internalFailure("this kind does not take a packed operand pair");
         }
     }
 
@@ -3899,7 +3885,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 ? &opFloatModulo
                 : (unsigned ? &opModuloUnsigned : &opModuloSigned);
 
-        assert(0, text("`", expressionText(expression), "`: dmd lowers ",
+        internalFailure(text("`", expressionText(expression), "`: dmd lowers ",
             "every other compound assignment"));
     }
 
@@ -3965,7 +3951,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return;
 
             case pointerDifference:
-                assert(0, text("`", expressionText(expression), "`: a ",
+                internalFailure(text("`", expressionText(expression), "`: a ",
                     "postfix `++`/`--` has the type of its operand"));
         }
         emit(handler, valueOffset, stepOffset, operationWidth, operands);
@@ -3996,13 +3982,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     extern(C++):
-
-    override void visit(Expression expression) {
-        import std.conv: text;
-
-        assert(0, text("Expression ", expression.op,
-            ": no `visit` override, and not in `UnreachableNodes`"));
-    }
 
     protected override void visitDeclaration(DeclarationExp expression) {
         if (_destination != discardResult && _expressions.active())
@@ -4200,8 +4179,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: Tdelegate;
 
         if (expression.fd is null)
-            assert(0,
-                "`FuncExp`'s constructor always resolves its declaration");
+            internalFailure("`FuncExp`'s constructor always resolves its declaration");
 
         if (expression.type.toBasetype.ty != Tdelegate) {
             const address = _bytecode.callableAddress(expression.fd, 0);
@@ -4218,7 +4196,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         requireDestination(expression);
 
         if (expression.func is null)
-            assert(0, "a `DelegateExp` names its method");
+            internalFailure("a `DelegateExp` names its method");
         compileDelegateValue(
             delegateTargetOf(expression.func, expression.type, expression.e1,
                 expression.vthis2),
@@ -4241,7 +4219,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             delegateContextOffset, delegateFunctionOffset;
 
         if (target.function_ is null)
-            assert(0, "a delegate value names its function");
+            internalFailure("a delegate value names its function");
 
         const context = _destination + delegateContextOffset;
         if (target.receiver !is null) {
@@ -4684,7 +4662,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 Tdchar, Terror, Tinstance, Ttypeof, Ttuple, Tslice, Treturn,
                 Tnull, Tvector, Tint128, Tuns128, Ttraits, Tmixin,
                 Tnoreturn, Ttag:
-                assert(0, text("`", expression.toString, "` slices a `",
+                internalFailure(text("`", expression.toString, "` slices a `",
                     sourceType.toString, "`: semantic slices only a ",
                     "pointer or an array at run time, a vector through its ",
                     "`.array` and an aggregate through `opSlice`"));
@@ -4941,7 +4919,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // never a hash table this compiler builds itself.
     protected override void visitUnloweredAssocArrayLiteral(
             AssocArrayLiteralExp expression) {
-        assert(0, "dmd lowers every associative array literal "
+        internalFailure("dmd lowers every associative array literal "
             ~ "(`tryLowerAALiteral`) or reports the missing hook");
     }
 
@@ -4987,7 +4965,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         NewExp expression, NewPlan plan,
     ) {
         if (plan.destination == NewPlan.Destination.lowering)
-            assert(0, "dmd lowers every heap `new` of a class that is not "
+            internalFailure("dmd lowers every heap `new` of a class that is not "
                 ~ "a `scope class`, outside a `ctfe` or `-betterC` scope");
 
         prepareNewDestination(expression);
@@ -5039,7 +5017,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 && expression.arguments !is null
                 && expression.arguments.length != 0) {
             if (expression.arguments.length != 1)
-                assert(0, "dmd rejects `new T(a, b)` for a scalar `T`");
+                internalFailure("dmd rejects `new T(a, b)` for a scalar `T`");
             const facts = TypeFacts.of(expression.newtype);
             const valueOffset = reserveTemp(facts);
             evalInto((*expression.arguments)[0], valueOffset, facts.size);
@@ -5139,7 +5117,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto type = isType(expression.obj);
         if (!(type !is null && type.vtinfo !is null))
-            assert(0, "`TypeidExp` semantic leaves a type with its `TypeInfo`");
+            internalFailure("`TypeidExp` semantic leaves a type with its `TypeInfo`");
 
         emitRuntimeTypeInfoConstant(type);
     }
@@ -5277,7 +5255,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     protected override void visitUnloweredCat(CatExp expression) {
-        assert(0, "dmd lowers every `~` outside a `-betterC` scope "
+        internalFailure("dmd lowers every `~` outside a `-betterC` scope "
             ~ "(`trySetCatExpLowering`)");
     }
 
@@ -5613,7 +5591,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             case floating:
                 return floatingBinaryHandler(expression);
             case complex, pointerOffset, pointerDifference, vector:
-                assert(0, text("`", expressionText(expression), "` has a ",
+                internalFailure(text("`", expressionText(expression), "` has a ",
                     "lane that is neither integral nor floating"));
         }
     }
@@ -5648,7 +5626,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             case div, divAssign: return &opFloatDivide;
             case mod, modAssign: return &opFloatModulo;
             default:
-                assert(0, text("`", expressionText(expression), "`: dmd ",
+                internalFailure(text("`", expressionText(expression), "`: dmd ",
                     "rejects bitwise and shift operators on floating ",
                     "operands"));
         }
@@ -5744,7 +5722,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     case equal, identity: pointerHandler = &opEqual; break;
                     case notEqual, notIdentity: pointerHandler = &opNotEqual;
                         break;
-                    default: assert(0);
+                    default: internalFailure();
                 }
 
                 const leftOffset = reserveTemp(operandFacts);
@@ -5800,7 +5778,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return compileVectorComparison(expression, plan, destOffset);
 
             case dynamicArray, staticArray:
-                assert(0, text("`", expressionText(expression), "` cannot ",
+                internalFailure(text("`", expressionText(expression), "` cannot ",
                     "reach here: dmd lowers array ordering to `__cmp`, and ",
                     "array equality is a byte compare"));
 
@@ -5840,7 +5818,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             case equal: return &opFloatEqual;
             case notEqual: return &opFloatNotEqual;
             default:
-                assert(0, text("`", expressionText(expression), "`: dmd ",
+                internalFailure(text("`", expressionText(expression), "`: dmd ",
                     "builds a `CmpExp` or `EqualExp` only for these ",
                     "operators"));
         }
@@ -5871,7 +5849,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 strict = &opGreaterThanUnsigned;
                 break;
             default:
-                assert(0, text("`", expressionText(expression), "`: dmd ",
+                internalFailure(text("`", expressionText(expression), "`: dmd ",
                     "builds a `CmpExp` only for the four orderings"));
         }
         auto low = comparisonHandler(expression, true);
@@ -5918,7 +5896,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 break;
             case complex, reference, vector, dynamicArray, staticArray,
                 delegate_:
-                assert(0, text("`", expressionText(expression), "` has a ",
+                internalFailure(text("`", expressionText(expression), "` has a ",
                     "vector lane that is neither integral nor floating"));
         }
 
@@ -6109,7 +6087,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return &opEqual;
             case notEqual:
                 return &opNotEqual;
-            default: assert(0);
+            default: internalFailure();
         }
     }
 
@@ -6160,7 +6138,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                         laneHandler = &opFloatNegate;
                         break;
                     case complex, pointerOffset, pointerDifference, vector:
-                        assert(0, text("`", expressionText(expression),
+                        internalFailure(text("`", expressionText(expression),
                             "` has a lane that is neither integral nor ",
                             "floating"));
                 }
@@ -6170,7 +6148,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             }
 
             case pointerOffset, pointerDifference:
-                assert(0, text("`", expressionText(expression), "`: D has ",
+                internalFailure(text("`", expressionText(expression), "`: D has ",
                     "no unary arithmetic on a pointer"));
         }
     }
@@ -6497,7 +6475,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         case classReference:
         case zero:
         case truth:
-            assert(0);
+            internalFailure();
         static foreach (member; EnumMembers!CastKind) {
             static if (member != copy && member != classReference
                     && member != zero && member != truth)
@@ -6533,7 +6511,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto calleeType = typeFunctionOf(callee);
         if (arityMismatches(calleeType.parameterList, expression.arguments,
                 calleeType.parameterList.varargs == VarArg.variadic))
-            assert(0, "dmd rejects a call with the wrong number of arguments");
+            internalFailure("dmd rejects a call with the wrong number of arguments");
 
         auto returnType = calleeType.next;
         const isVoidCallee = returnType is null || returnType.ty == Tvoid;
@@ -6541,7 +6519,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             isVoidCallee ? TypeFacts.init
                 : calleeType.isRef ? pointerFacts : TypeFacts.of(returnType);
         if (isVoidCallee && destOffset != discardResult)
-            assert(0, "a `void` call is only ever evaluated for effect");
+            internalFailure("a `void` call is only ever evaluated for effect");
 
         const objectOffset = reserveTemp(pointerFacts);
         evalInto(receiver, objectOffset, size_t.sizeof);
@@ -6584,8 +6562,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         const index = callee.vtblIndex;
         if (index < 0)
-            assert(0,
-                "dmd gives every virtual method a vtbl slot");
+            internalFailure("dmd gives every virtual method a vtbl slot");
 
         const vptrOffset = reserveTemp(pointerFacts);
         emit(&opLoadIndirect, vptrOffset, objectOffset, size_t.sizeof);
@@ -6842,7 +6819,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (arityMismatches(calleeType.parameterList, arguments,
                 calleeType.parameterList.varargs == VarArg.variadic))
-            assert(0, "dmd rejects a call with the wrong number of arguments");
+            internalFailure("dmd rejects a call with the wrong number of arguments");
 
         Arg[] args;
         // `calleeLayout.hiddenThis.variable`, not `hasThis`: a
@@ -6852,8 +6829,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // knows whether this callee's frame reserved it a slot.
         if (calleeLayout.hiddenThis.variable !is null) {
             if (!hasThis)
-                assert(0,
-                    "dmd binds a hidden `this` to every call of a method");
+                internalFailure("dmd binds a hidden `this` to every call of a method");
 
             args ~= Arg(
                 receiverOffset,
@@ -6881,7 +6857,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const isVoidCallee = returnShape.isVoid;
         if (isVoidCallee && !returnShape.resultIsReceiver
                 && destOffset != discardResult)
-            assert(0, "a `void` call is only ever evaluated for effect");
+            internalFailure("a `void` call is only ever evaluated for effect");
 
         const siteIndex = _callSites.length;
         // The delegate outlives this compiler, so it captures the backend
@@ -6984,12 +6960,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.ffi.call: CallAdapter;
 
         if (arityMismatches(type.parameterList, arguments, allowExtraArguments))
-            assert(0, "dmd rejects a call with the wrong number of arguments");
+            internalFailure("dmd rejects a call with the wrong number of arguments");
 
         const returnShape = CallAdapter.ofType(type);
         if (returnShape.isVoid && !returnShape.resultIsReceiver
                 && destOffset != discardResult)
-            assert(0, "a `void` call is only ever evaluated for effect");
+            internalFailure("a `void` call is only ever evaluated for effect");
 
         auto preparation = CallAdapter.Arguments.of(
             type, arguments, destinationParameter);
@@ -7246,8 +7222,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         } else {
             functionType = deref is null ? null : deref.type.isTypeFunction;
             if (functionType is null)
-                assert(0,
-                    "dmd wraps a function pointer call's callee in a `PtrExp`");
+                internalFailure("dmd wraps a function pointer call's callee in a `PtrExp`");
 
             calleeOffset = reserveTemp(pointerFacts);
             evalInto(deref.e1, calleeOffset, size_t.sizeof);
@@ -7256,7 +7231,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto valueCall = ValueCall.of(functionType, isDelegateCall);
         if (valueCall.mismatches(expression.arguments))
-            assert(0, "dmd rejects a call with the wrong number of arguments");
+            internalFailure("dmd rejects a call with the wrong number of arguments");
 
         // A `ref` return hands back its target's address in the return
         // register regardless of the pointee's own width - the same shape
@@ -7267,7 +7242,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const returnShape = CallAdapter.ofType(functionType);
         const isVoidCallee = returnShape.isVoid;
         if (isVoidCallee && destOffset != discardResult)
-            assert(0, "a `void` call is only ever evaluated for effect");
+            internalFailure("a `void` call is only ever evaluated for effect");
 
         const calleeLayout = valueCall.layout;
 

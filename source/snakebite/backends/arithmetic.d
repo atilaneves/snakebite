@@ -2,6 +2,9 @@ module snakebite.backends.arithmetic;
 
 private:
 
+
+import snakebite.internalfailure: internalFailure;
+
 import snakebite.nativelayout: TypeFacts;
 import snakebite.nativevalue: ComplexOperands;
 
@@ -114,17 +117,17 @@ package ArithmeticPlan.Kind arithmeticKind(imported!"dmd.mtype".Type type) {
             return vector;
 
         case Tarray, Tsarray:
-            assert(0, text("arithmetic in `", type.toString, "` is an ",
+            internalFailure(text("arithmetic in `", type.toString, "` is an ",
                 "array operation: dmd lowers it to a druntime call"));
 
         case Tstruct, Tclass:
-            assert(0, text("arithmetic in `", type.toString, "` is on an ",
+            internalFailure(text("arithmetic in `", type.toString, "` is on an ",
                 "aggregate: dmd rewrites it to an operator overload call"));
 
         case Taarray, Tdelegate, Tfunction, Tnull, Tint128, Tuns128, Tenum,
             Tvoid, Tnoreturn, Treference, Tident, Tnone, Terror, Tinstance,
             Ttypeof, Ttuple, Tslice, Treturn, Ttraits, Tmixin, Ttag:
-            assert(0, text("`", type.toString, "` is not arithmetic: ",
+            internalFailure(text("`", type.toString, "` is not arithmetic: ",
                 "semantic rejects it, and `toBasetype` leaves no enum"));
     }
 }
@@ -154,7 +157,7 @@ private imported!"snakebite.nativevalue".ComplexOperand complexOperand(
             Tfunction, Tnull, Tenum, Tvoid, Tnoreturn, Treference, Tident,
             Tnone, Terror, Tinstance, Ttypeof, Ttuple, Tslice, Treturn,
             Ttraits, Tmixin, Ttag:
-            assert(0, text("`", type.toString, "` is an operand of complex ",
+            internalFailure(text("`", type.toString, "` is an operand of complex ",
                 "arithmetic: semantic converts it to a floating type"));
     }
 }

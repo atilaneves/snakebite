@@ -2,6 +2,9 @@ module snakebite.backends.comparison;
 
 private:
 
+
+import snakebite.internalfailure: internalFailure;
+
 import snakebite.nativelayout: TypeFacts;
 
 package struct ComparisonPlan {
@@ -86,14 +89,14 @@ private ComparisonPlan.Kind kindOf(imported!"dmd.mtype".Type type) {
             return integral;
 
         case Tstruct, Taarray:
-            assert(0, text("dmd rewrites every comparison of `",
+            internalFailure(text("dmd rewrites every comparison of `",
                 type.toString, "`: a struct's to an identity or to its ",
                 "fields', an associative array's to a call"));
 
         case Tint128, Tuns128, Tenum, Tvoid, Tfunction, Tnoreturn,
             Treference, Tident, Tnone, Terror, Tinstance, Ttypeof, Ttuple,
             Tslice, Treturn, Ttraits, Tmixin, Ttag:
-            assert(0, text("`", type.toString, "` is not a comparable ",
+            internalFailure(text("`", type.toString, "` is not a comparable ",
                 "value: semantic rejects `cent`/`ucent`, and `toBasetype` ",
                 "leaves no enum"));
     }

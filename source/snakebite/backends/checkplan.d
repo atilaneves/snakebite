@@ -4,6 +4,9 @@ module snakebite.backends.checkplan;
 private:
 
 
+import snakebite.internalfailure: internalFailure;
+
+
 import snakebite.frontend.checks: Checks;
 
 
@@ -52,7 +55,7 @@ public FailurePlan boundsPlanOf(
 
     final switch (checks.arrayBounds) with (CHECKENABLE) {
         case _default:
-            assert(0);
+            internalFailure();
         case off:
         case on:
             return planFor(checks.arrayBounds, checks);
@@ -121,7 +124,7 @@ private FailurePlan planFor(
 
     final switch (enable) with (CHECKENABLE) {
         case _default:
-            assert(0);
+            internalFailure();
         case off:
         case safeonly:
             return FailurePlan(FailurePlan.Kind.ignore);

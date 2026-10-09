@@ -11,7 +11,7 @@ import dmd.expression:
     NewExp, ThrowExp,
     TupleExp;
 import dmd.statement:
-    ExpStatement, IfStatement, ReturnStatement,
+    Statement, ExpStatement, IfStatement, ReturnStatement,
     SwitchErrorStatement, SwitchStatement, ThrowStatement, WithStatement;
 import dmd.location: Loc;
 import dmd.typesem: isString;
@@ -57,6 +57,23 @@ static foreach (name; __traits(allMembers, imported!"dmd.expression")) {
 // NewExp. Destination hooks keep that result alive across nested evaluation.
 extern(C++) package abstract class LoweringVisitor: Visitor {
     alias visit = Visitor.visit;
+
+    // Every backend uses the same terminal policy if closed dispatch fails.
+    final override void visit(Expression expression) {
+        import std.conv: text;
+        import snakebite.internalfailure: internalFailure;
+
+        internalFailure(text("Expression ", expression.op,
+            ": no `visit` override, and not in `UnreachableNodes`"));
+    }
+
+    final override void visit(Statement statement) {
+        import std.conv: text;
+        import snakebite.internalfailure: internalFailure;
+
+        internalFailure(text("Statement ", statement.stmt,
+            ": no `visit` override, and not in `UnreachableNodes`"));
+    }
 
     // The statements and operands that end a full expression are opened
     // here, so no backend can forget one; the positions are listed in

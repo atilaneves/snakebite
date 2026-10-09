@@ -3,6 +3,9 @@ module snakebite.hostthreads;
 
 private:
 
+
+import snakebite.internalfailure: internalFailure;
+
 import core.thread: Thread, ThreadID;
 import snakebite.cstack: CStack;
 
@@ -22,7 +25,7 @@ public auto heapNew(T, Args...)(auto ref Args args) {
 
     auto memory = calloc(1, size);
     if (memory is null)
-        assert(0, "out of memory for the state of a thread");
+        internalFailure("out of memory for the state of a thread");
     GC.addRange(memory, size);
     version(unittest)
         ++_heapObjects;
