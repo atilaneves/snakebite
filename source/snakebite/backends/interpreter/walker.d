@@ -6713,23 +6713,20 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         FuncDeclaration function_,
         void* classReceiver,
     ) {
-        if (function_.isThis !is null) {
-            auto dot = expression.e1.isDotVarExp;
-            const classDeclaration =
-                cast(ClassDeclaration) function_.isThis.isClassDeclaration;
-            if (classDeclaration !is null)
-                return cast(size_t) classReceiver;
-            if (dot is null)
-                internalFailure("a struct member reached with no receiver "
-                    ~ "expression is called through a value");
-            return cast(size_t) addressOf(dot.e1);
-        }
+        import snakebite.frontend.dmd.dispatch: CallReceiver, receiverOf;
 
-        // A nested callee's `vthis` is its enclosing context. A
-        // delegate supplies this context directly because it may
-        // outlive the call that created it; a direct call finds it
-        // by walking the current static chain.
-        return callContextOf(*calleeContextPlanOf(expression, function_));
+        // DMD expressions must stay mutable for backend evaluation.
+        auto receiver = receiverOf(expression, function_);
+        final switch (receiver.kind) with (CallReceiver.Kind) {
+        case enclosing:
+            return callContextOf(*calleeContextPlanOf(expression, function_));
+        case classValue:
+            return cast(size_t) classReceiver;
+        case aggregateAddress:
+            return cast(size_t) addressOf(receiver.expression);
+        case implicitThis:
+            return thisValueOf(_function.vthis);
+        }
     }
 
     extern(D) private const(ContextSource)* calleeContextPlanOf(

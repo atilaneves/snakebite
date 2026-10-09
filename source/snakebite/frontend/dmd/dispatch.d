@@ -16,23 +16,50 @@ public bool usesVtable(
     return !directcall && function_.isVirtual && !function_.isFinalFunc;
 }
 
-// Calls through values carry their context in the value, not in a class
-// receiver expression. A constructor delegation can name `this` or
-// `super` without a DotVarExp.
-public imported!"dmd.expression".Expression classReceiverOf(
+public struct CallReceiver {
+    import dmd.expression: Expression;
+
+    public enum Kind {
+        enclosing,
+        classValue,
+        aggregateAddress,
+        implicitThis,
+    }
+
+    public Kind kind;
+    public Expression expression;
+}
+
+// A direct call gets its context from the receiver or the static chain.
+// Calls through values use the context carried by the value instead.
+public CallReceiver receiverOf(
     imported!"dmd.expression".CallExp call,
     imported!"dmd.func".FuncDeclaration callee,
 ) {
     import dmd.astenums: Tclass;
     import dmd.typesem: toBasetype;
 
-    const aggregate = callee.isThis;
-    if (aggregate is null || aggregate.isClassDeclaration is null)
-        return null;
+    if (callee.isThis is null)
+        return CallReceiver.init;
 
     auto dot = call.e1.isDotVarExp;
     auto receiver = dot is null ? call.e1 : dot.e1;
-    return receiver.type.toBasetype.ty == Tclass ? receiver : null;
+    if (receiver.type.toBasetype.ty == Tclass)
+        return CallReceiver(CallReceiver.Kind.classValue, receiver);
+    if (dot !is null || receiver.isThisExp !is null
+            || receiver.isSuperExp !is null)
+        return CallReceiver(CallReceiver.Kind.aggregateAddress, receiver);
+    return CallReceiver(CallReceiver.Kind.implicitThis, null);
+}
+
+public imported!"dmd.expression".Expression classReceiverOf(
+    imported!"dmd.expression".CallExp call,
+    imported!"dmd.func".FuncDeclaration callee,
+) {
+    // DMD expressions must stay mutable for backend evaluation.
+    auto receiver = receiverOf(call, callee);
+    return receiver.kind == CallReceiver.Kind.classValue
+        ? receiver.expression : null;
 }
 
 // dmd checks the receiver at the vtable read, after argument evaluation.

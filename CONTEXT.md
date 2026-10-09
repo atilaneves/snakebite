@@ -66,6 +66,11 @@ to call; ADR-0013 defines its builtin route and signature contract.
 The pinned native DMD result that defines a compiler intrinsic's guest
 result. ADR-0013 records the owner's narrow constant-fabs exception.
 
+**Call receiver**:
+The object or enclosing context supplied to a callee as its hidden argument.
+A direct call obtains it from its receiver expression or its caller; a delegate
+carries it with the function value.
+
 **Call arguments**:
 The values supplied to a call: hidden context and type information,
 declared parameter values or references, and any variadic extra values.
