@@ -26,7 +26,7 @@ import snakebite.backends.haltprocess: HaltAction, isHalt;
 import snakebite.backends.unwindplan:
     ExceptionCandidate, UnwindPlan, unwindPlanOf;
 import snakebite.callarguments: CallArguments;
-import snakebite.nativelayout: TypeFacts;
+import snakebite.nativevalue: TypeFacts;
 import snakebite.nativevalue:
     CastKind, ComplexOperation, floatingToBool, loadFloating, loadSigned,
     loadUnsigned, shiftCount, storeFloating, storeIntegral;
@@ -751,7 +751,7 @@ private Activation* popActivation(Activation* active, FrameStack* frames) {
 
 
 private void unwindFinally(Throwable throwable, scope void delegate() cleanup) {
-    import snakebite.backends.exceptions: sharedUnwindFinally = unwindFinally;
+    import snakebite.backends.unwindplan: sharedUnwindFinally = unwindFinally;
 
     sharedUnwindFinally(throwable, cleanup);
 }

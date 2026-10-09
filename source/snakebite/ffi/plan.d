@@ -7,6 +7,9 @@ import snakebite.ffi.symbol: Resolver;
 
 private:
 
+import snakebite.nativelayout: typeFacts;
+
+
 
 import snakebite.internalfailure: internalFailure;
 
@@ -1275,7 +1278,7 @@ public struct PlanCache {
     private SharedTable!(Signature, CallPlan*) _signatures;
 
     // No frontend lock: `_shapeOf` forces every dmd forward reference it
-    // could still need itself, up front, through `TypeFacts.of` (its
+    // could still need itself, up front, through `typeFacts` (its
     // own doc), and `_signatures` is a `SharedTable`, which brings its
     // own insert lock (ADR-0006) - the same reasoning `snakebite.
     // backends.interpreter.walker`'s `Cache.build` and `snakebite.
@@ -1732,10 +1735,10 @@ private CallPlan _shapeOf(
 
         // Forces every dmd forward reference a struct or enum argument
         // or return type could still have - a class handle, a pointer
-        // and every basic type have none (`TypeFacts.of`'s own doc) - up
+        // and every basic type have none (`typeFacts`'s own doc) - up
         // front, through the one mechanism every other backend and cache
         // already forces one through (`snakebite.frontend.compiler.
-        // forceIfNeeded`, reached here via `TypeFacts.of`), each only
+        // forceIfNeeded`, reached here via `typeFacts`), each only
         // while dmd has not already resolved it. `classify`/`ArgumentPlan.
         // of` (`snakebite.ffi.abi`) read a struct's own `.size`/
         // `.alignsize` directly, not through `TypeFacts`, so without this
@@ -1744,7 +1747,7 @@ private CallPlan _shapeOf(
         // forcing the struct itself here is enough for its own fields
         // too: dmd's `finalizeSize` (`dsymbolsem.d`) determines every
         // field's own size as part of computing the struct's, all under
-        // the one lock `TypeFacts.of` takes only while still needed, so
+        // the one lock `typeFacts` takes only while still needed, so
         // `classify`'s later, recursive field reads find every size it
         // touches already resolved.
         {
@@ -1752,11 +1755,11 @@ private CallPlan _shapeOf(
 
             auto returnType = type.nextOf;
             if (returnType !is null)
-                TypeFacts.of(returnType);
+                typeFacts(returnType);
             foreach (i, parameter; type.parameterList)
-                TypeFacts.of(parameter.type);
+                typeFacts(parameter.type);
             foreach (extraType; extraArgumentTypes)
-                TypeFacts.of(extraType);
+                typeFacts(extraType);
         }
 
         // A variadic callee is handed its extra arguments differently -

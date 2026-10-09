@@ -2,6 +2,9 @@ module snakebite.backends.comparison;
 
 private:
 
+import snakebite.nativelayout: typeFacts;
+
+
 
 import snakebite.internalfailure: internalFailure;
 
@@ -43,7 +46,7 @@ package ComparisonPlan comparisonPlan(
     import dmd.typesem: toBasetype;
 
     auto type = expression.e1.type.toBasetype;
-    auto plan = ComparisonPlan(kindOf(type), TypeFacts.of(type));
+    auto plan = ComparisonPlan(kindOf(type), typeFacts(type));
     // dmd's `e2ir.d` compares a static array with a dynamic one as two
     // `{length, ptr}` values.
     if (plan.kind == ComparisonPlan.Kind.staticArray
@@ -52,7 +55,7 @@ package ComparisonPlan comparisonPlan(
     if (plan.kind == ComparisonPlan.Kind.vector) {
         auto lane = type.isTypeVector.elementType;
         plan.laneKind = kindOf(lane);
-        plan.laneFacts = TypeFacts.of(lane);
+        plan.laneFacts = typeFacts(lane);
     }
     return plan;
 }

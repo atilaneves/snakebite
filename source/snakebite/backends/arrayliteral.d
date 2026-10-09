@@ -3,6 +3,9 @@ module snakebite.backends.arrayliteral;
 
 private:
 
+import snakebite.nativelayout: typeFacts;
+
+
 import snakebite.nativelayout: TypeFacts;
 
 
@@ -41,7 +44,7 @@ public ArrayLiteralPlan planArrayLiteral(
         : kind == Tpointer ? ArrayLiteralPlan.Result.pointer
         : ArrayLiteralPlan.Result.value;
     plan.elementType = elementType;
-    plan.elementFacts = TypeFacts.of(elementType);
+    plan.elementFacts = typeFacts(elementType);
     plan.count = expression.elements is null ? 0 : expression.elements.length;
     plan.bytes = plan.count * plan.elementFacts.size;
     // Scope-local and equality transforms can set onstack after lowering.

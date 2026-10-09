@@ -3,6 +3,9 @@ module snakebite.backends.layout;
 
 private:
 
+import snakebite.nativelayout: typeFacts;
+
+
 
 import snakebite.internalfailure: internalFailure;
 
@@ -42,7 +45,7 @@ package struct FrameLayout {
 
     // One parameter's slot: its offset into the frame, the facts needed
     // to place a value there, and whether it is `ref` - decided together,
-    // from the same `TypeFacts.of` call, since a parameter's type never
+    // from the same `typeFacts` call, since a parameter's type never
     // changes between calls. For a `ref` parameter, `facts` are a
     // pointer's, not the parameter's own type's: a `ref` parameter
     // occupies a pointer slot in a compiled frame, the address of the
@@ -204,7 +207,7 @@ package struct FrameLayout {
                 VariableSlot(layout.variadicCursor, false);
 
         if (layout._returns.hasPlace) {
-            const result = imported!"snakebite.nativelayout".TypeFacts.of(
+            const result = typeFacts(
                 typeFunctionOf(function_).next);
             layout.returnPlace = imported!"snakebite.backends.returnplace"
                 .ReturnPlace(layout.reserveSlot(
@@ -304,7 +307,7 @@ package struct FrameLayout {
     }
 
     // One slot `reserveSlot` just reserved: its offset into the frame,
-    // and the facts `TypeFacts.of` already had to compute to know how
+    // and the facts `typeFacts` already had to compute to know how
     // big the slot was and how it had to be aligned - so a caller that
     // wants both, like a parameter's slot, gets them from the one call.
     package struct Slot {
@@ -316,7 +319,7 @@ package struct FrameLayout {
     // facts. A parameter and a local differ in what they key the offset
     // by, not in how the frame grows to fit them, so both come here.
     private Slot reserveSlot(Type type) {
-        return reserveSlot(TypeFacts.of(type));
+        return reserveSlot(typeFacts(type));
     }
 
     // As above, for a caller that already knows the slot's facts rather
@@ -474,7 +477,7 @@ package struct ClosureLayout {
                 ? TypeFacts.lazyArgument
                 : isRef
                     ? TypeFacts.pointer
-                    : TypeFacts.of(variable.type);
+                    : typeFacts(variable.type);
             const offset = alignUp(closure.size, facts.alignment);
             closure._slots[variable] = Slot(offset, facts, isRef);
             closure.size = offset + facts.size;

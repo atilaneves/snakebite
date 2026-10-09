@@ -2,6 +2,9 @@ module snakebite.backends.shifts;
 
 private:
 
+import snakebite.nativelayout: typeFacts;
+
+
 import snakebite.nativelayout: TypeFacts;
 
 // How a shift (`<<`, `>>`, `>>>` and the compound forms) runs. dmd gives the left
@@ -27,7 +30,7 @@ package struct ShiftPlan {
 // The operands of a plain shift are already promoted, so the left
 // operand's own type is the operation type.
 package ShiftPlan shiftPlan(imported!"dmd.expression".BinExp expression) {
-    const facts = TypeFacts.of(expression.e1.type);
+    const facts = typeFacts(expression.e1.type);
     const direction = expression.isShlExp
         ? ShiftPlan.Direction.left
         : expression.isUshrExp || facts.isUnsigned
@@ -42,8 +45,8 @@ package ShiftPlan shiftPlan(
 ) {
     import snakebite.frontend.storage: compoundTarget;
 
-    const targetFacts = TypeFacts.of(compoundTarget(expression).type);
-    const width = TypeFacts.of(expression.e1.type).size;
+    const targetFacts = typeFacts(compoundTarget(expression).type);
+    const width = typeFacts(expression.e1.type).size;
     const direction = directionOf(expression);
 
     // On x86-64 a shift whose operation type is `int`-wide runs at the
@@ -69,7 +72,7 @@ private ShiftPlan.Direction directionOf(
         auto shifted = expression.e1;
         if (auto promotion = shifted.isCastExp)
             shifted = promotion.e1;
-        return TypeFacts.of(shifted.type).isUnsigned
+        return typeFacts(shifted.type).isUnsigned
             ? rightLogical : rightArithmetic;
     }
 }

@@ -4,42 +4,8 @@ module snakebite.backends.exceptions;
 private:
 
 
-import object: Throwable, TypeInfo_Class;
+public import snakebite.backends.unwindplan: catchMatches, unwindFinally;
 
-
-// `throwable` is `null` while an exception that is no `Throwable` unwinds,
-// and then it is already in flight.
-public void unwindFinally(
-    Throwable throwable,
-    scope void delegate() cleanup,
-) {
-    if (throwable is null) {
-        cleanup();
-        return;
-    }
-
-    try {
-        throw throwable;
-    } finally {
-        cleanup();
-    }
-}
-
-
-// Whether a guest `catch` naming `expected` accepts a throwable whose own
-// runtime type is `actual` - the same relation the bytecode VM already
-// reads straight off native `TypeInfo_Class` objects for a compiled catch
-// clause (`vm.findHandler`), now shared with the interpreter's own
-// `matchesThrowable` for the one case it still needs a `TypeInfo_Class`
-// comparison at all: a native throwable, which has no guest declaration
-// for an AST-level comparison to fall back to. `expected` is `null` for a
-// catch clause this backend never resolved a runtime type for; such a
-// clause matches nothing.
-public bool catchMatches(
-    const TypeInfo_Class expected, const TypeInfo_Class actual,
-) @safe @nogc nothrow pure {
-    return expected !is null && actual !is null && expected.isBaseOf(actual);
-}
 
 // What a failed `assert` reports, decided once from the assertion itself
 // so that every backend and mode says the same thing: `message` is D's own

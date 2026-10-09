@@ -1,5 +1,7 @@
 module ut.frontend.memory;
 
+import snakebite.nativelayout: typeFacts, truthFacts;
+
 
 // The frontend allocates like dmd does: from an arena that is never
 // freed and never scanned (`snakebite.gc`). Guest and host code keep
@@ -259,7 +261,7 @@ static foreach (shape; AliasSeq!("direct", "staticArray", "dynamicArray")) {
                     }
                     static if (shape == "dynamicArray")
                         qualified = newInFrontend!arrayOf(qualified);
-                    const facts = TypeFacts.of(qualified);
+                    const facts = typeFacts(qualified);
                     static if (shape == "direct")
                         facts.size.should == int.sizeof;
                     else static if (shape == "staticArray")
@@ -293,7 +295,7 @@ unittest {
         if (auto declaration = member.isEnumDeclaration) {
             ++checked;
             auto qualified = newInFrontend!constOf(declaration.type);
-            const truth = TypeFacts.Truth.of(qualified);
+            const truth = truthFacts(qualified);
             truth.size.should == size_t.sizeof;
             arenaReport.should == "";
         }

@@ -2,6 +2,9 @@ module snakebite.backends.compoundassign;
 
 private:
 
+import snakebite.nativelayout: typeFacts;
+
+
 import snakebite.backends.arithmetic: ArithmeticPlan;
 import snakebite.backends.casts: CastPlan;
 
@@ -41,7 +44,7 @@ package CompoundConversion compoundConversion(
         arithmeticKind(targetType) != arithmeticKind(operationType);
     const readsFirst = readsTargetFirst(
         arithmeticKind(operationType), crossesKind,
-        TypeFacts.of(targetType).size, TypeFacts.of(operationType).size);
+        typeFacts(targetType).size, typeFacts(operationType).size);
     if (!crossesKind)
         return CompoundConversion(false, readsFirst);
 

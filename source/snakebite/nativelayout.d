@@ -74,379 +74,290 @@ public long loadIntegral(in void* place, in size_t size, in bool signed) {
     return nativeLoadIntegral(place, size, signed);
 }
 
-// What a caller on a hot execution path repeatedly asks a dmd `Type`
-// for - its size, its alignment, whether it is integral, and if so
-// whether it is signed - decided once and kept, instead of re-entering
-// dmd's semantic-analysis machinery (`Type.size`, `TypeBasic.alignsize`,
-// `isIntegral`, `isUnsigned`) on every visit of the same node. Shared
-// between backends (not owned by the interpreter package) because any
-// tree-walking or bytecode backend asks a dmd `Type` the same four
-// questions to lay a value out in native memory.
-public struct TypeFacts {
-    import dmd.mtype: Type;
+public alias TypeFacts = imported!"snakebite.nativevalue".TypeFacts;
+public alias alignUp = imported!"snakebite.nativevalue".alignUp;
 
-    public size_t size;
-    public uint alignment;
-    public bool isIntegral;
-    public bool isUnsigned;
-    // Whether `type` is a dynamic array (`T[]`) - the native `{length,
-    // pointer}` pair, always `arrayValueSize` bytes regardless of `T`. A
-    // caller that only moves a value between slots (`opCopy`/`opConstant`,
-    // parameter passing, a return) needs nothing more than this and `size`
-    // to do so correctly; only a caller that indexes into the array needs
-    // `elementSize` as well.
-    public bool isDynamicArray;
-    // The element type's own size, meaningful only when `isDynamicArray` is
-    // `true` - what indexing has to multiply an index by to find an
-    // element's byte offset from the array's own pointer word.
-    public size_t elementSize;
+// The facts for `type`, read from dmd exactly once by the caller
+// that builds this. `resolved`/`forceResolved` force any forward
+// reference `size`/`alignsize`/`toBasetype` below could still
+// resolve, under the frontend lock, before this asks dmd anything -
+// see their own doc for why a call that finds nothing to force
+// needs no lock.
+public TypeFacts typeFacts(imported!"dmd.mtype".Type type) {
+    import dmd.astenums: Tarray, Tvector;
+    import dmd.typesem:
+        alignsize, isIntegral, isUnsigned, nextOf;
+    import snakebite.frontend.compiler: forceIfNeeded;
 
-    // A pointer-sized slot: what a `ref`/`out` parameter or local, a
-    // struct's hidden `this`, or a `ref` return's own place all hold -
-    // the argument's or result's own address, never its pointee's facts.
-    // Every backend that reserves such a slot reserves it with this same
-    // shape, so it is decided once here rather than spelled out with the
-    // same four literals at each call site.
-    public static TypeFacts pointer() {
-        return TypeFacts(size_t.sizeof, size_t.sizeof, false, false);
-    }
+    forceIfNeeded(() => resolved(type), () { forceResolved(type); });
 
-    // A delegate value's own slot: the fixed two-word `{context,
-    // function}` pair, whatever the delegate's own signature.
-    public static TypeFacts delegateValue() {
-        return TypeFacts(delegateValueSize, size_t.sizeof, false, false);
-    }
+    // An enum value has the representation of its base type. Keeping
+    // that representation here lets every byte-storage caller use the
+    // same facts for enum values with floating or string bases.
+    type = representationType(type);
 
-    // A `lazy` parameter's own slot: dmd's own implicit delegate, the
-    // same two words regardless of the type it wraps - never the wrapped
-    // type's own facts.
-    public alias lazyArgument = delegateValue;
-
-    // The facts for `type`, read from dmd exactly once by the caller
-    // that builds this. `resolved`/`forceResolved` force any forward
-    // reference `size`/`alignsize`/`toBasetype` below could still
-    // resolve, under the frontend lock, before this asks dmd anything -
-    // see their own doc for why a call that finds nothing to force
-    // needs no lock.
-    public static TypeFacts of(Type type) {
-        import dmd.astenums: Tarray, Tvector;
-        import dmd.typesem:
-            alignsize, isIntegral, isUnsigned, nextOf;
-        import snakebite.frontend.compiler: forceIfNeeded;
-
-        forceIfNeeded(() => resolved(type), () { forceResolved(type); });
-
-        // An enum value has the representation of its base type. Keeping
-        // that representation here lets every byte-storage caller use the
-        // same facts for enum values with floating or string bases.
-        type = representationType(type);
-
-        if (type.ty == Tarray) {
-            forceIfNeeded(
-                () => resolved(type.nextOf),
-                () { forceResolved(type.nextOf); },
-            );
-            return TypeFacts(
-                arrayValueSize, size_t.alignof, false, false, true,
-                representationSize(type.nextOf),
-            );
-        }
-
-        // A vector is not an integral value, whatever its element type:
-        // `isIntegral` answers for the element, and a vector is wider than
-        // any integral.
-        const scalar = type.ty != Tvector;
+    if (type.ty == Tarray) {
+        forceIfNeeded(
+            () => resolved(type.nextOf),
+            () { forceResolved(type.nextOf); },
+        );
         return TypeFacts(
-            representationSize(type),
-            type.alignsize,
-            scalar && type.isIntegral,
-            scalar && type.isUnsigned,
+            arrayValueSize, size_t.alignof, false, false, true,
+            representationSize(type.nextOf),
         );
     }
 
-    private static Type representationType(Type type) {
-        import dmd.typesem: toBasetype;
-        import snakebite.frontend.compiler: newInFrontend;
+    // A vector is not an integral value, whatever its element type:
+    // `isIntegral` answers for the element, and a vector is wider than
+    // any integral.
+    const scalar = type.ty != Tvector;
+    return TypeFacts(
+        representationSize(type),
+        type.alignsize,
+        scalar && type.isIntegral,
+        scalar && type.isUnsigned,
+    );
+}
 
-        // DMD can cache a new qualified base even when the enum is resolved.
-        if (type.isTypeEnum !is null)
-            return newInFrontend!toBasetype(type);
-        return type;
+private imported!"dmd.mtype".Type representationType(
+    imported!"dmd.mtype".Type type,
+) {
+    import dmd.typesem: toBasetype;
+    import snakebite.frontend.compiler: newInFrontend;
+
+    // DMD can cache a new qualified base even when the enum is resolved.
+    if (type.isTypeEnum !is null)
+        return newInFrontend!toBasetype(type);
+    return type;
+}
+
+private auto representationSize(imported!"dmd.mtype".Type type) {
+    import dmd.typesem: size;
+    import snakebite.frontend.compiler: newInFrontend;
+
+    // Static-array size normalizes each nested element. An enum can
+    // still allocate a qualified base after its declaration is resolved.
+    auto element = type;
+    while (auto arrayType = element.isTypeSArray)
+        element = arrayType.next;
+    if (element.isTypeEnum !is null)
+        return newInFrontend!size(type);
+    return type.size;
+}
+
+// `typeFacts`, for a caller that only prepares what execution may ask for
+// later: a type with no size (an aggregate that is declared and never
+// defined, an array too large to size) leaves `facts` alone and gives
+// `false`, where `typeFacts` would give a size that no memory has. The
+// execution that asks for such a type still asks `typeFacts`. Run it with
+// dmd's diagnostics gagged.
+public bool tryTypeFacts(imported!"dmd.mtype".Type type, out TypeFacts facts) {
+    if (!hasSize(type))
+        return false;
+
+    facts = typeFacts(type);
+    return facts.size != size_t.max;
+}
+
+private bool hasSize(imported!"dmd.mtype".Type type) {
+    import dmd.astenums: Sizeok, Tarray, Terror;
+    import dmd.enumsem: getMemtype;
+    import dmd.location: Loc;
+    import dmd.typesem: nextOf;
+    import snakebite.frontend.compiler: newInFrontend;
+
+    if (type.ty == Terror)
+        return false;
+
+    if (auto enumType = type.isTypeEnum) {
+        auto memtype = newInFrontend!getMemtype(enumType.sym, Loc.initial);
+        return memtype !is null && hasSize(memtype);
     }
 
-    private static auto representationSize(Type type) {
-        import dmd.typesem: size;
-        import snakebite.frontend.compiler: newInFrontend;
+    if (auto structType = type.isTypeStruct)
+        return structType.sym.members !is null
+            || structType.sym.sizeok == Sizeok.done;
 
-        // Static-array size normalizes each nested element. An enum can
-        // still allocate a qualified base after its declaration is resolved.
-        auto element = type;
-        while (auto arrayType = element.isTypeSArray)
-            element = arrayType.next;
-        if (element.isTypeEnum !is null)
-            return newInFrontend!size(type);
-        return type.size;
-    }
+    if (auto arrayType = type.isTypeSArray)
+        return hasSize(arrayType.next);
 
-    // `of`, for a caller that only prepares what execution may ask for
-    // later: a type with no size (an aggregate that is declared and never
-    // defined, an array too large to size) leaves `facts` alone and gives
-    // `false`, where `of` would give a size that no memory has. The
-    // execution that asks for such a type still asks `of`. Run it with
-    // dmd's diagnostics gagged.
-    public static bool tryOf(Type type, out TypeFacts facts) {
-        if (!hasSize(type))
-            return false;
+    if (type.ty == Tarray)
+        return hasSize(type.nextOf);
 
-        facts = of(type);
-        return facts.size != size_t.max;
-    }
+    return true;
+}
 
-    private static bool hasSize(Type type) {
-        import dmd.astenums: Sizeok, Tarray, Terror;
+// Whether every forward reference `toBasetype`/`size`/`alignsize`
+// could still resolve for `type` is already resolved - an enum's own
+// base type (`EnumDeclaration.getMemtype`, reached through
+// `toBasetype`), or a struct's own size
+// (`AggregateDeclaration.determineSize`, reached through `size`/
+// `alignsize` directly, or through `Type.baseElemOf`'s
+// `toBasetype`-then-descend walk for a static array). A pointer, a
+// class handle, a dynamic array's own two words, and every basic
+// type answer `size`/`alignsize` from a fixed table with no dsymbol
+// to force at all (`dmd.typesem.size`'s own switch), so this
+// defaults to `true` for any `Type` kind not named below.
+//
+// Every field read here is `atomicLoad!(MemoryOrder.acq)`, not a
+// plain read - `forceIfNeeded`'s own doc (`snakebite.frontend.
+// compiler`) explains why an unlocked reader needs that much, and
+// why the field itself must be the one dmd sets only once the data
+// it guards is completely settled, not merely a field dmd's own
+// single-threaded code happens to gate re-entrancy on.
+private bool resolved(imported!"dmd.mtype".Type type) {
+    import core.atomic: atomicLoad, MemoryOrder;
+    import dmd.astenums: Sizeok;
+    import dmd.dsymbol: PASS;
+
+    // `EnumDeclaration.enumSemantic` (dmd/enumsem.d) clears `_scope`
+    // (dmd's own re-entrancy gate, and the field `getMemtype` itself
+    // reads) as soon as it starts, long before `memtype` is
+    // reassigned to its resolved form a few lines later - `_scope
+    // is null` can be true while a racing reader still sees the
+    // pre-semantic, unresolved `memtype` the parser first assigned
+    // (e.g. a `TypeIdentifier` for `enum E : SomeAlias`), not a real
+    // answer to `size`/`alignsize`. `semanticRun` only reaches
+    // `semanticdone` after that reassignment, on every path through
+    // `enumSemantic` that starts with `memtype` non-null - gate on
+    // that field instead. `enum { A, B, C }` (no explicit base)
+    // leaves `memtype` null past `semanticdone` too (dmd fills it in
+    // later still, from the first member's own value) - `memtype
+    // !is null` below stays false for that case until dmd truly
+    // sets it, keeping every caller on the locked path meanwhile, so
+    // it is kept alongside the corrected `semanticRun` check rather
+    // than dropped.
+    if (auto enumType = type.isTypeEnum)
+        return atomicLoad!(MemoryOrder.acq)(enumType.sym.semanticRun)
+                >= PASS.semanticdone
+            && atomicLoad!(MemoryOrder.acq)(enumType.sym.memtype)
+                !is null
+            && resolved(enumType.sym.memtype);
+
+    // `finalizeSize` (dsymbolsem.d) sets `sizeok = Sizeok.done` as
+    // its very last write, strictly after `structsize`/`alignsize`
+    // are both final - unlike `EnumDeclaration._scope` above, this
+    // field really is the last word.
+    if (auto structType = type.isTypeStruct)
+        return atomicLoad!(MemoryOrder.acq)(structType.sym.sizeok)
+            == Sizeok.done;
+
+    if (auto arrayType = type.isTypeSArray)
+        return resolved(arrayType.next);
+
+    return true;
+}
+
+// The forcing half of `resolved`: runs, under the frontend lock
+// (`forceIfNeeded`'s own doc explains why only there), exactly the
+// dmd call whose own idempotent gate `resolved` mirrors. Each dmd
+// function re-checks that same gate itself, so calling it again for
+// a branch another thread resolved first, between `resolved`'s read
+// and this thread taking the lock, is itself a no-op - never a
+// second write.
+private void forceResolved(imported!"dmd.mtype".Type type) {
+    import dmd.location: Loc;
+    import snakebite.frontend.compiler: newInFrontend;
+
+    if (auto enumType = type.isTypeEnum) {
         import dmd.enumsem: getMemtype;
-        import dmd.location: Loc;
-        import dmd.typesem: nextOf;
-        import snakebite.frontend.compiler: newInFrontend;
 
-        if (type.ty == Terror)
-            return false;
-
-        if (auto enumType = type.isTypeEnum) {
-            auto memtype = newInFrontend!getMemtype(enumType.sym, Loc.initial);
-            return memtype !is null && hasSize(memtype);
-        }
-
-        if (auto structType = type.isTypeStruct)
-            return structType.sym.members !is null
-                || structType.sym.sizeok == Sizeok.done;
-
-        if (auto arrayType = type.isTypeSArray)
-            return hasSize(arrayType.next);
-
-        if (type.ty == Tarray)
-            return hasSize(type.nextOf);
-
-        return true;
+        forceResolved(newInFrontend!getMemtype(enumType.sym, Loc.initial));
+        return;
     }
 
-    // Whether every forward reference `toBasetype`/`size`/`alignsize`
-    // could still resolve for `type` is already resolved - an enum's own
-    // base type (`EnumDeclaration.getMemtype`, reached through
-    // `toBasetype`), or a struct's own size
-    // (`AggregateDeclaration.determineSize`, reached through `size`/
-    // `alignsize` directly, or through `Type.baseElemOf`'s
-    // `toBasetype`-then-descend walk for a static array). A pointer, a
-    // class handle, a dynamic array's own two words, and every basic
-    // type answer `size`/`alignsize` from a fixed table with no dsymbol
-    // to force at all (`dmd.typesem.size`'s own switch), so this
-    // defaults to `true` for any `Type` kind not named below.
-    //
-    // Every field read here is `atomicLoad!(MemoryOrder.acq)`, not a
-    // plain read - `forceIfNeeded`'s own doc (`snakebite.frontend.
-    // compiler`) explains why an unlocked reader needs that much, and
-    // why the field itself must be the one dmd sets only once the data
-    // it guards is completely settled, not merely a field dmd's own
-    // single-threaded code happens to gate re-entrancy on.
-    private static bool resolved(Type type) {
-        import core.atomic: atomicLoad, MemoryOrder;
-        import dmd.astenums: Sizeok;
-        import dmd.dsymbol: PASS;
+    if (auto structType = type.isTypeStruct) {
+        import dmd.dsymbolsem: size;
 
-        // `EnumDeclaration.enumSemantic` (dmd/enumsem.d) clears `_scope`
-        // (dmd's own re-entrancy gate, and the field `getMemtype` itself
-        // reads) as soon as it starts, long before `memtype` is
-        // reassigned to its resolved form a few lines later - `_scope
-        // is null` can be true while a racing reader still sees the
-        // pre-semantic, unresolved `memtype` the parser first assigned
-        // (e.g. a `TypeIdentifier` for `enum E : SomeAlias`), not a real
-        // answer to `size`/`alignsize`. `semanticRun` only reaches
-        // `semanticdone` after that reassignment, on every path through
-        // `enumSemantic` that starts with `memtype` non-null - gate on
-        // that field instead. `enum { A, B, C }` (no explicit base)
-        // leaves `memtype` null past `semanticdone` too (dmd fills it in
-        // later still, from the first member's own value) - `memtype
-        // !is null` below stays false for that case until dmd truly
-        // sets it, keeping every caller on the locked path meanwhile, so
-        // it is kept alongside the corrected `semanticRun` check rather
-        // than dropped.
-        if (auto enumType = type.isTypeEnum)
-            return atomicLoad!(MemoryOrder.acq)(enumType.sym.semanticRun)
-                    >= PASS.semanticdone
-                && atomicLoad!(MemoryOrder.acq)(enumType.sym.memtype)
-                    !is null
-                && resolved(enumType.sym.memtype);
-
-        // `finalizeSize` (dsymbolsem.d) sets `sizeok = Sizeok.done` as
-        // its very last write, strictly after `structsize`/`alignsize`
-        // are both final - unlike `EnumDeclaration._scope` above, this
-        // field really is the last word.
-        if (auto structType = type.isTypeStruct)
-            return atomicLoad!(MemoryOrder.acq)(structType.sym.sizeok)
-                == Sizeok.done;
-
-        if (auto arrayType = type.isTypeSArray)
-            return resolved(arrayType.next);
-
-        return true;
+        newInFrontend!size(structType.sym, Loc.initial);
+        return;
     }
 
-    // The forcing half of `resolved`: runs, under the frontend lock
-    // (`forceIfNeeded`'s own doc explains why only there), exactly the
-    // dmd call whose own idempotent gate `resolved` mirrors. Each dmd
-    // function re-checks that same gate itself, so calling it again for
-    // a branch another thread resolved first, between `resolved`'s read
-    // and this thread taking the lock, is itself a no-op - never a
-    // second write.
-    private static void forceResolved(Type type) {
-        import dmd.location: Loc;
-        import snakebite.frontend.compiler: newInFrontend;
-
-        if (auto enumType = type.isTypeEnum) {
-            import dmd.enumsem: getMemtype;
-
-            forceResolved(newInFrontend!getMemtype(enumType.sym, Loc.initial));
-            return;
-        }
-
-        if (auto structType = type.isTypeStruct) {
-            import dmd.dsymbolsem: size;
-
-            newInFrontend!size(structType.sym, Loc.initial);
-            return;
-        }
-
-        if (auto arrayType = type.isTypeSArray)
-            forceResolved(arrayType.next);
-    }
-
-    // Which native bytes of a value of `type` decide whether it is true
-    // as a condition (`if`, `assert`, `!`, `&&`, `||`, `?:`) - dmd's own
-    // `toBoolean` (`dmd.expressionsem`) leaves such a condition's type
-    // unchanged for every case here, so the real test is the one native
-    // codegen makes of the value's bytes, not any `bool` conversion:
-    //
-    // * A floating value is true when nonzero, compared as a float, at
-    //   `size` bytes from the value's own start.
-    // * A dynamic array is true when either of its two words (`ptr`,
-    //   `length`) is nonzero: a zero-length slice over real storage is
-    //   true, and so is a null pointer with a nonzero length (dmd
-    //   compiles both so; `ldc2` tests the pointer alone).
-    // * A delegate is true when either of its two words (`ptr`,
-    //   `funcptr`) is nonzero.
-    // * A pointer, a class reference, an associative array's one
-    //   pointer-sized handle, and every integral (`bool`, `char`, an
-    //   enum with an integral base, ...) are already exactly one native
-    //   word: `offset` alone, `size` bytes, decides it.
-    //
-    // One rule shared by every backend that compiles or interprets a
-    // condition, so neither special-cases an associative array or a
-    // delegate on its own.
-    public struct Truth {
-        public bool isFloat;
-        // Offset, from the value's own start, and width, of the bytes
-        // that decide truth on their own (the only bytes there are,
-        // unless `secondOffset` names a second word).
-        public size_t offset;
-        public size_t size;
-        // Offset of a second, `size_t.sizeof`-wide word to test as well
-        // (true if either word is nonzero) - `noSecondWord` when the
-        // first word already decides it alone.
-        public size_t secondOffset = noSecondWord;
-
-        public enum noSecondWord = size_t.max;
-
-        public static Truth of(Type type) {
-            import dmd.astenums: TY;
-            import dmd.typesem: size;
-            import std.conv: text;
-
-            type = representationType(type);
-            final switch (type.ty) with (TY) {
-                // An imaginary value is one `float`/`double`/`real`-shaped
-                // component on its own - the same nonzero test a real one
-                // gets, just at its own (imaginary) type's size.
-                case Tfloat32, Tfloat64, Tfloat80,
-                    Timaginary32, Timaginary64, Timaginary80:
-                    return Truth(true, 0, type.size);
-
-                // A complex value is true when either of its two
-                // `float`/`double`/`real`-shaped components (`re`, `im`,
-                // each exactly half `type.size` - `nativevalue.
-                // loadComplexRe`/`loadComplexIm`'s own layout) is nonzero.
-                case Tcomplex32, Tcomplex64, Tcomplex80: {
-                    const half = type.size / 2;
-                    return Truth(true, 0, half, half);
-                }
-
-                case Tarray:
-                    return Truth(
-                        false, arrayPointerOffset, size_t.sizeof,
-                        arrayLengthOffset,
-                    );
-
-                case Tdelegate:
-                    return Truth(
-                        false, delegateContextOffset, size_t.sizeof,
-                        delegateFunctionOffset,
-                    );
-
-                // `typeof(null)` has only ever the one value - always zero
-                // bits, so `if (x)` on it is always false - but that is
-                // still the same one-word nonzero test a pointer's own
-                // `Truth` already is.
-                case Tpointer, Tclass, Taarray, Tnull,
-                    Tbool, Tchar, Twchar, Tdchar, Tint8, Tuns8, Tint16,
-                    Tuns16, Tint32, Tuns32, Tint64, Tuns64:
-                    return Truth(false, 0, type.size);
-
-                // Evaluating the condition never finishes, so no byte of
-                // it is ever tested.
-                case Tnoreturn:
-                    return Truth(false, 0, 0);
-
-                case Tstruct, Tsarray, Tvector, Tint128, Tuns128, Tenum,
-                    Tvoid, Tfunction, Treference, Tident, Tnone, Terror,
-                    Tinstance, Ttypeof, Ttuple, Tslice, Treturn, Ttraits,
-                    Tmixin, Ttag:
-                    internalFailure(text("`", type.toString, "` cannot be a ",
-                        "condition: semantic rejects it, and `toBasetype` ",
-                        "leaves no enum"));
-            }
-        }
-    }
+    if (auto arrayType = type.isTypeSArray)
+        forceResolved(arrayType.next);
 }
 
-// Rounds `offset` up to the next multiple of `alignment`, by way of dmd's
-// default field-alignment rule (`aggregate.alignmember`, the same one it
-// uses to lay out a struct's fields), rather than reimplementing it: no
-// generic round-up-to-alignment helper exists anywhere else in the dmd
-// frontend sources. Parameter frame offsets are ordinarily assigned far
-// downstream of this, in dmd's machine-code backend, which this project
-// does not use - laying out frames here is unavoidable, not a case of
-// redoing work dmd already did for us at this stage.
-public size_t alignUp(in size_t offset, in uint alignment) {
-    import dmd.aggregate: alignmember;
+// Which native bytes of a value of `type` decide whether it is true
+// as a condition (`if`, `assert`, `!`, `&&`, `||`, `?:`) - dmd's own
+// `toBoolean` (`dmd.expressionsem`) leaves such a condition's type
+// unchanged for every case here, so the real test is the one native
+// codegen makes of the value's bytes, not any `bool` conversion:
+//
+// * A floating value is true when nonzero, compared as a float, at
+//   `size` bytes from the value's own start.
+// * A dynamic array is true when either of its two words (`ptr`,
+//   `length`) is nonzero: a zero-length slice over real storage is
+//   true, and so is a null pointer with a nonzero length (dmd
+//   compiles both so; `ldc2` tests the pointer alone).
+// * A delegate is true when either of its two words (`ptr`,
+//   `funcptr`) is nonzero.
+// * A pointer, a class reference, an associative array's one
+//   pointer-sized handle, and every integral (`bool`, `char`, an
+//   enum with an integral base, ...) are already exactly one native
+//   word: `offset` alone, `size` bytes, decides it.
+//
+// One rule shared by every backend that compiles or interprets a
+// condition, so neither special-cases an associative array or a
+// delegate on its own.
+public TypeFacts.Truth truthFacts(imported!"dmd.mtype".Type type) {
+    alias Truth = TypeFacts.Truth;
+    import dmd.astenums: TY;
+    import dmd.typesem: size;
+    import std.conv: text;
 
-    // `noreturn.alignof` is 0: a value that never exists needs no
-    // alignment, and `alignmember` requires a power of 2.
-    if (alignment == 0)
-        return offset;
-    return alignmember(defaultAlignment, alignment, cast(uint) offset);
+    type = representationType(type);
+    final switch (type.ty) with (TY) {
+        // An imaginary value is one `float`/`double`/`real`-shaped
+        // component on its own - the same nonzero test a real one
+        // gets, just at its own (imaginary) type's size.
+        case Tfloat32, Tfloat64, Tfloat80,
+            Timaginary32, Timaginary64, Timaginary80:
+            return Truth(true, 0, type.size);
+
+        // A complex value is true when either of its two
+        // `float`/`double`/`real`-shaped components (`re`, `im`,
+        // each exactly half `type.size` - `nativevalue.
+        // loadComplexRe`/`loadComplexIm`'s own layout) is nonzero.
+        case Tcomplex32, Tcomplex64, Tcomplex80: {
+            const half = type.size / 2;
+            return Truth(true, 0, half, half);
+        }
+
+        case Tarray:
+            return Truth(
+                false, arrayPointerOffset, size_t.sizeof,
+                arrayLengthOffset,
+            );
+
+        case Tdelegate:
+            return Truth(
+                false, delegateContextOffset, size_t.sizeof,
+                delegateFunctionOffset,
+            );
+
+        // `typeof(null)` has only ever the one value - always zero
+        // bits, so `if (x)` on it is always false - but that is
+        // still the same one-word nonzero test a pointer's own
+        // `Truth` already is.
+        case Tpointer, Tclass, Taarray, Tnull,
+            Tbool, Tchar, Twchar, Tdchar, Tint8, Tuns8, Tint16,
+            Tuns16, Tint32, Tuns32, Tint64, Tuns64:
+            return Truth(false, 0, type.size);
+
+        // Evaluating the condition never finishes, so no byte of
+        // it is ever tested.
+        case Tnoreturn:
+            return Truth(false, 0, 0);
+
+        case Tstruct, Tsarray, Tvector, Tint128, Tuns128, Tenum,
+            Tvoid, Tfunction, Treference, Tident, Tnone, Terror,
+            Tinstance, Ttypeof, Ttuple, Tslice, Treturn, Ttraits,
+            Tmixin, Ttag:
+            internalFailure(text("`", type.toString, "` cannot be a ",
+                "condition: semantic rejects it, and `toBasetype` ",
+                "leaves no enum"));
+    }
 }
-
-// `alignmember` takes a `structalign_t` for cases with an explicit
-// `align(N)`; there is none here, so `defaultAlignment` is always the
-// type's own natural alignment - and it is built at compile time,
-// not on every call, since this runs on every parameter offset and every
-// frame stack push.
-private enum defaultAlignment = () {
-    import dmd.astenums: structalign_t;
-
-    structalign_t alignment;
-    alignment.setDefault;
-    return alignment;
-}();
 
 // Inspecting an initializer's value must not itself run construction.
 public imported!"dmd.expression".Expression initializerValueOf(
@@ -678,7 +589,7 @@ public struct NativeData {
                         access.store(cast(ubyte*) address + access.offset,
                             element.toInteger);
                     } else
-                        write(field.type, TypeFacts.of(field.type), element,
+                        write(field.type, typeFacts(field.type), element,
                             cast(ubyte*) address + field.offset);
                 }
             }
@@ -698,7 +609,7 @@ public struct NativeData {
                 return;
             }
             version(unittest) assertCacheFillAllowed!"struct constants";
-            const facts = TypeFacts.of(literal.type);
+            const facts = typeFacts(literal.type);
             auto bytes = reserve(facts);
             address = bytes.ptr;
             // Register before fields: compile-time values can form cycles.
@@ -771,7 +682,7 @@ public struct NativeData {
         Type type,
         Expression expression,
     ) {
-        const facts = TypeFacts.of(type);
+        const facts = typeFacts(type);
         auto bytes = reserve(facts);
         write(type, facts, expression, bytes.ptr);
         return bytes;
@@ -780,7 +691,7 @@ public struct NativeData {
     public const(void)[] value(Type type, in void[] representation) {
         import core.stdc.string: memcpy;
 
-        const facts = TypeFacts.of(type);
+        const facts = typeFacts(type);
         assert(representation.length == facts.size);
         auto bytes = reserve(facts);
         memcpy(bytes.ptr, representation.ptr, bytes.length);
@@ -834,7 +745,7 @@ public struct NativeData {
         if (auto found = variable in _statics)
             return *found;
 
-        const facts = TypeFacts.of(variable.type);
+        const facts = typeFacts(variable.type);
         if (variable.isThreadLocalStorage)
             return _tls.current.slotFor(tlsDescriptorOf(variable));
 
@@ -880,7 +791,7 @@ public struct NativeData {
                 descriptor = found;
                 return;
             }
-            const facts = TypeFacts.of(variable.type);
+            const facts = typeFacts(variable.type);
             if (hasNativeStorage(variable)) {
                 const name = nativeSymbolName(variable);
                 // Only to learn that the symbol is there: this thread's
@@ -1125,7 +1036,7 @@ public void storeValue(
     imported!"dmd.expression".Expression value,
     void* place,
 ) {
-    storeValue(type, TypeFacts.of(type), value, place, null);
+    storeValue(type, typeFacts(type), value, place, null);
 }
 
 private void storeValue(
@@ -1135,7 +1046,7 @@ private void storeValue(
     scope SymbolAddress symbolAddress,
     NativeData* nativeData = null,
 ) {
-    storeValue(type, TypeFacts.of(type), value, place, symbolAddress, nativeData);
+    storeValue(type, typeFacts(type), value, place, symbolAddress, nativeData);
 }
 
 public void storeValue(
@@ -1500,7 +1411,7 @@ public BitfieldAccess bitfieldAccess(imported!"dmd.declaration".VarDeclaration f
     if (bitfield is null)
         internalFailure("a bit field access needs a bit field declaration");
 
-    const facts = TypeFacts.of(field.type);
+    const facts = typeFacts(field.type);
     const unitBits = facts.size * 8;
     const units = bitfield.bitOffset / unitBits;
     const shift = bitfield.bitOffset - units * unitBits;

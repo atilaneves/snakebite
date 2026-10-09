@@ -3,6 +3,9 @@ module snakebite.backends.aggregateinit;
 
 private:
 
+import snakebite.nativelayout: typeFacts;
+
+
 
 import snakebite.nativelayout: TypeFacts;
 import snakebite.nativelayout: fieldOffset;
@@ -345,8 +348,8 @@ private InitStep fieldStep(
 ) {
     auto sarrayType = field.type.isTypeSArray;
     if (sarrayType !is null && !source.type.equals(field.type)) {
-        const elementFacts = TypeFacts.of(source.type);
-        const fieldFacts = TypeFacts.of(sarrayType);
+        const elementFacts = typeFacts(source.type);
+        const fieldFacts = typeFacts(sarrayType);
         auto step = InitStep(
             InitStep.Kind.broadcast, field.offset, elementFacts, source.type,
         );
@@ -355,7 +358,7 @@ private InitStep fieldStep(
         return step;
     }
 
-    const facts = TypeFacts.of(field.type);
+    const facts = typeFacts(field.type);
     if (field.isBitFieldDeclaration !is null) {
         auto step = InitStep(
             InitStep.Kind.bitfield, fieldOffset(field), facts, field.type);

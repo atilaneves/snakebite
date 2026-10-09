@@ -3,7 +3,7 @@ module snakebite.backends.argumentflow;
 
 private:
 
-import snakebite.nativelayout: TypeFacts;
+import snakebite.nativevalue: TypeFacts;
 import snakebite.sharedtable: SharedTable;
 
 

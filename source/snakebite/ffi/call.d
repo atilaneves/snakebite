@@ -3,6 +3,9 @@ module snakebite.ffi.call;
 
 private:
 
+import snakebite.nativelayout: typeFacts;
+
+
 
 import core.stdc.string: memcpy;
 
@@ -201,13 +204,13 @@ public struct CallAdapter {
                 const facts = declared.isReference ? TypeFacts.pointer
                     : declared.isLazy
                         ? TypeFacts.lazyArgument
-                        : TypeFacts.of(declared.parameterType);
+                        : typeFacts(declared.parameterType);
                 emit(Value(
                     declared.expression, facts, declared.isReference,
                 ));
             }
             foreach (expression; _expressions[extraOffset .. $])
-                emit(Value(expression, TypeFacts.of(expression.type)));
+                emit(Value(expression, typeFacts(expression.type)));
         }
 
         // The order a native callee takes already-evaluated arguments in,
@@ -219,7 +222,7 @@ public struct CallAdapter {
 
         public void eachExtra(scope void delegate(Value) emit) {
             foreach (expression; _expressions[extraOffset .. $])
-                emit(Value(expression, TypeFacts.of(expression.type)));
+                emit(Value(expression, typeFacts(expression.type)));
         }
 
         private Declared declaredValue(in size_t i) {
@@ -264,7 +267,7 @@ public struct CallAdapter {
             import snakebite.ffi.abi: dVariadicArgumentsIsSlice;
 
             auto expression = _expressions[0];
-            auto value = Value(expression, TypeFacts.of(expression.type));
+            auto value = Value(expression, typeFacts(expression.type));
             // The host compiler can require a field read after evaluation.
             if (dVariadicArgumentsIsSlice) {
                 value.readsField = true;
@@ -297,7 +300,7 @@ public struct CallAdapter {
                 slots[first] = evaluate(hiddenArgument);
             foreach (i; extraOffset .. _expressions.length)
                 slots[first + i] = evaluate(Value(
-                    _expressions[i], TypeFacts.of(_expressions[i].type),
+                    _expressions[i], typeFacts(_expressions[i].type),
                 ));
             return arguments;
         }
@@ -334,10 +337,10 @@ public struct CallAdapter {
 
         if (adapter._referenceResult) {
             assert(returnType !is null);
-            adapter._resultSize = TypeFacts.of(returnType).size;
+            adapter._resultSize = typeFacts(returnType).size;
             adapter._returnFacts = TypeFacts.pointer;
         } else if (!adapter._isVoid) {
-            adapter._returnFacts = TypeFacts.of(returnType);
+            adapter._returnFacts = typeFacts(returnType);
         }
 
         return adapter;

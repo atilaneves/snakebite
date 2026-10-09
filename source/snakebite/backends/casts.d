@@ -3,6 +3,9 @@ module snakebite.backends.casts;
 
 private:
 
+import snakebite.nativelayout: typeFacts;
+
+
 
 import snakebite.internalfailure: internalFailure;
 
@@ -63,7 +66,7 @@ public CastPlan classify(
 
     return classifyByKind(
         kindOf(sourceType), kindOf(destType), sourceType, destType,
-        TypeFacts.of(sourceType), TypeFacts.of(destType),
+        typeFacts(sourceType), typeFacts(destType),
     );
 }
 
@@ -419,7 +422,7 @@ public CastPlan classify(
 ) {
     if (expression.isNullExp !is null)
         return CastPlan(
-            CastKind.zero, TypeFacts.init, TypeFacts.of(destType));
+            CastKind.zero, TypeFacts.init, typeFacts(destType));
 
     return classify(expression.type, destType);
 }

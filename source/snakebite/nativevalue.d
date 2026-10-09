@@ -7,6 +7,80 @@ private:
 import snakebite.internalfailure: internalFailure;
 
 
+// What a caller on a hot execution path repeatedly asks a dmd `Type`
+// for - its size, its alignment, whether it is integral, and if so
+// whether it is signed - decided once and kept, instead of re-entering
+// dmd's semantic-analysis machinery (`Type.size`, `TypeBasic.alignsize`,
+// `isIntegral`, `isUnsigned`) on every visit of the same node. Shared
+// between backends (not owned by the interpreter package) because any
+// tree-walking or bytecode backend asks a dmd `Type` the same four
+// questions to lay a value out in native memory.
+public struct TypeFacts {
+    public size_t size;
+    public uint alignment;
+    public bool isIntegral;
+    public bool isUnsigned;
+    // Whether `type` is a dynamic array (`T[]`) - the native `{length,
+    // pointer}` pair, always `arrayValueSize` bytes regardless of `T`. A
+    // caller that only moves a value between slots (`opCopy`/`opConstant`,
+    // parameter passing, a return) needs nothing more than this and `size`
+    // to do so correctly; only a caller that indexes into the array needs
+    // `elementSize` as well.
+    public bool isDynamicArray;
+    // The element type's own size, meaningful only when `isDynamicArray` is
+    // `true` - what indexing has to multiply an index by to find an
+    // element's byte offset from the array's own pointer word.
+    public size_t elementSize;
+
+    // A pointer-sized slot: what a `ref`/`out` parameter or local, a
+    // struct's hidden `this`, or a `ref` return's own place all hold -
+    // the argument's or result's own address, never its pointee's facts.
+    // Every backend that reserves such a slot reserves it with this same
+    // shape, so it is decided once here rather than spelled out with the
+    // same four literals at each call site.
+    public static TypeFacts pointer() @safe @nogc nothrow pure {
+        return TypeFacts(size_t.sizeof, size_t.sizeof, false, false);
+    }
+
+    // A delegate value's own slot: the fixed two-word `{context,
+    // function}` pair, whatever the delegate's own signature.
+    public static TypeFacts delegateValue() @safe @nogc nothrow pure {
+        return TypeFacts(delegateValueSize, size_t.sizeof, false, false);
+    }
+
+    // A `lazy` parameter's own slot: dmd's own implicit delegate, the
+    // same two words regardless of the type it wraps - never the wrapped
+    // type's own facts.
+    public alias lazyArgument = delegateValue;
+
+    public struct Truth {
+        public bool isFloat;
+        // Offset, from the value's own start, and width, of the bytes
+        // that decide truth on their own (the only bytes there are,
+        // unless `secondOffset` names a second word).
+        public size_t offset;
+        public size_t size;
+        // Offset of a second, `size_t.sizeof`-wide word to test as well
+        // (true if either word is nonzero) - `noSecondWord` when the
+        // first word already decides it alone.
+        public size_t secondOffset = noSecondWord;
+
+        public enum noSecondWord = size_t.max;
+    }
+}
+
+// Default native field alignment uses DMD's uint offset arithmetic.
+// A zero alignment describes a value that never exists (`noreturn`).
+public size_t alignUp(in size_t offset, in uint alignment)
+    @safe @nogc nothrow pure
+{
+    if (alignment == 0)
+        return offset;
+    assert((alignment & (alignment - 1)) == 0);
+    const mask = alignment - 1;
+    return (cast(uint) offset + mask) & ~mask;
+}
+
 // Integral values in guest storage use the same byte order and widths as
 // compiled D values. Callers validate a width before reaching this module;
 // the assertions keep invalid calls from becoming silent memory corruption

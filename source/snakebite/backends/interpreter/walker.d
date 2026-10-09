@@ -3,6 +3,9 @@ module snakebite.backends.interpreter.walker;
 
 private:
 
+import snakebite.nativelayout: typeFacts, tryTypeFacts, truthFacts;
+
+
 
 import snakebite.internalfailure: internalFailure;
 
@@ -1188,7 +1191,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return _cachedFacts;
         }
 
-        const facts = *_typeFacts.build(type, () => TypeFacts.of(type));
+        const facts = *_typeFacts.build(type, () => typeFacts(type));
         _cachedType = type;
         _cachedFacts = facts;
         return facts;
@@ -1760,7 +1763,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return;
 
         TypeFacts facts;
-        if (TypeFacts.tryOf(type, facts))
+        if (tryTypeFacts(type, facts))
             _typeFacts.build(type, () => facts);
     }
 
@@ -1779,7 +1782,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     extern(D) private void prepareDefault(Type type) {
         TypeFacts facts;
-        if (TypeFacts.tryOf(type, facts) && facts.size <= preparedBytesLimit)
+        if (tryTypeFacts(type, facts) && facts.size <= preparedBytesLimit)
             _nativeData.initialValue(type, Loc.initial);
     }
 
@@ -1791,7 +1794,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         if (variable.isThreadlocal || variable.isDataseg) {
             TypeFacts facts;
-            if (!TypeFacts.tryOf(variable.type, facts)
+            if (!tryTypeFacts(variable.type, facts)
                     || facts.size > preparedBytesLimit)
                 return;
 
@@ -2760,7 +2763,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private bool truthOf(Expression expression) {
         auto type = expression.type;
 
-        // Sized to `creal`, the widest condition value `Truth.of` ever
+        // Sized to `creal`, the widest condition value `truthFacts` ever
         // answers `supported` for - a plain real, an imaginary, or one
         // component of a complex all fit within it too.
         const facts = factsOf(type);
@@ -2776,7 +2779,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.nativelayout: TypeFacts, loadIntegral;
         import snakebite.nativevalue: loadFloating;
 
-        const truth = TypeFacts.Truth.of(type);
+        const truth = truthFacts(type);
         const buffer = cast(const(ubyte)*) value;
 
         if (truth.isFloat) {
@@ -5367,7 +5370,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         // `e1` is a class reference or a struct pointer here - a single
         // pointer-sized value that is its own truth test
-        // (`TypeFacts.Truth.of`'s own answer for either shape) - evaluated
+        // (`truthFacts`'s own answer for either shape) - evaluated
         // once and reused for both the condition check and the invariant
         // call below, the same "evaluate once, reuse the same compiler
         // temporary for both" dmd's own glue layer does with its one
