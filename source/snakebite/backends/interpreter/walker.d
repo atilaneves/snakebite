@@ -2337,18 +2337,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         in FullExpressionScope.Position position,
         Expression expression,
     ) {
-        if (readsResultAfterEnd(position, expression)) {
-            void* address;
-            fullExpression(position, expression, {
-                address = addressOf(FullExpressionScope.lvalueOf(expression));
-            });
-            return truthOfStored(address, expression.type);
-        }
-
         bool result;
-        fullExpression(position, expression, {
-            result = truthOf(expression);
-        });
+        fullExpressionValue!(void*)(position, expression,
+            { result = truthOf(expression); },
+            (operand) { return addressOf(operand); },
+            (address) { result = truthOfStored(address, expression.type); });
         return result;
     }
 
@@ -2386,21 +2379,13 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
             const operandFacts = factsOf(statement.condition.type);
             long condition;
-            if (readsResultAfterEnd(
-                    FullExpressionScope.Position.switchOperand,
-                    statement.condition)) {
-                void* address;
-                fullExpression(FullExpressionScope.Position.switchOperand,
-                    statement.condition, {
-                    address = addressOf(FullExpressionScope.lvalueOf(
-                        statement.condition));
-                });
-                condition = loadIntegral(
-                    address, operandFacts.size, !operandFacts.isUnsigned);
-            } else
-                fullExpression(FullExpressionScope.Position.switchOperand,
-                    statement.condition, {
-                    condition = asIntegral(statement.condition);
+            fullExpressionValue!(void*)(FullExpressionScope.Position.switchOperand,
+                statement.condition,
+                { condition = asIntegral(statement.condition); },
+                (operand) { return addressOf(operand); },
+                (address) {
+                    condition = loadIntegral(
+                        address, operandFacts.size, !operandFacts.isUnsigned);
                 });
 
             Statement selected = selectCase(plan, condition, (case_) {
@@ -5346,18 +5331,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.nativelayout: arrayValueSize;
 
         align(size_t.sizeof) ubyte[arrayValueSize] buffer = void;
-        if (readsResultAfterEnd(
-                FullExpressionScope.Position.assertMessage, message)) {
-            const(void)* address;
-            fullExpression(FullExpressionScope.Position.assertMessage,
-                message, {
-                address = addressOf(FullExpressionScope.lvalueOf(message));
-            });
-            buffer[] = (cast(const(ubyte)*) address)[0 .. arrayValueSize];
-        } else
-            fullExpression(FullExpressionScope.Position.assertMessage,
-                message, {
-                evaluate(message, message.type, buffer.ptr);
+        fullExpressionValue!(void*)(FullExpressionScope.Position.assertMessage,
+            message,
+            { evaluate(message, message.type, buffer.ptr); },
+            (operand) { return addressOf(operand); },
+            (address) {
+                buffer[] = (cast(const(ubyte)*) address)[0 .. arrayValueSize];
             });
 
         return (*cast(const(char)[]*) buffer.ptr).idup;

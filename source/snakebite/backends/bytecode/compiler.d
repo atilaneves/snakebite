@@ -2568,19 +2568,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t destination,
         in size_t width,
     ) {
-        if (_expressions.readsResultAfterEnd(position, expression)) {
-            size_t address;
-            fullExpression(position, expression, {
-                address = compileAddress(
-                    FullExpressionScope.lvalueOf(expression));
-            });
-            emit(&opLoadIndirect, destination, address, width);
-            return;
-        }
+        if (_emittingCleanup)
+            return evalInto(expression, destination, width);
 
-        inFullExpression(position, expression,
+        fullExpressionValue!size_t(position, expression,
             { evalInto(expression, destination, width); },
-        );
+            (operand) { return compileAddress(operand); },
+            (address) { emit(&opLoadIndirect, destination, address, width); });
     }
 
     // A destructor expression compiled into a cleanup runs inside the full

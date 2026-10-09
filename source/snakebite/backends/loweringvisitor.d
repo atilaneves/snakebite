@@ -103,6 +103,38 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
         withFullExpression(position, root, evaluate);
     }
 
+    // Cleanup must finish before a delayed result read or a transfer. If
+    // cleanup throws, the pending result and transfer are both abandoned.
+    extern(D) protected final void fullExpressionResult(
+        in FullExpressionScope.Position position,
+        Expression expression,
+        scope void delegate(bool) prepare,
+        scope void delegate(bool) consume,
+    ) {
+        const afterEnd = readsResultAfterEnd(position, expression);
+        fullExpression(position, expression, { prepare(afterEnd); });
+        consume(afterEnd);
+    }
+
+    extern(D) protected void fullExpressionValue(Address)(
+        in FullExpressionScope.Position position,
+        Expression expression,
+        scope void delegate() evaluate,
+        scope Address delegate(Expression) addressOf,
+        scope void delegate(Address) read,
+    ) {
+        Address address;
+        fullExpressionResult(position, expression, (afterEnd) {
+            if (afterEnd)
+                address = addressOf(FullExpressionScope.lvalueOf(expression));
+            else
+                evaluate();
+        }, (afterEnd) {
+            if (afterEnd)
+                read(address);
+        });
+    }
+
     final override void visit(ExpStatement statement) {
         if (statement.exp is null)
             return;
@@ -130,12 +162,11 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     }
 
     private void throwOperand(Expression operand) {
-        const afterEnd = readsResultAfterEnd(
-            FullExpressionScope.Position.throwOperand, operand);
         size_t thrown;
-        fullExpression(FullExpressionScope.Position.throwOperand,
-            operand, { thrown = visitThrowOperand(operand, afterEnd); });
-        visitThrowTransfer(operand, thrown, afterEnd);
+        fullExpressionResult(FullExpressionScope.Position.throwOperand,
+            operand,
+            (afterEnd) { thrown = visitThrowOperand(operand, afterEnd); },
+            (afterEnd) { visitThrowTransfer(operand, thrown, afterEnd); });
     }
 
     // The initialiser of the `with` handle is a full expression of its own:
@@ -162,10 +193,11 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
             enum readsAfterEnd = false;
             visitReturnOperand(statement, readsAfterEnd);
         } else {
-            const afterEnd = readsResultAfterEnd(
-                FullExpressionScope.Position.returnOperand, statement.exp);
-            fullExpression(FullExpressionScope.Position.returnOperand,
-                statement.exp, { visitReturnOperand(statement, afterEnd); });
+            fullExpressionResult(FullExpressionScope.Position.returnOperand,
+                statement.exp,
+                (afterEnd) { visitReturnOperand(statement, afterEnd); },
+                (afterEnd) { visitReturnTransfer(statement); });
+            return;
         }
         visitReturnTransfer(statement);
     }

@@ -46,6 +46,11 @@ The single component that turns a mangled symbol name into a host
 address.
 _Avoid_: symbol lookup, loader
 
+**Full expression**:
+A guest expression together with the temporary values whose lifetimes end
+when that expression finishes. Its result can be read after those temporary
+values are destroyed.
+
 **Control transfer**:
 A return, break, continue, or goto that changes which guest statement
 executes next, after required cleanup. A control transfer from cleanup
