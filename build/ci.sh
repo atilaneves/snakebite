@@ -2,6 +2,9 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
+# The VM must compile with no DMD frontend import paths.
+"${LDC:-ldc2}" -o- -Isource source/snakebite/backends/bytecode/vm.d
+
 build/reggae.sh
 ninja
 # One worker keeps the full-suite time stable under strace.

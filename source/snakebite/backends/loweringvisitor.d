@@ -3,6 +3,9 @@ module snakebite.backends.loweringvisitor;
 
 private:
 
+import snakebite.nativelayout: typeFacts;
+
+
 import dmd.expression:
     ArrayLiteralExp, AssignExp, AssocArrayLiteralExp, CastExp, CatAssignExp,
     CatExp, CallExp, CmpExp, EqualExp, HaltExp, IntegerExp, LogicalExp,
@@ -277,7 +280,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
                 import snakebite.nativelayout: TypeFacts;
 
                 visitConstantBytes(expression,
-                    constant.bytes(TypeFacts.of(expression.type).size));
+                    constant.bytes(typeFacts(expression.type).size));
             } else
                 constant.expression.accept(this);
             return;
@@ -565,7 +568,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
             return visitStoredArrayLiteral(expression);
 
         auto pointerType = Type.tvoid.pointerTo;
-        withTemporaryDestination(pointerType, TypeFacts.of(pointerType), {
+        withTemporaryDestination(pointerType, typeFacts(pointerType), {
             final switch (plan.storage) {
             case ArrayLiteralPlan.Storage.empty:
                 clearTemporaryPointer;

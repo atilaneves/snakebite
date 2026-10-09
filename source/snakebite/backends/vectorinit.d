@@ -3,6 +3,9 @@ module snakebite.backends.vectorinit;
 
 private:
 
+import snakebite.nativelayout: typeFacts;
+
+
 import snakebite.nativelayout: TypeFacts;
 
 
@@ -20,7 +23,7 @@ package VectorInitPlan planVectorInit(
     import dmd.astenums: Tsarray;
     import dmd.typesem: toBasetype;
 
-    const sourceFacts = TypeFacts.of(expression.e1.type);
+    const sourceFacts = typeFacts(expression.e1.type);
     if (expression.e1.type.toBasetype.ty == Tsarray)
         return VectorInitPlan(sourceFacts, 1);
 
@@ -28,5 +31,5 @@ package VectorInitPlan planVectorInit(
     // can have a different element width. Use native sizes for repetition,
     // as DMD's glue does, including scalar default initialization.
     return VectorInitPlan(sourceFacts,
-        TypeFacts.of(expression.type).size / sourceFacts.size);
+        typeFacts(expression.type).size / sourceFacts.size);
 }

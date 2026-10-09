@@ -2,6 +2,9 @@ module snakebite.backends.arithmetic;
 
 private:
 
+import snakebite.nativelayout: typeFacts;
+
+
 
 import snakebite.internalfailure: internalFailure;
 
@@ -82,11 +85,11 @@ package ArithmeticPlan arithmeticPlan(
 private ArithmeticPlan planOf(
     imported!"dmd.mtype".Type type, in ArithmeticPlan.Kind kind,
 ) {
-    auto plan = ArithmeticPlan(kind, TypeFacts.of(type));
+    auto plan = ArithmeticPlan(kind, typeFacts(type));
     if (kind == ArithmeticPlan.Kind.vector) {
         auto lane = type.isTypeVector.elementType;
         plan.laneKind = arithmeticKind(lane);
-        plan.laneFacts = TypeFacts.of(lane);
+        plan.laneFacts = typeFacts(lane);
     }
     return plan;
 }

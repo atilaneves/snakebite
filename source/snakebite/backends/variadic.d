@@ -3,7 +3,7 @@ module snakebite.backends.variadic;
 private:
 
 import core.internal.vararg.sysv_x64: __va_list_tag;
-import snakebite.nativelayout: TypeFacts, alignUp;
+import snakebite.nativevalue: TypeFacts, alignUp;
 
 // Compiled code starts a `va_list` again from the state its prologue saved.
 // A cursor is followed by a copy of its first state for the same purpose.

@@ -3,6 +3,9 @@ module snakebite.backends.bytecode.compiler;
 
 private:
 
+import snakebite.nativelayout: typeFacts, truthFacts;
+
+
 
 import snakebite.internalfailure: internalFailure;
 
@@ -496,7 +499,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // orders: `build` held the compiler lock and waited on
     // `_compileLock`, while this, walking a body, could hold
     // `_compileLock` and wait on the compiler lock instead - through a
-    // forced dmd forward reference (`TypeFacts.of`, `FrameLayout.of`,
+    // forced dmd forward reference (`typeFacts`, `FrameLayout.of`,
     // ... - `forceIfNeeded`) or through `visitUnloweredNew` reaching
     // `classRuntimeInfo` -> `build` for a class not yet built. Two
     // threads, one in each order, could deadlock forever - the same
@@ -571,7 +574,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             // ffi.plan` already uses for a native `ref`-returning callee.
             const isRefReturn = functionType.isRef;
             const pointeeFacts =
-                isVoidReturn ? TypeFacts.init : TypeFacts.of(returnType);
+                isVoidReturn ? TypeFacts.init : typeFacts(returnType);
             const returnFacts = isRefReturn ? pointerFactsOf : pointeeFacts;
 
             auto body_ = function_.fbody;
@@ -1608,7 +1611,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (readsAfterEnd)
             return compileAddress(FullExpressionScope.lvalueOf(expression));
 
-        const facts = TypeFacts.of(expression.type);
+        const facts = typeFacts(expression.type);
         const offset = reserveTemp(facts);
         evalInto(expression, offset, facts.size);
         return offset;
@@ -1669,7 +1672,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto label = consumeLabel(statement); // auto: const(Identifier) will not implicitly convert back
         auto plan = switchPlan(statement);
-        const facts = TypeFacts.of(statement.condition.type);
+        const facts = typeFacts(statement.condition.type);
         assert(facts.isIntegral && isIntegralSize(facts.size));
 
         const conditionOffset = reserveTemp(facts);
@@ -1895,9 +1898,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import snakebite.nativelayout: TypeFacts;
 
-        const truth = TypeFacts.Truth.of(condition.type);
+        const truth = truthFacts(condition.type);
 
-        const facts = TypeFacts.of(condition.type);
+        const facts = typeFacts(condition.type);
         const valueOffset = reserveTemp(facts);
         compileValue(position, condition, valueOffset, facts.size);
         const offset = valueOffset + truth.offset;
@@ -1930,7 +1933,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t compileIntegralComparisonBranch(
         BinExp expression,
     ) {
-        const facts = TypeFacts.of(expression.e1.type);
+        const facts = typeFacts(expression.e1.type);
         if (!facts.isIntegral || !isIntegralSize(facts.size))
             return size_t.max;
 
@@ -1995,7 +1998,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t conditionWidth(Expression condition) {
         import snakebite.nativelayout: TypeFacts;
 
-        const truth = TypeFacts.Truth.of(condition.type);
+        const truth = truthFacts(condition.type);
         // `opFloatToBool` (in `compileCondition`) always writes a 1-byte
         // `bool` at its destination, whatever the floating source's own
         // width was.
@@ -2143,7 +2146,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // The message of a failed assertion runs only then.
     private size_t compileMessage(Expression message) {
-        const facts = TypeFacts.of(message.type);
+        const facts = typeFacts(message.type);
         const offset = reserveTemp(facts);
         compileValue(FullExpressionScope.Position.assertMessage,
             message, offset, facts.size);
@@ -2727,7 +2730,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (initializerRunsForEffect(expInitializer, variable))
             return compileEffect(expInitializer.exp);
 
-        const facts = TypeFacts.of(variable.type);
+        const facts = typeFacts(variable.type);
         auto initializer = initializerValueOf(expInitializer);
         import snakebite.nativelayout: isStoredLiteral;
 
@@ -2809,14 +2812,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 auto field = dot.var.isVarDeclaration;
                 if (field !is null
                         && field.isBitFieldDeclaration !is null) {
-                    const facts = TypeFacts.of(field.type);
+                    const facts = typeFacts(field.type);
                     emit(&opLoadBitfield, destOffset, target, facts.size,
                         bitfieldAccess(field).encode(facts.size));
                     return;
                 }
             }
             emit(&opLoadIndirect, destOffset, target,
-                TypeFacts.of(expression.type).size);
+                typeFacts(expression.type).size);
         }
     }
 
@@ -3121,7 +3124,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (auto dot = expression.e1.isDotVarExp) {
             auto field = dot.var.isVarDeclaration;
             if (field !is null && field.isBitFieldDeclaration !is null) {
-                const facts = TypeFacts.of(field.type);
+                const facts = typeFacts(field.type);
                 const valueOffset = reserveTemp(facts);
                 evalInto(expression.e2, valueOffset, facts.size,
                     expression.e1.type);
@@ -3133,7 +3136,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             }
         }
 
-        const facts = TypeFacts.of(expression.e1.type);
+        const facts = typeFacts(expression.e1.type);
         import snakebite.backends.assignment: executeAssignment;
 
         const valueOffset = executeAssignment!size_t(
@@ -3162,7 +3165,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         assert(field !is null, "an assignable field is a variable");
 
         if (auto bitfield = field.isBitFieldDeclaration) {
-            const facts = TypeFacts.of(field.type);
+            const facts = typeFacts(field.type);
             const valueOffset = reserveTemp(facts);
             evalInto(expression.e2, valueOffset, facts.size, expression.e1.type);
             emitBitfieldStore(field, target, valueOffset, facts.size);
@@ -3171,7 +3174,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        const facts = TypeFacts.of(target.type);
+        const facts = typeFacts(target.type);
 
         const addressOffset = compileFieldAddress(target);
         const valueOffset = reserveTemp(facts);
@@ -3237,7 +3240,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t valueWidth,
     ) {
         const metadata = bitfieldAccess(field).encode(
-            TypeFacts.of(field.type).size);
+            typeFacts(field.type).size);
         emit(&opStoreBitfield, addressOffset, valueOffset, valueWidth,
             metadata);
     }
@@ -3268,7 +3271,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
 
         auto sarrayType = targetType.isTypeSArray;
-        const elementFacts = TypeFacts.of(sarrayType.next);
+        const elementFacts = typeFacts(sarrayType.next);
 
         const dim = cast(size_t) sarrayType.dim.toInteger;
 
@@ -3293,13 +3296,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const baseOffset = resolvedTarget == size_t.max
             ? compileAddress(target.e1)
-            : loadSlicePointer(resolvedTarget, TypeFacts.of(target.type));
+            : loadSlicePointer(resolvedTarget, typeFacts(target.type));
 
         const rightTy = expression.e2.type.toBasetype.ty;
         import snakebite.nativelayout: isStoredLiteral;
 
         if (isStoredLiteral(expression.e2)) {
-            const facts = TypeFacts.of(sarrayType);
+            const facts = typeFacts(sarrayType);
             const valueOffset = reserveTemp(facts);
             evalInto(expression.e2, valueOffset, facts.size, sarrayType);
             emit(&opStoreIndirect, baseOffset, valueOffset, facts.size);
@@ -3384,9 +3387,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         assert(elementType !is null);
         const elementBase = elementType.toBasetype;
         const elementSize =
-            elementBase.ty == Tvoid ? 1 : TypeFacts.of(elementType).size;
+            elementBase.ty == Tvoid ? 1 : typeFacts(elementType).size;
 
-        const arrayFacts = TypeFacts.of(target.type);
+        const arrayFacts = typeFacts(target.type);
         const destSliceOffset = resolvedTarget == size_t.max
             ? reserveTemp(arrayFacts)
             : loadSliceDescriptor(resolvedTarget, arrayFacts);
@@ -3398,10 +3401,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const sourceElementBase = sourceElementType.toBasetype;
 
         const sourceElementSize = sourceElementBase.ty == Tvoid
-            ? 1 : TypeFacts.of(sourceElementType).size;
+            ? 1 : typeFacts(sourceElementType).size;
         assert(elementSize == sourceElementSize);
 
-        const sourceFacts = TypeFacts.of(expression.e2.type);
+        const sourceFacts = typeFacts(expression.e2.type);
         const sourceSliceOffset = reserveTemp(sourceFacts);
         evalInto(expression.e2, sourceSliceOffset, sourceFacts.size);
 
@@ -3446,9 +3449,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileSliceFill(
         AssignExp expression, SliceExp target, in size_t resolvedTarget,
     ) {
-        const elementFacts = TypeFacts.of(target.type.nextOf);
+        const elementFacts = typeFacts(target.type.nextOf);
         const destSliceOffset =
-            loadSliceDescriptor(resolvedTarget, TypeFacts.of(target.type));
+            loadSliceDescriptor(resolvedTarget, typeFacts(target.type));
         const valueOffset = reserveTemp(elementFacts);
         evalInto(expression.e2, valueOffset, elementFacts.size);
         emit(&opSliceFill, destSliceOffset, valueOffset, elementFacts.size);
@@ -3477,8 +3480,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import std.conv: text;
 
         auto target = compoundTarget(expression);
-        const targetFacts = TypeFacts.of(target.type);
-        const operationFacts = TypeFacts.of(expression.e1.type);
+        const targetFacts = typeFacts(target.type);
+        const operationFacts = typeFacts(expression.e1.type);
         const plan = arithmeticPlan(expression);
         Instruction.Handler handler;
         // Explicit types: `auto` would copy `const` from the facts.
@@ -3513,7 +3516,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             case complex:
                 conversion = compoundConversion(expression);
                 handler = complexHandler(expression);
-                rightFacts = TypeFacts.of(expression.e2.type);
+                rightFacts = typeFacts(expression.e2.type);
                 operationWidth = operationFacts.size / 2;
                 operands = plan.operands.packed;
                 break;
@@ -3642,7 +3645,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private ScalarStorage scalarStorage(Expression target) {
         import snakebite.backends.arithmetic: arithmeticKind;
 
-        const facts = TypeFacts.of(target.type);
+        const facts = typeFacts(target.type);
         const arithmetic = arithmeticKind(target.type);
 
         if (auto dot = target.isDotVarExp) {
@@ -3936,7 +3939,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             // not from `e2`.
             case pointerOffset: {
                 const elementFacts =
-                    TypeFacts.of(expression.e1.type.toBasetype.nextOf);
+                    typeFacts(expression.e1.type.toBasetype.nextOf);
                 emit(&opConstant, stepOffset,
                     addConstant(cast(long) elementFacts.size),
                     storage.facts.size);
@@ -4363,7 +4366,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // dmd's own native semantics rather than recomputed here.
     override void visit(DotVarExp expression) {
         if (_destination == discardResult) {
-            const facts = TypeFacts.of(expression.type);
+            const facts = typeFacts(expression.type);
             const offset = reserveTemp(facts);
             evalInto(expression, offset, facts.size);
             return;
@@ -4375,7 +4378,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         assert(field !is null, "a field read names a variable");
 
         if (auto bitfield = field.isBitFieldDeclaration) {
-            const facts = TypeFacts.of(field.type);
+            const facts = typeFacts(field.type);
             const addressOffset = compileFieldAddress(expression);
             emit(&opLoadBitfield, _destination, addressOffset, facts.size,
                 bitfieldAccess(field).encode(facts.size));
@@ -4385,7 +4388,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: Tclass, Tpointer;
         auto aggregateType = expression.e1.type.toBasetype;
         if (aggregateType.ty == Tclass || aggregateType.ty == Tpointer) {
-            const facts = TypeFacts.of(field.type);
+            const facts = typeFacts(field.type);
             const objectOffset = reserveTemp(pointerFacts);
             evalInto(expression.e1, objectOffset, size_t.sizeof);
             compileNullCheck(objectOffset, expression.e1.loc);
@@ -4400,7 +4403,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         assert(aggregateType.isTypeStruct !is null,
             "a struct field has a struct or class receiver");
 
-        const baseFacts = TypeFacts.of(expression.e1.type);
+        const baseFacts = typeFacts(expression.e1.type);
         const baseOffset = reserveTemp(baseFacts);
         evalInto(expression.e1, baseOffset, baseFacts.size);
         emit(&opCopy, _destination, baseOffset + field.offset, _width);
@@ -4522,7 +4525,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         requireDestination(expression);
 
-        const facts = TypeFacts.of(expression.e1.type);
+        const facts = typeFacts(expression.e1.type);
         assert(facts.isDynamicArray);
 
         const arrayOffset = reserveTemp(facts);
@@ -4582,7 +4585,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const byteOffsetOffset = reserveTemp(pointerFacts);
         emit(&opCopy, byteOffsetOffset, lowOffset, size_t.sizeof);
-        const elementFacts = TypeFacts.of(expression.e1.type.nextOf);
+        const elementFacts = typeFacts(expression.e1.type.nextOf);
         const elementSizeOffset = reserveTemp(pointerFacts);
         emit(&opConstant, elementSizeOffset,
             addConstant(cast(long) elementFacts.size), size_t.sizeof);
@@ -4618,7 +4621,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const sliceFacts = TypeFacts(
             arrayValueSize, size_t.alignof, false, false, true,
-            TypeFacts.of(expression.e1.type.toBasetype.nextOf).size,
+            typeFacts(expression.e1.type.toBasetype.nextOf).size,
         );
         const header = reserveTemp(sliceFacts);
 
@@ -4667,7 +4670,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             arrayLengthOffset, arrayPointerOffset;
 
         assert(expression.upr !is null);
-        const facts = TypeFacts.of(sourceType);
+        const facts = typeFacts(sourceType);
         const pointerOffset = reserveTemp(facts);
         evalInto(expression.e1, pointerOffset, facts.size);
 
@@ -4699,7 +4702,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCopy, _destination + arrayLengthOffset, highOffset,
             size_t.sizeof);
 
-        const elementFacts = TypeFacts.of(sourceType.nextOf);
+        const elementFacts = typeFacts(sourceType.nextOf);
         const elementSizeOffset = reserveTemp(pointerFacts);
         emit(&opConstant, elementSizeOffset,
             addConstant(cast(long) elementFacts.size), size_t.sizeof);
@@ -4755,7 +4758,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        const facts = TypeFacts.of(sourceType);
+        const facts = typeFacts(sourceType);
         const arrayOffset = reserveTemp(facts);
         evalInto(expression.e1, arrayOffset, facts.size);
 
@@ -4770,7 +4773,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // the load once that address is in hand.
     override void visit(IndexExp expression) {
         if (_destination == discardResult) {
-            const elementFacts = TypeFacts.of(expression.type);
+            const elementFacts = typeFacts(expression.type);
             const offset = reserveTemp(elementFacts);
             evalInto(expression, offset, elementFacts.size);
             return;
@@ -4937,7 +4940,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // Type must stay mutable for destination restoration.
         auto destination = NewDestination(
             _destination, _width, _valueType);
-        const facts = TypeFacts.of(expression.type);
+        const facts = typeFacts(expression.type);
         const temporary = reserveTemp(facts);
         _newDestinations ~= destination;
         _destination = temporary;
@@ -5010,7 +5013,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 && expression.arguments.length != 0) {
             if (expression.arguments.length != 1)
                 internalFailure("dmd rejects `new T(a, b)` for a scalar `T`");
-            const facts = TypeFacts.of(expression.newtype);
+            const facts = typeFacts(expression.newtype);
             const valueOffset = reserveTemp(facts);
             evalInto((*expression.arguments)[0], valueOffset, facts.size);
             emit(&opStoreIndirect, _destination, valueOffset, facts.size);
@@ -5228,7 +5231,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const arrayOffset = compileAddress(expression.e1);
 
-        const valueFacts = TypeFacts.of(expression.e2.type);
+        const valueFacts = typeFacts(expression.e2.type);
         const valueOffset = reserveTemp(valueFacts);
         evalInto(expression.e2, valueOffset, valueFacts.size);
 
@@ -5439,7 +5442,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (_destination != discardResult)
             return;
 
-        const facts = TypeFacts.of(expression.type);
+        const facts = typeFacts(expression.type);
         _destination = reserveTemp(facts);
         _width = facts.size;
         _valueType = expression.type;
@@ -5464,7 +5467,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Instruction.Handler signedHandler,
         Instruction.Handler unsignedHandler,
     ) {
-        const handler = TypeFacts.of(expression.e1.type).isUnsigned
+        const handler = typeFacts(expression.e1.type).isUnsigned
             ? unsignedHandler : signedHandler;
         compileBinaryExpression(expression, handler);
     }
@@ -5511,10 +5514,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             }
 
             case complex: {
-                const leftFacts = TypeFacts.of(expression.e1.type);
+                const leftFacts = typeFacts(expression.e1.type);
                 const leftOffset = reserveTemp(plan.facts);
                 evalInto(expression.e1, leftOffset, leftFacts.size);
-                const rightFacts = TypeFacts.of(expression.e2.type);
+                const rightFacts = typeFacts(expression.e2.type);
                 const rightOffset = reserveTemp(rightFacts);
                 evalInto(expression.e2, rightOffset, rightFacts.size);
                 emit(complexHandler(expression), leftOffset, rightOffset,
@@ -5642,7 +5645,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import std.conv: text;
 
-        const operandFacts = TypeFacts.of(operand.type);
+        const operandFacts = typeFacts(operand.type);
         assert(operandFacts.isIntegral && isIntegralSize(operandFacts.size),
             text("`", expressionText(operand), "`: semantic types every ",
                 "index, slice bound and integral operand as an integer"));
@@ -5657,7 +5660,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             Type literalType = operandFacts.isUnsigned
                 ? (width == 8 ? Type.tuns64 : Type.tuns32)
                 : (width == 8 ? Type.tint64 : Type.tint32);
-            if (TypeFacts.of(literalType).size == width) {
+            if (typeFacts(literalType).size == width) {
                 evalInto(operand, destOffset, width, literalType);
                 return;
             }
@@ -5894,7 +5897,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const laneSize = plan.laneFacts.size;
         const lanes = plan.facts.size / laneSize;
-        const resultLaneSize = TypeFacts.of(expression.type).size / lanes;
+        const resultLaneSize = typeFacts(expression.type).size / lanes;
         const laneOffset = reserveTemp(plan.laneFacts);
         foreach (i; 0 .. lanes) {
             emit(&opCopy, laneOffset, leftOffset + i * laneSize, laneSize);
@@ -5920,7 +5923,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        const facts = TypeFacts.of(expression.e1.type);
+        const facts = typeFacts(expression.e1.type);
         const arrayFacts = TypeFacts(
             arrayValueSize, size_t.alignof, false, false, true, 0);
         const leftOffset = reserveTemp(plan.staticArray
@@ -5980,7 +5983,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const arrayFacts = TypeFacts(
             arrayValueSize, size_t.alignof, false, false, true, 0);
-        const elementFacts = TypeFacts.of(expression.e1.type.nextOf);
+        const elementFacts = typeFacts(expression.e1.type.nextOf);
 
         const leftOffset = reserveTemp(arrayFacts);
         evalArrayValueInto(expression.e1, leftOffset);
@@ -6010,7 +6013,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         const address = compileIdentityArrayStorage(
-            operand, TypeFacts.of(type));
+            operand, typeFacts(type));
         emit(&opConstant, destOffset + arrayLengthOffset,
             addConstant(cast(long) type.isTypeSArray.dim.toInteger),
             size_t.sizeof);
@@ -6039,8 +6042,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         assert(expression.lowering is null);
 
-        const leftFacts = TypeFacts.of(expression.e1.type);
-        const rightFacts = TypeFacts.of(expression.e2.type);
+        const leftFacts = typeFacts(expression.e1.type);
+        const rightFacts = typeFacts(expression.e2.type);
 
         const leftOffset = reserveTemp(leftFacts);
         evalInto(expression.e1, leftOffset, leftFacts.size);
@@ -6509,7 +6512,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const isVoidCallee = returnType is null || returnType.ty == Tvoid;
         const returnFacts =
             isVoidCallee ? TypeFacts.init
-                : calleeType.isRef ? pointerFacts : TypeFacts.of(returnType);
+                : calleeType.isRef ? pointerFacts : typeFacts(returnType);
         if (isVoidCallee && destOffset != discardResult)
             internalFailure("a `void` call is only ever evaluated for effect");
 
@@ -7101,7 +7104,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const firstExtra = hasTypes + layout.parameters.length;
         TypeFacts[] facts;
         foreach (argument; (*arguments)[firstExtra .. $])
-            facts ~= TypeFacts.of(argument.type);
+            facts ~= typeFacts(argument.type);
         const plan = VariadicLayout.of(facts);
         const storage = reserveTemp(TypeFacts(plan.size, plan.alignment));
         alias Cursor = VariadicLayout.Cursor;
@@ -7579,7 +7582,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         ) {
             import snakebite.nativelayout: arrayLengthOffset;
 
-            const facts = TypeFacts.of(expression.e1.type);
+            const facts = typeFacts(expression.e1.type);
             const array = compiler.reserveTemp(facts);
             compiler.emit(&opLoadIndirect, array, base, facts.size);
             return array + arrayLengthOffset;
@@ -7652,13 +7655,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             import snakebite.nativelayout: arrayPointerOffset;
 
             const stride =
-                TypeFacts.of(expression.e1.type.toBasetype.nextOf).size;
+                typeFacts(expression.e1.type.toBasetype.nextOf).size;
             const strideOffset = compiler.reserveTemp(compiler.pointerFacts);
             compiler.emit(&opConstant, strideOffset,
                 compiler.addConstant(cast(long) stride), size_t.sizeof);
             compiler.emit(&opMultiply, index, strideOffset, size_t.sizeof);
 
-            const facts = TypeFacts.of(expression.e1.type);
+            const facts = typeFacts(expression.e1.type);
             const array = compiler.reserveTemp(facts);
             compiler.emit(&opLoadIndirect, array, base, facts.size);
             const address = compiler.reserveTemp(compiler.pointerFacts);
@@ -7674,7 +7677,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             import dmd.typesem: toBasetype;
 
             const stride =
-                TypeFacts.of(expression.e1.type.toBasetype.nextOf).size;
+                typeFacts(expression.e1.type.toBasetype.nextOf).size;
             const strideOffset = compiler.reserveTemp(compiler.pointerFacts);
             compiler.emit(&opConstant, strideOffset,
                 compiler.addConstant(cast(long) stride), size_t.sizeof);
@@ -7692,7 +7695,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             import dmd.typesem: toBasetype;
 
             const stride =
-                TypeFacts.of(expression.e1.type.toBasetype.nextOf).size;
+                typeFacts(expression.e1.type.toBasetype.nextOf).size;
             const strideOffset = compiler.reserveTemp(compiler.pointerFacts);
             compiler.emit(&opConstant, strideOffset,
                 compiler.addConstant(cast(long) stride), size_t.sizeof);
@@ -7720,7 +7723,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // for that literal's own address. Materialising it here, into
         // scratch storage, then reading its address, is what supplies one.
         public size_t storageValue(Expression expression) {
-            const facts = TypeFacts.of(expression.type);
+            const facts = typeFacts(expression.type);
             const value = compiler.reserveTemp(facts);
             compiler.evalInto(expression, value, facts.size);
             const result = compiler.reserveTemp(compiler.pointerFacts);

@@ -3,6 +3,9 @@ module snakebite.backends.calls;
 
 private:
 
+import snakebite.nativelayout: typeFacts;
+
+
 
 import snakebite.internalfailure: internalFailure;
 
@@ -485,7 +488,7 @@ public struct CallSelection {
         if (!integerConstantOf(operand, bits))
             return false;
 
-        switch (TypeFacts.of(operand.type).size) {
+        switch (typeFacts(operand.type).size) {
             case 2:
                 value = name == "bswap" ? swapTo!ushort(bits)
                     : popcnt(cast(ushort) bits); break;
@@ -726,7 +729,7 @@ public struct CallSelection {
         Vconst stored;
         stored.Vreal = 0;
         if (operand.hasStorage) {
-            const width = TypeFacts.of((*expression.arguments)[0].type).size;
+            const width = typeFacts((*expression.arguments)[0].type).size;
             memcpy(&stored, operand.bytes(width).ptr, width);
         } else {
             const value = operand.exp.toReal;

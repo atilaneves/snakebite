@@ -7,23 +7,7 @@ private:
 import object: Throwable, TypeInfo_Class;
 
 
-// `throwable` is `null` while an exception that is no `Throwable` unwinds,
-// and then it is already in flight.
-public void unwindFinally(
-    Throwable throwable,
-    scope void delegate() cleanup,
-) {
-    if (throwable is null) {
-        cleanup();
-        return;
-    }
-
-    try {
-        throw throwable;
-    } finally {
-        cleanup();
-    }
-}
+public import snakebite.backends.unwindplan: unwindFinally;
 
 
 // Whether a guest `catch` naming `expected` accepts a throwable whose own

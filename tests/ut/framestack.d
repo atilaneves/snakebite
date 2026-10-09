@@ -498,3 +498,42 @@ private void growSurvivesConcurrentCollection() @system {
 unittest {
     growSurvivesConcurrentCollection;
 }
+
+
+@("nativeAlignment.offsetWidth")
+unittest {
+    import snakebite.nativevalue: alignUp;
+
+    alignUp(3, 0).should == 3;
+    alignUp(3, 1).should == 3;
+    alignUp(3, 8).should == 8;
+    alignUp(8, 8).should == 8;
+    alignUp(uint.max, 8).should == 0;
+    static if (size_t.sizeof > uint.sizeof) {
+        const wide = cast(size_t) uint.max + 4;
+        alignUp(wide, 0).should == wide;
+        alignUp(wide, 8).should == 8;
+    }
+}
+
+
+@("nativeAlignment.compiledFieldOffsets")
+unittest {
+    import snakebite.nativevalue: alignUp;
+
+    struct Fields {
+        ubyte first;
+        ushort second;
+        double third;
+        ubyte last;
+    }
+
+    alignUp(Fields.first.offsetof + ubyte.sizeof, ushort.alignof)
+        .should == Fields.second.offsetof;
+    alignUp(Fields.second.offsetof + ushort.sizeof, double.alignof)
+        .should == Fields.third.offsetof;
+    alignUp(Fields.third.offsetof + double.sizeof, ubyte.alignof)
+        .should == Fields.last.offsetof;
+    alignUp(Fields.last.offsetof + ubyte.sizeof, Fields.alignof)
+        .should == Fields.sizeof;
+}
