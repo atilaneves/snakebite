@@ -8,11 +8,52 @@ import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import dmd.dmodule: Module;
 import dmd.func: FuncDeclaration;
+import dmd.dsymbol: Dsymbol;
+import dmd.declaration: VarDeclaration;
+import snakebite.backends.declaration: forEachRuntimeVariable;
+import snakebite.nativelayout: NativeData;
 import std.conv: text;
 import core.exception: AssertError;
 import core.thread: Fiber, Thread;
 import snakebite.sharedtable: PreparedExecution, SharedTable;
 import ut.backends: Matrix, Omit, Because, Ctfe, shouldBeStatusOf;
+
+
+static foreach (rootOwned; [true, false]) {
+    @("preparedStaticStorageKeepsOwnership." ~ (rootOwned ? "guest" : "native"))
+    unittest {
+        struct Ownership {
+            bool* available;
+            bool isRootOwned(Dsymbol) const {
+                assert(*available, "ownership queried after preparation");
+                return rootOwned;
+            }
+        }
+        bool available = true;
+        auto ownership = Ownership(&available);
+        auto module_ = parseSnippet("__gshared int value = 7;");
+        VarDeclaration variable;
+        foreach (declaration; *module_.members)
+            forEachRuntimeVariable(declaration, (member) {
+                variable = member;
+            });
+        assert(variable !is null);
+        int nativeValue = 7;
+        auto data = NativeData(
+            &ownership.isRootOwned,
+            (declaration) => declaration,
+            (declaration) => cast(void*) &nativeValue,
+            (name) => cast(void*) null,
+            (declaration) => cast(TypeInfo_Class) null,
+            (function_, place, arguments) { assert(0); },
+        );
+        const storage = data.storageOf(variable);
+        available = false;
+        auto execution = PreparedExecution(true);
+        data.storageOf(variable).ptr.should == storage.ptr;
+        (*cast(int*) storage.ptr).should == 7;
+    }
+}
 
 
 @("preparedExecutionRejectsNewCacheEntries")
@@ -231,6 +272,58 @@ static foreach (aggregate; ["class", "struct"]) {
                 0.shouldBeStatusOf!(backend, constantGuest!(aggregate, warm));
             }
         }
+    }
+}
+
+// The first destructor call must use prepared answers for both constant and
+// runtime operands. Ordinary calls and their callee effects must still run.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call a runtime TypeInfo destructor"),
+)) {
+    @("firstDestructorCallbackIntrinsicPlans." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.memory: GC;
+            import core.math: fabs;
+            import core.bitop: bswap, popcnt;
+            import core.stdc.string: memset;
+            import core.stdc.stdlib: abs;
+            pragma(mangle, "callFinalizerTestCallback")
+            extern(C) void callFinalizerTestCallback(void*, Object);
+            int identity(int value) { return value; }
+            int function(int) select(ref int effects) {
+                ++effects;
+                return &identity;
+            }
+            class Resource {
+                int* result;
+                double operand;
+                this(int* result) {
+                    this.result = result;
+                    operand = -4.0;
+                }
+                ~this() {
+                    ubyte[4] bytes;
+                    memset(bytes.ptr, 1, bytes.length);
+                    assert(bytes[0] == 1 && bytes[3] == 1);
+                    assert(fabs(-3.0) == 3.0 && fabs(operand) == 4.0);
+                    assert(bswap(bswap(0x12345678u)) == 0x12345678u);
+                    assert(popcnt(cast(uint) abs(-7)) == 3);
+                    int effects;
+                    assert(select(effects)(7) == 7);
+                    *result = effects;
+                }
+            }
+            void main() {
+                int result;
+                auto resource = new Resource(&result);
+                GC.clrAttr(cast(void*) resource, GC.BlkAttr.FINALIZE);
+                callFinalizerTestCallback(typeid(Resource).destructor, resource);
+                assert(result == 1);
+            }
+        });
     }
 }
 

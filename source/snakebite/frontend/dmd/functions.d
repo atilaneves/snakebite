@@ -53,7 +53,45 @@ public bool isRootOwned(
     imported!"dmd.dsymbol".Dsymbol declaration,
     in bool[imported!"dmd.dmodule".Module] rootModules,
 ) {
-    return (declaration.getModule in rootModules) !is null;
+    return (moduleOf(declaration) in rootModules) !is null;
+}
+
+// Arena lifetime does not make parent links immutable. scopeCreateGlobal
+// temporarily reparents a shared top-level package during semantic work.
+public imported!"dmd.dmodule".Module moduleOf(
+    imported!"dmd.dsymbol".Dsymbol declaration,
+) {
+    import snakebite.frontend.compiler: withCompilerQuery;
+
+    imported!"dmd.dmodule".Module result;
+    withCompilerQuery({ result = declaration.getModule; });
+    return result;
+}
+
+public struct FunctionContext {
+    public imported!"dmd.dmodule".Module module_;
+    public imported!"dmd.func".FuncDeclaration outerFunction;
+    public bool instantiated;
+    public bool templateParent;
+}
+
+// Call selection keeps these answers, not a chain to traverse after unlock.
+public FunctionContext contextOf(
+    imported!"dmd.func".FuncDeclaration function_,
+) {
+    import snakebite.frontend.compiler: withCompilerQuery;
+    import snakebite.frontend.dmd.delegates: outerFunctionOf;
+
+    FunctionContext result;
+    withCompilerQuery({
+        result.module_ = function_.getModule;
+        result.outerFunction = outerFunctionOf(function_);
+        result.instantiated = function_.isInstantiated !is null;
+        const parent = function_.toParent;
+        result.templateParent = parent !is null
+            && parent.isTemplateInstance !is null;
+    });
+    return result;
 }
 
 // `function_`'s type as the function type it must be. A `FuncDeclaration`

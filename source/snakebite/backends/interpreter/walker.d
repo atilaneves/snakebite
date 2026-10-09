@@ -1273,12 +1273,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // or a builtin, regardless of which module owns it - never a
         // guest one, since there is no guest body to walk.
         auto body_ = function_.fbody;
-        const decision = _callSelection.decisionOf(
+        const decision = CallSelection.atCallSite(_callSelection.decisionOf(
             function_,
             (callee) => _program.isInterpreted(callee),
             hasNativeSymbol(function_),
             hasIndependentNativeSymbol(function_),
-        );
+        ), callSite);
         if (!callbackEntry) final switch (decision.route)
             with (CallSelection.Route) {
         case native:
@@ -1577,6 +1577,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         }
         scope scout = new BodyScout(Preparation(
             (site, named) => attempt({
+                _callSelection.prepareIntrinsic(named);
                 // Execution plans the definition that the linker finds for
                 // a declaration, and asks for it at each call, a virtual
                 // one included: it asks about the declaration that dmd
@@ -1681,9 +1682,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         CallExp site,
         FuncDeclaration callee,
     ) {
-        const layout = layoutOf(callee);
-        if (callee.isThis is null && layout.hiddenThis.variable !is null)
-            calleeContextPlanOf(site, callee);
         prepareCall(site, site.arguments, callee);
     }
 
@@ -1695,12 +1693,15 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         const layout = layoutOf(callee);
         callShapeOf(callee);
         prepareContext(outerFunctionOf(callee));
-        const decision = _callSelection.decisionOf(
+        if (site.isCallExp !is null && callee.isThis is null
+                && layout.hiddenThis.variable !is null)
+            calleeContextPlanOf(site.isCallExp, callee);
+        const decision = CallSelection.atCallSite(_callSelection.decisionOf(
             callee,
             (function_) => _program.isInterpreted(function_),
             hasNativeSymbol(callee),
             hasIndependentNativeSymbol(callee),
-        );
+        ), site);
 
         if (decision.route == CallSelection.Route.guest
                 && typeFunctionOf(callee).parameterList.varargs
@@ -1722,6 +1723,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 () => adapter.prepare(*_plans, callee));
         } else
             callPlanOf(site, callee);
+    }
+
+    extern(D) protected override CallSelection* callSelection() {
+        return _callSelection;
     }
 
     // The facts that execution asks for about the type of a node, its base
@@ -2887,6 +2892,13 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     override void visit(RealExp expression) {
         _nativeData.write(_type, _facts, expression, _place);
+    }
+
+    extern(D) override void visitConstantBytes(Expression expression, in void[] bytes) {
+        import core.stdc.string: memcpy;
+
+        assert(bytes.length == _facts.size);
+        memcpy(_place, bytes.ptr, bytes.length);
     }
 
     // `1.0f + 0.0fi`: dmd's own constant folding already reduces
@@ -6398,7 +6410,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // Calls always go through the FFI call adapter. It copies a reference's
     // value into `_place` for this ordinary expression path; `addressOf`
     // uses `refCallAddress` when the expression itself is an lvalue.
-    override void visit(CallExp expression) {
+    protected override void visitUnfoldedCall(CallExp expression) {
         _executeCallExpression(expression, _place);
     }
 
@@ -6409,6 +6421,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.frontend.dmd.functions: unresolvedCalleeOf;
         import std.conv: text;
 
+        CallSelection.eachResolvedCalleePrefix(expression,
+            (prefix) { runForEffect(prefix); });
         auto resolved = expression.f is null
             ? unresolvedCalleeOf(expression) : expression.f;
         auto callee = resolved is null

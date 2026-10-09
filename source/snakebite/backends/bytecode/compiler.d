@@ -697,6 +697,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     alias visit = LoweringVisitor.visit;
 
+    extern(D) protected override CallSelection* callSelection() {
+        return &_bytecode._callSelection;
+    }
+
     extern(D):
 
     private Bytecode _bytecode;
@@ -4033,6 +4037,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileConstant(expression);
     }
 
+    extern(D) override void visitConstantBytes(Expression expression, in void[] bytes) {
+        requireDestination(expression);
+        emitBytes(_bytecode._nativeData.value(_valueType, bytes));
+    }
+
     // `1.0f + 0.0fi`: dmd's own constant folding already reduces
     // `complex`-literal arithmetic to one `ComplexExp` (`EXP.complex80`
     // regardless of the actual `cfloat`/`cdouble`/`creal` width - only
@@ -5157,7 +5166,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             width == size_t.max ? _width : width);
     }
 
-    override void visit(CallExp expression) {
+    protected override void visitUnfoldedCall(CallExp expression) {
         if (_destination != discardResult && isRefCall(expression)) {
             const addressOffset = compileAddress(expression);
             emit(&opLoadIndirect, _destination, addressOffset, _width);
@@ -6599,6 +6608,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.frontend.dmd.dispatch: readsVtable;
         import snakebite.frontend.dmd.functions: unresolvedCalleeOf;
 
+        CallSelection.eachResolvedCalleePrefix(expression, &compileEffect);
         auto callee = expression.f;
         if (callee is null)
             callee = unresolvedCalleeOf(expression);
@@ -6630,7 +6640,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             callee, expression.arguments, expression.loc,
             expressionText(expression), hasThis,
             () => receiverOffsetOf(expression, callee, destOffset),
-            destOffset);
+            destOffset, expression);
     }
 
     // The address of `callee`'s own hidden `this` argument for `expression`
@@ -6759,6 +6769,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         bool hasThis,
         size_t delegate() thisOffsetOf,
         in size_t destOffset,
+        Expression site = null,
     ) {
         import dmd.astenums: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
@@ -6771,7 +6782,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         constructTemporary(callee,
             { emit(&opTemporarySuspend, 0, receiverOffset, 0); },
             { compileResolvedCallBody(callee, arguments, loc, exprText,
-                hasThis, receiverOffset, destOffset); },
+                hasThis, receiverOffset, destOffset, site); },
             { emit(&opTemporaryArm, 0, receiverOffset, 0); });
     }
 
@@ -6783,6 +6794,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         bool hasThis,
         size_t receiverOffset,
         size_t destOffset,
+        Expression site = null,
     ) {
         import dmd.astenums: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
@@ -6791,10 +6803,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto type = typeFunctionOf(callee);
 
         const hasNativeSymbol = _bytecode.hasNativeSymbol(callee);
-        const decision = _bytecode._callSelection.decisionOf(
+        const decision = CallSelection.atCallSite(_bytecode._callSelection.decisionOf(
             callee, &_bytecode.isGuestFunction, hasNativeSymbol,
             _bytecode.hasIndependentNativeSymbol(callee),
-        );
+        ), site);
         final switch (decision.route) with (CallSelection.Route) {
         case native:
             Arg[] initialArgs;

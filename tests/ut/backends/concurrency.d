@@ -53,23 +53,16 @@ private enum functionCount = 16;
 private enum threadCount = 8;
 private enum rounds = 6;
 
-// Every function throws a compile-time class literal (`static immutable`,
-// dmd's own CTFE folds `new Exception(...)` before any backend thread
-// touches it - `NativeData.classValue`'s route, always under the full
-// frontend lock), never a runtime `new`: `Evaluator.constructAggregate`'s
-// own routing decision (`snakebite.backends.calls.CallSelection.
-// buildDecision` -> `outerFunctionOf` -> `Dsymbol.toParent2`) is a
-// separate, pre-existing race of its own (reproduces the same way on
-// `origin/master`, unrelated to this branch's lock narrowing) that this
-// test must not also trip over while isolating the one this branch's
-// `RuntimeTypes.get` narrowing introduced.
+// Keep both compile-time class literals and runtime construction. Runtime
+// construction also selects a constructor through shared parent metadata
+// while other threads can force frontend semantic work.
 private enum guestSource = (){
     string source =
         "module ut.backends.concurrency_guest;\n";
     foreach (i; 0 .. functionCount)
         source ~= text(
             "long f", i, "() { ",
-            "static immutable failure", i,
+            i % 2 == 0 ? "static immutable failure" : "auto failure", i,
             " = new Exception(\"boom", i, "\"); ",
             "try { throw failure", i, "; } ",
             "catch (Exception e) { return e.msg.length + ", i, "; } }\n",

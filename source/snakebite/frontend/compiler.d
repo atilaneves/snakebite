@@ -105,6 +105,23 @@ public void withCompilerLock(
     compiler.withLock(action, flags);
 }
 
+// Metadata queries can run inside an unfinished diagnostic pass. They must
+// exclude semantic writers without clearing that pass's errors or flags.
+public void withCompilerQuery(scope void delegate() query) {
+    import snakebite.gc: resumeFrontend, suspendFrontend;
+
+    version(unittest) {
+        import snakebite.sharedtable: assertCacheFillAllowed;
+        assertCacheFillAllowed!"frontend metadata query";
+    }
+    compiler.mutex.lock;
+    scope(exit) compiler.mutex.unlock;
+
+    const depth = suspendFrontend;
+    scope(exit) resumeFrontend(depth);
+    query();
+}
+
 // Runs `action` with dmd's diagnostics gagged, for a caller that holds the
 // frontend lock: a question that the frontend cannot answer prints nothing,
 // and dmd does not keep the error it found on the declaration

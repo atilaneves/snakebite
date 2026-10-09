@@ -4,8 +4,8 @@ module snakebite.backends.loweringvisitor;
 private:
 
 import dmd.expression:
-    ArrayLiteralExp, AssignExp, AssocArrayLiteralExp, CastExp, CatAssignExp, CatExp,
-    CmpExp, EqualExp, HaltExp, LogicalExp,
+    ArrayLiteralExp, AssignExp, AssocArrayLiteralExp, CastExp, CatAssignExp,
+    CatExp, CallExp, CmpExp, EqualExp, HaltExp, IntegerExp, LogicalExp,
     CatElemAssignExp, CatDcharAssignExp,
     ConstructExp, DeclarationExp, Expression, IdentityExp, LoweredAssignExp,
     NewExp, ThrowExp,
@@ -250,6 +250,31 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     }
 
     protected abstract void visitHalt();
+
+    final override void visit(CallExp expression) {
+        import snakebite.backends.calls: CallSelection;
+
+        CallSelection.ScalarConstant constant;
+        if (callSelection.foldedScalarIntrinsic(expression, constant)) {
+            if (constant.hasStorage) {
+                import snakebite.nativelayout: TypeFacts;
+
+                visitConstantBytes(expression,
+                    constant.bytes(TypeFacts.of(expression.type).size));
+            } else
+                constant.expression.accept(this);
+            return;
+        }
+        visitUnfoldedCall(expression);
+    }
+
+    protected abstract void visitUnfoldedCall(CallExp expression);
+
+    extern(D) protected abstract imported!"snakebite.backends.calls".CallSelection*
+        callSelection();
+
+    extern(D) protected abstract void visitConstantBytes(
+        Expression expression, in void[] bytes);
 
     final override void visit(EqualExp expression) {
         if (expression.lowering !is null) {

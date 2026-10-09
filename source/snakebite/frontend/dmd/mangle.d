@@ -87,9 +87,13 @@ public void completeFunctionType(
 // not `toParent2` (a different, closure-ownership chain `snakebite.
 // frontend.dmd.delegates` uses for a different question).
 public void completeMangleTargets(imported!"dmd.dsymbol".Dsymbol symbol) {
-    for (auto current = symbol; current !is null; current = current.parent)
-        if (auto function_ = current.isFuncDeclaration)
-            completeFunctionType(function_);
+    import snakebite.frontend.compiler: withCompilerQuery;
+
+    withCompilerQuery({
+        for (auto current = symbol; current !is null; current = current.parent)
+            if (auto function_ = current.isFuncDeclaration)
+                completeFunctionType(function_);
+    });
 }
 
 // The complete, dmd-exact mangled linker name of `function_`, for
