@@ -36,6 +36,52 @@ FILE_BACKENDS = ["bytecode", "interpreter"]
 PROGRAM_BACKENDS = ["native", *FILE_BACKENDS]
 
 
+# The DMD source declarations are @trusted; LDC exports @safe symbols.
+# ADR-0009 requires the original bodies, not renamed host declarations,
+# when these exact native symbols are absent from the release process.
+@pytest.mark.parametrize("backend", ["dmd", "ldc2", *BACKENDS])
+def test_phobos_round_and_trunc_use_resolved_declarations(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    write(app / "dub.sdl", dub_project_recipe("phobos-round-trunc"))
+    write(
+        app / "source" / "main.d",
+        """
+        module main;
+        import std.math: round, trunc;
+        real rounded(real value) { return round(value); }
+        real truncated(real value) { return trunc(value); }
+        unittest {
+            assert(rounded(4.49L) == 4);
+            assert(rounded(4.5L) == 5);
+            assert(rounded(-4.49L) == -4);
+            assert(rounded(-4.5L) == -5);
+            assert(truncated(4.99L) == 4);
+            assert(truncated(5.0L) == 5);
+            assert(truncated(-4.99L) == -4);
+            assert(truncated(-5.0L) == -5);
+        }
+        int main() { return 0; }
+        """,
+    )
+
+    if backend in ("dmd", "ldc2"):
+        program = app / "native-program"
+        build = subprocess.run(
+            [backend, "-unittest", f"-of={program}", "source/main.d"],
+            cwd=app, capture_output=True, check=False, text=True,
+        )
+        assert build.returncode == 0, output(build)
+        result = subprocess.run(
+            [str(program)], cwd=app, capture_output=True, check=False, text=True,
+        )
+    else:
+        result = run_sb(f"--backend={backend}", str(app), cwd=tmp_path)
+
+    assert result.returncode == 0, output(result)
+
+
 # A second runner must not delete files owned by a runner that is still live.
 # The test list is larger than the pipe buffer, so the first runner stays
 # live until we drain its output. No test helper or extra guest program runs.

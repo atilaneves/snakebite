@@ -304,8 +304,12 @@ public struct CallSelection {
         // carry the host compiler's frame layout, not this backend's -
         // reusing it for a guest call reads that closure with the wrong
         // layout. A missing independent symbol leaves the guest body.
+        // An ordinary dependency uses its own frontend body when its exact
+        // native symbol is absent (ADR-0009, decision 3).
+        const rootOwned = isGuest(function_);
         const prefers = context.instantiated
-            ? !hasIndependentNativeSymbol : isGuest(function_);
+            ? !hasIndependentNativeSymbol
+            : rootOwned || !hasNativeSymbol;
         return Decision(prefers ? Route.guest : Route.native);
     }
 
