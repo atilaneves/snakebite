@@ -5,12 +5,15 @@ private:
 
 import dmd.expression;
 import dmd.statement;
-import std.meta: AliasSeq;
+import std.meta: AliasSeq, NoDuplicates, staticIndexOf;
+import std.traits: Parameters, isAbstractClass;
+import dmd.visitor: FrontendVisitor = Visitor;
+import snakebite.backends.loweringvisitor: LoweringVisitor;
 
 
-// A frontend node class that no backend ever receives, and why. A class on
-// this list needs no `visit` override. A visitor that handles the class
-// anyway is an error, unless `handledAnyway` states why that is correct.
+// An existing pre-runtime audit claim, with a pending reason. It retains
+// the old structural exemption until its producer/escape-path proof is
+// reviewed. `handledAnyway` records an existing intentional adapter.
 package struct Unreachable(Node, string reason, string handledAnywayReason = "") {
     alias Class = Node;
     enum handledAnyway = handledAnywayReason;
@@ -153,13 +156,12 @@ package alias UnreachableNodes = AliasSeq!(
         "inline assembler fails the load (ADR-0012)"),
 );
 
-// Fails the build, naming the visitor and each class, when a concrete
-// frontend `Expression` or `Statement` class has neither a `visit` override
-// in `Visitor` nor an entry in `UnreachableNodes`. It also fails when an
-// entry names a class that `Visitor` handles, because that entry says
-// something false about the code. An override of the `Expression` or
-// `Statement` catch-all itself does not count as handling a class.
+// This structural gate retains the old pre-runtime exemptions. Their
+// producer and escape-path proofs are pending; this is not a semantic
+// coverage certificate (docs/agents/node-coverage.md).
 package template AssertEveryNodeHandled(Visitor) {
+    static assert(AssertForwardingRecords!ForwardedNodes);
+    static assert(AssertNodeUniverse!(NodeSet!FrontendNodes, NodeSet!VisitorNodes));
     private enum missing = missingNodes!Visitor;
     static assert(missing.length == 0,
         Visitor.stringof ~ " has no `visit` override for:" ~ missing);
@@ -173,47 +175,78 @@ package template AssertEveryNodeHandled(Visitor) {
 }
 
 private string unnecessaryEntries(Visitor)() {
-    import dmd.expression: Expression;
-    import dmd.statement: Statement;
-
     string result;
     static foreach (Entry; UnreachableNodes) {
         static if (Entry.handledAnyway.length == 0
-                && isHandled!(Visitor, Entry.Class, Expression, Statement))
+                && hasRuntimeVisit!(Visitor, Entry.Class))
             result ~= " " ~ Entry.Class.stringof;
     }
     return result;
 }
 
 private string missingNodes(Visitor)() {
-    import dmd.expression: Expression;
-    import dmd.statement: Statement;
-
     string result;
     static foreach (Node; ConcreteNodes) {
-        static if (!isUnreachable!Node && !isHandled!(Visitor, Node,
-                Expression, Statement))
+        static if (!isUnreachable!Node && !hasRuntimeVisit!(Visitor, Node))
             result ~= " " ~ Node.stringof;
     }
     return result;
 }
 
-private alias ConcreteNodes = AliasSeq!(
-    concreteClasses!(imported!"dmd.expression", Expression),
-    concreteClasses!(imported!"dmd.statement", Statement),
-);
+package alias FrontendNodes = NoDuplicates!(AliasSeq!(
+    nodeClasses!(imported!"dmd.expression", Expression),
+    nodeClasses!(imported!"dmd.statement", Statement),
+));
 
-private template concreteClasses(alias mod, Base) {
+private alias ConcreteNodes = concreteNodes!FrontendNodes;
+
+private template concreteNodes(Nodes...) {
+    alias concreteNodes = AliasSeq!();
+    static foreach (Node; Nodes) {
+        static if (!isAbstractClass!Node)
+            concreteNodes = AliasSeq!(concreteNodes, Node);
+    }
+}
+
+private template visitParameters(Visitor) {
+    alias visitParameters = AliasSeq!();
+    static foreach (method; __traits(getOverloads, Visitor, "visit")) {
+        static if (Parameters!method.length == 1) {
+            static if (is(Parameters!method[0] : Expression)
+                    || is(Parameters!method[0] : Statement))
+                visitParameters = AliasSeq!(visitParameters, Parameters!method[0]);
+        }
+    }
+}
+
+package alias VisitorNodes = NoDuplicates!(visitParameters!FrontendVisitor);
+
+// CTFEExp has no Visitor overload: its accept path is Expression.accept.
+// Its separate entry must remain visible in the pre-runtime audit.
+package struct NodeSet(Nodes...) {
+    alias Types = AliasSeq!Nodes;
+}
+
+package template AssertNodeUniverse(Classes, Visits) {
+    static foreach (Node; Visits.Types)
+        static assert(staticIndexOf!(Node, Classes.Types) >= 0,
+            "node coverage: Visitor node absent from class inventory: " ~ Node.stringof);
+    static foreach (Node; Classes.Types)
+        static assert(staticIndexOf!(Node, Visits.Types) >= 0 || is(Node == CTFEExp),
+            "node coverage: class absent from Visitor inventory: " ~ Node.stringof);
+    enum AssertNodeUniverse = true;
+}
+
+private template nodeClasses(alias mod, Base) {
     import std.traits: isAbstractClass;
 
-    alias concreteClasses = AliasSeq!();
+    alias nodeClasses = AliasSeq!();
     static foreach (name; __traits(allMembers, mod)) {
         static if (__traits(compiles, __traits(getMember, mod, name))
                 && is(__traits(getMember, mod, name) == class)
-                && is(__traits(getMember, mod, name) : Base)
-                && !isAbstractClass!(__traits(getMember, mod, name)))
-            concreteClasses = AliasSeq!(
-                concreteClasses, __traits(getMember, mod, name));
+                && is(__traits(getMember, mod, name) : Base))
+            nodeClasses = AliasSeq!(
+                nodeClasses, __traits(getMember, mod, name));
     }
 }
 
@@ -228,41 +261,76 @@ private template isUnreachableIn(Node, Entries...) {
         enum isUnreachableIn = isUnreachableIn!(Node, Entries[1 .. $]);
 }
 
-// The nearest ancestor-or-self of `Node` that `Visitor` itself (not dmd's
-// default forwarding in `dmd.visitor.Visitor`) overrides `visit` for must
-// not be one of the catch-all classes. Names stand in for the types so one
-// string search replaces a pairwise type comparison, which costs seconds.
-private template isHandled(Visitor, Node, Expression, Statement) {
-    import std.algorithm.searching: canFind;
-    import std.traits: BaseClassesTuple;
-
-    enum overridden = overriddenParameterNames!Visitor;
-
-    template nearest(Chain...) {
-        static if (Chain.length == 0)
-            enum nearest = "";
-        else static if (overridden.canFind(Chain[0].stringof))
-            enum nearest = Chain[0].stringof;
-        else
-            enum nearest = nearest!(Chain[1 .. $]);
-    }
-
-    enum found = nearest!(Node, BaseClassesTuple!Node);
-    enum isHandled = found.length != 0
-        && found != Expression.stringof && found != Statement.stringof;
+// These records permit only the pinned frontend's named forwarding edges.
+// The target must have an exact execution adapter. The source proof and
+// field obligations are recorded in docs/agents/node-coverage.md.
+package struct Forward(Node, Target) {
+    alias Class = Node;
+    alias Destination = Target;
 }
 
-private template overriddenParameterNames(Visitor) {
-    import std.traits: Parameters;
-    import dmd.visitor: FrontendVisitor = Visitor;
+package alias ForwardedNodes = AliasSeq!(
+    Forward!(SuperExp, ThisExp),
+    Forward!(DtorExpStatement, ExpStatement),
+    Forward!(CompoundDeclarationStatement, CompoundStatement),
+    Forward!(CompoundAsmStatement, CompoundStatement),
+    Forward!(AddAssignExp, BinAssignExp),
+    Forward!(MinAssignExp, BinAssignExp),
+    Forward!(MulAssignExp, BinAssignExp),
+    Forward!(DivAssignExp, BinAssignExp),
+    Forward!(ModAssignExp, BinAssignExp),
+    Forward!(AndAssignExp, BinAssignExp),
+    Forward!(OrAssignExp, BinAssignExp),
+    Forward!(XorAssignExp, BinAssignExp),
+    Forward!(ShlAssignExp, BinAssignExp),
+    Forward!(ShrAssignExp, BinAssignExp),
+    Forward!(UshrAssignExp, BinAssignExp),
+);
 
-    enum overriddenParameterNames = () {
-        string[] names;
-        static foreach (method; __traits(getOverloads, Visitor, "visit")) {
-            static if (!is(FrontendVisitor : __traits(parent, method))
-                    && Parameters!method.length == 1)
-                names ~= Parameters!method[0].stringof;
+package template AssertForwardingRecords(Entries...) {
+    static foreach (i, Entry; Entries) {
+        static assert(!is(Entry.Class == Entry.Destination),
+            "node coverage: forwarding cycle: " ~ Entry.Class.stringof);
+        static foreach (Previous; Entries[0 .. i])
+            static assert(!is(Previous.Class == Entry.Class),
+                "node coverage: duplicate forwarding record: " ~ Entry.Class.stringof);
+        static assert(staticIndexOf!(Entry, ForwardedNodes) >= 0
+                && is(Entry.Class : Entry.Destination),
+            "node coverage: wrong forwarding target: " ~ Entry.Class.stringof);
+        static assert(!is(Entry.Destination == Expression)
+                && !is(Entry.Destination == Statement),
+            "node coverage: forwarding target is a catch-all: " ~ Entry.Class.stringof);
+    }
+    enum AssertForwardingRecords = true;
+}
+
+package bool hasRuntimeVisit(Visitor, Node)() @safe @nogc nothrow pure {
+    static if (hasExactVisit!(Visitor, Node))
+        return true;
+    else {
+        static foreach (Entry; ForwardedNodes) {
+            static if (is(Node == Entry.Class))
+                return hasExactVisit!(Visitor, Entry.Destination);
         }
-        return names;
-    }();
+        return false;
+    }
+}
+
+// A backend declares its own exact adapters. Shared policies count only
+// when final, so a change of parent class cannot silently earn coverage.
+package bool hasExactVisit(Visitor, Node)() @safe @nogc nothrow pure {
+    static if (is(Node == Expression) || is(Node == Statement))
+        return false;
+    else {
+        static foreach (method; __traits(getOverloads, Visitor, "visit")) {
+            static if (Parameters!method.length == 1) {
+                static if (is(Parameters!method[0] == Node)
+                        && (is(__traits(parent, method) == Visitor)
+                            || (is(__traits(parent, method) == LoweringVisitor)
+                                && __traits(isFinalFunction, method))))
+                    return true;
+            }
+        }
+        return false;
+    }
 }
