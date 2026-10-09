@@ -257,7 +257,8 @@ public struct CallSelection {
         scope bool delegate(FuncDeclaration) isGuest,
     ) {
         import dmd.astenums: VarArg;
-        import snakebite.frontend.dmd.functions: contextOf, typeFunctionOf;
+        import snakebite.frontend.dmd.functions:
+            bodyIsSelected, contextOf, typeFunctionOf;
 
         const context = contextOf(function_);
 
@@ -269,6 +270,10 @@ public struct CallSelection {
                 ? Decision(Route.vaStart, &startVariadicEntry)
                 : isAlloca(function_) ? Decision(Route.alloca)
                 : intrinsicPlanOf(function_).call;
+
+        const rootOwned = isGuest(function_);
+        if (!bodyIsSelected(context.module_, rootOwned))
+            return Decision(Route.native);
 
         const type = typeFunctionOf(function_);
         if (type.parameterList.varargs == VarArg.variadic && hasNativeSymbol)
@@ -284,7 +289,7 @@ public struct CallSelection {
         // when the linker cannot resolve that symbol.
         if (function_.isFuncLiteralDeclaration !is null
                 && function_.fbody !is null
-                && (isGuest(function_) || !hasNativeSymbol))
+                && (rootOwned || !hasNativeSymbol))
             return Decision(Route.guest);
 
         // The host compiler's druntime implements `va_copy` as an
@@ -304,8 +309,11 @@ public struct CallSelection {
         // carry the host compiler's frame layout, not this backend's -
         // reusing it for a guest call reads that closure with the wrong
         // layout. A missing independent symbol leaves the guest body.
+        // An ordinary dependency uses its own frontend body when its exact
+        // native symbol is absent (ADR-0009, decision 3).
         const prefers = context.instantiated
-            ? !hasIndependentNativeSymbol : isGuest(function_);
+            ? !hasIndependentNativeSymbol
+            : rootOwned || !hasNativeSymbol;
         return Decision(prefers ? Route.guest : Route.native);
     }
 

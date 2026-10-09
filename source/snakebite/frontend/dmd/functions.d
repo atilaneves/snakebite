@@ -94,6 +94,20 @@ public FunctionContext contextOf(
     return result;
 }
 
+// ImportC parses imported definitions even when the source list excludes
+// their module. Header declarations share that module's source selection.
+// D dependency bodies remain available for exact-symbol fallback.
+public bool bodyIsSelected(
+    const(imported!"dmd.dmodule".Module) module_,
+    in bool rootOwned,
+) {
+    import dmd.astenums: FileType;
+
+    if (rootOwned)
+        return true;
+    return module_ is null || module_.filetype != FileType.c;
+}
+
 // `function_`'s type as the function type it must be. A `FuncDeclaration`
 // whose type is not a `TypeFunction` would be a malformed AST, not a guest
 // construct a backend has chosen not to support, so this halts on it as
