@@ -409,6 +409,7 @@ public struct Function {
     package size_t cursorOffset = size_t.max;
     package size_t declaredParameters;
     package const(Signature)* signature;
+    package imported!"snakebite.backends.returnplace".ReturnPlace returnPlace;
 }
 
 
@@ -463,6 +464,8 @@ public struct Vm {
         foreach (argument; arguments)
             memcpy(frame.base + argument.offset, argument.source,
                 argument.width);
+        returnPlace = function_.returnPlace.bind(
+            &_frames, frame.base, returnPlace);
         initializeClosure(&function_, frame.base, &_frames);
         auto pc = function_.instructions.ptr;
         dispatch(
@@ -1276,7 +1279,9 @@ private const(Instruction)* callFunction(bool redirected = false, Decoded)(
     activation.pc = activation.start = callee.instructions.ptr;
     activation.end = null;
     activation.resume = null;
-    activation.returnPlace = site.returnWidth == 0 ? null : execution.destination;
+    activation.returnPlace = callee.returnPlace.bind(
+        execution.frames, activation.frame,
+        site.returnWidth == 0 ? null : execution.destination);
     activation.constants = callee.constants;
     activation.callSites = callee.callSites;
     activation.assertSites = callee.assertSites;
@@ -1312,7 +1317,8 @@ private const(Instruction)* runReturn(Decoded)(
 ) {
     import core.stdc.string: memcpy;
 
-    if (execution.returnPlace !is null)
+    if (execution.returnPlace !is null
+            && execution.returnPlace != execution.source)
         memcpy(execution.returnPlace, execution.source, execution.width);
     return null;
 }

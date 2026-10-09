@@ -29,6 +29,8 @@ package struct FrameLayout {
 
     package size_t size;
     package uint alignment = 1;
+    package imported!"snakebite.backends.returnplace".ReturnPlace returnPlace;
+    private imported!"snakebite.backends.returnstorage".ReturnStoragePlan _returns;
 
     // Whether a local of the function can point into the temporaries of its
     // initialiser: decided once here, so a call of any other function does
@@ -90,6 +92,7 @@ package struct FrameLayout {
         // Whether the variable can point into the temporaries of its own
         // initialiser.
         package bool retainsTemporaries;
+        package bool isReturnPlace;
     }
     private VariableSlot[VarDeclaration] _slotOf;
 
@@ -116,6 +119,8 @@ package struct FrameLayout {
         version(unittest) ++builds;
 
         FrameLayout layout;
+        layout._returns = imported!"snakebite.backends.returnstorage"
+            .ReturnStoragePlan.of(function_);
 
         if (hasHiddenThis(function_)) {
             // `function_.vthis` is `dmd.funcsem.declareThis`'s own answer,
@@ -194,6 +199,15 @@ package struct FrameLayout {
         if (layout.variadicCursor != size_t.max && function_.v_argptr !is null)
             layout._slotOf[function_.v_argptr] =
                 VariableSlot(layout.variadicCursor, false);
+
+        if (layout._returns.hasPlace) {
+            const result = imported!"snakebite.nativelayout".TypeFacts.of(
+                typeFunctionOf(function_).next);
+            layout.returnPlace = imported!"snakebite.backends.returnplace"
+                .ReturnPlace(layout.reserveSlot(
+                    imported!"snakebite.nativelayout".TypeFacts.pointer).offset,
+                    result.size, result.alignment);
+        }
 
         // Locals share the same frame as the parameters: each one gets a
         // slot appended after whatever came before it, keyed by its own
@@ -379,6 +393,11 @@ package struct FrameLayout {
     package bool isRef(VarDeclaration variable) const {
         auto slot = variable in _slotOf;
         return slot !is null && slot.isRef;
+    }
+
+    package bool isReturnPlace(VarDeclaration variable) const {
+        const slot = slotOf(variable);
+        return slot !is null && slot.isReturnPlace;
     }
 
     // The one host-to-guest argument-count rule, shared by both backends'
@@ -695,13 +714,17 @@ extern(C++) private final class LocalsCollector:
         const retains = canRetainTemporaries(variable);
         _layout.retainsTemporaries |= retains;
 
+        const isReturnPlace = _layout._returns.aliases(variable);
         const isRef = (variable.storage_class & STC.ref_) != 0;
-        const slot = isRef
+        const slot = isReturnPlace
+            ? FrameLayout.Slot(_layout.returnPlace.offset, TypeFacts.pointer)
+            : isRef
             ? _layout.reserveSlot(
                 TypeFacts.pointer)
             : _layout.reserveSlot(variable.type);
         _layout._slotOf[variable] =
-            FrameLayout.VariableSlot(slot.offset, isRef, retains);
+            FrameLayout.VariableSlot(
+                slot.offset, isRef, retains, isReturnPlace);
 
         if (variable._init is null)
             return;

@@ -1310,6 +1310,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             break;
         }
 
+        returnPlace = layout.returnPlace.bind(&_frames, frameBase, returnPlace);
         const guard = CallStateGuard(this);
 
         _closureBase = null;
@@ -2394,7 +2395,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             fullExpression(FullExpressionScope.Position.returnOperand,
                 statement.exp, {
                 if (returned.place !is null) {
-                    memcpy(returned.place, returned.address, returned.size);
+                    if (returned.place != returned.address)
+                        memcpy(returned.place, returned.address, returned.size);
                     return;
                 }
                 // A discarded result is still read: the read can fault.
@@ -3114,7 +3116,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // type (the variable's declared type), so this is a plain copy,
         // not a conversion - unlike a literal, which `storeValue` has
         // to convert from its dmd node first.
-        memcpy(_place, slotOf(expression), _facts.size);
+        const source = slotOf(expression);
+        if (source != _place)
+            memcpy(_place, source, _facts.size);
     }
 
     // A class `this` is a reference value in its hidden frame slot. A
@@ -3265,13 +3269,16 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (auto slot = _layout.slotOf(variable)) {
             if (retains !is null)
                 *retains = slot.retainsTemporaries;
-            return _frameBase + slot.offset;
+            auto address = _frameBase + slot.offset;
+            return slot.isReturnPlace ? *cast(ubyte**) address : address;
         }
-
         if (owner is null)
             assert(0, "a local variable has an enclosing function");
 
-        return contextOf(owner) + layoutOf(owner).offsetOf(variable);
+        const layout = layoutOf(owner);
+        auto address = contextOf(owner) + layout.offsetOf(variable);
+        return layout.isReturnPlace(variable)
+            ? *cast(ubyte**) address : address;
     }
 
     private bool isRefStorage(VarDeclaration variable) {
@@ -3346,7 +3353,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // storage, not the storage itself. Reading through it once more here,
         // the one place every read, write and address-of a variable resolves
         // its slot, makes a reach of the variable reach its target instead.
-        if (slot.isRef)
+        if (slot.isRef || slot.isReturnPlace)
             return cast(ubyte*) loadIntegral(
                 address, size_t.sizeof, false);
 

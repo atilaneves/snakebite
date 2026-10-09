@@ -1025,6 +1025,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 ? _layout.variadicCursor : size_t.max,
             _layout.parameters.length,
             _layout.signature,
+            _layout.returnPlace,
         );
         return result;
     }
@@ -1567,7 +1568,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // runs, exactly as a compiled `return` inside a `try` does: the
         // finally can go on to use its own temporaries without disturbing
         // the value already on its way out.
-        _returnOffset = reserveTemp(_returnFacts);
+        _returnOffset = _layout.returnPlace.offset == size_t.max
+            ? reserveTemp(_returnFacts)
+            : indirectStorage(_layout.returnPlace.offset);
         if (readsAfterEnd)
             _returnAddress = compileAddress(
                 FullExpressionScope.lvalueOf(statement.exp));
@@ -2660,7 +2663,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         VarDeclaration variable,
         Expression destructor,
     ) {
-        const base = _layout.offsetOf(variable);
+        const base = variableStorage(variable);
         const site = _callSites.length;
         _callSites ~= CallSite.temporary;
         _temporaries ~= Temporary(base, site, destructor);
@@ -2753,7 +2756,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        const offset = _layout.offsetOf(variable);
+        const offset = variableStorage(variable);
 
         // `foreach (ref value; values) ...` declares `value` afresh each
         // iteration, bound to `values[i]`'s own storage - the same `ref`
@@ -2917,6 +2920,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return _closurePlans[function_];
     }
 
+    private size_t variableStorage(VarDeclaration variable) {
+        const offset = _layout.offsetOf(variable);
+        return _layout.isReturnPlace(variable)
+            ? indirectStorage(offset) : offset;
+    }
+
     // The address of a variable's storage as a pointer value in a frame
     // slot. A ref variable is indirected here, so all callers see the
     // storage it refers to rather than its pointer slot.
@@ -2931,7 +2940,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto owner = outerFunctionOf(variable);
         if (owner is _function) {
-            if (_layout.isRef(variable))
+            if (_layout.isRef(variable) || _layout.isReturnPlace(variable))
                 return _layout.offsetOf(variable);
 
             const result = reserveTemp(pointerFacts);
@@ -2963,7 +2972,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 "a frame layout reserves a slot for each of its locals");
 
         context = addPointerOffset(context, layout.offsetOf(variable));
-        if (layout.isRef(variable))
+        if (layout.isRef(variable) || layout.isReturnPlace(variable))
             emit(&opLoadIndirect, context, context, size_t.sizeof);
         return context;
     }
@@ -3292,6 +3301,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 && !targetVariable.isDataseg
                 && !isClosureVariable(targetVariable)
                 && !_layout.isRef(targetVariable)
+                && !_layout.isReturnPlace(targetVariable)
                 && _layout.hasSlot(targetVariable)
             ? _layout.offsetOf(targetVariable) : size_t.max;
 
@@ -3679,7 +3689,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     arithmetic,
                 );
             if (_layout.hasSlot(variable) && !isClosureVariable(variable)
-                    && !_layout.isRef(variable))
+                    && !_layout.isRef(variable)
+                    && !_layout.isReturnPlace(variable))
                 return ScalarStorage(
                     ScalarStorage.Kind.frame, facts,
                     _layout.offsetOf(variable), null,
@@ -4165,7 +4176,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        const source = _layout.offsetOf(variable);
+        const source = variableStorage(variable);
 
         // A `ref` variable's own slot holds the address of the storage it
         // is bound to, not the storage itself - reading it means reading

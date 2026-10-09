@@ -902,3 +902,96 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// A MEMORY-class returned local is constructed in its caller's result place.
+// Its constructor and a nonescaping nested function must see that same place.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE copies the returned local without rebinding its constructor's "
+        ~ "object address; the sibling test records that result"),
+)) {
+    @("structCopy.returnedLocalKeepsConstructorAddress." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, returnedLocalAddressCode);
+    }
+}
+
+@("structCopy.returnedLocalKeepsConstructorAddress.CtfeDivergence")
+@Tags("Ctfe")
+unittest {
+    1.shouldBeStatusOf!(Ctfe, returnedLocalAddressCode);
+}
+
+private enum returnedLocalAddressCode = q{
+            struct S {
+                S* constructed;
+                long[4] values;
+                this(long value) {
+                    constructed = &this;
+                    values[0] = value;
+                }
+            }
+            S make(long value) {
+                auto result = S(value);
+                void update() { ++result.values[0]; }
+                update();
+                if (value < 0) return result;
+                result.values[1] = value;
+                return result;
+            }
+            int main() {
+                auto first = make(7);
+                if (first.constructed != &first) return 1;
+                if (first.values[0] != 8 || first.values[1] != 7) return 2;
+                auto second = make(-2);
+                if (second.constructed != &second) return 3;
+                return second.values[0] == -1 ? 0 : 4;
+            }
+        };
+
+
+// Returning different named locals copies the selected value directly into
+// the result place, even when neither named local can share that place.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot cast a constructor's object address to size_t"),
+)) {
+    @("structCopy.returnCopyCtorKeepsResultAddress." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S {
+                size_t copied;
+                int* copies;
+                long[4] values;
+                this(long value, int* count) {
+                    copies = count;
+                    values[0] = value;
+                }
+                this(ref return scope const S other) {
+                    copied = cast(size_t) &this;
+                    copies = cast(int*) other.copies;
+                    values = other.values;
+                    ++*copies;
+                }
+            }
+            S choose(bool first, int* count) {
+                auto left = S(7, count);
+                auto right = S(9, count);
+                if (first) return left;
+                return right;
+            }
+            int main() {
+                int count;
+                auto left = choose(true, &count);
+                if (left.copied != cast(size_t) &left || left.values[0] != 7) return 1;
+                if (count != 1) return 2;
+                auto right = choose(false, &count);
+                if (right.copied != cast(size_t) &right || right.values[0] != 9) return 3;
+                return count == 2 ? 0 : 4;
+            }
+        });
+    }
+}
