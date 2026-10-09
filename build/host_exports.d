@@ -1,3 +1,9 @@
+// Test hosts need exact linker exports for native fixtures called through guest
+// declarations and for explicit resolver tests. Most fixtures use executable
+// lookup by name because of the existing test design, not a D language rule.
+// The host compiler derives the mangled names for the test-host export maps;
+// production exports only rt_options. Keeping other host template instances
+// private prevents ELF symbol interposition on loaded D code.
 module host_exports;
 
 // Each entry names a fixture and a consumer that resolves it by linker name.
