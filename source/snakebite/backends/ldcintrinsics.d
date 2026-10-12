@@ -107,10 +107,13 @@ private alias Scalars = imported!"std.meta".AliasSeq!(
     float, double, real, bool, ubyte, ushort, uint, ulong,
 );
 
-// The length of a copy is not an `i1`.
+// The length of a copy is not an `i1`. LLVM 22 has no x86 instruction
+// selection for `minimum` and `maximum` on `real` (`f80`): LDC stops the
+// compilation of any call, so no wrapper for them can exist.
 private template takesType(string name, T) {
     enum takesType = !(is(T == bool)
-        && (name == "llvm_memcpy" || name == "llvm_memmove" || name == "llvm_memset"));
+        && (name == "llvm_memcpy" || name == "llvm_memmove" || name == "llvm_memset"))
+        && !(is(T == real) && (name == "llvm_minimum" || name == "llvm_maximum"));
 }
 
 // The parameters that LLVM wants as constants, by intrinsic name: the
