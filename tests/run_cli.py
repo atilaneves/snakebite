@@ -277,6 +277,37 @@ def test_module_constructor_uses_project_directory(
     assert (tmp_path / "app" / "test-ran.txt").exists()
 
 
+# The benchmark harness runs the tests where `dub test` runs them: in the
+# project directory, whatever directory the harness starts in or a previous
+# run leaves.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_bench_runs_tests_in_project_directory(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(tmp_path / "outside" / ".keep")
+    write(tmp_path / "app" / "dub.sdl", dub_project_recipe("bench-cwd"))
+    write(tmp_path / "app" / "project-relative.txt", "ready\n")
+    write(
+        tmp_path / "app" / "source" / "main.d",
+        """
+        module main;
+        import std.file: chdir, readText;
+        unittest {
+            assert("project-relative.txt".readText == "ready\\n");
+            chdir("/");
+        }
+        int main() { return 0; }
+        """,
+    )
+
+    result = run_bench(
+        str(tmp_path / "app"), f"--backend={backend}", "--runs=2",
+        "--warmup=0", cwd=tmp_path / "outside",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 # A module destructor sees the directory that the constructors and `main`
 # of the same program see.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
@@ -4995,6 +5026,25 @@ def run_sb(
         timeout=timeout_seconds,
         cwd=cwd,
         env=None if env is None else {**os.environ, **env},
+    )
+
+
+def run_bench(
+    *args: str,
+    cwd: Path,
+    timeout_seconds: int = 120,
+) -> subprocess.CompletedProcess[str]:
+    bench = os.path.join(os.getcwd(), "bin", "bench")
+    if not os.path.exists(bench):
+        pytest.fail("bin/bench does not exist; run `ninja bin/bench` first")
+
+    return subprocess.run(
+        [bench, *args],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=timeout_seconds,
+        cwd=cwd,
     )
 
 

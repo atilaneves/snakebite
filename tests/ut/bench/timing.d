@@ -5,6 +5,7 @@ import bench.benchmark: benchmark;
 import snakebite.backends: backendIdentity, Backends, Program;
 import snakebite.frontend.compiler: parseSnippets;
 import std.conv: text;
+import std.file: getcwd;
 import ut;
 
 
@@ -23,6 +24,7 @@ unittest {
             BackendType.stringof,
             backendIdentity!BackendType,
             program,
+            getcwd,
             0,
             1,
         );

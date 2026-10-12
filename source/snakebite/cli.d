@@ -29,9 +29,10 @@ public int run(string[] args) {
     import snakebite.dub: fetchProject;
     import snakebite.execution: executeBackend, prepareProject;
     import snakebite.gc: selectFrontendMemory;
+    import snakebite.project: enterProjectDirectory;
     import std.algorithm.iteration: map;
     import std.array: array;
-    import std.file: chdir, exists, isDir;
+    import std.file: exists, isDir;
     import std.path: absolutePath;
     import std.stdio: stderr, stdout, write;
 
@@ -52,9 +53,7 @@ public int run(string[] args) {
             .map!(path => path.absolutePath).array;
         const stringImportPaths = parsed.options.stringImportPaths
             .map!(path => path.absolutePath).array;
-        // The process ends with the program, and the module destructors run
-        // when it does: they see the directory that `main` saw.
-        chdir(projectDirectory);
+        enterProjectDirectory(projectDirectory);
         auto preparation = prepareProject(
             projectDirectory,
             importPaths,

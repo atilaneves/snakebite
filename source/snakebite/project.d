@@ -118,6 +118,14 @@ shared static this() {
 }
 
 
+// Guest code runs where `dub test` runs it: in the project directory.
+public void enterProjectDirectory(in string projectDirectory) {
+    import std.file: chdir;
+
+    chdir(projectDirectory);
+}
+
+
 public string projectStateDirectory(in string projectDirectory) {
     import std.digest.sha: sha256Of;
     import std.digest: toHexString;

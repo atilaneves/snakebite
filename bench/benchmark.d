@@ -209,11 +209,21 @@ private imported!"snakebite.execution".PreparationReport loadProject(
     in Options options,
 ) {
     import snakebite.execution: prepareProject;
+    import snakebite.project: enterProjectDirectory;
+    import std.algorithm.iteration: map;
+    import std.array: array;
+    import std.path: absolutePath;
+
+    // Made absolute first: they are relative to where the harness started.
+    const importPaths = options.importPaths.map!(path => path.absolutePath).array;
+    const stringImportPaths =
+        options.stringImportPaths.map!(path => path.absolutePath).array;
+    enterProjectDirectory(options.projectDirectory);
 
     return prepareProject(
         options.projectDirectory,
-        options.importPaths,
-        options.stringImportPaths,
+        importPaths,
+        stringImportPaths,
         selected(options, "interpreter") || selected(options, "bytecode"),
         options.versions,
     );
@@ -233,6 +243,7 @@ private BackendReport[] benchmarkAll(
                 backendName!BackendType,
                 backendIdentity!BackendType,
                 project.program,
+                project.directory,
                 options.warmup,
                 options.runs,
             );
@@ -262,12 +273,14 @@ public BackendReport benchmark(
     in string name,
     in imported!"snakebite.backends".BackendName backendName_,
     imported!"snakebite.backends".Program program,
+    in string directory,
     in uint warmup,
     in uint runs,
 ) {
     import bench.capture: captureStdout;
     import bench.report: timingStatistics, updateTestCounts;
     import snakebite.execution: executeBackend, ExecutionReport;
+    import snakebite.project: enterProjectDirectory;
 
     BackendReport report;
     report.name = name;
@@ -293,6 +306,9 @@ public BackendReport benchmark(
         // on an unlucky one in ten.
         import core.memory: GC;
         GC.collect();
+
+        // A guest may change directory; every round starts in the project.
+        enterProjectDirectory(directory);
 
         ExecutionReport execution;
         const result = captureStdout(() {

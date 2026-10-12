@@ -51,6 +51,7 @@ unittest {
                 BackendType.stringof,
                 backendIdentity!BackendType,
                 program,
+                getcwd,
                 0,
                 1,
             ).runTime.median;
@@ -59,6 +60,7 @@ unittest {
             BackendType.stringof,
             backendIdentity!BackendType,
             program,
+            getcwd,
             2,
             10,
         );
