@@ -263,3 +263,27 @@ unittest {
     fetchProject("package", ["sh", "-c", "echo warning >&2; echo /the/path"])
         .should == "/the/path";
 }
+
+
+// A pinned version is the one used, also when another version is already
+// cached: the cached 1.0 answers a plain `describe package`, but `package@2.0`
+// is only known after a fetch. `sh -c` stands in for dub; the words after the
+// script are its positional arguments, so `$0` is the dub subcommand and `$1`
+// the package.
+@("fetchProject.pinnedVersionIsFetchedWhenAnotherIsCached")
+unittest {
+    import snakebite.dub: fetchProject;
+
+    const sandbox = Sandbox();
+    const fetched = sandbox.inSandboxPath("fetched");
+    const script = `
+        case $0 in
+            fetch) : > ` ~ fetched ~ `;;
+            describe) case $1 in
+                package@2.0) [ -e ` ~ fetched ~ ` ] && echo /cache/package-2.0 || exit 1;;
+                *) echo /cache/package-1.0;;
+            esac;;
+        esac`;
+
+    fetchProject("package@2.0", ["sh", "-c", script]).should == "/cache/package-2.0";
+}
