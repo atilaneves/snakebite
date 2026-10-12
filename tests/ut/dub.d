@@ -126,6 +126,27 @@ unittest {
     calls.should == 1;
 }
 
+// dub runs the pre-generate commands when it describes a project, so a record
+// of such a project could be out of date with no input that the cache sees.
+@("cache.skipsProjectsWithGenerateCommands")
+unittest {
+    const sandbox = Sandbox();
+    auto recorded = recordedDescription(sandbox, "cached-library");
+    recorded.packages[0].preGenerateCommands = ["generate"];
+    const directory = sandbox.inSandboxPath("app");
+    size_t calls;
+    DubDescription describe() {
+        ++calls;
+        return DubDescription(recorded, "library");
+    }
+    void load() { cachedDubDescription(directory, defaultCompiler, null, &describe); }
+
+    load;
+    load;
+
+    calls.should == 2;
+}
+
 // The description is made by the library that is linked into snakebite, so a
 // record is only as good as the snakebite build that made it. Two builds that
 // take turns on one project each keep their record.
@@ -172,4 +193,46 @@ unittest {
 
     (dependencyFingerprint(directory, unittestBuild)
         != dependencyFingerprint(directory, debugBuild)).should == true;
+}
+
+
+// A dependency is built from its sources, which the description of the root
+// lists; the sources of the root are not an input of that build.
+@("dependencyFingerprint.followsDependencySourcesOnly")
+unittest {
+    const sandbox = Sandbox();
+    auto recorded = recordedDescription(sandbox, "cached-app-with-dependency");
+    const directory = sandbox.inSandboxPath("app");
+    const description = DubDescription(recorded, "library");
+    const before = dependencyFingerprint(directory, description);
+
+    sandbox.writeFile("app/source/app.d", "module app; void other() {}\n");
+    dependencyFingerprint(directory, description).should == before;
+
+    sandbox.writeFile("dependency/source/dependency.d", "module dependency; void other() {}\n");
+    (dependencyFingerprint(directory, description) != before).should == true;
+}
+
+
+@("description.readsEnvironmentsOfTheTarget")
+unittest {
+    const project = projectDescriptionFromJson(parseJSON(`{
+        "rootPackage": "app",
+        "targets": [{"rootPackage": "app", "buildSettings": {
+            "environments": {"NAME": "value"}
+        }}]
+    }`));
+
+    project.lookupTarget("app").buildSettings.environments.should == ["NAME": "value"];
+}
+
+
+@("description.ignoresValuesOfTheWrongShape")
+unittest {
+    const project = projectDescriptionFromJson(parseJSON(
+        `{"rootPackage": "app", "packages": "none", "targets": {}}`));
+
+    project.rootPackage.should == "app";
+    project.packages.length.should == 0;
+    project.targets.length.should == 0;
 }
