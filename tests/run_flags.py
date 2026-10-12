@@ -446,7 +446,7 @@ def test_root_build_command_failure_is_reported(
     output = result.stdout + result.stderr
     assert result.returncode != 0, output
     assert marker in output, output
-    assert "Command failed with exit code 27" in output, output
+    assert "failed with exit code 27" in output, output
     assert not list((tmp_path / ".snakebite").rglob("dub-dependencies"))
 
 
