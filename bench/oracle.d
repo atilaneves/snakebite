@@ -71,7 +71,7 @@ BackendReport oracleReport(
         if (tmpBinary.exists)
             tmpBinary.remove;
 
-    const binary = dub ? dubTestBinary(directory) : TestBinary(tmpBinary, null);
+    const binary = dub ? dubTestBinary(directory) : TestBinary(tmpBinary, directory);
     if (dub)
         throwawayDubTestBuild(directory);
 

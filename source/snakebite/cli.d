@@ -27,12 +27,10 @@ public int run(string[] args) {
     import snakebite.backends: BackendName;
     import snakebite.dependencyimage: Optimise;
     import snakebite.dub: fetchProject;
-    import snakebite.execution: executeBackend, prepareProject;
+    import snakebite.execution: executeBackend, prepareSources, runProject;
+    import snakebite.project: EndsProcess;
     import snakebite.gc: selectFrontendMemory;
-    import std.algorithm.iteration: map;
-    import std.array: array;
-    import std.file: chdir, exists, isDir;
-    import std.path: absolutePath;
+    import std.file: exists, isDir;
     import std.stdio: stderr, stdout, write;
 
     const parsed = parseArgs(args);
@@ -47,31 +45,33 @@ public int run(string[] args) {
         string projectDirectory = parsed.options.projectDirectory;
         if (!projectDirectory.exists || !projectDirectory.isDir)
             projectDirectory = fetchProject(projectDirectory);
-        projectDirectory = projectDirectory.absolutePath;
-        const importPaths = parsed.options.importPaths
-            .map!(path => path.absolutePath).array;
-        const stringImportPaths = parsed.options.stringImportPaths
-            .map!(path => path.absolutePath).array;
-        // The process ends with the program, and the module destructors run
-        // when it does: they see the directory that `main` saw.
-        chdir(projectDirectory);
-        auto preparation = prepareProject(
+        return runProject(
             projectDirectory,
-            importPaths,
-            stringImportPaths,
-            parsed.options.backend != BackendName.ctfe,
+            parsed.options.importPaths,
+            parsed.options.stringImportPaths,
             parsed.options.versions,
-            parsed.options.noOptimiseImage ? Optimise.no : Optimise.yes,
+            EndsProcess.yes,
+            (directory, sources, discovery, enterWorkingDirectory) {
+                auto preparation = prepareSources(
+                    directory,
+                    sources,
+                    discovery,
+                    parsed.options.backend != BackendName.ctfe,
+                    parsed.options.noOptimiseImage ? Optimise.no : Optimise.yes,
+                );
+                enterWorkingDirectory();
+                const report = executeBackend(
+                    parsed.options.backend,
+                    preparation.project.program,
+                    [preparation.project.program.name]
+                        ~ parsed.options.programArguments,
+                    false,
+                    true,
+                );
+                _statistics = Statistics(true, preparation, report);
+                return report.status;
+            },
         );
-        const report = executeBackend(
-            parsed.options.backend,
-            preparation.project.program,
-            [preparation.project.program.name] ~ parsed.options.programArguments,
-            false,
-            true,
-        );
-        _statistics = Statistics(true, preparation, report);
-        return report.status;
     } catch (Exception exception) {
         stderr.write("snakebite: ", exception.msg, "\n");
         return 1;

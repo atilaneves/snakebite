@@ -16,6 +16,9 @@ public struct SourceSet {
     public string[string] sourceOverrides;
     public string[] linkerFiles;
     public DubDescription dubDescription;
+    // Where `dub test` runs the test binary; empty when the recipe sets no
+    // `workingDirectory`, and for a bare directory.
+    public string workingDirectory;
     // A bare directory is built as `dmd -i` builds it, which compiles a C
     // module that a D module imports. A dub recipe names its C files in
     // `sourceFiles`, and dub does not compile one that it does not name.
@@ -107,14 +110,61 @@ public bool isDubProject(in string directory) {
 }
 
 
-// Project state lives under the directory snakebite started in. The CLI
-// changes into the project directory so that guest code sees the files
-// it expects, and that must not move the state with it.
+// Project state lives under the directory snakebite started in. Guest code
+// runs in the directory of its project so that it sees the files it expects,
+// and that must not move the state with it.
 private immutable string _startDirectory;
 
 shared static this() {
     import std.file: getcwd;
     _startDirectory = getcwd;
+}
+
+
+// Whether the process ends when the guest returns.
+public enum EndsProcess { no, yes }
+
+
+// The frontend runs in the project directory, where dub builds. The guest
+// runs in the working directory, where `dub test` runs it; `enterWorking`
+// goes there, and goes there again after a guest has left it. The destructor
+// goes back to where the host was, unless the process ends with the guest: its
+// module destructors then run after the guest returns and see the directory
+// that its constructors and `main` saw.
+public struct ProjectDirectory {
+    private string _project;
+    private string _working;
+    private string _previous;
+    private EndsProcess _endsProcess;
+
+    @disable this(this);
+
+    this(
+        in string project,
+        in string working,
+        in EndsProcess endsProcess,
+    ) {
+        import std.file: chdir, getcwd;
+
+        _project = project;
+        _working = working;
+        _previous = getcwd;
+        _endsProcess = endsProcess;
+        chdir(_project);
+    }
+
+    void enterWorking() const {
+        import std.file: chdir;
+
+        chdir(_working);
+    }
+
+    ~this() {
+        import std.file: chdir;
+
+        if (_endsProcess == EndsProcess.no)
+            chdir(_previous);
+    }
 }
 
 
@@ -260,7 +310,7 @@ private SourceSet dubSourceSet(
 
     import snakebite.frontend.checks: expandedCompilerArguments;
 
-    return SourceSet(
+    auto sources = SourceSet(
         files.dup,
         importPaths.dup,
         stringImportPaths.dup,
@@ -271,6 +321,11 @@ private SourceSet dubSourceSet(
         linkerFiles.dup,
         description,
     );
+    // dub describe makes the directory absolute and leaves it empty when
+    // the recipe names none.
+    if (packageSettings && "workingDirectory" in settings.object)
+        sources.workingDirectory = settings["workingDirectory"].str;
+    return sources;
 }
 
 

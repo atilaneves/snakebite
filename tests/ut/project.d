@@ -7,13 +7,15 @@ import core.sync.mutex: Mutex;
 import snakebite.backends: BackendName, backendIdentity;
 import snakebite.backends.backend: Program;
 import snakebite.dependencyimage: TestHooks;
-import snakebite.execution: prepareProject, executeBackend;
+import snakebite.execution: prepareProject, executeBackend, runProject;
 import snakebite.dub: DubDescription;
-import snakebite.project: dubSourceSetFromDescription, projectStateDirectory;
+import snakebite.project:
+    dubSourceSetFromDescription, EndsProcess, ProjectDirectory,
+    projectStateDirectory;
 import std.algorithm.searching: endsWith;
 import std.digest.sha: sha256Of;
 import std.digest: toHexString;
-import std.file: getcwd;
+import std.file: chdir, getcwd;
 import std.path: absolutePath, buildNormalizedPath, buildPath, dirName;
 import ut;
 import ut.backends;
@@ -102,6 +104,116 @@ unittest {
     sources.flags.compilerArguments.should == [
         "-release", "-noboundscheck", "-betterC",
     ];
+}
+
+
+private bool isSameFile(in string first, in string second) {
+    import std.file: DirEntry;
+
+    const left = DirEntry(first).statBuf;
+    const right = DirEntry(second).statBuf;
+    return left.st_dev == right.st_dev && left.st_ino == right.st_ino;
+}
+
+
+// `dub test` runs the test binary in the `workingDirectory` of the recipe.
+@("sourceSet.takesWorkingDirectoryOfTheRecipe")
+unittest {
+    import std.json: parseJSON;
+
+    const directory = buildPath(__FILE__.dirName,
+        "../fixtures/dub-package-settings").absolutePath;
+    auto description = DubDescription(parseJSON(`{
+        "rootPackage": "root",
+        "configuration": "unittest",
+        "packages": [{"name": "root", "path": "` ~ directory ~ `"}],
+        "targets": [{
+            "rootPackage": "root",
+            "cacheArtifactPath": "/cache/root",
+            "buildSettings": {
+                "targetPath": ".",
+                "sourceFiles": ["` ~ directory ~ `/tests/main.d"],
+                "linkerFiles": [], "importPaths": [], "stringImportPaths": [],
+                "dflags": [], "debugVersions": [], "options": [],
+                "versions": [], "lflags": [], "libs": [],
+                "workingDirectory": "/data"
+            }
+        }]
+    }`));
+
+    dubSourceSetFromDescription(directory, description)
+        .workingDirectory.should == "/data";
+}
+
+
+// The directory is the state of the whole process, so these tests run alone.
+@("projectDirectory.runsFrontendInProjectAndGuestInWorking")
+@Tags("changes-working-directory")
+unittest {
+    const sandbox = Sandbox();
+    sandbox.writeFile("project/app.d", "module app; void main() {}");
+    sandbox.writeFile("working/data.txt", "");
+    const project = sandbox.inSandboxPath("project");
+    const working = sandbox.inSandboxPath("working");
+    const before = getcwd;
+    scope(exit) chdir(before);
+
+    {
+        auto entered = ProjectDirectory(project, working, EndsProcess.no);
+        isSameFile(getcwd, project).should == true;
+        entered.enterWorking;
+        isSameFile(getcwd, working).should == true;
+        chdir(project);
+        entered.enterWorking;
+        isSameFile(getcwd, working).should == true;
+    }
+
+    getcwd.should == before;
+}
+
+
+@("projectDirectory.staysWhenTheProcessEndsWithTheGuest")
+@Tags("changes-working-directory")
+unittest {
+    const sandbox = Sandbox();
+    sandbox.writeFile("project/app.d", "module app; void main() {}");
+    const project = sandbox.inSandboxPath("project");
+    const before = getcwd;
+    scope(exit) chdir(before);
+
+    {
+        auto entered = ProjectDirectory(project, project, EndsProcess.yes);
+    }
+
+    isSameFile(getcwd, project).should == true;
+}
+
+
+@("runProject.runsBodyInProjectDirectory")
+@Tags("changes-working-directory")
+unittest {
+    const sandbox = Sandbox();
+    sandbox.writeFile("app/app.d", "module app; void main() {}");
+    const before = getcwd;
+    scope(exit) chdir(before);
+    bool sawProject;
+    bool sawWorking;
+
+    const status = runProject(
+        sandbox.inSandboxPath("app"), null, null, null, EndsProcess.no,
+        (directory, sources, discovery, enterWorkingDirectory) {
+            sawProject = isSameFile(getcwd, directory);
+            chdir("/");
+            enterWorkingDirectory();
+            sawWorking = isSameFile(getcwd, directory);
+            return 7;
+        },
+    );
+
+    status.should == 7;
+    sawProject.should == true;
+    sawWorking.should == true;
+    getcwd.should == before;
 }
 
 

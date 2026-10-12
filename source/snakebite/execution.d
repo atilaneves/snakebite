@@ -41,6 +41,54 @@ public string discoveryLabel(in PreparationReport report) {
 }
 
 
+// Runs `body` the way `dub test` runs the project: the frontend in the
+// project directory, where dub builds, and the guest in the working
+// directory of the recipe, or the project directory when it names none.
+// Every front end that runs a project's code goes through here, and none
+// chooses a directory. The directory is state of the whole process, so only
+// a front end, never a function that a test calls on a thread, may set it.
+// Paths of the caller become absolute first: they are relative to where the
+// caller is. `body` gets the absolute project directory and a function that
+// enters the working directory: it calls it before each run of the guest.
+// `EndsProcess.yes` leaves the directory in place: the module destructors of
+// the program run when the process ends and see the directory that its
+// constructors and `main` saw.
+public int runProject(
+    in string projectDirectory,
+    in string[] callerImportPaths,
+    in string[] callerStringImportPaths,
+    in string[] versions,
+    in imported!"snakebite.project".EndsProcess endsProcess,
+    in int delegate(
+        string,
+        imported!"snakebite.project".SourceSet,
+        imported!"core.time".Duration,
+        void delegate(),
+    ) body,
+) {
+    import snakebite.project: ProjectDirectory, sourceSet;
+    import std.datetime.stopwatch: AutoStart, StopWatch;
+    import std.algorithm.iteration: map;
+    import std.array: array;
+    import std.path: absolutePath;
+
+    const directory = projectDirectory.absolutePath;
+    const importPaths = callerImportPaths.map!(path => path.absolutePath).array;
+    const stringImportPaths =
+        callerStringImportPaths.map!(path => path.absolutePath).array;
+    auto stopWatch = StopWatch(AutoStart.yes);
+    auto sources = sourceSet(directory, importPaths, stringImportPaths, versions);
+    const discovery = stopWatch.peek;
+    scope entered = ProjectDirectory(
+        directory,
+        sources.workingDirectory.length ? sources.workingDirectory : directory,
+        endsProcess,
+    );
+    return body(directory, sources, discovery, &entered.enterWorking);
+}
+
+
+// Does not change the working directory: `runProject` does.
 public PreparationReport prepareProject(
     in string directory,
     in string[] importPaths = null,
@@ -50,19 +98,33 @@ public PreparationReport prepareProject(
     in imported!"snakebite.dependencyimage".Optimise optimise
         = imported!"snakebite.dependencyimage".Optimise.yes,
 ) {
-    import snakebite.frontend.compiler: Snippets, initialize;
-    import snakebite.project: loadProject, sourceSet, prepareDependencies;
+    import snakebite.project: sourceSet;
     import std.datetime.stopwatch: AutoStart, StopWatch;
 
-    // Two costs a user pays before any backend runs, timed apart: finding
-    // the sources is not frontend work (for a dub project it is a `dub
-    // describe` subprocess, which spawns the compiler too) and once counted
-    // as frontend time it inflated that number by up to half.
+    // Finding the sources is not frontend work (for a dub project it is a
+    // `dub describe` subprocess, which spawns the compiler too) and once
+    // counted as frontend time it inflated that number by up to half.
     auto stopWatch = StopWatch(AutoStart.yes);
     auto sources = sourceSet(directory, importPaths, stringImportPaths, versions);
-    const discovery = stopWatch.peek;
+    return prepareSources(
+        directory, sources, stopWatch.peek, nativeDependencies, optimise,
+    );
+}
 
-    stopWatch.reset;
+
+public PreparationReport prepareSources(
+    in string directory,
+    imported!"snakebite.project".SourceSet sources,
+    in imported!"core.time".Duration discovery,
+    in bool nativeDependencies = true,
+    in imported!"snakebite.dependencyimage".Optimise optimise
+        = imported!"snakebite.dependencyimage".Optimise.yes,
+) {
+    import snakebite.frontend.compiler: Snippets, initialize;
+    import snakebite.project: loadProject, prepareDependencies;
+    import std.datetime.stopwatch: AutoStart, StopWatch;
+
+    auto stopWatch = StopWatch(AutoStart.yes);
     initialize(Snippets.no);
     auto project = loadProject(directory, sources);
     const frontendDuration = stopWatch.peek;

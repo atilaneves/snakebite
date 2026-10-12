@@ -455,6 +455,32 @@ def test_project_session_resolves_arguments_from_its_start_directory(
     assert result.stderr == ""
 
 
+# The session works where `dub test` runs the project: the `workingDirectory`
+# of the recipe.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_project_session_works_in_the_working_directory_of_the_recipe(
+    tmp_path: Path, backend: str,
+) -> None:
+    (tmp_path / "project" / "source").mkdir(parents=True)
+    (tmp_path / "project" / "data").mkdir()
+    (tmp_path / "project" / "dub.sdl").write_text(
+        f'name "{dub_name("session-cwd")}"\nworkingDirectory "data"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "project" / "source" / "session_cwd.d").write_text(
+        "module session_cwd;\nint one() { return 1; }\n", encoding="utf-8",
+    )
+
+    result = run_sb(
+        "--project", "project", "-b", backend,
+        input="import std.file;\nstd.file.getcwd()\n",
+        cwd=tmp_path, timeout_seconds=60,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == f"{(tmp_path / 'project' / 'data').resolve()}\n"
+
+
 def test_piped_blank_line_is_silent_noop() -> None:
     result = run_sb(input="\n")
 
