@@ -80,9 +80,8 @@ Target registryImageObject() {
 
 // The native libraries that `bin/ut` loads, built here so that no test
 // starts a compiler for them. They lie in `bin/fixtures`, next to the test
-// executable. They are implicit inputs of an empty object that only
-// `bin/ut` links, so that `ninja bin/ut` makes them and no other target
-// needs a C or C++ compiler for them.
+// executable. They are implicit inputs of an empty object linked by
+// `bin/ut` and `bin/arena`, so either target builds its own test fixtures.
 Target testFixtureObject(in string objectSet, Target exportMap,
                          Target[] libraries) {
     return Target(
@@ -120,7 +119,7 @@ Target[] dubTarget(string compiler, string config, string objectSet,
         buildOptions.dubBuildType = "release";
 
     DubInfo info = configToDubInfo[config].dup;
-    if (config == "acceptance-test")
+    if (config == "acceptance-test" || config == "arena-validation")
         info.packages[0].dflags ~= "-unittest";
     if (compiler != "dmd") {
         foreach (ref package_; info.packages)
@@ -159,7 +158,8 @@ Target[] dubTarget(string compiler, string config, string objectSet,
     // into the same link line as the D-compiled ones.
     info.packages[0].files ~= assembledSources.map!assembledObjectPath.array
         ~ assembledObjectPath(registryImageSource);
-    const testHost = config == "unittest" || config == "acceptance-test";
+    const unitHost = config == "unittest" || config == "arena-validation";
+    const testHost = unitHost || config == "acceptance-test";
     if (testHost)
         info.packages[0].files ~= "$project/" ~ objectSet ~ "_host_exports.o";
 
@@ -195,7 +195,7 @@ Target[] dubTarget(string compiler, string config, string objectSet,
     target.rawOutputs[0] = "bin/" ~ output;
     return testHost
         ? [target, testFixtureObject(objectSet, exportMap,
-            config == "unittest" ? testFixtureLibraries : [])] : [target];
+            unitHost ? testFixtureLibraries : [])] : [target];
 }
 
 Build reggaeBuild() {
@@ -203,6 +203,7 @@ Build reggaeBuild() {
         registryImageObject,
     ]
         ~ dubTarget("dmd", "unittest", "unittest", "ut")
+        ~ dubTarget("dmd", "arena-validation", "arena-validation", "arena")
         ~ dubTarget("ldc2", "acceptance-test", "release", "at", CompilerFlags("-release", "-O", "-flto=thin"))
         ~ dubTarget("ldc2", "sb", "release", "sb", CompilerFlags("-release", "-O", "-flto=thin"))
         ~ dubTarget("ldc2", "sb-repl", "release", "sb-repl", CompilerFlags("-release", "-O", "-flto=thin"))

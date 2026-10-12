@@ -66,8 +66,15 @@ public imported!"dmd.dmodule".Module moduleOf(
 ) {
     import snakebite.frontend.compiler: withCompilerQuery;
 
+    if (auto found = declaration in metadata.modules)
+        return *found;
+
     imported!"dmd.dmodule".Module result;
-    withCompilerQuery({ result = declaration.getModule; });
+    withCompilerQuery({
+        result = declaration.getModule;
+        if (result !is null)
+            metadata.modules[declaration] = result;
+    });
     return result;
 }
 
@@ -85,6 +92,9 @@ public FunctionContext contextOf(
     import snakebite.frontend.compiler: withCompilerQuery;
     import snakebite.frontend.dmd.delegates: outerFunctionOf;
 
+    if (auto found = function_ in metadata.contexts)
+        return *found;
+
     FunctionContext result;
     withCompilerQuery({
         result.module_ = function_.getModule;
@@ -93,8 +103,34 @@ public FunctionContext contextOf(
         const parent = function_.toParent;
         result.templateParent = parent !is null
             && parent.isTemplateInstance !is null;
+        if (result.module_ !is null) {
+            metadata.contexts[function_] = result;
+            metadata.modules[function_] = result.module_;
+        }
     });
     return result;
+}
+
+// DMD temporarily reparents packages during semantic work. A snapshot taken
+// under the query lock sees the settled owner. Each thread keeps that value
+// for the declaration's lifetime, as call decisions already do, so unrelated
+// semantic work cannot delay repeated runtime ownership queries.
+private struct ThreadMetadata {
+    size_t generation;
+    imported!"dmd.dmodule".Module[imported!"dmd.dsymbol".Dsymbol] modules;
+    FunctionContext[imported!"dmd.func".FuncDeclaration] contexts;
+}
+
+// Ordinary module storage is TLS in D; the maps need no shared lock.
+private ThreadMetadata _metadata;
+
+private ref ThreadMetadata metadata() {
+    import snakebite.frontend.compiler: metadataGeneration;
+
+    const generation = metadataGeneration;
+    if (_metadata.generation != generation)
+        _metadata = ThreadMetadata(generation);
+    return _metadata;
 }
 
 // ImportC parses imported definitions even when the source list excludes

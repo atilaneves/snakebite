@@ -12,7 +12,10 @@ import snakebite.hostthreads: heapDelete, heapNew;
 import snakebite.tlsstorage: TlsDescriptor, TlsSlots;
 
 
-public enum defaultFrameCapacity = 1024 * 1024;
+// Most guest frames fit in one page. The GC scans every committed byte,
+// including idle space, so start small and let commit grow with demand.
+// The separate reservation keeps frame addresses stable during growth.
+public enum defaultFrameCapacity = 4 * 1024;
 private enum defaultFrameReservation = 1024 * 1024 * 1024;
 
 

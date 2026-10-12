@@ -20,6 +20,12 @@ Do work in a git worktree in .worktrees unless instructed otherwise.
 
 Run tests after every edit made to D code.
 
+By default, write unit tests, put them in `bin/ut`, and run them in
+parallel. The separate `bin/arena` validates ownership across the shared
+frontend arena. Its scans need stable process state and hold the frontend
+lock. See `docs/adr/0015-frontend-memory-uses-an-arena.md` before adding
+checks to that runner.
+
 Prefer to run focussed tests instead of the whole test suite by passing
 the relevant test names to `bin/ut`.
 
@@ -98,3 +104,14 @@ Use the canonical triage label vocabulary. See
 
 Use the single-context domain-document layout. See
 `docs/agents/domain.md`.
+
+Before diagnosing performance or proposing changes to an existing
+mechanism, read the relevant ADRs. If no record explains the decision,
+trace the introducing commit, linked issues, and source comments. Before
+recommending a change, state the original problem, the guarantees that
+must remain true, and the evidence for both. State any gaps in the
+evidence. Identify which measured costs can be reduced while preserving
+those guarantees.
+
+For frontend allocation, GC boundaries, or arena checks, read
+`docs/adr/0015-frontend-memory-uses-an-arena.md`.

@@ -18,7 +18,16 @@ private:
 // ut.backends ut.ffi ut.repl ut.frontend` (`--DRT-gcopt=profile:1`): 89
 // collections and 35.5 s of GC time with the default factor, 68 and
 // 19.1 s with 4.
+// Test processes have a small GC heap and many short tasks. The default
+// marker pool spends much of its CPU time on its shared work queue.
+// One helper reduced a full 32-worker run from 123 to 31 CPU seconds
+// after reducing idle frame roots. CLI GC options can override this.
+version(unittest)
+    private enum testGcOptions = " parallel:1";
+else
+    private enum testGcOptions = "";
+
 extern(C) public __gshared string[] rt_options = [
     "gcopt=gc:" ~ imported!"snakebite.gc".gcName
-        ~ " cleanup:none heapSizeFactor:4",
+        ~ " cleanup:none heapSizeFactor:4" ~ testGcOptions,
 ];

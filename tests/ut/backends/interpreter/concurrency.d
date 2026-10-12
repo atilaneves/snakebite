@@ -7,6 +7,7 @@ import snakebite.backends.interpreter: Interpreter;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import std.conv: text;
+import core.thread: Thread;
 
 
 // Regression test for the frontend-lock narrowing this sits beside
@@ -141,4 +142,32 @@ unittest {
                     __FILE__, __LINE__,
                 );
     }
+}
+
+
+// Separate interpreter instances must agree when they share a declaration.
+@("call.separateInstancesAgreeAcrossThreads")
+unittest {
+    auto guestModule = parseSnippet("int settledAnswer() { return 42; }");
+    auto function_ = findFunction(guestModule, "settledAnswer");
+    auto program = Program([guestModule]);
+    auto first = Owned!Interpreter(program);
+    auto second = Owned!Interpreter(program);
+    int result;
+    first.call(function_, &result, []);
+    result.should == 42;
+    Throwable failure;
+    auto worker = new Thread({
+        int result;
+        try {
+            second.call(function_, &result, []);
+            result.should == 42;
+        } catch (Throwable error) {
+            failure = error;
+        }
+    });
+    worker.start;
+    worker.join;
+    if (failure !is null)
+        throw failure;
 }

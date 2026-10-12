@@ -289,7 +289,7 @@ private struct Shared {
     SharedTable!(const(void)*, ClassDeclaration) declarationOf;
     // Each guest function's frame layout, computed on that function's
     // first call and reused by every call after it.
-    SharedTable!(FuncDeclaration, FrameLayout) layouts;
+    SharedTable!(LayoutKey, FrameLayout) layouts;
     // Each guest function's name for a fault report, made with its frame
     // layout: the signal handler reads it and can take no lock, which dmd
     // needs to make the name.
@@ -494,6 +494,17 @@ private struct CallSiteKey {
     const(void)* function_;
 }
 
+private enum LayoutKind { body, parameters }
+
+// A native call binds arguments; explicit guest entry can still execute
+// the same declaration's body and therefore needs a separate full layout.
+private struct LayoutKey {
+    import dmd.func: FuncDeclaration;
+
+    FuncDeclaration function_;
+    LayoutKind kind;
+}
+
 // `CallAdapter` paired with one `CallAdapter.Argument` per declared
 // parameter, parallel to `FrameLayout.parameters` - both are pure
 // functions of the same `FuncDeclaration`'s type, so both are worked
@@ -584,7 +595,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private InterpreterStack _interpreterStack;
     private NativeData* _nativeData;
     // This thread's reads of the shared tables, counted.
-    private Cache!(FuncDeclaration, FrameLayout) _layouts;
+    private Cache!(LayoutKey, FrameLayout) _layouts;
     private Cache!(FuncDeclaration, CallShape) _calls;
     private Cache!(CallExp, ValueCall) _valueCalls;
     private CallExp _lastValueCallSite;
@@ -723,7 +734,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _runtimeTypes = &shared_.runtimeTypes;
         _plans = &shared_.plans;
         _callSelection = &shared_.callSelection;
-        _layouts = Cache!(FuncDeclaration, FrameLayout)(&shared_.layouts);
+        _layouts = Cache!(LayoutKey, FrameLayout)(&shared_.layouts);
         _calls = Cache!(FuncDeclaration, CallShape)(&shared_.calls);
         _valueCalls = Cache!(CallExp, ValueCall)(&shared_.valueCalls);
         _closurePlans =
@@ -991,70 +1002,51 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // `function_`'s frame layout, from the shared table; computed on its
     // first call on any thread. The returned pointer stays valid and is
     // the same on every thread.
-    private const(FrameLayout)* layoutOf(FuncDeclaration function_) {
-        if (auto cached = function_ in _layouts)
+    private const(FrameLayout)* layoutOf(
+        FuncDeclaration function_, in LayoutKind kind = LayoutKind.body,
+    ) {
+        // The key retains DMD's mutable declaration type.
+        auto key = LayoutKey(function_, kind);
+        if (auto cached = key in _layouts)
             return cached;
 
-        return _layouts.build(function_, () => buildLayout(function_));
+        return _layouts.build(key, () => buildLayout(function_, kind));
     }
 
-    extern(D) private FrameLayout buildLayout(FuncDeclaration function_) {
-        // dmd only runs semantic3 - the pass that resolves a function
-        // body's own locals, `newCapacity` and the rest of druntime's
-        // append hooks among them - on a module passed to it as a *root*
-        // module, the ones actually being built; parsing a module dmd
-        // reaches only through an `import`, as every druntime module
-        // here is, does not run semantic3 over it. A non-template
-        // function reached only by being called from one of those
-        // hooks, never itself instantiated or written by the guest, has
-        // a body dmd parsed but never finished analysing: its locals'
-        // `Type`s are still the unresolved placeholder dmd starts them
-        // at. dmd's own CTFE engine forces this same forward reference
-        // before interpreting such a body (`dinterpret.d`'s call to this
-        // same function) - which is why `Ctfe`, this interpreter's
-        // sibling backend, does not need this forcing of its own: it
-        // walks no body itself, `dinterpret.d` does, and already forces
-        // it there. Walking a body here without first forcing it would
-        // read those placeholders as real facts.
-        //
-        // `function_` here can be a druntime declaration many guest
-        // programs share the very same `FuncDeclaration` for - dmd's
-        // frontend is one process-global mutable structure, not one
-        // instance per snippet. Mutating its semantic state this way is
-        // safe only under the frontend-wide compiler lock, the same lock
-        // every other reach into that structure already goes through -
-        // without it, a second thread forcing the same forward reference
-        // would race this one. `forceIfNeeded` takes that lock only when
-        // `function_` is not already past `semantic3` - the common case
-        // once some other program's evaluator has already reached this
-        // same shared declaration - so a repeat build for a druntime
-        // hook already forced by an earlier program never queues on the
-        // lock at all; `FrameLayout.of` below forces the same pass again
-        // through `hasHiddenThis`, its own independent reason to (used,
-        // unlike this cache, by native FFI call sites this interpreter
-        // never walks a body for), guarded the same way, so it is always
-        // a no-op by the time it runs here.
-        import core.atomic: atomicLoad, MemoryOrder;
-        import dmd.dsymbol: PASS;
-        import dmd.funcsem: functionSemantic3;
-        import snakebite.frontend.compiler: forceIfNeeded, withCompilerLock;
+    private const(FrameLayout)* callLayoutOf(FuncDeclaration function_) {
+        const decision = _callSelection.decisionOf(
+            function_,
+            (callee) => _program.isInterpreted(callee),
+            hasNativeSymbol(function_),
+            hasIndependentNativeSymbol(function_),
+        );
+        return layoutOf(function_, decision.route == CallSelection.Route.guest
+            ? LayoutKind.body : LayoutKind.parameters);
+    }
+
+    extern(D) private FrameLayout buildLayout(
+        FuncDeclaration function_, in LayoutKind kind,
+    ) {
+        import snakebite.frontend.dmd.mangle: completeFunctionType;
+
+        if (kind == LayoutKind.parameters) {
+            // Native code owns its locals. Only its inferred signature,
+            // if any, is needed to bind this call's arguments.
+            completeFunctionType(function_);
+            return FrameLayout.ofParameters(function_);
+        }
+
+        import snakebite.frontend.compiler: withCompilerLock;
         import std.string: fromStringz;
 
-        // Acquire load - see `forceIfNeeded`'s own doc
-        // (`snakebite.frontend.compiler`) for why the unlocked check
-        // needs that much, not a plain field read.
-        forceIfNeeded!functionSemantic3(
-            () => atomicLoad!(MemoryOrder.acq)(function_.semanticRun)
-                >= PASS.semantic3done,
-            function_,
-        );
-        // `toPrettyChars` is dmd work: it allocates and reads symbol state.
+        auto layout = FrameLayout.of(function_);
+        // `toPrettyChars` allocates and reads shared DMD symbol state.
         withCompilerLock({
             _shared.names.insert(
                 function_, fromStringz(function_.toPrettyChars));
         });
 
-        return FrameLayout.of(function_);
+        return layout;
     }
 
     // A call through a function pointer or a delegate: the type of the value
@@ -1661,7 +1653,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         Expressions* arguments,
         FuncDeclaration callee,
     ) {
-        const layout = layoutOf(callee);
+        const layout = callLayoutOf(callee);
         callShapeOf(callee);
         prepareContext(outerFunctionOf(callee));
         if (site.isCallExp !is null && callee.isThis is null
@@ -6313,7 +6305,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             if (classReceiver is null && expression.readsVtable(function_)) {
                 // The vtable read is where the null receiver is met, after
                 // the arguments.
-                const layout = layoutOf(function_);
+                const layout = callLayoutOf(function_);
                 auto frame = bindFrame(expression, function_, layout);
                 bindArguments(function_, expression.arguments,
                     expression.loc, frame.base, layout);
@@ -6334,7 +6326,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         }
 
         funcType = typeFunctionOf(function_);
-        auto layout = layoutOf(function_);
+        auto layout = callLayoutOf(function_);
         if (isNativeVariadic(function_)) {
             auto frame = bindFrame(
                 expression, function_, layout, true, classReceiver);

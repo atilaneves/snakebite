@@ -50,6 +50,25 @@ configuration "unittest" {
     dependency "readline" version="0.3.0"
 }
 
+// Tests belong in bin/ut and run in parallel by default. Arena ownership
+// checks scan shared process state under the frontend lock, so they run
+// separately to keep that serial work out of the unit-test feedback loop.
+// See validation/main.d and docs/adr/0015-frontend-memory-uses-an-arena.md.
+configuration "arena-validation" {
+    targetType "executable"
+    targetName "arena"
+    targetPath "bin"
+    lflags "--export-dynamic" "--version-script=$PACKAGE_DIR/build/host-exports.map" platform="linux"
+
+    mainSourceFile "validation/main.d"
+    sourcePaths "validation" "tests" "bench"
+    excludedSourceFiles "tests/main.d" "bench/main.d"
+    importPaths "validation" "tests" "acceptance" "."
+
+    dependency "unit-threaded" version="*"
+    dependency "readline" version="0.3.0"
+}
+
 configuration "acceptance-test" {
     targetType "executable"
     targetName "at"

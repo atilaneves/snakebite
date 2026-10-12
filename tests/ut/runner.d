@@ -83,7 +83,6 @@ static import ut.backends.run.main,
     ut.repl.session,
     ut.process,
     ut.frontend.functions,
-    ut.frontend.memory,
     ut.frontend.checks;
 
 // unit-threaded removes its default sandbox root when a process starts.
@@ -115,24 +114,17 @@ mixin disableDefaultRunner;
 int run(string[] args) {
     import snakebite.frontend.compiler: Snippets, initialize;
     import ut.backends: prewarmFrontend;
-    import std.stdio: writeln;
     import std.file: rmdirRecurse;
     import ut: selectFrontendMemoryFromArguments;
 
     scope(exit) rmdirRecurse(sandboxPath);
     args = selectFrontendMemoryFromArguments(args);
-    const checkArena = args.canFind(checkArenaFlag);
-    if (args.canFind("-h") || args.canFind("--help"))
-        writeln("  ", checkArenaFlag, ": ", checkArenaHelp);
-    args = args.filter!(arg => arg != checkArenaFlag).array;
     initialize(Snippets.yes);
 
-    // Prepare the selected ASTs before any guest test executes. This does
-    // not warm the first runtime calls made through forced finalization.
-    auto options = Options(args.dup); // The forced pass copies and changes the worker count.
-    prewarmFrontend(options.testsToRun);
-
-    const status = runSelectedTests(options, allTestData!(
+    auto options = Options(args.dup); // The finalizer pass changes its worker count.
+    if (!options.exit)
+        prewarmFrontend(options.testsToRun);
+    return runSelectedTests(options, allTestData!(
         "ut.backends.run.main",
         "ut.backends.run.addresses",
         "ut.backends.run.arrays",
@@ -215,10 +207,8 @@ int run(string[] args) {
         "ut.repl.session",
         "ut.process",
         "ut.frontend.functions",
-        "ut.frontend.memory",
         "ut.frontend.checks",
     ));
-    return checkArena ? status | arenaStatus : status;
 }
 
 // A module-local @Serial still shares the heap with other test modules.
@@ -245,23 +235,4 @@ private int runSelectedTests(
         && isWantedTest(test, options.testsToRun)).array;
     return remaining.length == 0 ? forcedStatus
         : forcedStatus | runTests(options, remaining);
-}
-
-private enum checkArenaFlag = "--check-arena";
-private enum checkArenaHelp =
-    "After the tests, fail if an arena word points into the GC heap "
-    ~ "(debug builds; run with --DRT-gcopt=disable:1 so no block it points "
-    ~ "to is freed first).";
-
-// Every test has run, so the arena holds everything they made the
-// frontend keep: no word of it may point into the GC heap.
-private int arenaStatus() {
-    import snakebite.frontend.compiler: arenaReport;
-    import std.stdio: stderr;
-
-    const report = arenaReport;
-    if (report.length == 0)
-        return 0;
-    stderr.write(report);
-    return 1;
 }

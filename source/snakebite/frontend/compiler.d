@@ -17,6 +17,24 @@ __gshared Compiler compiler;
 // registered module from DMD's tables.
 private shared uint _moduleCounter;
 
+// Thread-owned metadata belongs to one set of frontend declarations.
+// Reset and shutdown require exclusive access with no live frontend users;
+// the next read on each thread must discard its previous snapshots.
+private shared size_t _metadataGeneration;
+
+public size_t metadataGeneration() @safe nothrow @nogc {
+    import core.atomic: atomicLoad, MemoryOrder;
+
+    return atomicLoad!(MemoryOrder.acq)(_metadataGeneration);
+}
+
+private void discardMetadata() @safe nothrow @nogc {
+    import core.atomic: atomicOp;
+
+    atomicOp!"+="(_metadataGeneration, size_t(1));
+}
+
+
 shared static this() {
     compiler = new Compiler;
 }
@@ -556,6 +574,7 @@ final class Compiler {
             return;
 
         inside({
+            discardMetadata;
             deinitializeDMD;
             // `deinitializeDMD` leaves `Module.amodules`, dmd's list of every
             // module parsed, as it was, so the modules `reset` drops would
@@ -755,6 +774,7 @@ final class Compiler {
             if (!initialized)
                 return;
 
+            discardMetadata;
             deinitializeDMD;
             initialized = false;
         });
@@ -1032,28 +1052,39 @@ final class Compiler {
         in string rootDirectory,
     ) const {
         import dmd.dmodule: Module;
+        import std.path: absolutePath, baseName, buildNormalizedPath;
 
-        foreach (module_; Module.amodules)
-            if (moduleSourceMatches(module_, filePath, importPaths, rootDirectory))
+        const absPath = filePath.absolutePath.buildNormalizedPath;
+        const fileName = absPath.baseName;
+        foreach (module_; Module.amodules) {
+            const sourcePath = module_.sourceFileName;
+            const sourceName = sourcePath.baseName;
+            // Resolving a directory cannot change an ordinary filename.
+            // Most loaded modules are unrelated snippets, so reject them
+            // before allocating paths for every possible base directory.
+            if (sourceName.length && sourceName != "." && sourceName != ".."
+                    && sourceName != fileName)
+                continue;
+
+            if (moduleSourceMatches(sourcePath, absPath, importPaths, rootDirectory))
                 return module_;
+        }
 
         return null;
     }
 
-    // Whether `module_` was parsed from `filePath`. A parsed module keeps
+    // Whether `sourcePath` resolves to `absPath`. A parsed module keeps
     // the name `dmdFileName` gave it, relative to the root directory or
     // to an import path, so a relative name is resolved against each of
     // those the way it was made.
     private bool moduleSourceMatches(
-        Module module_,
-        in string filePath,
+        in string sourcePath,
+        in string absPath,
         in string[] importPaths,
         in string rootDirectory,
     ) const {
         import std.path: absolutePath, buildNormalizedPath;
 
-        const absPath = filePath.absolutePath.buildNormalizedPath;
-        const sourcePath = module_.sourceFileName;
         if (sourcePath.absolutePath.buildNormalizedPath == absPath)
             return true;
 
