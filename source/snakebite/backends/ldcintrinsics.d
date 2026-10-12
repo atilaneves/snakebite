@@ -9,6 +9,7 @@ private:
 version (LDC):
 
 import snakebite.backends.builtins: BuiltinCall;
+import snakebite.internalfailure: internalFailure;
 import ldc.intrinsics;
 
 // The wrapper for the LLVM intrinsic `llvmName` (`llvm.sin.f64`), or `null`
@@ -184,7 +185,8 @@ extern(C) void entry(string key, alias intrinsic)(
     import std.traits: Parameters, ReturnType;
 
     alias Params = Parameters!intrinsic;
-    assert(argumentCount == Params.length);
+    if (argumentCount != Params.length)
+        internalFailure("an LLVM intrinsic wrapper got the wrong number of arguments");
     Params values;
     static foreach (i, P; Params)
         values[i] = *cast(P*) arguments[i];
@@ -222,7 +224,7 @@ auto invoke(alias intrinsic, size_t[] positions, size_t[] domains, size_t[] chos
                 case v:
                     return invoke!(intrinsic, positions, domains, chosen ~ v)(values);
             default:
-                assert(false, "an LLVM constant out of its range");
+                internalFailure("an LLVM constant out of its range");
         }
     }
 }
@@ -267,7 +269,7 @@ extern(C) void atomicLoad(Unsigned)(
         case AtomicOrdering.Consume:
             *cast(Unsigned*) returnPlace = llvm_atomic_load!Unsigned(pointer, AtomicOrdering.Acquire);
             return;
-        default: assert(false, "atomic load ordering");
+        default: internalFailure("atomic load ordering");
     }
 }
 
@@ -281,7 +283,7 @@ extern(C) void atomicStore(Unsigned)(
             case ordering:
                 llvm_atomic_store!Unsigned(value, pointer, ordering);
                 return;
-        default: assert(false, "atomic store ordering");
+        default: internalFailure("atomic store ordering");
     }
 }
 
@@ -302,7 +304,7 @@ extern(C) void atomicCompareExchange(Unsigned)(
                     *result = llvm_atomic_cmp_xchg!Unsigned(pointer, expected, desired, s, f, isWeak);
                     return;
                 }
-    assert(false, "atomic compare-exchange ordering");
+    internalFailure("atomic compare-exchange ordering");
 }
 
 template Signed(Unsigned) {
@@ -332,7 +334,7 @@ extern(C) void atomicReadModifyWrite(string operation, Unsigned)(
             *cast(Value*) returnPlace = operate!Value(pointer, value, o);
             return;
         }
-    assert(false, "atomic read-modify-write ordering");
+    internalFailure("atomic read-modify-write ordering");
 }
 
 extern(C) void fence(void*, scope const(void*)* arguments, size_t) nothrow @nogc {
@@ -344,7 +346,7 @@ extern(C) void fence(void*, scope const(void*)* arguments, size_t) nothrow @nogc
                 llvm_memory_fence(o, s);
                 return;
             }
-    assert(false, "fence ordering");
+    internalFailure("fence ordering");
 }
 
 extern(C) void volatileLoad(Unsigned)(
