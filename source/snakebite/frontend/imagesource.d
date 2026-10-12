@@ -67,6 +67,7 @@ private extern(C++) class Collector
     import dmd.func: FuncDeclaration;
     import dmd.dmodule: Module;
     import dmd.dsymbol: Dsymbol;
+    import dmd.dtemplate: TemplateInstance;
     import dmd.expression: CallExp, VarExp, DelegateExp;
     import dmd.mtype: Type;
     import snakebite.backends.backend: Program;
@@ -517,7 +518,8 @@ private extern(C++) class Collector
                     && !_program.isRootOwned(instance.tempdecl)
                     && !isImportCBuiltins(instance.tempdecl.getModule)
                     && !function_.needThis && !function_.isNested
-                    && !hasFunctionLocalType(instance)) {
+                    && !hasFunctionLocalType(instance)
+                    && isNamedByInstance(function_, instance)) {
                 const name = instance.tempdecl.getModule.toPrettyChars.fromStringz.idup;
                 _imports[name] = true;
                 import dmd.mtype: Type;
@@ -542,6 +544,31 @@ private extern(C++) class Collector
             }
         }
         function_.fbody.accept(this);
+    }
+
+    // A function that the instance holds besides its eponymous member, such as
+    // a lambda in a template that yields a type, is not named by the spelling
+    // of the instance. Without an eponymous member the spelling names the
+    // instance scope, and every function in it is kept.
+    private extern(D) bool isNamedByInstance(FuncDeclaration function_, TemplateInstance instance) {
+        import dmd.dsymbol: Dsymbol;
+        import dmd.dsymbolsem: toAlias;
+        import dmd.funcsem: overloadApply;
+
+        if (instance.aliasdecl is null)
+            return true;
+        // `overloadApply` reports an error for a member that is not a function.
+        const target = toAlias(instance.aliasdecl);
+        if (target.isFuncDeclaration is null && target.isOverDeclaration is null
+                && target.isFuncAliasDeclaration is null && target.isAliasDeclaration is null
+                && target.isTemplateDeclaration is null && target.isOverloadSet is null)
+            return false;
+        bool named;
+        overloadApply(instance.aliasdecl, (Dsymbol symbol) {
+            named = symbol is function_;
+            return named;
+        });
+        return named;
     }
 
     override void visit(CallExp expression) {

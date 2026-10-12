@@ -6,7 +6,8 @@ import snakebite.ffi: Resolver;
 import snakebite.dependencyimage:
     DependencyImage, ProjectImageCache, defaultCompiler, loadImage;
 import core.thread: Thread;
-import snakebite.execution: prepareProject;
+import snakebite.backends: BackendName, backendIdentity;
+import snakebite.execution: prepareProject, executeBackend;
 import snakebite.dependencyimage: Optimise;
 import snakebite.backends.backend: Program;
 import snakebite.frontend.compiler: parseSnippet;
@@ -464,6 +465,47 @@ unittest {
         int answer() { return cast(int) text(Color.green).length; }
     });
     "Color".should.not.be in source;
+}
+
+
+// Runs `main` of a project made of a dependency module and a root module
+// whose `main` returns 0 when `check` holds, and returns its status.
+private int runWithDependency(
+    in BackendName backend,
+    in string moduleName,
+    in string dependency,
+    in string check,
+) {
+    const sandbox = Sandbox();
+    sandbox.writeFile("deps/" ~ moduleName ~ ".d", "module " ~ moduleName ~ ";\n" ~ dependency);
+    sandbox.writeFile("app/app_" ~ moduleName ~ ".d",
+        "module app_" ~ moduleName ~ ";\nimport " ~ moduleName ~ ";\nimport std.traits;\nint main() { return "
+        ~ check ~ " ? 0 : 1; }");
+    auto program = prepareProject(
+        sandbox.inSandboxPath("app"), [sandbox.inSandboxPath("deps")], null, true,
+        optimise: Optimise.no).project.program;
+    // Only `main` runs: the host's unit tests are not the guest's.
+    program.startsAsProject = false;
+    return executeBackend(backend, program, null, false).status;
+}
+
+
+// A delegate type is callable as `T()` for the frontend, so a call of the
+// lambda that `SetFunctionAttributes` holds passes the `compiles` guard of the
+// image source and then fails in code generation.
+static foreach (backend; Matrix!()) {
+    @("image.templateYieldingTypeCompiles." ~ backend.stringof)
+    unittest {
+        enum moduleName = "image_template_yields_type";
+        enum dependency = "";
+        enum check = "SetFunctionAttributes!(int delegate(), `D`, 0).sizeof"
+            ~ " == (int delegate()).sizeof";
+        static if (is(backend == Native)) {
+            import std.traits: SetFunctionAttributes;
+            mixin("(", check, ")").should == true;
+        } else
+            runWithDependency(backendIdentity!backend, moduleName, dependency, check).should == 0;
+    }
 }
 
 
