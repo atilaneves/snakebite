@@ -113,3 +113,23 @@ identifier, so the mixed-in `asm` branch compiles in rather than out.
 The load-time diagnostic still catches it: it does not care how a
 root-owned function came to have an unguarded `asm` block.
 `inlineasm.versionIdentifier.mixinGapFailsLoad` pins it.
+
+Known, accepted limit: root code can instantiate a dependency template
+whose body has `asm`. The known family is `core.internal.atomic`, behind
+`core.atomic`. The instance is in the dependency image, and it runs as
+host code, only when the root-owned type is declared at module level and
+the instance uses it only as a pointer target, a class or interface
+reference, or an enum. In all other cases the instance stays guest code:
+a root-owned struct or union by value; a slice or a delegate type that
+names a root-owned type; a root-owned type declared inside a function.
+The same is true for `atomicOp!"+="` on a `shared` root-owned enum,
+because the image compiler's druntime has a different `atomicFetchAdd`
+signature (issue #601). The run then stops at the first call of the
+instance, with an "internal failure" message that names `Statement
+InlineAsm`. This is a run-time stop, not the load-time diagnostic that
+this ADR gives for a root-owned function. So this limit is an exception,
+for dependency instances, to the rejection of "Fail only at run time".
+Compiled D runs these programs. Snakebite does not support them. We
+accept this because, when this was decided, no project of the benchmark
+corpus (`build/bench-corpus.sh`) whose tests ran to the end stopped at
+such an instance. Issue #614 has the measurement.
