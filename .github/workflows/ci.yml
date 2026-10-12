@@ -22,7 +22,7 @@ jobs:
       - name: Install ldc (for the bench)
         uses: dlang-community/setup-dlang@v2
         with:
-          compiler: ldc-latest
+          compiler: ldc-1.43.0
 
       - name: Record ldc path
         run: |
@@ -44,10 +44,11 @@ jobs:
 
       # The REPL links GNU readline for interactive line editing.
       # build/ut-without-build-tools.sh runs bin/ut under strace.
-      - name: Install libreadline and strace
+      # reggaefile.d applies the patch of LDC's frontend additions with patch.
+      - name: Install libreadline, strace and patch
         run: |
           sudo apt-get update
-          sudo apt-get install -y libreadline-dev strace
+          sudo apt-get install -y libreadline-dev strace patch
 
       - name: Run CI
         run: build/ci.sh
