@@ -15,10 +15,17 @@ private:
 // error. See docs/adr/0012 for why only a root-owned function is
 // reported. The same walk also rejects a reference to a C `setjmp` or
 // `longjmp` function (see docs/adr/0014).
+//
+// On an LDC host the same walk refuses LLVM inline IR and LDC's inline
+// assembler (`pragma(LDC_inline_ir)`, `pragma(LDC_inline_asm)`) called from
+// root-owned code. `withoutImage` is true when no dependency image will hold
+// a copy that LDC compiled, so an instance of a dependency template that
+// the root code instantiates and that calls them is refused too.
 public void reportInlineAsmDiagnostics(
     imported!"dmd.dmodule".Module[] rootModules,
+    in bool withoutImage = false,
 ) {
-    scope collector = new InlineAsmCollector(rootModules);
+    scope collector = new InlineAsmCollector(rootModules, withoutImage);
     foreach (module_; rootModules)
         module_.accept(collector);
 }
@@ -56,7 +63,7 @@ private extern(C++) class InlineAsmCollector
     import dmd.attrib: MixinDeclaration;
     import dmd.dmodule: Module;
     import dmd.dsymbolsem: include;
-    import dmd.dtemplate: TemplateMixin;
+    import dmd.dtemplate: TemplateInstance, TemplateMixin;
     import dmd.errors: error;
     import dmd.expression: SymbolExp;
     import dmd.declaration: VarDeclaration;
@@ -67,11 +74,22 @@ private extern(C++) class InlineAsmCollector
     private bool[Module] _rootModules;
     private bool[FuncDeclaration] _visited;
     private bool[Loc] _reported;
+    private bool[Dsymbol] _reportedOwners;
     private Dsymbol _owner;
+    private bool _withoutImage;
 
-    private extern(D) this(Module[] rootModules) {
+    private extern(D) this(Module[] rootModules, in bool withoutImage) {
         foreach (module_; rootModules)
             _rootModules[module_] = true;
+        _withoutImage = withoutImage;
+    }
+
+    // The walk reaches an instance of a dependency template only through
+    // root code that names it. Without an image, no copy that LDC compiled
+    // exists for that instance, and the root program holds the only one.
+    private extern(D) bool isRootInstance(Dsymbol function_) {
+        return ldcHost && _withoutImage && function_.parent !is null
+            && function_.parent.isTemplateInstance !is null;
     }
 
     // The same question `Program.isRootOwned` (backend.d) answers, so the
@@ -82,6 +100,15 @@ private extern(C++) class InlineAsmCollector
             frontendIsRootOwned = isRootOwned;
 
         return frontendIsRootOwned(function_, _rootModules);
+    }
+
+    // A use of an instance that another use made first is a node of its own
+    // with no members: the instance with the members is `inst`.
+    override void visit(TemplateInstance instance) {
+        if (ldcHost && instance.inst !is null && instance.inst !is instance)
+            instance.inst.accept(this);
+        else
+            super.visit(instance);
     }
 
     // `mixin WithAsm;` instantiates a `mixin template` as a
@@ -146,6 +173,25 @@ private extern(C++) class InlineAsmCollector
             function_.fbody.accept(this);
     }
 
+    private extern(D) void reportInlineCode(
+        SymbolExp expression, FuncDeclaration function_,
+    ) {
+        import std.string: toStringz;
+
+        const construct = inlineCodeName(function_);
+        if (construct is null || _owner in _reportedOwners)
+            return;
+        _reportedOwners[_owner] = true;
+        error(
+            expression.loc,
+            "%s is not supported in `%s`: no backend runs it. Only code "
+            ~ "that LDC compiled into the host or the dependency image "
+            ~ "can use it",
+            construct.toStringz,
+            _owner.toPrettyChars,
+        );
+    }
+
     // The initializer of a module-scope variable or of an aggregate field
     // is guest code too: a function pointer stored there is called later.
     override void visit(VarDeclaration variable) {
@@ -165,9 +211,20 @@ private extern(C++) class InlineAsmCollector
     override void visit(SymbolExp expression) {
         import std.string: toStringz;
 
-        if (_owner is null || !isRootOwned(_owner))
+        if (_owner is null)
             return;
         auto function_ = expression.var.isFuncDeclaration;
+        if (function_ !is null && (isRootOwned(_owner) || isRootInstance(_owner)))
+            reportInlineCode(expression, function_);
+        // A call of an instance of a dependency template may have been
+        // instantiated first by another module, which is no root.
+        if (function_ !is null && ldcHost && isRootOwned(_owner) && _withoutImage
+                && function_.parent !is null
+                && function_.parent.isTemplateInstance !is null
+                && function_ !in _visited)
+            function_.accept(this);
+        if (!isRootOwned(_owner))
+            return;
         if (function_ is null || !isNonLocalJump(function_))
             return;
         if (expression.loc in _reported)
@@ -180,6 +237,25 @@ private extern(C++) class InlineAsmCollector
             nonLocalJumpName(function_).toStringz,
         );
     }
+}
+
+// Only an LDC host has LDC's pragmas for inline IR and inline assembler.
+private version (LDC) enum ldcHost = true; else enum ldcHost = false;
+
+// A call of a declaration that LDC compiles to LLVM inline IR or to inline
+// assembler. Nothing here runs it (docs/adr/0012): it belongs to code that
+// LDC compiled, in the host or in the image.
+private string inlineCodeName(imported!"dmd.func".FuncDeclaration function_) {
+    version (LDC) {
+        import gen.dpragma: LDCPragma;
+
+        with (LDCPragma) switch (function_.llvmInternal) {
+            case LLVMinline_ir: return "LLVM inline IR (`pragma(LDC_inline_ir)`)";
+            case LLVMinline_asm: return "inline assembler (`pragma(LDC_inline_asm)`)";
+            default: return null;
+        }
+    } else
+        return null;
 }
 
 // The C functions that save and restore a stack context, by the name the

@@ -82,6 +82,7 @@ configuration "acceptance-test" {
     sourceFiles "tests/ut/backends/call/intrinsics.d"
     sourceFiles "tests/ut/backends/call/arrayoperations.d"
     sourceFiles "tests/ut/backends/run/hostfrontend.d"
+    sourceFiles "tests/ut/backends/run/inlineasm.d"
     sourceFiles "tests/ut/ffi/sysv.d"
     sourcePaths "bench"
     excludedSourceFiles "bench/main.d"

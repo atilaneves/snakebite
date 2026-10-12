@@ -270,9 +270,21 @@ static foreach (backend; Matrix!()) {
 
 // `core.simd`'s own unaligned load and store, which druntime's array
 // operations are written with.
+// LDC's `loadUnaligned` is LLVM inline IR, which no backend runs; the load
+// of such a program fails (`inlineasm.loadDiagnostic.
+// rootInstanceOfIrTemplateFailsLoad`).
+version (LDC)
+    private alias InlineIrLoad = AliasSeq!(
+        Omit!(Bytecode, Because.diverges, "the load fails"),
+        Omit!(Interpreter, Because.diverges, "the load fails"),
+    );
+else
+    private alias InlineIrLoad = AliasSeq!();
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "dmd's CTFE cannot evaluate `core.simd.__simd`"),
+    InlineIrLoad,
 )) {
     @("arrayOperations.loadAndStoreUnaligned." ~ backend.stringof)
     @Tags(backend.stringof)

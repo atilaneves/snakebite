@@ -434,3 +434,62 @@ unittest {
             text(path, "(4,5): ", jumpError!"longjmp"),
         );
 }
+
+
+// LDC's LLVM inline IR and inline assembler are inline assembler for a
+// backend: nothing runs them (docs/adr/0012). Only code that LDC compiled
+// into the host or the dependency image can use them. Like an `asm` block,
+// a call in root-owned code fails the load and names the construct.
+version (LDC) {
+    @("inlineasm.loadDiagnostic.llvmInlineIrFailsLoad")
+    unittest {
+        parseSnippet(q{
+            import ldc.llvmasm: __ir;
+
+            int add(int a, int b) {
+                return __ir!(`%r = add i32 %0, %1
+                              ret i32 %r`, int)(a, b);
+            }
+            unittest {
+                add(1, 2);
+            }
+        }).shouldThrow.msg.withoutSnippetCounter.should ==
+            "LLVM inline IR (`pragma(LDC_inline_ir)`) is not supported in "
+            ~ "`snippet_N.add`: no backend runs it. Only code that LDC "
+            ~ "compiled into the host or the dependency image can use it";
+    }
+
+    @("inlineasm.loadDiagnostic.llvmInlineAsmFailsLoad")
+    unittest {
+        parseSnippet(q{
+            import ldc.llvmasm: __asm;
+
+            void pause() {
+                __asm("pause", "");
+            }
+            unittest {
+                pause();
+            }
+        }).shouldThrow.msg.withoutSnippetCounter.should ==
+            "inline assembler (`pragma(LDC_inline_asm)`) is not supported in "
+            ~ "`snippet_N.pause`: no backend runs it. Only code that LDC "
+            ~ "compiled into the host or the dependency image can use it";
+    }
+
+    // The instance of a dependency template that root code instantiates is
+    // part of the root program, and no image holds a copy that LDC compiled.
+    @("inlineasm.loadDiagnostic.rootInstanceOfIrTemplateFailsLoad")
+    unittest {
+        const message = parseSnippet(q{
+            import core.simd: float4, loadUnaligned;
+
+            float4 load(const float4* pointer) {
+                return loadUnaligned(pointer);
+            }
+        }).shouldThrow.msg.withoutSnippetCounter;
+        // Both overloads of `loadUnaligned` have an instance.
+        ("LLVM inline IR (`pragma(LDC_inline_ir)`) is not supported in "
+            ~ "`ldc.simd.loadUnaligned!(__vector(float[4])).loadUnaligned`: "
+            ~ "no backend runs it").should.be in message;
+    }
+}

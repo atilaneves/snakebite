@@ -987,7 +987,8 @@ final class Compiler {
         in string[] rootImportPaths = null,
     ) {
         module_.importedFrom = module_;
-        driveSharedSemantic([module_], rootImportPaths);
+        // A snippet has no dependency image; a cell of a project has one.
+        driveSharedSemantic([module_], rootImportPaths, rootImportPaths.length == 0);
     }
 
     // Parse each of `sources` not already in `sourceCache` as its own module,
@@ -1035,7 +1036,7 @@ final class Compiler {
             freshModules ~= result.module_;
         }
 
-        driveSharedSemantic(freshModules);
+        driveSharedSemantic(freshModules, null, true);
         if (global.errors != 0)
             throw new Exception(diagnosticMessage);
 
@@ -1172,6 +1173,7 @@ final class Compiler {
 private void driveSharedSemantic(
     imported!"dmd.dmodule".Module[] modules,
     in string[] rootImportPaths = null,
+    in bool withoutImage = false,
 ) {
     import dmd.dsymbolsem:
         dsymbolSemantic,
@@ -1203,7 +1205,7 @@ private void driveSharedSemantic(
         rootModules ~= analyseLoadedRootOwnedImports(rootImportPaths);
 
     if (global.errors == 0)
-        reportInlineAsmDiagnostics(rootModules);
+        reportInlineAsmDiagnostics(rootModules, withoutImage);
 }
 
 // Every module under `rootImportPaths` that the phases above loaded and

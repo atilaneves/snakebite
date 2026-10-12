@@ -133,3 +133,22 @@ Compiled D runs these programs. Snakebite does not support them. We
 accept this because, when this was decided, no project of the benchmark
 corpus (`build/bench-corpus.sh`) whose tests ran to the end stopped at
 such an instance. Issue #614 has the measurement.
+
+## LDC's inline IR and inline assembler
+
+On a host built by LDC, the frontend has LDC's pragmas. LLVM inline IR
+(`pragma(LDC_inline_ir)`: `__ir`, `__ir_pure`, `__irEx`) and LDC's inline
+assembler (`pragma(LDC_inline_asm)`: `__asm`) are inline assembler for a
+backend, and the same rule holds. No backend runs them. Only code that LDC
+compiled into the host or into the dependency image can use them.
+
+The load fails, with one diagnostic that names the construct and the
+function, when root-owned code calls a declaration under either pragma. The
+same walk finds it (`InlineAsmCollector`), through
+`FuncDeclaration.llvmInternal`. Where no image exists, which is the case for
+a snippet of a test binary, the load fails also for an instance of a
+dependency template that root code instantiates and whose body calls them,
+for example `ldc.simd.loadUnaligned` and `storeUnaligned`. A project that
+runs through `bin/sb` has an image, which holds the copy that LDC compiled,
+so that instance is not refused there. GCC-style `asm` statements are
+inline assembler statements and keep the rule of this ADR.
