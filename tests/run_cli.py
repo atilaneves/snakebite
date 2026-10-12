@@ -654,16 +654,21 @@ def test_state_directory_stays_in_caller_directory(
     assert not (tmp_path / "app" / ".snakebite").exists()
 
 
-# The `dub describe` record of a project that nothing changed since the
-# first start holds on the second start. The state directory lies in the
-# project directory here, which the record watches: creating it must not
-# change what the record saw.
+# The description of a project that nothing changed since the first start
+# holds on the second start: dub is not called again, which shows in the
+# pre-build commands that dub's description is made with. The state directory
+# lies in the project directory here, which the record watches: creating it
+# must not change what the record saw.
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_second_start_does_not_describe_again(
     tmp_path: Path, backend: str,
 ) -> None:
     app = tmp_path / "app"
-    write(app / "dub.sdl", dub_project_recipe("describe-once"))
+    write(
+        app / "dub.sdl",
+        dub_project_recipe("describe-once")
+        + 'preBuildCommands "echo run >> runs.log"\n',
+    )
     write(
         app / "source" / "main.d",
         """
@@ -671,22 +676,14 @@ def test_second_start_does_not_describe_again(
         int main() { return 0; }
         """,
     )
-    real_dub = shutil.which("dub")
-    assert real_dub is not None
-    log = tmp_path / "dub.log"
-    fake_dub(tmp_path, f'echo "$*" >> "{log}"\nexec "{real_dub}" "$@"\n')
 
     for _ in range(2):
-        result = run_with_fake_dub_in(
-            tmp_path, app, f"--backend={backend}", "--no-optimise-image", ".",
+        result = run_sb(
+            f"--backend={backend}", "--no-optimise-image", ".", cwd=app,
         )
         assert result.returncode == 0, output(result)
 
-    describes = [
-        line for line in log.read_text().splitlines()
-        if line.split()[0] == "describe"
-    ]
-    assert len(describes) == 1, describes
+    assert (app / "runs.log").read_text().splitlines() == ["run"]
 
 
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
@@ -1901,80 +1898,80 @@ def test_string_import_is_followed_by_zero(
 
 
 def test_fetch_keeps_package_name(tmp_path: Path) -> None:
-    fake_dub(
-        tmp_path,
-        'echo "fake dub received: $*"\n'
-        "exit 1\n",
-    )
-
     for backend in BACKENDS:
-        result = run_with_fake_dub(
-            tmp_path, f"--backend={backend}", "unit-threaded",
+        result = run_with_dub_home(
+            tmp_path, f"--backend={backend}", "absent-package@1.2.3",
         )
 
         assert result.returncode == 1
-        assert "fake dub received: fetch unit-threaded" in output(result)
+        assert (
+            "No package absent-package was found matching the dependency 1.2.3"
+            in output(result)
+        )
 
 
-# A package already in the local dub cache must resolve without
-# `dub fetch`: without a version, fetch always asks the registry over the
-# network.
+# A package already in the local dub cache must resolve without a fetch:
+# without a version, a fetch always asks the registry over the network.
 def test_package_on_disk_does_not_fetch(tmp_path: Path) -> None:
-    log = tmp_path / "dub.log"
-    fake_dub(
-        tmp_path,
-        f'echo "$*" >> "{log}"\n'
-        '[ "$1" = describe ] || exit 1\n'
-        f'echo "{tmp_path / "packages" / "cached"}"\n',
-    )
+    name = dub_name("cached")
+    package = tmp_path / "home" / "packages" / name / "1.0.0" / name
+    write_fetchable_package(package, name)
 
-    run_with_fake_dub(tmp_path, "cached")
+    result = run_with_dub_home(tmp_path, name)
 
-    assert log.read_text().splitlines() == [
-        "describe cached --data=working-directory --data-list",
-    ]
+    assert result.returncode == 0, output(result)
 
 
-# A package missing from the local dub cache is fetched once, then
-# described.
+# A package missing from the local dub cache is fetched once, then used.
 def test_package_missing_fetches_then_describes(tmp_path: Path) -> None:
-    log = tmp_path / "dub.log"
-    fetched = tmp_path / "fetched"
-    fake_dub(
-        tmp_path,
-        f'echo "$*" >> "{log}"\n'
-        f'if [ "$1" = fetch ]; then touch "{fetched}"; exit 0; fi\n'
-        f'[ -e "{fetched}" ] || '
-        '{ echo "Failed to find package locally."; exit 2; }\n'
-        f'echo "{tmp_path / "packages" / "missing"}"\n',
+    name = dub_name("missing")
+    source = tmp_path / "source" / f"{name}-1.0.0"
+    write_fetchable_package(source, name)
+    registry = tmp_path / "registry"
+    registry.mkdir()
+    shutil.make_archive(str(registry / f"{name}-1.0.0"), "zip", tmp_path / "source")
+
+    result = run_with_dub_home(
+        tmp_path, name, env={"DUB_REGISTRY": f"file://{registry}"},
     )
 
-    run_with_fake_dub(tmp_path, "missing")
-
-    assert log.read_text().splitlines() == [
-        "describe missing --data=working-directory --data-list",
-        "fetch missing",
-        "describe missing --data=working-directory --data-list",
-    ]
+    assert result.returncode == 0, output(result)
+    assert (tmp_path / "home" / "packages" / name / "1.0.0" / name).is_dir()
 
 
 # A package that cannot be fetched reports what dub said about it.
 def test_fetch_failure_reports_dub_output(tmp_path: Path) -> None:
-    fake_dub(
-        tmp_path,
-        'echo "fake dub said: $1"\n'
-        "exit 2\n",
-    )
-
-    result = run_with_fake_dub(tmp_path, "absent")
+    result = run_with_dub_home(tmp_path, "absent")
 
     assert result.returncode == 1
     assert (
-        "snakebite: dub fetch failed for `absent`:\n"
-        "fake dub said: fetch\n"
-        "after dub describe failed:\n"
-        "fake dub said: describe\n"
+        "No package absent was found matching the dependency *"
     ) in output(result)
+
+
+def write_fetchable_package(directory: Path, name: str) -> None:
+    write(
+        directory / "dub.sdl",
+        f'name "{name}"\nversion "1.0.0"\ntargetType "library"\n'
+        'configuration "unittest" {\n    targetType "executable"\n}\n',
+    )
+    write(
+        directory / "source" / "main.d",
+        "module main;\nint main() { return 0; }\n",
+    )
+
+
+# The dub home is in the test directory, so the packages that dub finds are
+# the ones that the test made. The registry of the test is asked before the
+# ones of dub.
+def run_with_dub_home(
+    directory: Path, *args: str, env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    outside = directory / "outside"
+    outside.mkdir(exist_ok=True)
+    return run_sb(
+        *args, cwd=outside, env={"DUB_HOME": str(directory / "home"), **(env or {})},
+    )
 
 
 C_ROOT_SOURCE = """
@@ -5212,29 +5209,6 @@ def test_unittest_configuration_settings_are_loaded(
 def write(path: Path, text: str = "") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
-
-
-def fake_dub(directory: Path, script_body: str) -> None:
-    dub = directory / "bin" / "dub"
-    write(dub, "#!/bin/sh\n" + script_body)
-    dub.chmod(dub.stat().st_mode | stat.S_IXUSR)
-
-
-# The fake dub goes on the child's PATH only, so no other process sees it.
-def run_with_fake_dub(
-    directory: Path, *args: str,
-) -> subprocess.CompletedProcess[str]:
-    outside = directory / "outside"
-    outside.mkdir(exist_ok=True)
-    path = f"{directory / 'bin'}:{os.environ.get('PATH', '')}"
-    return run_sb(*args, cwd=outside, env={"PATH": path})
-
-
-def run_with_fake_dub_in(
-    directory: Path, cwd: Path, *args: str,
-) -> subprocess.CompletedProcess[str]:
-    path = f"{directory / 'bin'}:{os.environ.get('PATH', '')}"
-    return run_sb(*args, cwd=cwd, env={"PATH": path})
 
 
 def output(result: subprocess.CompletedProcess[str]) -> str:
