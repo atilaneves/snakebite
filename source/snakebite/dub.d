@@ -25,9 +25,6 @@ public imported!"dub.compilers.buildsettings".BuildSettings rootBuildSettings(
 }
 
 
-// The search path belongs to the whole process.
-private __gshared imported!"core.sync.mutex".Mutex _searchPathLock;
-
 // A package that is on disk is used as it is. The registry is asked only for
 // a package that is not there, because `dub fetch` without a version always
 // asks the registry for the latest one, over the network, even when the
@@ -66,7 +63,9 @@ public DubDescription dubDescribeProject(
 
     return cachedDubDescription(directory, defaultCompiler, versions, {
         auto dub = loadedDub(directory);
-        auto settings = platformSettings(dub, versions);
+        const binary = compilerBinary(directory, versions);
+        ensureCompilerWrapper(binary);
+        auto settings = platformSettings(dub, binary, versions);
         settings.buildType = "unittest";
         settings.config = "unittest";
         DubDescription description;
@@ -108,7 +107,9 @@ private void silenceDubLog() {
 }
 
 // The platform is what the compiler reports, as in `dub describe`.
-private auto platformSettings(imported!"dub.dub".Dub dub, in string[] versions) {
+private auto platformSettings(
+    imported!"dub.dub".Dub dub, in string compilerBinary, in string[] versions,
+) {
     import dub.compilers.buildsettings: BuildOption;
     import dub.compilers.compiler: getCompiler;
     import dub.generators.generator: GeneratorSettings;
@@ -118,7 +119,7 @@ private auto platformSettings(imported!"dub.dub".Dub dub, in string[] versions) 
     GeneratorSettings settings;
     settings.compiler = getCompiler(defaultCompiler);
     settings.platform = settings.compiler.determinePlatform(
-        settings.buildSettings, defaultCompiler, dub.defaultArchitecture);
+        settings.buildSettings, compilerBinary, dub.defaultArchitecture);
     settings.buildSettings.options = BuildOption.none;
     settings.buildSettings.addVersions(versions);
     settings.cache = NativePath(dubCacheDirectory);
@@ -192,16 +193,16 @@ private void runPreBuildCommands(
 // supported platform. The build must not add a PIC flag through `DFLAGS`:
 // dub keys its build-cache artifacts by `DFLAGS` too, so a build with an
 // environment that the description did not see produces artifacts at paths
-// the description does not name.
+// the description does not name. For the same reason the build gets the
+// compiler binary of the description.
 public void buildDubDependencies(
     in string directory, in string stateDirectory,
     in DubDescription description, in string[] linkerFiles,
 ) {
-    import snakebite.dependencyimage: defaultCompiler;
     import snakebite.exception: SnakebiteException;
-    import std.process: environment;
     import std.algorithm: all;
-    import std.file: exists, mkdirRecurse, readText, write, remove, rmdir;
+    import std.conv: text;
+    import std.file: exists, mkdirRecurse, readText, write;
     import std.path: buildPath;
 
     const statePath = buildPath(stateDirectory, "dub-dependencies");
@@ -211,127 +212,154 @@ public void buildDubDependencies(
             && statePath.readText == fingerprint ~ before)
         return;
 
-    const wrapperDirectory = rootCompilerWrapper(description, stateDirectory);
-    scope(exit) if (wrapperDirectory.length) {
-        remove(buildPath(wrapperDirectory, defaultCompiler));
-        rmdir(wrapperDirectory);
-    }
+    const binary = compilerBinary(directory, description.versions);
+    installCompilerWrapper(binary, description);
     auto dub = loadedDub(directory);
-    auto settings = platformSettings(dub, description.versions);
+    auto settings = platformSettings(dub, binary, description.versions);
     settings.config = description.requestedConfiguration;
     settings.buildType = description.project.buildType;
     settings.buildDeep = true;
 
-    // dub starts the compiler by name, so the wrapper has to be first in the
-    // search path of this process while dub builds.
-    {
-        import core.sync.mutex: Mutex;
-        import std.concurrency: initOnce;
-
-        auto searchPathLock = initOnce!_searchPathLock(new Mutex);
-        searchPathLock.lock;
-        scope(exit) searchPathLock.unlock;
-        const searchPath = environment["PATH"];
-        if (wrapperDirectory.length)
-            environment["PATH"] = wrapperDirectory ~ ":" ~ searchPath;
-        scope(exit) environment["PATH"] = searchPath;
-        try
-            dub.generateProject("build", settings);
-        catch (Exception exception)
-            throw new SnakebiteException("Dub dependency build failed:\n" ~ exception.msg);
-    }
+    // The compiler writes to the standard output and error of this process,
+    // so only the project is named here.
+    try
+        dub.generateProject("build", settings);
+    catch (Exception exception)
+        throw new SnakebiteException(text(
+            "Dub dependency build failed for ", description.project.rootPackage,
+            " (the compiler output is above): ", exception.msg));
     if (!linkerFiles.all!exists)
         throw new SnakebiteException("Dub build did not produce all dependency libraries");
     stateDirectory.mkdirRecurse;
     statePath.write(fingerprint ~ fileFingerprint(linkerFiles));
 }
 
-// Keep dub's compiler identity and dependency cache paths. Only the root
-// output gets translated flags; dependencies retain their own checks.
-// A real build lets dub run its hooks and report every build failure.
-private string rootCompilerWrapper(
-    in DubDescription description, in string stateDirectory,
-) {
+// dub keeps the compiler binary in the build identity of every target, so the
+// description and the build have to name the same one. With ldc2 it is a
+// script in the state directory of the project, at a place that depends only
+// on what the description is made from. The script of a description is
+// written when the build knows the description.
+private string compilerBinary(in string directory, in string[] versions) {
     import snakebite.dependencyimage: defaultCompiler;
-    import snakebite.frontend.checks: isCheckFlag, ldcArguments;
-    import std.algorithm: startsWith;
-    import std.conv: octal;
-    import std.json: JSONValue;
-    import std.file: mkdirRecurse, setAttributes, write;
+    import snakebite.project: projectStateDirectory;
+    import std.digest.sha: sha256Of;
+    import std.digest: toHexString;
     import std.path: absolutePath, buildPath;
-    import std.process: environment, escapeShellCommand;
-    import std.uuid: randomUUID;
+    import std.conv: text;
 
     if (defaultCompiler != "ldc2")
-        return null;
-    if (description.project.rootPackage !in description.project.targetLookup)
-        return null;
-    {
-        const target = description.project.lookupTarget(description.project.rootPackage);
-        const flags = target.buildSettings.dflags.dup;
-        const translatedFlags = ldcArguments(flags);
-        if (flags == translatedFlags)
-            return null;
-        const output = target.cacheArtifactPath;
-        string responseArgument(in string argument) {
-            import std.algorithm: canFind;
-            import std.string: replace;
+        return defaultCompiler;
+    const key = text(versions.length, versions).sha256Of.toHexString.idup;
+    return buildPath(projectStateDirectory(directory).absolutePath,
+        "dub-compiler-" ~ key[0 .. 16], defaultCompiler);
+}
 
-            return argument.canFind(' ') || argument.canFind('\t') || argument.canFind('"')
-                ? "\"" ~ argument.replace("\\", "\\\\").replace("\"", "\\\"") ~ "\""
-                : argument;
-        }
-        string rewrite = "BEGIN {\n";
-        foreach (flag; flags)
-            rewrite ~= "remove[" ~ JSONValue(responseArgument(flag)).toString ~ "] = 1;\n";
-        rewrite ~= "}\n!($0 in remove) { print }\nEND {\n";
-        foreach (flag; translatedFlags)
-            rewrite ~= "print " ~ JSONValue(responseArgument(flag)).toString ~ ";\n";
-        rewrite ~= "}\n";
-        string[] outputArguments;
-        foreach (suffix; ["", ".o"])
-            foreach (prefix; ["-of", "-of=", "--of="])
-                outputArguments ~= ["-e", responseArgument(prefix ~ output ~ suffix)];
-        string[] checkArguments;
-        foreach (flag; flags)
-            if (isCheckFlag(flag) || flag.startsWith("@"))
-                checkArguments ~= ["-e", responseArgument(flag)];
-        const directory = buildPath(stateDirectory,
-            "dub-compiler-" ~ randomUUID.toString).absolutePath;
-        directory.mkdirRecurse;
-        const script = "#!/bin/bash\nPATH="
-            ~ escapeShellCommand([environment["PATH"]]) ~ "\nexport PATH\n"
-            // dub serializes one argument per line in its compiler response
-            // file. Replace those records, not the response-file grammar.
-            ~ "for arg in \"$@\"; do\ncase \"$arg\" in @*)\nfile=${arg:1}\n"
-            ~ "if grep -Fxq " ~ escapeShellCommand(outputArguments) ~ " -- \"$file\""
-            ~ " && grep -Fxq " ~ escapeShellCommand(checkArguments) ~ " -- \"$file\"; then\n"
-            ~ "temporary=$(mktemp " ~ escapeShellCommand([buildPath(directory, "arguments.XXXXXX")]) ~ ") || exit 1\n"
-            ~ "trap 'rm -f -- \"$temporary\"' EXIT\nawk " ~ escapeShellCommand([rewrite])
-            ~ " \"$file\" > \"$temporary\" || exit 1\n"
-            ~ "args=()\nfor original in \"$@\"; do\n"
-            ~ "if [[ $original == \"$arg\" ]]; then args+=(\"@$temporary\"); else args+=(\"$original\"); fi\ndone\n"
-            ~ "ldc2 \"${args[@]}\"\nexit $?\nfi\n;;\nesac\ndone\n"
-            ~ "root=false\nfor arg in \"$@\"; do\ncase \"$arg\" in\n"
-            ~ escapeShellCommand(["-of" ~ output]) ~ "|"
-            ~ escapeShellCommand(["-of=" ~ output]) ~ "|"
-            ~ escapeShellCommand(["--of=" ~ output]) ~ "|"
-            ~ escapeShellCommand(["-of" ~ output ~ ".o"]) ~ "|"
-            ~ escapeShellCommand(["-of=" ~ output ~ ".o"]) ~ "|"
-            ~ escapeShellCommand(["--of=" ~ output ~ ".o"])
-            ~ ") root=true;;\nesac\ndone\n"
-            ~ "if $root; then\nargs=(\"$@\")\nflags=(" ~ escapeShellCommand(flags) ~ ")\n"
-            ~ "for ((i=0; i<=${#args[@]}-${#flags[@]}; ++i)); do\nmatch=true\n"
-            ~ "for ((j=0; j<${#flags[@]}; ++j)); do\n"
-            ~ "if [[ ${args[i+j]} != \"${flags[j]}\" ]]; then match=false; break; fi\ndone\n"
-            ~ "if $match; then\nexec ldc2 \"${args[@]:0:i}\" "
-            ~ escapeShellCommand(translatedFlags)
-            ~ " \"${args[@]:i+${#flags[@]}}\"\nfi\ndone\nfi\nexec ldc2 \"$@\"\n";
-        const path = buildPath(directory, defaultCompiler);
-        path.write(script);
-        path.setAttributes(octal!700);
-        return directory;
+// The description starts the compiler to learn its platform.
+private void ensureCompilerWrapper(in string binary) {
+    import std.file: exists;
+
+    if (!binary.exists)
+        installCompilerWrapper(binary, DubDescription.init);
+}
+
+// Only the ldc2 binary is a script; dmd runs as it is.
+private void installCompilerWrapper(in string binary, in DubDescription description) {
+    import core.sys.posix.fcntl: O_CLOEXEC, O_CREAT, O_TRUNC, O_WRONLY, open;
+    import core.sys.posix.unistd: close, write;
+    import std.conv: octal;
+    import std.exception: errnoEnforce;
+    import std.file: mkdirRecurse, rename;
+    import std.path: dirName, isAbsolute;
+    import std.string: toStringz;
+    import std.uuid: randomUUID;
+
+    if (!binary.isAbsolute)
+        return;
+    const script = compilerWrapperScript(binary, description);
+    binary.dirName.mkdirRecurse;
+    // The file is closed before it gets its name, and no child process keeps
+    // it open: a file that is open for writing cannot be started.
+    const temporary = binary ~ "." ~ randomUUID.toString;
+    const descriptor = open(temporary.toStringz,
+        O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, octal!700);
+    errnoEnforce(descriptor >= 0, temporary);
+    const written = write(descriptor, script.ptr, script.length);
+    const closed = close(descriptor);
+    errnoEnforce(written == script.length && closed == 0, temporary);
+    temporary.rename(binary);
+}
+
+// Keep dub's compiler identity and dependency cache paths. Only the root
+// output gets translated flags; dependencies retain their own checks.
+// A real build lets dub run its hooks and report every build failure. A
+// script that has nothing to translate starts the compiler as it is.
+private string compilerWrapperScript(in string binary, in DubDescription description) {
+    import snakebite.dependencyimage: defaultCompiler;
+    import snakebite.frontend.checks: isCheckFlag, ldcArguments;
+    import std.algorithm: canFind, startsWith;
+    import std.json: JSONValue;
+    import std.path: buildPath, dirName;
+    import std.process: escapeShellCommand;
+    import std.string: replace;
+
+    enum passthrough = "#!/bin/bash\nexec " ~ defaultCompiler ~ " \"$@\"\n";
+    const project = description.project;
+    if (project.rootPackage !in project.targetLookup)
+        return passthrough;
+    const target = project.lookupTarget(project.rootPackage);
+    const flags = target.buildSettings.dflags.dup;
+    const translatedFlags = ldcArguments(flags);
+    if (flags == translatedFlags)
+        return passthrough;
+    const output = target.cacheArtifactPath;
+    string responseArgument(in string argument) {
+        return argument.canFind(' ') || argument.canFind('\t') || argument.canFind('"')
+            ? "\"" ~ argument.replace("\\", "\\\\").replace("\"", "\\\"") ~ "\""
+            : argument;
     }
+    string rewrite = "BEGIN {\n";
+    foreach (flag; flags)
+        rewrite ~= "remove[" ~ JSONValue(responseArgument(flag)).toString ~ "] = 1;\n";
+    rewrite ~= "}\n!($0 in remove) { print }\nEND {\n";
+    foreach (flag; translatedFlags)
+        rewrite ~= "print " ~ JSONValue(responseArgument(flag)).toString ~ ";\n";
+    rewrite ~= "}\n";
+    string[] outputArguments;
+    foreach (suffix; ["", ".o"])
+        foreach (prefix; ["-of", "-of=", "--of="])
+            outputArguments ~= ["-e", responseArgument(prefix ~ output ~ suffix)];
+    string[] checkArguments;
+    foreach (flag; flags)
+        if (isCheckFlag(flag) || flag.startsWith("@"))
+            checkArguments ~= ["-e", responseArgument(flag)];
+    const directory = binary.dirName;
+    return "#!/bin/bash\n"
+        // dub serializes one argument per line in its compiler response
+        // file. Replace those records, not the response-file grammar.
+        ~ "for arg in \"$@\"; do\ncase \"$arg\" in @*)\nfile=${arg:1}\n"
+        ~ "if grep -Fxq " ~ escapeShellCommand(outputArguments) ~ " -- \"$file\""
+        ~ " && grep -Fxq " ~ escapeShellCommand(checkArguments) ~ " -- \"$file\"; then\n"
+        ~ "temporary=$(mktemp " ~ escapeShellCommand([buildPath(directory, "arguments.XXXXXX")]) ~ ") || exit 1\n"
+        ~ "trap 'rm -f -- \"$temporary\"' EXIT\nawk " ~ escapeShellCommand([rewrite])
+        ~ " \"$file\" > \"$temporary\" || exit 1\n"
+        ~ "args=()\nfor original in \"$@\"; do\n"
+        ~ "if [[ $original == \"$arg\" ]]; then args+=(\"@$temporary\"); else args+=(\"$original\"); fi\ndone\n"
+        ~ "ldc2 \"${args[@]}\"\nexit $?\nfi\n;;\nesac\ndone\n"
+        ~ "root=false\nfor arg in \"$@\"; do\ncase \"$arg\" in\n"
+        ~ escapeShellCommand(["-of" ~ output]) ~ "|"
+        ~ escapeShellCommand(["-of=" ~ output]) ~ "|"
+        ~ escapeShellCommand(["--of=" ~ output]) ~ "|"
+        ~ escapeShellCommand(["-of" ~ output ~ ".o"]) ~ "|"
+        ~ escapeShellCommand(["-of=" ~ output ~ ".o"]) ~ "|"
+        ~ escapeShellCommand(["--of=" ~ output ~ ".o"])
+        ~ ") root=true;;\nesac\ndone\n"
+        ~ "if $root; then\nargs=(\"$@\")\nflags=(" ~ escapeShellCommand(flags) ~ ")\n"
+        ~ "for ((i=0; i<=${#args[@]}-${#flags[@]}; ++i)); do\nmatch=true\n"
+        ~ "for ((j=0; j<${#flags[@]}; ++j)); do\n"
+        ~ "if [[ ${args[i+j]} != \"${flags[j]}\" ]]; then match=false; break; fi\ndone\n"
+        ~ "if $match; then\nexec ldc2 \"${args[@]:0:i}\" "
+        ~ escapeShellCommand(translatedFlags)
+        ~ " \"${args[@]:i+${#flags[@]}}\"\nfi\ndone\nfi\nexec ldc2 \"$@\"\n";
 }
 
 

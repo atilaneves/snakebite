@@ -143,6 +143,39 @@ unittest {
 }
 
 
+// dub starts the compiler of the root package through a wrapper. Building
+// must not change the environment of the process, which other threads read:
+// a pre-build command of the dependency prints the search path that it gets.
+@("buildDubDependencies.keepsTheSearchPathOfTheProcess")
+unittest {
+    import snakebite.dub: buildDubDependencies;
+    import snakebite.project: dubSourceSetFromDescription, projectStateDirectory;
+    import std.file: readText;
+    import std.process: environment;
+    import std.string: strip;
+
+    const sandbox = Sandbox();
+    const searchPath = sandbox.inSandboxPath("search-path.txt");
+    sandbox.writeFile("dependency/dub.sdl", text(
+        "name \"dependency\"\ntargetType \"library\"\n",
+        "preBuildCommands \"printenv PATH > ", searchPath, "\"\n"));
+    sandbox.writeFile("dependency/source/dependency.d", "module dependency;\n");
+    sandbox.writeFile("app/dub.json", `{
+        "name": "app", "targetType": "library",
+        "dependencies": {"dependency": {"path": "../dependency"}},
+        "dflags": ["-check=in=off"]
+    }`);
+    sandbox.writeFile("app/source/app.d", "module app;\n");
+    const directory = sandbox.inSandboxPath("app");
+
+    auto description = dubDescribeProject(directory);
+    buildDubDependencies(directory, projectStateDirectory(directory), description,
+        dubSourceSetFromDescription(directory, description).linkerFiles);
+
+    readText(searchPath).strip.should == environment["PATH"];
+}
+
+
 @("fetchProject.usesAPackageThatIsOnDisk")
 unittest {
     const sandbox = Sandbox();
