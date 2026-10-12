@@ -2,13 +2,47 @@ module ut.frontend.functions;
 
 
 import snakebite.frontend.compiler:
-    parseSnippet, returnsOnStack, withCompilerLock;
+    FrontendFlags, parseRootModules, parseSnippet, returnsOnStack,
+    withCompilerLock;
 import snakebite.frontend.dmd.functions: contextOf, findFunction, moduleOf;
 import ut;
 import core.sync.semaphore: Semaphore;
 import core.thread: Thread;
 import core.time: seconds;
 import snakebite.frontend.dmd.mangle: mangledNameOf;
+
+
+// Equal filenames can name different modules. Path aliases must still
+// select the same root, whether DMD kept an absolute or relative name.
+static foreach (basis; ["absolute", "root", "import"]) {
+    @("rootModules.pathAliases." ~ basis)
+    unittest {
+        enum directory = "/snakebite_root_lookup";
+        enum prefix = directory ~ "/" ~ basis;
+        enum left = prefix ~ "/left/same.d";
+        enum right = prefix ~ "/right/same.d";
+        enum leftSource = "module lookup_" ~ basis ~ "_left; int left() { return 1; }";
+        enum rightSource = "module lookup_" ~ basis ~ "_right; int right() { return 2; }";
+        const root = basis == "root" ? directory : null;
+        const imports = basis == "import" ? [directory] : [];
+        const flags = FrontendFlags.init;
+        auto first = parseRootModules(
+            [left], imports, flags, [left: leftSource], root);
+        auto second = parseRootModules(
+            [right], imports, flags, [right: rightSource], root);
+        (first[0] is second[0]).should == false;
+        (findFunction(first[0], "left") !is null).should == true;
+        (findFunction(second[0], "right") !is null).should == true;
+
+        enum leftAlias = prefix ~ "/left/unused/../same.d";
+        enum rightAlias = prefix ~ "/right/./same.d";
+        auto repeated = parseRootModules(
+            [leftAlias, rightAlias], imports, flags,
+            [leftAlias: leftSource, rightAlias: rightSource], root);
+        (repeated[0] is first[0]).should == true;
+        (repeated[1] is second[0]).should == true;
+    }
+}
 
 
 // An is-expression can test an invalid instance without rejecting the module.

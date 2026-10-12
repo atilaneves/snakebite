@@ -1052,28 +1052,39 @@ final class Compiler {
         in string rootDirectory,
     ) const {
         import dmd.dmodule: Module;
+        import std.path: absolutePath, baseName, buildNormalizedPath;
 
-        foreach (module_; Module.amodules)
-            if (moduleSourceMatches(module_, filePath, importPaths, rootDirectory))
+        const absPath = filePath.absolutePath.buildNormalizedPath;
+        const fileName = absPath.baseName;
+        foreach (module_; Module.amodules) {
+            const sourcePath = module_.sourceFileName;
+            const sourceName = sourcePath.baseName;
+            // Resolving a directory cannot change an ordinary filename.
+            // Most loaded modules are unrelated snippets, so reject them
+            // before allocating paths for every possible base directory.
+            if (sourceName.length && sourceName != "." && sourceName != ".."
+                    && sourceName != fileName)
+                continue;
+
+            if (moduleSourceMatches(sourcePath, absPath, importPaths, rootDirectory))
                 return module_;
+        }
 
         return null;
     }
 
-    // Whether `module_` was parsed from `filePath`. A parsed module keeps
+    // Whether `sourcePath` resolves to `absPath`. A parsed module keeps
     // the name `dmdFileName` gave it, relative to the root directory or
     // to an import path, so a relative name is resolved against each of
     // those the way it was made.
     private bool moduleSourceMatches(
-        Module module_,
-        in string filePath,
+        in string sourcePath,
+        in string absPath,
         in string[] importPaths,
         in string rootDirectory,
     ) const {
         import std.path: absolutePath, buildNormalizedPath;
 
-        const absPath = filePath.absolutePath.buildNormalizedPath;
-        const sourcePath = module_.sourceFileName;
         if (sourcePath.absolutePath.buildNormalizedPath == absPath)
             return true;
 
