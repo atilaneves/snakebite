@@ -51,12 +51,18 @@ else
     static assert(false, "the host is built by a compiler that has no configuration file here");
 
 /// The import paths in the configuration file of the compiler that built
-/// this binary. Ends the process when the compiler or a path is missing.
-public string[] hostImportPaths() {
-    import std.concurrency: initOnce;
+/// this binary. They are looked up once, when the program starts, outside
+/// the frontend's arena, which must hold no pointer to the garbage-collected
+/// heap. The program ends with a message when the compiler or a path is
+/// missing.
+public const(string)[] hostImportPaths() {
+    return _hostImportPaths;
+}
 
-    __gshared string[] paths;
-    return initOnce!paths(findImportPaths);
+private __gshared string[] _hostImportPaths;
+
+shared static this() {
+    _hostImportPaths = findImportPaths;
 }
 
 private string[] findImportPaths() {
