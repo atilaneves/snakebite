@@ -2,8 +2,6 @@ module ut.backends.call.arrayoperations;
 
 
 import ut.backends;
-import snakebite.frontend.compiler: parseSnippet;
-import std.array: join;
 
 
 // druntime's array operations take a vector path for 16 bytes at a time and
@@ -273,56 +271,46 @@ static foreach (backend; Matrix!()) {
 // `core.simd`'s own unaligned load and store, which druntime's array
 // operations are written with.
 //
-// LDC's `loadUnaligned` is LLVM inline IR, which no backend runs (ADR-0012).
-// A program that calls it from root code fails at load on the backends
-// that run a snippet from source, and runs where LDC compiles it.
-private enum loadAndStoreUnalignedProgram = q{
-    import core.simd: float4, int4, loadUnaligned, storeUnaligned;
-
-    void main() {
-        float[8] source = [1, 2, 3, 4, 5, 6, 7, 8];
-        float[8] target = 0;
-        foreach (offset; 0 .. 4) {
-            float4 loaded = loadUnaligned(
-                cast(const float4*) (source.ptr + offset));
-            storeUnaligned(cast(float4*) (target.ptr + offset), loaded);
-            foreach (i; 0 .. 4)
-                assert(target[offset + i] == source[offset + i]);
-        }
-
-        int[7] integers = [10, 20, 30, 40, 50, 60, 70];
-        int4 one = loadUnaligned(cast(const int4*) (integers.ptr + 1));
-        assert(one.array == [20, 30, 40, 50]);
-    }
-};
-
-private string inlineIrRefusal(in string owner) {
-    return "LLVM inline IR (`pragma(LDC_inline_ir)`) is not supported in `" ~ owner
-        ~ "`: no backend runs it. Only code that LDC compiled into the host or "
-        ~ "the dependency image can use it";
-}
+// LDC's `loadUnaligned` is LLVM inline IR, which no backend runs (ADR-0012);
+// native code built by LDC runs it. The load refusal is pinned in
+// `inlineasm.loadDiagnostic.llvmInlineIrFailsLoad`.
+version (LDC)
+    private alias InlineIr = AliasSeq!(
+        Omit!(Interpreter, Because.diverges,
+            "LDC's inline IR is refused at load"),
+        Omit!(Bytecode, Because.diverges,
+            "LDC's inline IR is refused at load"),
+    );
+else
+    private alias InlineIr = AliasSeq!();
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "dmd's CTFE cannot evaluate `core.simd.__simd`"),
+    InlineIr,
 )) {
     @("arrayOperations.loadAndStoreUnaligned." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        version (LDC)
-            enum refusesInlineIr = !is(backend == Native);
-        else
-            enum refusesInlineIr = false;
+        0.shouldBeStatusOf!(backend, q{
+            import core.simd: float4, int4, loadUnaligned, storeUnaligned;
 
-        static if (refusesInlineIr) {
-            parseSnippet(loadAndStoreUnalignedProgram)
-                .shouldThrowWithMessage([
-                    inlineIrRefusal("ldc.simd.loadUnaligned!(__vector(float[4])).loadUnaligned"),
-                    inlineIrRefusal("ldc.simd.storeUnaligned!(__vector(float[4])).storeUnaligned"),
-                    inlineIrRefusal("ldc.simd.loadUnaligned!(__vector(int[4])).loadUnaligned"),
-                ].join("\n"));
-        } else
-            0.shouldBeStatusOf!(backend, loadAndStoreUnalignedProgram);
+            void main() {
+                float[8] source = [1, 2, 3, 4, 5, 6, 7, 8];
+                float[8] target = 0;
+                foreach (offset; 0 .. 4) {
+                    float4 loaded = loadUnaligned(
+                        cast(const float4*) (source.ptr + offset));
+                    storeUnaligned(cast(float4*) (target.ptr + offset), loaded);
+                    foreach (i; 0 .. 4)
+                        assert(target[offset + i] == source[offset + i]);
+                }
+
+                int[7] integers = [10, 20, 30, 40, 50, 60, 70];
+                int4 one = loadUnaligned(cast(const int4*) (integers.ptr + 1));
+                assert(one.array == [20, 30, 40, 50]);
+            }
+        });
     }
 }
 

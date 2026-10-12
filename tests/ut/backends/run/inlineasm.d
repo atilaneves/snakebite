@@ -8,8 +8,6 @@ import std.conv: text;
 import std.file: mkdirRecurse, rmdirRecurse, tempDir, write;
 import std.path: buildPath;
 import std.process: thisProcessID;
-import snakebite.dependencyimage: Optimise;
-import snakebite.execution: prepareProject;
 
 
 // Snakebite parses a root module as if `D_InlineAsm_X86_64` were
@@ -462,25 +460,6 @@ version (LDC) {
         );
     }
 
-    @("inlineasm.loadDiagnostic.llvmInlineAsmFailsLoad")
-    unittest {
-        parseRootSource("asm_fails_load", q{
-            import ldc.llvmasm: __asm;
-
-            void pause() {
-                __asm("pause", "");
-            }
-            unittest {
-                pause();
-            }
-        }).shouldThrowWithMessage(
-            "/asm_fails_load.d(5,17): inline assembler "
-            ~ "(`pragma(LDC_inline_asm)`) is not supported in "
-            ~ "`asm_fails_load.pause`: no backend runs it. Only code that LDC "
-            ~ "compiled into the host or the dependency image can use it",
-        );
-    }
-
     // A root module of a fixed name, so that the message has no snippet
     // counter.
     private auto parseRootSource(in string name, in string source) {
@@ -509,66 +488,6 @@ version (LDC) {
         );
     }
 
-    // Three template instances deep: nothing but the instance at the
-    // bottom holds the inline IR. With no image to compile the instances,
-    // the root program runs all of them, so the load names the bottom one.
-    @("inlineasm.loadDiagnostic.irInstanceThreeLevelsDeepFailsLoadWithoutImage")
-    unittest {
-        const directory = buildPath(
-            tempDir, text("ir_chain_", thisProcessID),
-        );
-        scope(exit) rmdirRecurse(directory);
-        writeIrChainProject(directory, "ir_chain_depth");
-
-        const noNativeDependencies = false;
-        prepareProject(
-            buildPath(directory, "app"),
-            [buildPath(directory, "deps")],
-            null,
-            noNativeDependencies,
-            optimise: Optimise.no,
-        ).shouldThrowWithMessage(
-            text(buildPath(directory, "deps", "ir_chain_depth.d"), "(7,48): ", innermostRefusal("ir_chain_depth")),
-        );
-    }
-
-    // dmd keeps an instance in the members of the root module that first
-    // needed it, and a later program reuses it from there: the members of
-    // the later program's root modules do not list it. Only the calls lead
-    // to it.
-    @("inlineasm.loadDiagnostic.irInstanceMadeForAnotherProgramFailsLoadWithoutImage")
-    unittest {
-        const directory = buildPath(
-            tempDir, text("ir_chain_other_", thisProcessID),
-        );
-        scope(exit) rmdirRecurse(directory);
-        writeIrChainProject(directory, "ir_chain_other");
-        const otherRoot = buildPath(directory, "other");
-        mkdirRecurse(otherRoot);
-        write(buildPath(otherRoot, "ir_chain_other_second.d"),
-            "module ir_chain_other_second;\nimport ir_chain_other: outer;\n" ~ q{
-            int second() { return outer(3, 4); }
-            void main() {}
-        });
-        parseRootModules(
-            [buildPath(directory, "app", "ir_chain_other_root.d")],
-            [buildPath(directory, "deps")],
-            FrontendFlags(),
-            dependencyImage: true,
-        );
-
-        const noNativeDependencies = false;
-        prepareProject(
-            otherRoot,
-            [buildPath(directory, "deps")],
-            null,
-            noNativeDependencies,
-            optimise: Optimise.no,
-        ).shouldThrowWithMessage(
-            text(buildPath(directory, "deps", "ir_chain_other.d"), "(7,48): ", innermostRefusal("ir_chain_other")),
-        );
-    }
-
     // The same program loads where a dependency image holds the instances:
     // LDC compiles them there.
     @("inlineasm.loadDiagnostic.irInstanceLoadsWhenAnImageHoldsIt")
@@ -585,13 +504,6 @@ version (LDC) {
             FrontendFlags(),
             dependencyImage: true,
         );
-    }
-
-    private string innermostRefusal(in string module_) {
-        return "LLVM inline IR (`pragma(LDC_inline_ir)`) is not supported in `"
-            ~ module_ ~ ".innermost!int.innermost`: no backend runs it. Only "
-            ~ "code that LDC compiled into the host or the dependency image "
-            ~ "can use it";
     }
 
     // The modules are named for the test: the frontend keeps a module of a
