@@ -137,7 +137,8 @@ public struct Repl {
 
         Module module_;
         try
-            module_ = parseSnippet(fullSource, _importPaths, _flags);
+            module_ = parseSnippet(
+                fullSource, _importPaths, _flags, _dependencyImage !is null);
         catch (Exception exception) {
             _pendingInput = null;
             return SubmitResult(SubmitResult.Kind.error, exception.msg.withoutDuplicateLines);
@@ -219,7 +220,8 @@ public struct Repl {
 
         Module module_;
         try
-            module_ = parseSnippet(fullSource, _importPaths, _flags);
+            module_ = parseSnippet(
+                fullSource, _importPaths, _flags, _dependencyImage !is null);
         catch (Exception exception) {
             _pendingInput = null;
             return SubmitResult(SubmitResult.Kind.error, exception.msg.withoutDuplicateLines);

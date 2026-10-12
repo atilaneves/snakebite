@@ -18,14 +18,15 @@ private:
 //
 // On an LDC host the same walk refuses LLVM inline IR and LDC's inline
 // assembler (`pragma(LDC_inline_ir)`, `pragma(LDC_inline_asm)`) called from
-// root-owned code. `withoutImage` is true when no dependency image will hold
-// a copy that LDC compiled, so an instance of a dependency template that
-// the root code instantiates and that calls them is refused too.
+// root-owned code. `dependencyImage` says whether a dependency image will
+// hold a copy that LDC compiled of each instance of a dependency template
+// that root code causes; when none will, the root program runs those
+// instances and the walk refuses the ones that call them too.
 public void reportInlineAsmDiagnostics(
     imported!"dmd.dmodule".Module[] rootModules,
-    in bool withoutImage = false,
+    in bool dependencyImage,
 ) {
-    scope collector = new InlineAsmCollector(rootModules, withoutImage);
+    scope collector = new InlineAsmCollector(rootModules, dependencyImage);
     foreach (module_; rootModules)
         module_.accept(collector);
 }
@@ -76,19 +77,19 @@ private extern(C++) class InlineAsmCollector
     private bool[Loc] _reported;
     private bool[Dsymbol] _reportedOwners;
     private Dsymbol _owner;
-    private bool _withoutImage;
+    private bool _dependencyImage;
 
-    private extern(D) this(Module[] rootModules, in bool withoutImage) {
+    private extern(D) this(Module[] rootModules, in bool dependencyImage) {
         foreach (module_; rootModules)
             _rootModules[module_] = true;
-        _withoutImage = withoutImage;
+        _dependencyImage = dependencyImage;
     }
 
     // The walk reaches an instance of a dependency template only through
     // root code that names it. Without an image, no copy that LDC compiled
     // exists for that instance, and the root program holds the only one.
     private extern(D) bool isRootInstance(Dsymbol function_) {
-        return ldcHost && _withoutImage && function_.parent !is null
+        return ldcHost && !_dependencyImage && function_.parent !is null
             && function_.parent.isTemplateInstance !is null;
     }
 
@@ -218,7 +219,7 @@ private extern(C++) class InlineAsmCollector
             reportInlineCode(expression, function_);
         // A call of an instance of a dependency template may have been
         // instantiated first by another module, which is no root.
-        if (function_ !is null && ldcHost && isRootOwned(_owner) && _withoutImage
+        if (function_ !is null && ldcHost && isRootOwned(_owner) && !_dependencyImage
                 && function_.parent !is null
                 && function_.parent.isTemplateInstance !is null
                 && function_ !in _visited)

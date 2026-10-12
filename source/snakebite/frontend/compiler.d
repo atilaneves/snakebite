@@ -71,6 +71,7 @@ public imported!"dmd.dmodule".Module[] parseRootModules(
     in string[string] sourceOverrides = null,
     in string rootDirectory = null,
     in bool importedCFilesAreRoots = false,
+    in bool dependencyImage = true,
 ) {
     return compiler.parseRootModules(
         filePaths,
@@ -79,6 +80,7 @@ public imported!"dmd.dmodule".Module[] parseRootModules(
         sourceOverrides,
         rootDirectory,
         importedCFilesAreRoots,
+        dependencyImage,
     );
 }
 
@@ -95,8 +97,9 @@ public imported!"dmd.dmodule".Module parseSnippet(
     in string source,
     in string[] rootImportPaths = null,
     in FrontendFlags flags = FrontendFlags.init,
+    in bool dependencyImage = false,
 ) {
-    return compiler.parseSnippet(source, rootImportPaths, flags);
+    return compiler.parseSnippet(source, rootImportPaths, flags, dependencyImage);
 }
 
 // Parse several whole guest programs, driving the shared semantic phases
@@ -814,6 +817,7 @@ final class Compiler {
         in string[string] sourceOverrides,
         in string rootDirectory,
         in bool importedCFilesAreRoots,
+        in bool dependencyImage,
     ) {
         return inside(() => parseRootModulesLocked(
             filePaths,
@@ -822,6 +826,7 @@ final class Compiler {
             sourceOverrides,
             rootDirectory,
             importedCFilesAreRoots,
+            dependencyImage,
         ));
     }
 
@@ -832,6 +837,7 @@ final class Compiler {
         in string[string] sourceOverrides,
         in string rootDirectory,
         in bool importedCFilesAreRoots,
+        in bool dependencyImage,
     ) {
         import dmd.dmodule: Module;
         import dmd.frontend: addImport, dmdParseModule = parseModule;
@@ -891,7 +897,7 @@ final class Compiler {
         // Drive the shared semantic phases over the whole root set the way dmd
         // drives `-unittest <files>`: each phase runs across all roots before
         // the next begins.
-        driveSharedSemantic(modules);
+        driveSharedSemantic(modules, null, dependencyImage);
         if (global.errors != 0)
             throw new Exception(diagnosticMessageWithLocations);
 
@@ -904,6 +910,7 @@ final class Compiler {
         in string source,
         in string[] rootImportPaths,
         in FrontendFlags flags,
+        in bool dependencyImage,
     ) {
         return inside(() {
             const savedFlags = saveFrontendFlags;
@@ -911,7 +918,7 @@ final class Compiler {
             applyFrontendFlags(flags);
 
             return parseSourceLocked(
-                owned(source), owned(rootImportPaths), flags);
+                owned(source), owned(rootImportPaths), flags, dependencyImage);
         });
     }
 
@@ -923,6 +930,7 @@ final class Compiler {
         in string source,
         in string[] rootImportPaths,
         in FrontendFlags flags,
+        in bool dependencyImage,
     ) {
         import core.atomic: atomicFetchAdd;
         import dmd.errors: diagnostics;
@@ -941,7 +949,7 @@ final class Compiler {
         // `rootImportPaths`, no flags) benefit from the cache; they are
         // unaffected by this.
         const cacheable = rootImportPaths.length == 0
-            && flags.compilerArguments.length == 0;
+            && flags.compilerArguments.length == 0 && !dependencyImage;
         if (cacheable) {
             if (auto cached = source in sourceCache)
                 return *cached;
@@ -970,7 +978,7 @@ final class Compiler {
         if (moduleResult.diagnostics.hasErrors)
             throw new Exception(diagnosticMessage);
 
-        fullSemantic(moduleResult.module_, rootImportPaths);
+        fullSemantic(moduleResult.module_, rootImportPaths, dependencyImage);
         if (global.errors != 0)
             throw new Exception(diagnosticMessage);
 
@@ -985,10 +993,10 @@ final class Compiler {
     private void fullSemantic(
         Module module_,
         in string[] rootImportPaths = null,
+        in bool dependencyImage = false,
     ) {
         module_.importedFrom = module_;
-        // A snippet has no dependency image; a cell of a project has one.
-        driveSharedSemantic([module_], rootImportPaths, rootImportPaths.length == 0);
+        driveSharedSemantic([module_], rootImportPaths, dependencyImage);
     }
 
     // Parse each of `sources` not already in `sourceCache` as its own module,
@@ -1036,7 +1044,7 @@ final class Compiler {
             freshModules ~= result.module_;
         }
 
-        driveSharedSemantic(freshModules, null, true);
+        driveSharedSemantic(freshModules, null, false);
         if (global.errors != 0)
             throw new Exception(diagnosticMessage);
 
@@ -1154,6 +1162,10 @@ final class Compiler {
 // check: what counts as fatal differs (root-set parsing reports locations,
 // snippet parsing does not).
 //
+// `dependencyImage` says whether the run will have a dependency image that
+// holds the instances of dependency templates that root code causes (the
+// inline assembler check needs the fact, see `reportInlineAsmDiagnostics`).
+//
 // `modules` is also the root-owned set for the `D_InlineAsm_X86_64`
 // version gate and the inline assembler check (issue #415; see
 // docs/adr/0012). Every load path converges here, so this is the one
@@ -1173,7 +1185,7 @@ final class Compiler {
 private void driveSharedSemantic(
     imported!"dmd.dmodule".Module[] modules,
     in string[] rootImportPaths = null,
-    in bool withoutImage = false,
+    in bool dependencyImage = false,
 ) {
     import dmd.dsymbolsem:
         dsymbolSemantic,
@@ -1205,7 +1217,7 @@ private void driveSharedSemantic(
         rootModules ~= analyseLoadedRootOwnedImports(rootImportPaths);
 
     if (global.errors == 0)
-        reportInlineAsmDiagnostics(rootModules, withoutImage);
+        reportInlineAsmDiagnostics(rootModules, dependencyImage);
 }
 
 // Every module under `rootImportPaths` that the phases above loaded and

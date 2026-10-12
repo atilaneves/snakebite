@@ -64,7 +64,7 @@ public PreparationReport prepareProject(
 
     stopWatch.reset;
     initialize(Snippets.no);
-    auto project = loadProject(directory, sources);
+    auto project = loadProject(directory, sources, nativeDependencies);
     const frontendDuration = stopWatch.peek;
     stopWatch.reset;
     if (nativeDependencies)

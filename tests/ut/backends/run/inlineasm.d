@@ -8,6 +8,8 @@ import std.conv: text;
 import std.file: mkdirRecurse, rmdirRecurse, tempDir, write;
 import std.path: buildPath;
 import std.process: thisProcessID;
+import snakebite.dependencyimage: Optimise;
+import snakebite.execution: prepareProject;
 
 
 // Snakebite parses a root module as if `D_InlineAsm_X86_64` were
@@ -491,5 +493,78 @@ version (LDC) {
         ("LLVM inline IR (`pragma(LDC_inline_ir)`) is not supported in "
             ~ "`ldc.simd.loadUnaligned!(__vector(float[4])).loadUnaligned`: "
             ~ "no backend runs it").should.be in message;
+    }
+
+    // Three template instances deep: nothing but the instance at the
+    // bottom holds the inline IR. With no image to compile the instances,
+    // the root program runs all of them, so the load names the bottom one.
+    @("inlineasm.loadDiagnostic.irInstanceThreeLevelsDeepFailsLoadWithoutImage")
+    unittest {
+        const directory = buildPath(
+            tempDir, text("ir_chain_", thisProcessID),
+        );
+        scope(exit) rmdirRecurse(directory);
+        writeIrChainProject(directory, "ir_chain_depth");
+
+        const noNativeDependencies = false;
+        const message = prepareProject(
+            buildPath(directory, "app"),
+            [buildPath(directory, "deps")],
+            null,
+            noNativeDependencies,
+            optimise: Optimise.no,
+        ).shouldThrow.msg;
+        ("LLVM inline IR (`pragma(LDC_inline_ir)`) is not supported in "
+            ~ "`ir_chain_depth.innermost!int.innermost`: no backend runs it")
+            .should.be in message;
+    }
+
+    // The same program loads where a dependency image holds the instances:
+    // LDC compiles them there.
+    @("inlineasm.loadDiagnostic.irInstanceLoadsWhenAnImageHoldsIt")
+    unittest {
+        const directory = buildPath(
+            tempDir, text("ir_chain_image_", thisProcessID),
+        );
+        scope(exit) rmdirRecurse(directory);
+        writeIrChainProject(directory, "ir_chain_image");
+
+        parseRootModules(
+            [buildPath(directory, "app", "ir_chain_image_root.d")],
+            [buildPath(directory, "deps")],
+            FrontendFlags(),
+            dependencyImage: true,
+        );
+    }
+
+    // The modules are named for the test: the frontend keeps a module of a
+    // name for the life of the process.
+    private void writeIrChainProject(
+        in string directory,
+        in string name,
+        in bool madeByTheDependency = false,
+    ) {
+        mkdirRecurse(buildPath(directory, "deps"));
+        mkdirRecurse(buildPath(directory, "app"));
+        write(buildPath(directory, "deps", name ~ ".d"),
+            "module " ~ name ~ ";\n" ~ q{
+            import ldc.llvmasm: __ir;
+
+            int innermost(T)(T a, T b) {
+                return __ir!(`%r = add i32 %0, %1
+                              ret i32 %r`, int)(a, b);
+            }
+            int middle(T)(T a, T b) { return innermost(a, b); }
+            int outer(T)(T a, T b) { return middle(a, b); }
+        } ~ (madeByTheDependency ? q{
+            alias madeOuter = outer!int;
+            alias madeMiddle = middle!int;
+            alias madeInnermost = innermost!int;
+        } : ""));
+        write(buildPath(directory, "app", name ~ "_root.d"),
+            "module " ~ name ~ "_root;\nimport " ~ name ~ ": outer;\n" ~ q{
+            int sum() { return outer(1, 2); }
+            void main() {}
+        });
     }
 }

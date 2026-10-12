@@ -36,7 +36,11 @@ public struct Project {
 // Finding the sources (`sourceSet`: `dub describe` for a dub project) and
 // running the frontend over them are separate steps so a caller can time
 // the second alone; see `snakebite.execution.prepareProject`.
-public Project loadProject(in string directory, SourceSet sources) {
+public Project loadProject(
+    in string directory,
+    SourceSet sources,
+    in bool dependencyImage = true,
+) {
     import snakebite.backends: Program;
     import snakebite.frontend.compiler:
         checksOf, FrontendFlags, parseRootModules;
@@ -61,6 +65,7 @@ public Project loadProject(in string directory, SourceSet sources) {
         project.sources.sourceOverrides,
         project.directory,
         project.sources.importedCFilesAreRoots,
+        dependencyImage,
     );
     project.program = Program(parsed, project.name, checksOf(flags));
 
