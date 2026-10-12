@@ -111,11 +111,77 @@ public DubDescription dubDescribeProject(
     const cached = cachedDubDescription(directory, defaultCompiler, versions, {
         const result = describe(directory,
             ["--compiler=" ~ defaultCompiler] ~ versionArguments, DubConfig.test);
-        return JSONValue(["value": parseJSON(result.output),
-            "arguments": JSONValue((result.buildArguments ~ versionArguments).dup)]);
+        DubDescription description = DubDescription(parseJSON(result.output),
+            (result.buildArguments ~ versionArguments).dup);
+        runBuildCommands(description);
+        return JSONValue(["value": description.value,
+            "arguments": JSONValue(description.buildArguments)]);
     });
     return DubDescription(cached["value"],
         cached["arguments"].array.map!(v => v.str).array);
+}
+
+// dub runs the pre-build commands of a project when its target is out of
+// date, before it compiles. The front end reads the project without dub's
+// build, so run the commands here, in the lambda that describes the project:
+// the cache of the description keeps its record while its watched inputs are
+// unchanged, and then the project is up to date and nothing runs. When the
+// cache is stale or off, they run. `dub describe` runs the pre-generate
+// commands itself, each time it runs, so they are not run here; the second
+// `dub describe` below, which expands the pre-build commands, runs them once
+// more for a project that has both kinds. The description and its file
+// list are already read when the commands run: a file they write is there for
+// the front end to import, but the description does not list it. They run in
+// the root package directory, as in dub; `dub describe --data` gives them
+// with every `$VARIABLE` already expanded. The environment has the `DUB_*`
+// variables of dub's documentation that the description states. dub gives
+// `DUB_PACKAGE` the root package name also for a command of a `sourceLibrary`
+// dependency (checked with dub 1.42.0).
+private void runBuildCommands(in DubDescription description) {
+    import snakebite.dependencyimage: defaultCompiler;
+    import snakebite.exception: SnakebiteException;
+    import std.conv: to;
+    import std.json: JSONType, JSONValue;
+    import std.process: Config, environment, executeShell;
+
+    const root = description.value["rootPackage"].str;
+    JSONValue settings;
+    foreach (target; description.value["targets"].array)
+        if (target["rootPackage"].str == root)
+            settings = target["buildSettings"];
+    if (settings.type != JSONType.object || settings["preBuildCommands"].array.length == 0)
+        return;
+
+    string packageDirectory, packageVersion;
+    foreach (package_; description.value["packages"].array)
+        if (package_["name"].str == root) {
+            packageDirectory = package_["path"].str;
+            packageVersion = package_["version"].str;
+        }
+
+    const result = describeCapturingOutput(
+        ["dub", "describe", "--data=pre-build-commands", "--data-list",
+            "--compiler=" ~ defaultCompiler] ~ description.buildArguments,
+        packageDirectory);
+    if (result.status != 0)
+        throw new SnakebiteException("dub describe failed in " ~ packageDirectory
+            ~ ": " ~ result.output ~ result.errors);
+
+    auto commandEnvironment = environment.toAA;
+    commandEnvironment["DUB_ROOT_PACKAGE"] = root;
+    commandEnvironment["DUB_PACKAGE"] = root;
+    commandEnvironment["DUB_PACKAGE_DIR"] = packageDirectory;
+    commandEnvironment["DUB_ROOT_PACKAGE_DIR"] = packageDirectory;
+    commandEnvironment["DUB_PACKAGE_VERSION"] = packageVersion;
+    commandEnvironment["DUB_CONFIG"] = description.value["configuration"].str;
+    commandEnvironment["DUB_BUILD_TYPE"] = description.value["buildType"].str;
+    foreach (command; parseDescribeList(result.output)) {
+        const run = executeShell(command, commandEnvironment, Config.none,
+            size_t.max, packageDirectory);
+        if (run.status != 0)
+            throw new SnakebiteException("Pre-build command failed with exit code "
+                ~ run.status.to!string ~ ": " ~ command ~ "\n" ~ run.output);
+    }
 }
 
 

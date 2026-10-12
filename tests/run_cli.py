@@ -789,6 +789,121 @@ def test_import_paths_stay_relative_to_caller(
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+# A dub build runs the `preBuildCommands` of the recipe before it compiles,
+# in the package directory and with the `DUB_*` variables set, so a file they
+# write is there for `import` to read.
+@pytest.mark.parametrize("backend", ["native", *FILE_BACKENDS])
+def test_pre_build_commands_run_before_the_project_is_read(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    name = dub_name("pre-build")
+    write(
+        app / "dub.sdl",
+        dub_project_recipe("pre-build")
+        + 'stringImportPaths "generated"\n'
+        + 'preBuildCommands "mkdir -p generated && '
+        + 'echo $$DUB_ROOT_PACKAGE $$DUB_PACKAGE $$DUB_PACKAGE_VERSION '
+        + '$$DUB_CONFIG $$DUB_BUILD_TYPE `basename $$DUB_PACKAGE_DIR` '
+        + '`basename $$DUB_ROOT_PACKAGE_DIR` > generated/root.txt"\n',
+    )
+    write(
+        app / "source" / "main.d",
+        f"""
+        module main;
+        static assert(import("root.txt")
+            == "{name} {name} ~master unittest unittest app app\\n");
+        int main() {{ return 0; }}
+        """,
+    )
+
+    result = run_program_backend(backend, app, tmp_path)
+
+    assert result.returncode == 0, output(result)
+
+
+# A dub build runs the pre-generate commands once, and `dub describe` runs
+# them each time it runs: a start must not describe the project again.
+@pytest.mark.parametrize("backend", ["native", *FILE_BACKENDS])
+def test_pre_generate_commands_run_once_in_a_start(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    write(
+        app / "dub.sdl",
+        dub_project_recipe("pre-generate")
+        + 'preGenerateCommands "echo run >> $PACKAGE_DIR/runs.log"\n',
+    )
+    write(app / "source" / "main.d", "module main;\nint main() { return 0; }\n")
+
+    result = run_program_backend(backend, app, tmp_path)
+
+    assert result.returncode == 0, output(result)
+    assert (app / "runs.log").read_text().splitlines() == ["run"]
+
+
+# The pre-build commands run when the cached description of the project is
+# not used: a second start with unchanged inputs runs nothing, and a changed
+# input runs them again.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_pre_build_commands_run_again_only_when_inputs_change(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    write(
+        app / "dub.sdl",
+        dub_project_recipe("pre-build-cache")
+        + 'preBuildCommands "echo run >> runs.log"\n',
+    )
+    write(app / "source" / "main.d", "module main;\nint main() { return 0; }\n")
+    runs = app / "runs.log"
+
+    first = run_backend(backend, app, tmp_path)
+    second = run_backend(backend, app, tmp_path)
+    assert first.returncode == 0, output(first)
+    assert second.returncode == 0, output(second)
+    unchanged = runs.read_text().splitlines()
+
+    write(app / "source" / "other.d", "module other;\n")
+    third = run_backend(backend, app, tmp_path)
+
+    assert third.returncode == 0, output(third)
+    assert (unchanged, runs.read_text().splitlines()) == (["run"], ["run", "run"])
+
+
+# A dub build stops when a pre-build command fails, and says which command
+# failed, with what status and what output.
+@pytest.mark.parametrize("backend", ["native", *FILE_BACKENDS])
+def test_failing_pre_build_command_stops_the_run(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    write(
+        app / "dub.sdl",
+        dub_project_recipe("pre-build-fails")
+        + 'preBuildCommands "echo boom-line >&2; exit 3"\n',
+    )
+    write(app / "source" / "main.d", "module main;\nint main() { return 0; }\n")
+
+    result = run_program_backend(backend, app, tmp_path)
+
+    assert result.returncode != 0, output(result)
+    assert "echo boom-line >&2; exit 3" in output(result)
+    assert "3" in output(result)
+    assert "boom-line" in output(result)
+
+
+def run_program_backend(
+    backend: str, app: Path, tmp_path: Path,
+) -> subprocess.CompletedProcess[str]:
+    if backend == "native":
+        return subprocess.run(
+            ["dub", "test", "-q", "--compiler=dmd"],
+            capture_output=True, check=False, text=True, cwd=app,
+        )
+    return run_backend(backend, app, tmp_path)
+
+
 # Compiled D runs the module destructors after `main`, and the output they
 # write is flushed before the process ends.
 @pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
@@ -4210,7 +4325,6 @@ def test_transitive_dub_dependencies_reach_the_image(
         name "image-app"
         targetType "library"
         targetName "image-app"
-        preBuildCommands "test ! -e reject-build"
         dependency "image-middle" path="../middle"
         configuration "unittest" {
             targetType "executable"
@@ -4224,6 +4338,7 @@ def test_transitive_dub_dependencies_reach_the_image(
         """
         name "image-middle"
         targetType "staticLibrary"
+        preBuildCommands "test ! -e reject-build"
         dependency "image-leaf" path="../leaf archives"
         """,
     )
@@ -4259,13 +4374,15 @@ def test_transitive_dub_dependencies_reach_the_image(
     first = start()
     assert first.returncode == 0, output(first)
 
-    # With the build command of the app rejecting a build, an edit of the
-    # app still starts: neither the app nor the archives are built again.
-    write(tmp_path / "app" / "reject-build")
+    # With the build command of a dependency rejecting a build, an edit of
+    # the app still starts: the archives are not built again. (The build
+    # commands of the app itself run at each changed start, so the app
+    # cannot hold the rejecting command.)
+    write(tmp_path / "middle" / "reject-build")
     write(app_source, app_using_unused_member(backend, 73) + "\n")
     edited_app = start()
     assert edited_app.returncode == 0, output(edited_app)
-    (tmp_path / "app" / "reject-build").unlink()
+    (tmp_path / "middle" / "reject-build").unlink()
 
     write(
         unused,
