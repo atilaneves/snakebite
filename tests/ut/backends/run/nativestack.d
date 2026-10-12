@@ -67,9 +67,9 @@ static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "dmd's CTFE stops at a fixed recursion limit far below this depth"),
     Omit!(Interpreter, Because.unconfirmed,
-        "the walker uses about 2.6 KiB of native stack for each guest call "
-        ~ "and runs on the stack it was entered on: the process dies with "
-        ~ "SIGSEGV at about 3000 calls on an 8 MiB stack"),
+        "the walker runs on the stack it was entered on and uses far more of "
+        ~ "it for each guest call than compiled D: 220000 calls overflow "
+        ~ "8 MiB and the process dies with SIGSEGV"),
 )) {
     @("nativeStack.deepRecursionReachesCompiledDepth." ~ backend.stringof)
     @Tags(backend.stringof)
