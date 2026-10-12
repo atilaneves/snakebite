@@ -925,7 +925,8 @@ static foreach (backend; Matrix!(
         const result = execute(command ~ ["--", "call"]);
         result.status.should.not == 0;
         version (LDC) {
-            "declared by `__builtin_ia32_rsqrtps`: it is not in this process"
+            ("no host wrapper serves the LDC intrinsic `llvm.x86.sse.rsqrt.ps` "
+                ~ "declared by `__builtin_ia32_rsqrtps`")
                 .should.be in result.output;
         } else {
             "declared by `__simd`: it is not in this process"

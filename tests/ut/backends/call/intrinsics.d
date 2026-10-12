@@ -652,3 +652,104 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// LLVM's `expect` takes a `bool` as an `i1`. A guest that calls it names an
+// intrinsic that only LDC's druntime has, so the program is empty for dmd.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE has no source for an LLVM intrinsic"),
+)) {
+    @("ffi.executedIntrinsicCall.llvmExpect.bool." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            version (LDC) {
+                import ldc.intrinsics: llvm_expect;
+                import core.volatile: volatileLoad;
+
+                bool opaque(bool value) {
+                    ubyte bits = value;
+                    return volatileLoad(&bits) != 0;
+                }
+
+                void main() {
+                    assert(llvm_expect!bool(opaque(true), true));
+                    assert(!llvm_expect!bool(opaque(false), true));
+                    assert(llvm_expect!bool(opaque(true), false));
+                    assert(llvm_expect!ubyte(opaque(true), 1) == 1);
+                }
+            } else
+                void main() {}
+        });
+    }
+}
+
+
+// `cas` on a type of 16 bytes is `llvm_atomic_cmp_xchg` on that type.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE cannot take the address of a global to cast it at compile time"),
+    AssemblerAtomics,
+)) {
+    @("ffi.executedIntrinsicCall.atomic.sixteenBytes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            version (LDC) {
+                import core.atomic: atomicLoad, atomicStore, cas;
+
+                align(16) struct Pair { ulong low, high; }
+
+                shared Pair slot;
+
+                void main() {
+                    atomicStore(slot, Pair(1, 2));
+                    assert(atomicLoad(slot) == Pair(1, 2));
+                    assert(!cas(&slot, Pair(1, 3), Pair(5, 6)));
+                    assert(atomicLoad(slot) == Pair(1, 2));
+                    assert(cas(&slot, Pair(1, 2), Pair(5, 6)));
+                    assert(atomicLoad(slot) == Pair(5, 6));
+                }
+            } else
+                void main() {}
+        });
+    }
+}
+
+
+// `is_fpclass` takes a mask of the ten classes that LLVM names.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE has no source for an LLVM intrinsic"),
+)) {
+    @("ffi.executedIntrinsicCall.llvmIsFpclass." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, opaqueDouble ~ q{
+            version (LDC) {
+                import ldc.intrinsics: llvm_is_fpclass;
+
+                enum signalingNaN = 1 << 0, quietNaN = 1 << 1,
+                    negativeInfinity = 1 << 2, negativeNormal = 1 << 3,
+                    negativeZero = 1 << 5, positiveZero = 1 << 6,
+                    positiveNormal = 1 << 8, positiveInfinity = 1 << 9;
+
+                void main() {
+                    assert(llvm_is_fpclass!double(opaque(double.nan), quietNaN | signalingNaN));
+                    assert(!llvm_is_fpclass!double(opaque(1.5), quietNaN));
+                    assert(llvm_is_fpclass!double(opaque(1.5), positiveNormal));
+                    assert(llvm_is_fpclass!double(opaque(1.5), positiveNormal | negativeNormal));
+                    assert(!llvm_is_fpclass!double(opaque(-1.5), positiveNormal));
+                    assert(llvm_is_fpclass!double(opaque(-0.0), negativeZero));
+                    assert(!llvm_is_fpclass!double(opaque(-0.0), positiveZero));
+                    assert(llvm_is_fpclass!double(opaque(double.infinity), positiveInfinity));
+                    assert(llvm_is_fpclass!double(opaque(-double.infinity), negativeInfinity));
+                    assert(!llvm_is_fpclass!double(opaque(1.5), 0));
+                    assert(llvm_is_fpclass!float(2.5f, positiveNormal));
+                }
+            } else
+                void main() {}
+        });
+    }
+}

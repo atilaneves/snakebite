@@ -11,6 +11,7 @@ version (LDC):
 import snakebite.backends.builtins: BuiltinCall;
 import snakebite.internalfailure: internalFailure;
 import ldc.intrinsics;
+import core.int128: Cent;
 
 // The wrapper for the LLVM intrinsic `llvmName` (`llvm.sin.f64`), or `null`
 // when none takes it. The name pins the signature, so a guest's own
@@ -26,7 +27,7 @@ public BuiltinCall intrinsicEntryOf(in const(char)[] llvmName) nothrow @nogc {
 // `pragma(LDC_atomic_rmw)`.
 public BuiltinCall atomicLoadEntryOf(in size_t size) nothrow @nogc {
     switch (size) {
-        static foreach (Unsigned; Integers)
+        static foreach (Unsigned; AtomicTypes)
             case Unsigned.sizeof: return &atomicLoad!Unsigned;
         default: return null;
     }
@@ -34,7 +35,7 @@ public BuiltinCall atomicLoadEntryOf(in size_t size) nothrow @nogc {
 
 public BuiltinCall atomicStoreEntryOf(in size_t size) nothrow @nogc {
     switch (size) {
-        static foreach (Unsigned; Integers)
+        static foreach (Unsigned; AtomicTypes)
             case Unsigned.sizeof: return &atomicStore!Unsigned;
         default: return null;
     }
@@ -42,7 +43,7 @@ public BuiltinCall atomicStoreEntryOf(in size_t size) nothrow @nogc {
 
 public BuiltinCall atomicCompareExchangeEntryOf(in size_t size) nothrow @nogc {
     switch (size) {
-        static foreach (Unsigned; Integers)
+        static foreach (Unsigned; AtomicTypes)
             case Unsigned.sizeof: return &atomicCompareExchange!Unsigned;
         default: return null;
     }
@@ -87,6 +88,9 @@ public BuiltinCall volatileStoreEntryOf(in size_t size) nothrow @nogc {
 }
 
 alias Integers = imported!"std.meta".AliasSeq!(ubyte, ushort, uint, ulong);
+// `core.atomic` takes a `Cent` for any type of 16 bytes. The read-modify-write
+// operations stop at the size of a pointer (`AtomicRmwSizeLimit`).
+alias AtomicTypes = imported!"std.meta".AliasSeq!(ubyte, ushort, uint, ulong, Cent);
 enum readModifyWriteOperations = [
     "xchg", "add", "sub", "and", "nand", "or", "xor", "max", "min", "umax", "umin",
 ];
@@ -96,10 +100,18 @@ struct Row {
     BuiltinCall call;
 }
 
-// The scalar types that an intrinsic template is tried with.
+// The scalar types that an intrinsic template is tried with, `bool` among
+// them (LLVM's `i1`). A template that a type does not satisfy has no
+// instance.
 alias Scalars = imported!"std.meta".AliasSeq!(
-    float, double, real, ubyte, ushort, uint, ulong,
+    float, double, real, bool, ubyte, ushort, uint, ulong,
 );
+
+// The length of a copy is not an `i1`.
+template takesType(string name, T) {
+    enum takesType = !(is(T == bool)
+        && (name == "llvm_memcpy" || name == "llvm_memmove" || name == "llvm_memset"));
+}
 
 // The parameters that LLVM wants as constants, by intrinsic name: the
 // position and the number of values. The wrapper chooses the call with the
@@ -133,10 +145,10 @@ immutable(Row)[] intrinsicRows = () {
     Row[] rows;
     static foreach (memberName; __traits(allMembers, ldc.intrinsics)) {
         static if (memberName.length > 5 && memberName[0 .. 5] == "llvm_") {
-            static if (isFrameIntrinsic(memberName)) {
+            static if (hasNoWrapper(memberName)) {
             } else static if (__traits(isTemplate, member!memberName)) {
                 static foreach (Scalar; Scalars) {
-                    static if (is(typeof(instance!(memberName, Scalar))))
+                    static if (takesType!(memberName, Scalar) && is(typeof(instance!(memberName, Scalar))))
                         rows ~= Row(
                             instance!(memberName, Scalar).mangleof,
                             &entry!(instance!(memberName, Scalar).mangleof, instance!(memberName, Scalar)),
@@ -147,29 +159,51 @@ immutable(Row)[] intrinsicRows = () {
             }
         }
     }
+    static foreach (Float; imported!"std.meta".AliasSeq!(float, double, real))
+        rows ~= Row(llvm_is_fpclass!Float.mangleof, &isFpclass!Float);
     return rows;
 }();
 
-// These answer for the frame of the function that calls them; a wrapper
-// would answer for its own.
-bool isFrameIntrinsic(in string name) {
-    // The atomics and the fence are not LLVM intrinsics by name; they have
-    // wrappers of their own.
+// The intrinsics with no wrapper, by the name of the D declaration. Calling
+// one reports its name (`snakebite.ffi.plan`).
+//
+// The frame intrinsics answer for the frame of the function that calls them;
+// a wrapper would answer for its own. The atomics and the fence are not LLVM
+// intrinsics by name; they have wrappers of their own. `llvm_powi` and
+// `llvm_thread_pointer` do not compile with LDC 1.43 and LLVM 22 at all
+// (LDC leaves the overloaded name unmangled, and LLVM's verifier ends the
+// compilation), and `llvm_pcmarker` has no instruction selection on x86.
+// `llvm_is_fpclass` has a wrapper of its own below.
+bool hasNoWrapper(in string name) {
     if (name.length > 12 && name[0 .. 12] == "llvm_atomic_" || name == "llvm_memory_fence")
         return true;
     switch (name) {
         case "llvm_returnaddress", "llvm_frameaddress", "llvm_stackaddress",
-                "llvm_stacksave", "llvm_stackrestore":
-            return true;
-        // The mask is an immediate with 1024 values.
-        case "llvm_is_fpclass":
-            return true;
-        // LDC does not mangle its overloaded name for every type.
-        case "llvm_powi", "llvm_thread_pointer", "llvm_pcmarker":
+                "llvm_stacksave", "llvm_stackrestore",
+                "llvm_is_fpclass",
+                "llvm_powi", "llvm_thread_pointer", "llvm_pcmarker":
             return true;
         default:
             return false;
     }
+}
+
+// The mask of `llvm.is.fpclass` is an immediate of ten bits, one for each
+// class, and the result is true when the value is in any class that the mask
+// names: one call for each bit gives the same answer.
+extern(C) void isFpclass(Float)(
+    void* returnPlace, scope const(void*)* arguments, size_t,
+) nothrow @nogc {
+    import core.stdc.string: memcpy;
+
+    Float value;
+    memcpy(&value, arguments[0], Float.sizeof);
+    const mask = *cast(const(uint)*) arguments[1];
+    bool result;
+    static foreach (bit; 0 .. 10)
+        if (mask & (1u << bit))
+            result = result || llvm_is_fpclass!Float(value, 1u << bit);
+    *cast(bool*) returnPlace = result;
 }
 
 alias member(string name) = __traits(getMember, ldc.intrinsics, name);
@@ -182,20 +216,24 @@ template instance(string name, Scalar) {
 extern(C) void entry(string key, alias intrinsic)(
     void* returnPlace, scope const(void*)* arguments, size_t argumentCount,
 ) nothrow @nogc {
+    import core.stdc.string: memcpy;
     import std.traits: Parameters, ReturnType;
 
     alias Params = Parameters!intrinsic;
     if (argumentCount != Params.length)
         internalFailure("an LLVM intrinsic wrapper got the wrong number of arguments");
+    // A vector or a 16-byte value in a frame slot is not always aligned as
+    // its type is.
     Params values;
     static foreach (i, P; Params)
-        values[i] = *cast(P*) arguments[i];
+        memcpy(&values[i], arguments[i], P.sizeof);
     enum chosen = constantsOf!(intrinsic.mangleof);
     static if (is(ReturnType!intrinsic == void)) {
         invoke!(intrinsic, chosen.positions, chosen.domains)(values);
-    } else
-        *cast(ReturnType!intrinsic*) returnPlace =
-            invoke!(intrinsic, chosen.positions, chosen.domains)(values);
+    } else {
+        auto result = invoke!(intrinsic, chosen.positions, chosen.domains)(values);
+        memcpy(returnPlace, &result, result.sizeof);
+    }
 }
 
 auto invoke(alias intrinsic, size_t[] positions, size_t[] domains, size_t[] chosen = [], Params...)(
@@ -257,6 +295,21 @@ enum failureOrderings = [
     AtomicOrdering.SequentiallyConsistent,
 ];
 
+// A value in a frame slot is not always aligned as its type is.
+T fetch(T)(const(void)* place) nothrow @nogc {
+    import core.stdc.string: memcpy;
+
+    T value;
+    memcpy(&value, place, T.sizeof);
+    return value;
+}
+
+void store(T)(void* place, in T value) nothrow @nogc {
+    import core.stdc.string: memcpy;
+
+    memcpy(place, &value, T.sizeof);
+}
+
 extern(C) void atomicLoad(Unsigned)(
     void* returnPlace, scope const(void*)* arguments, size_t,
 ) nothrow @nogc {
@@ -264,10 +317,10 @@ extern(C) void atomicLoad(Unsigned)(
     switch (*cast(const(int)*) arguments[1]) {
         static foreach (ordering; loadOrderings)
             case ordering:
-                *cast(Unsigned*) returnPlace = llvm_atomic_load!Unsigned(pointer, ordering);
+                store(returnPlace, llvm_atomic_load!Unsigned(pointer, ordering));
                 return;
         case AtomicOrdering.Consume:
-            *cast(Unsigned*) returnPlace = llvm_atomic_load!Unsigned(pointer, AtomicOrdering.Acquire);
+            store(returnPlace, llvm_atomic_load!Unsigned(pointer, AtomicOrdering.Acquire));
             return;
         default: internalFailure("atomic load ordering");
     }
@@ -276,7 +329,7 @@ extern(C) void atomicLoad(Unsigned)(
 extern(C) void atomicStore(Unsigned)(
     void*, scope const(void*)* arguments, size_t,
 ) nothrow @nogc {
-    const value = *cast(const(Unsigned)*) arguments[0];
+    const value = fetch!Unsigned(arguments[0]);
     auto pointer = cast(shared(Unsigned)*) *cast(void**) arguments[1];
     switch (*cast(const(int)*) arguments[2]) {
         static foreach (ordering; storeOrderings)
@@ -291,17 +344,16 @@ extern(C) void atomicCompareExchange(Unsigned)(
     void* returnPlace, scope const(void*)* arguments, size_t,
 ) nothrow @nogc {
     auto pointer = cast(shared(Unsigned)*) *cast(void**) arguments[0];
-    const expected = *cast(const(Unsigned)*) arguments[1];
-    const desired = *cast(const(Unsigned)*) arguments[2];
+    const expected = fetch!Unsigned(arguments[1]);
+    const desired = fetch!Unsigned(arguments[2]);
     const success = *cast(const(int)*) arguments[3];
     const failure = *cast(const(int)*) arguments[4];
     const weak = *cast(const(bool)*) arguments[5];
-    auto result = cast(CmpXchgResult!Unsigned*) returnPlace;
     static foreach (s; updateOrderings)
         static foreach (f; failureOrderings)
             static foreach (isWeak; [false, true])
                 if (success == s && failure == f && weak == isWeak) {
-                    *result = llvm_atomic_cmp_xchg!Unsigned(pointer, expected, desired, s, f, isWeak);
+                    store(returnPlace, llvm_atomic_cmp_xchg!Unsigned(pointer, expected, desired, s, f, isWeak));
                     return;
                 }
     internalFailure("atomic compare-exchange ordering");

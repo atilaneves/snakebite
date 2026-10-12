@@ -1649,12 +1649,27 @@ private CallPlan prepareCommon(
     void* address = target.address;
     if (address is null)
         address = resolver.resolve(name);
-    if (address is null)
+    if (address is null) {
+        version (LDC) {
+            import gen.dpragma: LDCPragma;
+
+            // LDC compiles this declaration inline, so the host has no symbol
+            // for it; a wrapper in `snakebite.backends.ldcintrinsics` is the
+            // way to a result, and this one has none.
+            if (function_.llvmInternal != LDCPragma.LLVMnone)
+                throw new Exception(
+                    text("no host wrapper serves the LDC intrinsic `",
+                        function_.mangleOverride.length
+                            ? function_.mangleOverride : name,
+                        "` declared by `", function_.toString, "`"),
+                );
+        }
         throw new Exception(
             text("ffi cannot resolve the symbol `", name,
                 "` declared by `", function_.toString,
                 "`: it is not in this process"),
         );
+    }
 
     plan._address = address;
     return plan;
