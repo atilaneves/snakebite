@@ -762,19 +762,33 @@ static foreach (backend; Matrix!(
         directory.mkdir;
         scope(exit) directory.rmdirRecurse;
         const source = buildPath(directory, "probe.d");
-        source.write(q{
-            import core.simd;
-            void main(string[] args) {
-                if (args.length == 1)
-                    return;
-                float4 a = 1, b = 2;
-                if (args.length == 3) {
-                    float4 c = cast(float4) __simd(XMM.SQRTPS, a);
-                    return;
+        // dmd has `__simd`; LDC has no such function, and calls its LLVM
+        // intrinsics through `ldc.gccbuiltins_x86`, which no wrapper covers.
+        version (LDC)
+            source.write(q{
+                import core.simd;
+                import ldc.gccbuiltins_x86: __builtin_ia32_rsqrtps;
+                void main(string[] args) {
+                    if (args.length == 1)
+                        return;
+                    float4 a = 1;
+                    float4 c = __builtin_ia32_rsqrtps(a);
                 }
-                float4 c = cast(float4) __simd(XMM.ADDPS, a, b);
-            }
-        });
+            });
+        else
+            source.write(q{
+                import core.simd;
+                void main(string[] args) {
+                    if (args.length == 1)
+                        return;
+                    float4 a = 1, b = 2;
+                    if (args.length == 3) {
+                        float4 c = cast(float4) __simd(XMM.SQRTPS, a);
+                        return;
+                    }
+                    float4 c = cast(float4) __simd(XMM.ADDPS, a, b);
+                }
+            });
         static if (is(backend == Interpreter)) enum name = "interpreter";
         else enum name = "bytecode";
         const command = [
@@ -784,12 +798,17 @@ static foreach (backend; Matrix!(
         execute(command).status.should == 0;
         const result = execute(command ~ ["--", "call"]);
         result.status.should.not == 0;
-        "declared by `__simd`: it is not in this process"
-            .should.be in result.output;
-        const unary = execute(command ~ ["--", "call", "unary"]);
-        unary.status.should.not == 0;
-        "core.simd.__simd has no wrapper for the opcode"
-            .should.be in unary.output;
+        version (LDC) {
+            "declared by `__builtin_ia32_rsqrtps`: it is not in this process"
+                .should.be in result.output;
+        } else {
+            "declared by `__simd`: it is not in this process"
+                .should.be in result.output;
+            const unary = execute(command ~ ["--", "call", "unary"]);
+            unary.status.should.not == 0;
+            "core.simd.__simd has no wrapper for the opcode"
+                .should.be in unary.output;
+        }
     }
 }
 

@@ -78,6 +78,11 @@ public enum ParameterType {
 }
 
 
+// The wrappers below give dmd's results, for a host built by dmd. A host
+// built by LDC takes the wrappers of `ldcintrinsics`.
+version (DigitalMars):
+
+
 // `name` is a string key, not dmd's `BUILTIN` enum value, so this
 // module and the bytecode VM that calls into it need no DMD frontend
 // import path (CODING.md, "Code organisation"). `null` means that no

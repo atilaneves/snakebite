@@ -4772,6 +4772,21 @@ C_PROJECTS: dict[str, CProject] = {
         42,
         backends=tuple(FILE_BACKENDS),
     ),
+    "builtinAlloca": CProject(
+        r"""
+        int fill(int count) {
+            char *buffer = __builtin_alloca(count);
+            buffer[0] = 7;
+            return buffer[0];
+        }
+        """,
+        r"""
+        import CMOD;
+        int main() { return fill(4); }
+        """,
+        7,
+        backends=tuple(FILE_BACKENDS),
+    ),
     "compoundLiteralWithCharArray": CProject(
         r"""
         struct Named { int x; char name[8]; };

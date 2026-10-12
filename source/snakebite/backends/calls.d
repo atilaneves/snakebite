@@ -20,8 +20,7 @@ public struct CallSelection {
     import dmd.func: FuncDeclaration;
 
     import snakebite.backends.builtins:
-        BuiltinCall, ParameterType, copyVariadicEntry, endVariadicEntry,
-        startVariadicEntry;
+        BuiltinCall, ParameterType, startVariadicEntry;
     import snakebite.sharedtable: SharedTable;
 
     // Every call site resolves to exactly one of these. `guest` and
@@ -272,15 +271,15 @@ public struct CallSelection {
         // A declaration without a body can only describe a native call or
         // a builtin - never a guest one, since there is no guest body to
         // run.
-        if (function_.fbody is null)
-            return isVaStart(function_, context)
-                ? Decision(Route.vaStart, &startVariadicEntry)
-                : isVaEnd(function_, context)
-                ? Decision(Route.builtin, &endVariadicEntry)
-                : isVaCopy(function_, context)
-                ? Decision(Route.builtin, &copyVariadicEntry)
-                : isAlloca(function_) ? Decision(Route.alloca)
-                : intrinsicPlanOf(function_).call;
+        if (function_.fbody is null) {
+            version (LDC)
+                return intrinsicPlanOf(function_).call;
+            else
+                return isVaStart(function_, context)
+                    ? Decision(Route.vaStart, &startVariadicEntry)
+                    : isAlloca(function_) ? Decision(Route.alloca)
+                    : intrinsicPlanOf(function_).call;
+        }
 
         const rootOwned = isGuest(function_);
         if (!bodyIsSelected(context.module_, rootOwned))
@@ -341,15 +340,6 @@ public struct CallSelection {
             && module_.md.toString == "core.stdc.stdarg";
     }
 
-    private static bool isVaEnd(FuncDeclaration function_,
-        in imported!"snakebite.frontend.dmd.functions".FunctionContext context,
-    ) {
-        const module_ = context.module_;
-        return function_.ident.toString == "va_end"
-            && module_ !is null && module_.md !is null
-            && module_.md.toString == "core.stdc.stdarg";
-    }
-
     private static bool isVaCopy(FuncDeclaration function_,
         in imported!"snakebite.frontend.dmd.functions".FunctionContext context,
     ) {
@@ -384,6 +374,66 @@ public struct CallSelection {
     // it never serves a declaration whose signature differs. dmd gives such
     // a declaration an unspecified result, or a raw SIMD instruction
     // (`__simd_ib`) that has no wrapper.
+    version (LDC)
+    private static IntrinsicPlan buildIntrinsicPlan(FuncDeclaration function_,
+        in imported!"dmd.dmodule".Module module_,
+    ) {
+        import dmd.dtemplate: TemplateInstance;
+        import dmd.typesem: size;
+        import core.stdc.string: strlen;
+        import gen.dpragma: LDCPragma;
+        import snakebite.frontend.dmd.functions: typeFunctionOf;
+        import snakebite.backends.builtins:
+            copyVariadicEntry, endVariadicEntry;
+        import snakebite.backends.ldcintrinsics;
+
+        static IntrinsicPlan builtin(BuiltinCall entry) {
+            return entry is null
+                ? IntrinsicPlan.init
+                : IntrinsicPlan(Decision(Route.builtin, entry));
+        }
+
+        // The size of the type argument of an atomic template instance.
+        size_t argumentSize() {
+            auto instance = function_.parent.isTemplateInstance;
+            return instance is null || instance.tdtypes.length != 1
+                ? 0 : (cast(imported!"dmd.mtype".Type) instance.tdtypes[0]).size;
+        }
+
+        static const(char)[] intrinsicNameOf(imported!"dmd.dtemplate".TemplateDeclaration declaration) {
+            return declaration.intrinsicName[0 .. strlen(declaration.intrinsicName)];
+        }
+
+        with (LDCPragma) switch (function_.llvmInternal) {
+            case LLVMva_start:
+                return IntrinsicPlan(Decision(Route.vaStart, &startVariadicEntry));
+            case LLVMva_end: return builtin(&endVariadicEntry);
+            case LLVMva_copy: return builtin(&copyVariadicEntry);
+            case LLVMalloca: return IntrinsicPlan(Decision(Route.alloca));
+            case LLVMintrinsic:
+                return builtin(intrinsicEntryOf(function_.mangleOverride));
+            case LLVMfence: return builtin(fenceEntry);
+            case LLVMatomic_load: return builtin(atomicLoadEntryOf(argumentSize));
+            case LLVMatomic_store: return builtin(atomicStoreEntryOf(argumentSize));
+            case LLVMatomic_cmp_xchg:
+                return builtin(atomicCompareExchangeEntryOf(argumentSize));
+            case LLVMatomic_rmw: {
+                auto instance = function_.parent.isTemplateInstance;
+                return instance is null ? IntrinsicPlan.init
+                    : builtin(atomicReadModifyWriteEntryOf(
+                        intrinsicNameOf(instance.tempdecl.isTemplateDeclaration),
+                        argumentSize));
+            }
+            case LLVMbitop_vld:
+                return builtin(volatileLoadEntryOf(
+                    typeFunctionOf(function_).next.size));
+            case LLVMbitop_vst:
+                return builtin(volatileStoreEntryOf(
+                    typeFunctionOf(function_).parameterList[1].type.size));
+            default: return IntrinsicPlan.init;
+        }
+    }
+    else
     private static IntrinsicPlan buildIntrinsicPlan(FuncDeclaration function_,
         in imported!"dmd.dmodule".Module module_,
     ) {
@@ -410,6 +460,13 @@ public struct CallSelection {
             );
     }
 
+    version (LDC) {
+        public bool foldedScalarIntrinsic(
+            imported!"dmd.expression".CallExp, out ScalarConstant,
+        ) {
+            return false;
+        }
+    } else
     public bool foldedScalarIntrinsic(
         imported!"dmd.expression".CallExp expression,
         out ScalarConstant constant,
@@ -465,6 +522,9 @@ public struct CallSelection {
         }
     }
 
+    // The rest of this struct is dmd's code generator reproduced for a host
+    // built by dmd. An LDC host takes `ldcintrinsics`.
+    version (DigitalMars) {
     // DMD's backend constant folder (`evalu8`, OPbswap) uses the operand
     // width; `cdbswap` uses the result width for a nonconstant operand.
     // The call site must keep that distinction before argument evaluation.
@@ -1019,6 +1079,7 @@ public struct CallSelection {
                 Tint128, Tuns128, Ttraits, Tmixin, Tnoreturn, Ttag:
                 return false;
         }
+    }
     }
 }
 
