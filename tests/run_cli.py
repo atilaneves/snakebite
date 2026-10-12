@@ -277,15 +277,15 @@ def test_module_constructor_uses_project_directory(
     assert (tmp_path / "app" / "test-ran.txt").exists()
 
 
-# The benchmark harness runs the tests where `dub test` runs them: in the
-# project directory, whatever directory the harness starts in or a previous
-# run leaves.
+# Every front end runs the tests where `dub test` runs them: in the project
+# directory, whatever directory it starts in or a previous run leaves.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
-def test_bench_runs_tests_in_project_directory(
-    tmp_path: Path, backend: str,
+@pytest.mark.parametrize("frontend", ["sb", "bench"])
+def test_tests_run_in_project_directory(
+    tmp_path: Path, backend: str, frontend: str,
 ) -> None:
     write(tmp_path / "outside" / ".keep")
-    write(tmp_path / "app" / "dub.sdl", dub_project_recipe("bench-cwd"))
+    write(tmp_path / "app" / "dub.sdl", dub_project_recipe("project-cwd"))
     write(tmp_path / "app" / "project-relative.txt", "ready\n")
     write(
         tmp_path / "app" / "source" / "main.d",
@@ -300,10 +300,16 @@ def test_bench_runs_tests_in_project_directory(
         """,
     )
 
-    result = run_bench(
-        str(tmp_path / "app"), f"--backend={backend}", "--runs=2",
-        "--warmup=0", cwd=tmp_path / "outside",
-    )
+    if frontend == "sb":
+        result = run_sb(
+            f"--backend={backend}", "--no-optimise-image",
+            str(tmp_path / "app"), cwd=tmp_path / "outside",
+        )
+    else:
+        result = run_bench(
+            str(tmp_path / "app"), f"--backend={backend}", "--runs=2",
+            "--warmup=0", cwd=tmp_path / "outside",
+        )
 
     assert result.returncode == 0, result.stdout + result.stderr
 

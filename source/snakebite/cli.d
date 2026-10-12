@@ -29,9 +29,6 @@ public int run(string[] args) {
     import snakebite.dub: fetchProject;
     import snakebite.execution: executeBackend, prepareProject;
     import snakebite.gc: selectFrontendMemory;
-    import snakebite.project: enterProjectDirectory;
-    import std.algorithm.iteration: map;
-    import std.array: array;
     import std.file: exists, isDir;
     import std.path: absolutePath;
     import std.stdio: stderr, stdout, write;
@@ -49,15 +46,10 @@ public int run(string[] args) {
         if (!projectDirectory.exists || !projectDirectory.isDir)
             projectDirectory = fetchProject(projectDirectory);
         projectDirectory = projectDirectory.absolutePath;
-        const importPaths = parsed.options.importPaths
-            .map!(path => path.absolutePath).array;
-        const stringImportPaths = parsed.options.stringImportPaths
-            .map!(path => path.absolutePath).array;
-        enterProjectDirectory(projectDirectory);
         auto preparation = prepareProject(
             projectDirectory,
-            importPaths,
-            stringImportPaths,
+            parsed.options.importPaths,
+            parsed.options.stringImportPaths,
             parsed.options.backend != BackendName.ctfe,
             parsed.options.versions,
             parsed.options.noOptimiseImage ? Optimise.no : Optimise.yes,

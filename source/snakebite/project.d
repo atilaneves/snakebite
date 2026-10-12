@@ -107,9 +107,9 @@ public bool isDubProject(in string directory) {
 }
 
 
-// Project state lives under the directory snakebite started in. The CLI
-// changes into the project directory so that guest code sees the files
-// it expects, and that must not move the state with it.
+// Project state lives under the directory snakebite started in. Guest code
+// runs in the project directory so that it sees the files it expects, and
+// that must not move the state with it.
 private immutable string _startDirectory;
 
 shared static this() {
@@ -119,10 +119,29 @@ shared static this() {
 
 
 // Guest code runs where `dub test` runs it: in the project directory.
-public void enterProjectDirectory(in string projectDirectory) {
-    import std.file: chdir;
+// The destructor goes back to where the host was, unless the process ends
+// with the guest: its module destructors then run after the guest returns
+// and see the directory that its constructors and `main` saw.
+public struct ProjectDirectory {
+    private string _previous;
+    private bool _restore;
 
-    chdir(projectDirectory);
+    @disable this(this);
+
+    this(in string projectDirectory, in bool restore) {
+        import std.file: chdir, getcwd;
+
+        _previous = getcwd;
+        _restore = restore;
+        chdir(projectDirectory);
+    }
+
+    ~this() {
+        import std.file: chdir;
+
+        if (_restore)
+            chdir(_previous);
+    }
 }
 
 
