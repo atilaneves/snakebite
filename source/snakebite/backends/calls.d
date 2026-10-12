@@ -396,22 +396,31 @@ public struct CallSelection {
                 : IntrinsicPlan(Decision(Route.builtin, entry));
         }
 
-        // The size of the type argument of an atomic template instance.
+        // The size of the type argument of an atomic template instance. A
+        // declaration of the guest can carry the pragma on something else
+        // (a value parameter, no template): it has no wrapper, and the call
+        // says so.
         size_t argumentSize() {
+            import dmd.dtemplate: isType;
+
             auto instance = function_.parent.isTemplateInstance;
-            return instance is null || instance.tdtypes.length != 1
-                ? 0 : (cast(imported!"dmd.mtype".Type) instance.tdtypes[0]).size;
+            if (instance is null || instance.tdtypes.length != 1)
+                return 0;
+            auto type = isType(instance.tdtypes[0]);
+            return type is null ? 0 : type.size;
         }
 
         static const(char)[] intrinsicNameOf(imported!"dmd.dtemplate".TemplateDeclaration declaration) {
-            return declaration.intrinsicName[0 .. strlen(declaration.intrinsicName)];
+            return declaration.intrinsicName is null
+                ? "" : declaration.intrinsicName[0 .. strlen(declaration.intrinsicName)];
         }
 
         with (LDCPragma) switch (function_.llvmInternal) {
             case LLVMva_start:
                 return IntrinsicPlan(Decision(Route.vaStart, &startVariadicEntry));
             case LLVMva_end: return builtin(&endVariadicEntry);
-            case LLVMva_copy: return builtin(&copyVariadicEntry);
+            case LLVMva_copy:
+                return IntrinsicPlan(Decision(Route.vaCopy, &copyVariadicEntry));
             case LLVMalloca: return IntrinsicPlan(Decision(Route.alloca));
             case LLVMintrinsic:
                 return builtin(intrinsicEntryOf(function_.mangleOverride));

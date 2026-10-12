@@ -312,6 +312,43 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A declaration of the guest with LDC's atomic pragma on something that is
+// not a template over a type has no wrapper; the call says so.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible, "the pragmas are LDC's own"),
+    Omit!(Ctfe, Because.inexpressible, "CTFE has no source for an intrinsic"),
+)) {
+    @("ownAtomicDeclarationHasNoWrapper." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-ownatomic-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        buildPath(directory, "probe.d").write(q{
+            pragma(LDC_atomic_load)
+            int ownLoad(int N)(const shared int* pointer, int ordering);
+            void main(string[] args) {
+                if (args.length == 1)
+                    return;
+                shared int value;
+                ownLoad!0(&value, 0);
+            }
+        });
+        static if (is(backend == Interpreter)) enum name = "interpreter";
+        else enum name = "bytecode";
+        const command = [
+            "timeout", "60", buildPath(getcwd, "bin", "sb"),
+            "-b", name, directory,
+        ];
+        execute(command).status.should == 0;
+        const result = execute(command ~ ["--", "call"]);
+        result.status.should.not == 0;
+        "no host wrapper serves the LDC intrinsic".should.be in result.output;
+        "declared by `ownLoad".should.be in result.output;
+    }
+}
+
 // `core.thread.Fiber` has more fields when LDC compiles druntime than when
 // the frontend reads its source as DigitalMars. A guest class derived from
 // it must put its own fields after the fields of the compiled base.
