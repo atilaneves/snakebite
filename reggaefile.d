@@ -24,12 +24,11 @@ string ldcPath() {
 // Native sources built by the system C compiler, not
 // dmd/ldc, and linked into every dub target below - each for its own
 // reason a comment on the source file itself explains (the FFI call
-// stub, ADR-0001; the interpreter's native-stack switch; the weak
-// fallback for `dmd.astenums.Edition.init`). `cc` is what already
+// stub, ADR-0001; the weak fallback for `dmd.astenums.Edition.init`).
+// `cc` is what already
 // understands `.cfi_` directives and `.note.GNU-stack`.
 immutable string[] assembledSources = [
     "source/snakebite/ffi/sysv_amd64.S",
-    "source/snakebite/backends/interpreter/interpreter_stack_amd64.S",
     "source/dmd/iasm/edition_init_amd64.S",
 ];
 

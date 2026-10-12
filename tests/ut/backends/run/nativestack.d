@@ -4,34 +4,12 @@ module ut.backends.run.nativestack;
 import ut.backends;
 
 
-// Regression test for a native-stack overflow in the interpreter,
-// originally found through `bin/sb -b interpreter dlib` segfaulting.
-// dlib's filesystem walk creates a `core.thread.Fiber` with the default
-// stack size to implement a recursive directory walk, calling
-// `Fiber.yield()` deep inside its own recursion. The interpreter's own
-// recursive tree walk costs far more native stack per nested guest call
-// than compiled D does (`executeCall` -> `executeRaw` -> `visit` -> ...
-// -> `executeCall` again for every guest call), so it used to overflow
-// a `Fiber`'s small default stack after only a handful of levels -
-// `walk` below recurses `depth` levels deep, comfortably past that,
-// inside a `Fiber` given no explicit size (the same default dlib's own
-// `Fiber` gets).
-//
-// A forced collection partway down also used to segfault on its own,
-// even after switching to a bigger native stack for the walk:
-// druntime's conservative GC scans "the current native stack" using the
-// active `Fiber`'s own recorded bounds
-// (`core.thread.context.StackContext.bstack`), which a plain `%rsp`
-// switch leaves pointing at the small stack while a live `%rsp` reads
-// from the bigger one - see
-// `source/snakebite/backends/interpreter/nativestack.d`. `walk` forces
-// a collection every few levels to exercise exactly that, and forces two
-// more at the two points where the re-pointed `StackContext` is what the
-// GC actually scans from the *main* context rather than from inside the
-// walk itself: once while the fiber sits suspended mid-recursion
-// (between the first and second `fiber.call()` in `main`, below), and
-// once right after `Fiber.yield()` returns, before the walk starts
-// unwinding back through every recursive frame.
+// A guest `Fiber` runs the walker on the stack that the Fiber has, and
+// druntime scans it: a collection in the middle of a deep recursion, while
+// the Fiber is suspended, and right after it resumes must keep the objects
+// that the recursion holds. The Fiber has an explicit stack size: the
+// default one (16 KiB) is sized for compiled D, which needs far less
+// stack for each call than the Interpreter does.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot call native functions such as "
@@ -45,6 +23,7 @@ static foreach (backend; Matrix!(
             import core.thread.fiber: Fiber;
 
             enum depth = 40;
+            enum stackBytes = 1024 * 1024;
             int deepest;
 
             void walk(int level) {
@@ -54,9 +33,7 @@ static foreach (backend; Matrix!(
                     GC.collect();
                 if (level >= depth) {
                     Fiber.yield();
-                    // Right after resume: still on the dedicated stack,
-                    // with the guest fiber's `StackContext` still
-                    // re-pointed at it, before any unwinding starts.
+                    // Right after resume, before any unwinding starts.
                     GC.collect();
                     return;
                 }
@@ -68,12 +45,12 @@ static foreach (backend; Matrix!(
             }
 
             void main() {
-                auto fiber = new Fiber(&entry);
+                auto fiber = new Fiber(&entry, stackBytes);
                 fiber.call();
                 assert(fiber.state != Fiber.State.TERM);
                 // The fiber is suspended mid-recursion, `depth` frames
-                // deep on the dedicated stack, while this collection
-                // runs from the main context.
+                // deep, while this collection runs from the main
+                // context.
                 GC.collect();
                 while (fiber.state != Fiber.State.TERM)
                     fiber.call();
@@ -90,8 +67,9 @@ static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "dmd's CTFE stops at a fixed recursion limit far below this depth"),
     Omit!(Interpreter, Because.unconfirmed,
-        "the walker overflows its 512 MiB native stack and the process "
-        ~ "dies with SIGSEGV"),
+        "the walker uses about 2.6 KiB of native stack for each guest call "
+        ~ "and runs on the stack it was entered on: the process dies with "
+        ~ "SIGSEGV at about 3000 calls on an 8 MiB stack"),
 )) {
     @("nativeStack.deepRecursionReachesCompiledDepth." ~ backend.stringof)
     @Tags(backend.stringof)
