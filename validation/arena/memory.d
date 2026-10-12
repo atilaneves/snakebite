@@ -1,4 +1,4 @@
-module ut.frontend.memory;
+module arena.memory;
 
 import snakebite.nativelayout: typeFacts, truthFacts;
 

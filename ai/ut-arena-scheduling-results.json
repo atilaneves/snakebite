@@ -1,0 +1,299 @@
+{
+  "base_commit": "9ef27cd8056c18eccc8d20033c6651d1b6e11e9a",
+  "compiler": "DMD64 D Compiler v2.113.0",
+  "logical_cpus": 32,
+  "allocator": "Default frontend arena; no --lowmem or GC option overrides.",
+  "method": "Fresh processes, sequential alternating variants at 32 workers, then one pair at one worker. GNU time measures wall, user CPU, system CPU, and peak RSS. Build time excluded. Medians for three samples; individual values for one sample.",
+  "change": "Run selected memory tests serially before unrelated AST preparation. Preserve all 21 memory-test scans and add one full-arena check after mixed runs.",
+  "full_single_worker_test_names_identical": true,
+  "cli_selection": [
+    {
+      "check": "list",
+      "arguments": [
+        "-l"
+      ],
+      "cases": 8107,
+      "matched": true
+    },
+    {
+      "check": "memory-name",
+      "arguments": [
+        "-j",
+        "32",
+        "ut.frontend.memory.arenaHoldsNoGCPointers.qualifiedEnumRepresentation.staticArray"
+      ],
+      "cases": 1,
+      "matched": true
+    },
+    {
+      "check": "mixed-tag",
+      "arguments": [
+        "-j",
+        "32",
+        "ut.frontend.memory.arenaHoldsNoGCPointers.arrayConstructionInCtfeBlock.array",
+        "ut.backends.call.arithmetic",
+        "@Bytecode"
+      ],
+      "cases": 61,
+      "matched": true
+    },
+    {
+      "check": "negative-tag",
+      "arguments": [
+        "-j",
+        "32",
+        "ut.frontend.memory.arenaHoldsNoGCPointers.arrayConstructionInCtfeBlock.array",
+        "~@Bytecode"
+      ],
+      "cases": 2,
+      "matched": true
+    },
+    {
+      "check": "explicit-check",
+      "arguments": [
+        "-j",
+        "32",
+        "--check-arena",
+        "ut.frontend.memory.arenaHoldsNoGCPointers.qualifiedEnumRepresentation.staticArray"
+      ],
+      "cases": 1,
+      "matched": true
+    },
+    {
+      "check": "random",
+      "arguments": [
+        "-r",
+        "--seed=42",
+        "ut.frontend.memory.arenaHoldsNoGCPointers.qualifiedEnumRepresentation.staticArray",
+        "ut.backends.call.arithmetic"
+      ],
+      "cases": 242,
+      "matched": true
+    }
+  ],
+  "summary": [
+    {
+      "workers": 1,
+      "before": {
+        "samples": 1,
+        "wall_seconds": 81.16,
+        "cpu_seconds": 166.10999999999999,
+        "max_rss_kib": 1361332.0
+      },
+      "after": {
+        "samples": 1,
+        "wall_seconds": 40.26,
+        "cpu_seconds": 114.82,
+        "max_rss_kib": 1352692.0
+      },
+      "elapsed_reduction_percent": 50.394282897979295,
+      "speedup": 2.0158966716343767
+    },
+    {
+      "workers": 32,
+      "before": {
+        "samples": 3,
+        "wall_seconds": 65.76,
+        "cpu_seconds": 163.41,
+        "max_rss_kib": 1372232.0
+      },
+      "after": {
+        "samples": 3,
+        "wall_seconds": 30.16,
+        "cpu_seconds": 117.58000000000001,
+        "max_rss_kib": 1367980.0
+      },
+      "elapsed_reduction_percent": 54.13625304136254,
+      "speedup": 2.180371352785146
+    }
+  ],
+  "runs": [
+    {
+      "label": "before-trial-j32",
+      "variant": "before",
+      "jobs": 32,
+      "exit_code": 0,
+      "tests": 8099,
+      "failed": 0,
+      "load_before": null,
+      "wall": 68.26,
+      "user": 112.96,
+      "sys": 43.63,
+      "rss": 1367152.0,
+      "command": [
+        "bin/ut-arena-baseline",
+        "-j",
+        "32"
+      ],
+      "phase_test_counts": [
+        15,
+        8084
+      ]
+    },
+    {
+      "label": "after-1-j32",
+      "variant": "after",
+      "jobs": 32,
+      "exit_code": 0,
+      "tests": 8099,
+      "failed": 0,
+      "load_before": null,
+      "wall": 33.1,
+      "user": 69.05,
+      "sys": 27.85,
+      "rss": 1364284.0,
+      "command": [
+        "bin/ut",
+        "-j",
+        "32"
+      ],
+      "phase_test_counts": [
+        25,
+        15,
+        8059
+      ]
+    },
+    {
+      "label": "before-2-j32",
+      "variant": "before",
+      "jobs": 32,
+      "exit_code": 0,
+      "tests": 8099,
+      "failed": 0,
+      "load_before": "3.42 3.77 3.91 2/1788 257331",
+      "wall": 65.76,
+      "user": 116.04,
+      "sys": 48.01,
+      "rss": 1372232.0,
+      "command": [
+        "bin/ut-arena-baseline",
+        "-j",
+        "32"
+      ],
+      "phase_test_counts": [
+        15,
+        8084
+      ]
+    },
+    {
+      "label": "after-2-j32",
+      "variant": "after",
+      "jobs": 32,
+      "exit_code": 0,
+      "tests": 8099,
+      "failed": 0,
+      "load_before": "5.29 4.24 4.06 10/1751 259410",
+      "wall": 30.11,
+      "user": 76.25,
+      "sys": 42.74,
+      "rss": 1367980.0,
+      "command": [
+        "bin/ut",
+        "-j",
+        "32"
+      ],
+      "phase_test_counts": [
+        25,
+        15,
+        8059
+      ]
+    },
+    {
+      "label": "before-3-j32",
+      "variant": "before",
+      "jobs": 32,
+      "exit_code": 0,
+      "tests": 8099,
+      "failed": 0,
+      "load_before": "4.24 4.09 4.02 1/1758 260265",
+      "wall": 65.67,
+      "user": 115.89,
+      "sys": 47.52,
+      "rss": 1376356.0,
+      "command": [
+        "bin/ut-arena-baseline",
+        "-j",
+        "32"
+      ],
+      "phase_test_counts": [
+        15,
+        8084
+      ]
+    },
+    {
+      "label": "after-3-j32",
+      "variant": "after",
+      "jobs": 32,
+      "exit_code": 0,
+      "tests": 8099,
+      "failed": 0,
+      "load_before": "3.33 4.01 4.01 1/1773 261804",
+      "wall": 30.16,
+      "user": 75.15,
+      "sys": 42.43,
+      "rss": 1392052.0,
+      "command": [
+        "bin/ut",
+        "-j",
+        "32"
+      ],
+      "phase_test_counts": [
+        25,
+        15,
+        8059
+      ]
+    },
+    {
+      "label": "before-1-j1",
+      "variant": "before",
+      "jobs": 1,
+      "exit_code": 0,
+      "tests": 8099,
+      "failed": 0,
+      "load_before": "2.82 3.82 3.94 1/1762 262868",
+      "wall": 81.16,
+      "user": 119.1,
+      "sys": 47.01,
+      "rss": 1361332.0,
+      "command": [
+        "bin/ut-arena-baseline",
+        "-j",
+        "1"
+      ],
+      "phase_test_counts": [
+        15,
+        8084
+      ]
+    },
+    {
+      "label": "after-1-j1",
+      "variant": "after",
+      "jobs": 1,
+      "exit_code": 0,
+      "tests": 8099,
+      "failed": 0,
+      "load_before": "2.75 3.73 3.91 1/1744 264162",
+      "wall": 40.26,
+      "user": 73.28,
+      "sys": 41.54,
+      "rss": 1352692.0,
+      "command": [
+        "bin/ut",
+        "-j",
+        "1"
+      ],
+      "phase_test_counts": [
+        25,
+        15,
+        8059
+      ]
+    }
+  ],
+  "runner_sha256": "f0a35ba694962463603c74a96283bbd8fd96807dc25b0ea7a6500b29d43de1e6",
+  "raw_logs": "/tmp/snakebite-ut-parallel",
+  "limitations": [
+    "Shared workstation; other background activity was not controlled.",
+    "One-worker comparison has one sample per variant.",
+    "No tests changed; this is a runner scheduling trial, not a scanner rewrite."
+  ]
+}

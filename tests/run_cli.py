@@ -86,7 +86,7 @@ def test_phobos_round_and_trunc_use_resolved_declarations(
 # The test list is larger than the pipe buffer, so the first runner stays
 # live until we drain its output. No test helper or extra guest program runs.
 @pytest.mark.parametrize(
-    "flags", [[], ["--check-arena"], ["--lowmem", "--check-arena"]],
+    "flags", [[], ["--lowmem"]],
 )
 def test_unit_runner_keeps_other_runner_sandbox(
     tmp_path: Path, flags: list[str],
@@ -122,6 +122,41 @@ def test_unit_runner_keeps_other_runner_sandbox(
         if parent.poll() is None:
             parent.kill()
         parent.communicate(timeout=30)
+
+
+# Ownership scans must stay outside the default parallel unit-test run.
+def test_unit_runner_excludes_arena_validation(tmp_path: Path) -> None:
+    runner = Path.cwd() / "bin" / "ut"
+    listed = subprocess.run(
+        [str(runner), "--list"], cwd=tmp_path,
+        capture_output=True, text=True, check=False, timeout=30,
+    )
+    assert listed.returncode == 0, output(listed)
+    assert "ut.process.hostRuntimeOptions" in listed.stdout
+    assert "ut.frontend.memory." not in listed.stdout
+    assert "arena.memory." not in listed.stdout
+    rejected = subprocess.run(
+        [str(runner), "--check-arena"], cwd=tmp_path,
+        capture_output=True, text=True, check=False, timeout=30,
+    )
+    assert rejected.returncode != 0, output(rejected)
+
+
+# The arena runner validates the complete corpus in its own process.
+@pytest.mark.parametrize(
+    "args, expected_status", [(["--help"], 0), (["ut.process"], 1)],
+)
+def test_arena_runner_arguments(
+    tmp_path: Path, args: list[str], expected_status: int,
+) -> None:
+    runner = Path.cwd() / "bin" / "arena"
+    result = subprocess.run(
+        [str(runner), *args], cwd=tmp_path,
+        capture_output=True, text=True, check=False, timeout=30,
+    )
+    assert result.returncode == expected_status, output(result)
+    assert "bin/arena" in output(result)
+    assert not list((tmp_path / "tmp" / "snakebite-ut").iterdir())
 
 
 # A host invariant failure must report its call site even when release

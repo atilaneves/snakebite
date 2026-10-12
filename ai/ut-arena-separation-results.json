@@ -1,0 +1,121 @@
+{
+  "method": "Fresh processes on a shared workstation, default arena, no --lowmem; build time excluded. Three runs per worker count. Original timings from earlier scheduling experiment on the same workstation. Worker counts measured in groups, not interleaved.",
+  "original_32_worker_median_seconds": 65.76,
+  "separated_32_worker_median_seconds": 20.54,
+  "elapsed_reduction_percent": 68.76520681265208,
+  "unit_tests": 8074,
+  "arena_validation_cases": 8099,
+  "case_names_preserved": true,
+  "arena_validation_time": {
+    "wall": 40.62,
+    "user": 77.46,
+    "sys": 42.88,
+    "rss": 1365804.0
+  },
+  "arena_final_scan_passed": true,
+  "runs": [
+    {
+      "command": [
+        "bin/ut",
+        "-j",
+        "32"
+      ],
+      "exit_code": 0,
+      "tests": 8074,
+      "failed": 0,
+      "wall": 20.54,
+      "user": 63.69,
+      "sys": 41.31,
+      "rss": 1176512.0
+    },
+    {
+      "command": [
+        "bin/ut",
+        "-j",
+        "32"
+      ],
+      "exit_code": 0,
+      "tests": 8074,
+      "failed": 0,
+      "wall": 20.46,
+      "user": 65.65,
+      "sys": 41.26,
+      "rss": 1176992.0
+    },
+    {
+      "command": [
+        "bin/ut",
+        "-j",
+        "32"
+      ],
+      "exit_code": 0,
+      "tests": 8074,
+      "failed": 0,
+      "wall": 20.57,
+      "user": 65.82,
+      "sys": 41.06,
+      "rss": 1178368.0
+    },
+    {
+      "command": [
+        "bin/ut",
+        "-j",
+        "1"
+      ],
+      "exit_code": 0,
+      "tests": 8074,
+      "failed": 0,
+      "wall": 30.7,
+      "user": 60.69,
+      "sys": 39.64,
+      "rss": 1166628.0
+    },
+    {
+      "command": [
+        "bin/ut",
+        "-j",
+        "1"
+      ],
+      "exit_code": 0,
+      "tests": 8074,
+      "failed": 0,
+      "wall": 31.05,
+      "user": 62.55,
+      "sys": 40.09,
+      "rss": 1164516.0
+    },
+    {
+      "command": [
+        "bin/ut",
+        "-j",
+        "1"
+      ],
+      "exit_code": 0,
+      "tests": 8074,
+      "failed": 0,
+      "wall": 30.49,
+      "user": 60.06,
+      "sys": 37.19,
+      "rss": 1166712.0
+    }
+  ],
+  "raw_logs": "/tmp/snakebite-ut-parallel",
+  "worker_comparison": [
+    {
+      "workers": 1,
+      "samples": 3,
+      "wall_seconds": 30.7,
+      "cpu_seconds": 100.33,
+      "peak_rss_kib": 1166628.0
+    },
+    {
+      "workers": 32,
+      "samples": 3,
+      "wall_seconds": 20.54,
+      "cpu_seconds": 106.88,
+      "peak_rss_kib": 1176992.0
+    }
+  ],
+  "speedup_32_vs_1": 1.4946445959104186,
+  "elapsed_reduction_32_vs_1_percent": 33.09446254071662
+}

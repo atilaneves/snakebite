@@ -12,6 +12,9 @@ build/ut-without-build-tools.sh -j 1
 # The default thread count runs tests on several threads at once, which
 # the single-worker run above never does.
 build/ut-without-build-tools.sh
+# Arena scans hold the frontend lock and depend on retained process state.
+# Validate ownership separately so bin/ut can run unit tests in parallel.
+bin/arena
 # The tests tagged `@Tags("alone")` need a process in which no other
 # test runs: they gate on measured times, or they count what the process
 # holds while no other thread starts. Run them on their own,
