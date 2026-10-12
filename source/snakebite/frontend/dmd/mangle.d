@@ -92,10 +92,14 @@ public void completeFunctionType(
 public void completeMangleTargets(imported!"dmd.dsymbol".Dsymbol symbol) {
     import snakebite.frontend.compiler: withCompilerQuery;
 
+    if (symbol in names.completed)
+        return;
+
     withCompilerQuery({
         for (auto current = symbol; current !is null; current = current.parent)
             if (auto function_ = current.isFuncDeclaration)
                 completeFunctionType(function_);
+        names.completed[symbol] = true;
     });
 }
 
@@ -108,9 +112,38 @@ public const(char)[] mangledNameOf(
     imported!"dmd.func".FuncDeclaration function_,
 ) {
     import dmd.mangle: mangleExact;
-    import snakebite.frontend.compiler: newInFrontend;
+    import snakebite.frontend.compiler: newInFrontend, withCompilerQuery;
     import std.string: fromStringz;
 
-    completeMangleTargets(function_);
-    return newInFrontend!mangleExact(function_).fromStringz;
+    if (auto found = function_ in names.mangled)
+        return *found;
+
+    const(char)[] result;
+    withCompilerQuery({
+        completeMangleTargets(function_);
+        result = newInFrontend!mangleExact(function_).fromStringz;
+        names.mangled[function_] = result;
+    });
+    return result;
+}
+
+// DMD keeps a completed mangled name on its declaration permanently. Each
+// thread retains that finished result too, so symbol lookup need not wait
+// for unrelated semantic work. Publishing follows successful completion;
+// an unfinished signature must never enter either cache.
+private struct ThreadNames {
+    size_t generation;
+    bool[imported!"dmd.dsymbol".Dsymbol] completed;
+    const(char)[][imported!"dmd.func".FuncDeclaration] mangled;
+}
+
+private ThreadNames _names;
+
+private ref ThreadNames names() {
+    import snakebite.frontend.compiler: metadataGeneration;
+
+    const generation = metadataGeneration;
+    if (_names.generation != generation)
+        _names = ThreadNames(generation);
+    return _names;
 }

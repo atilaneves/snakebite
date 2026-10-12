@@ -948,8 +948,10 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// Repeated materialization must produce fresh values, including a wide sum.
+// Storage reuse is checked directly below instead of inferred from a long run.
 static foreach (backend; Matrix!()) {
-    @("staticArray.rvalue.loopOverManyRvalues." ~ backend.stringof)
+    @("staticArray.rvalue.loopOverRvalues." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
@@ -957,10 +959,41 @@ static foreach (backend; Matrix!()) {
             S make(int base) { return S([base, 1]); }
             void main() {
                 long sum;
-                foreach (i; 0 .. 200_000)
-                    foreach (v; make(i).values)
-                        sum += v;
-                assert(sum == 19_999_900_000 + 200_000);
+                foreach (base; [0, 2_000_000_000])
+                    foreach (i; 0 .. 4)
+                        foreach (v; make(base + i).values)
+                            sum += v;
+                assert(sum == 8_000_000_020L);
+            }
+        });
+    }
+}
+
+// Each iteration evaluates a new collection value in the same native
+// temporary slot. Compare addresses only; expired storage is never read.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE has no stack slot: each temporary is a new value"),
+)) {
+    @("staticArray.rvalue.reusesCollectionStorage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[2] values; }
+            S make(int base) { return S([base, 1]); }
+            void main() {
+                const(int)* first;
+                foreach (i; 0 .. 4) {
+                    foreach (j, ref value; make(i).values) {
+                        if (j == 0) {
+                            if (i == 0) first = &value;
+                            assert(&value is first);
+                            assert(value == i);
+                        } else {
+                            assert(value == 1);
+                        }
+                    }
+                }
             }
         });
     }

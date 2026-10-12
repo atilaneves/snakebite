@@ -7,8 +7,10 @@ import ut.backends;
 // druntime's array operations take a vector path for 16 bytes at a time and
 // a scalar path for the remainder, so each test below covers lengths on
 // both sides of the vector width, with a remainder, and checks that nothing
-// beyond the slice changes. The expectation is the same expression on one
-// element at a time.
+// beyond the slice changes. Lengths follow each type's vector width; extra
+// iterations at unrelated widths add interpretation cost without another
+// vector boundary. The expectation is the same expression on one element
+// at a time.
 private enum helpers = q{
     T valueOf(T)(size_t seed) {
         T value = cast(T) (seed * 7 % 23 + 1);
@@ -18,7 +20,9 @@ private enum helpers = q{
         return value;
     }
 
-    immutable lengths = [0, 1, 3, 4, 5, 8, 15, 16, 17, 31, 33, 40];
+    enum width(T) = 16 / T.sizeof;
+    enum lengths(T) = [0, 1, width!T - 1, width!T,
+        width!T + 1, 2 * width!T + 1];
     enum sentinel = 99;
 
     T[40] filled(T)(in size_t offset) {
@@ -39,7 +43,7 @@ static foreach (backend; Matrix!()) {
             void check(T, string op)() {
                 const b = filled!T(0);
                 const c = filled!T(11);
-                foreach (length; lengths) {
+                foreach (length; lengths!T) {
                     T[40] a;
                     a[] = cast(T) sentinel;
                     mixin("a[0 .. length] = b[0 .. length] " ~ op ~
@@ -73,7 +77,7 @@ static foreach (backend; Matrix!()) {
             void check(T, string op)() {
                 const b = filled!T(0);
                 const c = filled!T(11);
-                foreach (length; lengths) {
+                foreach (length; lengths!T) {
                     T[40] a;
                     a[] = cast(T) sentinel;
                     mixin("a[0 .. length] = b[0 .. length] " ~ op ~
@@ -104,7 +108,7 @@ static foreach (backend; Matrix!()) {
         0.shouldBeStatusOf!(backend, helpers ~ q{
             void check(T, string op)() {
                 const b = filled!T(0);
-                foreach (length; lengths) {
+                foreach (length; lengths!T) {
                     T[40] a;
                     a[] = cast(T) sentinel;
                     mixin("a[0 .. length] = " ~ op ~ "b[0 .. length];");
@@ -139,7 +143,7 @@ static foreach (backend; Matrix!()) {
             void check(T, string op)() {
                 const original = filled!T(0);
                 const c = filled!T(11);
-                foreach (length; lengths) {
+                foreach (length; lengths!T) {
                     T[40] a;
                     a[] = original[];
                     mixin("a[0 .. length] " ~ op ~ "= c[0 .. length];");
@@ -176,7 +180,7 @@ static foreach (backend; Matrix!()) {
             void check(T, string op)() {
                 const T scalar = valueOf!T(5);
                 const b = filled!T(0);
-                foreach (length; lengths) {
+                foreach (length; lengths!T) {
                     T[40] a;
                     a[] = cast(T) sentinel;
                     mixin("a[0 .. length] = b[0 .. length] " ~ op ~
@@ -302,7 +306,7 @@ static foreach (backend; Matrix!()) {
     unittest {
         0.shouldBeStatusOf!(backend, helpers ~ q{
             void check(T)() {
-                foreach (length; lengths) {
+                foreach (length; lengths!T) {
                     auto a = filled!T(100);
                     const b = filled!T(0);
                     a[0 .. length] = b[0 .. length] ^^ 2;

@@ -17,6 +17,24 @@ __gshared Compiler compiler;
 // registered module from DMD's tables.
 private shared uint _moduleCounter;
 
+// Thread-owned metadata belongs to one set of frontend declarations.
+// Reset and shutdown require exclusive access with no live frontend users;
+// the next read on each thread must discard its previous snapshots.
+private shared size_t _metadataGeneration;
+
+public size_t metadataGeneration() @safe nothrow @nogc {
+    import core.atomic: atomicLoad, MemoryOrder;
+
+    return atomicLoad!(MemoryOrder.acq)(_metadataGeneration);
+}
+
+private void discardMetadata() @safe nothrow @nogc {
+    import core.atomic: atomicOp;
+
+    atomicOp!"+="(_metadataGeneration, size_t(1));
+}
+
+
 shared static this() {
     compiler = new Compiler;
 }
@@ -556,6 +574,7 @@ final class Compiler {
             return;
 
         inside({
+            discardMetadata;
             deinitializeDMD;
             // `deinitializeDMD` leaves `Module.amodules`, dmd's list of every
             // module parsed, as it was, so the modules `reset` drops would
@@ -755,6 +774,7 @@ final class Compiler {
             if (!initialized)
                 return;
 
+            discardMetadata;
             deinitializeDMD;
             initialized = false;
         });
