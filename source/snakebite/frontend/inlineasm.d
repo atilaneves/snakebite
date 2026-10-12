@@ -85,12 +85,20 @@ private extern(C++) class InlineAsmCollector
         _dependencyImage = dependencyImage;
     }
 
-    // The walk reaches an instance of a dependency template only through
-    // root code that names it. Without an image, no copy that LDC compiled
-    // exists for that instance, and the root program holds the only one.
-    private extern(D) bool isRootInstance(Dsymbol function_) {
-        return ldcHost && !_dependencyImage && function_.parent !is null
-            && function_.parent.isTemplateInstance !is null;
+    // Whether the root program itself runs the body of `symbol`: the body is
+    // root-owned, or it is part of an instance of a dependency template and
+    // no dependency image holds a copy that LDC compiled of that instance.
+    private extern(D) bool isRunByRoot(Dsymbol symbol) {
+        return isRootOwned(symbol) || isRootInstance(symbol);
+    }
+
+    private extern(D) bool isRootInstance(Dsymbol symbol) {
+        if (!ldcHost || _dependencyImage)
+            return false;
+        for (auto enclosing = symbol; enclosing !is null; enclosing = enclosing.parent)
+            if (enclosing.isTemplateInstance !is null)
+                return true;
+        return false;
     }
 
     // The same question `Program.isRootOwned` (backend.d) answers, so the
@@ -215,15 +223,15 @@ private extern(C++) class InlineAsmCollector
         if (_owner is null)
             return;
         auto function_ = expression.var.isFuncDeclaration;
-        if (function_ !is null && (isRootOwned(_owner) || isRootInstance(_owner)))
+        if (function_ !is null && ldcHost && isRunByRoot(_owner)) {
             reportInlineCode(expression, function_);
-        // A call of an instance of a dependency template may have been
-        // instantiated first by another module, which is no root.
-        if (function_ !is null && ldcHost && isRootOwned(_owner) && !_dependencyImage
-                && function_.parent !is null
-                && function_.parent.isTemplateInstance !is null
-                && function_ !in _visited)
-            function_.accept(this);
+            // A program that an earlier load made the instance for does
+            // not list it in its own members, so the call is the way to it,
+            // at any depth.
+            if (function_.fbody !is null && function_ !in _visited
+                    && isRunByRoot(function_))
+                function_.accept(this);
+        }
         if (!isRootOwned(_owner))
             return;
         if (function_ is null || !isNonLocalJump(function_))

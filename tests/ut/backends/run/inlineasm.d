@@ -519,6 +519,44 @@ version (LDC) {
             .should.be in message;
     }
 
+    // dmd keeps an instance in the members of the root module that first
+    // needed it, and a later program reuses it from there: the members of
+    // the later program's root modules do not list it. Only the calls lead
+    // to it.
+    @("inlineasm.loadDiagnostic.irInstanceMadeForAnotherProgramFailsLoadWithoutImage")
+    unittest {
+        const directory = buildPath(
+            tempDir, text("ir_chain_other_", thisProcessID),
+        );
+        scope(exit) rmdirRecurse(directory);
+        writeIrChainProject(directory, "ir_chain_other");
+        const otherRoot = buildPath(directory, "other");
+        mkdirRecurse(otherRoot);
+        write(buildPath(otherRoot, "ir_chain_other_second.d"),
+            "module ir_chain_other_second;\nimport ir_chain_other: outer;\n" ~ q{
+            int second() { return outer(3, 4); }
+            void main() {}
+        });
+        parseRootModules(
+            [buildPath(directory, "app", "ir_chain_other_root.d")],
+            [buildPath(directory, "deps")],
+            FrontendFlags(),
+            dependencyImage: true,
+        );
+
+        const noNativeDependencies = false;
+        const message = prepareProject(
+            otherRoot,
+            [buildPath(directory, "deps")],
+            null,
+            noNativeDependencies,
+            optimise: Optimise.no,
+        ).shouldThrow.msg;
+        ("LLVM inline IR (`pragma(LDC_inline_ir)`) is not supported in "
+            ~ "`ir_chain_other.innermost!int.innermost`: no backend runs it")
+            .should.be in message;
+    }
+
     // The same program loads where a dependency image holds the instances:
     // LDC compiles them there.
     @("inlineasm.loadDiagnostic.irInstanceLoadsWhenAnImageHoldsIt")
@@ -542,7 +580,6 @@ version (LDC) {
     private void writeIrChainProject(
         in string directory,
         in string name,
-        in bool madeByTheDependency = false,
     ) {
         mkdirRecurse(buildPath(directory, "deps"));
         mkdirRecurse(buildPath(directory, "app"));
@@ -556,11 +593,7 @@ version (LDC) {
             }
             int middle(T)(T a, T b) { return innermost(a, b); }
             int outer(T)(T a, T b) { return middle(a, b); }
-        } ~ (madeByTheDependency ? q{
-            alias madeOuter = outer!int;
-            alias madeMiddle = middle!int;
-            alias madeInnermost = innermost!int;
-        } : ""));
+        });
         write(buildPath(directory, "app", name ~ "_root.d"),
             "module " ~ name ~ "_root;\nimport " ~ name ~ ": outer;\n" ~ q{
             int sum() { return outer(1, 2); }
