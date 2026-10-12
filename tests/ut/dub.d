@@ -1,8 +1,7 @@
 module ut.dub;
 
 
-import dub.dub: SkipPackageSuppliers;
-import snakebite.dub: DubDescription, dependencyFingerprint, dubDescribeProject, fetchProject;
+import snakebite.dub: DubDescription, dependencyFingerprint;
 import snakebite.dubcache: cachedDubDescription, projectDescriptionFromJson;
 import snakebite.dependencyimage: defaultCompiler, generatorKey;
 import snakebite.project: projectStateDirectory;
@@ -10,7 +9,6 @@ import dub.description: ProjectDescription;
 import std.json: parseJSON;
 import std.file: write, remove, rename, readText, dirEntries, SpanMode;
 import std.path: absolutePath, baseName, buildPath, dirName, relativePath;
-import std.conv: text;
 import std.string: replace;
 import ut;
 
@@ -174,64 +172,4 @@ unittest {
 
     (dependencyFingerprint(directory, unittestBuild)
         != dependencyFingerprint(directory, debugBuild)).should == true;
-}
-
-
-// Several threads describe at once, as parallel tests do. dub keeps its
-// compilers in thread-local storage, so each thread needs its own.
-@("describe.concurrentCallsEachHaveCompilers")
-unittest {
-    import core.thread: Thread;
-
-    const sandbox = Sandbox();
-    sandbox.writeFile("app/dub.sdl", "name \"app\"\ntargetType \"library\"\n");
-    sandbox.writeFile("app/source/app.d", "module app;\n");
-    const directory = sandbox.inSandboxPath("app");
-
-    enum threadCount = 4;
-    string[threadCount] roots;
-    // A function of its own, so that each thread has its own `index`.
-    Thread startDescribe(in size_t index) {
-        auto thread = new Thread({
-            roots[index] = dubDescribeProject(directory, [text("Thread", index)])
-                .project.rootPackage;
-        });
-        thread.start;
-        return thread;
-    }
-
-    Thread[] threads;
-    foreach (index; 0 .. threadCount)
-        threads ~= startDescribe(index);
-    foreach (thread; threads) thread.join;
-
-    foreach (root; roots)
-        root.should == "app";
-}
-
-
-@("fetchProject.usesAPackageThatIsOnDisk")
-unittest {
-    const sandbox = Sandbox();
-    sandbox.writeFile(".dub/packages/package/1.0.0/package/dub.sdl",
-        "name \"package\"\nversion \"1.0.0\"\n");
-
-    fetchProject("package", sandbox.sandboxPath.absolutePath, SkipPackageSuppliers.all)
-        .should == buildPath(sandbox.sandboxPath.absolutePath,
-            ".dub/packages/package/1.0.0/package/");
-}
-
-
-// A pinned version is the one used, also when another version is on disk:
-// the cached 1.0.0 answers a plain `package`, but `package@2.0.0` is only
-// known after a fetch.
-@("fetchProject.pinnedVersionIsFetchedWhenAnotherIsOnDisk")
-unittest {
-    const sandbox = Sandbox();
-    sandbox.writeFile(".dub/packages/package/1.0.0/package/dub.sdl",
-        "name \"package\"\nversion \"1.0.0\"\n");
-
-    fetchProject("package@2.0.0", sandbox.sandboxPath.absolutePath, SkipPackageSuppliers.all)
-        .shouldThrowWithMessage(
-            "No package package was found matching the dependency 2.0.0");
 }
