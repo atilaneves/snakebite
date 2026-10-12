@@ -4325,6 +4325,7 @@ def test_transitive_dub_dependencies_reach_the_image(
         name "image-app"
         targetType "library"
         targetName "image-app"
+        postBuildCommands "test ! -e reject-build"
         dependency "image-middle" path="../middle"
         configuration "unittest" {
             targetType "executable"
@@ -4374,14 +4375,16 @@ def test_transitive_dub_dependencies_reach_the_image(
     first = start()
     assert first.returncode == 0, output(first)
 
-    # With the build command of a dependency rejecting a build, an edit of
-    # the app still starts: the archives are not built again. (The build
-    # commands of the app itself run at each changed start, so the app
-    # cannot hold the rejecting command.)
+    # With the build commands of the app and of a dependency rejecting a
+    # build, an edit of the app still starts: neither the app nor the
+    # archives are built again. The app holds a post-build command: dub
+    # runs it only after a build of the app, and Snakebite never runs it.
+    write(tmp_path / "app" / "reject-build")
     write(tmp_path / "middle" / "reject-build")
     write(app_source, app_using_unused_member(backend, 73) + "\n")
     edited_app = start()
     assert edited_app.returncode == 0, output(edited_app)
+    (tmp_path / "app" / "reject-build").unlink()
     (tmp_path / "middle" / "reject-build").unlink()
 
     write(
