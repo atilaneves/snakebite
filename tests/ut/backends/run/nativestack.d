@@ -62,13 +62,14 @@ static foreach (backend; Matrix!(
 
 
 // This depth is several times what the walker holds in the 8 MiB stack of a
-// default Linux thread (about 3,000 guest calls). A guest that recurses this
-// deep is a valid program, and compiled D does it.
+// default Linux thread (about 3,000 guest calls): the walker needs more stack
+// than the thread gives it. A guest that recurses this deep is a valid
+// program, and compiled D does it.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "dmd's CTFE stops at a fixed recursion limit far below this depth"),
 )) {
-    @("nativeStack.deepRecursionReachesCompiledDepth." ~ backend.stringof)
+    @("nativeStack.recursionDeeperThanTheThreadStackRuns." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         size_t(10_000).shouldBeRetOf!(backend, q{
@@ -86,6 +87,31 @@ static foreach (backend; Matrix!(
                 return walk(10_000);
             }
         }, "answer");
+    }
+}
+
+
+// A guest that recurses without end stops: the status is 1 and the message
+// is on stderr, as for a Bytecode VM that runs out of frame stack. Compiled D
+// ends with SIGSEGV, which would end `bin/ut`, so `Native` has no arm.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "compiled D ends with SIGSEGV, and that ends the test process"),
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops at a fixed recursion limit far below this depth"),
+)) {
+    @("nativeStack.runawayRecursionStopsTheRun." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeStatusOf!(backend, q{
+            size_t walk(size_t n) {
+                return 1 + walk(n + 1);
+            }
+
+            void main() {
+                walk(0);
+            }
+        });
     }
 }
 

@@ -5,10 +5,15 @@ private:
 
 
 import core.thread.fiber: Fiber;
+import snakebite.exception: SnakebiteException;
 import snakebite.hostthreads: Continuation;
 
 
 private enum pieceBytes = 1024 * 1024;
+// The pieces of all the walks on one thread together. A guest that recurses
+// without end stops with a message at this bound.
+private enum maxPieceBytes = 128 * pieceBytes;
+private enum maxPieceCount = maxPieceBytes / pieceBytes;
 private enum freePieceCount = 2;
 
 
@@ -25,28 +30,26 @@ public struct StackPieces {
     private Piece _current;
 
     // The walker is entered from host code, on the stack that the host code
-    // runs on. The limit is the one of that stack again when the entry
-    // ends. An entry on a piece (a destructor that a collection runs there)
-    // keeps the limit of the piece.
+    // runs on, and no walk is active on this evaluator. The limit is the one
+    // of that stack until the entry ends.
     public Entry enter() @system {
         import core.memory: GC;
 
         if (!GC.inFinalizer && _reserve is null)
             _reserve = new Piece;
-        const outer = limit;
-        if (_current is null)
-            limit = limitOfCurrentStack;
-        return Entry(&this, outer);
+        if (_tooDeep is null)
+            _tooDeep = new SnakebiteException(tooDeepMessage);
+        limit = limitOfCurrentStack;
+        return Entry(&this);
     }
 
     public struct Entry {
         private StackPieces* _stack;
-        private size_t _outer;
 
         @disable this(this);
 
         public ~this() @safe @nogc nothrow pure {
-            _stack.limit = _outer;
+            _stack.limit = 0;
         }
     }
 
@@ -105,7 +108,11 @@ public struct StackPieces {
                 give(done);
                 thrown = unhandled;
             } else if (top.deeper) {
-                top = take(top, top.request);
+                // The piece that asked for more gets the error and unwinds.
+                try
+                    top = take(top, top.request);
+                catch (SnakebiteException tooDeep)
+                    thrown = tooDeep;
             } else {
                 try
                     top.request();
@@ -118,6 +125,8 @@ public struct StackPieces {
     }
 
     private Piece take(Piece below, scope void delegate() work) @system {
+        if (_live >= maxPieceCount)
+            throw _tooDeep;
         Piece piece;
         foreach (ref slot; _free)
             if (slot !is null) {
@@ -131,6 +140,7 @@ public struct StackPieces {
         piece.of = Fiber.getThis;
         piece.below = below;
         piece.work = work;
+        ++_live;
         return piece;
     }
 }
@@ -162,6 +172,14 @@ private Piece[freePieceCount] _free;
 // Made by `enter` outside a finalizer. A finalizer cannot allocate, and
 // a destructor that the collector runs always needs a piece to recurse on.
 private Piece _reserve;
+// The pieces in use on this thread. Made by `enter`, because the error
+// cannot be allocated in a finalizer.
+private size_t _live;
+private SnakebiteException _tooDeep;
+private enum tooDeepMessage = imported!"std.conv".text(
+    "guest recursion too deep for the Interpreter: the walk needs more than ",
+    maxPieceBytes / (1024 * 1024), " MiB of stack pieces for one thread",
+);
 
 
 private Piece takeReserveOrNew() @system {
@@ -181,6 +199,7 @@ private Piece takeReserveOrNew() @system {
 
 
 private void give(Piece piece) @system {
+    --_live;
     piece.stack = null;
     piece.of = null;
     piece.below = null;

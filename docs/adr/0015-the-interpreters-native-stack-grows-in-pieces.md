@@ -21,8 +21,14 @@ large fixed size chosen for particular programs.
 The walker runs on the native stack that it is entered on, the base. Before
 each guest call it compares the stack pointer with a limit. Below the
 limit, the walk continues on a new `core.thread.Fiber` of 1 MiB, a piece,
-and returns to the base when the deep part is done. Depth is limited by
-memory only.
+and returns to the base when the deep part is done. The pieces of one
+thread together are limited to 128 MiB (the constant `maxPieceBytes` in
+`stackpieces.d`), about 45,000 guest calls at 2.9 KB each. A guest that
+needs more, such as one that recurses without end, stops the run with a
+message that names the cause and the bound (exit status 1, as for a Bytecode
+VM that runs out of frame stack). Compiled D ends such a program with
+SIGSEGV after 8 MiB of stack. Without this bound the program takes memory
+until the system stops it.
 
 - The limit of a thread's stack is its middle. The bounds come from
   `pthread_getattr_np` and `pthread_attr_getstack`, once for each thread.
@@ -113,3 +119,13 @@ These limits remain:
 8. A guest destructor that the collector runs has one reserve piece and the
    free pieces, and no more. A destructor that recurses past them stops the
    run with a message.
+9. Guest code in a guest `Fiber` always runs on a piece, because the size of
+   the stack of a `Fiber` is not public, and so no room can be known. Each
+   host call and each callback there costs one `Fiber` switch. A `qsort` of
+   200,000 ints with a guest comparator, inside a guest `Fiber` of 1 MiB,
+   took 4.34 s on master and 6.87 s on this design. On the main thread the
+   time is unchanged.
+10. The bound of 128 MiB is for the pieces of one thread. A program whose
+    recursion needs more than about 45,000 guest calls fails on the
+    Interpreter, and compiled D reaches about 260,000 calls on an 8 MiB
+    stack.
