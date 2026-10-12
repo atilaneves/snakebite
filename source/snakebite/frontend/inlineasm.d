@@ -75,7 +75,7 @@ private extern(C++) class InlineAsmCollector
     private bool[Module] _rootModules;
     private bool[FuncDeclaration] _visited;
     private bool[Loc] _reported;
-    private bool[Dsymbol] _reportedOwners;
+    private bool[string] _reportedOwners;
     private Dsymbol _owner;
     private bool _dependencyImage;
 
@@ -176,19 +176,22 @@ private extern(C++) class InlineAsmCollector
     private extern(D) void reportInlineCode(
         SymbolExp expression, FuncDeclaration function_,
     ) {
-        import std.string: toStringz;
+        import std.string: fromStringz, toStringz;
 
         const construct = inlineCodeName(function_);
-        if (construct is null || _owner in _reportedOwners)
+        // By name: dmd can hold two instances of one template for one
+        // argument list, and the user sees one.
+        const owner = _owner.toPrettyChars.fromStringz.idup;
+        if (construct is null || owner in _reportedOwners)
             return;
-        _reportedOwners[_owner] = true;
+        _reportedOwners[owner] = true;
         error(
             expression.loc,
             "%s is not supported in `%s`: no backend runs it. Only code "
             ~ "that LDC compiled into the host or the dependency image "
             ~ "can use it",
             construct.toStringz,
-            _owner.toPrettyChars,
+            owner.toStringz,
         );
     }
 

@@ -431,7 +431,7 @@ unittest {
         ~ "}\n",
     );
 
-    parseRootModules([path], [], FrontendFlags())
+    parseRootModules([path], [], FrontendFlags(), dependencyImage: true)
         .shouldThrowWithMessage(
             text(path, "(4,5): ", jumpError!"longjmp"),
         );
@@ -445,7 +445,7 @@ unittest {
 version (LDC) {
     @("inlineasm.loadDiagnostic.llvmInlineIrFailsLoad")
     unittest {
-        parseSnippet(q{
+        parseRootSource("ir_fails_load", q{
             import ldc.llvmasm: __ir;
 
             int add(int a, int b) {
@@ -455,15 +455,16 @@ version (LDC) {
             unittest {
                 add(1, 2);
             }
-        }).shouldThrow.msg.withoutSnippetCounter.should ==
-            "LLVM inline IR (`pragma(LDC_inline_ir)`) is not supported in "
-            ~ "`snippet_N.add`: no backend runs it. Only code that LDC "
-            ~ "compiled into the host or the dependency image can use it";
+        }).shouldThrowWithMessage(
+            "/ir_fails_load.d(6,48): LLVM inline IR (`pragma(LDC_inline_ir)`) "
+            ~ "is not supported in `ir_fails_load.add`: no backend runs it. Only code that LDC "
+            ~ "compiled into the host or the dependency image can use it",
+        );
     }
 
     @("inlineasm.loadDiagnostic.llvmInlineAsmFailsLoad")
     unittest {
-        parseSnippet(q{
+        parseRootSource("asm_fails_load", q{
             import ldc.llvmasm: __asm;
 
             void pause() {
@@ -472,27 +473,40 @@ version (LDC) {
             unittest {
                 pause();
             }
-        }).shouldThrow.msg.withoutSnippetCounter.should ==
-            "inline assembler (`pragma(LDC_inline_asm)`) is not supported in "
-            ~ "`snippet_N.pause`: no backend runs it. Only code that LDC "
-            ~ "compiled into the host or the dependency image can use it";
+        }).shouldThrowWithMessage(
+            "/asm_fails_load.d(5,17): inline assembler "
+            ~ "(`pragma(LDC_inline_asm)`) is not supported in "
+            ~ "`asm_fails_load.pause`: no backend runs it. Only code that LDC "
+            ~ "compiled into the host or the dependency image can use it",
+        );
+    }
+
+    // A root module of a fixed name, so that the message has no snippet
+    // counter.
+    private auto parseRootSource(in string name, in string source) {
+        const path = "/" ~ name ~ ".d";
+        return parseRootModules(
+            [path], [], FrontendFlags(), dependencyImage: false,
+            sourceOverrides: [path: source],
+        );
     }
 
     // The instance of a dependency template that root code instantiates is
     // part of the root program, and no image holds a copy that LDC compiled.
     @("inlineasm.loadDiagnostic.rootInstanceOfIrTemplateFailsLoad")
     unittest {
-        const message = parseSnippet(q{
+        parseSnippet(q{
             import core.simd: float4, loadUnaligned;
 
             float4 load(const float4* pointer) {
                 return loadUnaligned(pointer);
             }
-        }).shouldThrow.msg.withoutSnippetCounter;
-        // Both overloads of `loadUnaligned` have an instance.
-        ("LLVM inline IR (`pragma(LDC_inline_ir)`) is not supported in "
+        }).shouldThrowWithMessage(
+            "LLVM inline IR (`pragma(LDC_inline_ir)`) is not supported in "
             ~ "`ldc.simd.loadUnaligned!(__vector(float[4])).loadUnaligned`: "
-            ~ "no backend runs it").should.be in message;
+            ~ "no backend runs it. Only code that LDC compiled into the host "
+            ~ "or the dependency image can use it",
+        );
     }
 
     // Three template instances deep: nothing but the instance at the
@@ -507,16 +521,15 @@ version (LDC) {
         writeIrChainProject(directory, "ir_chain_depth");
 
         const noNativeDependencies = false;
-        const message = prepareProject(
+        prepareProject(
             buildPath(directory, "app"),
             [buildPath(directory, "deps")],
             null,
             noNativeDependencies,
             optimise: Optimise.no,
-        ).shouldThrow.msg;
-        ("LLVM inline IR (`pragma(LDC_inline_ir)`) is not supported in "
-            ~ "`ir_chain_depth.innermost!int.innermost`: no backend runs it")
-            .should.be in message;
+        ).shouldThrowWithMessage(
+            text(buildPath(directory, "deps", "ir_chain_depth.d"), "(7,48): ", innermostRefusal("ir_chain_depth")),
+        );
     }
 
     // dmd keeps an instance in the members of the root module that first
@@ -545,16 +558,15 @@ version (LDC) {
         );
 
         const noNativeDependencies = false;
-        const message = prepareProject(
+        prepareProject(
             otherRoot,
             [buildPath(directory, "deps")],
             null,
             noNativeDependencies,
             optimise: Optimise.no,
-        ).shouldThrow.msg;
-        ("LLVM inline IR (`pragma(LDC_inline_ir)`) is not supported in "
-            ~ "`ir_chain_other.innermost!int.innermost`: no backend runs it")
-            .should.be in message;
+        ).shouldThrowWithMessage(
+            text(buildPath(directory, "deps", "ir_chain_other.d"), "(7,48): ", innermostRefusal("ir_chain_other")),
+        );
     }
 
     // The same program loads where a dependency image holds the instances:
@@ -573,6 +585,13 @@ version (LDC) {
             FrontendFlags(),
             dependencyImage: true,
         );
+    }
+
+    private string innermostRefusal(in string module_) {
+        return "LLVM inline IR (`pragma(LDC_inline_ir)`) is not supported in `"
+            ~ module_ ~ ".innermost!int.innermost`: no backend runs it. Only "
+            ~ "code that LDC compiled into the host or the dependency image "
+            ~ "can use it";
     }
 
     // The modules are named for the test: the frontend keeps a module of a

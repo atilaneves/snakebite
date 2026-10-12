@@ -3,6 +3,7 @@ module ut.backends.call.arrayoperations;
 
 import ut.backends;
 import snakebite.frontend.compiler: parseSnippet;
+import std.array: join;
 
 
 // druntime's array operations take a vector path for 16 bytes at a time and
@@ -295,6 +296,12 @@ private enum loadAndStoreUnalignedProgram = q{
     }
 };
 
+private string inlineIrRefusal(in string owner) {
+    return "LLVM inline IR (`pragma(LDC_inline_ir)`) is not supported in `" ~ owner
+        ~ "`: no backend runs it. Only code that LDC compiled into the host or "
+        ~ "the dependency image can use it";
+}
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "dmd's CTFE cannot evaluate `core.simd.__simd`"),
@@ -308,11 +315,12 @@ static foreach (backend; Matrix!(
             enum refusesInlineIr = false;
 
         static if (refusesInlineIr) {
-            const message = parseSnippet(loadAndStoreUnalignedProgram)
-                .shouldThrow.msg;
-            ("LLVM inline IR (`pragma(LDC_inline_ir)`) is not supported in "
-                ~ "`ldc.simd.loadUnaligned!(__vector(float[4])).loadUnaligned`: "
-                ~ "no backend runs it").should.be in message;
+            parseSnippet(loadAndStoreUnalignedProgram)
+                .shouldThrowWithMessage([
+                    inlineIrRefusal("ldc.simd.loadUnaligned!(__vector(float[4])).loadUnaligned"),
+                    inlineIrRefusal("ldc.simd.storeUnaligned!(__vector(float[4])).storeUnaligned"),
+                    inlineIrRefusal("ldc.simd.loadUnaligned!(__vector(int[4])).loadUnaligned"),
+                ].join("\n"));
         } else
             0.shouldBeStatusOf!(backend, loadAndStoreUnalignedProgram);
     }
