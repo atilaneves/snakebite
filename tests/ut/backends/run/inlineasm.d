@@ -460,6 +460,25 @@ version (LDC) {
         );
     }
 
+    @("inlineasm.loadDiagnostic.llvmInlineAsmFailsLoad")
+    unittest {
+        parseRootSource("asm_fails_load", q{
+            import ldc.llvmasm: __asm;
+
+            void pause() {
+                __asm("pause", "");
+            }
+            unittest {
+                pause();
+            }
+        }).shouldThrowWithMessage(
+            "/asm_fails_load.d(5,17): inline assembler "
+            ~ "(`pragma(LDC_inline_asm)`) is not supported in "
+            ~ "`asm_fails_load.pause`: no backend runs it. Only code that LDC "
+            ~ "compiled into the host or the dependency image can use it",
+        );
+    }
+
     // A root module of a fixed name, so that the message has no snippet
     // counter.
     private auto parseRootSource(in string name, in string source) {
