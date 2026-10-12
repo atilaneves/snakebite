@@ -125,13 +125,11 @@ string hostCompilerRecordDirectory(in string compiler, in string objectSet) {
     const result = execute([compiler, "-v", "-c", "-o-", "/dev/null"]);
     string record;
     foreach (line; result.output.lineSplitter) {
-        if (const path = line.matchFirst(regex(`^import path\[\d+\] = (.*)$`)))
-            record ~= "import " ~ path[1] ~ "\n";
-        else if (line.startsWith("predefs"))
+        if (line.startsWith("predefs"))
             foreach (identifier; line["predefs".length .. $].split)
                 record ~= "version " ~ identifier ~ "\n";
     }
-    enforce(record.length, compiler ~ " -v gave no import paths and predefs");
+    enforce(record.length, compiler ~ " -v gave no predefs");
     const probe = pinnedFrontendProbe(compiler);
     record ~= "vendor " ~ probe.vendor ~ "\n";
     const directory = buildPath(getcwd, ".reggae", "host-compiler", objectSet);

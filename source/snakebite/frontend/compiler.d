@@ -604,6 +604,7 @@ final class Compiler {
         import dmd.globals: global;
         import dmd.cond: VersionCondition;
         import dmd.target: CPU, target;
+        import snakebite.frontend.hostcompiler: hostImportPaths;
         import snakebite.frontend.importc: preprocessCFile;
         import std.algorithm.iteration: each;
 
@@ -617,7 +618,7 @@ final class Compiler {
         global.versionids.setDim(0);
         host.versionIdentifiers.each!(
             identifier => VersionCondition.addPredefinedGlobalIdent(owned(identifier)));
-        host.importPaths.each!(path => addImport(owned(path)));
+        hostImportPaths.each!(path => addImport(owned(path)));
 
         // Prevent DMD from calling exit() when too many cascading errors
         // accumulate. The shared parse path already checks global.errors after

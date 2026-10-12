@@ -2,8 +2,8 @@ module at.cli;
 
 
 import ut.backends;
-import std.conv: text;
-import std.file: getcwd, mkdir, mkdirRecurse, rmdirRecurse, tempDir, write;
+import std.conv: octal, text;
+import std.file: getcwd, mkdir, mkdirRecurse, rmdirRecurse, setAttributes, tempDir, write;
 import std.path: buildPath;
 import std.process: Config, execute, thisProcessID;
 
@@ -535,6 +535,44 @@ static foreach (backend; Matrix!(
         }
         if (result.status != 0)
             fail(result.output, __FILE__, __LINE__);
+    }
+}
+
+// The import paths of druntime and Phobos come from the configuration file
+// of the compiler that built `bin/sb`, found by that compiler's own name.
+// Another compiler on `PATH` is not it.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible, "the oracle is not `bin/sb`"),
+)) {
+    @("hostCompilerIsFoundByItsOwnName." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-hostcompiler-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        buildPath(directory, "probe.d").write("void main() {}\n");
+        const otherVendor = buildPath(directory, "bin");
+        otherVendor.mkdir;
+        version (LDC)
+            enum other = "dmd";
+        else
+            enum other = "ldc2";
+        buildPath(otherVendor, other).write("#!/bin/sh\n");
+        buildPath(otherVendor, other).setAttributes(octal!755);
+        static if (is(backend == Interpreter)) enum name = "interpreter";
+        else static if (is(backend == Bytecode)) enum name = "bytecode";
+        else enum name = "ctfe";
+        const result = execute(
+            [buildPath(getcwd, "bin", "sb"), "-b", name, directory],
+            ["PATH": otherVendor],
+        );
+        result.status.should.not == 0;
+        version (LDC)
+            enum own = "ldc2";
+        else
+            enum own = "dmd";
+        ("`" ~ own ~ "` built this binary and is not on PATH").should.be in result.output;
     }
 }
 
