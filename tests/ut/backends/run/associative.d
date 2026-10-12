@@ -724,3 +724,41 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// dmd lowers `a[0] = ++level` to an associative array index-assign whose
+// value operand is the increment itself. The increment is evaluated once
+// and both the variable and the element see its result.
+static foreach (backend; Matrix!()) {
+    @("associativeArrayAssignFromPreIncrement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int level;
+                int[int] a;
+                a[0] = ++level;
+                assert(level == 1);
+                assert(a[0] == 1);
+                assert(a.length == 1);
+            }
+        });
+    }
+}
+
+// An index that is an increment is evaluated once, and its result is the key.
+static foreach (backend; Matrix!()) {
+    @("associativeArrayIndexIsPreIncrement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int level;
+                int[int] a;
+                a[++level] = 3;
+                assert(level == 1);
+                assert(a.length == 1);
+                assert(a[1] == 3);
+            }
+        });
+    }
+}

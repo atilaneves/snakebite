@@ -3564,6 +3564,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
             evaluator._type = expression.type;
             evaluator._facts = evaluator.factsOf(expression.type);
+            // The caller wants the target's address, not the value of the
+            // expression, so the value has a scratch place of its own: the
+            // enclosing place may be null.
+            auto scratch = evaluator._frames.push(
+                evaluator._facts.size, evaluator._facts.alignment);
+            evaluator._place = scratch.base;
             evaluator.storeCompoundAt(expression, target);
         }
 
