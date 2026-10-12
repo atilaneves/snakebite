@@ -157,6 +157,15 @@ import snakebite.faulthandler: GuestPosition, GuestRun, register, unregister;
 // entry, and kept until it ends. A free function, because a member that
 // takes a closure as an alias parameter needs two contexts.
 private auto onEvaluator(alias action)(Interpreter interpreter) {
+    import snakebite.backends.interpreter.stackpieces: StackPieces;
+
+    // Host code that runs on a piece, such as a destructor that the
+    // collector calls, belongs to the evaluator that owns the piece.
+    if (auto owner = StackPieces.ownerOfCurrentPiece) {
+        if (interpreter._checksNullDeref)
+            return action(cast(Evaluator!true) owner);
+        return action(cast(Evaluator!false) owner);
+    }
     if (interpreter._checksNullDeref)
         return action(interpreter._checkedEvaluators.current);
     return action(interpreter._evaluators.current);
@@ -542,6 +551,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     import dmd.dclass: ClassDeclaration;
     import dmd.dstruct: StructDeclaration;
     import snakebite.framestack: FrameStack, defaultFrameCapacity;
+    import snakebite.backends.interpreter.stackpieces: StackPieces;
     import snakebite.backends.druntimehooks: DruntimeHook;
     import snakebite.ffi:
         CallAdapter, CallbackCall, CallPlan, CallResult, PlanCache;
@@ -587,6 +597,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // bump-allocated on call and popped on return. Frames never move;
     // overflow throws loudly.
     private FrameStack _frames;
+    private StackPieces _stack;
     private NativeData* _nativeData;
     // This thread's reads of the shared tables, counted.
     private Cache!(LayoutKey, FrameLayout) _layouts;
@@ -737,6 +748,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             Cache!(StaticChainKey, Hop[])(&shared_.staticChains);
         _catchTypes = Cache!(Catch, TypeInfo_Class)(&shared_.catchTypes);
         _frames = FrameStack(defaultFrameCapacity);
+        _stack.owner = cast(void*) this;
         _temporaries = TemporaryLifetime(&destroyTemporary);
         // The first touch of this thread's thread-local table allocates,
         // and a destructor that the GC finalizer runs cannot.
@@ -835,6 +847,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 _frames.release(frameMark);
         }
         _frames.backendEntry = &entry;
+        _stack.enter;
         _guestRun = GuestRun(
             cast(void*) this, &guestPosition,
             // The lower end of the native stack that the walker runs on is
@@ -1289,6 +1302,15 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             break;
         }
 
+        ubyte here;
+        if (cast(size_t) &here < _stack.limit) {
+            _stack.continueOnNewPiece({
+                executeRaw(function_, returnPlace, frameBase, layout,
+                    callSite, arguments, argumentCount, callbackEntry);
+            });
+            return;
+        }
+
         returnPlace = layout.returnPlace.bind(&_frames, frameBase, returnPlace);
         const guard = CallStateGuard(this);
 
@@ -1379,7 +1401,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     pragma(inline, true)
     extern(D) private void crossNative(scope void delegate() call) {
         try {
-            call();
+            _stack.runOnBase(call);
         } catch (Throwable thrown) {
             if (isHalt(thrown)) {
                 _halted = true;
