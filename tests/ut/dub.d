@@ -1,13 +1,16 @@
 module ut.dub;
 
 
-import snakebite.dub: DubDescription, dependencyFingerprint, parseDescribeLists;
-import snakebite.dubcache: cachedDubDescription;
+import dub.dub: SkipPackageSuppliers;
+import snakebite.dub: DubDescription, dependencyFingerprint, dubDescribeProject, fetchProject;
+import snakebite.dubcache: cachedDubDescription, projectDescriptionFromJson;
 import snakebite.dependencyimage: defaultCompiler, generatorKey;
 import snakebite.project: projectStateDirectory;
-import std.json: JSONValue, parseJSON;
+import dub.description: ProjectDescription;
+import std.json: parseJSON;
 import std.file: write, remove, rename, readText, dirEntries, SpanMode;
 import std.path: absolutePath, baseName, buildPath, dirName, relativePath;
+import std.conv: text;
 import std.string: replace;
 import ut;
 
@@ -18,14 +21,14 @@ import ut;
 // not start dub. `tests/run_cli.py` checks the recordings against the real
 // dub. The project of the fixture is written into the sandbox, and `@ROOT@`
 // in the recording stands for the sandbox.
-private JSONValue recordedDescription(in Sandbox sandbox, in string fixture) {
+private ProjectDescription recordedDescription(in Sandbox sandbox, in string fixture) {
     const directory = buildPath(__FILE__.dirName, "../fixtures/dub-describe", fixture);
     foreach (entry; dirEntries(directory, SpanMode.depth))
         if (entry.isFile && entry.name.baseName != "describe.json"
                 && entry.name.baseName != "describe.cmd")
             sandbox.writeFile(entry.name.relativePath(directory), readText(entry.name));
-    return parseJSON(readText(buildPath(directory, "describe.json"))
-        .replace("@ROOT@", sandbox.sandboxPath.absolutePath));
+    return projectDescriptionFromJson(parseJSON(readText(buildPath(directory, "describe.json"))
+        .replace("@ROOT@", sandbox.sandboxPath.absolutePath)));
 }
 
 @("cache.reusesDescriptionsAndRefreshesBuildInputs")
@@ -35,10 +38,9 @@ unittest {
     const recipe = readText(sandbox.inSandboxPath("app/dub.sdl"));
     const directory = sandbox.inSandboxPath("app");
     size_t calls;
-    JSONValue describe() {
+    DubDescription describe() {
         ++calls;
-        const arguments = ["--config=unittest", "--build=unittest"];
-        return JSONValue(["value": recorded, "arguments": JSONValue(arguments)]);
+        return DubDescription(recorded, "unittest");
     }
     void load() { cachedDubDescription(directory, defaultCompiler, null, &describe); }
     load;
@@ -96,10 +98,9 @@ unittest {
     auto recorded = recordedDescription(sandbox, "cached-library");
     const directory = sandbox.inSandboxPath("app");
     size_t calls;
-    JSONValue describe() {
+    DubDescription describe() {
         ++calls;
-        return JSONValue(["value": recorded,
-            "arguments": JSONValue(["--build=debug"])]);
+        return DubDescription(recorded, "library");
     }
     void load() { cachedDubDescription(directory, defaultCompiler, null, &describe); }
 
@@ -115,10 +116,9 @@ unittest {
     auto recorded = recordedDescription(sandbox, "cached-app-with-dependency");
     const directory = sandbox.inSandboxPath("app");
     size_t calls;
-    JSONValue describe() {
+    DubDescription describe() {
         ++calls;
-        return JSONValue(["value": recorded,
-            "arguments": JSONValue(["--build=debug"])]);
+        return DubDescription(recorded, "library");
     }
     void load() { cachedDubDescription(directory, defaultCompiler, null, &describe); }
 
@@ -126,50 +126,6 @@ unittest {
     load;
 
     calls.should == 1;
-}
-
-// dub prints each kind's lines joined by newlines, the kinds joined by one
-// blank line, then a final newline. An empty kind is nothing between two
-// blank lines and must keep its place among the others.
-@("parseDescribeLists.keepsEmptyKindsInPlace")
-unittest {
-    const output =
-        "a.d\nb.d" ~ "\n\n" ~ "-checkaction=context" ~ "\n\n" ~ "" ~ "\n\n"
-        ~ "Have_x" ~ "\n";
-
-    parseDescribeLists(output, 4).should == [
-        ["a.d", "b.d"],
-        ["-checkaction=context"],
-        [],
-        ["Have_x"],
-    ];
-}
-
-
-// Nothing follows the last blank line when the last kind is empty.
-@("parseDescribeLists.trailingEmptyKinds")
-unittest {
-    parseDescribeLists("a.d\n\n\n", 2).should == [["a.d"], []];
-    parseDescribeLists("a.d\n\n\n\n\n", 3).should == [["a.d"], [], []];
-}
-
-
-@("parseDescribeLists.wrongNumberOfListsThrows")
-unittest {
-    parseDescribeLists("a.d\n", 2).shouldThrowWithMessage(
-        "dub describe printed 1 lists, expected 2:\na.d\n",
-    );
-    parseDescribeLists("a.d\n\n\n\n\n", 2).shouldThrowWithMessage(
-        "dub describe printed 3 lists, expected 2:\na.d\n\n\n\n\n",
-    );
-}
-
-
-@("parseDescribeLists.missingFinalNewlineThrows")
-unittest {
-    parseDescribeLists("a.d\n\nb.d", 2).shouldThrowWithMessage(
-        "dub describe output does not end in a newline:\na.d\n\nb.d",
-    );
 }
 
 // The description holds the build arguments that snakebite itself derives,
@@ -183,10 +139,9 @@ unittest {
     sandbox.writeFile("generator-b", "generator b, a different build");
     const directory = sandbox.inSandboxPath("app");
     size_t calls;
-    JSONValue describe() {
+    DubDescription describe() {
         ++calls;
-        return JSONValue(["value": recorded,
-            "arguments": JSONValue(["--build=debug"])]);
+        return DubDescription(recorded, "library");
     }
     void load(in string generator) {
         cachedDubDescription(directory, defaultCompiler, null, &describe,
@@ -203,39 +158,43 @@ unittest {
 }
 
 
-// `dub build` runs with the derived build arguments, so a change in them
-// must rebuild the dependencies even when the description is equal.
-@("dependencyFingerprint.dependsOnBuildArguments")
+// The build of the dependencies asks dub for the configuration and build
+// type of the description, so a change in them must rebuild the dependencies.
+@("dependencyFingerprint.dependsOnBuildType")
 unittest {
     const sandbox = Sandbox();
     const directory = sandbox.inSandboxPath("app");
-    const value = parseJSON(`{"rootPackage": "app", "targets": [], "packages": []}`);
+    ProjectDescription project;
+    project.rootPackage = "app";
 
-    const unittestBuild = dependencyFingerprint(directory,
-        DubDescription(value, ["--config=unittest", "--build=unittest"]));
-    const debugBuild = dependencyFingerprint(directory,
-        DubDescription(value, ["--build=debug"]));
+    auto unittestBuild = DubDescription(project, "unittest");
+    unittestBuild.project.buildType = "unittest";
+    auto debugBuild = DubDescription(project, "library");
+    debugBuild.project.buildType = "debug";
 
-    (unittestBuild != debugBuild).should == true;
+    (dependencyFingerprint(directory, unittestBuild)
+        != dependencyFingerprint(directory, debugBuild)).should == true;
 }
 
 
-// Several threads describe at once, as parallel tests do. Each call gets
-// its own output and not that of a call that runs at the same time.
-@("describe.concurrentCallsKeepTheirOwnOutput")
+// Several threads describe at once, as parallel tests do. dub keeps its
+// compilers in thread-local storage, so each thread needs its own.
+@("describe.concurrentCallsEachHaveCompilers")
 unittest {
     import core.thread: Thread;
-    import snakebite.dub: describeCapturingOutput;
-    import std.conv: text;
 
-    enum threadCount = 6;
-    string[threadCount] outputs;
-    // A function of its own, so that each thread has its own `label`.
+    const sandbox = Sandbox();
+    sandbox.writeFile("app/dub.sdl", "name \"app\"\ntargetType \"library\"\n");
+    sandbox.writeFile("app/source/app.d", "module app;\n");
+    const directory = sandbox.inSandboxPath("app");
+
+    enum threadCount = 4;
+    string[threadCount] roots;
+    // A function of its own, so that each thread has its own `index`.
     Thread startDescribe(in size_t index) {
-        const label = "describe-output-" ~ text(index);
         auto thread = new Thread({
-            outputs[index] = describeCapturingOutput(
-                ["sh", "-c", "echo " ~ label ~ "; sleep 0.3; echo " ~ label], ".").output;
+            roots[index] = dubDescribeProject(directory, [text("Thread", index)])
+                .project.rootPackage;
         });
         thread.start;
         return thread;
@@ -246,44 +205,32 @@ unittest {
         threads ~= startDescribe(index);
     foreach (thread; threads) thread.join;
 
-    foreach (index; 0 .. threadCount) {
-        const label = "describe-output-" ~ text(index);
-        outputs[index].should == label ~ "\n" ~ label ~ "\n";
-    }
+    foreach (root; roots)
+        root.should == "app";
 }
 
 
-// dub prints warnings on stderr; they must not reach the data on stdout
-// that fetchProject parses. `sh -c` stands in for dub; the words after the
-// script are its positional arguments.
-@("fetchProject.keepsStderrOutOfTheProjectDirectory")
+@("fetchProject.usesAPackageThatIsOnDisk")
 unittest {
-    import snakebite.dub: fetchProject;
-
-    fetchProject("package", ["sh", "-c", "echo warning >&2; echo /the/path"])
-        .should == "/the/path";
-}
-
-
-// A pinned version is the one used, also when another version is already
-// cached: the cached 1.0 answers a plain `describe package`, but `package@2.0`
-// is only known after a fetch. `sh -c` stands in for dub; the words after the
-// script are its positional arguments, so `$0` is the dub subcommand and `$1`
-// the package.
-@("fetchProject.pinnedVersionIsFetchedWhenAnotherIsCached")
-unittest {
-    import snakebite.dub: fetchProject;
-
     const sandbox = Sandbox();
-    const fetched = sandbox.inSandboxPath("fetched");
-    const script = `
-        case $0 in
-            fetch) : > ` ~ fetched ~ `;;
-            describe) case $1 in
-                package@2.0) [ -e ` ~ fetched ~ ` ] && echo /cache/package-2.0 || exit 1;;
-                *) echo /cache/package-1.0;;
-            esac;;
-        esac`;
+    sandbox.writeFile(".dub/packages/package/1.0.0/package/dub.sdl",
+        "name \"package\"\nversion \"1.0.0\"\n");
 
-    fetchProject("package@2.0", ["sh", "-c", script]).should == "/cache/package-2.0";
+    fetchProject("package", sandbox.sandboxPath.absolutePath, SkipPackageSuppliers.all)
+        .should == buildPath(sandbox.sandboxPath.absolutePath,
+            ".dub/packages/package/1.0.0/package/");
+}
+
+
+// A pinned version is the one used, also when another version is on disk:
+// the cached 1.0.0 answers a plain `package`, but `package@2.0.0` is only
+// known after a fetch.
+@("fetchProject.pinnedVersionIsFetchedWhenAnotherIsOnDisk")
+unittest {
+    const sandbox = Sandbox();
+    sandbox.writeFile(".dub/packages/package/1.0.0/package/dub.sdl",
+        "name \"package\"\nversion \"1.0.0\"\n");
+
+    fetchProject("package@2.0.0", sandbox.sandboxPath.absolutePath, SkipPackageSuppliers.all)
+        .shouldThrow;
 }

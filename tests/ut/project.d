@@ -9,6 +9,7 @@ import snakebite.backends.backend: Program;
 import snakebite.dependencyimage: TestHooks;
 import snakebite.execution: prepareProject, executeBackend, runProject;
 import snakebite.dub: DubDescription;
+import snakebite.dubcache: projectDescriptionFromJson;
 import snakebite.project:
     dubSourceSetFromDescription, EndsProcess, ProjectDirectory,
     projectStateDirectory;
@@ -43,7 +44,7 @@ unittest {
 
     const directory = buildPath(__FILE__.dirName,
         "../fixtures/dub-package-settings").absolutePath;
-    auto description = DubDescription(parseJSON(`{
+    auto description = DubDescription(projectDescriptionFromJson(parseJSON(`{
         "rootPackage": "root",
         "configuration": "unittest",
         "targets": [],
@@ -63,7 +64,7 @@ unittest {
                 "importPaths": ["source"], "stringImportPaths": []
             }
         ]
-    }`));
+    }`)));
 
     const sources = dubSourceSetFromDescription(directory, description);
 
@@ -82,7 +83,7 @@ unittest {
 
     const directory = buildPath(__FILE__.dirName,
         "../fixtures/dub-package-settings").absolutePath;
-    auto description = DubDescription(parseJSON(`{
+    auto description = DubDescription(projectDescriptionFromJson(parseJSON(`{
         "rootPackage": "root",
         "configuration": "unittest",
         "targets": [],
@@ -97,7 +98,7 @@ unittest {
                 "versions": [], "lflags": [], "libs": []
             }
         ]
-    }`));
+    }`)));
 
     const sources = dubSourceSetFromDescription(directory, description);
 
@@ -123,7 +124,7 @@ unittest {
 
     const directory = buildPath(__FILE__.dirName,
         "../fixtures/dub-package-settings").absolutePath;
-    auto description = DubDescription(parseJSON(`{
+    auto description = DubDescription(projectDescriptionFromJson(parseJSON(`{
         "rootPackage": "root",
         "configuration": "unittest",
         "packages": [{"name": "root", "path": "` ~ directory ~ `"}],
@@ -139,7 +140,7 @@ unittest {
                 "workingDirectory": "/data"
             }
         }]
-    }`));
+    }`)));
 
     dubSourceSetFromDescription(directory, description)
         .workingDirectory.should == "/data";
