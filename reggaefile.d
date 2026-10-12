@@ -238,16 +238,19 @@ DubInfo withLdcFrontend(DubInfo info, in string compiler, in CompilerProbe probe
 
     const prefix = "dmd-" ~ pin ~ "-ldc-";
     const patches = buildPath(getcwd, "vendor", "ldc-frontend");
-    auto candidates = dirEntries(patches, SpanMode.shallow)
-        .filter!(entry => entry.isDir && entry.name.baseName.startsWith(prefix));
-    enforce(!candidates.empty,
-        "there is no patch of LDC's additions for the dmd frontend " ~ pin
-        ~ " (vendor/ldc-frontend/" ~ prefix ~ "*), and " ~ compiler ~ " is LDC " ~ ldcVersion[1]);
-    const patchDirectory = candidates.front.name;
-    const patchLdcVersion = patchDirectory.baseName[prefix.length .. $];
-    enforce(patchLdcVersion == ldcVersion[1],
-        "the patch of LDC's additions for the dmd frontend " ~ pin ~ " is for LDC "
-        ~ patchLdcVersion ~ " but " ~ compiler ~ " is LDC " ~ ldcVersion[1]);
+    const patchDirectory = buildPath(patches, prefix ~ ldcVersion[1]);
+    if (!patchDirectory.exists || !patchDirectory.isDir) {
+        import std.array: join;
+
+        auto others = dirEntries(patches, SpanMode.shallow)
+            .filter!(entry => entry.isDir && entry.name.baseName.startsWith(prefix))
+            .map!(entry => entry.name.baseName[prefix.length .. $]).array;
+        enforce(others.length,
+            "there is no patch of LDC's additions for the dmd frontend " ~ pin
+            ~ " (vendor/ldc-frontend/" ~ prefix ~ "*), and " ~ compiler ~ " is LDC " ~ ldcVersion[1]);
+        throw new Exception("the patch of LDC's additions for the dmd frontend " ~ pin
+            ~ " is for LDC " ~ others.join(", ") ~ " but " ~ compiler ~ " is LDC " ~ ldcVersion[1]);
+    }
 
     const frontendPackages = info.packages.filter!(a => a.name.startsWith("dmd:")).array;
     enforce(frontendPackages.length, "no dmd:* package in the dub description");
