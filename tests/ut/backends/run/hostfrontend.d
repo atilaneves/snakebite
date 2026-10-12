@@ -31,52 +31,48 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// `__traits(targetCPU)` and `__traits(targetHasFeature)` exist in LDC only.
-static foreach (backend; Matrix!()) {
-    @("hostFrontend.targetTraits." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            version (LDC) {
+// `__traits(targetCPU)` and `__traits(targetHasFeature)` exist in LDC only,
+// so the tests of this part exist in a host built by LDC only.
+version (LDC) {
+    static foreach (backend; Matrix!()) {
+        @("hostFrontend.targetTraits." ~ backend.stringof)
+        @Tags(backend.stringof)
+        unittest {
+            0.shouldBeStatusOf!(backend, q{
                 static assert(__traits(targetCPU).length > 0);
                 static assert(__traits(targetHasFeature, "sse2"));
-            }
 
-            void main() {}
-        });
+                void main() {}
+            });
+        }
     }
-}
 
-// LDC's `core.simd` has the 64-byte vector types on any x86-64 CPU; the
-// functions of `ldc.gccbuiltins_x86` take them.
-static foreach (backend; Matrix!()) {
-    @("hostFrontend.vector64.gccBuiltins." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            version (LDC) {
+    // LDC's `core.simd` has the 64-byte vector types on any x86-64 CPU; the
+    // functions of `ldc.gccbuiltins_x86` take them.
+    static foreach (backend; Matrix!()) {
+        @("hostFrontend.vector64.sizeofIs64Bytes." ~ backend.stringof)
+        @Tags(backend.stringof)
+        unittest {
+            0.shouldBeStatusOf!(backend, q{
                 import core.simd: long8;
 
                 static assert(long8.sizeof == 64);
-            }
 
-            void main() {}
-        });
+                void main() {}
+            });
+        }
     }
-}
 
-// LDC has 32-byte vector types on any x86-64 CPU, so a program built for LDC
-// may use them. dmd has them only when the CPU has AVX; the program is
-// empty for it.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "dmd's own CTFE cannot evaluate vector arithmetic"),
-)) {
-    @("vector32.arithmeticAndStorage." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            version (LDC) {
+    // LDC has 32-byte vector types on any x86-64 CPU. dmd has them only when
+    // the CPU has AVX.
+    static foreach (backend; Matrix!(
+        Omit!(Ctfe, Because.inexpressible,
+            "dmd's own CTFE cannot evaluate vector arithmetic"),
+    )) {
+        @("vector32.arithmeticAndStorage." ~ backend.stringof)
+        @Tags(backend.stringof)
+        unittest {
+            0.shouldBeStatusOf!(backend, q{
                 import core.simd: float8;
 
                 float8 twice(float8 value) {
@@ -99,10 +95,8 @@ static foreach (backend; Matrix!(
                     const copy = boxed;
                     assert(copy.value[3] == 3 && copy.after == 2);
                 }
-            } else {
-                void main() {}
-            }
-        });
+            });
+        }
     }
 }
 
