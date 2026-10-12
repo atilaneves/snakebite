@@ -537,56 +537,56 @@ public struct CallSelection {
     // The rest of this struct is dmd's code generator reproduced for a host
     // built by dmd. An LDC host takes `ldcintrinsics`.
     version (DigitalMars) {
-    // DMD's backend constant folder (`evalu8`, OPbswap) uses the operand
-    // width; `cdbswap` uses the result width for a nonconstant operand.
-    // The call site must keep that distinction before argument evaluation.
-    private bool foldedIntegerIntrinsic(
-        imported!"dmd.expression".CallExp expression, out ulong value,
-    ) {
-        import core.bitop: popcnt;
-        import core.stdc.fenv;
-        import snakebite.backends.dmdintrinsics: swapTo;
-        import snakebite.nativelayout: TypeFacts;
+        // DMD's backend constant folder (`evalu8`, OPbswap) uses the operand
+        // width; `cdbswap` uses the result width for a nonconstant operand.
+        // The call site must keep that distinction before argument evaluation.
+        private bool foldedIntegerIntrinsic(
+            imported!"dmd.expression".CallExp expression, out ulong value,
+        ) {
+            import core.bitop: popcnt;
+            import core.stdc.fenv;
+            import snakebite.backends.dmdintrinsics: swapTo;
+            import snakebite.nativelayout: TypeFacts;
 
-        auto function_ = expression.f;
-        if (function_ is null || function_.fbody !is null
-                || !hasIntrinsicCallee(expression)
-                || expression.arguments is null
-                || expression.arguments.length != 1)
-            return false;
-        const identifier = function_.ident.toString;
-        if (identifier != "bswap" && identifier != "_popcnt")
-            return false;
-        const name = identifier == "bswap" ? "bswap" : "_popcnt";
-        auto operand = (*expression.arguments)[0];
-        const plan = intrinsicPlanOf(function_);
-        if (plan.call.route != Route.builtin || plan.parameters.length != 1)
-            return false;
+            auto function_ = expression.f;
+            if (function_ is null || function_.fbody !is null
+                    || !hasIntrinsicCallee(expression)
+                    || expression.arguments is null
+                    || expression.arguments.length != 1)
+                return false;
+            const identifier = function_.ident.toString;
+            if (identifier != "bswap" && identifier != "_popcnt")
+                return false;
+            const name = identifier == "bswap" ? "bswap" : "_popcnt";
+            auto operand = (*expression.arguments)[0];
+            const plan = intrinsicPlanOf(function_);
+            if (plan.call.route != Route.builtin || plan.parameters.length != 1)
+                return false;
 
-        // Native compilation uses its own FP environment. A proof must
-        // neither depend on nor change the guest's rounding or flags.
-        fenv_t environment;
-        if (feholdexcept(&environment) != 0)
-            return false;
-        scope(exit) fesetenv(&environment);
-        fesetround(FE_TONEAREST);
-        ulong bits;
-        if (!integerConstantOf(operand, bits))
-            return false;
+            // Native compilation uses its own FP environment. A proof must
+            // neither depend on nor change the guest's rounding or flags.
+            fenv_t environment;
+            if (feholdexcept(&environment) != 0)
+                return false;
+            scope(exit) fesetenv(&environment);
+            fesetround(FE_TONEAREST);
+            ulong bits;
+            if (!integerConstantOf(operand, bits))
+                return false;
 
-        switch (typeFacts(operand.type).size) {
-            case 2:
-                value = name == "bswap" ? swapTo!ushort(bits)
-                    : popcnt(cast(ushort) bits); break;
-            case 4:
-                value = name == "bswap" ? swapTo!uint(bits)
-                    : popcnt(cast(uint) bits); break;
-            case 8:
-                value = name == "bswap" ? swapTo!ulong(bits)
-                    : popcnt(bits); break;
-            default: return false;
-        }
-        return true;
+            switch (typeFacts(operand.type).size) {
+                case 2:
+                    value = name == "bswap" ? swapTo!ushort(bits)
+                        : popcnt(cast(ushort) bits); break;
+                case 4:
+                    value = name == "bswap" ? swapTo!uint(bits)
+                        : popcnt(cast(uint) bits); break;
+                case 8:
+                    value = name == "bswap" ? swapTo!ulong(bits)
+                        : popcnt(bits); break;
+                default: return false;
+            }
+            return true;
     }
 
     private bool integerConstantOf(

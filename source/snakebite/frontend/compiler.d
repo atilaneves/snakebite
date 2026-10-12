@@ -68,10 +68,10 @@ public imported!"dmd.dmodule".Module[] parseRootModules(
     in string[] filePaths,
     in string[] importPaths,
     in FrontendFlags flags,
+    in bool dependencyImage,
     in string[string] sourceOverrides = null,
     in string rootDirectory = null,
     in bool importedCFilesAreRoots = false,
-    in bool dependencyImage = true,
 ) {
     return compiler.parseRootModules(
         filePaths,
@@ -95,11 +95,21 @@ public imported!"dmd.dmodule".Module[] parseRootModules(
 // the parse needs them.
 public imported!"dmd.dmodule".Module parseSnippet(
     in string source,
-    in string[] rootImportPaths = null,
-    in FrontendFlags flags = FrontendFlags.init,
-    in bool dependencyImage = false,
+    in string[] rootImportPaths,
+    in FrontendFlags flags,
+    in bool dependencyImage,
 ) {
     return compiler.parseSnippet(source, rootImportPaths, flags, dependencyImage);
+}
+
+// A snippet of a test binary: no dependency image will exist for it.
+public imported!"dmd.dmodule".Module parseSnippet(
+    in string source,
+    in string[] rootImportPaths = null,
+    in FrontendFlags flags = FrontendFlags.init,
+) {
+    const noDependencyImage = false;
+    return parseSnippet(source, rootImportPaths, flags, noDependencyImage);
 }
 
 // Parse several whole guest programs, driving the shared semantic phases
@@ -528,6 +538,9 @@ final class Compiler {
         import snakebite.frontend.hostcompiler: hostCompiler, hostImportPaths;
 
         const host = hostCompiler;
+        // Outside `inside`: it reads files and may throw for the user's
+        // environment, and the result is copied into the arena below.
+        const importPaths = hostImportPaths(host);
 
         inside({
             initializeDmdState(snippets, host, importPaths);
@@ -538,9 +551,6 @@ final class Compiler {
     // Runs `work`, which is dmd code or this module's own code around
     // it, inside the frontend: under the lock, with every allocation of
     // this thread from the frontend arena (`snakebite.gc`), the way dmd
-        // Outside `inside`: it reads files and may throw for the user's
-        // environment, and the result is copied into the arena below.
-        const importPaths = hostImportPaths(host);
     // allocates. What `work` returns is arena memory, which is never
     // freed, so host code may keep it. An exception is made again
     // outside, so the host never gets an arena object that druntime's
@@ -598,6 +608,7 @@ final class Compiler {
     private void initializeDmdState(
         in Snippets snippets,
         in imported!"snakebite.frontend.hostcompiler".HostCompiler host,
+        in string[] importPaths,
     ) {
         import dmd.common.charactertables:
             IdentifierCharLookup,
@@ -607,7 +618,6 @@ final class Compiler {
         import dmd.globals: global;
         import dmd.cond: VersionCondition;
         import dmd.target: CPU, target;
-        in string[] importPaths,
         import snakebite.frontend.importc: preprocessCFile;
         import std.algorithm.iteration: each;
 
@@ -1048,7 +1058,11 @@ final class Compiler {
             freshModules ~= result.module_;
         }
 
-        driveSharedSemantic(freshModules, null, false);
+        driveSharedSemantic(
+            freshModules,
+            null, // rootImportPaths
+            false, // dependencyImage
+        );
         if (global.errors != 0)
             throw new Exception(diagnosticMessage);
 

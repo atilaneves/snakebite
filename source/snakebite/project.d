@@ -39,7 +39,7 @@ public struct Project {
 public Project loadProject(
     in string directory,
     SourceSet sources,
-    in bool dependencyImage = true,
+    in bool dependencyImage,
 ) {
     import snakebite.backends: Program;
     import snakebite.frontend.compiler:
@@ -62,10 +62,10 @@ public Project loadProject(
         project.sources.files,
         project.sources.importPaths,
         flags,
+        dependencyImage,
         project.sources.sourceOverrides,
         project.directory,
         project.sources.importedCFilesAreRoots,
-        dependencyImage,
     );
     project.program = Program(parsed, project.name, checksOf(flags));
 
@@ -362,9 +362,10 @@ public const(imported!"snakebite.dependencyimage".DependencyImage)* prepareStart
 ) {
     import snakebite.frontend.compiler: withScratchFrontend;
 
+    const buildsDependencyImage = true;
     return prepareDependencies(directory, sources,
         () => withScratchFrontend(
-            () => dependencyAnalysis(loadProject(directory, sources).program)),
+            () => dependencyAnalysis(loadProject(directory, sources, buildsDependencyImage).program)),
         optimise, false);
 }
 

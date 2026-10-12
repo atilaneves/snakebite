@@ -87,15 +87,15 @@ public BuiltinCall volatileStoreEntryOf(in size_t size) nothrow @nogc {
     }
 }
 
-alias Integers = imported!"std.meta".AliasSeq!(ubyte, ushort, uint, ulong);
+private alias Integers = imported!"std.meta".AliasSeq!(ubyte, ushort, uint, ulong);
 // `core.atomic` takes a `Cent` for any type of 16 bytes. The read-modify-write
 // operations stop at the size of a pointer (`AtomicRmwSizeLimit`).
-alias AtomicTypes = imported!"std.meta".AliasSeq!(ubyte, ushort, uint, ulong, Cent);
-enum readModifyWriteOperations = [
+private alias AtomicTypes = imported!"std.meta".AliasSeq!(ubyte, ushort, uint, ulong, Cent);
+private enum readModifyWriteOperations = [
     "xchg", "add", "sub", "and", "nand", "or", "xor", "max", "min", "umax", "umin",
 ];
 
-struct Row {
+private struct Row {
     string name;
     BuiltinCall call;
 }
@@ -103,12 +103,12 @@ struct Row {
 // The scalar types that an intrinsic template is tried with, `bool` among
 // them (LLVM's `i1`). A template that a type does not satisfy has no
 // instance.
-alias Scalars = imported!"std.meta".AliasSeq!(
+private alias Scalars = imported!"std.meta".AliasSeq!(
     float, double, real, bool, ubyte, ushort, uint, ulong,
 );
 
 // The length of a copy is not an `i1`.
-template takesType(string name, T) {
+private template takesType(string name, T) {
     enum takesType = !(is(T == bool)
         && (name == "llvm_memcpy" || name == "llvm_memmove" || name == "llvm_memset"));
 }
@@ -116,13 +116,13 @@ template takesType(string name, T) {
 // The parameters that LLVM wants as constants, by intrinsic name: the
 // position and the number of values. The wrapper chooses the call with the
 // constant that the argument holds.
-struct Constants {
+private struct Constants {
     string name;
     size_t[] positions;
     size_t[] domains;
 }
 
-enum constants = [
+private enum constants = [
     Constants("llvm.ctlz", [1], [2]),
     Constants("llvm.cttz", [1], [2]),
     Constants("llvm.prefetch", [1, 2, 3], [2, 4, 2]),
@@ -131,7 +131,7 @@ enum constants = [
     Constants("llvm.memset", [3], [2]),
 ];
 
-template constantsOf(string llvmName) {
+private template constantsOf(string llvmName) {
     enum constantsOf = () {
         foreach (entry; constants)
             if (llvmName.length >= entry.name.length
@@ -141,7 +141,7 @@ template constantsOf(string llvmName) {
     }();
 }
 
-immutable(Row)[] intrinsicRows = () {
+private immutable(Row)[] intrinsicRows = () {
     Row[] rows;
     static foreach (memberName; __traits(allMembers, ldc.intrinsics)) {
         static if (memberName.length > 5 && memberName[0 .. 5] == "llvm_") {
@@ -174,7 +174,7 @@ immutable(Row)[] intrinsicRows = () {
 // (LDC leaves the overloaded name unmangled, and LLVM's verifier ends the
 // compilation), and `llvm_pcmarker` has no instruction selection on x86.
 // `llvm_is_fpclass` has a wrapper of its own below.
-bool hasNoWrapper(in string name) {
+private bool hasNoWrapper(in string name) {
     if (name.length > 12 && name[0 .. 12] == "llvm_atomic_" || name == "llvm_memory_fence")
         return true;
     switch (name) {
@@ -191,7 +191,7 @@ bool hasNoWrapper(in string name) {
 // The mask of `llvm.is.fpclass` is an immediate of ten bits, one for each
 // class, and the result is true when the value is in any class that the mask
 // names: one call for each bit gives the same answer.
-extern(C) void isFpclass(Float)(
+private extern(C) void isFpclass(Float)(
     void* returnPlace, scope const(void*)* arguments, size_t,
 ) nothrow @nogc {
     import core.stdc.string: memcpy;
@@ -206,14 +206,14 @@ extern(C) void isFpclass(Float)(
     *cast(bool*) returnPlace = result;
 }
 
-alias member(string name) = __traits(getMember, ldc.intrinsics, name);
+private alias member(string name) = __traits(getMember, ldc.intrinsics, name);
 
-template instance(string name, Scalar) {
+private template instance(string name, Scalar) {
     alias M = member!name;
     alias instance = M!Scalar;
 }
 
-extern(C) void entry(string key, alias intrinsic)(
+private extern(C) void entry(string key, alias intrinsic)(
     void* returnPlace, scope const(void*)* arguments, size_t argumentCount,
 ) nothrow @nogc {
     import core.stdc.string: memcpy;
@@ -236,7 +236,7 @@ extern(C) void entry(string key, alias intrinsic)(
     }
 }
 
-auto invoke(alias intrinsic, size_t[] positions, size_t[] domains, size_t[] chosen = [], Params...)(
+private auto invoke(alias intrinsic, size_t[] positions, size_t[] domains, size_t[] chosen = [], Params...)(
     ref Params values,
 ) {
     static if (chosen.length == positions.length) {
@@ -267,7 +267,7 @@ auto invoke(alias intrinsic, size_t[] positions, size_t[] domains, size_t[] chos
     }
 }
 
-string digits(size_t value) {
+private string digits(size_t value) {
     string result;
     do {
         result = cast(char) ('0' + value % 10) ~ result;
@@ -278,25 +278,25 @@ string digits(size_t value) {
 
 // The orderings that LLVM accepts for an access, as constants. `Consume`
 // has the strength of `Acquire`.
-enum loadOrderings = [
+private enum loadOrderings = [
     AtomicOrdering.Unordered, AtomicOrdering.Monotonic, AtomicOrdering.Acquire,
     AtomicOrdering.SequentiallyConsistent,
 ];
-enum storeOrderings = [
+private enum storeOrderings = [
     AtomicOrdering.Unordered, AtomicOrdering.Monotonic, AtomicOrdering.Release,
     AtomicOrdering.SequentiallyConsistent,
 ];
-enum updateOrderings = [
+private enum updateOrderings = [
     AtomicOrdering.Monotonic, AtomicOrdering.Acquire, AtomicOrdering.Release,
     AtomicOrdering.AcquireRelease, AtomicOrdering.SequentiallyConsistent,
 ];
-enum failureOrderings = [
+private enum failureOrderings = [
     AtomicOrdering.Monotonic, AtomicOrdering.Acquire,
     AtomicOrdering.SequentiallyConsistent,
 ];
 
 // A value in a frame slot is not always aligned as its type is.
-T fetch(T)(const(void)* place) nothrow @nogc {
+private T fetch(T)(const(void)* place) nothrow @nogc {
     import core.stdc.string: memcpy;
 
     T value;
@@ -304,13 +304,13 @@ T fetch(T)(const(void)* place) nothrow @nogc {
     return value;
 }
 
-void store(T)(void* place, in T value) nothrow @nogc {
+private void store(T)(void* place, in T value) nothrow @nogc {
     import core.stdc.string: memcpy;
 
     memcpy(place, &value, T.sizeof);
 }
 
-extern(C) void atomicLoad(Unsigned)(
+private extern(C) void atomicLoad(Unsigned)(
     void* returnPlace, scope const(void*)* arguments, size_t,
 ) nothrow @nogc {
     auto pointer = cast(shared(Unsigned)*) *cast(void**) arguments[0];
@@ -326,7 +326,7 @@ extern(C) void atomicLoad(Unsigned)(
     }
 }
 
-extern(C) void atomicStore(Unsigned)(
+private extern(C) void atomicStore(Unsigned)(
     void*, scope const(void*)* arguments, size_t,
 ) nothrow @nogc {
     const value = fetch!Unsigned(arguments[0]);
@@ -340,7 +340,7 @@ extern(C) void atomicStore(Unsigned)(
     }
 }
 
-extern(C) void atomicCompareExchange(Unsigned)(
+private extern(C) void atomicCompareExchange(Unsigned)(
     void* returnPlace, scope const(void*)* arguments, size_t,
 ) nothrow @nogc {
     auto pointer = cast(shared(Unsigned)*) *cast(void**) arguments[0];
@@ -359,7 +359,7 @@ extern(C) void atomicCompareExchange(Unsigned)(
     internalFailure("atomic compare-exchange ordering");
 }
 
-template Signed(Unsigned) {
+private template Signed(Unsigned) {
     static if (is(Unsigned == ubyte))
         alias Signed = byte;
     else static if (is(Unsigned == ushort))
@@ -370,7 +370,7 @@ template Signed(Unsigned) {
         alias Signed = long;
 }
 
-extern(C) void atomicReadModifyWrite(string operation, Unsigned)(
+private extern(C) void atomicReadModifyWrite(string operation, Unsigned)(
     void* returnPlace, scope const(void*)* arguments, size_t,
 ) nothrow @nogc {
     static if (operation == "max" || operation == "min")
@@ -389,7 +389,7 @@ extern(C) void atomicReadModifyWrite(string operation, Unsigned)(
     internalFailure("atomic read-modify-write ordering");
 }
 
-extern(C) void fence(void*, scope const(void*)* arguments, size_t) nothrow @nogc {
+private extern(C) void fence(void*, scope const(void*)* arguments, size_t) nothrow @nogc {
     const ordering = *cast(const(int)*) arguments[0];
     const scope_ = *cast(const(int)*) arguments[1];
     static foreach (o; updateOrderings)
@@ -401,7 +401,7 @@ extern(C) void fence(void*, scope const(void*)* arguments, size_t) nothrow @nogc
     internalFailure("fence ordering");
 }
 
-extern(C) void volatileLoad(Unsigned)(
+private extern(C) void volatileLoad(Unsigned)(
     void* returnPlace, scope const(void*)* arguments, size_t,
 ) nothrow @nogc {
     import core.volatile: volatileLoad;
@@ -409,7 +409,7 @@ extern(C) void volatileLoad(Unsigned)(
     *cast(Unsigned*) returnPlace = volatileLoad(*cast(Unsigned**) arguments[0]);
 }
 
-extern(C) void volatileStore(Unsigned)(
+private extern(C) void volatileStore(Unsigned)(
     void*, scope const(void*)* arguments, size_t,
 ) nothrow @nogc {
     import core.volatile: volatileStore;
