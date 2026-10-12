@@ -22,11 +22,11 @@ public struct GuestPosition {
     public size_t line;
 }
 
-// What a backend registers while guest code runs on a native stack of its
-// own: a Fiber and a thread each have one, and they run in turn. The
-// handler picks the entry whose stack it runs on, so that each reports its
-// own position. `position` runs inside the signal handler, so it must read
-// state that already exists and nothing else.
+// What a backend registers while guest code runs: a Fiber and a thread each
+// have a run, and they run in turn. The handler picks the entry whose stack
+// it runs on, so that each reports its own position. `position` runs inside
+// the signal handler, so it must read state that already exists and nothing
+// else.
 public struct GuestRun {
     public alias Position = GuestPosition function(void* context)
         nothrow @nogc;

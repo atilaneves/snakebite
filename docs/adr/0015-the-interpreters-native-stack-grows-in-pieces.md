@@ -41,8 +41,10 @@ memory only.
   it again. The same object arrives at the guest `catch`.
 - A finished piece goes to a free list of two for each thread. A piece that
   does not fit is destroyed, and druntime unmaps its stack. In a GC
-  finalizer, `new` is not possible, so the walker uses a free piece, or
-  runs in place when there is none.
+  finalizer, `new` is not possible. Each thread keeps one more piece in
+  reserve, made at the first entry outside a finalizer. A guest destructor
+  that the collector runs takes a free piece, or the reserve. When it needs
+  more, the run stops with a message that says so.
 - State that is local to a Fiber, such as the execution state, is looked up
   by the Fiber that the piece continues, or by the thread, and not by the
   piece (`Continuation` in `hostthreads.d`). Host code that runs on a piece,
@@ -108,3 +110,6 @@ These limits remain:
 7. Guest signal handlers on an alternate stack, `pthread_exit` and
    `pthread_cancel` in guest code, and a guest `Fiber` that moves to another
    thread while it has pieces are not supported and were not run.
+8. A guest destructor that the collector runs has one reserve piece and the
+   free pieces, and no more. A destructor that recurses past them stops the
+   run with a message.

@@ -837,7 +837,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 _frames.release(frameMark);
         }
         _frames.backendEntry = &entry;
-        _stack.enter;
+        const stackEntry = _stack.enter;
         _guestRun = GuestRun(
             cast(void*) this, &guestPosition,
             // The lower end of the native stack that the walker runs on is

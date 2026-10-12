@@ -8,8 +8,8 @@ import core.thread.fiber: Fiber;
 import snakebite.hostthreads: Continuation;
 
 
-enum pieceBytes = 1024 * 1024;
-enum freePieceCount = 2;
+private enum pieceBytes = 1024 * 1024;
+private enum freePieceCount = 2;
 
 
 // The walker runs on the native stack that it is entered on, the base.
@@ -22,27 +22,41 @@ public struct StackPieces {
     // A guest call starts at an address at or above this one. Zero: no limit.
     public size_t limit;
 
-    private size_t _baseLimit;
     private Piece _current;
 
-    // The walker is entered at the top level on the current stack.
-    public void enter() @system {
-        limit = _baseLimit = limitOfCurrentStack;
+    // The walker is entered from host code, on the stack that the host code
+    // runs on. The limit is the one of that stack again when the entry
+    // ends. An entry on a piece (a destructor that a collection runs there)
+    // keeps the limit of the piece.
+    public Entry enter() @system {
+        import core.memory: GC;
+
+        if (!GC.inFinalizer && _reserve is null)
+            _reserve = new Piece;
+        const outer = limit;
+        if (_current is null)
+            limit = limitOfCurrentStack;
+        return Entry(&this, outer);
+    }
+
+    public struct Entry {
+        private StackPieces* _stack;
+        private size_t _outer;
+
+        @disable this(this);
+
+        public ~this() @safe @nogc nothrow pure {
+            _stack.limit = _outer;
+        }
     }
 
     // Runs `work` with fresh stack under it.
     public void continueOnNewPiece(scope void delegate() work) @system {
-        import core.memory: GC;
-
-        if (GC.inFinalizer && !hasFreePiece) {
-            work();
-            return;
-        }
         if (_current is null) {
             drive(work);
             return;
         }
-        resumeBaseWith(_current, work, true);
+        resumeBaseWith(_current, work, Deeper.yes);
     }
 
     // Runs a host call on the base.
@@ -51,16 +65,18 @@ public struct StackPieces {
             call();
             return;
         }
-        resumeBaseWith(_current, call, false);
+        resumeBaseWith(_current, call, Deeper.no);
     }
+
+    private enum Deeper { no, yes }
 
     private void resumeBaseWith(
         Piece piece,
         scope void delegate() request,
-        in bool deeper,
+        in Deeper deeper,
     ) @system {
         piece.request = request;
-        piece.deeper = deeper;
+        piece.deeper = deeper == Deeper.yes;
         Fiber.yield;
         auto thrown = piece.incoming;
         if (thrown is null)
@@ -110,7 +126,7 @@ public struct StackPieces {
                 break;
             }
         if (piece is null)
-            piece = new Piece;
+            piece = takeReserveOrNew;
         piece.stack = &this;
         piece.of = Fiber.getThis;
         piece.below = below;
@@ -121,15 +137,15 @@ public struct StackPieces {
 
 
 private final class Piece: Continuation {
-    StackPieces* stack;
-    size_t limit;
-    Piece below;
-    void delegate() work;
-    void delegate() request;
-    bool deeper;
-    Throwable incoming;
+    public StackPieces* stack;
+    public size_t limit;
+    public Piece below;
+    public void delegate() work;
+    public void delegate() request;
+    public bool deeper;
+    public Throwable incoming;
 
-    this() {
+    public this() {
         super(&run, pieceBytes);
     }
 
@@ -143,13 +159,24 @@ private final class Piece: Continuation {
 
 
 private Piece[freePieceCount] _free;
+// Made by `enter` outside a finalizer. A finalizer cannot allocate, and
+// a destructor that the collector runs always needs a piece to recurse on.
+private Piece _reserve;
 
 
-private bool hasFreePiece() @safe @nogc nothrow {
-    foreach (piece; _free)
-        if (piece !is null)
-            return true;
-    return false;
+private Piece takeReserveOrNew() @system {
+    import core.memory: GC;
+    import snakebite.internalfailure: internalFailure;
+
+    if (!GC.inFinalizer)
+        return new Piece;
+    if (_reserve is null)
+        internalFailure(
+            "A guest destructor that the collector runs needs more stack "
+            ~ "than the one piece that is kept for it");
+    auto piece = _reserve;
+    _reserve = null;
+    return piece;
 }
 
 
@@ -159,9 +186,13 @@ private void give(Piece piece) @system {
     piece.below = null;
     piece.work = null;
     piece.request = null;
+    piece.reset;
+    if (_reserve is null) {
+        _reserve = piece;
+        return;
+    }
     foreach (ref slot; _free)
         if (slot is null) {
-            piece.reset;
             slot = piece;
             return;
         }
@@ -170,8 +201,8 @@ private void give(Piece piece) @system {
 
 
 private struct Bounds {
-    size_t low;
-    size_t high;
+    public size_t low;
+    public size_t high;
 }
 
 
@@ -208,7 +239,7 @@ private Bounds boundsOfThisThread() @system {
 }
 
 
-// glibc's, and not in druntime's bindings.
+// glibc's, and not in druntime's public bindings.
 private extern(C) int pthread_getattr_np(
     imported!"core.sys.posix.sys.types".pthread_t,
     imported!"core.sys.posix.pthread".pthread_attr_t*,

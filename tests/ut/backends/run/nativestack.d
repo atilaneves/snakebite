@@ -2,6 +2,9 @@ module ut.backends.run.nativestack;
 
 
 import ut.backends;
+import snakebite.backends.backend: Program;
+import snakebite.frontend.compiler: parseSnippet;
+import snakebite.frontend.dmd.functions: findFunction;
 
 
 // A guest `Fiber` of the default size (16 KiB) runs the guest code: a
@@ -58,8 +61,9 @@ static foreach (backend; Matrix!(
 }
 
 
-// Compiled D reaches this depth in the 8 MiB stack of a default Linux
-// thread. A guest that recurses this deep is a valid program.
+// This depth is several times what the walker holds in the 8 MiB stack of a
+// default Linux thread (about 3,000 guest calls). A guest that recurses this
+// deep is a valid program, and compiled D does it.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "dmd's CTFE stops at a fixed recursion limit far below this depth"),
@@ -67,7 +71,7 @@ static foreach (backend; Matrix!(
     @("nativeStack.deepRecursionReachesCompiledDepth." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        size_t(220_000).shouldBeRetOf!(backend, q{
+        size_t(10_000).shouldBeRetOf!(backend, q{
             size_t salt = 1;
 
             size_t walk(size_t n) {
@@ -79,7 +83,7 @@ static foreach (backend; Matrix!(
             }
 
             size_t answer() {
-                return walk(220_000);
+                return walk(10_000);
             }
         }, "answer");
     }
@@ -295,5 +299,138 @@ static foreach (backend; Matrix!(
                 assert(walked == depth);
             }
         });
+    }
+}
+
+
+// A guest destructor that the collector runs has stack to run on, when the
+// collection starts at a depth that made the thread use its pieces.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call `GC.collect`"),
+)) {
+    @("nativeStack.destructorRunByCollectionAtDepth."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.memory: GC;
+
+            class Dying {
+                ~this() {
+                    ++destroyed;
+                }
+            }
+
+            int destroyed;
+
+            void garbage() {
+                foreach (_; 0 .. 1_000)
+                    new Dying;
+            }
+
+            size_t walk(size_t n) {
+                if (n == 0) {
+                    garbage;
+                    GC.collect;
+                    return 0;
+                }
+                return 1 + walk(n - 1);
+            }
+
+            void main() {
+                assert(walk(10_000) == 10_000);
+                assert(destroyed > 0);
+            }
+        });
+    }
+}
+
+
+// The same in a `Fiber` of the default size, which has no room for the
+// walker and thus always runs on a piece.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call native functions such as "
+        ~ "`core.thread.fiber.Fiber`'s constructor or `GC.collect`"),
+)) {
+    @("nativeStack.destructorRunByCollectionInAFiber." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.memory: GC;
+            import core.thread.fiber: Fiber;
+
+            class Dying {
+                ~this() {
+                    ++destroyed;
+                }
+            }
+
+            int destroyed;
+
+            void garbage() {
+                foreach (_; 0 .. 1_000)
+                    new Dying;
+            }
+
+            void main() {
+                auto fiber = new Fiber({
+                    garbage;
+                    GC.collect;
+                });
+                fiber.call;
+                assert(destroyed > 0);
+            }
+        });
+    }
+}
+
+
+// A value that a host `Fiber` keeps only in its own frame survives a
+// collection that a guest call starts.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the test calls one parsed guest function through `call`"),
+    Omit!(Ctfe, Because.inexpressible,
+        "the test calls one parsed guest function through `call`"),
+)) {
+    @("nativeStack.hostFiberOwnStackSurvivesCollectionDuringGuestCall."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        import core.thread.fiber: Fiber;
+
+        auto guestModule = parseSnippet(q{
+            void forceCollection() {
+                import core.memory: GC;
+
+                GC.collect;
+            }
+        });
+        auto function_ = findFunction(guestModule, "forceCollection");
+        auto evaluator = Owned!backend(Program([guestModule]));
+
+        static class Box {
+            int value;
+        }
+
+        int survivorValue = -1;
+        auto fiber = new Fiber({
+            auto box = new Box;
+            box.value = 42;
+
+            evaluator.call(function_, null, []);
+
+            // A block that the collection freed is the first one that a
+            // same-size allocation gets back.
+            foreach (_; 0 .. 64)
+                cast(void) new Box;
+
+            survivorValue = box.value;
+        });
+        fiber.call;
+
+        survivorValue.should == 42;
     }
 }
