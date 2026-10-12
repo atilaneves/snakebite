@@ -157,15 +157,6 @@ import snakebite.faulthandler: GuestPosition, GuestRun, register, unregister;
 // entry, and kept until it ends. A free function, because a member that
 // takes a closure as an alias parameter needs two contexts.
 private auto onEvaluator(alias action)(Interpreter interpreter) {
-    import snakebite.backends.interpreter.stackpieces: StackPieces;
-
-    // Host code that runs on a piece, such as a destructor that the
-    // collector calls, belongs to the evaluator that owns the piece.
-    if (auto owner = StackPieces.ownerOfCurrentPiece) {
-        if (interpreter._checksNullDeref)
-            return action(cast(Evaluator!true) owner);
-        return action(cast(Evaluator!false) owner);
-    }
     if (interpreter._checksNullDeref)
         return action(interpreter._checkedEvaluators.current);
     return action(interpreter._evaluators.current);
@@ -748,7 +739,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             Cache!(StaticChainKey, Hop[])(&shared_.staticChains);
         _catchTypes = Cache!(Catch, TypeInfo_Class)(&shared_.catchTypes);
         _frames = FrameStack(defaultFrameCapacity);
-        _stack.owner = cast(void*) this;
         _temporaries = TemporaryLifetime(&destroyTemporary);
         // The first touch of this thread's thread-local table allocates,
         // and a destructor that the GC finalizer runs cannot.

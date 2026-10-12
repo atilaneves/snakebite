@@ -244,3 +244,56 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// Execution that a guest runs on a `Fiber` after a deep recursion that
+// made callbacks is not confused with the recursion that came before.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot pass a function to a native function such as `qsort`"),
+)) {
+    @("nativeStack.callbackInAFiberAfterDeepRecursion." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.stdlib: qsort;
+            import core.thread.fiber: Fiber;
+
+            enum depth = 10_000;
+            size_t walked;
+
+            size_t walk(size_t n) {
+                return n == 0 ? 0 : 1 + walk(n - 1);
+            }
+
+            extern(C) int deepCompare(scope const void* a, scope const void* b) {
+                walked += walk(depth);
+                return *cast(const(int)*) a - *cast(const(int)*) b;
+            }
+
+            extern(C) int compare(scope const void* a, scope const void* b) {
+                return *cast(const(int)*) a - *cast(const(int)*) b;
+            }
+
+            size_t descend(size_t n) {
+                if (n == 0) {
+                    int[2] values = [2, 1];
+                    qsort(values.ptr, values.length, int.sizeof, &deepCompare);
+                    return 0;
+                }
+                return 1 + descend(n - 1);
+            }
+
+            void main() {
+                assert(descend(depth) == depth);
+                int[2] values = [2, 1];
+                auto fiber = new Fiber({
+                    qsort(values.ptr, values.length, int.sizeof, &compare);
+                });
+                fiber.call;
+                assert(values[0] == 1);
+                assert(walked == depth);
+            }
+        });
+    }
+}

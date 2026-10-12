@@ -5,6 +5,7 @@ private:
 
 
 import core.thread.fiber: Fiber;
+import snakebite.hostthreads: Continuation;
 
 
 enum pieceBytes = 1024 * 1024;
@@ -20,8 +21,6 @@ enum freePieceCount = 2;
 public struct StackPieces {
     // A guest call starts at an address at or above this one. Zero: no limit.
     public size_t limit;
-    // What `ownerOfCurrentPiece` gives back: the evaluator of this stack.
-    public void* owner;
 
     private size_t _baseLimit;
     private Piece _current;
@@ -53,13 +52,6 @@ public struct StackPieces {
             return;
         }
         resumeBaseWith(_current, call, false);
-    }
-
-    // The evaluator whose walker runs on the piece that is running now, or
-    // null if the code is not on a piece.
-    public static void* ownerOfCurrentPiece() @system {
-        auto piece = cast(Piece) Fiber.getThis;
-        return piece is null ? null : piece.stack.owner;
     }
 
     private void resumeBaseWith(
@@ -120,6 +112,7 @@ public struct StackPieces {
         if (piece is null)
             piece = new Piece;
         piece.stack = &this;
+        piece.of = Fiber.getThis;
         piece.below = below;
         piece.work = work;
         return piece;
@@ -127,7 +120,7 @@ public struct StackPieces {
 }
 
 
-private final class Piece: Fiber {
+private final class Piece: Continuation {
     StackPieces* stack;
     size_t limit;
     Piece below;
@@ -162,6 +155,7 @@ private bool hasFreePiece() @safe @nogc nothrow {
 
 private void give(Piece piece) @system {
     piece.stack = null;
+    piece.of = null;
     piece.below = null;
     piece.work = null;
     piece.request = null;
