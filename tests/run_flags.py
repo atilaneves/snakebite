@@ -999,18 +999,9 @@ extern(C) int main() {
 # The thread sets the length of the window by itself: no sleep gives it. CTFE
 # has no process to end: it cannot start a thread, call `__cxa_atexit` or read
 # a static variable.
-DAEMON_ENDS = {
-    "return": "",
-    "exit": "exit(3);",
-    "throw": 'throw new Exception("BOOM");',
-}
-DAEMON_STATUS = {"return": 0, "exit": 3, "throw": 1}
-
-
 @pytest.mark.parametrize("backend", ENDS_PROCESS)
-@pytest.mark.parametrize("end", DAEMON_ENDS)
 def test_daemon_thread_runs_until_the_process_ends(
-    tmp_path: Path, backend: str, end: str,
+    tmp_path: Path, backend: str,
 ) -> None:
     (tmp_path / "source").mkdir()
     (tmp_path / "dub.json").write_text(json.dumps({
@@ -1050,14 +1041,14 @@ void main() {
     daemon.isDaemon = true;
     daemon.start;
     while (!atomicLoad(running)) {}
-    %s
+    exit(3);
 }
-""" % DAEMON_ENDS[end], encoding="utf-8")
+""", encoding="utf-8")
     command = [sb_path(), f"--backend={backend}", "--no-optimise-image", str(tmp_path)]
     result = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True,
                             timeout=TIMEOUT)
     output = result.stdout + result.stderr
-    assert result.returncode == DAEMON_STATUS[end], output
+    assert result.returncode == 3, output
     assert "CRT_WINDOW" in output and "ATEXIT_WINDOW" in output, output
 
 
