@@ -33,6 +33,38 @@ public extern(C) void startVariadicEntry(
 }
 
 
+// `core.stdc.stdarg.va_end` of a druntime that declares it as an intrinsic:
+// compiled code releases nothing.
+public extern(C) void endVariadicEntry(
+    void*, scope const(void*)*, size_t,
+) nothrow @nogc {
+}
+
+
+// `core.stdc.stdarg.va_copy` of a druntime that declares it as an
+// intrinsic. `dest` is an `out` parameter, so its argument is the address of
+// the destination variable. The copy lives in its own storage, as the copy
+// of a druntime that gives `va_copy` a body does.
+public extern(C) void copyVariadicEntry(
+    void*, scope const(void*)* arguments, size_t,
+) nothrow @nogc {
+    import core.internal.vararg.sysv_x64: __va_list_tag;
+    import core.stdc.string: memcpy;
+
+    alias Allocate = void* function(size_t) nothrow @nogc;
+    const allocate = cast(Allocate) &allocateCollected;
+    auto copy = allocate(__va_list_tag.sizeof);
+    memcpy(copy, *cast(void**) arguments[1], __va_list_tag.sizeof);
+    **cast(void***) arguments[0] = copy;
+}
+
+private void* allocateCollected(size_t size) nothrow {
+    import core.memory: GC;
+
+    return GC.malloc(size);
+}
+
+
 // The concrete type of one parameter of a call's declaration - with the
 // name, the other half of this table's lookup key, since dmd's own
 // `BUILTIN` classification (`dmd.builtin.isBuiltin`) does not carry it:

@@ -20,7 +20,8 @@ public struct CallSelection {
     import dmd.func: FuncDeclaration;
 
     import snakebite.backends.builtins:
-        BuiltinCall, ParameterType, startVariadicEntry;
+        BuiltinCall, ParameterType, copyVariadicEntry, endVariadicEntry,
+        startVariadicEntry;
     import snakebite.sharedtable: SharedTable;
 
     // Every call site resolves to exactly one of these. `guest` and
@@ -274,6 +275,10 @@ public struct CallSelection {
         if (function_.fbody is null)
             return isVaStart(function_, context)
                 ? Decision(Route.vaStart, &startVariadicEntry)
+                : isVaEnd(function_, context)
+                ? Decision(Route.builtin, &endVariadicEntry)
+                : isVaCopy(function_, context)
+                ? Decision(Route.builtin, &copyVariadicEntry)
                 : isAlloca(function_) ? Decision(Route.alloca)
                 : intrinsicPlanOf(function_).call;
 
@@ -332,6 +337,15 @@ public struct CallSelection {
         const module_ = context.module_;
         return function_.ident.toString == "va_start"
             && context.templateParent
+            && module_ !is null && module_.md !is null
+            && module_.md.toString == "core.stdc.stdarg";
+    }
+
+    private static bool isVaEnd(FuncDeclaration function_,
+        in imported!"snakebite.frontend.dmd.functions".FunctionContext context,
+    ) {
+        const module_ = context.module_;
+        return function_.ident.toString == "va_end"
             && module_ !is null && module_.md !is null
             && module_.md.toString == "core.stdc.stdarg";
     }
