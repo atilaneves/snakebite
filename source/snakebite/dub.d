@@ -53,27 +53,30 @@ public struct DubDescription {
 // `dub fetch` without a version always asks the registry for the latest
 // one, over the network, even when the package is already on disk. So ask
 // the local cache first and fetch only when the package is not there.
-public string fetchProject(in string packageName) {
+public string fetchProject(in string packageName, in string[] dubCommand = ["dub"]) {
     import std.string: strip;
 
-    const firstDescribe = describeWorkingDirectory(packageName);
+    const firstDescribe = describeWorkingDirectory(packageName, dubCommand);
     const described = firstDescribe.status == 0
         ? firstDescribe
-        : fetchAndDescribe(packageName, firstDescribe.output);
+        : fetchAndDescribe(
+            packageName, dubCommand, firstDescribe.output ~ firstDescribe.errors);
     if (described.status != 0)
         throw new Exception("dub describe failed for `" ~ packageName ~ "`:\n"
-            ~ described.output);
+            ~ described.output ~ described.errors);
 
     const directories = parseDescribeList(described.output);
     if (directories.length != 1)
         throw new Exception(
             "dub describe returned no project directory for `"
-            ~ packageName ~ "`",
+            ~ packageName ~ "`:\n" ~ described.output ~ described.errors,
         );
     return directories[0].strip;
 }
 
-private auto fetchAndDescribe(in string packageName, in string describeOutput) {
+private auto fetchAndDescribe(
+    in string packageName, in string[] dubCommand, in string describeOutput,
+) {
     import std.process: Config, execute;
 
     const fetched = execute(["dub", "fetch", packageName], null, Config.none);
@@ -81,16 +84,14 @@ private auto fetchAndDescribe(in string packageName, in string describeOutput) {
         throw new Exception("dub fetch failed for `" ~ packageName ~ "`:\n"
             ~ fetched.output
             ~ "after dub describe failed:\n" ~ describeOutput);
-    return describeWorkingDirectory(packageName);
+    return describeWorkingDirectory(packageName, dubCommand);
 }
 
-private auto describeWorkingDirectory(in string packageName) {
-    import std.process: Config, execute;
-
-    return execute([
-        "dub", "describe", packageName,
+private auto describeWorkingDirectory(in string packageName, in string[] dubCommand) {
+    return describeCapturingOutput(dubCommand ~ [
+        "describe", packageName,
         "--data=working-directory", "--data-list",
-    ], null, Config.none);
+    ], ".");
 }
 
 
@@ -124,42 +125,49 @@ private auto describe(
     const command = ["dub", "describe"];
     if (config == DubConfig.test) {
         const testArguments = ["--config=unittest", "--build=unittest"];
-        const result = describeCapturingStdout(
+        const result = describeCapturingOutput(
             command ~ testArguments ~ arguments, directory);
         if (result.status == 0)
             return tuple!("output", "buildArguments")(result.output, testArguments.dup);
     }
-    const result = describeCapturingStdout(command ~ arguments, directory);
+    const result = describeCapturingOutput(command ~ arguments, directory);
     if (result.status != 0)
-        throw new Exception("dub describe failed in " ~ directory ~ ": " ~ result.output);
+        throw new Exception("dub describe failed in " ~ directory ~ ": "
+            ~ result.output ~ result.errors);
     return tuple!("output", "buildArguments")(result.output, ["--build=debug"]);
 }
 
-// Run a `dub describe` command in pkgDir, capturing its stdout and discarding
-// its stderr. dub emits diagnostics on stderr (e.g. dscanner's "License in
+// Run a `dub` command in pkgDir, capturing its stdout and its stderr, each
+// apart from the other. dub emits diagnostics on stderr (e.g. dscanner's "License in
 // sub-package ... is different" warning, arsd-official's "defines no import
-// paths"). They are noise from the benchmarked project, so drop them rather than
-// forward them to our console. They must also stay out of the captured stdout:
+// paths"). They are noise from the benchmarked project, so do not forward
+// them to our console; callers add `errors` to the message of a failure.
+// They must also stay out of the captured stdout:
 // merged in, a warning line parses as a bogus data value - forwarded as an
 // lflag/linker-file it fails the dependency-image link with `cannot open <text>`.
-public auto describeCapturingStdout(in string[] command, in string pkgDir) {
+public auto describeCapturingOutput(in string[] command, in string pkgDir) {
     import std.process: Config, spawnProcess, wait;
     import std.algorithm.iteration: joiner;
     import std.array: array;
     import std.stdio: File, stdin;
     import std.typecons: tuple;
 
-    // Capture stdout via an anonymous temp file rather than a pipe so a large
-    // describe list cannot deadlock on a full pipe buffer. Each call has its
-    // own file: callers on several threads describe at the same time. The file
-    // stays open in this process after the spawn, to read it back.
+    // Capture stdout and stderr via anonymous temp files rather than pipes so a
+    // large describe list cannot deadlock on a full pipe buffer. Each call has
+    // its own files: callers on several threads describe at the same time. The
+    // files stay open in this process after the spawn, to read them back.
     auto stdoutFile = File.tmpfile;
-    auto devNull = File("/dev/null", "w");
-    auto pid = spawnProcess(command, stdin, stdoutFile, devNull, null, Config.retainStdout, pkgDir);
+    auto stderrFile = File.tmpfile;
+    auto pid = spawnProcess(
+        command, stdin, stdoutFile, stderrFile, null,
+        Config.retainStdout | Config.retainStderr, pkgDir);
     const status = wait(pid);
-    stdoutFile.rewind;
-    const output = cast(string) stdoutFile.byChunk(64 * 1024).joiner.array.idup;
-    return tuple!("status", "output")(status, output);
+    string contents(ref File file) {
+        file.rewind;
+        return cast(string) file.byChunk(64 * 1024).joiner.array.idup;
+    }
+    return tuple!("status", "output", "errors")(
+        status, contents(stdoutFile), contents(stderrFile));
 }
 
 // Split the `--data-list` output for several data kinds into one list per

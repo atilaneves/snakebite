@@ -225,7 +225,7 @@ unittest {
 @("describe.concurrentCallsKeepTheirOwnOutput")
 unittest {
     import core.thread: Thread;
-    import snakebite.dub: describeCapturingStdout;
+    import snakebite.dub: describeCapturingOutput;
     import std.conv: text;
 
     enum threadCount = 6;
@@ -234,7 +234,7 @@ unittest {
     Thread startDescribe(in size_t index) {
         const label = "describe-output-" ~ text(index);
         auto thread = new Thread({
-            outputs[index] = describeCapturingStdout(
+            outputs[index] = describeCapturingOutput(
                 ["sh", "-c", "echo " ~ label ~ "; sleep 0.3; echo " ~ label], ".").output;
         });
         thread.start;
@@ -250,4 +250,16 @@ unittest {
         const label = "describe-output-" ~ text(index);
         outputs[index].should == label ~ "\n" ~ label ~ "\n";
     }
+}
+
+
+// dub prints warnings on stderr; they must not reach the data on stdout
+// that fetchProject parses. `sh -c` stands in for dub; the words after the
+// script are its positional arguments.
+@("fetchProject.keepsStderrOutOfTheProjectDirectory")
+unittest {
+    import snakebite.dub: fetchProject;
+
+    fetchProject("package", ["sh", "-c", "echo warning >&2; echo /the/path"])
+        .should == "/the/path";
 }
