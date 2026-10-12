@@ -116,12 +116,12 @@ Target[] testFixtureLibraries() {
 // generated, to a directory of its own per object set, and given to the
 // compiler as a string import path.
 string hostCompilerRecordDirectory(in string compiler, in string objectSet) {
-    import std.conv: text;
     import std.file: mkdirRecurse, write;
+    import std.path: absolutePath;
     import std.process: execute;
-    import std.regex: matchFirst, regex;
     import std.string: lineSplitter, split;
 
+    const binary = compiler.executablePath.absolutePath;
     const result = execute([compiler, "-v", "-c", "-o-", "/dev/null"]);
     string record;
     foreach (line; result.output.lineSplitter) {
@@ -132,6 +132,7 @@ string hostCompilerRecordDirectory(in string compiler, in string objectSet) {
     enforce(record.length, compiler ~ " -v gave no predefs");
     const probe = pinnedFrontendProbe(compiler);
     record ~= "vendor " ~ probe.vendor ~ "\n";
+    record ~= "compiler " ~ binary ~ "\n";
     const directory = buildPath(getcwd, ".reggae", "host-compiler", objectSet);
     mkdirRecurse(directory);
     write(buildPath(directory, "snakebite_host_compiler.txt"), record);
@@ -140,14 +141,30 @@ string hostCompilerRecordDirectory(in string compiler, in string objectSet) {
     return directory;
 }
 
+// `compiler` as a path: itself when it names a path, else the first file of
+// that name on `PATH`.
+string executablePath(in string compiler) {
+    import std.file: exists, isFile;
+
+    if (compiler.canFind("/"))
+        return compiler.idup;
+    foreach (directory; environment.get("PATH", "").split(":")) {
+        const candidate = buildPath(directory.length ? directory : ".", compiler);
+        if (candidate.exists && candidate.isFile)
+            return candidate;
+    }
+    throw new Exception(compiler ~ " is not on PATH");
+}
+
 // The probe of `compiler`, when its frontend is the one that snakebite links.
 CompilerProbe pinnedFrontendProbe(in string compiler) {
     import std.conv: text;
 
     const probe = compilerProbe(compiler);
-    enforce(probe.frontendVersion == dmdLibraryVersion,
+    const library = dmdLibraryVersion;
+    enforce(probe.frontendVersion == library.number,
         compiler ~ " has the frontend version " ~ probe.frontendVersion.text
-        ~ " but the dmd frontend library is " ~ dmdLibraryVersion.text);
+        ~ " but the dmd frontend library is " ~ library.number.text);
     return probe;
 }
 
@@ -208,13 +225,13 @@ struct TemporaryDirectory {
 }
 
 CompilerProbe runProbe(in string compiler) {
-    import std.conv: to;
+    import std.conv: text, to;
     import std.file: tempDir, write;
     import std.process: execute, thisProcessID;
     import std.string: strip;
 
     scope directory = TemporaryDirectory(
-        buildPath(tempDir, "snakebite-probe-" ~ thisProcessID.to!string));
+        buildPath(tempDir, "snakebite-probe-" ~ thisProcessID.text));
     const source = buildPath(directory.path, "probe.d");
     write(source, `pragma(msg, __VENDOR__, "|", __VERSION__);`);
     const result = execute([compiler, "-c", "-o-", source]);
@@ -224,9 +241,13 @@ CompilerProbe runProbe(in string compiler) {
     return CompilerProbe(fields[0], fields[1].strip.chomp("L").to!uint);
 }
 
-// The frontend that snakebite links, from the dub selection of `dmd`
-// (`2.113.0` is `2113`).
-uint dmdLibraryVersion() {
+// The frontend that snakebite links, from the dub selection of `dmd`.
+struct DmdLibraryVersion {
+    string text; /// For example `2.113.0`.
+    uint number; /// For example `2113`.
+}
+
+DmdLibraryVersion dmdLibraryVersion() {
     import std.conv: to;
     import std.file: readText;
     import std.json: parseJSON;
@@ -234,16 +255,7 @@ uint dmdLibraryVersion() {
     const text = readText(buildPath(getcwd, "dub.selections.json"))
         .parseJSON["versions"]["dmd"].str;
     const parts = text.split(".");
-    return parts[0].to!uint * 1000 + parts[1].to!uint;
-}
-
-// The dub selection of `dmd`, for example `2.113.0`.
-string dmdLibraryVersionText() {
-    import std.file: readText;
-    import std.json: parseJSON;
-
-    return readText(buildPath(getcwd, "dub.selections.json"))
-        .parseJSON["versions"]["dmd"].str;
+    return DmdLibraryVersion(text, parts[0].to!uint * 1000 + parts[1].to!uint);
 }
 
 // For an LDC target the frontend is the pinned package source plus the
@@ -253,14 +265,12 @@ string dmdLibraryVersionText() {
 // compile-time interpreter evaluates. The build stops, and names both
 // versions, when `compiler` and the patch do not belong to the pin.
 DubInfo withLdcFrontend(DubInfo info, in string compiler, in CompilerProbe probe) {
-    import std.algorithm: any;
-    import std.conv: text;
     import std.file: dirEntries, exists, isDir, SpanMode;
     import std.process: execute;
     import std.regex: matchFirst, regex;
 
     enforce(probe.vendor == "LDC", compiler ~ " is not LDC but the vendor is `" ~ probe.vendor ~ "`");
-    const pin = dmdLibraryVersionText;
+    const pin = dmdLibraryVersion.text;
     const versionText = execute([compiler, "--version"]).output;
     const ldcVersion = versionText.matchFirst(regex(`\((\d+\.\d+)\.\d+\)`));
     enforce(ldcVersion, compiler ~ " --version does not give an LDC version: " ~ versionText);

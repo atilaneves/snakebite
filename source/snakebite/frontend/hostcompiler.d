@@ -1,11 +1,13 @@
 /// What the compiler that built this binary tells the frontend: where its
 /// druntime and Phobos source lie, and which version identifiers it
-/// predefines. The import paths come from the compiler's own configuration
-/// file when the frontend starts; the identifiers are recorded by the build
-/// (`reggaefile.d`) in a string import.
+/// predefines. The build (`reggaefile.d`) records the identifiers and the
+/// binary in a string import; the import paths come from the configuration
+/// file of that binary when the frontend is set up.
 module snakebite.frontend.hostcompiler;
 
 private:
+
+import snakebite.exception: SnakebiteException;
 
 // An LDC target links the frontend with LDC's additions (`reggaefile.d`);
 // a missing import path would build the unpatched one.
@@ -19,6 +21,7 @@ version (LDC) {
 public struct HostCompiler {
     string[] versionIdentifiers;
     string vendor; /// What `__VENDOR__` is.
+    string binary; /// Absolute path of the compiler that built this binary.
 }
 
 /// The record that the build made for the compiler of this binary.
@@ -26,8 +29,8 @@ public HostCompiler hostCompiler() @safe pure {
     return parse(import("snakebite_host_compiler.txt"));
 }
 
-/// Lines are `version <identifier>` and `vendor <name>`.
-HostCompiler parse(in string record) @safe pure {
+/// Lines are `version <identifier>`, `vendor <name>` and `compiler <path>`.
+private HostCompiler parse(in string record) @safe pure {
     import std.algorithm.searching: startsWith;
     import std.string: lineSplitter;
 
@@ -37,6 +40,8 @@ HostCompiler parse(in string record) @safe pure {
             result.versionIdentifiers ~= line["version ".length .. $];
         else if (line.startsWith("vendor "))
             result.vendor = line["vendor ".length .. $];
+        else if (line.startsWith("compiler "))
+            result.binary = line["compiler ".length .. $];
     }
     return result;
 }
@@ -51,51 +56,36 @@ else
     static assert(false, "the host is built by a compiler that has no configuration file here");
 
 /// The import paths in the configuration file of the compiler that built
-/// this binary. They are looked up once, when the program starts, outside
-/// the frontend's arena, which must hold no pointer to the garbage-collected
-/// heap. The program ends with a message when the compiler or a path is
-/// missing.
-public const(string)[] hostImportPaths() {
-    return _hostImportPaths;
-}
-
-private __gshared string[] _hostImportPaths;
-
-shared static this() {
-    _hostImportPaths = findImportPaths;
-}
-
-private string[] findImportPaths() {
+/// this binary: the binary the build recorded, and only when that file is
+/// gone the compiler of the same vendor on `PATH` (`onPath`). An environment
+/// without the compiler, or a configuration file without an import path, is
+/// an error of the user's environment: it throws a `SnakebiteException`.
+/// Call it outside the frontend's arena, which must hold no pointer to the
+/// garbage-collected heap.
+public string[] hostImportPaths(in HostCompiler host, lazy string onPath = firstOnPath(compilerName)) {
     import dmd.frontend: findDMDConfig, findLDCConfig;
-    import snakebite.internalfailure: internalFailure;
     import std.file: exists, isFile;
-    import std.path: buildPath, dirName;
-    import std.process: environment;
-    import std.string: split;
+    import std.path: dirName;
 
-    string binary;
-    foreach (directory; environment.get("PATH", "").split(":")) {
-        const candidate = buildPath(directory.length ? directory : ".", compilerName);
-        if (candidate.exists && candidate.isFile) {
-            binary = candidate;
-            break;
-        }
-    }
+    const binary = host.binary.exists && host.binary.isFile
+        ? host.binary
+        : onPath;
     if (binary is null)
-        internalFailure("`" ~ compilerName ~ "` built this binary and is not on PATH: "
-            ~ "its configuration file gives the import paths of druntime and Phobos");
+        throw new SnakebiteException("`" ~ host.binary ~ "` built this binary and is gone, and `"
+            ~ compilerName ~ "` is not on PATH: its configuration file gives the import paths of "
+            ~ "druntime and Phobos");
 
     version (LDC)
         const configuration = findLDCConfig(binary);
     else
         const configuration = findDMDConfig(binary);
     if (configuration is null || !configuration.exists)
-        internalFailure("`" ~ binary ~ "` has no configuration file (`"
+        throw new SnakebiteException("`" ~ binary ~ "` has no configuration file (`"
             ~ configurationFile ~ "`)");
 
     const paths = importPathsOf(configuration, binary.dirName);
     if (paths.length == 0)
-        internalFailure("the configuration file `" ~ configuration ~ "` of `"
+        throw new SnakebiteException("the configuration file `" ~ configuration ~ "` of `"
             ~ binary ~ "` gives no import path");
     return paths.dup;
 }
@@ -143,3 +133,18 @@ version (LDC)
     private enum configurationFile = "ldc2.conf";
 else
     private enum configurationFile = "dmd.conf";
+
+// The first file of that name in a directory of `PATH`, or null.
+private string firstOnPath(in string name) {
+    import std.file: exists, isFile;
+    import std.path: buildPath;
+    import std.process: environment;
+    import std.string: split;
+
+    foreach (directory; environment.get("PATH", "").split(":")) {
+        const candidate = buildPath(directory.length ? directory : ".", name);
+        if (candidate.exists && candidate.isFile)
+            return candidate;
+    }
+    return null;
+}

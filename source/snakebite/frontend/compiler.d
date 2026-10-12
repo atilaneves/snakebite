@@ -525,12 +525,12 @@ final class Compiler {
     // compiler predefines, so that the sizes and offsets the frontend
     // computes are those of the druntime this binary links.
     private void setUpDmd() {
-        import snakebite.frontend.hostcompiler: hostCompiler;
+        import snakebite.frontend.hostcompiler: hostCompiler, hostImportPaths;
 
         const host = hostCompiler;
 
         inside({
-            initializeDmdState(snippets, host);
+            initializeDmdState(snippets, host, importPaths);
             initialModuleCount = Module.amodules.length;
         });
     }
@@ -538,6 +538,9 @@ final class Compiler {
     // Runs `work`, which is dmd code or this module's own code around
     // it, inside the frontend: under the lock, with every allocation of
     // this thread from the frontend arena (`snakebite.gc`), the way dmd
+        // Outside `inside`: it reads files and may throw for the user's
+        // environment, and the result is copied into the arena below.
+        const importPaths = hostImportPaths(host);
     // allocates. What `work` returns is arena memory, which is never
     // freed, so host code may keep it. An exception is made again
     // outside, so the host never gets an arena object that druntime's
@@ -604,7 +607,7 @@ final class Compiler {
         import dmd.globals: global;
         import dmd.cond: VersionCondition;
         import dmd.target: CPU, target;
-        import snakebite.frontend.hostcompiler: hostImportPaths;
+        in string[] importPaths,
         import snakebite.frontend.importc: preprocessCFile;
         import std.algorithm.iteration: each;
 
@@ -618,7 +621,7 @@ final class Compiler {
         global.versionids.setDim(0);
         host.versionIdentifiers.each!(
             identifier => VersionCondition.addPredefinedGlobalIdent(owned(identifier)));
-        hostImportPaths.each!(path => addImport(owned(path)));
+        importPaths.each!(path => addImport(owned(path)));
 
         // Prevent DMD from calling exit() when too many cascading errors
         // accumulate. The shared parse path already checks global.errors after

@@ -5,7 +5,7 @@ import ut.backends;
 import std.conv: octal, text;
 import std.file: getcwd, mkdir, mkdirRecurse, rmdirRecurse, setAttributes, tempDir, write;
 import std.path: buildPath;
-import std.process: Config, execute, thisProcessID;
+import std.process: Config, environment, execute, thisProcessID;
 
 
 static foreach (backend; Matrix!(
@@ -487,7 +487,8 @@ static foreach (backend; Matrix!(
     }
 }
 
-// An import inside a function brings the host class into the guest the same way as a module-scope import; the guest uses `Fiber` itself.
+// An import inside a function brings the host class into the guest the same
+// way as a module-scope import; the guest uses `Fiber` itself.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read the native Fiber page size"),
@@ -528,7 +529,8 @@ static foreach (backend; Matrix!(
     }
 }
 
-// As above, with a class derived from `Fiber` that the function itself declares: its fields start after the host base object.
+// As above, with a class derived from `Fiber` that the function itself
+// declares: its fields start after the host base object.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read the native Fiber page size"),
@@ -576,12 +578,13 @@ static foreach (backend; Matrix!(
 }
 
 // The import paths of druntime and Phobos come from the configuration file
-// of the compiler that built `bin/sb`, found by that compiler's own name.
-// Another compiler on `PATH` is not it.
+// of the compiler that built `bin/sb`: the binary the build recorded. A file
+// with a compiler's name earlier on `PATH`, and a configuration file beside
+// it, are not that compiler.
 static foreach (backend; Matrix!(
     Omit!(Native, Because.inexpressible, "the oracle is not `bin/sb`"),
 )) {
-    @("hostCompilerIsFoundByItsOwnName." ~ backend.stringof)
+    @("hostCompilerIsTheRecordedBinary." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         const directory = buildPath(tempDir,
@@ -589,27 +592,257 @@ static foreach (backend; Matrix!(
         directory.mkdir;
         scope(exit) directory.rmdirRecurse;
         buildPath(directory, "probe.d").write("void main() {}\n");
-        const otherVendor = buildPath(directory, "bin");
-        otherVendor.mkdir;
-        version (LDC)
-            enum other = "dmd";
-        else
-            enum other = "ldc2";
-        buildPath(otherVendor, other).write("#!/bin/sh\n");
-        buildPath(otherVendor, other).setAttributes(octal!755);
+        const decoys = buildPath(directory, "bin");
+        decoys.mkdir;
+        foreach (name; ["ldc2", "dmd"]) {
+            buildPath(decoys, name).write("#!/bin/sh\n");
+            buildPath(decoys, name).setAttributes(octal!755);
+            buildPath(decoys, name ~ ".conf").write("switches = [\"-I/nonexistent\"];\n");
+        }
         static if (is(backend == Interpreter)) enum name = "interpreter";
         else static if (is(backend == Bytecode)) enum name = "bytecode";
         else enum name = "ctfe";
         const result = execute(
             [buildPath(getcwd, "bin", "sb"), "-b", name, directory],
-            ["PATH": otherVendor],
+            ["PATH": decoys ~ ":" ~ environment["PATH"]],
         );
-        result.status.should.not == 0;
-        version (LDC)
-            enum own = "ldc2";
-        else
-            enum own = "dmd";
-        ("`" ~ own ~ "` built this binary and is not on PATH").should.be in result.output;
+        result.status.should == 0;
+    }
+}
+
+// `--help` needs no compiler.
+@("helpNeedsNoCompiler")
+unittest {
+    const result = execute(
+        [buildPath(getcwd, "bin", "sb"), "--help"],
+        ["PATH": "/nonexistent"],
+    );
+    result.status.should == 0;
+    "Usage".should.be in result.output;
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the native Fiber page size"),
+)) {
+    @("fiberSubclassKeepsNativeLayout." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-fibersub-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            import core.thread: Fiber;
+            class Tagged : Fiber {
+                int tag = 42;
+                bool seen;
+                this() { super(&run); }
+                void run() {
+                    auto current = cast(Tagged) Fiber.getThis();
+                    assert(current is this);
+                    assert(current.tag == 42);
+                    seen = true;
+                }
+            }
+            unittest {
+                auto fiber = new Tagged;
+                fiber.call();
+                assert(fiber.seen);
+                assert(fiber.state == Fiber.State.TERM);
+            }
+            void main() {}
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
+            const result = execute([
+                "timeout", "10", buildPath(getcwd, "bin", "sb"),
+                "-b", name, directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the native Fiber page size"),
+)) {
+    @("threadSubclassKeepsNativeLayout." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-threadsub-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            import core.thread: Thread;
+            class Tagged : Thread {
+                int tag = 42;
+                int seen;
+                this() { super(&run); }
+                void run() { seen = tag; }
+            }
+            unittest {
+                auto thread = new Tagged;
+                thread.start();
+                thread.join();
+                assert(thread.seen == 42);
+                assert(thread.tag == 42);
+            }
+            void main() {}
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
+            const result = execute([
+                "timeout", "10", buildPath(getcwd, "bin", "sb"),
+                "-b", name, directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the native Fiber page size"),
+)) {
+    @("hostClassSizeIsNativeSize." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-hostsize-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            import core.thread: Fiber, Thread;
+            unittest {
+                assert(__traits(classInstanceSize, Fiber)
+                    == typeid(Fiber).initializer.length);
+                assert(__traits(classInstanceSize, Thread)
+                    == typeid(Thread).initializer.length);
+            }
+            void main() {}
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
+            const result = execute([
+                "timeout", "10", buildPath(getcwd, "bin", "sb"),
+                "-b", name, directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}
+
+// An import inside a function brings the host class into the guest the same
+// way as a module-scope import; the guest uses `Fiber` itself.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the native Fiber page size"),
+)) {
+    @("functionLocalFiberImport." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-functionlocalfiberimport-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            unittest {
+                import core.thread: Fiber;
+                bool ran;
+                auto fiber = new Fiber({ ran = true; });
+                fiber.call();
+                assert(ran);
+                assert(fiber.state == Fiber.State.TERM);
+            }
+            void main() {}
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
+            const result = execute([
+                "timeout", "10", buildPath(getcwd, "bin", "sb"),
+                "-b", name, directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}
+
+// As above, with a class derived from `Fiber` that the function itself
+// declares: its fields start after the host base object.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the native Fiber page size"),
+)) {
+    @("functionLocalFiberSubclass." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-functionlocalfibersubclass-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            unittest {
+                import core.thread: Fiber;
+                class Tagged : Fiber {
+                    int tag = 42;
+                    bool seen;
+                    this() { super(&run); }
+                    void run() { seen = tag == 42; }
+                }
+                auto fiber = new Tagged;
+                fiber.call();
+                assert(fiber.seen);
+                assert(fiber.tag == 42);
+                assert(fiber.state == Fiber.State.TERM);
+            }
+            void main() {}
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
+            const result = execute([
+                "timeout", "10", buildPath(getcwd, "bin", "sb"),
+                "-b", name, directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
     }
 }
 

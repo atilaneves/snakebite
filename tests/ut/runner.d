@@ -84,7 +84,8 @@ static import ut.backends.run.main,
     ut.repl.session,
     ut.process,
     ut.frontend.functions,
-    ut.frontend.checks;
+    ut.frontend.checks,
+    ut.frontend.hostcompiler;
 
 // unit-threaded removes its default sandbox root when a process starts.
 // A second test process must not remove this process's active sandboxes.
@@ -210,6 +211,7 @@ int run(string[] args) {
         "ut.process",
         "ut.frontend.functions",
         "ut.frontend.checks",
+        "ut.frontend.hostcompiler",
     ));
 }
 
