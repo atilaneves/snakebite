@@ -82,3 +82,34 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// Compiled D reaches this depth in the 8 MiB stack of a default Linux
+// thread. A guest that recurses this deep is a valid program.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops at a fixed recursion limit far below this depth"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "the walker overflows its 512 MiB native stack and the process "
+        ~ "dies with SIGSEGV"),
+)) {
+    @("nativeStack.deepRecursionReachesCompiledDepth." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        size_t(220_000).shouldBeRetOf!(backend, q{
+            size_t salt = 1;
+
+            size_t walk(size_t n) {
+                import core.volatile: volatileLoad;
+
+                if (n == 0)
+                    return 0;
+                return walk(n - 1) + volatileLoad(&salt);
+            }
+
+            size_t answer() {
+                return walk(220_000);
+            }
+        }, "answer");
+    }
+}
