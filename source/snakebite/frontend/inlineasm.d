@@ -64,7 +64,7 @@ private extern(C++) class InlineAsmCollector
     import dmd.attrib: MixinDeclaration;
     import dmd.dmodule: Module;
     import dmd.dsymbolsem: include;
-    import dmd.dtemplate: TemplateInstance, TemplateMixin;
+    import dmd.dtemplate: TemplateMixin;
     import dmd.errors: error;
     import dmd.expression: SymbolExp;
     import dmd.declaration: VarDeclaration;
@@ -109,15 +109,6 @@ private extern(C++) class InlineAsmCollector
             frontendIsRootOwned = isRootOwned;
 
         return frontendIsRootOwned(function_, _rootModules);
-    }
-
-    // A use of an instance that another use made first is a node of its own
-    // with no members: the instance with the members is `inst`.
-    override void visit(TemplateInstance instance) {
-        if (ldcHost && instance.inst !is null && instance.inst !is instance)
-            instance.inst.accept(this);
-        else
-            super.visit(instance);
     }
 
     // `mixin WithAsm;` instantiates a `mixin template` as a
