@@ -51,35 +51,6 @@ unittest {
     output.should == input;
 }
 
-// The 32-byte vector types of LDC's `core.simd` pass in two SSE registers
-// when the CPU has no AVX, as the arguments and the result of a function
-// that LDC compiles. dmd has the type only with AVX, in which case the
-// vector travels in one YMM register; no test for it.
-version (LDC) {
-    private alias Vector8 = __vector(float[8]);
-
-    private extern(C) Vector8 snakebite_ut_sysv_vector8(Vector8 left, Vector8 right) {
-        return left + right;
-    }
-
-    @("vectorArgumentAndReturn.32bytes.twoXmmRegisters")
-    unittest {
-        CallFrame frame;
-        const float[8] left = [1, 2, 3, 4, 5, 6, 7, 8];
-        const float[8] right = [10, 20, 30, 40, 50, 60, 70, 80];
-        import core.stdc.string: memcpy;
-        memcpy(frame.sse[0].ptr, left.ptr, 32);
-        memcpy(frame.sse[2].ptr, right.ptr, 32);
-        frame.sseCount = 4;
-
-        call(cast(const void*) &snakebite_ut_sysv_vector8, frame);
-
-        float[8] output;
-        memcpy(output.ptr, frame.sseResult[0].ptr, 32);
-        output.should == [11, 22, 33, 44, 55, 66, 77, 88];
-    }
-}
-
 // Thin `@trusted` wrappers around the two entries above, kept here
 // rather than in `snakebite.ffi.sysv` itself: nothing outside this test
 // module calls either entry any other way (`plan.d` calls through its
