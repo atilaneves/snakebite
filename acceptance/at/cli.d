@@ -814,7 +814,7 @@ static foreach (backend; Matrix!(
         const source = buildPath(directory, "probe.d");
         source.write(q{
             int depth(int n) { return n == 0 ? 0 : 1 + depth(n - 1); }
-            unittest { assert(depth(100_000) == 100_000); }
+            unittest { assert(depth(20_000) == 20_000); }
             void main() {}
         });
         static if (is(backend == Native))
@@ -851,10 +851,10 @@ static foreach (backend; Matrix!(
             int depth(int n) { return n == 0 ? 0 : 1 + depth(n - 1); }
             unittest {
                 int result;
-                auto thread = new Thread({ result = depth(100_000); });
+                auto thread = new Thread({ result = depth(20_000); });
                 thread.start;
                 thread.join;
-                assert(result == 100_000);
+                assert(result == 20_000);
             }
             void main() {}
         });

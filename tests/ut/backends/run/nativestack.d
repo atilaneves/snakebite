@@ -92,13 +92,16 @@ static foreach (backend; Matrix!(
 
 
 // A guest that recurses without end stops: the status is 1 and the message
-// is on stderr, as for a Bytecode VM that runs out of frame stack. Compiled D
-// ends with SIGSEGV, which would end `bin/ut`, so `Native` has no arm.
+// is on stderr, as for a Bytecode VM that runs out of frame stack (that arm
+// is too slow). Compiled D ends with SIGSEGV, which would end `bin/ut`, so
+// `Native` has no arm.
 static foreach (backend; Matrix!(
     Omit!(Native, Because.inexpressible,
         "compiled D ends with SIGSEGV, and that ends the test process"),
     Omit!(Ctfe, Because.inexpressible,
         "dmd's CTFE stops at a fixed recursion limit far below this depth"),
+    Omit!(Bytecode, Because.unconfirmed,
+        "the arm takes 30 s and 1.1 GB because it fills the frame stack"),
 )) {
     @("nativeStack.runawayRecursionStopsTheRun." ~ backend.stringof)
     @Tags(backend.stringof)

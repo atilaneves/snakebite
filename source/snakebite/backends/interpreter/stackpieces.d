@@ -13,7 +13,7 @@ import snakebite.hostthreads: Continuation;
 private enum pieceBytes = 1024 * 1024;
 // The pieces of all the walks on one thread together. A guest that recurses
 // without end stops with a message at this bound.
-private enum maxPieceBytes = 128 * pieceBytes;
+private enum maxPieceBytes = 256 * pieceBytes;
 private enum maxPieceCount = maxPieceBytes / pieceBytes;
 private enum freePieceCount = 2;
 
