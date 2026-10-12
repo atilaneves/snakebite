@@ -208,11 +208,12 @@ private imported!"std.json".JSONValue collectWatches(
     ref bool cacheable,
 ) {
     import std.json: JSONValue;
-    import std.file: exists, isDir, isSymlink, dirEntries, SpanMode, readText, getcwd, readLink;
+    import std.file: exists, isDir, isSymlink, dirEntries, SpanMode, readText, getcwd, readLink, thisExePath;
     import std.path: buildPath, baseName, dirName, absolutePath, buildNormalizedPath;
     import std.process: environment;
     import std.string: split;
     import std.algorithm: canFind;
+    import snakebite.dub: dubHomeDirectory;
     import snakebite.project: projectStateDirectory;
 
     string[string] watched;
@@ -272,9 +273,7 @@ private imported!"std.json".JSONValue collectWatches(
                 file(source);
         }
     }
-    const dpath = environment.get("DPATH", "");
-    const dubHome = environment.get("DUB_HOME", dpath.length
-        ? buildPath(dpath, "dub") : buildPath(environment.get("HOME", ""), ".dub"));
+    const dubHome = dubHomeDirectory;
     void settings(in string path) {
         file(path);
         // Settings can redirect package storage and add package suppliers.
@@ -289,35 +288,33 @@ private imported!"std.json".JSONValue collectWatches(
                 "packages/local-overrides.json",
             ])
             file(buildPath(path, name));
-    foreach (binary; ["dub", compiler]) {
-        string resolved;
-        foreach (path; environment.get("PATH", "").split(":")) {
-            const candidate = buildPath(path, binary).absolutePath;
-            file(candidate);
-            if (candidate.exists) { resolved = candidate; break; }
+    // The library reads the settings next to the running executable.
+    settings(buildPath(thisExePath.dirName, "../etc/dub/settings.json").buildNormalizedPath);
+    string resolved;
+    foreach (path; environment.get("PATH", "").split(":")) {
+        const candidate = buildPath(path, compiler).absolutePath;
+        file(candidate);
+        if (candidate.exists) { resolved = candidate; break; }
+    }
+    if (resolved.length) {
+        // Compiler installations commonly expose binaries through links.
+        while (resolved.isSymlink) {
+            resolved = readLink(resolved).absolutePath(resolved.dirName).buildNormalizedPath;
+            file(resolved);
         }
-        if (resolved.length) {
-            // Compiler installations commonly expose binaries through links.
-            while (resolved.isSymlink) {
-                resolved = readLink(resolved).absolutePath(resolved.dirName).buildNormalizedPath;
-                file(resolved);
-            }
-            if (binary == "dub")
-                settings(buildPath(resolved.dirName, "../etc/dub/settings.json").buildNormalizedPath);
-            foreach (name; ["dmd.conf", "ldc2.conf"])
-                foreach (path; [root, getcwd, environment.get("HOME", ""), resolved.dirName,
-                        buildPath(resolved.dirName, "../etc"), "/etc",
-                        buildPath(environment.get("HOME", ""), ".ldc"), "/etc/ldc",
-                    ]) {
-                    const config = buildPath(path, name).absolutePath.buildNormalizedPath;
-                    file(config);
-                    if (config.exists && config.isDir) {
-                        directory(config);
-                        foreach (entry; dirEntries(config, SpanMode.depth))
-                            file(entry.name);
-                    }
+        foreach (name; ["dmd.conf", "ldc2.conf"])
+            foreach (path; [root, getcwd, environment.get("HOME", ""), resolved.dirName,
+                    buildPath(resolved.dirName, "../etc"), "/etc",
+                    buildPath(environment.get("HOME", ""), ".ldc"), "/etc/ldc",
+                ]) {
+                const config = buildPath(path, name).absolutePath.buildNormalizedPath;
+                file(config);
+                if (config.exists && config.isDir) {
+                    directory(config);
+                    foreach (entry; dirEntries(config, SpanMode.depth))
+                        file(entry.name);
                 }
-        }
+            }
     }
     return JSONValue(watched);
 }
@@ -362,7 +359,6 @@ public imported!"std.json".JSONValue toJson(T)(in T value) {
     import std.array: array;
     import std.conv: text;
     import std.json: JSONValue;
-    import std.range.primitives: ElementType;
     import std.traits: EnumMembers, FieldNameTuple, isArray, isSomeString;
 
     static if (isSomeString!T || is(T == bool))

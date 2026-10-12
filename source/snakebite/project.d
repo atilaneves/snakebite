@@ -239,7 +239,7 @@ private SourceSet dubSourceSet(
     import std.array: array;
     import std.conv: text;
     import dub.compilers.buildsettings: BuildOption, BuildSettings;
-    import dub.description: PackageDescription, SourceFileRole;
+    import dub.description: SourceFileRole;
     import snakebite.dub: rootBuildSettings;
     import std.path: buildNormalizedPath, buildPath;
     import std.traits: EnumMembers;

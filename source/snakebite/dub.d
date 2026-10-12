@@ -126,15 +126,22 @@ private auto platformSettings(
     return settings;
 }
 
-// dub's own function for this is not public.
-private string dubCacheDirectory() {
+// The directory that dub keeps its settings, packages and build cache in.
+// dub's own function for this is not public, so this is its rule for the
+// environment. The `dubHome` setting of a settings file is not read.
+public string dubHomeDirectory() {
     import std.path: buildPath;
     import std.process: environment;
 
     const dpath = environment.get("DPATH", "");
-    const home = environment.get("DUB_HOME", dpath.length
+    return environment.get("DUB_HOME", dpath.length
         ? buildPath(dpath, "dub") : buildPath(environment.get("HOME", ""), ".dub"));
-    return buildPath(home, "cache");
+}
+
+private string dubCacheDirectory() {
+    import std.path: buildPath;
+
+    return buildPath(dubHomeDirectory, "cache");
 }
 
 

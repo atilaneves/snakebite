@@ -126,9 +126,9 @@ unittest {
     calls.should == 1;
 }
 
-// The description holds the build arguments that snakebite itself derives,
-// so a record is only as good as the snakebite build that made it. Two
-// builds that take turns on one project each keep their record.
+// The description is made by the library that is linked into snakebite, so a
+// record is only as good as the snakebite build that made it. Two builds that
+// take turns on one project each keep their record.
 @("cache.keepsGeneratorsApart")
 unittest {
     const sandbox = Sandbox();

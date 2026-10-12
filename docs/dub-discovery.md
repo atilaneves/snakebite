@@ -12,8 +12,10 @@ that it was made with. It does not call DUB or start the compiler for
 discovery. The frontend still reads the
 current source files.
 
-The cache tracks package recipes, selections, directory contents, DUB and
-compiler binaries, compiler configuration, and local package registrations.
+The cache tracks package recipes, selections, directory contents, the
+compiler binary, compiler configuration, the DUB settings files that the DUB
+library reads, and local package registrations. The library reads the
+settings next to the Snakebite executable, not next to a `dub` executable.
 Version identifiers requested by the caller and environment changes also
 invalidate it. The shell bookkeeping variables `_` and `SHLVL` are ignored.
 Files added, removed, or renamed cause discovery to run again. An atomic

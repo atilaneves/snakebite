@@ -108,8 +108,10 @@ static foreach (backend; Matrix!(
 }
 
 
-// These call the dub library, which starts the compiler and git, so they are
-// not unit tests.
+// The tests from here on call the dub library, which starts the compiler and
+// git, so they are not unit tests.
+
+
 // Several threads describe at once, as parallel tests do. dub keeps its
 // compilers in thread-local storage, so each thread needs its own.
 @("describe.concurrentCallsEachHaveCompilers")
