@@ -6,6 +6,7 @@ private:
 
 import core.thread.fiber: Fiber;
 import snakebite.exception: SnakebiteException;
+import snakebite.internalfailure: internalFailure;
 import snakebite.hostthreads: Continuation;
 
 
@@ -35,10 +36,12 @@ public struct StackPieces {
     public Entry enter() @system {
         import core.memory: GC;
 
-        if (!GC.inFinalizer && _reserve is null)
-            _reserve = new Piece;
-        if (_tooDeep is null)
-            _tooDeep = new SnakebiteException(tooDeepMessage);
+        if (!GC.inFinalizer) {
+            if (_reserve is null)
+                _reserve = new Piece;
+            if (_tooDeep is null)
+                _tooDeep = new SnakebiteException(tooDeepMessage);
+        }
         limit = limitOfCurrentStack;
         return Entry(&this);
     }
@@ -125,8 +128,11 @@ public struct StackPieces {
     }
 
     private Piece take(Piece below, scope void delegate() work) @system {
-        if (_live >= maxPieceCount)
+        if (_live >= maxPieceCount) {
+            if (_tooDeep is null)
+                internalFailure(tooDeepMessage);
             throw _tooDeep;
+        }
         Piece piece;
         foreach (ref slot; _free)
             if (slot !is null) {
@@ -172,8 +178,8 @@ private Piece[freePieceCount] _free;
 // Made by `enter` outside a finalizer. A finalizer cannot allocate, and
 // a destructor that the collector runs always needs a piece to recurse on.
 private Piece _reserve;
-// The pieces in use on this thread. Made by `enter`, because the error
-// cannot be allocated in a finalizer.
+// The pieces in use on this thread. The error is made by `enter`, outside a
+// finalizer, because it cannot be allocated in one.
 private size_t _live;
 private SnakebiteException _tooDeep;
 private enum tooDeepMessage = imported!"std.conv".text(
@@ -184,7 +190,6 @@ private enum tooDeepMessage = imported!"std.conv".text(
 
 private Piece takeReserveOrNew() @system {
     import core.memory: GC;
-    import snakebite.internalfailure: internalFailure;
 
     if (!GC.inFinalizer)
         return new Piece;

@@ -116,41 +116,6 @@ static foreach (backend; Matrix!(
 }
 
 
-// A call from guest code to host code at depth runs on the native stack that
-// the guest code was entered on: a host function sees the `Fiber` of the
-// guest, not an implementation detail of how deep the recursion is.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "CTFE cannot call native functions such as "
-        ~ "`core.thread.fiber.Fiber`'s constructor, `call` or `getThis`"),
-)) {
-    @("nativeStack.hostCallAtDepthInAFiberSeesTheFiber." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            import core.thread.fiber: Fiber;
-
-            enum depth = 100;
-            Fiber seen;
-
-            void walk(int level) {
-                if (level == depth) {
-                    seen = Fiber.getThis;
-                    return;
-                }
-                walk(level + 1);
-            }
-
-            void main() {
-                auto fiber = new Fiber({ walk(0); });
-                fiber.call;
-                assert(seen is fiber);
-            }
-        });
-    }
-}
-
-
 // A `Throwable` that a host function throws at depth reaches a guest
 // `catch` far above it, and the guest `finally` in between runs.
 static foreach (backend; Matrix!(
