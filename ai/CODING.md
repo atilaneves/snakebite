@@ -138,3 +138,5 @@ review must-fix.
 - The `ut` binary should be the first safety net; its dual mandate is
   to be fast and catch *most* things. It can't catch everything, and
   that's what the other tests are for.
+- Tests must have positive ROI. Tests are not free, even merely
+  existing has a cost, as well as the actual cost of running them.
