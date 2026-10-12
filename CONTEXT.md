@@ -88,7 +88,10 @@ _Avoid_: per-thread evaluator, thread context
 
 **Execution state**:
 The evaluator or VM state for guest calls on one native stack. Each Fiber
-has its own execution state, separate from the thread's main stack.
+has its own execution state, separate from the thread's main stack. The
+Interpreter's walker runs on the stack that it is entered on, the base. When
+the stack is low, the walk continues on a piece, a 1 MiB `Fiber`, and host
+calls from a piece run on the base (ADR-0015).
 
 **Halt**:
 The end of a run with no more guest code. No `catch`, `finally`,
