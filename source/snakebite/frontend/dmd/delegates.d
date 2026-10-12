@@ -40,8 +40,7 @@ public bool isCtfeVariable(Declaration variable) {
 //
 // `closureVars`, the variables the analysis walks, are collected by
 // `functionSemantic3` (body semantic), so the answer is only trustworthy
-// after that pass - forced here for the same reason `hasHiddenThis` below
-// forces it: a function dmd never analysed eagerly (one in a non-root
+// after that pass: a function dmd never analysed eagerly (one in a non-root
 // module, reached through a delegate) would otherwise answer `false` to
 // one backend and, once analysed, `true` to the other.
 public bool functionNeedsClosure(FuncDeclaration function_) {
@@ -74,52 +73,22 @@ public void runSemantic3(FuncDeclaration function_) {
     );
 }
 
-// Whether `function_` receives a hidden `this`/context argument before its
-// declared parameters: an ordinary member method or constructor, or a
-// nested function that reads an outer member function's `this` implicitly.
-//
-// `vthis` is a local variable `functionSemantic3` (body semantic) creates,
-// so it stays unset until that pass has run - forcing it here is what lets
-// this answer be trusted for a native declaration neither backend ever
-// walks the body of, such as `object.Exception`'s constructor, reached
-// through a guest exception class's `super(...)`. Forcing it a second time
-// for a function already past that pass is a no-op: `functionSemantic3`
-// checks `semanticRun` itself. `FrameLayout.of`, the FFI call plan, and a
-// call site's own argument count all ask this one function, so the three
-// cannot disagree about whether a given callee takes a hidden `this`.
-//
-// `declareThis`, the one place dmd itself ever assigns `vthis`, only runs
-// while walking a body (`semantic3.d` gates the whole block on `fbody`,
-// or an in/out contract) - `Exception.this` has one, even though neither
-// backend walks it, because dmd's own semantic still does. A declaration
-// with no body anywhere - an `extern(C++)` method or constructor bound to
-// a host library, with nothing for `functionSemantic3` to walk - never
-// runs `declareThis` at all, so `vthis` stays null whether or not the
-// declaration takes a hidden `this`. `isThis()`/`isNested()` answer that
-// same question directly, from the declaration alone, with no body
-// required, and agree with `vthis` on every case that does have a body:
-// `declareThis` sets `vthis` from exactly those two facts (deliberately
-// leaving it null when both are false), and its own dead-context lambda
-// case, below, only ever narrows a non-null `vthis` to unused, never
-// widens a null one.
+// DMD's `declareThis` derives the context parameter from `isThis` and
+// `isNested`, including dual-context functions. These declaration facts
+// also cover bodyless native methods. Analysing a native method's body
+// just to count arguments does unnecessary work and can leave deferred
+// TypeInfo work for a later parse with different compiler flags.
+// A function literal still needs semantic inference: an inferred function
+// pointer can retain a provisional `vthis`, so its token is the authority.
 public bool hasHiddenThis(FuncDeclaration function_) {
     import dmd.tokens: TOK;
 
-    runSemantic3(function_);
-
-    // Inferred function pointers can retain the provisional context variable
-    // that DMD created before it knew whether the lambda captured anything.
-    if (auto literal = function_.isFuncLiteralDeclaration)
-        if (literal.tok != TOK.delegate_)
-            return false;
-
-    if (function_.vthis is null)
-        return function_.isThis() !is null || function_.isNested();
-
-    // A delegate call always passes its context word, even when the
-    // function does not use it. Keep the slot so a delegate target and its
-    // caller use one native layout.
-    return true;
+    function_ = function_.toAliasFunc;
+    if (auto literal = function_.isFuncLiteralDeclaration) {
+        runSemantic3(function_);
+        return literal.tok == TOK.delegate_;
+    }
+    return function_.isThis() !is null || function_.isNested();
 }
 
 // The nearest enclosing function `symbol` (a captured variable or a nested
@@ -145,13 +114,13 @@ public FuncDeclaration outerFunctionOf(Dsymbol symbol) {
 
 // Whether `symbol` has two contexts: a function or aggregate template
 // instantiated with an alias to a local symbol of another function or
-// aggregate than the one that declares it. dmd settles this while it
-// analyses a function body, so the answer for a function is read after
-// that pass has run.
+// aggregate than the one that declares it. Use the parent comparison
+// from DMD's `declareThis`; counting context arguments must not analyse
+// the body of a native callee.
 public bool isDualContext(Dsymbol symbol) {
     if (auto function_ = symbol.isFuncDeclaration) {
-        runSemantic3(function_);
-        return function_.hasDualContext;
+        const target = function_.toAliasFunc;
+        return target.toParent2 !is target.toParentLocal;
     }
 
     auto aggregate = symbol.isAggregateDeclaration;

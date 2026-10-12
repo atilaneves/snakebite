@@ -7,6 +7,9 @@ module ut.backends.run.structs;
 
 
 import ut.backends;
+import snakebite.frontend.compiler:
+    FrontendFlags, parseSnippet, withCompilerLock;
+import snakebite.frontend.dmd.functions: findFunction;
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot read runtime TypeInfo"),
@@ -682,15 +685,24 @@ static foreach (backend; Matrix!(
     @("runtimeTypeInfoNamesGuestAggregates." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.shouldBeStatusOf!(backend, q{
-            enum Code : int { ready = 7 }
-            struct Value { int field; }
-            class Product {}
-            void main() {
-                assert((cast(TypeInfo_Enum) typeid(Code)).name.length != 0);
-                assert((cast(TypeInfo_Struct) typeid(Value)).name.length != 0);
-                assert((cast(TypeInfo_Class) typeid(Product)).name.length != 0);
-            }
+        // Keep the two operations adjacent: another test's parse could
+        // finish semantic work left by the runtime metadata query.
+        withCompilerLock({
+            0.shouldBeStatusOf!(backend, q{
+                enum Code : int { ready = 7 }
+                struct Value { int field; }
+                class Product {}
+                void main() {
+                    assert((cast(TypeInfo_Enum) typeid(Code)).name.length != 0);
+                    assert((cast(TypeInfo_Struct) typeid(Value)).name.length != 0);
+                    assert((cast(TypeInfo_Class) typeid(Product)).name.length != 0);
+                }
+            });
+            // A native metadata call must not leave analysis of its body for
+            // a later program that uses different compiler flags.
+            auto next = parseSnippet("extern(C) int answer() { return 42; }",
+                [], FrontendFlags(["-betterC"]));
+            (findFunction(next, "answer") !is null).should == true;
         });
     }
 }

@@ -71,13 +71,9 @@ public imported!"dmd.dmodule".Module moduleOf(
 
     imported!"dmd.dmodule".Module result;
     withCompilerQuery({
-        if (auto found = declaration in metadata.modules) {
-            result = *found;
-            return;
-        }
         result = declaration.getModule;
         if (result !is null)
-            metadata.modules.insert(declaration, result);
+            metadata.modules[declaration] = result;
     });
     return result;
 }
@@ -101,10 +97,6 @@ public FunctionContext contextOf(
 
     FunctionContext result;
     withCompilerQuery({
-        if (auto found = function_ in metadata.contexts) {
-            result = *found;
-            return;
-        }
         result.module_ = function_.getModule;
         result.outerFunction = outerFunctionOf(function_);
         result.instantiated = function_.isInstantiated !is null;
@@ -112,80 +104,33 @@ public FunctionContext contextOf(
         result.templateParent = parent !is null
             && parent.isTemplateInstance !is null;
         if (result.module_ !is null) {
-            metadata.contexts.insert(function_, result);
-            metadata.modules.insert(function_, result.module_);
+            metadata.contexts[function_] = result;
+            metadata.modules[function_] = result.module_;
         }
     });
     return result;
 }
 
-// A completed declaration has the same diagnostic name in every backend.
-// Keep DMD's parent walk and allocation on the first query only.
-public const(char)[] prettyNameOf(
-    imported!"dmd.func".FuncDeclaration function_,
-) {
-    import dmd.dsymbol: PASS;
-    import snakebite.frontend.compiler: withCompilerQuery;
-    import std.string: fromStringz;
-
-    if (auto found = function_ in metadata.prettyNames)
-        return *found;
-
-    const(char)[] result;
-    withCompilerQuery({
-        if (auto found = function_ in metadata.prettyNames) {
-            result = *found;
-            return;
-        }
-        result = function_.toPrettyChars.fromStringz;
-        if (function_.semanticRun >= PASS.semantic3done)
-            metadata.prettyNames.insert(function_, result);
-    });
-    return result;
-}
-
-// DMD temporarily reparents packages during semantic work. Once captured
-// under the query lock, ownership is the same on every thread. Publish that
-// answer once so a new worker can read it without waiting for semantic work.
-private struct Metadata {
-    import dmd.dmodule: Module;
-    import dmd.dsymbol: Dsymbol;
-    import dmd.func: FuncDeclaration;
-    import snakebite.sharedtable: SharedTable;
-
+// DMD temporarily reparents packages during semantic work. A snapshot taken
+// under the query lock sees the settled owner. Each thread keeps that value
+// for the declaration's lifetime, as call decisions already do, so unrelated
+// semantic work cannot delay repeated runtime ownership queries.
+private struct ThreadMetadata {
     size_t generation;
-    SharedTable!(Dsymbol, Module) modules;
-    SharedTable!(FuncDeclaration, FunctionContext) contexts;
-    SharedTable!(FuncDeclaration, const(char)[]) prettyNames;
+    imported!"dmd.dmodule".Module[imported!"dmd.dsymbol".Dsymbol] modules;
+    FunctionContext[imported!"dmd.func".FuncDeclaration] contexts;
 }
 
-private __gshared Metadata* _metadata;
+// Ordinary module storage is TLS in D; the maps need no shared lock.
+private ThreadMetadata _metadata;
 
-private Metadata* metadata() {
-    import core.atomic: atomicLoad, atomicStore, MemoryOrder;
-    import snakebite.frontend.compiler: metadataGeneration, withCompilerQuery;
+private ref ThreadMetadata metadata() {
+    import snakebite.frontend.compiler: metadataGeneration;
 
     const generation = metadataGeneration;
-    auto result = atomicLoad!(MemoryOrder.acq)(_metadata);
-    if (result !is null && result.generation == generation)
-        return result;
-
-    withCompilerQuery({
-        result = atomicLoad!(MemoryOrder.acq)(_metadata);
-        if (result !is null && result.generation == generation)
-            return;
-        result = new Metadata;
-        result.generation = generation;
-        atomicStore!(MemoryOrder.rel)(_metadata, result);
-    });
-    return result;
-}
-
-// Reset is exclusive. Drop the shared root before DMD invalidates pointers.
-package(snakebite.frontend) void discardFunctionMetadata() nothrow @nogc {
-    import core.atomic: atomicStore, MemoryOrder;
-
-    atomicStore!(MemoryOrder.rel)(_metadata, cast(Metadata*) null);
+    if (_metadata.generation != generation)
+        _metadata = ThreadMetadata(generation);
+    return _metadata;
 }
 
 // ImportC parses imported definitions even when the source list excludes

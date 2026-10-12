@@ -111,12 +111,52 @@ package struct FrameLayout {
         return _arrayLiteralOffset[expression];
     }
 
-    // How many layouts `of` has built on this thread. A build walks the
-    // whole function body, so a backend that is meant to build each
-    // function's layout once and keep it can be held to that here.
+    // Count declared-function layouts so tests can detect repeated builds
+    // when a backend should reuse a completed layout.
     version(unittest) package static size_t builds;
 
     package static FrameLayout of(FuncDeclaration function_) {
+        import snakebite.frontend.dmd.delegates: runSemantic3;
+        import snakebite.frontend.dmd.functions: typeFunctionOf;
+
+        // Imported guest bodies can still have unresolved locals.
+        runSemantic3(function_);
+        auto layout = ofParameters(function_);
+        layout._returns = imported!"snakebite.backends.returnstorage"
+            .ReturnStoragePlan.of(function_);
+
+        if (layout._returns.hasPlace) {
+            const result = typeFacts(
+                typeFunctionOf(function_).next);
+            layout.returnPlace = imported!"snakebite.backends.returnplace"
+                .ReturnPlace(layout.reserveSlot(
+                    imported!"snakebite.nativelayout".TypeFacts.pointer).offset,
+                    result.size, result.alignment);
+        }
+
+        // Locals share the same frame as the parameters: each one gets a
+        // slot appended after whatever came before it, keyed by its own
+        // `VarDeclaration` since `visit(VarExp)` looks up both kinds of
+        // read the same way. A body-less declaration has no `fbody` to
+        // walk, so this is a no-op for it, the same as the `variables is
+        // null` case above.
+        if (function_.fbody !is null) {
+            scope collector = new LocalsCollector(&layout, function_);
+            function_.fbody.accept(collector);
+            // DMD assigns the out-contract result in the lowered body,
+            // but does not introduce it with a DeclarationExp.
+            if (function_.vresult !is null
+                    && !layout.hasSlot(function_.vresult))
+                collector.collectVariable(function_.vresult);
+        }
+
+        return layout;
+    }
+
+    // FFI calls need argument storage even when the native body's locals
+    // have never had semantic analysis. Walking those locals would force
+    // work that belongs to the native compiler, not this call's frame.
+    package static FrameLayout ofParameters(FuncDeclaration function_) {
         import snakebite.frontend.dmd.delegates: hasHiddenThis;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
         import dmd.astenums: STC;
@@ -125,23 +165,20 @@ package struct FrameLayout {
         version(unittest) ++builds;
 
         FrameLayout layout;
-        layout._returns = imported!"snakebite.backends.returnstorage"
-            .ReturnStoragePlan.of(function_);
 
         if (hasHiddenThis(function_)) {
             // `function_.vthis` is `dmd.funcsem.declareThis`'s own answer,
             // but that pass only runs while walking a body (`semantic3.d`
             // gates the whole block on `fbody`), so a bodyless declaration
-            // - an `extern(C++)` method or constructor bound to a host
-            // library, with nothing for `functionSemantic3` to walk - never
-            // gets one, whether or not it takes a hidden `this`
+            // or a native method whose body stays unanalysed has no
+            // `vthis`, whether or not it takes a hidden `this`
             // (`hasHiddenThis`'s own doc). Its facts are exactly what
             // `declareThis` would have derived: a struct `this` travels by
             // reference, a class one by its own already-pointer-shaped
             // handle type; nothing here calls a bodyless declaration
             // nested, so `isThis()` is the only case left. A fabricated
             // `ThisDeclaration` stands in for the missing `vthis`: no body
-            // exists to read it back through a `VarExp`, the one other
+            // runs here to read it back through a `VarExp`, the one other
             // reason `hiddenThis.variable`'s own doc gives it meaning, so
             // it only ever has to be a non-null marker here - the same
             // one every other reader of `hiddenThis.variable` already
@@ -205,31 +242,6 @@ package struct FrameLayout {
         if (layout.variadicCursor != size_t.max && function_.v_argptr !is null)
             layout._slotOf[function_.v_argptr] =
                 VariableSlot(layout.variadicCursor, false);
-
-        if (layout._returns.hasPlace) {
-            const result = typeFacts(
-                typeFunctionOf(function_).next);
-            layout.returnPlace = imported!"snakebite.backends.returnplace"
-                .ReturnPlace(layout.reserveSlot(
-                    imported!"snakebite.nativelayout".TypeFacts.pointer).offset,
-                    result.size, result.alignment);
-        }
-
-        // Locals share the same frame as the parameters: each one gets a
-        // slot appended after whatever came before it, keyed by its own
-        // `VarDeclaration` since `visit(VarExp)` looks up both kinds of
-        // read the same way. A body-less declaration has no `fbody` to
-        // walk, so this is a no-op for it, the same as the `variables is
-        // null` case above.
-        if (function_.fbody !is null) {
-            scope collector = new LocalsCollector(&layout, function_);
-            function_.fbody.accept(collector);
-            // DMD assigns the out-contract result in the lowered body,
-            // but does not introduce it with a DeclarationExp.
-            if (function_.vresult !is null
-                    && !layout.hasSlot(function_.vresult))
-                collector.collectVariable(function_.vresult);
-        }
 
         return layout;
     }

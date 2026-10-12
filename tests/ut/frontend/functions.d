@@ -76,21 +76,16 @@ unittest {
 }
 
 
-// Frontend ownership and linker names belong to the declaration. A thread
-// that has not used it yet must be able to reuse another thread's snapshot.
-@("metadata.publishedReadsDoNotWaitForUnrelatedSemantic")
+// A declaration has the same ownership and linker name on each thread.
+@("metadata.answersAgreeAcrossThreads")
 unittest {
     auto module_ = parseSnippet("auto publishedAnswer() { return 42; }");
     auto function_ = findFunction(module_, "publishedAnswer");
     (moduleOf(function_) is module_).should == true;
     const context = contextOf(function_);
     const name = mangledNameOf(function_);
-    auto begin = new Semaphore;
-    auto finished = new Semaphore;
     Throwable failure;
     auto worker = new Thread({
-        begin.wait;
-        scope(exit) finished.notify;
         try {
             (moduleOf(function_) is module_).should == true;
             contextOf(function_).should == context;
@@ -100,21 +95,14 @@ unittest {
         }
     });
     worker.start;
-    bool completed;
-    withCompilerLock({
-        begin.notify;
-        completed = finished.wait(5.seconds);
-    });
     worker.join;
     if (failure !is null)
         throw failure;
-    completed.should == true;
 }
 
 
-// ABI classification is fixed after semantic analysis. Different callers
-// of the same declaration must be able to reuse its completed answer.
-@("metadata.returnPlacementDoesNotWaitForUnrelatedSemantic")
+// ABI placement must agree across callers for scalar and aggregate returns.
+@("metadata.returnPlacementAgreesAcrossThreads")
 unittest {
     auto module_ = parseSnippet(q{
         int scalar() { return 42; }
@@ -125,17 +113,11 @@ unittest {
         findFunction(module_, "scalar"),
         findFunction(module_, "aggregate"),
     ];
-    const expected = [
-        returnsOnStack(declarations[0]),
-        returnsOnStack(declarations[1]),
-    ];
-    expected.should == [false, true];
-    auto begin = new Semaphore;
-    auto finished = new Semaphore;
+    const expected = [false, true];
+    foreach (i, declaration; declarations)
+        returnsOnStack(declaration).should == expected[i];
     Throwable failure;
     auto worker = new Thread({
-        begin.wait;
-        scope(exit) finished.notify;
         try {
             foreach (i, declaration; declarations)
                 returnsOnStack(declaration).should == expected[i];
@@ -144,13 +126,7 @@ unittest {
         }
     });
     worker.start;
-    bool completed;
-    withCompilerLock({
-        begin.notify;
-        completed = finished.wait(5.seconds);
-    });
     worker.join;
     if (failure !is null)
         throw failure;
-    completed.should == true;
 }

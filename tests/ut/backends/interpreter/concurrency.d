@@ -4,12 +4,10 @@ module ut.backends.interpreter.concurrency;
 import ut;
 import snakebite.backends.backend: Program;
 import snakebite.backends.interpreter: Interpreter;
-import snakebite.frontend.compiler: parseSnippet, withCompilerLock;
+import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import std.conv: text;
-import core.sync.semaphore: Semaphore;
 import core.thread: Thread;
-import core.time: seconds;
 
 
 // Regression test for the frontend-lock narrowing this sits beside
@@ -147,30 +145,20 @@ unittest {
 }
 
 
-// Separate interpreter instances execute the same settled declaration.
-// Reusing its frontend facts must not wait for unrelated semantic work.
-@("call.settledFunctionOnAnotherInstanceDoesNotWaitForSemantic")
+// Separate interpreter instances must agree when they share a declaration.
+@("call.separateInstancesAgreeAcrossThreads")
 unittest {
     auto guestModule = parseSnippet("int settledAnswer() { return 42; }");
     auto function_ = findFunction(guestModule, "settledAnswer");
     auto program = Program([guestModule]);
     auto first = Owned!Interpreter(program);
     auto second = Owned!Interpreter(program);
-    auto ready = new Semaphore;
-    auto repeat = new Semaphore;
-    auto finished = new Semaphore;
+    int result;
+    first.call(function_, &result, []);
+    result.should == 42;
     Throwable failure;
     auto worker = new Thread({
         int result;
-        try {
-            first.call(function_, &result, []);
-            result.should == 42;
-        } catch (Throwable error) {
-            failure = error;
-        }
-        ready.notify;
-        repeat.wait;
-        scope(exit) finished.notify;
         try {
             second.call(function_, &result, []);
             result.should == 42;
@@ -179,14 +167,7 @@ unittest {
         }
     });
     worker.start;
-    ready.wait;
-    bool completed;
-    withCompilerLock({
-        repeat.notify;
-        completed = finished.wait(5.seconds);
-    });
     worker.join;
     if (failure !is null)
         throw failure;
-    completed.should == true;
 }

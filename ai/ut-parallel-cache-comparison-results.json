@@ -1,0 +1,224 @@
+{
+  "base_revision": "9befebc9",
+  "method": "Three sequential full-suite runs per variant at each of 1 and 32 workers, alternating order. Both executables built with ninja -j1 bin/ut, same worktree, tests, GC workload and native-call fix. Saved executables use the same built native fixtures through a symlink. Default arena and GC helpers; no --lowmem, no CI, no arena runner. Machine load is uncontrolled.",
+  "variants": {
+    "shared": "Global publication of module/context/names/return ABI from 9befebc9, plus the current GC-test and native-body changes.",
+    "thread_local": "Module/context/linker-name caches and reset generation from acd1e248; return ABI and interpreter pretty names use prior locked queries. Completed-bytecode fast path retained. All other behavior matches shared."
+  },
+  "binary_sha256": {
+    "shared": "d286544a9f752252a9ffafe7b1cc555310f83acbda03408e47c27c68b4cad58b",
+    "thread_local": "d4ab20e7e3ed615fdfd97d3eeddfb70dcca3eea7ef004ec05fb82198abd55e2b"
+  },
+  "summary": {
+    "shared": {
+      "1": {
+        "wall_median_seconds": 15.53,
+        "wall_range_seconds": [
+          15.44,
+          15.67
+        ],
+        "cpu_median_seconds": 19.840000000000003
+      },
+      "32": {
+        "wall_median_seconds": 13.16,
+        "wall_range_seconds": [
+          13.11,
+          19.18
+        ],
+        "cpu_median_seconds": 25.540000000000003
+      },
+      "speedup_1_to_32": 1.1800911854103342
+    },
+    "thread_local": {
+      "1": {
+        "wall_median_seconds": 15.54,
+        "wall_range_seconds": [
+          15.22,
+          15.6
+        ],
+        "cpu_median_seconds": 18.82
+      },
+      "32": {
+        "wall_median_seconds": 13.9,
+        "wall_range_seconds": [
+          13.33,
+          14.42
+        ],
+        "cpu_median_seconds": 25.21
+      },
+      "speedup_1_to_32": 1.1179856115107913
+    }
+  },
+  "decision": "Remove the global metadata/name/return-ABI publication. The shared variant has a 5.3% lower median wall time at 32 workers, with large variation and no single-worker gain. This small benefit does not justify the added shared state and reset rules. Retain the existing completed-bytecode fast path, which reuses an existing table.",
+  "limits": [
+    "Three runs per cell are insufficient for a tight confidence interval on this loaded machine.",
+    "One shared-cache 32-worker run took 19.18 seconds; it is included, not discarded.",
+    "All 12 valid runs passed all 8081 tests. An initial copied-binary run failed because native fixtures were absent; excluded from timings after setup was corrected.",
+    "These timings isolate the metadata-cache difference. They do not isolate the native-body fix or GC-test changes. Scaling remains poor for both variants."
+  ],
+  "native_body_fix": {
+    "cause": "Context queries and interpreter call layouts forced semantic3 for native TypeInfo.name. Its associative-array cache queued deferred TypeInfo semantic work, which a later betterC parse drained under different flags.",
+    "change": "Read ordinary hidden/dual context from declarations; infer function literals when needed. Build only argument layouts for native calls. Full guest layouts explicitly force semantic3 before reading locals/body. Keep separate body and parameter layout cache keys for explicit guest callbacks.",
+    "regression": "Strengthened existing runtimeTypeInfoNamesGuestAggregates for every existing backend: call TypeInfo.name, then parse a betterC snippet while holding the same frontend lock. Failed before the fix for Bytecode and Interpreter; passed afterward, with Native control.",
+    "focused_tests_passed": 4519,
+    "focused_log": "/tmp/snakebite-ut-parallel/native-layout-kinds-focused.log"
+  },
+  "runs": [
+    {
+      "repeat": 0,
+      "variant": "shared",
+      "workers": 1,
+      "wall": 15.67,
+      "cpu": 19.840000000000003,
+      "rss_kib": 952160.0,
+      "exit_code": 0,
+      "tests": 8081,
+      "timestamp": "2026-10-12T13:34:50.562741+00:00",
+      "load": "5.86 11.79 11.73 4/2024 2183089",
+      "log": "/tmp/snakebite-ut-parallel/cache-ab-0-j1-shared.log"
+    },
+    {
+      "repeat": 0,
+      "variant": "thread_local",
+      "workers": 1,
+      "wall": 15.54,
+      "cpu": 18.82,
+      "rss_kib": 956916.0,
+      "exit_code": 0,
+      "tests": 8081,
+      "timestamp": "2026-10-12T13:35:06.295218+00:00",
+      "load": "5.43 11.41 11.60 3/1993 2184042",
+      "log": "/tmp/snakebite-ut-parallel/cache-ab-0-j1-thread_local.log"
+    },
+    {
+      "repeat": 0,
+      "variant": "thread_local",
+      "workers": 32,
+      "wall": 13.9,
+      "cpu": 25.21,
+      "rss_kib": 959952.0,
+      "exit_code": 0,
+      "tests": 8081,
+      "timestamp": "2026-10-12T13:35:21.882565+00:00",
+      "load": "4.89 11.00 11.47 5/2020 2185191",
+      "log": "/tmp/snakebite-ut-parallel/cache-ab-0-j32-thread_local.log"
+    },
+    {
+      "repeat": 0,
+      "variant": "shared",
+      "workers": 32,
+      "wall": 13.16,
+      "cpu": 23.78,
+      "rss_kib": 953116.0,
+      "exit_code": 0,
+      "tests": 8081,
+      "timestamp": "2026-10-12T13:35:35.852090+00:00",
+      "load": "4.33 10.57 11.32 2/1976 2186210",
+      "log": "/tmp/snakebite-ut-parallel/cache-ab-0-j32-shared.log"
+    },
+    {
+      "repeat": 1,
+      "variant": "shared",
+      "workers": 32,
+      "wall": 13.11,
+      "cpu": 25.540000000000003,
+      "rss_kib": 952028.0,
+      "exit_code": 0,
+      "tests": 8081,
+      "timestamp": "2026-10-12T13:35:49.079493+00:00",
+      "load": "4.05 10.20 11.18 3/1972 2186812",
+      "log": "/tmp/snakebite-ut-parallel/cache-ab-1-j32-shared.log"
+    },
+    {
+      "repeat": 1,
+      "variant": "thread_local",
+      "workers": 32,
+      "wall": 13.33,
+      "cpu": 23.64,
+      "rss_kib": 959192.0,
+      "exit_code": 0,
+      "tests": 8081,
+      "timestamp": "2026-10-12T13:36:02.269622+00:00",
+      "load": "3.58 9.90 11.07 2/1973 2187375",
+      "log": "/tmp/snakebite-ut-parallel/cache-ab-1-j32-thread_local.log"
+    },
+    {
+      "repeat": 1,
+      "variant": "thread_local",
+      "workers": 1,
+      "wall": 15.22,
+      "cpu": 18.39,
+      "rss_kib": 960672.0,
+      "exit_code": 0,
+      "tests": 8081,
+      "timestamp": "2026-10-12T13:36:15.636042+00:00",
+      "load": "3.24 9.51 10.93 2/1980 2187985",
+      "log": "/tmp/snakebite-ut-parallel/cache-ab-1-j1-thread_local.log"
+    },
+    {
+      "repeat": 1,
+      "variant": "shared",
+      "workers": 1,
+      "wall": 15.53,
+      "cpu": 19.17,
+      "rss_kib": 950956.0,
+      "exit_code": 0,
+      "tests": 8081,
+      "timestamp": "2026-10-12T13:36:30.904166+00:00",
+      "load": "3.46 9.24 10.82 2/1969 2188553",
+      "log": "/tmp/snakebite-ut-parallel/cache-ab-1-j1-shared.log"
+    },
+    {
+      "repeat": 2,
+      "variant": "shared",
+      "workers": 1,
+      "wall": 15.44,
+      "cpu": 20.52,
+      "rss_kib": 952100.0,
+      "exit_code": 0,
+      "tests": 8081,
+      "timestamp": "2026-10-12T13:36:46.485985+00:00",
+      "load": "3.00 8.85 10.66 3/2105 2189739",
+      "log": "/tmp/snakebite-ut-parallel/cache-ab-2-j1-shared.log"
+    },
+    {
+      "repeat": 2,
+      "variant": "thread_local",
+      "workers": 1,
+      "wall": 15.6,
+      "cpu": 19.380000000000003,
+      "rss_kib": 956760.0,
+      "exit_code": 0,
+      "tests": 8081,
+      "timestamp": "2026-10-12T13:37:01.959511+00:00",
+      "load": "3.16 8.60 10.55 5/1979 2190376",
+      "log": "/tmp/snakebite-ut-parallel/cache-ab-2-j1-thread_local.log"
+    },
+    {
+      "repeat": 2,
+      "variant": "thread_local",
+      "workers": 32,
+      "wall": 14.42,
+      "cpu": 25.939999999999998,
+      "rss_kib": 957020.0,
+      "exit_code": 0,
+      "tests": 8081,
+      "timestamp": "2026-10-12T13:37:17.659148+00:00",
+      "load": "3.19 8.25 10.39 4/1984 2190914",
+      "log": "/tmp/snakebite-ut-parallel/cache-ab-2-j32-thread_local.log"
+    },
+    {
+      "repeat": 2,
+      "variant": "shared",
+      "workers": 32,
+      "wall": 19.18,
+      "cpu": 30.58,
+      "rss_kib": 957224.0,
+      "exit_code": 0,
+      "tests": 8081,
+      "timestamp": "2026-10-12T13:37:32.150046+00:00",
+      "load": "3.46 8.14 10.34 37/2076 2191579",
+      "log": "/tmp/snakebite-ut-parallel/cache-ab-2-j32-shared.log"
+    }
+  ]
+}

@@ -572,12 +572,11 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                 isVoidReturn ? TypeFacts.init : typeFacts(returnType);
             const returnFacts = isRefReturn ? pointerFactsOf : pointeeFacts;
 
+            auto layout = FrameLayout.of(function_);
             auto body_ = function_.fbody;
             if (body_ is null)
                 internalFailure("`CallSelection` routes a bodyless function to "
                     ~ "FFI or a builtin, never to the compiler");
-
-            auto layout = FrameLayout.of(function_);
 
             // Registered before the body is walked, not after: a call
             // inside this very body to `function_` itself finds this
@@ -6592,14 +6591,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (expression.readsVtable(callee))
             return compileVirtualCall(expression, callee, destOffset);
 
-        // `hasHiddenThis` reflects `needThis()`: true for an ordinary
-        // member method and also for a nested function or lambda that
-        // reads an outer method's `this` implicitly (`receiverOffsetOf`
-        // then reaches that `this` through the static chain), and forces
-        // `functionSemantic3` first so it stays reliable on a native
-        // declaration this compiler never walks the body of - `Exception.
-        // this` is one, reached through `super(...)` delegation from a
-        // guest exception constructor.
+        // Call sites and native call plans must agree on the hidden
+        // context argument, including methods whose bodies stay native.
         import snakebite.frontend.dmd.delegates: hasHiddenThis;
 
         const hasThis = hasHiddenThis(callee);

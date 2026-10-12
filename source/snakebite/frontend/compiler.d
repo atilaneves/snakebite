@@ -17,9 +17,9 @@ __gshared Compiler compiler;
 // registered module from DMD's tables.
 private shared uint _moduleCounter;
 
-// Published metadata belongs to one set of frontend declarations.
-// Reset and shutdown require exclusive access with no live frontend users
-// and discard the snapshots before DMD invalidates their pointers.
+// Thread-owned metadata belongs to one set of frontend declarations.
+// Reset and shutdown require exclusive access with no live frontend users;
+// the next read on each thread must discard its previous snapshots.
 private shared size_t _metadataGeneration;
 
 public size_t metadataGeneration() @safe nothrow @nogc {
@@ -28,16 +28,10 @@ public size_t metadataGeneration() @safe nothrow @nogc {
     return atomicLoad!(MemoryOrder.acq)(_metadataGeneration);
 }
 
-private void discardMetadata() nothrow @nogc {
-    import core.atomic: atomicOp, atomicStore, MemoryOrder;
-    import snakebite.frontend.dmd.functions: discardFunctionMetadata;
-    import snakebite.frontend.dmd.mangle: discardNameMetadata;
+private void discardMetadata() @safe nothrow @nogc {
+    import core.atomic: atomicOp;
 
     atomicOp!"+="(_metadataGeneration, size_t(1));
-    discardFunctionMetadata;
-    discardNameMetadata;
-    atomicStore!(MemoryOrder.rel)(compiler._returnLocations,
-        cast(Compiler.ReturnLocations*) null);
 }
 
 
@@ -242,38 +236,16 @@ public auto newInFrontend(alias dmdSymbol, Args...)(auto ref Args arguments) {
 }
 
 // The target query can create TypeTuple nodes while it classifies a return.
-// Once semantic3 completes, the ABI answer is fixed and can be published
-// for every backend and thread without exposing mutable DMD state.
 public bool returnsOnStack(
     imported!"dmd.func".FuncDeclaration function_,
 ) {
-    import core.atomic: atomicLoad, atomicStore, MemoryOrder;
-    import dmd.dsymbol: PASS;
     import dmd.target: target;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
 
-    if (auto cache = atomicLoad!(MemoryOrder.acq)(compiler._returnLocations))
-        if (auto found = function_ in *cache)
-            return *found;
-
-    bool result;
-    withCompilerQuery({
-        auto cache = atomicLoad!(MemoryOrder.acq)(compiler._returnLocations);
-        if (cache !is null)
-            if (auto found = function_ in *cache) {
-                result = *found;
-                return;
-            }
-        result = compiler.inside(() => target.isReturnOnStack(
-            typeFunctionOf(function_), function_.needThis()));
-        if (function_.semanticRun >= PASS.semantic3done) {
-            if (cache is null)
-                cache = new Compiler.ReturnLocations;
-            cache.insert(function_, result);
-            atomicStore!(MemoryOrder.rel)(compiler._returnLocations, cache);
-        }
+    return compiler.inside(() {
+        return target.isReturnOnStack(
+            typeFunctionOf(function_), function_.needThis());
     });
-    return result;
 }
 
 // CTFE copies and constant folding can produce literals after DMD's GC
@@ -518,10 +490,6 @@ final class Compiler {
     // Keyed by source content; prevents re-registering the same root module
     // in DMD's process-global table.
     private Module[string] sourceCache;
-    private import dmd.func: FuncDeclaration;
-    private import snakebite.sharedtable: SharedTable;
-    private alias ReturnLocations = SharedTable!(FuncDeclaration, bool);
-    private ReturnLocations* _returnLocations;
     // What `initialize` was asked for and how many modules it left parsed,
     // so `reset` can tell whether anything was parsed since and redo it.
     private Snippets snippets;
