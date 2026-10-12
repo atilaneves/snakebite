@@ -36,8 +36,8 @@ private __gshared imported!"core.sync.mutex".Mutex _searchPathLock;
 public string fetchProject(
     in string packageName,
     in string rootDirectory = ".",
-    in imported!"dub.dub".SkipPackageSuppliers suppliers
-        = imported!"dub.dub".SkipPackageSuppliers.none,
+    in imported!"std.typecons".Nullable!(imported!"dub.dub".SkipPackageSuppliers) suppliers
+        = imported!"std.typecons".Nullable!(imported!"dub.dub".SkipPackageSuppliers).init,
 ) {
     import dub.dependency: PackageName, VersionRange;
     import dub.dub: Dub;
@@ -88,12 +88,16 @@ public DubDescription dubDescribeProject(
     });
 }
 
+// A dependency that is not on disk is fetched, as `dub test` does. When all
+// dependencies are on disk, dub asks no package supplier.
 private auto loadedDub(in string directory) {
-    import dub.dub: Dub, SkipPackageSuppliers;
+    import dub.dub: Dub, UpgradeOptions;
 
     silenceDubLog;
-    auto dub = new Dub(directory, null, SkipPackageSuppliers.all);
+    auto dub = new Dub(directory);
     dub.loadPackage;
+    if (!dub.project.hasAllDependencies)
+        dub.upgrade(UpgradeOptions.select);
     return dub;
 }
 
@@ -155,6 +159,8 @@ private void runPreBuildCommands(
     import std.conv: text;
     import std.process: Config, environment, executeShell;
 
+    if (project.rootPackage !in project.targetLookup)
+        return;
     const buildSettings = project.rootBuildSettings;
     if (buildSettings.preBuildCommands.length == 0)
         return;

@@ -8,6 +8,7 @@ import std.conv: text;
 import std.path: buildPath, absolutePath;
 import std.process: execute, Config;
 import std.string: toLower;
+import std.typecons: nullable;
 
 // Separate processes match normal sb execution. DMD retains parsed modules
 // inside one process, independently of the discovery cache.
@@ -148,7 +149,7 @@ unittest {
     sandbox.writeFile(".dub/packages/package/1.0.0/package/dub.sdl",
         "name \"package\"\nversion \"1.0.0\"\n");
 
-    fetchProject("package", sandbox.sandboxPath.absolutePath, SkipPackageSuppliers.all)
+    fetchProject("package", sandbox.sandboxPath.absolutePath, nullable(SkipPackageSuppliers.all))
         .should == buildPath(sandbox.sandboxPath.absolutePath,
             ".dub/packages/package/1.0.0/package/");
 }
@@ -163,7 +164,7 @@ unittest {
     sandbox.writeFile(".dub/packages/package/1.0.0/package/dub.sdl",
         "name \"package\"\nversion \"1.0.0\"\n");
 
-    fetchProject("package@2.0.0", sandbox.sandboxPath.absolutePath, SkipPackageSuppliers.all)
+    fetchProject("package@2.0.0", sandbox.sandboxPath.absolutePath, nullable(SkipPackageSuppliers.all))
         .shouldThrowWithMessage(
             "No package package was found matching the dependency 2.0.0");
 }

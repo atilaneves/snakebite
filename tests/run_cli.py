@@ -1897,43 +1897,40 @@ def test_string_import_is_followed_by_zero(
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_fetch_keeps_package_name(tmp_path: Path) -> None:
-    for backend in BACKENDS:
-        result = run_with_dub_home(
-            tmp_path, f"--backend={backend}", "absent-package@1.2.3",
-        )
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_fetch_keeps_package_name(tmp_path: Path, backend: str) -> None:
+    result = run_with_dub_home(
+        tmp_path, f"--backend={backend}", "absent-package@1.2.3",
+    )
 
-        assert result.returncode == 1
-        assert (
-            "No package absent-package was found matching the dependency 1.2.3"
-            in output(result)
-        )
+    assert result.returncode == 1
+    assert (
+        "No package absent-package was found matching the dependency 1.2.3"
+        in output(result)
+    )
 
 
 # A package already in the local dub cache must resolve without a fetch:
-# without a version, a fetch always asks the registry over the network.
+# without a version, a fetch always asks the registry. The registry of the
+# test holds a newer version, so a fetch shows as a second version on disk.
 def test_package_on_disk_does_not_fetch(tmp_path: Path) -> None:
     name = dub_name("cached")
     package = tmp_path / "home" / "packages" / name / "1.0.0" / name
     write_fetchable_package(package, name)
+    publish_package(tmp_path, name, "2.0.0")
 
     result = run_with_dub_home(tmp_path, name)
 
     assert result.returncode == 0, output(result)
+    assert [path.name for path in (package.parent.parent).iterdir()] == ["1.0.0"]
 
 
 # A package missing from the local dub cache is fetched once, then used.
 def test_package_missing_fetches_then_describes(tmp_path: Path) -> None:
     name = dub_name("missing")
-    source = tmp_path / "source" / f"{name}-1.0.0"
-    write_fetchable_package(source, name)
-    registry = tmp_path / "registry"
-    registry.mkdir()
-    shutil.make_archive(str(registry / f"{name}-1.0.0"), "zip", tmp_path / "source")
+    publish_package(tmp_path, name, "1.0.0")
 
-    result = run_with_dub_home(
-        tmp_path, name, env={"DUB_REGISTRY": f"file://{registry}"},
-    )
+    result = run_with_dub_home(tmp_path, name)
 
     assert result.returncode == 0, output(result)
     assert (tmp_path / "home" / "packages" / name / "1.0.0" / name).is_dir()
@@ -1949,7 +1946,60 @@ def test_fetch_failure_reports_dub_output(tmp_path: Path) -> None:
     ) in output(result)
 
 
-def write_fetchable_package(directory: Path, name: str) -> None:
+# A dependency of the project that is not on disk is fetched, as `dub test`
+# does, and the project then runs.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_missing_dependency_is_fetched(tmp_path: Path, backend: str) -> None:
+    dependency = dub_name("fetched-dependency")
+    publish_package(tmp_path, dependency, "1.0.0", library=True)
+    app = tmp_path / "app"
+    write(
+        app / "dub.sdl",
+        dub_project_recipe("missing-dependency")
+        + f'dependency "{dependency}" version="~>1.0"\n',
+    )
+    write(
+        app / "source" / "app.d",
+        "module app;\nimport dependency_module;\n"
+        "unittest { assert(answer == 42); }\nvoid main() {}\n",
+    )
+
+    result = run_with_dub_home(tmp_path, f"--backend={backend}", str(app))
+
+    assert result.returncode == 0, output(result)
+    assert (tmp_path / "home" / "packages" / dependency / "1.0.0" / dependency).is_dir()
+
+
+# The root package has no target, so there is nothing to build, but its
+# sources still run their unit tests.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_target_type_none_runs_unit_tests(tmp_path: Path, backend: str) -> None:
+    app = tmp_path / "app"
+    write(
+        app / "dub.sdl",
+        f'name "{dub_name("no-target")}"\ntargetType "none"\n',
+    )
+    write(
+        app / "source" / "app.d",
+        "module app;\nunittest { assert(1 + 1 == 2); }\n",
+    )
+
+    result = run_sb(f"--backend={backend}", str(app), cwd=tmp_path)
+
+    assert result.returncode == 0, output(result)
+
+
+def write_fetchable_package(directory: Path, name: str, library: bool = False) -> None:
+    if library:
+        write(
+            directory / "dub.sdl",
+            f'name "{name}"\nversion "1.0.0"\ntargetType "library"\n',
+        )
+        write(
+            directory / "source" / "dependency_module.d",
+            "module dependency_module;\nint answer() { return 42; }\n",
+        )
+        return
     write(
         directory / "dub.sdl",
         f'name "{name}"\nversion "1.0.0"\ntargetType "library"\n'
@@ -1961,14 +2011,39 @@ def write_fetchable_package(directory: Path, name: str) -> None:
     )
 
 
+# Puts the package in the registry that `run_with_dub_home` gives to dub.
+def publish_package(
+    directory: Path, name: str, version: str, library: bool = False,
+) -> None:
+    root = directory / "source" / name
+    package = root / f"{name}-{version}"
+    write_fetchable_package(package, name, library)
+    write(
+        package / "dub.sdl",
+        (package / "dub.sdl").read_text().replace('version "1.0.0"', f'version "{version}"'),
+    )
+    registry = directory / "registry"
+    registry.mkdir(exist_ok=True)
+    shutil.make_archive(str(registry / f"{name}-{version}"), "zip", root)
+
+
 # The dub home is in the test directory, so the packages that dub finds are
-# the ones that the test made. The registry of the test is asked before the
-# ones of dub.
+# the ones that the test made. Its settings skip the standard registry and
+# name the registry of the test, a directory: no test reaches the network.
 def run_with_dub_home(
     directory: Path, *args: str, env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     outside = directory / "outside"
     outside.mkdir(exist_ok=True)
+    registry = directory / "registry"
+    registry.mkdir(exist_ok=True)
+    write(
+        directory / "home" / "settings.json",
+        json.dumps({
+            "skipRegistry": "standard",
+            "registryUrls": [f"file://{registry}"],
+        }),
+    )
     return run_sb(
         *args, cwd=outside, env={"DUB_HOME": str(directory / "home"), **(env or {})},
     )
