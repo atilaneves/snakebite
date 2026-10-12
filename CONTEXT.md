@@ -63,8 +63,9 @@ snakebite's own builtin wrapper. A compiler intrinsic has no host body
 to call; ADR-0013 defines its builtin route and signature contract.
 
 **Intrinsic reference**:
-The pinned native DMD result that defines a compiler intrinsic's guest
-result. ADR-0013 records the owner's narrow constant-fabs exception.
+The result of native code that the compiler which built the host gives for
+a compiler intrinsic. That is the guest result of the intrinsic. ADR-0013
+records the owner's narrow constant-fabs exception for a dmd host.
 
 **Call receiver**:
 The object or enclosing context supplied to a callee as its hidden argument.

@@ -35,8 +35,10 @@ public struct CallSelection {
     // arguments: it also reads the cursor of the function that calls it,
     // so each backend appends that cursor to the call's arguments.
     // `alloca` is the other: its memory lives as long as the activation
-    // that calls it, which only the backend knows how to hold.
-    public enum Route { guest, native, builtin, vaStart, alloca }
+    // that calls it, which only the backend knows how to hold. `vaCopy`
+    // needs the same memory for the copy, so each backend appends a pointer
+    // to storage of the calling activation, as compiled code has it.
+    public enum Route { guest, native, builtin, vaStart, vaCopy, alloca }
 
     // The dmd-touching questions a function's route needs, decided once
     // per function and read back without a lock (ADR-0006, finding
@@ -72,7 +74,8 @@ public struct CallSelection {
     ) {
         auto call = site is null ? null : site.isCallExp;
         return call !is null && !hasIntrinsicCallee(call)
-                && (decision.route == Route.builtin || decision.route == Route.vaStart)
+                && (decision.route == Route.builtin || decision.route == Route.vaStart
+                    || decision.route == Route.vaCopy)
             ? Decision(Route.native) : decision;
     }
 
@@ -271,11 +274,15 @@ public struct CallSelection {
         // A declaration without a body can only describe a native call or
         // a builtin - never a guest one, since there is no guest body to
         // run.
-        if (function_.fbody is null)
-            return isVaStart(function_, context)
-                ? Decision(Route.vaStart, &startVariadicEntry)
-                : isAlloca(function_) ? Decision(Route.alloca)
-                : intrinsicPlanOf(function_).call;
+        if (function_.fbody is null) {
+            version (LDC)
+                return intrinsicPlanOf(function_).call;
+            else
+                return isVaStart(function_, context)
+                    ? Decision(Route.vaStart, &startVariadicEntry)
+                    : isAlloca(function_) ? Decision(Route.alloca)
+                    : intrinsicPlanOf(function_).call;
+        }
 
         const rootOwned = isGuest(function_);
         if (!bodyIsSelected(context.module_, rootOwned))
@@ -370,6 +377,75 @@ public struct CallSelection {
     // it never serves a declaration whose signature differs. dmd gives such
     // a declaration an unspecified result, or a raw SIMD instruction
     // (`__simd_ib`) that has no wrapper.
+    version (LDC)
+    private static IntrinsicPlan buildIntrinsicPlan(FuncDeclaration function_,
+        in imported!"dmd.dmodule".Module module_,
+    ) {
+        import dmd.dtemplate: TemplateInstance;
+        import dmd.typesem: size;
+        import core.stdc.string: strlen;
+        import gen.dpragma: LDCPragma;
+        import snakebite.frontend.dmd.functions: typeFunctionOf;
+        import snakebite.backends.builtins:
+            copyVariadicEntry, endVariadicEntry;
+        import snakebite.backends.ldcintrinsics;
+
+        static IntrinsicPlan builtin(BuiltinCall entry) {
+            return entry is null
+                ? IntrinsicPlan.init
+                : IntrinsicPlan(Decision(Route.builtin, entry));
+        }
+
+        // The size of the type argument of an atomic template instance. A
+        // declaration of the guest can carry the pragma on something else
+        // (a value parameter, no template): it has no wrapper, and the call
+        // says so.
+        size_t argumentSize() {
+            import dmd.dtemplate: isType;
+
+            auto instance = function_.parent.isTemplateInstance;
+            if (instance is null || instance.tdtypes.length != 1)
+                return 0;
+            auto type = isType(instance.tdtypes[0]);
+            return type is null ? 0 : type.size;
+        }
+
+        static const(char)[] intrinsicNameOf(imported!"dmd.dtemplate".TemplateDeclaration declaration) {
+            return declaration.intrinsicName is null
+                ? "" : declaration.intrinsicName[0 .. strlen(declaration.intrinsicName)];
+        }
+
+        with (LDCPragma) switch (function_.llvmInternal) {
+            case LLVMva_start:
+                return IntrinsicPlan(Decision(Route.vaStart, &startVariadicEntry));
+            case LLVMva_end: return builtin(&endVariadicEntry);
+            case LLVMva_copy:
+                return IntrinsicPlan(Decision(Route.vaCopy, &copyVariadicEntry));
+            case LLVMalloca: return IntrinsicPlan(Decision(Route.alloca));
+            case LLVMintrinsic:
+                return builtin(intrinsicEntryOf(function_.mangleOverride));
+            case LLVMfence: return builtin(fenceEntry);
+            case LLVMatomic_load: return builtin(atomicLoadEntryOf(argumentSize));
+            case LLVMatomic_store: return builtin(atomicStoreEntryOf(argumentSize));
+            case LLVMatomic_cmp_xchg:
+                return builtin(atomicCompareExchangeEntryOf(argumentSize));
+            case LLVMatomic_rmw: {
+                auto instance = function_.parent.isTemplateInstance;
+                return instance is null ? IntrinsicPlan.init
+                    : builtin(atomicReadModifyWriteEntryOf(
+                        intrinsicNameOf(instance.tempdecl.isTemplateDeclaration),
+                        argumentSize));
+            }
+            case LLVMbitop_vld:
+                return builtin(volatileLoadEntryOf(
+                    typeFunctionOf(function_).next.size));
+            case LLVMbitop_vst:
+                return builtin(volatileStoreEntryOf(
+                    typeFunctionOf(function_).parameterList[1].type.size));
+            default: return IntrinsicPlan.init;
+        }
+    }
+    else
     private static IntrinsicPlan buildIntrinsicPlan(FuncDeclaration function_,
         in imported!"dmd.dmodule".Module module_,
     ) {
@@ -396,6 +472,13 @@ public struct CallSelection {
             );
     }
 
+    version (LDC) {
+        public bool foldedScalarIntrinsic(
+            imported!"dmd.expression".CallExp, out ScalarConstant,
+        ) {
+            return false;
+        }
+    } else
     public bool foldedScalarIntrinsic(
         imported!"dmd.expression".CallExp expression,
         out ScalarConstant constant,
@@ -451,56 +534,59 @@ public struct CallSelection {
         }
     }
 
-    // DMD's backend constant folder (`evalu8`, OPbswap) uses the operand
-    // width; `cdbswap` uses the result width for a nonconstant operand.
-    // The call site must keep that distinction before argument evaluation.
-    private bool foldedIntegerIntrinsic(
-        imported!"dmd.expression".CallExp expression, out ulong value,
-    ) {
-        import core.bitop: popcnt;
-        import core.stdc.fenv;
-        import snakebite.backends.dmdintrinsics: swapTo;
-        import snakebite.nativelayout: TypeFacts;
+    // The rest of this struct is dmd's code generator reproduced for a host
+    // built by dmd. An LDC host takes `ldcintrinsics`.
+    version (DigitalMars) {
+        // DMD's backend constant folder (`evalu8`, OPbswap) uses the operand
+        // width; `cdbswap` uses the result width for a nonconstant operand.
+        // The call site must keep that distinction before argument evaluation.
+        private bool foldedIntegerIntrinsic(
+            imported!"dmd.expression".CallExp expression, out ulong value,
+        ) {
+            import core.bitop: popcnt;
+            import core.stdc.fenv;
+            import snakebite.backends.dmdintrinsics: swapTo;
+            import snakebite.nativelayout: TypeFacts;
 
-        auto function_ = expression.f;
-        if (function_ is null || function_.fbody !is null
-                || !hasIntrinsicCallee(expression)
-                || expression.arguments is null
-                || expression.arguments.length != 1)
-            return false;
-        const identifier = function_.ident.toString;
-        if (identifier != "bswap" && identifier != "_popcnt")
-            return false;
-        const name = identifier == "bswap" ? "bswap" : "_popcnt";
-        auto operand = (*expression.arguments)[0];
-        const plan = intrinsicPlanOf(function_);
-        if (plan.call.route != Route.builtin || plan.parameters.length != 1)
-            return false;
+            auto function_ = expression.f;
+            if (function_ is null || function_.fbody !is null
+                    || !hasIntrinsicCallee(expression)
+                    || expression.arguments is null
+                    || expression.arguments.length != 1)
+                return false;
+            const identifier = function_.ident.toString;
+            if (identifier != "bswap" && identifier != "_popcnt")
+                return false;
+            const name = identifier == "bswap" ? "bswap" : "_popcnt";
+            auto operand = (*expression.arguments)[0];
+            const plan = intrinsicPlanOf(function_);
+            if (plan.call.route != Route.builtin || plan.parameters.length != 1)
+                return false;
 
-        // Native compilation uses its own FP environment. A proof must
-        // neither depend on nor change the guest's rounding or flags.
-        fenv_t environment;
-        if (feholdexcept(&environment) != 0)
-            return false;
-        scope(exit) fesetenv(&environment);
-        fesetround(FE_TONEAREST);
-        ulong bits;
-        if (!integerConstantOf(operand, bits))
-            return false;
+            // Native compilation uses its own FP environment. A proof must
+            // neither depend on nor change the guest's rounding or flags.
+            fenv_t environment;
+            if (feholdexcept(&environment) != 0)
+                return false;
+            scope(exit) fesetenv(&environment);
+            fesetround(FE_TONEAREST);
+            ulong bits;
+            if (!integerConstantOf(operand, bits))
+                return false;
 
-        switch (typeFacts(operand.type).size) {
-            case 2:
-                value = name == "bswap" ? swapTo!ushort(bits)
-                    : popcnt(cast(ushort) bits); break;
-            case 4:
-                value = name == "bswap" ? swapTo!uint(bits)
-                    : popcnt(cast(uint) bits); break;
-            case 8:
-                value = name == "bswap" ? swapTo!ulong(bits)
-                    : popcnt(bits); break;
-            default: return false;
-        }
-        return true;
+            switch (typeFacts(operand.type).size) {
+                case 2:
+                    value = name == "bswap" ? swapTo!ushort(bits)
+                        : popcnt(cast(ushort) bits); break;
+                case 4:
+                    value = name == "bswap" ? swapTo!uint(bits)
+                        : popcnt(cast(uint) bits); break;
+                case 8:
+                    value = name == "bswap" ? swapTo!ulong(bits)
+                        : popcnt(bits); break;
+                default: return false;
+            }
+            return true;
     }
 
     private bool integerConstantOf(
@@ -1005,6 +1091,7 @@ public struct CallSelection {
                 Tint128, Tuns128, Ttraits, Tmixin, Tnoreturn, Ttag:
                 return false;
         }
+    }
     }
 }
 

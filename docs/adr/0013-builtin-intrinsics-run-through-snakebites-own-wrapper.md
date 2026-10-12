@@ -64,7 +64,27 @@ reached call without a host symbol gives the resolver's missing-symbol
 diagnostic. The accepted raw-SIMD exception below is distinct from the
 supported intrinsic signatures.
 
-### The result is dmd's result
+### The result is the host compiler's result
+
+The text below, up to the section on array operations, is the rule for a
+host built by dmd. For a host built by LDC, the frontend has LDC's additions
+to the pinned frontend (`vendor/ldc-frontend`) and reads LDC's druntime. A
+declaration without a body then carries the pragma of LDC that declared it
+(`FuncDeclaration.llvmInternal`), and call selection reads that value, not a
+module name and an identifier. `LDC_va_start`, `LDC_va_end`, `LDC_va_copy`
+and `LDC_alloca` keep the routes of the frame-bound intrinsics. A
+`LDC_intrinsic` declaration, an `LDC_atomic_*` declaration, `LDC_fence` and
+the volatile access of `ldc.bitop` take the builtin route to a wrapper that
+LDC compiles into the host (`source/snakebite/backends/ldcintrinsics.d`),
+keyed by the LLVM name of the intrinsic (`FuncDeclaration.mangleOverride`),
+or by the pragma and the size of its type argument for the atomics. A
+parameter that LLVM wants as a constant is a `switch` in the wrapper. A
+declaration with no wrapper takes the native route and the resolver's
+diagnostic. `dmdintrinsics.d` and the classifier of dmd's code generator are
+for a dmd host only. The result of an intrinsic is then the result of native
+code that LDC built: `rndtol(2.5)` is 3, `sin` is libm's.
+
+### The result is dmd's result (host built by dmd)
 
 The intrinsic reference is DMD 2.113.0 on Linux x86-64, with the narrow
 owner-approved constant-fabs exception below. The guest is always analysed

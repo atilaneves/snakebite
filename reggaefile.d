@@ -5,11 +5,13 @@ import reggae.build: Build, Target;
 import reggae.rules.dub: CompilationMode;
 import reggae.rules.dub.runtime: dubBuild;
 import reggae.types: CompilerFlags;
-import std.algorithm: canFind, endsWith, filter, map, startsWith;
+import std.algorithm: canFind, endsWith, filter, map, sort, startsWith;
 import std.array: array;
 import std.process: environment, executeShell, escapeShellCommand;
-import std.path: baseName, stripExtension;
-import std.string: chomp;
+import std.exception: enforce;
+import std.file: getcwd;
+import std.path: baseName, buildPath, dirName, stripExtension;
+import std.string: chomp, split, stripRight;
 
 string ldcPath() {
     version (Windows)
@@ -107,6 +109,260 @@ Target[] testFixtureLibraries() {
     ];
 }
 
+// What the compiler of this target says about itself (`-v`): its import
+// paths and predefined version identifiers. The frontend inside the
+// binary analyses that druntime source in the way that compiler does
+// (`snakebite.frontend.hostcompiler`). Written when the build is
+// generated, to a directory of its own per object set, and given to the
+// compiler as a string import path.
+string hostCompilerRecordDirectory(in string compiler, in string objectSet) {
+    import std.file: mkdirRecurse, write;
+    import std.path: absolutePath;
+    import std.process: execute;
+    import std.string: lineSplitter, split;
+
+    const binary = compiler.executablePath.absolutePath;
+    const result = execute([compiler, "-v", "-c", "-o-", "/dev/null"]);
+    string record;
+    foreach (line; result.output.lineSplitter) {
+        if (line.startsWith("predefs"))
+            foreach (identifier; line["predefs".length .. $].split)
+                record ~= "version " ~ identifier ~ "\n";
+    }
+    enforce(record.length, compiler ~ " -v gave no predefs");
+    const probe = pinnedFrontendProbe(compiler);
+    record ~= "vendor " ~ probe.vendor ~ "\n";
+    record ~= "compiler " ~ binary ~ "\n";
+    const directory = buildPath(getcwd, ".reggae", "host-compiler", objectSet);
+    mkdirRecurse(directory);
+    write(buildPath(directory, "snakebite_host_compiler.txt"), record);
+    write(buildPath(directory, "snakebite_host_features.txt"),
+        probe.vendor == "LDC" ? ldcFeatureNames(compiler) : "");
+    return directory;
+}
+
+// `compiler` as a path: itself when it names a path, else the first file of
+// that name on `PATH`.
+string executablePath(in string compiler) {
+    import std.file: exists, isFile;
+
+    if (compiler.canFind("/"))
+        return compiler.idup;
+    foreach (directory; environment.get("PATH", "").split(":")) {
+        const candidate = buildPath(directory.length ? directory : ".", compiler);
+        if (candidate.exists && candidate.isFile)
+            return candidate;
+    }
+    throw new Exception(compiler ~ " is not on PATH");
+}
+
+// The probe of `compiler`, when its frontend is the one that snakebite links.
+CompilerProbe pinnedFrontendProbe(in string compiler) {
+    import std.conv: text;
+
+    const probe = compilerProbe(compiler);
+    const library = dmdLibraryVersion;
+    enforce(probe.frontendVersion == library.number,
+        compiler ~ " has the frontend version " ~ probe.frontendVersion.text
+        ~ " but the dmd frontend library is " ~ library.number.text);
+    return probe;
+}
+
+// What `__traits(targetHasFeature)` can be asked, one name on each line.
+string ldcFeatureNames(in string compiler) {
+    import std.process: execute;
+    import std.regex: matchFirst, regex;
+    import std.string: lineSplitter;
+
+    const help = execute([compiler, "-mattr=help"]).output;
+    string names;
+    bool inFeatures;
+    foreach (line; help.lineSplitter) {
+        if (line.startsWith("Available features"))
+            inFeatures = true;
+        else if (inFeatures)
+            if (const feature = line.matchFirst(regex(`^  (\S+)\s+- `)))
+                names ~= feature[1] ~ "\n";
+    }
+    enforce(names.length, compiler ~ " -mattr=help lists no features");
+    return names;
+}
+
+// What `__VENDOR__` and `__VERSION__` are for `compiler`: the strings a guest
+// sees, and the version of the frontend that the compiler contains.
+struct CompilerProbe {
+    string vendor;
+    uint frontendVersion;
+}
+
+// The probe runs once for each compiler: every target of the build asks.
+CompilerProbe compilerProbe(in string compiler) {
+    static CompilerProbe[string] probes;
+    if (auto known = compiler in probes)
+        return *known;
+    return probes[compiler] = runProbe(compiler);
+}
+
+// A directory that is gone when its owner goes out of scope.
+struct TemporaryDirectory {
+    string path;
+
+    this(string path) {
+        import std.file: mkdirRecurse;
+
+        this.path = path;
+        mkdirRecurse(path);
+    }
+
+    ~this() {
+        import std.file: exists, rmdirRecurse;
+
+        if (path.exists)
+            rmdirRecurse(path);
+    }
+
+    @disable this(this);
+}
+
+CompilerProbe runProbe(in string compiler) {
+    import std.conv: text, to;
+    import std.file: tempDir, write;
+    import std.process: execute, thisProcessID;
+    import std.string: strip;
+
+    scope directory = TemporaryDirectory(
+        buildPath(tempDir, "snakebite-probe-" ~ thisProcessID.text));
+    const source = buildPath(directory.path, "probe.d");
+    write(source, `pragma(msg, __VENDOR__, "|", __VERSION__);`);
+    const result = execute([compiler, "-c", "-o-", source]);
+    enforce(result.status == 0, compiler ~ " cannot compile the probe: " ~ result.output);
+    const fields = result.output.strip.split("|");
+    enforce(fields.length == 2, "unexpected probe output: " ~ result.output);
+    return CompilerProbe(fields[0], fields[1].strip.chomp("L").to!uint);
+}
+
+// The frontend that snakebite links, from the dub selection of `dmd`.
+struct DmdLibraryVersion {
+    string text; /// For example `2.113.0`.
+    uint number; /// For example `2113`.
+}
+
+DmdLibraryVersion dmdLibraryVersion() {
+    import std.conv: to;
+    import std.file: readText;
+    import std.json: parseJSON;
+
+    const text = readText(buildPath(getcwd, "dub.selections.json"))
+        .parseJSON["versions"]["dmd"].str;
+    const parts = text.split(".");
+    return DmdLibraryVersion(text, parts[0].to!uint * 1000 + parts[1].to!uint);
+}
+
+// For an LDC target the frontend is the pinned package source plus the
+// additions that LDC makes to the same frontend version
+// (`vendor/ldc-frontend`), because the source that LDC compiles uses them:
+// its pragmas, its traits, 64-byte vectors, and intrinsics that the
+// compile-time interpreter evaluates. The build stops, and names both
+// versions, when `compiler` and the patch do not belong to the pin.
+DubInfo withLdcFrontend(DubInfo info, in string compiler, in CompilerProbe probe) {
+    import std.file: dirEntries, exists, isDir, SpanMode;
+    import std.process: execute;
+    import std.regex: matchFirst, regex;
+
+    enforce(probe.vendor == "LDC", compiler ~ " is not LDC but the vendor is `" ~ probe.vendor ~ "`");
+    const pin = dmdLibraryVersion.text;
+    const versionText = execute([compiler, "--version"]).output;
+    const ldcVersion = versionText.matchFirst(regex(`\((\d+\.\d+)\.\d+\)`));
+    enforce(ldcVersion, compiler ~ " --version does not give an LDC version: " ~ versionText);
+
+    const prefix = "dmd-" ~ pin ~ "-ldc-";
+    const patches = buildPath(getcwd, "vendor", "ldc-frontend");
+    const patchDirectory = buildPath(patches, prefix ~ ldcVersion[1]);
+    if (!patchDirectory.exists || !patchDirectory.isDir) {
+        import std.array: join;
+
+        auto others = dirEntries(patches, SpanMode.shallow)
+            .filter!(entry => entry.isDir && entry.name.baseName.startsWith(prefix))
+            .map!(entry => entry.name.baseName[prefix.length .. $]).array;
+        enforce(others.length,
+            "there is no patch of LDC's additions for the dmd frontend " ~ pin
+            ~ " (vendor/ldc-frontend/" ~ prefix ~ "*), and " ~ compiler ~ " is LDC " ~ ldcVersion[1]);
+        throw new Exception("the patch of LDC's additions for the dmd frontend " ~ pin
+            ~ " is for LDC " ~ others.join(", ") ~ " but " ~ compiler ~ " is LDC " ~ ldcVersion[1]);
+    }
+
+    const frontendPackages = info.packages.filter!(a => a.name.startsWith("dmd:")).array;
+    enforce(frontendPackages.length, "no dmd:* package in the dub description");
+    const packageDirectory = frontendPackages[0].path.stripRight("/");
+    const frontend = patchedFrontendDirectory(packageDirectory, patchDirectory, pin);
+
+    foreach (ref package_; info.packages) {
+        foreach (ref path; package_.files)
+            path = path.moveTree(packageDirectory, frontend);
+        foreach (ref path; package_.importPaths)
+            path = path.moveTree(packageDirectory, frontend);
+        foreach (ref path; package_.cImportPaths)
+            path = path.moveTree(packageDirectory, frontend);
+        foreach (ref path; package_.stringImportPaths)
+            path = path.moveTree(packageDirectory, frontend);
+        package_.path = package_.path.moveTree(packageDirectory, frontend);
+        if (package_.name == "dmd:frontend")
+            package_.files ~= buildPath(frontend, "compiler", "src", "dmd", "hooks.d")
+                ~ dirEntries(buildPath(frontend, "compiler", "src", "gen"), "*.d", SpanMode.shallow)
+                    .map!(entry => entry.name).array;
+    }
+    return info;
+}
+
+string moveTree(in string path, in string from, in string to) {
+    return path.startsWith(from) ? to ~ path[from.length .. $] : path;
+}
+
+// A copy of the pinned package with the patch applied, and the modules that
+// the patch imports. Made again only when its inputs change, so that the
+// time stamps of the sources stay and ninja does not rebuild the frontend.
+string patchedFrontendDirectory(in string packageDirectory, in string patchDirectory, in string pin) {
+    import std.digest.sha: sha256Of;
+    import std.digest: toHexString;
+    import std.file: copy, dirEntries, exists, isDir, mkdirRecurse, readText, rmdirRecurse, SpanMode, write;
+    import std.process: execute;
+
+    const root = buildPath(getcwd, ".reggae", "ldc-frontend", pin);
+    const patchFile = buildPath(patchDirectory, patchDirectory.baseName ~ ".patch");
+    const generatedSources = dirEntries(buildPath(patchDirectory, "gen"), "*.d", SpanMode.shallow)
+        .map!(entry => entry.name).array.sort.release;
+
+    ubyte[] inputs = cast(ubyte[]) (packageDirectory ~ readText(patchFile));
+    foreach (source; generatedSources)
+        inputs ~= cast(ubyte[]) (source ~ readText(source));
+    const stamp = sha256Of(inputs).toHexString.idup;
+    const stampFile = buildPath(root, "stamp");
+    if (stampFile.exists && readText(stampFile) == stamp)
+        return root;
+
+    if (root.exists)
+        rmdirRecurse(root);
+    foreach (relative; ["compiler/src", "generated/dub"])
+        foreach (entry; dirEntries(buildPath(packageDirectory, relative), SpanMode.depth)) {
+            const target = buildPath(root, entry.name[packageDirectory.length + 1 .. $]);
+            if (entry.isDir)
+                mkdirRecurse(target);
+            else {
+                mkdirRecurse(target.dirName);
+                copy(entry.name, target);
+            }
+        }
+    const applied = execute(["patch", "-p1", "-d", buildPath(root, "compiler", "src"), "-i", patchFile]);
+    enforce(applied.status == 0, "the patch " ~ patchFile ~ " does not apply to "
+        ~ packageDirectory ~ ": " ~ applied.output);
+    const generatedDirectory = buildPath(root, "compiler", "src", "gen");
+    mkdirRecurse(generatedDirectory);
+    foreach (source; generatedSources)
+        copy(source, buildPath(generatedDirectory, source.baseName));
+    write(stampFile, stamp);
+    return root;
+}
+
 Target[] dubTarget(string compiler, string config, string objectSet,
                  string output, CompilerFlags flags = CompilerFlags()) {
     auto buildOptions = options.dup;
@@ -119,6 +375,9 @@ Target[] dubTarget(string compiler, string config, string objectSet,
         buildOptions.dubBuildType = "release";
 
     DubInfo info = configToDubInfo[config].dup;
+    if (compiler != "dmd")
+        info = info.withLdcFrontend(buildOptions.dCompiler,
+            pinnedFrontendProbe(buildOptions.dCompiler));
     if (config == "acceptance-test" || config == "arena-validation")
         info.packages[0].dflags ~= "-unittest";
     if (compiler != "dmd") {
@@ -147,6 +406,8 @@ Target[] dubTarget(string compiler, string config, string objectSet,
     info.packages[0].lflags ~= compiler == "dmd"
         ? "-defaultlib=libphobos2.so" : "-link-defaultlib-shared";
     info.options = buildOptions;
+    info.packages[0].stringImportPaths ~=
+        hostCompilerRecordDirectory(buildOptions.dCompiler, objectSet);
     if (compiler == "dmd")
         info.packages[0].importPaths = info.packages[0].importPaths
             .filter!(a => a.baseName != "tests" && a.baseName != "acceptance")

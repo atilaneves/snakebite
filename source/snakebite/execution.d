@@ -126,7 +126,7 @@ public PreparationReport prepareSources(
 
     auto stopWatch = StopWatch(AutoStart.yes);
     initialize(Snippets.no);
-    auto project = loadProject(directory, sources);
+    auto project = loadProject(directory, sources, nativeDependencies);
     const frontendDuration = stopWatch.peek;
     stopWatch.reset;
     if (nativeDependencies)

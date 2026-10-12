@@ -4,19 +4,26 @@ module ut.backends.call.intrinsics;
 import ut.backends;
 
 
-// A guest is analysed as dmd code, so an intrinsic gives dmd's result on
-// every backend, whichever compiler built the test binary. Compiled D is
-// the oracle only where its compiler is dmd: LDC's `core.math` rounds
-// `rndtol` ties away from zero without regard to the rounding mode, takes
-// `sin` and `cos` from libm instead of the x87 instruction, and has a
-// different `ldexp` and no `float` or `double` `yl2x`. A test of such a
-// function asserts the values of a native dmd run.
-version (DigitalMars)
-    private alias DmdOnlyNative = AliasSeq!();
+// A guest is analysed as code of the compiler that built the test binary, so
+// an intrinsic gives that compiler's result on every backend. The native
+// arm is compiled D of the same compiler and is the oracle. Where dmd and
+// LDC differ (`rndtol` rounds ties in the current rounding mode with dmd and
+// away from zero with LDC; `sin` and `cos` are x87 instructions with dmd and
+// libm with LDC; LDC has `yl2x` for `real` only), the guest asserts the
+// values of its own compiler under `version`.
+
+
+// dmd's druntime implements the atomic operations with inline assembler,
+// which no backend runs (ADR-0012); LDC's druntime declares them as
+// intrinsics.
+version (LDC)
+    private alias AssemblerAtomics = AliasSeq!();
 else
-    private alias DmdOnlyNative = AliasSeq!(
-        Omit!(Native, Because.inexpressible,
-            "LDC's core.math gives another result than dmd's for this"),
+    private alias AssemblerAtomics = AliasSeq!(
+        Omit!(Bytecode, Because.inexpressible,
+            "dmd's druntime implements atomic operations with inline assembler"),
+        Omit!(Interpreter, Because.inexpressible,
+            "dmd's druntime implements atomic operations with inline assembler"),
     );
 
 
@@ -118,12 +125,12 @@ static foreach (backend; Matrix!()) {
 
 
 // The x87 instructions that dmd emits for these, which differ from libm and
-// from LDC's own `core.math`. The values come from a native dmd 2.113 run.
-// A `float` or `double` `yl2x` takes the `real` instruction's result,
-// rounded once.
+// from LDC's own `core.math`. The dmd values come from a native dmd 2.113
+// run, the LDC values from a native LDC 1.43 run. A `float` or `double`
+// `yl2x` takes the `real` instruction's result, rounded once, with dmd; LDC
+// gives the `real` result.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE evaluates sin, cos and yl2x in the host's libm, not as the x87 instruction"),
-    DmdOnlyNative,
 )) {
     @("ffi.executedIntrinsicCall.x87Results." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -137,28 +144,56 @@ static foreach (backend; Matrix!(
                 const double pi = opaque(0x1.921fb54442d18p+1);
                 const float piFloat = pi;
                 const real piReal = pi;
-                assert(sin(pi) == 0x1.1a6p-53);
-                assert(sin(piFloat) == -0x1.777a5cp-24f);
-                assert(sin(piReal) == 0x8.d3p-56L);
-                const double halfPi = -pi / 2;
-                const float halfPiFloat = halfPi;
-                const real halfPiReal = halfPi;
-                assert(cos(halfPi) == 0x1.1a6p-54);
-                assert(cos(halfPiFloat) == -0x1.777a5cp-25f);
-                assert(cos(halfPiReal) == 0x8.d3p-57L);
+                version (LDC) {
+                    assert(sin(pi) == 0x1.1a62633145c07p-53);
+                    assert(sin(piFloat) == -0x1.777a5cp-24f);
+                    assert(sin(piReal) == 0x1.1a62633145c06e0ep-53L);
+                    const double halfPi = -pi / 2;
+                    const float halfPiFloat = halfPi;
+                    const real halfPiReal = halfPi;
+                    assert(cos(halfPi) == 0x1.1a62633145c07p-54);
+                    assert(cos(halfPiFloat) == -0x1.777a5cp-25f);
+                    assert(cos(halfPiReal) == 0x1.1a62633145c06e0ep-54L);
 
-                const double x = opaque(0x1.0624dd2f1a9fcp-10);
-                const float xFloat = x;
-                assert(yl2x(x, opaque(1.0)) == -0x1.3ee7b471b3a95p+3);
-                assert(yl2x(xFloat, 1.0f) == -0x1.3ee7b4p+3f);
-                assert(yl2xp1(x, opaque(1.0)) == 0x1.7a013faca6c6bp-10);
-                assert(yl2xp1(xFloat, 1.0f) == 0x1.7a014p-10f);
+                    const double x = opaque(0x1.0624dd2f1a9fcp-10);
+                    const float xFloat = x;
+                    assert(yl2x(x, opaque(1.0)) == -0x1.3ee7b471b3a95038p+3L);
+                    assert(yl2x(xFloat, 1.0f) == -0x1.3ee7b44ce9bf95e8p+3L);
+                    assert(yl2xp1(x, opaque(1.0)) == 0x1.7a013faca6c6aafp-10L);
+                    assert(yl2xp1(xFloat, 1.0f) == 0x1.7a0140d9b93f276p-10L);
+                } else {
+                    assert(sin(pi) == 0x1.1a6p-53);
+                    assert(sin(piFloat) == -0x1.777a5cp-24f);
+                    assert(sin(piReal) == 0x8.d3p-56L);
+                    const double halfPi = -pi / 2;
+                    const float halfPiFloat = halfPi;
+                    const real halfPiReal = halfPi;
+                    assert(cos(halfPi) == 0x1.1a6p-54);
+                    assert(cos(halfPiFloat) == -0x1.777a5cp-25f);
+                    assert(cos(halfPiReal) == 0x8.d3p-57L);
+
+                    const double x = opaque(0x1.0624dd2f1a9fcp-10);
+                    const float xFloat = x;
+                    assert(yl2x(x, opaque(1.0)) == -0x1.3ee7b471b3a95p+3);
+                    assert(yl2x(xFloat, 1.0f) == -0x1.3ee7b4p+3f);
+                    assert(yl2xp1(x, opaque(1.0)) == 0x1.7a013faca6c6bp-10);
+                    assert(yl2xp1(xFloat, 1.0f) == 0x1.7a014p-10f);
+                }
 
                 const float zero = cast(float) opaque(0);
-                assert(ldexp(zero, 5) == 0.0f);
+                // LDC's `ldexp` of zero is a denormal number.
+                version (LDC)
+                    assert(ldexp(zero, 5) == 0x1p-145f);
+                else
+                    assert(ldexp(zero, 5) == 0.0f);
 
                 const double negative = sqrt(opaque(-1.0));
-                assert((*cast(const(ulong)*) &negative >> 63) == 1);
+                // The x87 default NaN has its sign bit set. LDC's `sqrt` of a
+                // negative number is a NaN whose sign its optimiser decides.
+                version (LDC)
+                    assert(negative != negative);
+                else
+                    assert((*cast(const(ulong)*) &negative >> 63) == 1);
             }
         });
     }
@@ -425,7 +460,6 @@ static foreach (backend; Matrix!(
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "dmd's CTFE has no source for `rndtol`"),
-    DmdOnlyNative,
 )) {
     @("ffi.executedIntrinsicCall.rndtol.halfway." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -434,11 +468,20 @@ static foreach (backend; Matrix!(
             import core.math: rndtol;
 
             void main() {
-                assert(rndtol(0.5) == 0L);
-                assert(rndtol(1.5) == 2L);
-                assert(rndtol(2.5) == 2L);
-                assert(rndtol(-1.5) == -2L);
-                assert(rndtol(-2.5) == -2L);
+                version (LDC) {
+                    // Ties go away from zero.
+                    assert(rndtol(0.5) == 1L);
+                    assert(rndtol(1.5) == 2L);
+                    assert(rndtol(2.5) == 3L);
+                    assert(rndtol(-1.5) == -2L);
+                    assert(rndtol(-2.5) == -3L);
+                } else {
+                    assert(rndtol(0.5) == 0L);
+                    assert(rndtol(1.5) == 2L);
+                    assert(rndtol(2.5) == 2L);
+                    assert(rndtol(-1.5) == -2L);
+                    assert(rndtol(-2.5) == -2L);
+                }
                 assert(rndtol(3.5f) == 4L);
                 assert(rndtol(3.5L) == 4L);
                 assert(rndtol(-0.0) == 0L);
@@ -452,7 +495,6 @@ static foreach (backend; Matrix!(
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "dmd's CTFE has no source for `rndtol`"),
-    DmdOnlyNative,
 )) {
     @("ffi.executedIntrinsicCall.rndtol.roundingMode." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -463,19 +505,36 @@ static foreach (backend; Matrix!(
                 FE_TOWARDZERO, FE_TONEAREST;
 
             void main() {
-                fesetround(FE_UPWARD);
-                assert(rndtol(2.1) == 3L);
-                assert(rndtol(-2.9) == -2L);
-                assert(rndtol(2.1L) == 3L);
-                fesetround(FE_DOWNWARD);
-                assert(rndtol(2.9) == 2L);
-                assert(rndtol(-2.1) == -3L);
-                assert(rndtol(2.9f) == 2L);
-                fesetround(FE_TOWARDZERO);
-                assert(rndtol(2.9) == 2L);
-                assert(rndtol(-2.9) == -2L);
-                fesetround(FE_TONEAREST);
-                assert(rndtol(2.9) == 3L);
+                version (LDC) {
+                    // `llround` does not read the rounding mode.
+                    fesetround(FE_UPWARD);
+                    assert(rndtol(2.1) == 2L);
+                    assert(rndtol(-2.9) == -3L);
+                    assert(rndtol(2.1L) == 2L);
+                    fesetround(FE_DOWNWARD);
+                    assert(rndtol(2.9) == 3L);
+                    assert(rndtol(-2.1) == -2L);
+                    assert(rndtol(2.9f) == 3L);
+                    fesetround(FE_TOWARDZERO);
+                    assert(rndtol(2.9) == 3L);
+                    assert(rndtol(-2.9) == -3L);
+                    fesetround(FE_TONEAREST);
+                    assert(rndtol(2.9) == 3L);
+                } else {
+                    fesetround(FE_UPWARD);
+                    assert(rndtol(2.1) == 3L);
+                    assert(rndtol(-2.9) == -2L);
+                    assert(rndtol(2.1L) == 3L);
+                    fesetround(FE_DOWNWARD);
+                    assert(rndtol(2.9) == 2L);
+                    assert(rndtol(-2.1) == -3L);
+                    assert(rndtol(2.9f) == 2L);
+                    fesetround(FE_TOWARDZERO);
+                    assert(rndtol(2.9) == 2L);
+                    assert(rndtol(-2.9) == -2L);
+                    fesetround(FE_TONEAREST);
+                    assert(rndtol(2.9) == 3L);
+                }
             }
         });
     }
@@ -554,5 +613,142 @@ static foreach (backend; Matrix!()) {
                 assert(rintIfAsked(false, 2.5) == 0);
             }
         });
+    }
+}
+
+
+// The atomic operations of the host compiler's druntime take a template
+// argument of any type of the same size, among them a class reference of
+// the program.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE cannot take the address of a global to cast it at compile time"),
+    AssemblerAtomics,
+)) {
+    @("ffi.executedIntrinsicCall.atomic.classReference." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.atomic: atomicLoad, atomicStore, cas, atomicOp;
+
+            class Node {}
+
+            shared Node head;
+            shared int counter;
+
+            void main() {
+                auto first = new shared Node;
+                auto second = new shared Node;
+                assert(cas(&head, cast(shared Node) null, first));
+                assert(head is first);
+                assert(!cas(&head, cast(shared Node) null, second));
+                assert(cas(&head, first, second));
+                assert(atomicLoad(head) is second);
+                atomicStore(head, first);
+                assert(atomicLoad(head) is first);
+                atomicOp!"+="(counter, 3);
+                assert(atomicLoad(counter) == 3);
+            }
+        });
+    }
+}
+
+
+version (LDC) {
+    // LLVM's `expect` takes a `bool` as an `i1`. A guest that calls it names
+    // an intrinsic that only LDC's druntime has, so the test exists in a host
+    // built by LDC only.
+    static foreach (backend; Matrix!(
+        Omit!(Ctfe, Because.inexpressible,
+            "CTFE has no source for an LLVM intrinsic"),
+    )) {
+        @("ffi.executedIntrinsicCall.llvmExpect.bool." ~ backend.stringof)
+        @Tags(backend.stringof)
+        unittest {
+            0.shouldBeStatusOf!(backend, q{
+                import ldc.intrinsics: llvm_expect;
+                import core.volatile: volatileLoad;
+
+                bool opaque(bool value) {
+                    ubyte bits = value;
+                    return volatileLoad(&bits) != 0;
+                }
+
+                void main() {
+                    assert(llvm_expect!bool(opaque(true), true));
+                    assert(!llvm_expect!bool(opaque(false), true));
+                    assert(llvm_expect!bool(opaque(true), false));
+                    assert(llvm_expect!ubyte(opaque(true), 1) == 1);
+                }
+            });
+        }
+    }
+}
+
+
+version (LDC) {
+    // `cas` on a type of 16 bytes is `llvm_atomic_cmp_xchg` on that type; LDC's
+    // druntime only.
+    static foreach (backend; Matrix!(
+        Omit!(Ctfe, Because.inexpressible,
+            "dmd's CTFE cannot take the address of a global to cast it at compile time"),
+        AssemblerAtomics,
+    )) {
+        @("ffi.executedIntrinsicCall.atomic.sixteenBytes." ~ backend.stringof)
+        @Tags(backend.stringof)
+        unittest {
+            0.shouldBeStatusOf!(backend, q{
+                import core.atomic: atomicLoad, atomicStore, cas;
+
+                align(16) struct Pair { ulong low, high; }
+
+                shared Pair slot;
+
+                void main() {
+                    atomicStore(slot, Pair(1, 2));
+                    assert(atomicLoad(slot) == Pair(1, 2));
+                    assert(!cas(&slot, Pair(1, 3), Pair(5, 6)));
+                    assert(atomicLoad(slot) == Pair(1, 2));
+                    assert(cas(&slot, Pair(1, 2), Pair(5, 6)));
+                    assert(atomicLoad(slot) == Pair(5, 6));
+                }
+            });
+        }
+    }
+}
+
+
+version (LDC) {
+    // `is_fpclass` takes a mask of the ten classes that LLVM names.
+    static foreach (backend; Matrix!(
+        Omit!(Ctfe, Because.inexpressible,
+            "CTFE has no source for an LLVM intrinsic"),
+    )) {
+        @("ffi.executedIntrinsicCall.llvmIsFpclass." ~ backend.stringof)
+        @Tags(backend.stringof)
+        unittest {
+            0.shouldBeStatusOf!(backend, opaqueDouble ~ q{
+                import ldc.intrinsics: llvm_is_fpclass;
+
+                enum signalingNaN = 1 << 0, quietNaN = 1 << 1,
+                    negativeInfinity = 1 << 2, negativeNormal = 1 << 3,
+                    negativeZero = 1 << 5, positiveZero = 1 << 6,
+                    positiveNormal = 1 << 8, positiveInfinity = 1 << 9;
+
+                void main() {
+                    assert(llvm_is_fpclass!double(opaque(double.nan), quietNaN | signalingNaN));
+                    assert(!llvm_is_fpclass!double(opaque(1.5), quietNaN));
+                    assert(llvm_is_fpclass!double(opaque(1.5), positiveNormal));
+                    assert(llvm_is_fpclass!double(opaque(1.5), positiveNormal | negativeNormal));
+                    assert(!llvm_is_fpclass!double(opaque(-1.5), positiveNormal));
+                    assert(llvm_is_fpclass!double(opaque(-0.0), negativeZero));
+                    assert(!llvm_is_fpclass!double(opaque(-0.0), positiveZero));
+                    assert(llvm_is_fpclass!double(opaque(double.infinity), positiveInfinity));
+                    assert(llvm_is_fpclass!double(opaque(-double.infinity), negativeInfinity));
+                    assert(!llvm_is_fpclass!double(opaque(1.5), 0));
+                    assert(llvm_is_fpclass!float(2.5f, positiveNormal));
+                }
+            });
+        }
     }
 }

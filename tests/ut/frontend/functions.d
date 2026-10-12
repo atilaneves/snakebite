@@ -26,10 +26,11 @@ static foreach (basis; ["absolute", "root", "import"]) {
         const root = basis == "root" ? directory : null;
         const imports = basis == "import" ? [directory] : [];
         const flags = FrontendFlags.init;
+        const dependencyImage = true;
         auto first = parseRootModules(
-            [left], imports, flags, [left: leftSource], root);
+            [left], imports, flags, dependencyImage, [left: leftSource], root);
         auto second = parseRootModules(
-            [right], imports, flags, [right: rightSource], root);
+            [right], imports, flags, dependencyImage, [right: rightSource], root);
         (first[0] is second[0]).should == false;
         (findFunction(first[0], "left") !is null).should == true;
         (findFunction(second[0], "right") !is null).should == true;
@@ -37,7 +38,7 @@ static foreach (basis; ["absolute", "root", "import"]) {
         enum leftAlias = prefix ~ "/left/unused/../same.d";
         enum rightAlias = prefix ~ "/right/./same.d";
         auto repeated = parseRootModules(
-            [leftAlias, rightAlias], imports, flags,
+            [leftAlias, rightAlias], imports, flags, dependencyImage,
             [leftAlias: leftSource, rightAlias: rightSource], root);
         (repeated[0] is first[0]).should == true;
         (repeated[1] is second[0]).should == true;

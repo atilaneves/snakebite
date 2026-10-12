@@ -2,10 +2,10 @@ module at.cli;
 
 
 import ut.backends;
-import std.conv: text;
-import std.file: getcwd, mkdir, mkdirRecurse, rmdirRecurse, tempDir, write;
+import std.conv: octal, text;
+import std.file: getcwd, mkdir, mkdirRecurse, rmdirRecurse, setAttributes, tempDir, write;
 import std.path: buildPath;
-import std.process: Config, execute, thisProcessID;
+import std.process: Config, environment, execute, thisProcessID;
 
 
 static foreach (backend; Matrix!(
@@ -292,6 +292,275 @@ static foreach (backend; Matrix!()) {
                 ubyte[4] values = [23, 13, 42, 71];
                 assert(values == [23, 13, 42, 71]);
                 assert(values != [23, 13, 42, 72]);
+            }
+            void main() {}
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
+            const result = execute([
+                "timeout", "10", buildPath(getcwd, "bin", "sb"),
+                "-b", name, directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}
+
+// The import paths of druntime and Phobos come from the configuration file
+// of the compiler that built `bin/sb`: the binary the build recorded. A file
+// with a compiler's name earlier on `PATH`, and a configuration file beside
+// it, are not that compiler.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible, "the oracle is not `bin/sb`"),
+)) {
+    @("hostCompilerIsTheRecordedBinary." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-hostcompiler-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        buildPath(directory, "probe.d").write("void main() {}\n");
+        const decoys = buildPath(directory, "bin");
+        decoys.mkdir;
+        foreach (name; ["ldc2", "dmd"]) {
+            buildPath(decoys, name).write("#!/bin/sh\n");
+            buildPath(decoys, name).setAttributes(octal!755);
+            buildPath(decoys, name ~ ".conf").write("switches = [\"-I/nonexistent\"];\n");
+        }
+        static if (is(backend == Interpreter)) enum name = "interpreter";
+        else static if (is(backend == Bytecode)) enum name = "bytecode";
+        else enum name = "ctfe";
+        const result = execute(
+            [buildPath(getcwd, "bin", "sb"), "-b", name, directory],
+            ["PATH": decoys ~ ":" ~ environment["PATH"]],
+        );
+        result.status.should == 0;
+    }
+}
+
+// `--help` needs no compiler.
+@("helpNeedsNoCompiler")
+unittest {
+    const result = execute(
+        [buildPath(getcwd, "bin", "sb"), "--help"],
+        ["PATH": "/nonexistent"],
+    );
+    result.status.should == 0;
+    "Usage".should.be in result.output;
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the native Fiber page size"),
+)) {
+    @("fiberSubclassKeepsNativeLayout." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-fibersub-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            import core.thread: Fiber;
+            class Tagged : Fiber {
+                int tag = 42;
+                bool seen;
+                this() { super(&run); }
+                void run() {
+                    auto current = cast(Tagged) Fiber.getThis();
+                    assert(current is this);
+                    assert(current.tag == 42);
+                    seen = true;
+                }
+            }
+            unittest {
+                auto fiber = new Tagged;
+                fiber.call();
+                assert(fiber.seen);
+                assert(fiber.state == Fiber.State.TERM);
+            }
+            void main() {}
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
+            const result = execute([
+                "timeout", "10", buildPath(getcwd, "bin", "sb"),
+                "-b", name, directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the native Fiber page size"),
+)) {
+    @("threadSubclassKeepsNativeLayout." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-threadsub-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            import core.thread: Thread;
+            class Tagged : Thread {
+                int tag = 42;
+                int seen;
+                this() { super(&run); }
+                void run() { seen = tag; }
+            }
+            unittest {
+                auto thread = new Tagged;
+                thread.start();
+                thread.join();
+                assert(thread.seen == 42);
+                assert(thread.tag == 42);
+            }
+            void main() {}
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
+            const result = execute([
+                "timeout", "10", buildPath(getcwd, "bin", "sb"),
+                "-b", name, directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the native Fiber page size"),
+)) {
+    @("hostClassSizeIsNativeSize." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-hostsize-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            import core.thread: Fiber, Thread;
+            unittest {
+                assert(__traits(classInstanceSize, Fiber)
+                    == typeid(Fiber).initializer.length);
+                assert(__traits(classInstanceSize, Thread)
+                    == typeid(Thread).initializer.length);
+            }
+            void main() {}
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
+            const result = execute([
+                "timeout", "10", buildPath(getcwd, "bin", "sb"),
+                "-b", name, directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}
+
+// An import inside a function brings the host class into the guest the same
+// way as a module-scope import; the guest uses `Fiber` itself.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the native Fiber page size"),
+)) {
+    @("functionLocalFiberImport." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-functionlocalfiberimport-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            unittest {
+                import core.thread: Fiber;
+                bool ran;
+                auto fiber = new Fiber({ ran = true; });
+                fiber.call();
+                assert(ran);
+                assert(fiber.state == Fiber.State.TERM);
+            }
+            void main() {}
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
+            const result = execute([
+                "timeout", "10", buildPath(getcwd, "bin", "sb"),
+                "-b", name, directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}
+
+// As above, with a class derived from `Fiber` that the function itself
+// declares: its fields start after the host base object.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the native Fiber page size"),
+)) {
+    @("functionLocalFiberSubclass." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-functionlocalfibersubclass-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            unittest {
+                import core.thread: Fiber;
+                class Tagged : Fiber {
+                    int tag = 42;
+                    bool seen;
+                    this() { super(&run); }
+                    void run() { seen = tag == 42; }
+                }
+                auto fiber = new Tagged;
+                fiber.call();
+                assert(fiber.seen);
+                assert(fiber.tag == 42);
+                assert(fiber.state == Fiber.State.TERM);
             }
             void main() {}
         });
@@ -624,19 +893,33 @@ static foreach (backend; Matrix!(
         directory.mkdir;
         scope(exit) directory.rmdirRecurse;
         const source = buildPath(directory, "probe.d");
-        source.write(q{
-            import core.simd;
-            void main(string[] args) {
-                if (args.length == 1)
-                    return;
-                float4 a = 1, b = 2;
-                if (args.length == 3) {
-                    float4 c = cast(float4) __simd(XMM.SQRTPS, a);
-                    return;
+        // dmd has `__simd`; LDC has no such function, and calls its LLVM
+        // intrinsics through `ldc.gccbuiltins_x86`, which no wrapper covers.
+        version (LDC)
+            source.write(q{
+                import core.simd;
+                import ldc.gccbuiltins_x86: __builtin_ia32_rsqrtps;
+                void main(string[] args) {
+                    if (args.length == 1)
+                        return;
+                    float4 a = 1;
+                    float4 c = __builtin_ia32_rsqrtps(a);
                 }
-                float4 c = cast(float4) __simd(XMM.ADDPS, a, b);
-            }
-        });
+            });
+        else
+            source.write(q{
+                import core.simd;
+                void main(string[] args) {
+                    if (args.length == 1)
+                        return;
+                    float4 a = 1, b = 2;
+                    if (args.length == 3) {
+                        float4 c = cast(float4) __simd(XMM.SQRTPS, a);
+                        return;
+                    }
+                    float4 c = cast(float4) __simd(XMM.ADDPS, a, b);
+                }
+            });
         static if (is(backend == Interpreter)) enum name = "interpreter";
         else enum name = "bytecode";
         const command = [
@@ -646,12 +929,18 @@ static foreach (backend; Matrix!(
         execute(command).status.should == 0;
         const result = execute(command ~ ["--", "call"]);
         result.status.should.not == 0;
-        "declared by `__simd`: it is not in this process"
-            .should.be in result.output;
-        const unary = execute(command ~ ["--", "call", "unary"]);
-        unary.status.should.not == 0;
-        "core.simd.__simd has no wrapper for the opcode"
-            .should.be in unary.output;
+        version (LDC) {
+            ("no host wrapper serves the LDC intrinsic `llvm.x86.sse.rsqrt.ps` "
+                ~ "declared by `__builtin_ia32_rsqrtps`")
+                .should.be in result.output;
+        } else {
+            "declared by `__simd`: it is not in this process"
+                .should.be in result.output;
+            const unary = execute(command ~ ["--", "call", "unary"]);
+            unary.status.should.not == 0;
+            "core.simd.__simd has no wrapper for the opcode"
+                .should.be in unary.output;
+        }
     }
 }
 

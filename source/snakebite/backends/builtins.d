@@ -33,6 +33,34 @@ public extern(C) void startVariadicEntry(
 }
 
 
+// `core.stdc.stdarg.va_end` of a druntime that declares it as an intrinsic:
+// compiled code releases nothing.
+public extern(C) void endVariadicEntry(
+    void*, scope const(void*)*, size_t,
+) nothrow @nogc {
+}
+
+
+// The size of the storage that `copyVariadicEntry` fills.
+public enum variadicCopySize = imported!"core.internal.vararg.sysv_x64".__va_list_tag.sizeof;
+
+
+// `core.stdc.stdarg.va_copy` of a druntime that declares it as an
+// intrinsic. `dest` is an `out` parameter, so its argument is the address of
+// the destination variable. The backend appends the address of a slot that
+// holds `variadicCopySize` bytes of the calling activation's storage, which
+// is where compiled code keeps the copy: nothing is allocated here.
+public extern(C) void copyVariadicEntry(
+    void*, scope const(void*)* arguments, size_t,
+) nothrow @nogc {
+    import core.stdc.string: memcpy;
+
+    auto copy = *cast(void**) arguments[2];
+    memcpy(copy, *cast(void**) arguments[1], variadicCopySize);
+    **cast(void***) arguments[0] = copy;
+}
+
+
 // The concrete type of one parameter of a call's declaration - with the
 // name, the other half of this table's lookup key, since dmd's own
 // `BUILTIN` classification (`dmd.builtin.isBuiltin`) does not carry it:
@@ -44,6 +72,11 @@ public enum ParameterType {
     float_, double_, real_, ubyte_, ushort_, short_, int_, uint_, long_, ulong_,
     vector_, pointer_, void_,
 }
+
+
+// The wrappers below give dmd's results, for a host built by dmd. A host
+// built by LDC takes the wrappers of `ldcintrinsics`.
+version (DigitalMars):
 
 
 // `name` is a string key, not dmd's `BUILTIN` enum value, so this

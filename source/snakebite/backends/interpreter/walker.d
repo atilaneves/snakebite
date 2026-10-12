@@ -1276,6 +1276,16 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             decision.builtinEntry(
                 returnPlace, withCursor.ptr, withCursor.length);
             return;
+        case vaCopy:
+            import snakebite.backends.builtins: variadicCopySize;
+
+            const(void)*[3] withStorage;
+            withStorage[0 .. argumentCount] = arguments[0 .. argumentCount];
+            void* storage = allocateForActivation(variadicCopySize);
+            withStorage[argumentCount] = &storage;
+            decision.builtinEntry(
+                returnPlace, withStorage.ptr, withStorage.length);
+            return;
         case alloca:
             *cast(void**) returnPlace = allocateForActivation(
                 *cast(const(size_t)*) arguments[0]);

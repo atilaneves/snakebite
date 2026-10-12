@@ -5,97 +5,12 @@ private:
 
 
 // The `core.math` intrinsics with the result dmd's code generator gives
-// them. A guest is analysed as dmd code (`version (DigitalMars)`), so the
-// same guest program must give the same result whether the host that runs
-// it was built by dmd or by LDC. dmd's own `core.math` is that result by
-// definition. LDC's `core.math` differs from it in places: `sin` and `cos`
-// are libm's, `rndtol` ties away from zero and ignores the rounding mode,
-// `ldexp` is software, and `yl2x`/`yl2xp1` exist for `real` only. The
-// definitions for LDC below are what dmd emits: an x87 instruction on a
-// `real`, narrowed once when the result is not a `real`.
-version (DigitalMars) {
-    public import core.math: fabs, sqrt, sin, cos, ldexp, rint, rndtol,
-        yl2x, yl2xp1;
-} else version (LDC) {
-    public import core.math: fabs, rint;
+// them, for a host built by dmd. A host built by LDC takes the results of
+// LDC's druntime through `ldcintrinsics`.
+version (DigitalMars):
 
-    import ldc.intrinsics: llvm_llrint;
-
-    // The instruction itself, not `llvm_sqrt`: LLVM can lower that to a call
-    // of libm's `sqrt`, whose NaN for a negative argument has the other sign.
-    public T sqrt(T)(in T x) @trusted pure nothrow @nogc {
-        T result = void;
-        static if (is(T == float))
-            asm @trusted pure nothrow @nogc {
-                "sqrtss %1, %0" : "=x" (result) : "x" (x);
-            }
-        else static if (is(T == double))
-            asm @trusted pure nothrow @nogc {
-                "sqrtsd %1, %0" : "=x" (result) : "x" (x);
-            }
-        else
-            asm @trusted pure nothrow @nogc {
-                "fsqrt" : "=st" (result) : "st" (x);
-            }
-        return result;
-    }
-
-    public T sin(T)(in T x) @trusted pure nothrow @nogc {
-        real result = void;
-        const widened = cast(real) x;
-        asm @trusted pure nothrow @nogc {
-            "fsin" : "=st" (result) : "st" (widened);
-        }
-        return cast(T) result;
-    }
-
-    public T cos(T)(in T x) @trusted pure nothrow @nogc {
-        real result = void;
-        const widened = cast(real) x;
-        asm @trusted pure nothrow @nogc {
-            "fcos" : "=st" (result) : "st" (widened);
-        }
-        return cast(T) result;
-    }
-
-    public T ldexp(T)(in T x, in int exponent) @trusted pure nothrow @nogc {
-        real result = void;
-        const widened = cast(real) x;
-        const scale = cast(real) exponent;
-        asm @trusted pure nothrow @nogc {
-            "fscale\n\tfstp\t%%st(1)" : "=st" (result)
-                : "st" (widened), "st(1)" (scale) : "st(1)";
-        }
-        return cast(T) result;
-    }
-
-    public T yl2x(T)(in T x, in T y) @trusted pure nothrow @nogc {
-        real result = void;
-        const widenedX = cast(real) x;
-        const widenedY = cast(real) y;
-        asm @trusted pure nothrow @nogc {
-            "fyl2x" : "=st" (result) : "st(1)" (widenedY), "st" (widenedX)
-                : "st(1)";
-        }
-        return cast(T) result;
-    }
-
-    public T yl2xp1(T)(in T x, in T y) @trusted pure nothrow @nogc {
-        real result = void;
-        const widenedX = cast(real) x;
-        const widenedY = cast(real) y;
-        asm @trusted pure nothrow @nogc {
-            "fyl2xp1" : "=st" (result) : "st(1)" (widenedY), "st" (widenedX)
-                : "st(1)";
-        }
-        return cast(T) result;
-    }
-
-    public long rndtol(T)(in T x) @safe pure nothrow @nogc {
-        return llvm_llrint(x);
-    }
-} else
-    static assert(false, "Builtin intrinsics need DMD or LDC as the host");
+public import core.math: fabs, sqrt, sin, cos, ldexp, rint, rndtol,
+    yl2x, yl2xp1;
 
 
 // The operand is a value in memory, already narrowed to its own precision,
@@ -137,16 +52,6 @@ public Result roundedTo(Result, T)(in T x) pure nothrow @nogc {
             fld x;
             fistp result;
         }
-    } else version (LDC) {
-        const widened = cast(real) x;
-        static if (is(Result == short))
-            enum instruction = "fistps %0";
-        else static if (is(Result == int))
-            enum instruction = "fistpl %0";
-        else
-            enum instruction = "fistpq %0";
-        mixin("asm pure nothrow @nogc { \"" ~ instruction
-            ~ "\" : \"=m\" (result) : \"st\" (widened) : \"st\"; }");
     }
     return result;
 }
@@ -176,12 +81,6 @@ public int bitTest(string name, T)(void* address, in T index) nothrow @nogc {
             ~ "mov RAX, address; mov " ~ register ~ ", index;"
             ~ name ~ " [RAX], " ~ register ~ ";"
             ~ "setc AL; movzx EAX, AL; mov result, EAX; }");
-    } else version (LDC) {
-        ubyte carry;
-        mixin("asm nothrow @nogc { \"" ~ name ~ " %2, (%1)\\n\\tsetc %0\""
-            ~ " : \"=q\" (carry) : \"r\" (address), \"r\" (index)"
-            ~ " : \"memory\", \"cc\"; }");
-        result = carry;
     }
     return result;
 }
@@ -199,10 +98,6 @@ public Value portInput(Value, Port)(in Port port) nothrow @nogc {
         enum operand = Value.sizeof == 1 ? "AL" : "AX";
         mixin("asm nothrow @nogc { mov DX, address; in " ~ operand
             ~ ", DX; mov result, " ~ register ~ "; }");
-    } else version (LDC) {
-        enum instruction = Value.sizeof == 4 ? "in %1, %%ax" : "in %1, %0";
-        mixin("asm nothrow @nogc { \"" ~ instruction
-            ~ "\" : \"={ax}\" (result) : \"{dx}\" (address); }");
     }
     return result;
 }
@@ -215,10 +110,6 @@ public Value portOutput(Value, Port)(in Port port, in Value value) nothrow @nogc
         enum operand = Value.sizeof == 1 ? "AL" : "AX";
         mixin("asm nothrow @nogc { mov DX, address; mov " ~ register
             ~ ", value; out DX, " ~ operand ~ "; }");
-    } else version (LDC) {
-        enum instruction = Value.sizeof == 4 ? "out %%ax, %1" : "out %0, %1";
-        mixin("asm nothrow @nogc { \"" ~ instruction
-            ~ "\" : : \"{ax}\" (value), \"{dx}\" (address); }");
     }
     return value;
 }
@@ -242,18 +133,6 @@ public void volatileCopyWide(size_t width)(
                 mov RDX, destination;
                 movdqu XMM0, [RAX];
                 movdqu [RDX], XMM0;
-            }
-        }
-    } else version (LDC) {
-        static if (width == 10) {
-            asm nothrow @nogc {
-                "fldt (%1)\n\tfstpt (%0)"
-                    : : "r" (destination), "r" (source) : "memory", "st";
-            }
-        } else {
-            asm nothrow @nogc {
-                "movdqu (%1), %%xmm0\n\tmovdqu %%xmm0, (%0)"
-                    : : "r" (destination), "r" (source) : "memory", "xmm0";
             }
         }
     }

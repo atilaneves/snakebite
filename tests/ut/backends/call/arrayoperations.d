@@ -270,9 +270,24 @@ static foreach (backend; Matrix!()) {
 
 // `core.simd`'s own unaligned load and store, which druntime's array
 // operations are written with.
+//
+// LDC's `loadUnaligned` is LLVM inline IR, which no backend runs (ADR-0012);
+// native code built by LDC runs it. The load refusal is pinned in
+// `inlineasm.loadDiagnostic.llvmInlineIrFailsLoad`.
+version (LDC)
+    private alias InlineIr = AliasSeq!(
+        Omit!(Interpreter, Because.diverges,
+            "LDC's inline IR is refused at load"),
+        Omit!(Bytecode, Because.diverges,
+            "LDC's inline IR is refused at load"),
+    );
+else
+    private alias InlineIr = AliasSeq!();
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "dmd's CTFE cannot evaluate `core.simd.__simd`"),
+    InlineIr,
 )) {
     @("arrayOperations.loadAndStoreUnaligned." ~ backend.stringof)
     @Tags(backend.stringof)

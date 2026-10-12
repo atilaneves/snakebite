@@ -18,7 +18,8 @@ int run(string[] args) {
         "at.runtime.threads", "at.runtime.registration",
         "at.backends.interpreter.nativestack",
         "ut.process", "ut.backends.call.intrinsics",
-        "ut.backends.call.arrayoperations", "at.process",
+        "ut.backends.call.arrayoperations", "ut.backends.run.hostfrontend", "ut.backends.run.inlineasm",
+        "at.process",
         "at.stackrelease",
         "at.runtime.faultregistration",
     );

@@ -39,7 +39,8 @@ static foreach (backend; Matrix!(Omit!(Native, Because.inexpressible,
     @Tags(backend.stringof)
     unittest {
         enum path = "/snakebite_array_literal_storage.c";
-        auto modules = parseRootModules([path], [], FrontendFlags.init,
+        const dependencyImage = true;
+        auto modules = parseRootModules([path], [], FrontendFlags.init, dependencyImage,
             [path: q{
                 int value(int n) { return n; }
                 int check(void) {

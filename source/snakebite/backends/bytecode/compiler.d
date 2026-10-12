@@ -6764,6 +6764,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             compileVaStart(type, arguments, loc, exprText,
                 destOffset, decision.builtinEntry);
             return;
+        case vaCopy:
+            compileVaCopy(type, arguments, loc, exprText,
+                destOffset, decision.builtinEntry);
+            return;
         case alloca:
             const size = reserveTemp(pointerFacts);
             evalInto((*arguments)[0], size, size_t.sizeof);
@@ -7033,6 +7037,30 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             null, destOffset, /* allowExtraArguments */ false,
             (args, returnWidth) => CallSite.builtin(
                 entry, args ~ Arg(cursor, 0, size_t.sizeof), returnWidth));
+    }
+
+    // The copy of a `va_list` lives in storage of the activation that makes
+    // it, as `alloca`'s memory does: a slot with its address joins the
+    // arguments.
+    private void compileVaCopy(
+        TypeFunction type,
+        Expressions* arguments,
+        Loc loc,
+        string exprText,
+        in size_t destOffset,
+        BuiltinCall entry,
+    ) {
+        import snakebite.backends.builtins: variadicCopySize;
+
+        const size = reserveTemp(pointerFacts);
+        emit(&opConstant, size, addConstant(cast(long) variadicCopySize),
+            size_t.sizeof);
+        const storage = reserveTemp(pointerFacts);
+        emit(&opAlloca, storage, size, size_t.sizeof);
+        compileBarrierCall(type, arguments, loc, exprText,
+            null, destOffset, /* allowExtraArguments */ false,
+            (args, returnWidth) => CallSite.builtin(
+                entry, args ~ Arg(storage, 0, size_t.sizeof), returnWidth));
     }
 
     // Where a native callee's result lands. A caller at statement level

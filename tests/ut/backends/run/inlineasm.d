@@ -429,8 +429,125 @@ unittest {
         ~ "}\n",
     );
 
-    parseRootModules([path], [], FrontendFlags())
+    parseRootModules([path], [], FrontendFlags(), dependencyImage: true)
         .shouldThrowWithMessage(
             text(path, "(4,5): ", jumpError!"longjmp"),
         );
+}
+
+
+// LDC's LLVM inline IR and inline assembler are inline assembler for a
+// backend: nothing runs them (docs/adr/0012). Only code that LDC compiled
+// into the host or the dependency image can use them. Like an `asm` block,
+// a call in root-owned code fails the load and names the construct.
+version (LDC) {
+    @("inlineasm.loadDiagnostic.llvmInlineIrFailsLoad")
+    unittest {
+        parseRootSource("ir_fails_load", q{
+            import ldc.llvmasm: __ir;
+
+            int add(int a, int b) {
+                return __ir!(`%r = add i32 %0, %1
+                              ret i32 %r`, int)(a, b);
+            }
+            unittest {
+                add(1, 2);
+            }
+        }).shouldThrowWithMessage(
+            "/ir_fails_load.d(6,48): LLVM inline IR (`pragma(LDC_inline_ir)`) "
+            ~ "is not supported in `ir_fails_load.add`: no backend runs it. Only code that LDC "
+            ~ "compiled into the host or the dependency image can use it",
+        );
+    }
+
+    @("inlineasm.loadDiagnostic.llvmInlineAsmFailsLoad")
+    unittest {
+        parseRootSource("asm_fails_load", q{
+            import ldc.llvmasm: __asm;
+
+            void pause() {
+                __asm("pause", "");
+            }
+            unittest {
+                pause();
+            }
+        }).shouldThrowWithMessage(
+            "/asm_fails_load.d(5,17): inline assembler "
+            ~ "(`pragma(LDC_inline_asm)`) is not supported in "
+            ~ "`asm_fails_load.pause`: no backend runs it. Only code that LDC "
+            ~ "compiled into the host or the dependency image can use it",
+        );
+    }
+
+    // A root module of a fixed name, so that the message has no snippet
+    // counter.
+    private auto parseRootSource(in string name, in string source) {
+        const path = "/" ~ name ~ ".d";
+        return parseRootModules(
+            [path], [], FrontendFlags(), dependencyImage: false,
+            sourceOverrides: [path: source],
+        );
+    }
+
+    // The instance of a dependency template that root code instantiates is
+    // part of the root program, and no image holds a copy that LDC compiled.
+    @("inlineasm.loadDiagnostic.rootInstanceOfIrTemplateFailsLoad")
+    unittest {
+        parseSnippet(q{
+            import core.simd: float4, loadUnaligned;
+
+            float4 load(const float4* pointer) {
+                return loadUnaligned(pointer);
+            }
+        }).shouldThrowWithMessage(
+            "LLVM inline IR (`pragma(LDC_inline_ir)`) is not supported in "
+            ~ "`ldc.simd.loadUnaligned!(__vector(float[4])).loadUnaligned`: "
+            ~ "no backend runs it. Only code that LDC compiled into the host "
+            ~ "or the dependency image can use it",
+        );
+    }
+
+    // The same program loads where a dependency image holds the instances:
+    // LDC compiles them there.
+    @("inlineasm.loadDiagnostic.irInstanceLoadsWhenAnImageHoldsIt")
+    unittest {
+        const directory = buildPath(
+            tempDir, text("ir_chain_image_", thisProcessID),
+        );
+        scope(exit) rmdirRecurse(directory);
+        writeIrChainProject(directory, "ir_chain_image");
+
+        parseRootModules(
+            [buildPath(directory, "app", "ir_chain_image_root.d")],
+            [buildPath(directory, "deps")],
+            FrontendFlags(),
+            dependencyImage: true,
+        );
+    }
+
+    // The modules are named for the test: the frontend keeps a module of a
+    // name for the life of the process.
+    private void writeIrChainProject(
+        in string directory,
+        in string name,
+    ) {
+        mkdirRecurse(buildPath(directory, "deps"));
+        mkdirRecurse(buildPath(directory, "app"));
+        write(buildPath(directory, "deps", name ~ ".d"),
+            "module " ~ name ~ ";\n" ~ q{
+            import ldc.llvmasm: __ir;
+
+            int innermost(T)(T a, T b) {
+                return __ir!(`%r = add i32 %0, %1
+                              ret i32 %r`, int)(a, b);
+            }
+            int middle(T)(T a, T b) { return innermost(a, b); }
+            int outer(T)(T a, T b) { return middle(a, b); }
+        });
+        write(buildPath(directory, "app", name ~ "_root.d"),
+            "module " ~ name ~ "_root;\nimport " ~ name ~ ": outer;\n" ~ q{
+            int sum() { return outer(1, 2); }
+            void main() {}
+        });
+    }
 }

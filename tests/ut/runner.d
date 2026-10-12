@@ -14,6 +14,7 @@ static import ut.backends.run.main,
     ut.backends.run.enums,
     ut.backends.run.exceptions,
     ut.backends.run.finalizers,
+    ut.backends.run.hostfrontend,
     ut.backends.run.inlineasm,
     ut.backends.run.nativestack,
     ut.backends.run.operators,
@@ -83,7 +84,8 @@ static import ut.backends.run.main,
     ut.repl.session,
     ut.process,
     ut.frontend.functions,
-    ut.frontend.checks;
+    ut.frontend.checks,
+    ut.frontend.hostcompiler;
 
 // unit-threaded removes its default sandbox root when a process starts.
 // A second test process must not remove this process's active sandboxes.
@@ -138,6 +140,7 @@ int run(string[] args) {
         "ut.backends.run.enums",
         "ut.backends.run.exceptions",
         "ut.backends.run.finalizers",
+        "ut.backends.run.hostfrontend",
         "ut.backends.run.inlineasm",
         "ut.backends.run.nativestack",
         "ut.backends.run.operators",
@@ -208,6 +211,7 @@ int run(string[] args) {
         "ut.process",
         "ut.frontend.functions",
         "ut.frontend.checks",
+        "ut.frontend.hostcompiler",
     ));
 }
 
