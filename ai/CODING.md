@@ -109,6 +109,8 @@ This means there is no need to marshall or unmarshall when doing FFI.
   and does not permit a new refusal of valid guest code.
 - Keep `static assert` for compile-time checks. Guest assertions and the
   trapping instruction for a guest halt keep their guest semantics.
+- Do not use ` __traits(getMember)` to read private members. All tests
+  must go through the public API.
 
 A new rejection site, `unsupported` member, throwing catch-all, or
 per-backend copy of a decision that belongs in the shared layer is a
