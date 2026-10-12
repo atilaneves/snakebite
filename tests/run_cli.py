@@ -708,6 +708,28 @@ def test_pre_build_commands_run_again_only_when_inputs_change(
     assert (unchanged, runs.read_text().splitlines()) == (["run"], ["run", "run"])
 
 
+# A dub build stops when a pre-build command fails, and says which command
+# failed, with what status and what output.
+@pytest.mark.parametrize("backend", ["native", *FILE_BACKENDS])
+def test_failing_pre_build_command_stops_the_run(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    write(
+        app / "dub.sdl",
+        dub_project_recipe("pre-build-fails")
+        + 'preBuildCommands "echo boom-line >&2; exit 3"\n',
+    )
+    write(app / "source" / "main.d", "module main;\nint main() { return 0; }\n")
+
+    result = run_program_backend(backend, app, tmp_path)
+
+    assert result.returncode != 0, output(result)
+    assert "echo boom-line >&2; exit 3" in output(result)
+    assert "3" in output(result)
+    assert "boom-line" in output(result)
+
+
 def run_program_backend(
     backend: str, app: Path, tmp_path: Path,
 ) -> subprocess.CompletedProcess[str]:

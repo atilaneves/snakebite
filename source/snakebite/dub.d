@@ -138,6 +138,7 @@ public DubDescription dubDescribeProject(
 private void runBuildCommands(in DubDescription description) {
     import snakebite.dependencyimage: defaultCompiler;
     import snakebite.exception: SnakebiteException;
+    import std.conv: to;
     import std.json: JSONType, JSONValue;
     import std.process: Config, environment, executeShell;
 
@@ -172,9 +173,13 @@ private void runBuildCommands(in DubDescription description) {
     commandEnvironment["DUB_PACKAGE_VERSION"] = packageVersion;
     commandEnvironment["DUB_CONFIG"] = description.value["configuration"].str;
     commandEnvironment["DUB_BUILD_TYPE"] = description.value["buildType"].str;
-    foreach (command; parseDescribeList(result.output))
-        executeShell(command, commandEnvironment, Config.none, size_t.max,
-            packageDirectory);
+    foreach (command; parseDescribeList(result.output)) {
+        const run = executeShell(command, commandEnvironment, Config.none,
+            size_t.max, packageDirectory);
+        if (run.status != 0)
+            throw new SnakebiteException("Pre-build command failed with exit code "
+                ~ run.status.to!string ~ ": " ~ command ~ "\n" ~ run.output);
+    }
 }
 
 
