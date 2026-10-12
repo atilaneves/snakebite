@@ -232,5 +232,6 @@ unittest {
         "name \"package\"\nversion \"1.0.0\"\n");
 
     fetchProject("package@2.0.0", sandbox.sandboxPath.absolutePath, SkipPackageSuppliers.all)
-        .shouldThrow;
+        .shouldThrowWithMessage(
+            "No package package was found matching the dependency 2.0.0");
 }

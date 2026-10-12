@@ -101,8 +101,8 @@ public PreparationReport prepareProject(
     import snakebite.project: sourceSet;
     import std.datetime.stopwatch: AutoStart, StopWatch;
 
-    // Finding the sources is not frontend work (for a dub project it is a
-    // `dub describe` subprocess, which spawns the compiler too) and once
+    // Finding the sources is not frontend work (for a dub project it is the dub
+    // library, which starts the compiler too) and once
     // counted as frontend time it inflated that number by up to half.
     auto stopWatch = StopWatch(AutoStart.yes);
     auto sources = sourceSet(directory, importPaths, stringImportPaths, versions);

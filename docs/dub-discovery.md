@@ -1,12 +1,15 @@
 # DUB discovery cache
 
-Normal Snakebite project execution caches the result of `dub describe`.
-No separate command or prototype is needed. The cache is stored in
-`.snakebite/<project-key>/dub-description.bin`, under the current directory.
+Normal Snakebite project execution caches the description that the DUB
+library gives for the project. No separate command or prototype is
+needed. The cache is stored in
+`.snakebite/<project-key>/dub-description.bin`, under the current
+directory.
 
-On a cache miss, Snakebite runs DUB as before. On a hit, it checks the saved
-inputs and uses the saved description and build arguments. It does not
-start DUB or the compiler for discovery. The frontend still reads the
+On a cache miss, Snakebite calls the DUB library as before. On a hit, it
+checks the saved inputs and uses the saved description and the choices
+that it was made with. It does not call DUB or start the compiler for
+discovery. The frontend still reads the
 current source files.
 
 The cache tracks package recipes, selections, directory contents, DUB and
