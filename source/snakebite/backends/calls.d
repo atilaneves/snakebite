@@ -35,8 +35,10 @@ public struct CallSelection {
     // arguments: it also reads the cursor of the function that calls it,
     // so each backend appends that cursor to the call's arguments.
     // `alloca` is the other: its memory lives as long as the activation
-    // that calls it, which only the backend knows how to hold.
-    public enum Route { guest, native, builtin, vaStart, alloca }
+    // that calls it, which only the backend knows how to hold. `vaCopy`
+    // needs the same memory for the copy, so each backend appends a pointer
+    // to storage of the calling activation, as compiled code has it.
+    public enum Route { guest, native, builtin, vaStart, vaCopy, alloca }
 
     // The dmd-touching questions a function's route needs, decided once
     // per function and read back without a lock (ADR-0006, finding
@@ -72,7 +74,8 @@ public struct CallSelection {
     ) {
         auto call = site is null ? null : site.isCallExp;
         return call !is null && !hasIntrinsicCallee(call)
-                && (decision.route == Route.builtin || decision.route == Route.vaStart)
+                && (decision.route == Route.builtin || decision.route == Route.vaStart
+                    || decision.route == Route.vaCopy)
             ? Decision(Route.native) : decision;
     }
 

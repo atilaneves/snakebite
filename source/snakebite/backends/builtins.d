@@ -41,27 +41,23 @@ public extern(C) void endVariadicEntry(
 }
 
 
+// The size of the storage that `copyVariadicEntry` fills.
+public enum variadicCopySize = imported!"core.internal.vararg.sysv_x64".__va_list_tag.sizeof;
+
+
 // `core.stdc.stdarg.va_copy` of a druntime that declares it as an
 // intrinsic. `dest` is an `out` parameter, so its argument is the address of
-// the destination variable. The copy lives in its own storage, as the copy
-// of a druntime that gives `va_copy` a body does.
+// the destination variable. The backend appends the address of a slot that
+// holds `variadicCopySize` bytes of the calling activation's storage, which
+// is where compiled code keeps the copy: nothing is allocated here.
 public extern(C) void copyVariadicEntry(
     void*, scope const(void*)* arguments, size_t,
 ) nothrow @nogc {
-    import core.internal.vararg.sysv_x64: __va_list_tag;
     import core.stdc.string: memcpy;
 
-    alias Allocate = void* function(size_t) nothrow @nogc;
-    const allocate = cast(Allocate) &allocateCollected;
-    auto copy = allocate(__va_list_tag.sizeof);
-    memcpy(copy, *cast(void**) arguments[1], __va_list_tag.sizeof);
+    auto copy = *cast(void**) arguments[2];
+    memcpy(copy, *cast(void**) arguments[1], variadicCopySize);
     **cast(void***) arguments[0] = copy;
-}
-
-private void* allocateCollected(size_t size) nothrow {
-    import core.memory: GC;
-
-    return GC.malloc(size);
 }
 
 

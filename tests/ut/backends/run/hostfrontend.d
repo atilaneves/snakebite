@@ -123,3 +123,45 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+// `va_copy` is an intrinsic in LDC's druntime and a function with a body in
+// dmd's. A finalizer runs inside a collection, where the copy of a `va_list`
+// must not take memory from the garbage-collected heap.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("hostFrontend.vaCopyInFinalizer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeRetOf!(backend, q{
+            import core.memory: GC;
+            import core.stdc.stdarg: va_arg, va_copy, va_end, va_list, va_start;
+            extern(C) int first(int count, ...) {
+                va_list args;
+                va_start(args, count);
+                va_list copy;
+                va_copy(copy, args);
+                va_arg!int(args);
+                const result = va_arg!int(copy);
+                va_end(copy);
+                va_end(args);
+                return result;
+            }
+            __gshared int finalized;
+            class Doomed {
+                ~this() {
+                    assert(first(2, 7, 9) == 7);
+                    finalized++;
+                }
+            }
+            int answer() {
+                foreach (i; 0 .. 20000)
+                    new Doomed;
+                GC.collect();
+                return finalized > 0 ? 1 : 0;
+            }
+        }, "answer");
+    }
+}
