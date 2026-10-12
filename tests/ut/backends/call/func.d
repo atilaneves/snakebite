@@ -5,6 +5,7 @@ import ut.backends;
 import snakebite.backends.backend: Program;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
+import ut.threadsync: beginExplicitCollect, endExplicitCollect;
 
 
 static foreach (backend; Matrix!()) {
@@ -871,7 +872,8 @@ static foreach (backend; Matrix!(
 
 
 // Alloca memory is stack memory, which the GC scans: it can hold the
-// only pointer to a GC object.
+// only pointer to a GC object. Collection must preserve ownership as well
+// as the values: reading freed memory can accidentally return old values.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot call alloca"),
@@ -879,6 +881,8 @@ static foreach (backend; Matrix!(
     @("call.alloca.holdsGcPointers." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
+        beginExplicitCollect;
+        scope(exit) endExplicitCollect;
         8028.shouldBeRetOf!(backend, q{
             import core.memory: GC;
             import core.stdc.stdlib: alloca;
@@ -888,8 +892,8 @@ static foreach (backend; Matrix!(
                     *slots[i] = 1000 + i;
                 }
             }
-            static void churn(int** slots) {
-                foreach (i; 0 .. 100_000) {
+            static void churn() {
+                foreach (i; 0 .. 8) {
                     auto other = new int;
                     *other = -1;
                 }
@@ -897,11 +901,15 @@ static foreach (backend; Matrix!(
             int answer() {
                 auto slots = cast(int**) alloca(8 * (int*).sizeof);
                 fill(slots);
+                churn;
                 GC.collect;
-                churn(slots);
+                churn;
+                GC.collect;
                 int total;
-                foreach (i; 0 .. 8)
+                foreach (i; 0 .. 8) {
+                    assert(GC.addrOf(slots[i]) !is null);
                     total += *slots[i];
+                }
                 return total;
             }
         }, "answer");
