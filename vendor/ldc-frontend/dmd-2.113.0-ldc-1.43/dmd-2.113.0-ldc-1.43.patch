@@ -1,0 +1,1086 @@
+LDC's additions to the dmd frontend 2.113.0, as LDC 1.43.0 has them.
+
+The text of the added lines comes from the `dmd/` directory of the LDC
+repository at tag v1.43.0, which is under the Boost Software License
+(see LICENSE in this directory), with `IN_LLVM` resolved to true. The new file
+`dmd/hooks.d` is LDC's own. Only the lines that decide which source the
+frontend accepts and how it evaluates it are here; the ones that serve
+LLVM code generation are not.
+
+Apply with `patch -p1` to a copy of the directory `compiler/src` of the dub
+package `dmd` 2.113.0.
+
+--- a/dmd/id.d
++++ b/dmd/id.d
+@@ -546,6 +546,70 @@
+ 
+     // for inline assembler
+     { "op" },
++
++    // IN_LLVM: LDC-specific pragmas
++    { "LDC_intrinsic" },
++    { "LDC_no_typeinfo" },
++    { "LDC_no_moduleinfo" },
++    { "LDC_alloca" },
++    { "LDC_va_start" },
++    { "LDC_va_copy" },
++    { "LDC_va_end" },
++    { "LDC_va_arg" },
++    { "LDC_verbose" },
++    { "LDC_allow_inline" },
++    { "LDC_never_inline" },
++    { "LDC_inline_asm" },
++    { "LDC_inline_ir" },
++    { "LDC_fence" },
++    { "LDC_atomic_load" },
++    { "LDC_atomic_store" },
++    { "LDC_atomic_cmp_xchg" },
++    { "LDC_atomic_rmw" },
++    { "LDC_global_crt_ctor" },
++    { "LDC_global_crt_dtor" },
++    { "LDC_extern_weak" },
++    { "LDC_profile_instr" },
++
++    // IN_LLVM: LDC-specific traits
++    { "targetCPU" },
++    { "targetHasFeature" },
++
++    // IN_LLVM: LDC-specific attributes
++    { "ldc" },
++    { "attributes" },
++    { "udaAllocSize", "allocSize" },
++    // fastmath is an AliasSeq of llvmAttr and llvmFastMathFlag
++    { "udaOptStrategy", "optStrategy" },
++    { "udaLLVMAttr", "llvmAttr" },
++    { "udaLLVMFastMathFlag", "llvmFastMathFlag" },
++    { "udaTarget", "target" },
++    { "udaAssumeUsed", "_assumeUsed" },
++    { "udaCallingConvention", "callingConvention" },
++    { "udaWeak", "_weak" },
++    { "udaCompute", "compute" },
++    { "udaKernel", "_kernel" },
++    { "udaDynamicCompile", "_dynamicCompile" },
++    { "udaDynamicCompileConst", "_dynamicCompileConst" },
++    { "udaDynamicCompileEmit", "_dynamicCompileEmit" },
++    { "udaHidden", "_hidden" },
++    { "udaNoSanitize", "noSanitize" },
++    { "udaNoSplitStack", "_noSplitStack" },
++    { "udaSwiftStub", "swift"},
++
++    // IN_LLVM: DCompute specific types and functionss
++    { "dcompute" },
++    { "dcPointer", "Pointer" },
++    { "dcReflect", "__dcompute_reflect" },
++    // dcompute array comparison/equality lowering hooks
++    { "comparison" },
++    { "equality" },
++    { "dstrcmp" },
++    { "RTInfoImpl" },
++    { "opencl" },
++
++    // IN_LLVM
++    { "io" },
+ ];
+ 
+ 
+--- a/dmd/builtin.d
++++ b/dmd/builtin.d
+@@ -56,6 +56,8 @@
+         {
+             static if (e == "unknown")
+                 case BUILTIN.unknown: assert(false);
++            else static if (e.length > 5 && e[0..5] == "llvm_")
++                mixin("case BUILTIN."~e~": return eval_llvm"~e[5..$]~"(loc, fd, (*arguments)[]);");
+             else
+                 mixin("case BUILTIN."~e~": return eval_"~e~"(loc, fd, (*arguments)[]);");
+         }
+@@ -82,6 +84,42 @@
+     auto fd = func.toAliasFunc();
+     if (fd.isDeprecated())
+         return BUILTIN.unimp;
++
++    import dmd.root.string : toDString;
++    import gen.dpragma : LDCPragma;
++
++    if (func.llvmInternal == LDCPragma.LLVMintrinsic)
++    {
++        const(char)[] name = func.mangleOverride;
++        if (name.length < 7 || name[0..5] != "llvm.")
++            return BUILTIN.unimp;
++
++        // find next "." after "llvm."
++        size_t end = 0;
++        foreach (i; 6 .. name.length)
++        {
++            if (name[i] == '.')
++            {
++                end = i;
++                break;
++            }
++        }
++        if (end == 0)
++            return BUILTIN.unimp;
++
++        name = name[5 .. end]; // e.g., "llvm.sin.f32" => "sin"
++        switch (name)
++        {
++            foreach (e; __traits(allMembers, BUILTIN))
++            {
++                static if (e.length > 5 && e[0..5] == "llvm_")
++                    mixin(`case "`~e[5..$]~`": return BUILTIN.`~e~";");
++            }
++            default: return BUILTIN.unimp;
++        }
++    }
++
++
+     auto m = fd.getModule();
+     if (!m || !m.md)
+         return BUILTIN.unimp;
+@@ -130,6 +168,7 @@
+     if (id3 == Id.yl2x)   return CTFloat.yl2x_supported ? BUILTIN.yl2x : BUILTIN.unimp;
+     if (id3 == Id.yl2xp1) return CTFloat.yl2xp1_supported ? BUILTIN.yl2xp1 : BUILTIN.unimp;
+ 
++
+     if (id3 == Id.log)   return BUILTIN.log;
+     if (id3 == Id.log2)  return BUILTIN.log2;
+     if (id3 == Id.log10) return BUILTIN.log10;
+@@ -468,3 +507,345 @@
+ {
+     assert(0);
+ }
++
++import dmd.globals : uinteger_t;
++
++private Type getTypeOfOverloadedIntrinsic(FuncDeclaration fd)
++{
++    import dmd.dtemplate : TemplateInstance;
++
++    // Depending on the state of the code generation we have to look at
++    // the template instance or the function declaration.
++    assert(fd.parent && "function declaration requires parent");
++    TemplateInstance tinst = fd.parent.isTemplateInstance();
++    if (tinst)
++    {
++        // See DtoOverloadedIntrinsicName
++        assert(tinst.tdtypes.length == 1);
++        return cast(Type) tinst.tdtypes[0];
++    }
++    else
++    {
++        assert(fd.type.ty == Tfunction);
++        TypeFunction tf = cast(TypeFunction) fd.type;
++        assert(tf.parameterList.length >= 1);
++        return (*tf.parameterList.parameters)[0].type;
++    }
++}
++
++private int getBitsizeOfType(Loc loc, Type type)
++{
++    switch (type.toBasetype().ty)
++    {
++      case Tint64:
++      case Tuns64: return 64;
++      case Tint32:
++      case Tuns32: return 32;
++      case Tint16:
++      case Tuns16: return 16;
++      case Tint128:
++      case Tuns128:
++          error(loc, "cent/ucent not supported");
++          break;
++      default:
++          error(loc, "unsupported type");
++          break;
++    }
++    return 32; // in case of error
++}
++
++Expression eval_llvmsin(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.float64);
++    return new RealExp(loc, CTFloat.sin(arg0.toReal()), type);
++}
++
++Expression eval_llvmcos(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.float64);
++    return new RealExp(loc, CTFloat.cos(arg0.toReal()), type);
++}
++
++Expression eval_llvmsqrt(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.float64);
++    return new RealExp(loc, CTFloat.sqrt(arg0.toReal()), type);
++}
++
++Expression eval_llvmexp(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.float64);
++    return new RealExp(loc, CTFloat.exp(arg0.toReal()), type);
++}
++
++Expression eval_llvmexp2(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.float64);
++    return new RealExp(loc, CTFloat.exp2(arg0.toReal()), type);
++}
++
++Expression eval_llvmlog(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.float64);
++    return new RealExp(loc, CTFloat.log(arg0.toReal()), type);
++}
++
++Expression eval_llvmlog2(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.float64);
++    return new RealExp(loc, CTFloat.log2(arg0.toReal()), type);
++}
++
++Expression eval_llvmlog10(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.float64);
++    return new RealExp(loc, CTFloat.log10(arg0.toReal()), type);
++}
++
++Expression eval_llvmfabs(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.float64);
++    return new RealExp(loc, CTFloat.fabs(arg0.toReal()), type);
++}
++
++Expression eval_llvmminnum(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.float64);
++    Expression arg1 = arguments[1];
++    assert(arg1.op == EXP.float64);
++    return new RealExp(loc, CTFloat.fmin(arg0.toReal(), arg1.toReal()), type);
++}
++
++Expression eval_llvmmaxnum(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.float64);
++    Expression arg1 = arguments[1];
++    assert(arg1.op == EXP.float64);
++    return new RealExp(loc, CTFloat.fmax(arg0.toReal(), arg1.toReal()), type);
++}
++
++Expression eval_llvmfloor(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.float64);
++    return new RealExp(loc, CTFloat.floor(arg0.toReal()), type);
++}
++
++Expression eval_llvmceil(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.float64);
++    return new RealExp(loc, CTFloat.ceil(arg0.toReal()), type);
++}
++
++Expression eval_llvmtrunc(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.float64);
++    return new RealExp(loc, CTFloat.trunc(arg0.toReal()), type);
++}
++
++Expression eval_llvmrint(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.float64);
++    return new RealExp(loc, CTFloat.rint(arg0.toReal()), type);
++}
++
++Expression eval_llvmnearbyint(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.float64);
++    return new RealExp(loc, CTFloat.nearbyint(arg0.toReal()), type);
++}
++
++Expression eval_llvmround(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.float64);
++    return new RealExp(loc, CTFloat.round(arg0.toReal()), type);
++}
++
++alias eval_llvmlrint = eval_llvmllrint; // difference: int return type, not long
++Expression eval_llvmllrint(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = fd.type.isTypeFunction().next; // int or long
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.float64);
++    return new IntegerExp(loc, CTFloat.llrint(arg0.toReal()), type);
++}
++
++alias eval_llvmlround = eval_llvmllround; // difference: int return type, not long
++Expression eval_llvmllround(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = fd.type.isTypeFunction().next; // int or long
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.float64);
++    return new IntegerExp(loc, CTFloat.llround(arg0.toReal()), type);
++}
++
++Expression eval_llvmfma(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.float64);
++    Expression arg1 = arguments[1];
++    assert(arg1.op == EXP.float64);
++    Expression arg2 = arguments[2];
++    assert(arg2.op == EXP.float64);
++    return new RealExp(loc, CTFloat.fma(arg0.toReal(), arg1.toReal(), arg2.toReal()), type);
++}
++
++Expression eval_llvmcopysign(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.float64);
++    Expression arg1 = arguments[1];
++    assert(arg1.op == EXP.float64);
++    return new RealExp(loc, CTFloat.copysign(arg0.toReal(), arg1.toReal()), type);
++}
++
++Expression eval_llvmbswap(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.int64);
++    uinteger_t n = arg0.toInteger();
++    enum ulong BYTEMASK = 0x00FF00FF00FF00FF;
++    enum ulong SHORTMASK = 0x0000FFFF0000FFFF;
++    enum ulong INTMASK = 0x00000000FFFFFFFF;
++    switch (type.toBasetype().ty)
++    {
++      case Tint64:
++      case Tuns64:
++          // swap high and low uints
++          n = ((n >> 32) & INTMASK) | ((n & INTMASK) << 32);
++          goto case Tuns32;
++      case Tint32:
++      case Tuns32:
++          // swap adjacent ushorts
++          n = ((n >> 16) & SHORTMASK) | ((n & SHORTMASK) << 16);
++          goto case Tuns16;
++      case Tint16:
++      case Tuns16:
++          // swap adjacent ubytes
++          n = ((n >> 8 ) & BYTEMASK)  | ((n & BYTEMASK) << 8 );
++          break;
++      case Tint128:
++      case Tuns128:
++          error(loc, "cent/ucent not supported");
++          break;
++      default:
++          error(loc, "unsupported type");
++          break;
++    }
++    return new IntegerExp(loc, n, type);
++}
++
++Expression eval_llvmcttz(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.int64);
++    uinteger_t x = arg0.toInteger();
++
++    int n = getBitsizeOfType(loc, type);
++
++    if (x == 0)
++    {
++        if (arguments[1].toInteger())
++            error(loc, "llvm.cttz.i#(0) is undefined");
++    }
++    else
++    {
++        int c = n >> 1;
++        n -= 1;
++        const uinteger_t mask = (uinteger_t(1L) << n) | (uinteger_t(1L) << n)-1;
++        do {
++            uinteger_t y = (x << c) & mask;
++            if (y != 0) { n -= c; x = y; }
++            c = c >> 1;
++        } while (c != 0);
++    }
++
++    return new IntegerExp(loc, n, type);
++}
++
++Expression eval_llvmctlz(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.int64);
++    uinteger_t x = arg0.toInteger();
++    if (x == 0 && arguments[1].toInteger())
++        error(loc, "llvm.ctlz.i#(0) is undefined");
++
++    int n = getBitsizeOfType(loc, type);
++    int c = n >> 1;
++    do {
++        uinteger_t y = x >> c; if (y != 0) { n -= c; x = y; }
++        c = c >> 1;
++    } while (c != 0);
++
++    return new IntegerExp(loc, n - x, type);
++}
++
++Expression eval_llvmctpop(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    // FIXME Does not work for cent/ucent
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.int64);
++    uinteger_t n = arg0.toInteger();
++    int cnt = 0;
++    while (n)
++    {
++        cnt += (n & 1);
++        n >>= 1;
++    }
++    return new IntegerExp(loc, cnt, type);
++}
++
++Expression eval_llvmexpect(Loc loc, FuncDeclaration fd, Expression[] arguments)
++{
++    Type type = getTypeOfOverloadedIntrinsic(fd);
++
++    Expression arg0 = arguments[0];
++    assert(arg0.op == EXP.int64);
++
++    return new IntegerExp(loc, arg0.toInteger(), type);
++}
++ // IN_LLVM
+--- a/dmd/traits.d
++++ b/dmd/traits.d
+@@ -2066,6 +2066,12 @@
+         d.storage_class |= STC.rvalue;
+         return new VarExp(e.loc, d);
+     }
++    import dmd.hooks : semanticTraitsHook;
++    if (Expression ret = semanticTraitsHook(e, sc))
++    {
++        return ret;
++    }
++
+     if (e.ident == Id.isZeroInit)
+     {
+         if (dim != 1)
+--- a/dmd/dtemplate.d
++++ b/dmd/dtemplate.d
+@@ -262,6 +262,9 @@
+     // threaded list of previous instantiation attempts on stack
+     TemplatePrevious* previous;
+ 
++    const(char)* intrinsicName;
++
++
+     Expression lastConstraint; /// the constraint after the last failed evaluation
+     Array!Expression lastConstraintNegs; /// its negative parts
+     Objects* lastConstraintTiargs; /// template instance arguments for `lastConstraint`
+@@ -309,7 +312,12 @@
+             foreach (i, ref param; *p)
+                 param = (*parameters)[i].syntaxCopy();
+         }
+-        return new TemplateDeclaration(loc, ident, p, constraint ? constraint.syntaxCopy() : null, Dsymbol.arraySyntaxCopy(members), ismixin, literal);
++        auto td = new TemplateDeclaration(loc, ident, p,
++                                          constraint ? constraint.syntaxCopy() : null,
++                                          Dsymbol.arraySyntaxCopy(members), ismixin, literal);
++        td.intrinsicName = intrinsicName;
++        return td;
++
+     }
+ 
+     override const(char)* kind() const
+--- a/dmd/func.d
++++ b/dmd/func.d
+@@ -89,6 +89,36 @@
+     toPrecDouble,
+     toPrecReal,
+     ctfeWrite,
++
++    // IN_LLVM:
++    llvm_sin,
++    llvm_cos,
++    llvm_sqrt,
++    llvm_exp,
++    llvm_exp2,
++    llvm_log,
++    llvm_log2,
++    llvm_log10,
++    llvm_fabs,
++    llvm_minnum,
++    llvm_maxnum,
++    llvm_floor,
++    llvm_ceil,
++    llvm_trunc,
++    llvm_rint,
++    llvm_nearbyint,
++    llvm_round,
++    llvm_lround,
++    llvm_llround,
++    llvm_lrint,
++    llvm_llrint,
++    llvm_fma,
++    llvm_copysign,
++    llvm_bswap,
++    llvm_cttz,
++    llvm_ctlz,
++    llvm_ctpop,
++    llvm_expect,
+ }
+ 
+ private struct FUNCFLAG
+@@ -220,6 +250,19 @@
+ 
+     const(char)* mangleString;          /// mangled symbol created from mangleExact()
+ 
++    uint priority;
++
++    // true if overridden with the pragma(LDC_allow_inline); statement
++    bool allowInlining = false;
++
++    // true if set with the pragma(LDC_never_inline); statement
++    bool neverInline = false;
++
++    // Whether to emit instrumentation code if -fprofile-instr-generate is specified,
++    // the value is set with pragma(LDC_profile_instr, true|false)
++    bool emitInstrumentation = true;
++
++
+     VarDeclaration vresult;             /// result variable for out contracts
+     LabelDsymbol returnLabel;           /// where the return goes
+ 
+@@ -392,6 +435,8 @@
+         f.frequires = frequires ? Statement.arraySyntaxCopy(frequires) : null;
+         f.fensures = fensures ? Ensure.arraySyntaxCopy(fensures) : null;
+         f.fbody = fbody ? fbody.syntaxCopy() : null;
++        f.mangleOverride = mangleOverride;
++
+         return f;
+     }
+ 
+--- a/dmd/pragmasem.d
++++ b/dmd/pragmasem.d
+@@ -48,6 +48,12 @@
+     import dmd.target;
+     import dmd.utils;
+ 
++    import gen.dpragma : LDCPragma, DtoCheckPragma, DtoGetPragma;
++
++    LDCPragma llvm_internal = LDCPragma.LLVMnone;
++    const(char)* arg1str = null;
++
++
+     void declarations()
+     {
+         if (!pd.decl)
+@@ -68,6 +74,9 @@
+             }
+ 
+             s.dsymbolSemantic(sc2);
++
++            DtoCheckPragma(pd, s, llvm_internal, arg1str);
++
+         }
+     }
+ 
+@@ -87,17 +96,21 @@
+     {
+         if (pd.ident == Id.linkerDirective)
+         {
+-            if (!pd.args || pd.args.length != 1)
+-                .error(pd.loc, "%s `%s` one string argument expected for pragma(linkerDirective)", pd.kind, pd.toPrettyChars);
++            if (!pd.args || pd.args.length == 0)
++                .error(pd.loc, "%s `%s` one or more string arguments expected for pragma(linkerDirective)", pd.kind, pd.toPrettyChars);
+             else
+             {
+-                auto se = semanticString(sc, (*pd.args)[0], "linker directive");
+-                if (!se)
+-                    return noDeclarations();
+-                (*pd.args)[0] = se;
+-                if (global.params.v.verbose)
+-                    message("linkopt   %.*s", cast(int)se.len, se.peekString().ptr);
++                for (size_t i = 0; i < pd.args.length; ++i)
++                {
++                    auto se = semanticString(sc, (*pd.args)[i], "linker directive");
++                    if (!se)
++                        break;
++                    (*pd.args)[i] = se;
++                    if (global.params.v.verbose)
++                        message("linkopt   %.*s", cast(int)se.len, se.peekString().ptr);
++                }
+             }
++
+             return noDeclarations();
+         }
+     }
+@@ -160,6 +173,10 @@
+             sc2.pop();
+         return;
+     }
++    else if ((llvm_internal = DtoGetPragma(sc, pd, arg1str)) != LDCPragma.LLVMnone)
++    {
++        return declarations();
++    }
+     else if (pd.ident == Id.crt_constructor || pd.ident == Id.crt_destructor)
+     {
+         if (pd.args && pd.args.length != 0)
+@@ -297,6 +314,38 @@
+             }
+         }
+     }
++    // IN_LLVM. FIXME Move to pragma.cpp
++    else if (ps.ident == Id.LDC_allow_inline)
++    {
++        sc.func.allowInlining = true;
++    }
++    // IN_LLVM. FIXME Move to pragma.cpp
++    else if (ps.ident == Id.LDC_never_inline)
++    {
++        sc.func.neverInline = true;
++    }
++    // IN_LLVM. FIXME Move to pragma.cpp
++    else if (ps.ident == Id.LDC_profile_instr)
++    {
++        import gen.dpragma : DtoCheckProfileInstrPragma;
++
++        bool emitInstr = true;
++        if (!ps.args || ps.args.length != 1 || !DtoCheckProfileInstrPragma((*ps.args)[0], emitInstr))
++        {
++            error(ps.loc, "pragma(LDC_profile_instr, true or false) expected");
++            return false;
++        }
++        else
++        {
++            auto fd = sc.func;
++            if (fd is null)
++            {
++                error(ps.loc, "pragma(LDC_profile_instr, ...) is not inside a function");
++                return false;
++            }
++            fd.emitInstrumentation = emitInstr;
++        }
++    }
+     else if (ps.ident == Id.linkerDirective)
+     {
+         /* Should this be allowed?
+--- a/dmd/dsymbol.d
++++ b/dmd/dsymbol.d
+@@ -366,6 +366,7 @@
+ {
+     Identifier ident;
+     Dsymbol parent;
++    uint llvmInternal; // LDC
+     void* csym;             // symbol for code generator
+     Scope* _scope;          // !=null means context to use for semantic()
+     private DsymbolAttributes* atts; /// attached attribute declarations
+--- a/dmd/templatesem.d
++++ b/dmd/templatesem.d
+@@ -1251,6 +1251,14 @@
+             //printf("tempdecl.ident = %s, s = `%s %s`\n", tempdecl.ident.toChars(), s.kind(), s.toPrettyChars());
+             //printf("setting aliasdecl\n");
+             tempinst.aliasdecl = s;
++            import gen.llvmhelpers : DtoSetFuncDeclIntrinsicName;
++            if (tempdecl.llvmInternal != 0)
++            {
++                s.llvmInternal = tempdecl.llvmInternal;
++                if (FuncDeclaration fd = s.isFuncDeclaration())
++                    DtoSetFuncDeclIntrinsicName(tempinst, tempdecl, fd);
++            }
++
+         }
+     }
+ 
+--- a/dmd/expressionsem.d
++++ b/dmd/expressionsem.d
+@@ -537,7 +537,17 @@
+         case EXP.string_: return typeof(return)(true);
+         case EXP.arrayLiteral: return arrayLiteralToBool(_this.isArrayLiteralExp());
+         case EXP.assocArrayLiteral: return assocArrayLiteralToBool(_this.isAssocArrayLiteralExp());
+-        case EXP.symbolOffset: return typeof(return)(true);
++        case EXP.symbolOffset:
++        {
++            import gen.dpragma : LDCPragma;
++
++            // For a weak symbol, we only statically know that it is non-null if the
++            // offset is non-zero.
++            auto soe = _this.isSymOffExp();
++            if (soe.var.llvmInternal == LDCPragma.LLVMextern_weak && soe.offset == 0)
++                return typeof(return)();
++            return typeof(return)(true);
++        }
+         case EXP.address: return addrToBool(_this.isAddrExp());
+         case EXP.slice: return _this.isSliceExp().e1.toBool();
+         case EXP.comma: return _this.isCommaExp().e2.toBool();
+@@ -4609,6 +4619,10 @@
+             // If not D linkage, do promotions
+             if (tf.linkage != LINK.d)
+             {
++              // IN_LLVM: don't do promotions on intrinsics
++              import gen.dpragma : DtoIsIntrinsic;
++              if (!(fd && DtoIsIntrinsic(fd)))
++              {
+                 // Promote bytes, words, etc., to ints
+                 arg = integralPromotions(arg, sc);
+ 
+@@ -4641,6 +4655,7 @@
+                         err = true;
+                     }
+                 }
++              }
+             }
+ 
+             // Do not allow types that need destructors or copy constructors.
+@@ -10355,6 +10370,13 @@
+             FuncDeclaration f = ve.var.isFuncDeclaration();
+             if (f)
+             {
++                import gen.dpragma : DtoIsIntrinsic;
++                if (DtoIsIntrinsic(f.toAliasFunc()))
++                {
++                    error(exp.loc, "cannot take the address of intrinsic function `%s`", f.toAliasFunc().toChars());
++                    result = ErrorExp.get();
++                    return;
++                }
+                 /* Because nested functions cannot be overloaded,
+                  * mark here that we took its address because castTo()
+                  * may not be called with an exact match.
+--- a/dmd/target.d
++++ b/dmd/target.d
+@@ -697,8 +697,7 @@
+      */
+     extern (C++) int isVectorTypeSupported(int sz, Type type) @safe
+     {
+-        if (!isXmmSupported())
+-            return 1; // not supported
++        // LDC_FIXME: Is it possible to query the LLVM target about supported vectors?
+ 
+         switch (type.ty)
+         {
+@@ -718,41 +717,6 @@
+             return 2; // wrong base type
+         }
+ 
+-        // Whether a vector is really supported depends on the CPU being targeted.
+-        if (sz == 16)
+-        {
+-            switch (type.ty)
+-            {
+-            case TY.Tint32:
+-            case TY.Tuns32:
+-            case TY.Tfloat32:
+-                if (cpu < CPU.sse)
+-                    return 3; // no SSE vector support
+-                break;
+-
+-            case TY.Tvoid:
+-            case TY.Tint8:
+-            case TY.Tuns8:
+-            case TY.Tint16:
+-            case TY.Tuns16:
+-            case TY.Tint64:
+-            case TY.Tuns64:
+-            case TY.Tfloat64:
+-                if (cpu < CPU.sse2)
+-                    return 3; // no SSE2 vector support
+-                break;
+-
+-            default:
+-                assert(0);
+-            }
+-        }
+-        else if (sz == 32)
+-        {
+-            if (cpu < CPU.avx)
+-                return 3; // no AVX vector support
+-        }
+-        else
+-            return 3; // wrong size
+ 
+         return 0;
+     }
+@@ -776,10 +740,6 @@
+         const vecsize = cast(int)tvec.basetype.size();
+         const elemty = cast(int)tvec.elementType().ty;
+ 
+-        // Only operations on these sizes are supported (see isVectorTypeSupported)
+-        if (vecsize != 16 && vecsize != 32)
+-            return false;
+-
+         switch (op)
+         {
+         case EXP.uadd:
+@@ -787,174 +747,39 @@
+             return tvec.isScalar();
+ 
+         case EXP.negate:
+-            if (vecsize == 16)
+-            {
+-                // float[4] negate needs SSE support ({V}SUBPS)
+-                if (elemty == TY.Tfloat32 && cpu >= CPU.sse)
+-                    return true;
+-                // double[2] negate needs SSE2 support ({V}SUBPD)
+-                if (elemty == TY.Tfloat64 && cpu >= CPU.sse2)
+-                    return true;
+-                // (u)byte[16]/short[8]/int[4]/long[2] negate needs SSE2 support ({V}PSUB[BWDQ])
+-                if (tvec.isIntegral() && cpu >= CPU.sse2)
+-                    return true;
+-            }
+-            else if (vecsize == 32)
+-            {
+-                // float[8]/double[4] negate needs AVX support (VSUBP[SD])
+-                if (tvec.isFloating() && cpu >= CPU.avx)
+-                    return true;
+-                // (u)byte[32]/short[16]/int[8]/long[4] negate needs AVX2 support (VPSUB[BWDQ])
+-                if (tvec.isIntegral() && cpu >= CPU.avx2)
+-                    return true;
+-            }
+-            break;
++            return tvec.isScalar();
+ 
+         case EXP.identity, EXP.notIdentity:
+-            return false;
++            return true;
+ 
+         case EXP.lessThan, EXP.greaterThan, EXP.lessOrEqual, EXP.greaterOrEqual:
+         case EXP.equal:
+         case EXP.notEqual:
+-            if (vecsize == 16)
+-            {
+-                // float[4] comparison needs SSE support (CMP{EQ,NEQ,LT,LE}PS)
+-                if (elemty == TY.Tfloat32 && cpu >= CPU.sse)
+-                    return true;
+-                // double[2] comparison needs SSE2 support (CMP{EQ,NEQ,LT,LE}PD)
+-                if (elemty == TY.Tfloat64 && cpu >= CPU.sse2)
+-                    return true;
+-                if (tvec.isIntegral())
+-                {
+-                    if (elemty == TY.Tint64 || elemty == TY.Tuns64)
+-                    {
+-                        // (u)long[2] equality needs SSE4.1 support (PCMPEQQ)
+-                       if ((op == EXP.equal || op == EXP.notEqual) && cpu >= CPU.sse4_1)
+-                           return true;
+-                       // (u)long[2] comparison needs SSE4.2 support (PCMPGTQ)
+-                       if (cpu >= CPU.sse4_2)
+-                           return true;
+-                    }
+-                    // (u)byte[16]/short[8]/int[4] comparison needs SSE2 support (PCMP{EQ,GT}[BWD])
+-                    if (cpu >= CPU.sse2)
+-                        return true;
+-                }
+-            }
+-            else if (vecsize == 32)
+-            {
+-                // float[8]/double[4] comparison needs AVX support (VCMP{EQ,NEQ,LT,LE}P[SD])
+-                if (tvec.isFloating() && cpu >= CPU.avx)
+-                    return true;
+-                // (u)byte[32]/short[16]/int[8]/long[4] comparison needs AVX2 support (VPCMP{EQ,GT}[BWDQ])
+-                if (tvec.isIntegral() && cpu >= CPU.avx2)
+-                    return true;
+-            }
+-            break;
++            return tvec.isScalar();
+ 
+         case EXP.leftShift, EXP.leftShiftAssign, EXP.rightShift, EXP.rightShiftAssign, EXP.unsignedRightShift, EXP.unsignedRightShiftAssign:
+-            return false;
++            return tvec.isIntegral();
+ 
+         case EXP.add, EXP.addAssign, EXP.min, EXP.minAssign:
+-            if (vecsize == 16)
+-            {
+-                // float[4] add/sub needs SSE support ({V}ADDPS, {V}SUBPS)
+-                if (elemty == TY.Tfloat32 && cpu >= CPU.sse)
+-                    return true;
+-                // double[2] add/sub needs SSE2 support ({V}ADDPD, {V}SUBPD)
+-                if (elemty == TY.Tfloat64 && cpu >= CPU.sse2)
+-                    return true;
+-                // (u)byte[16]/short[8]/int[4]/long[2] add/sub needs SSE2 support ({V}PADD[BWDQ], {V}PSUB[BWDQ])
+-                if (tvec.isIntegral() && cpu >= CPU.sse2)
+-                    return true;
+-            }
+-            else if (vecsize == 32)
+-            {
+-                // float[8]/double[4] add/sub needs AVX support (VADDP[SD], VSUBP[SD])
+-                if (tvec.isFloating() && cpu >= CPU.avx)
+-                    return true;
+-                // (u)byte[32]/short[16]/int[8]/long[4] add/sub needs AVX2 support (VPADD[BWDQ], VPSUB[BWDQ])
+-                if (tvec.isIntegral() && cpu >= CPU.avx2)
+-                    return true;
+-            }
+-            break;
++            return tvec.isScalar();
+ 
+         case EXP.mul, EXP.mulAssign:
+-            if (vecsize == 16)
+-            {
+-                // float[4] multiply needs SSE support ({V}MULPS)
+-                if (elemty == TY.Tfloat32 && cpu >= CPU.sse)
+-                    return true;
+-                // double[2] multiply needs SSE2 support ({V}MULPD)
+-                if (elemty == TY.Tfloat64 && cpu >= CPU.sse2)
+-                    return true;
+-                // (u)short[8] multiply needs SSE2 support ({V}PMULLW)
+-                if ((elemty == TY.Tint16 || elemty == TY.Tuns16) && cpu >= CPU.sse2)
+-                    return true;
+-                // (u)int[4] multiply needs SSE4.1 support ({V}PMULLD)
+-                if ((elemty == TY.Tint32 || elemty == TY.Tuns32) && cpu >= CPU.sse4_1)
+-                    return true;
+-            }
+-            else if (vecsize == 32)
+-            {
+-                // float[8]/double[4] multiply needs AVX support (VMULP[SD])
+-                if (tvec.isFloating() && cpu >= CPU.avx)
+-                    return true;
+-                // (u)short[16] multiply needs AVX2 support (VPMULLW)
+-                if ((elemty == TY.Tint16 || elemty == TY.Tuns16) && cpu >= CPU.avx2)
+-                    return true;
+-                // (u)int[8] multiply needs AVX2 support (VPMULLD)
+-                if ((elemty == TY.Tint32 || elemty == TY.Tuns32) && cpu >= CPU.avx2)
+-                    return true;
+-            }
+-            break;
++            return tvec.isScalar();
+ 
+         case EXP.div, EXP.divAssign:
+-            if (vecsize == 16)
+-            {
+-                // float[4] divide needs SSE support ({V}DIVPS)
+-                if (elemty == TY.Tfloat32 && cpu >= CPU.sse)
+-                    return true;
+-                // double[2] divide needs SSE2 support ({V}DIVPD)
+-                if (elemty == TY.Tfloat64 && cpu >= CPU.sse2)
+-                    return true;
+-            }
+-            else if (vecsize == 32)
+-            {
+-                // float[8]/double[4] multiply needs AVX support (VDIVP[SD])
+-                if (tvec.isFloating() && cpu >= CPU.avx)
+-                    return true;
+-            }
+-            break;
++            return tvec.isScalar();
+ 
+         case EXP.mod, EXP.modAssign:
+-            return false;
++            return tvec.isScalar();
+ 
+         case EXP.and, EXP.andAssign, EXP.or, EXP.orAssign, EXP.xor, EXP.xorAssign:
+-            if (tvec.isIntegral())
+-            {
+-                // (u)byte[16]/short[8]/int[4]/long[2] bitwise ops needs SSE2 support ({V}PAND, {V}POR, {V}PXOR)
+-                if (vecsize == 16 && cpu >= CPU.sse2)
+-                    return true;
+-                // (u)byte[32]/short[16]/int[8]/long[4] bitwise ops needs AVX2 support (VPAND, VPOR, VPXOR)
+-                if (vecsize == 32 && cpu >= CPU.avx2)
+-                    return true;
+-            }
+-            break;
++            return tvec.isIntegral();
+ 
+         case EXP.not:
+             return false;
+ 
+         case EXP.tilde:
+-            if (tvec.isIntegral())
+-            {
+-                // (u)byte[16]/short[8]/int[4]/long[2] logical exclusive needs SSE2 support ({V}PXOR)
+-                if (vecsize == 16 && cpu >= CPU.sse2)
+-                    return true;
+-                // (u)byte[32]/short[16]/int[8]/long[4] logical exclusive needs AVX2 support (VPXOR)
+-                if (vecsize == 32 && cpu >= CPU.avx2)
+-                    return true;
+-            }
+-            break;
++            return tvec.isIntegral();
+ 
+         case EXP.pow, EXP.powAssign:
+             return false;
+--- a/dmd/root/ctfloat.d
++++ b/dmd/root/ctfloat.d
+@@ -124,6 +124,23 @@
+     pure
+     static real_t fma(real_t x, real_t y, real_t z) { return (x * y) + z; }
+ 
++    static import std.math;
++
++    static if (!is(real_t == real))
++    {
++        static real_t rint(real_t x) { return real_t(cast(double)std.math.rint(cast(double)x)); }
++        static real_t nearbyint(real_t x) { return real_t(cast(double)std.math.nearbyint(cast(double)x)); }
++        static long llround(real_t x) { return core.math.rndtol(cast(double)x); }
++        static long llrint(real_t x) { return core.stdc.math.llrint(cast(double)x); }
++    }
++    else
++    {
++        static real_t rint(real_t x) { return std.math.rint(x); }
++        static real_t nearbyint(real_t x) { return std.math.nearbyint(x); }
++        static long llround(real_t x) { return core.math.rndtol(x); }
++        static long llrint(real_t x) { return core.stdc.math.llrintl(x); }
++    }
++
+     pure @trusted
+     static bool isIdentical(real_t a, real_t b)
+     {
+--- a/dmd/hooks.d
++++ b/dmd/hooks.d
+@@ -0,0 +1,19 @@
++// Compiler implementation of the D programming language
++// Copyright (c) 1999-2016 by Digital Mars
++// All Rights Reserved
++// http://www.digitalmars.com
++// Distributed under the Boost Software License, Version 1.0.
++// http://www.boost.org/LICENSE_1_0.txt
++
++module dmd.hooks;
++
++import dmd.dscope;
++import dmd.expression;
++
++import gen.ldctraits;
++
++/// Returns `null` when the __trait was not recognized.
++Expression semanticTraitsHook(TraitsExp e, Scope* sc)
++{
++    return semanticTraitsLDC(e, sc);
++}

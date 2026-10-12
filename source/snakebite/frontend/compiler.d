@@ -527,7 +527,7 @@ final class Compiler {
         const host = hostCompiler;
 
         inside({
-            initializeDmdState(snippets, host.importPaths, host.versionIdentifiers);
+            initializeDmdState(snippets, host);
             initialModuleCount = Module.amodules.length;
         });
     }
@@ -591,8 +591,7 @@ final class Compiler {
 
     private void initializeDmdState(
         in Snippets snippets,
-        in string[] importPaths,
-        in string[] versionIdentifiers,
+        in imported!"snakebite.frontend.hostcompiler".HostCompiler host,
     ) {
         import dmd.common.charactertables:
             IdentifierCharLookup,
@@ -609,12 +608,13 @@ final class Compiler {
         global.preprocess = &preprocessCFile;
         target.cpu = CPU.baseline;
         target.setCPU;
+        global.compileEnv.vendor = owned(host.vendor);
         // `initDMD` predefined the identifiers of dmd; the host compiler's
         // own list replaces them.
         global.versionids.setDim(0);
-        versionIdentifiers.each!(
+        host.versionIdentifiers.each!(
             identifier => VersionCondition.addPredefinedGlobalIdent(owned(identifier)));
-        importPaths.each!(path => addImport(owned(path)));
+        host.importPaths.each!(path => addImport(owned(path)));
 
         // Prevent DMD from calling exit() when too many cascading errors
         // accumulate. The shared parse path already checks global.errors after
