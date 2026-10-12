@@ -178,15 +178,44 @@ struct CompilerProbe {
     uint frontendVersion;
 }
 
+// The probe runs once for each compiler: every target of the build asks.
 CompilerProbe compilerProbe(in string compiler) {
+    static CompilerProbe[string] probes;
+    if (auto known = compiler in probes)
+        return *known;
+    return probes[compiler] = runProbe(compiler);
+}
+
+// A directory that is gone when its owner goes out of scope.
+struct TemporaryDirectory {
+    string path;
+
+    this(string path) {
+        import std.file: mkdirRecurse;
+
+        this.path = path;
+        mkdirRecurse(path);
+    }
+
+    ~this() {
+        import std.file: exists, rmdirRecurse;
+
+        if (path.exists)
+            rmdirRecurse(path);
+    }
+
+    @disable this(this);
+}
+
+CompilerProbe runProbe(in string compiler) {
     import std.conv: to;
-    import std.file: mkdirRecurse, tempDir, write;
+    import std.file: tempDir, write;
     import std.process: execute, thisProcessID;
     import std.string: strip;
 
-    const directory = buildPath(tempDir, "snakebite-probe-" ~ thisProcessID.to!string);
-    mkdirRecurse(directory);
-    const source = buildPath(directory, "probe.d");
+    scope directory = TemporaryDirectory(
+        buildPath(tempDir, "snakebite-probe-" ~ thisProcessID.to!string));
+    const source = buildPath(directory.path, "probe.d");
     write(source, `pragma(msg, __VENDOR__, "|", __VERSION__);`);
     const result = execute([compiler, "-c", "-o-", source]);
     enforce(result.status == 0, compiler ~ " cannot compile the probe: " ~ result.output);
@@ -226,7 +255,7 @@ string dmdLibraryVersionText() {
 DubInfo withLdcFrontend(DubInfo info, in string compiler, in CompilerProbe probe) {
     import std.algorithm: any;
     import std.conv: text;
-    import std.file: dirEntries, SpanMode;
+    import std.file: dirEntries, exists, isDir, SpanMode;
     import std.process: execute;
     import std.regex: matchFirst, regex;
 
