@@ -8,7 +8,9 @@ import reggae.types: CompilerFlags;
 import std.algorithm: canFind, endsWith, filter, map, startsWith;
 import std.array: array;
 import std.process: environment, executeShell, escapeShellCommand;
-import std.path: baseName, stripExtension;
+import std.exception: enforce;
+import std.file: getcwd;
+import std.path: baseName, buildPath, stripExtension;
 import std.string: chomp;
 
 string ldcPath() {
@@ -107,6 +109,34 @@ Target[] testFixtureLibraries() {
     ];
 }
 
+// What the compiler of this target says about itself (`-v`): its import
+// paths and predefined version identifiers. The frontend inside the
+// binary analyses that druntime source in the way that compiler does
+// (`snakebite.frontend.hostcompiler`). Written when the build is
+// generated, to a directory of its own per object set, and given to the
+// compiler as a string import path.
+string hostCompilerRecordDirectory(in string compiler, in string objectSet) {
+    import std.file: mkdirRecurse, write;
+    import std.process: execute;
+    import std.regex: matchFirst, regex;
+    import std.string: lineSplitter, split;
+
+    const result = execute([compiler, "-v", "-c", "-o-", "/dev/null"]);
+    string record;
+    foreach (line; result.output.lineSplitter) {
+        if (const path = line.matchFirst(regex(`^import path\[\d+\] = (.*)$`)))
+            record ~= "import " ~ path[1] ~ "\n";
+        else if (line.startsWith("predefs"))
+            foreach (identifier; line["predefs".length .. $].split)
+                record ~= "version " ~ identifier ~ "\n";
+    }
+    enforce(record.length, compiler ~ " -v gave no import paths and predefs");
+    const directory = buildPath(getcwd, ".reggae", "host-compiler", objectSet);
+    mkdirRecurse(directory);
+    write(buildPath(directory, "snakebite_host_compiler.txt"), record);
+    return directory;
+}
+
 Target[] dubTarget(string compiler, string config, string objectSet,
                  string output, CompilerFlags flags = CompilerFlags()) {
     auto buildOptions = options.dup;
@@ -147,6 +177,8 @@ Target[] dubTarget(string compiler, string config, string objectSet,
     info.packages[0].lflags ~= compiler == "dmd"
         ? "-defaultlib=libphobos2.so" : "-link-defaultlib-shared";
     info.options = buildOptions;
+    info.packages[0].stringImportPaths ~=
+        hostCompilerRecordDirectory(buildOptions.dCompiler, objectSet);
     if (compiler == "dmd")
         info.packages[0].importPaths = info.packages[0].importPaths
             .filter!(a => a.baseName != "tests" && a.baseName != "acceptance")

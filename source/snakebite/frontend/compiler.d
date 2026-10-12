@@ -517,21 +517,17 @@ final class Compiler {
         initialized = true;
     }
 
-    // Host code, in the GC: the search reads the configuration with
-    // Phobos, whose caches (`std.functional.memoize`, behind
-    // `std.regex`) are shared with every later host use. Made
-    // inside the frontend, their storage would be arena memory that
-    // host code then fills with GC data no collection looks at.
-    // Only dmd's own setup runs inside; the paths are copied in.
+    // The druntime and Phobos source is the one of the compiler that
+    // built this binary, analysed with the version identifiers that
+    // compiler predefines, so that the sizes and offsets the frontend
+    // computes are those of the druntime this binary links.
     private void setUpDmd() {
-        import dmd.frontend: findImportPaths;
+        import snakebite.frontend.hostcompiler: hostCompiler;
 
-        import std.array: array;
-
-        const importPaths = findImportPaths.array;
+        const host = hostCompiler;
 
         inside({
-            initializeDmdState(snippets, importPaths);
+            initializeDmdState(snippets, host.importPaths, host.versionIdentifiers);
             initialModuleCount = Module.amodules.length;
         });
     }
@@ -596,6 +592,7 @@ final class Compiler {
     private void initializeDmdState(
         in Snippets snippets,
         in string[] importPaths,
+        in string[] versionIdentifiers,
     ) {
         import dmd.common.charactertables:
             IdentifierCharLookup,
@@ -603,7 +600,8 @@ final class Compiler {
         import dmd.errors: diagnostics, fatalErrorHandler;
         import dmd.frontend: addImport, initDMD;
         import dmd.globals: global;
-        import dmd.target: CPU, addDefaultVersionIdentifiers, target;
+        import dmd.cond: VersionCondition;
+        import dmd.target: CPU, target;
         import snakebite.frontend.importc: preprocessCFile;
         import std.algorithm.iteration: each;
 
@@ -611,7 +609,11 @@ final class Compiler {
         global.preprocess = &preprocessCFile;
         target.cpu = CPU.baseline;
         target.setCPU;
-        addDefaultVersionIdentifiers(global.params, target);
+        // `initDMD` predefined the identifiers of dmd; the host compiler's
+        // own list replaces them.
+        global.versionids.setDim(0);
+        versionIdentifiers.each!(
+            identifier => VersionCondition.addPredefinedGlobalIdent(owned(identifier)));
         importPaths.each!(path => addImport(owned(path)));
 
         // Prevent DMD from calling exit() when too many cascading errors
@@ -679,7 +681,6 @@ final class Compiler {
         // `version (unittest)` blocks compile in. initDMD's global._init()
         // runs that pairing while useUnitTests is still false, so register it
         // here, after the assignment and after _init, for both worlds.
-        import dmd.cond: VersionCondition;
         VersionCondition.addPredefinedGlobalIdent("unittest");
         resetErrors;
 
