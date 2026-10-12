@@ -213,7 +213,9 @@ int run(string[] args) {
 
 // A module-local @Serial still shares the heap with other test modules.
 // Run forced library-unload scans before starting any guest worker, not
-// after a parallel pass whose guest threads could still be ending.
+// after a parallel pass whose guest threads could still be ending. A test
+// that changes the working directory of the process runs alone as well:
+// the directory belongs to all threads.
 private int runSelectedTests(
     Options options,
     in TestData[] tests,
@@ -222,7 +224,7 @@ private int runSelectedTests(
         return runTests(options, tests);
 
     const forced = tests.filter!(test =>
-        test.tags.canFind("forced-finalizers")
+        runsAlone(test)
         && isWantedTest(test, options.testsToRun)).array;
     if (forced.length == 0)
         return runTests(options, tests);
@@ -231,8 +233,13 @@ private int runSelectedTests(
     serialOptions.numThreads = 1;
     const forcedStatus = runTests(serialOptions, forced);
     const remaining = tests.filter!(test =>
-        !test.tags.canFind("forced-finalizers")
+        !runsAlone(test)
         && isWantedTest(test, options.testsToRun)).array;
     return remaining.length == 0 ? forcedStatus
         : forcedStatus | runTests(options, remaining);
+}
+
+private bool runsAlone(in TestData test) {
+    return test.tags.canFind("forced-finalizers")
+        || test.tags.canFind("changes-working-directory");
 }
