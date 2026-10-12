@@ -640,26 +640,83 @@ def test_pre_build_commands_run_before_the_project_is_read(
         dub_project_recipe("pre-build")
         + 'stringImportPaths "generated"\n'
         + 'preBuildCommands "mkdir -p generated && '
-        + 'echo $$DUB_ROOT_PACKAGE > generated/root.txt"\n',
+        + 'echo $$DUB_ROOT_PACKAGE $$DUB_PACKAGE $$DUB_PACKAGE_VERSION '
+        + '$$DUB_CONFIG $$DUB_BUILD_TYPE `basename $$DUB_PACKAGE_DIR` '
+        + '`basename $$DUB_ROOT_PACKAGE_DIR` > generated/root.txt"\n',
     )
     write(
         app / "source" / "main.d",
         f"""
         module main;
-        static assert(import("root.txt") == "{name}\\n");
+        static assert(import("root.txt")
+            == "{name} {name} ~master unittest unittest app app\\n");
         int main() {{ return 0; }}
         """,
     )
 
+    result = run_program_backend(backend, app, tmp_path)
+
+    assert result.returncode == 0, output(result)
+
+
+# A dub build runs the pre-generate commands once, and `dub describe` runs
+# them each time it runs: a start must not describe the project again.
+@pytest.mark.parametrize("backend", ["native", *FILE_BACKENDS])
+def test_pre_generate_commands_run_once_in_a_start(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    write(
+        app / "dub.sdl",
+        dub_project_recipe("pre-generate")
+        + 'preGenerateCommands "echo run >> $PACKAGE_DIR/runs.log"\n',
+    )
+    write(app / "source" / "main.d", "module main;\nint main() { return 0; }\n")
+
+    result = run_program_backend(backend, app, tmp_path)
+
+    assert result.returncode == 0, output(result)
+    assert (app / "runs.log").read_text().splitlines() == ["run"]
+
+
+# The pre-build commands run when the cached description of the project is
+# not used: a second start with unchanged inputs runs nothing, and a changed
+# input runs them again.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_pre_build_commands_run_again_only_when_inputs_change(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    write(
+        app / "dub.sdl",
+        dub_project_recipe("pre-build-cache")
+        + 'preBuildCommands "echo run >> runs.log"\n',
+    )
+    write(app / "source" / "main.d", "module main;\nint main() { return 0; }\n")
+    runs = app / "runs.log"
+
+    first = run_backend(backend, app, tmp_path)
+    second = run_backend(backend, app, tmp_path)
+    assert first.returncode == 0, output(first)
+    assert second.returncode == 0, output(second)
+    unchanged = runs.read_text().splitlines()
+
+    write(app / "source" / "other.d", "module other;\n")
+    third = run_backend(backend, app, tmp_path)
+
+    assert third.returncode == 0, output(third)
+    assert (unchanged, runs.read_text().splitlines()) == (["run"], ["run", "run"])
+
+
+def run_program_backend(
+    backend: str, app: Path, tmp_path: Path,
+) -> subprocess.CompletedProcess[str]:
     if backend == "native":
-        result = subprocess.run(
+        return subprocess.run(
             ["dub", "test", "-q", "--compiler=dmd"],
             capture_output=True, check=False, text=True, cwd=app,
         )
-    else:
-        result = run_backend(backend, app, tmp_path)
-
-    assert result.returncode == 0, output(result)
+    return run_backend(backend, app, tmp_path)
 
 
 # Compiled D runs the module destructors after `main`, and the output they
