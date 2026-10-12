@@ -112,8 +112,77 @@ public DubDescription dubDescribeProject(
         return JSONValue(["value": parseJSON(result.output),
             "arguments": JSONValue((result.buildArguments ~ versionArguments).dup)]);
     });
-    return DubDescription(cached["value"],
+    auto description = DubDescription(cached["value"],
         cached["arguments"].array.map!(v => v.str).array);
+    runBuildCommands(description);
+    return description;
+}
+
+// dub runs the pre-generate and pre-build commands of a project before it
+// compiles, so files they write can be sources and string imports. The
+// front end reads those files without dub's build, so run the commands
+// here. `dub describe --data` gives them with every `$VARIABLE` already
+// expanded; they run in the root package directory, as in dub, with the
+// environment of dub's documented `DUB_*` variables that the description
+// states and the recipe's environment maps for the command type.
+private void runBuildCommands(in DubDescription description) {
+    import snakebite.dependencyimage: defaultCompiler;
+    import snakebite.exception: SnakebiteException;
+    import std.conv: text;
+    import std.json: JSONType, JSONValue;
+    import std.process: Config, environment, executeShell;
+
+    const root = description.value["rootPackage"].str;
+    JSONValue settings;
+    foreach (target; description.value["targets"].array)
+        if (target["rootPackage"].str == root)
+            settings = target["buildSettings"];
+    if (settings.type != JSONType.object)
+        return;
+    const kinds = ["preGenerate", "preBuild"];
+    bool any;
+    foreach (kind; kinds)
+        any = any || settings[kind ~ "Commands"].array.length != 0;
+    if (!any)
+        return;
+
+    string packageDirectory, packageVersion;
+    foreach (package_; description.value["packages"].array)
+        if (package_["name"].str == root) {
+            packageDirectory = package_["path"].str;
+            packageVersion = package_["version"].str;
+        }
+
+    const result = describeCapturingOutput(
+        ["dub", "describe", "--data=pre-generate-commands,pre-build-commands",
+            "--data-list", "--compiler=" ~ defaultCompiler]
+            ~ description.buildArguments, packageDirectory);
+    if (result.status != 0)
+        throw new SnakebiteException("dub describe failed in " ~ packageDirectory
+            ~ ": " ~ result.output ~ result.errors);
+    const commands = parseDescribeLists(result.output, kinds.length);
+
+    foreach (index, kind; kinds) {
+        auto commandEnvironment = environment.toAA;
+        commandEnvironment["DC"] = defaultCompiler;
+        commandEnvironment["DUB_ROOT_PACKAGE"] = root;
+        commandEnvironment["DUB_PACKAGE"] = root;
+        commandEnvironment["DUB_PACKAGE_DIR"] = packageDirectory;
+        commandEnvironment["DUB_ROOT_PACKAGE_DIR"] = packageDirectory;
+        commandEnvironment["DUB_PACKAGE_VERSION"] = packageVersion;
+        commandEnvironment["DUB_CONFIG"] = description.value["configuration"].str;
+        commandEnvironment["DUB_BUILD_TYPE"] = description.value["buildType"].str;
+        foreach (key; ["environments", kind ~ "Environments"])
+            foreach (name, value; settings[key].object)
+                commandEnvironment[name] = value.str;
+        foreach (command; commands[index]) {
+            const run = executeShell(command, commandEnvironment, Config.none,
+                size_t.max, packageDirectory);
+            if (run.status != 0)
+                throw new SnakebiteException(kind ~ " command failed with status "
+                    ~ run.status.text ~ ": " ~ command ~ "\n" ~ run.output);
+        }
+    }
 }
 
 

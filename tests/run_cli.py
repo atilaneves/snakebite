@@ -626,6 +626,42 @@ def test_import_paths_stay_relative_to_caller(
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+# A dub build runs the `preBuildCommands` of the recipe before it compiles,
+# in the package directory and with the `DUB_*` variables set, so a file they
+# write is there for `import` to read.
+@pytest.mark.parametrize("backend", ["native", *FILE_BACKENDS])
+def test_pre_build_commands_run_before_the_project_is_read(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    name = dub_name("pre-build")
+    write(
+        app / "dub.sdl",
+        dub_project_recipe("pre-build")
+        + 'stringImportPaths "generated"\n'
+        + 'preBuildCommands "mkdir -p generated && '
+        + 'echo $$DUB_ROOT_PACKAGE > generated/root.txt"\n',
+    )
+    write(
+        app / "source" / "main.d",
+        f"""
+        module main;
+        static assert(import("root.txt") == "{name}\\n");
+        int main() {{ return 0; }}
+        """,
+    )
+
+    if backend == "native":
+        result = subprocess.run(
+            ["dub", "test", "-q", "--compiler=dmd"],
+            capture_output=True, check=False, text=True, cwd=app,
+        )
+    else:
+        result = run_backend(backend, app, tmp_path)
+
+    assert result.returncode == 0, output(result)
+
+
 # Compiled D runs the module destructors after `main`, and the output they
 # write is flushed before the process ends.
 @pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
