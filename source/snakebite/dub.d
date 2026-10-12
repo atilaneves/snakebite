@@ -53,6 +53,8 @@ public struct DubDescription {
 // `dub fetch` without a version always asks the registry for the latest
 // one, over the network, even when the package is already on disk. So ask
 // the local cache first and fetch only when the package is not there.
+// `name@version` names exactly that version: the cache is asked for it, it is
+// fetched when absent, and a different cached version never stands in for it.
 public string fetchProject(in string packageName, in string[] dubCommand = ["dub"]) {
     import std.string: strip;
 
@@ -79,7 +81,7 @@ private auto fetchAndDescribe(
 ) {
     import std.process: Config, execute;
 
-    const fetched = execute(["dub", "fetch", packageName], null, Config.none);
+    const fetched = execute(dubCommand ~ ["fetch", packageName], null, Config.none);
     if (fetched.status != 0)
         throw new Exception("dub fetch failed for `" ~ packageName ~ "`:\n"
             ~ fetched.output
