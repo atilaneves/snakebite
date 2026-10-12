@@ -278,7 +278,7 @@ unittest {
     const fetched = sandbox.inSandboxPath("fetched");
     const script = `
         case $0 in
-            fetch) touch ` ~ fetched ~ `;;
+            fetch) : > ` ~ fetched ~ `;;
             describe) case $1 in
                 package@2.0) [ -e ` ~ fetched ~ ` ] && echo /cache/package-2.0 || exit 1;;
                 *) echo /cache/package-1.0;;
