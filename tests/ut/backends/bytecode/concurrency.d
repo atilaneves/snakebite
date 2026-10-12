@@ -7,6 +7,10 @@ import snakebite.backends.bytecode: Bytecode;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import std.conv: text;
+import core.sync.semaphore: Semaphore;
+import core.thread: Thread;
+import core.time: seconds;
+import snakebite.frontend.compiler: withCompilerLock;
 
 
 // Regression test for issue #278. `Bytecode.call` used to compile a guest
@@ -273,4 +277,56 @@ unittest {
                     __FILE__, __LINE__,
                 );
     }
+}
+
+
+// A new call site can target a body that another call already compiled.
+// Executing that body must not wait for unrelated frontend work.
+@("compileFunction.completedCalleeDoesNotWaitForUnrelatedSemantic")
+unittest {
+    auto guestModule = parseSnippet(q{
+        int leaf() { return 42; }
+        int caller(bool useLeaf) { return useLeaf ? leaf() : 0; }
+    });
+    auto program = Program([guestModule]);
+    auto backend = Owned!Bytecode(program);
+    auto leaf = findFunction(guestModule, "leaf");
+    auto caller = findFunction(guestModule, "caller");
+    auto ready = new Semaphore;
+    auto repeat = new Semaphore;
+    auto finished = new Semaphore;
+    Throwable failure;
+    auto worker = new Thread({
+        int result;
+        bool useLeaf;
+        try {
+            backend.call(caller, &result, [cast(void*) &useLeaf]);
+            result.should == 0;
+            backend.call(leaf, &result, []);
+            result.should == 42;
+        } catch (Throwable error) {
+            failure = error;
+        }
+        ready.notify;
+        repeat.wait;
+        scope(exit) finished.notify;
+        try {
+            useLeaf = true;
+            backend.call(caller, &result, [cast(void*) &useLeaf]);
+            result.should == 42;
+        } catch (Throwable error) {
+            failure = error;
+        }
+    });
+    worker.start;
+    ready.wait;
+    bool completed;
+    withCompilerLock({
+        repeat.notify;
+        completed = finished.wait(5.seconds);
+    });
+    worker.join;
+    if (failure !is null)
+        throw failure;
+    completed.should == true;
 }

@@ -96,10 +96,12 @@ public void completeMangleTargets(imported!"dmd.dsymbol".Dsymbol symbol) {
         return;
 
     withCompilerQuery({
+        if (symbol in names.completed)
+            return;
         for (auto current = symbol; current !is null; current = current.parent)
             if (auto function_ = current.isFuncDeclaration)
                 completeFunctionType(function_);
-        names.completed[symbol] = true;
+        names.completed.insert(symbol, true);
     });
 }
 
@@ -120,30 +122,54 @@ public const(char)[] mangledNameOf(
 
     const(char)[] result;
     withCompilerQuery({
+        if (auto found = function_ in names.mangled) {
+            result = *found;
+            return;
+        }
         completeMangleTargets(function_);
         result = newInFrontend!mangleExact(function_).fromStringz;
-        names.mangled[function_] = result;
+        names.mangled.insert(function_, result);
     });
     return result;
 }
 
-// DMD keeps a completed mangled name on its declaration permanently. Each
-// thread retains that finished result too, so symbol lookup need not wait
-// for unrelated semantic work. Publishing follows successful completion;
-// an unfinished signature must never enter either cache.
-private struct ThreadNames {
+// DMD keeps a completed mangled name on its declaration permanently.
+// Publish successful results for all workers; a different thread does not
+// need to complete or mangle the same declaration again.
+private struct Names {
+    import dmd.dsymbol: Dsymbol;
+    import dmd.func: FuncDeclaration;
+    import snakebite.sharedtable: SharedTable;
+
     size_t generation;
-    bool[imported!"dmd.dsymbol".Dsymbol] completed;
-    const(char)[][imported!"dmd.func".FuncDeclaration] mangled;
+    SharedTable!(Dsymbol, bool) completed;
+    SharedTable!(FuncDeclaration, const(char)[]) mangled;
 }
 
-private ThreadNames _names;
+private __gshared Names* _names;
 
-private ref ThreadNames names() {
-    import snakebite.frontend.compiler: metadataGeneration;
+private Names* names() {
+    import core.atomic: atomicLoad, atomicStore, MemoryOrder;
+    import snakebite.frontend.compiler: metadataGeneration, withCompilerQuery;
 
     const generation = metadataGeneration;
-    if (_names.generation != generation)
-        _names = ThreadNames(generation);
-    return _names;
+    auto result = atomicLoad!(MemoryOrder.acq)(_names);
+    if (result !is null && result.generation == generation)
+        return result;
+
+    withCompilerQuery({
+        result = atomicLoad!(MemoryOrder.acq)(_names);
+        if (result !is null && result.generation == generation)
+            return;
+        result = new Names;
+        result.generation = generation;
+        atomicStore!(MemoryOrder.rel)(_names, result);
+    });
+    return result;
+}
+
+package(snakebite.frontend) void discardNameMetadata() nothrow @nogc {
+    import core.atomic: atomicStore, MemoryOrder;
+
+    atomicStore!(MemoryOrder.rel)(_names, cast(Names*) null);
 }

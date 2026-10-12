@@ -1,7 +1,8 @@
 module ut.frontend.functions;
 
 
-import snakebite.frontend.compiler: parseSnippet, withCompilerLock;
+import snakebite.frontend.compiler:
+    parseSnippet, returnsOnStack, withCompilerLock;
 import snakebite.frontend.dmd.functions: contextOf, findFunction, moduleOf;
 import ut;
 import core.sync.semaphore: Semaphore;
@@ -66,6 +67,86 @@ unittest {
     bool completed;
     withCompilerLock({
         repeat.notify;
+        completed = finished.wait(5.seconds);
+    });
+    worker.join;
+    if (failure !is null)
+        throw failure;
+    completed.should == true;
+}
+
+
+// Frontend ownership and linker names belong to the declaration. A thread
+// that has not used it yet must be able to reuse another thread's snapshot.
+@("metadata.publishedReadsDoNotWaitForUnrelatedSemantic")
+unittest {
+    auto module_ = parseSnippet("auto publishedAnswer() { return 42; }");
+    auto function_ = findFunction(module_, "publishedAnswer");
+    (moduleOf(function_) is module_).should == true;
+    const context = contextOf(function_);
+    const name = mangledNameOf(function_);
+    auto begin = new Semaphore;
+    auto finished = new Semaphore;
+    Throwable failure;
+    auto worker = new Thread({
+        begin.wait;
+        scope(exit) finished.notify;
+        try {
+            (moduleOf(function_) is module_).should == true;
+            contextOf(function_).should == context;
+            mangledNameOf(function_).should == name;
+        } catch (Throwable error) {
+            failure = error;
+        }
+    });
+    worker.start;
+    bool completed;
+    withCompilerLock({
+        begin.notify;
+        completed = finished.wait(5.seconds);
+    });
+    worker.join;
+    if (failure !is null)
+        throw failure;
+    completed.should == true;
+}
+
+
+// ABI classification is fixed after semantic analysis. Different callers
+// of the same declaration must be able to reuse its completed answer.
+@("metadata.returnPlacementDoesNotWaitForUnrelatedSemantic")
+unittest {
+    auto module_ = parseSnippet(q{
+        int scalar() { return 42; }
+        struct Large { long[4] values; }
+        Large aggregate() { return Large.init; }
+    });
+    auto declarations = [ // DMD queries require mutable declarations.
+        findFunction(module_, "scalar"),
+        findFunction(module_, "aggregate"),
+    ];
+    const expected = [
+        returnsOnStack(declarations[0]),
+        returnsOnStack(declarations[1]),
+    ];
+    expected.should == [false, true];
+    auto begin = new Semaphore;
+    auto finished = new Semaphore;
+    Throwable failure;
+    auto worker = new Thread({
+        begin.wait;
+        scope(exit) finished.notify;
+        try {
+            foreach (i, declaration; declarations)
+                returnsOnStack(declaration).should == expected[i];
+        } catch (Throwable error) {
+            failure = error;
+        }
+    });
+    worker.start;
+    bool completed;
+    withCompilerLock({
+        begin.notify;
         completed = finished.wait(5.seconds);
     });
     worker.join;

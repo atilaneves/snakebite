@@ -165,16 +165,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         void* returnPlace,
         void*[] args,
     ) {
-        // `compileFunction` takes the frontend (compiler) lock itself,
-        // for its own whole compile, the same lock every other
-        // dmd-touching entry point on every backend takes
-        // (`snakebite.frontend.compiler.withCompilerLock`) - see
-        // `compileFunction`'s own doc for why a second, backend-local
-        // lock cannot give class-runtime building and function
-        // compilation one consistent order.
-        auto complete = function_ in _complete;
-        const(Function)* compiled = complete is null
-            ? compileFunction(function_) : *complete;
+        const compiled = compileFunction(function_);
         runHostToGuest(compiled, function_, returnPlace, args);
     }
 
@@ -521,8 +512,9 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // might already be holding a `CallSite` that points at it (this
     // function's own first doc paragraph), which a `SharedTable`'s
     // "first write wins, never overwritten" insert does not provide -
-    // so both the miss check and the whole compile stay under the one
-    // lock, held for this one function's own duration.
+    // so an unfinished body and its whole compile stay under the one
+    // lock. Completed bodies are published in `_complete`; every caller
+    // can reuse them without waiting for unrelated frontend work.
     package const(Function)* compileFunction(FuncDeclaration function_) {
         import dmd.astenums: STC, Tvoid;
         import dmd.funcsem: needsClosure;
@@ -535,6 +527,9 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 
         if (function_ is null)
             internalFailure("callers pass a resolved function");
+
+        if (auto complete = function_ in _complete)
+            return *complete;
 
         const(Function)* result;
         withCompilerLock({
@@ -6887,11 +6882,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     //
     // No lock of its own: two threads racing this same call site's first
     // execution simply both call `compute` - `compileFunction`'s own
-    // lock (the frontend/compiler lock, its own doc) is what makes that
-    // safe and gives both of them the same finished pointer back, not an
-    // extra lock here, so there is nothing left for a second one to
-    // protect beyond publishing the result, which the atomic store
-    // below already does.
+    // completed cache or locked compile gives both callers the same
+    // finished pointer. The atomic store below publishes that result
+    // for later calls through this site.
     private static T delegate() deferred(T)(T delegate() compute)
     if (is(T: const(void)*)) {
         return &(new Deferred!T(compute)).get;

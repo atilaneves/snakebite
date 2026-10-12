@@ -1,0 +1,1860 @@
+{
+  "revision": "acd1e248",
+  "method": "Temporary phase timers and outermost frontend mutex probes. Fresh bin/ut processes, -j 1/32 -c --DRT-gcopt=profile:1, in order 1,32,32,1. Default arena; no --lowmem. ninja -j 1 bin/ut before tests. No CI or arena validation. Shared workstation load is uncontrolled.",
+  "correction": "Earlier whole-process parsing and lock totals were incorrectly attributed to parallel test execution. Registered snippets are prewarmed before the task pool starts. These results measure that startup separately.",
+  "limits": [
+    "Lock hold wall time includes GC pauses and scheduling delays; do not add GC pause time to lock hold time.",
+    "Wait time sums over threads and is not elapsed time.",
+    "Only outermost lock ownership is charged; nested calls belong to the outer caller.",
+    "The tests phase includes suite construction, the task pool, and result handling. The forced-finalizer pass is separate.",
+    "Initialization timing starts inside runner.run, after module constructors; cleanup timing ends before process teardown. External wall time includes both.",
+    "Instrumentation overhead was not independently bounded.",
+    "Two earlier full-suite repeats crashed with an invalid memory access in a guest constructor exception path. These four passing runs do not resolve that fault."
+  ],
+  "runs": [
+    {
+      "workers": 1,
+      "wall": 20.02,
+      "cpu": 24.2,
+      "rss_kib": 1006796.0,
+      "exit_code": 0,
+      "tests": 8078,
+      "phases": [
+        {
+          "name": "initialize",
+          "wall_ns": 22036500,
+          "cpu_ns": 21865110,
+          "gc_ns": 0,
+          "pause_ns": 0,
+          "collections": 0
+        },
+        {
+          "name": "prewarm",
+          "wall_ns": 3518837300,
+          "cpu_ns": 3492620496,
+          "gc_ns": 0,
+          "pause_ns": 0,
+          "collections": 0
+        },
+        {
+          "name": "selection",
+          "wall_ns": 6116200,
+          "cpu_ns": 7957570,
+          "gc_ns": 3425100,
+          "pause_ns": 3408600,
+          "collections": 1
+        },
+        {
+          "name": "forced",
+          "wall_ns": 8881700,
+          "cpu_ns": 9100840,
+          "gc_ns": 0,
+          "pause_ns": 0,
+          "collections": 0
+        },
+        {
+          "name": "selection",
+          "wall_ns": 2527600,
+          "cpu_ns": 2504930,
+          "gc_ns": 0,
+          "pause_ns": 0,
+          "collections": 0
+        },
+        {
+          "name": "tests",
+          "wall_ns": 16435925000,
+          "cpu_ns": 20594456002,
+          "gc_ns": 2174572500,
+          "pause_ns": 2035592300,
+          "collections": 88
+        },
+        {
+          "name": "cleanup",
+          "wall_ns": 4856600,
+          "cpu_ns": 4779920,
+          "gc_ns": 0,
+          "pause_ns": 0,
+          "collections": 0
+        }
+      ],
+      "locks": [
+        {
+          "phase": "initialize",
+          "site": "source/snakebite/frontend/compiler.d:509",
+          "calls": 1,
+          "wait_ns": 300,
+          "hold_ns": 21858700,
+          "cpu_ns": 21689930
+        },
+        {
+          "phase": "prewarm",
+          "site": "source/snakebite/frontend/compiler.d:906",
+          "calls": 2,
+          "wait_ns": 100,
+          "hold_ns": 633655200,
+          "cpu_ns": 628909079
+        },
+        {
+          "phase": "prewarm",
+          "site": "source/snakebite/frontend/compiler.d:917",
+          "calls": 36,
+          "wait_ns": 100,
+          "hold_ns": 2882719100,
+          "cpu_ns": 2861302837
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/backend.d:74",
+          "calls": 10,
+          "wait_ns": 300,
+          "hold_ns": 62400,
+          "cpu_ns": 54150
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/bytecode/compiler.d:540",
+          "calls": 17,
+          "wait_ns": 0,
+          "hold_ns": 4113900,
+          "cpu_ns": 4083280
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/interpreter/walker.d:1071",
+          "calls": 27,
+          "wait_ns": 200,
+          "hold_ns": 137400,
+          "cpu_ns": 137140
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/frontend/compiler.d:246",
+          "calls": 27,
+          "wait_ns": 0,
+          "hold_ns": 48700,
+          "cpu_ns": 50430
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/frontend/dmd/functions.d:99",
+          "calls": 5,
+          "wait_ns": 0,
+          "hold_ns": 9200,
+          "cpu_ns": 8970
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/frontend/compiler.d:231",
+          "calls": 12,
+          "wait_ns": 0,
+          "hold_ns": 14600,
+          "cpu_ns": 14720
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/ffi/plan.d:1403",
+          "calls": 7,
+          "wait_ns": 0,
+          "hold_ns": 73000,
+          "cpu_ns": 73370
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/classinfo.d:68",
+          "calls": 7,
+          "wait_ns": 0,
+          "hold_ns": 1118400,
+          "cpu_ns": 1121130
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/calls.d:125",
+          "calls": 10,
+          "wait_ns": 100,
+          "hold_ns": 13800,
+          "cpu_ns": 13530
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/runtimetypes.d:149",
+          "calls": 7,
+          "wait_ns": 0,
+          "hold_ns": 28400,
+          "cpu_ns": 28730
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:906",
+          "calls": 815,
+          "wait_ns": 27400,
+          "hold_ns": 505748900,
+          "cpu_ns": 500948500
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/backend.d:74",
+          "calls": 6126,
+          "wait_ns": 37800,
+          "hold_ns": 54670000,
+          "cpu_ns": 53963060
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/bytecode/compiler.d:540",
+          "calls": 12176,
+          "wait_ns": 729405200,
+          "hold_ns": 1230966800,
+          "cpu_ns": 1221746829
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/ctfe/package.d:117",
+          "calls": 1336,
+          "wait_ns": 800,
+          "hold_ns": 1234047500,
+          "cpu_ns": 1228031640
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/interpreter/walker.d:1071",
+          "calls": 11665,
+          "wait_ns": 88576700,
+          "hold_ns": 54314300,
+          "cpu_ns": 53779690
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:246",
+          "calls": 11863,
+          "wait_ns": 22267900,
+          "hold_ns": 23414700,
+          "cpu_ns": 24078870
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/dmd/functions.d:99",
+          "calls": 3440,
+          "wait_ns": 90517000,
+          "hold_ns": 9707200,
+          "cpu_ns": 9624510
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/ffi/plan.d:1403",
+          "calls": 4234,
+          "wait_ns": 13205400,
+          "hold_ns": 37155900,
+          "cpu_ns": 37007940
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:641",
+          "calls": 2218,
+          "wait_ns": 6326100,
+          "hold_ns": 8651800,
+          "cpu_ns": 8536490
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:231",
+          "calls": 1500,
+          "wait_ns": 11706300,
+          "hold_ns": 1963500,
+          "cpu_ns": 1918540
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/calls.d:125",
+          "calls": 1311,
+          "wait_ns": 9751300,
+          "hold_ns": 1953800,
+          "cpu_ns": 1942610
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/runtimetypes.d:149",
+          "calls": 1007,
+          "wait_ns": 18470600,
+          "hold_ns": 23766000,
+          "cpu_ns": 23611340
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/interpreter/walker.d:1556",
+          "calls": 593,
+          "wait_ns": 3654800,
+          "hold_ns": 31292100,
+          "cpu_ns": 31014410
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/ffi/callback.d:594",
+          "calls": 718,
+          "wait_ns": 173200,
+          "hold_ns": 5908700,
+          "cpu_ns": 5910730
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:789",
+          "calls": 71,
+          "wait_ns": 200,
+          "hold_ns": 12752400,
+          "cpu_ns": 12651820
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/classinfo.d:68",
+          "calls": 221,
+          "wait_ns": 200,
+          "hold_ns": 29234400,
+          "cpu_ns": 29145780
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:763",
+          "calls": 125,
+          "wait_ns": 1874100,
+          "hold_ns": 8502000,
+          "cpu_ns": 8444350
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/dmd/mangle.d:122",
+          "calls": 580,
+          "wait_ns": 38173300,
+          "hold_ns": 4046600,
+          "cpu_ns": 3934770
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:671",
+          "calls": 65,
+          "wait_ns": 100,
+          "hold_ns": 2396300,
+          "cpu_ns": 2388840
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:917",
+          "calls": 22,
+          "wait_ns": 400,
+          "hold_ns": 13844500,
+          "cpu_ns": 13725730
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/dmd/functions.d:73",
+          "calls": 58,
+          "wait_ns": 8658100,
+          "hold_ns": 180000,
+          "cpu_ns": 175630
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:816",
+          "calls": 14,
+          "wait_ns": 100,
+          "hold_ns": 1658065700,
+          "cpu_ns": 1647935080
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:562",
+          "calls": 32,
+          "wait_ns": 0,
+          "hold_ns": 1651200,
+          "cpu_ns": 1641400
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/ffi/callback.d:622",
+          "calls": 62,
+          "wait_ns": 14600,
+          "hold_ns": 411100,
+          "cpu_ns": 365410
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:606",
+          "calls": 17,
+          "wait_ns": 0,
+          "hold_ns": 122900,
+          "cpu_ns": 116810
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/ffi/callback.d:670",
+          "calls": 2,
+          "wait_ns": 0,
+          "hold_ns": 16500,
+          "cpu_ns": 16590
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:509",
+          "calls": 10,
+          "wait_ns": 2000,
+          "hold_ns": 15900,
+          "cpu_ns": 13340
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/imagesource.d:14",
+          "calls": 14,
+          "wait_ns": 0,
+          "hold_ns": 8946200,
+          "cpu_ns": 8851670
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/imagesource.d:47",
+          "calls": 1,
+          "wait_ns": 0,
+          "hold_ns": 425700,
+          "cpu_ns": 410540
+        },
+        {
+          "phase": "tests",
+          "site": "tests/ut/frontend/functions.d:24",
+          "calls": 1,
+          "wait_ns": 100,
+          "hold_ns": 5300,
+          "cpu_ns": 5330
+        },
+        {
+          "phase": "tests",
+          "site": "tests/ut/frontend/functions.d:67",
+          "calls": 1,
+          "wait_ns": 300,
+          "hold_ns": 32500,
+          "cpu_ns": 20060
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/project.d:381",
+          "calls": 6,
+          "wait_ns": 600,
+          "hold_ns": 2718600,
+          "cpu_ns": 2695450
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/repl/cell.d:50",
+          "calls": 170,
+          "wait_ns": 3200,
+          "hold_ns": 2149800,
+          "cpu_ns": 2137310
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/repl/cell.d:99",
+          "calls": 97,
+          "wait_ns": 100,
+          "hold_ns": 1710300,
+          "cpu_ns": 1564040
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/repl/cell.d:140",
+          "calls": 86,
+          "wait_ns": 2700,
+          "hold_ns": 1148600,
+          "cpu_ns": 1157200
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/repl/cell.d:72",
+          "calls": 93,
+          "wait_ns": 0,
+          "hold_ns": 825700,
+          "cpu_ns": 832040
+        }
+      ],
+      "log": "/tmp/snakebite-ut-parallel/phase-0-j1.log"
+    },
+    {
+      "workers": 32,
+      "wall": 14.12,
+      "cpu": 29.15,
+      "rss_kib": 1035356.0,
+      "exit_code": 0,
+      "tests": 8078,
+      "phases": [
+        {
+          "name": "initialize",
+          "wall_ns": 22614800,
+          "cpu_ns": 22464380,
+          "gc_ns": 0,
+          "pause_ns": 0,
+          "collections": 0
+        },
+        {
+          "name": "prewarm",
+          "wall_ns": 3432557200,
+          "cpu_ns": 3404525177,
+          "gc_ns": 0,
+          "pause_ns": 0,
+          "collections": 0
+        },
+        {
+          "name": "selection",
+          "wall_ns": 6128100,
+          "cpu_ns": 8066940,
+          "gc_ns": 3516900,
+          "pause_ns": 3501100,
+          "collections": 1
+        },
+        {
+          "name": "forced",
+          "wall_ns": 8592400,
+          "cpu_ns": 8925890,
+          "gc_ns": 0,
+          "pause_ns": 0,
+          "collections": 0
+        },
+        {
+          "name": "selection",
+          "wall_ns": 2695200,
+          "cpu_ns": 2705600,
+          "gc_ns": 0,
+          "pause_ns": 0,
+          "collections": 0
+        },
+        {
+          "name": "tests",
+          "wall_ns": 10616066900,
+          "cpu_ns": 25605069736,
+          "gc_ns": 2406410400,
+          "pause_ns": 2251220400,
+          "collections": 86
+        },
+        {
+          "name": "cleanup",
+          "wall_ns": 4621200,
+          "cpu_ns": 4814300,
+          "gc_ns": 0,
+          "pause_ns": 0,
+          "collections": 0
+        }
+      ],
+      "locks": [
+        {
+          "phase": "initialize",
+          "site": "source/snakebite/frontend/compiler.d:509",
+          "calls": 1,
+          "wait_ns": 600,
+          "hold_ns": 22413600,
+          "cpu_ns": 22266880
+        },
+        {
+          "phase": "prewarm",
+          "site": "source/snakebite/frontend/compiler.d:906",
+          "calls": 2,
+          "wait_ns": 0,
+          "hold_ns": 627098700,
+          "cpu_ns": 622231100
+        },
+        {
+          "phase": "prewarm",
+          "site": "source/snakebite/frontend/compiler.d:917",
+          "calls": 36,
+          "wait_ns": 0,
+          "hold_ns": 2802998700,
+          "cpu_ns": 2779888717
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/backend.d:74",
+          "calls": 10,
+          "wait_ns": 200,
+          "hold_ns": 72700,
+          "cpu_ns": 65050
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/bytecode/compiler.d:540",
+          "calls": 17,
+          "wait_ns": 0,
+          "hold_ns": 4076900,
+          "cpu_ns": 4050090
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/interpreter/walker.d:1071",
+          "calls": 27,
+          "wait_ns": 0,
+          "hold_ns": 148100,
+          "cpu_ns": 147370
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/frontend/compiler.d:246",
+          "calls": 27,
+          "wait_ns": 0,
+          "hold_ns": 47400,
+          "cpu_ns": 47800
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/frontend/dmd/functions.d:99",
+          "calls": 5,
+          "wait_ns": 0,
+          "hold_ns": 9100,
+          "cpu_ns": 9030
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/frontend/compiler.d:231",
+          "calls": 12,
+          "wait_ns": 0,
+          "hold_ns": 14600,
+          "cpu_ns": 14670
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/ffi/plan.d:1403",
+          "calls": 7,
+          "wait_ns": 0,
+          "hold_ns": 74000,
+          "cpu_ns": 74310
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/classinfo.d:68",
+          "calls": 7,
+          "wait_ns": 0,
+          "hold_ns": 1107100,
+          "cpu_ns": 1110030
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/calls.d:125",
+          "calls": 10,
+          "wait_ns": 0,
+          "hold_ns": 13400,
+          "cpu_ns": 13340
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/runtimetypes.d:149",
+          "calls": 7,
+          "wait_ns": 0,
+          "hold_ns": 27500,
+          "cpu_ns": 27730
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/backend.d:74",
+          "calls": 6126,
+          "wait_ns": 41303488200,
+          "hold_ns": 207423900,
+          "cpu_ns": 139161050
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/interpreter/walker.d:1071",
+          "calls": 11665,
+          "wait_ns": 68799046500,
+          "hold_ns": 351117300,
+          "cpu_ns": 148412450
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/bytecode/compiler.d:540",
+          "calls": 12166,
+          "wait_ns": 35109129000,
+          "hold_ns": 2854265400,
+          "cpu_ns": 2121699729
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:246",
+          "calls": 11863,
+          "wait_ns": 12720000700,
+          "hold_ns": 50440400,
+          "cpu_ns": 50207370
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/ctfe/package.d:117",
+          "calls": 1336,
+          "wait_ns": 2703668700,
+          "hold_ns": 1390832600,
+          "cpu_ns": 1382023158
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/dmd/functions.d:99",
+          "calls": 3976,
+          "wait_ns": 23881554000,
+          "hold_ns": 43003600,
+          "cpu_ns": 26716460
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:906",
+          "calls": 815,
+          "wait_ns": 5633299600,
+          "hold_ns": 961827800,
+          "cpu_ns": 808378930
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:231",
+          "calls": 1504,
+          "wait_ns": 8780690500,
+          "hold_ns": 51106900,
+          "cpu_ns": 4080880
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:641",
+          "calls": 2218,
+          "wait_ns": 15694807200,
+          "hold_ns": 854244300,
+          "cpu_ns": 39201970
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/ffi/plan.d:1403",
+          "calls": 4234,
+          "wait_ns": 17278289500,
+          "hold_ns": 243245600,
+          "cpu_ns": 157926639
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/interpreter/walker.d:1556",
+          "calls": 593,
+          "wait_ns": 2894013200,
+          "hold_ns": 82904200,
+          "cpu_ns": 65033310
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/ffi/callback.d:594",
+          "calls": 718,
+          "wait_ns": 638245200,
+          "hold_ns": 12426600,
+          "cpu_ns": 12313200
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/runtimetypes.d:149",
+          "calls": 1007,
+          "wait_ns": 6014445700,
+          "hold_ns": 60526900,
+          "cpu_ns": 48712450
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/dmd/mangle.d:122",
+          "calls": 864,
+          "wait_ns": 2835752900,
+          "hold_ns": 23208100,
+          "cpu_ns": 8191370
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/calls.d:125",
+          "calls": 1311,
+          "wait_ns": 8630315600,
+          "hold_ns": 4792800,
+          "cpu_ns": 4556160
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/classinfo.d:68",
+          "calls": 221,
+          "wait_ns": 1314766400,
+          "hold_ns": 63786300,
+          "cpu_ns": 60620100
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:789",
+          "calls": 71,
+          "wait_ns": 262651400,
+          "hold_ns": 23918800,
+          "cpu_ns": 23653070
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:763",
+          "calls": 125,
+          "wait_ns": 232831700,
+          "hold_ns": 14353100,
+          "cpu_ns": 14186190
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:671",
+          "calls": 65,
+          "wait_ns": 216443400,
+          "hold_ns": 4794100,
+          "cpu_ns": 4698190
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:917",
+          "calls": 22,
+          "wait_ns": 244891800,
+          "hold_ns": 20272200,
+          "cpu_ns": 20106480
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/dmd/functions.d:73",
+          "calls": 61,
+          "wait_ns": 374718600,
+          "hold_ns": 249900,
+          "cpu_ns": 238890
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:562",
+          "calls": 32,
+          "wait_ns": 58934200,
+          "hold_ns": 3391600,
+          "cpu_ns": 3338130
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:816",
+          "calls": 14,
+          "wait_ns": 199903200,
+          "hold_ns": 1972640600,
+          "cpu_ns": 1785795300
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/ffi/callback.d:622",
+          "calls": 51,
+          "wait_ns": 996672200,
+          "hold_ns": 620100,
+          "cpu_ns": 581120
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:606",
+          "calls": 17,
+          "wait_ns": 26315400,
+          "hold_ns": 240600,
+          "cpu_ns": 233790
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/imagesource.d:14",
+          "calls": 14,
+          "wait_ns": 1743100,
+          "hold_ns": 10032300,
+          "cpu_ns": 9963850
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/imagesource.d:47",
+          "calls": 1,
+          "wait_ns": 0,
+          "hold_ns": 628200,
+          "cpu_ns": 617990
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:509",
+          "calls": 10,
+          "wait_ns": 507448900,
+          "hold_ns": 17200,
+          "cpu_ns": 14260
+        },
+        {
+          "phase": "tests",
+          "site": "tests/ut/frontend/functions.d:24",
+          "calls": 1,
+          "wait_ns": 100,
+          "hold_ns": 4600,
+          "cpu_ns": 4660
+        },
+        {
+          "phase": "tests",
+          "site": "tests/ut/frontend/functions.d:67",
+          "calls": 1,
+          "wait_ns": 24119900,
+          "hold_ns": 58700,
+          "cpu_ns": 16340
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/project.d:381",
+          "calls": 6,
+          "wait_ns": 16001000,
+          "hold_ns": 2853900,
+          "cpu_ns": 2831030
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/repl/cell.d:99",
+          "calls": 97,
+          "wait_ns": 142082300,
+          "hold_ns": 3028700,
+          "cpu_ns": 2963460
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/repl/cell.d:140",
+          "calls": 86,
+          "wait_ns": 1848800,
+          "hold_ns": 1967800,
+          "cpu_ns": 1960470
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/repl/cell.d:50",
+          "calls": 170,
+          "wait_ns": 121284900,
+          "hold_ns": 5449900,
+          "cpu_ns": 5368310
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/repl/cell.d:72",
+          "calls": 93,
+          "wait_ns": 4500,
+          "hold_ns": 1610600,
+          "cpu_ns": 1604400
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/ffi/callback.d:670",
+          "calls": 2,
+          "wait_ns": 0,
+          "hold_ns": 24400,
+          "cpu_ns": 24460
+        }
+      ],
+      "log": "/tmp/snakebite-ut-parallel/phase-1-j32.log"
+    },
+    {
+      "workers": 32,
+      "wall": 14.43,
+      "cpu": 30.029999999999998,
+      "rss_kib": 1035604.0,
+      "exit_code": 0,
+      "tests": 8078,
+      "phases": [
+        {
+          "name": "initialize",
+          "wall_ns": 22125600,
+          "cpu_ns": 21958880,
+          "gc_ns": 0,
+          "pause_ns": 0,
+          "collections": 0
+        },
+        {
+          "name": "prewarm",
+          "wall_ns": 3533069400,
+          "cpu_ns": 3505967166,
+          "gc_ns": 0,
+          "pause_ns": 0,
+          "collections": 0
+        },
+        {
+          "name": "selection",
+          "wall_ns": 5419800,
+          "cpu_ns": 6669060,
+          "gc_ns": 2794200,
+          "pause_ns": 2774100,
+          "collections": 1
+        },
+        {
+          "name": "forced",
+          "wall_ns": 8794700,
+          "cpu_ns": 9129500,
+          "gc_ns": 0,
+          "pause_ns": 0,
+          "collections": 0
+        },
+        {
+          "name": "selection",
+          "wall_ns": 2710700,
+          "cpu_ns": 2708330,
+          "gc_ns": 0,
+          "pause_ns": 0,
+          "collections": 0
+        },
+        {
+          "name": "tests",
+          "wall_ns": 10811104000,
+          "cpu_ns": 26384132294,
+          "gc_ns": 2548443600,
+          "pause_ns": 2395267900,
+          "collections": 86
+        },
+        {
+          "name": "cleanup",
+          "wall_ns": 7636000,
+          "cpu_ns": 7552940,
+          "gc_ns": 0,
+          "pause_ns": 0,
+          "collections": 0
+        }
+      ],
+      "locks": [
+        {
+          "phase": "initialize",
+          "site": "source/snakebite/frontend/compiler.d:509",
+          "calls": 1,
+          "wait_ns": 700,
+          "hold_ns": 21922500,
+          "cpu_ns": 21766530
+        },
+        {
+          "phase": "prewarm",
+          "site": "source/snakebite/frontend/compiler.d:906",
+          "calls": 2,
+          "wait_ns": 200,
+          "hold_ns": 639529500,
+          "cpu_ns": 634300809
+        },
+        {
+          "phase": "prewarm",
+          "site": "source/snakebite/frontend/compiler.d:917",
+          "calls": 36,
+          "wait_ns": 0,
+          "hold_ns": 2891072600,
+          "cpu_ns": 2869246977
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/backend.d:74",
+          "calls": 10,
+          "wait_ns": 0,
+          "hold_ns": 54500,
+          "cpu_ns": 53420
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/bytecode/compiler.d:540",
+          "calls": 17,
+          "wait_ns": 300,
+          "hold_ns": 4104500,
+          "cpu_ns": 4064410
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/interpreter/walker.d:1071",
+          "calls": 27,
+          "wait_ns": 500,
+          "hold_ns": 139800,
+          "cpu_ns": 139260
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/frontend/compiler.d:246",
+          "calls": 27,
+          "wait_ns": 0,
+          "hold_ns": 48700,
+          "cpu_ns": 49980
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/frontend/dmd/functions.d:99",
+          "calls": 5,
+          "wait_ns": 0,
+          "hold_ns": 9200,
+          "cpu_ns": 9100
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/frontend/compiler.d:231",
+          "calls": 12,
+          "wait_ns": 0,
+          "hold_ns": 14600,
+          "cpu_ns": 14670
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/ffi/plan.d:1403",
+          "calls": 7,
+          "wait_ns": 0,
+          "hold_ns": 82700,
+          "cpu_ns": 83020
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/classinfo.d:68",
+          "calls": 7,
+          "wait_ns": 0,
+          "hold_ns": 1140300,
+          "cpu_ns": 1136210
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/calls.d:125",
+          "calls": 10,
+          "wait_ns": 0,
+          "hold_ns": 13600,
+          "cpu_ns": 13490
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/runtimetypes.d:149",
+          "calls": 7,
+          "wait_ns": 100,
+          "hold_ns": 28000,
+          "cpu_ns": 28160
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/backend.d:74",
+          "calls": 6126,
+          "wait_ns": 41508907000,
+          "hold_ns": 233663700,
+          "cpu_ns": 179354890
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:906",
+          "calls": 815,
+          "wait_ns": 6002137000,
+          "hold_ns": 992386600,
+          "cpu_ns": 829661050
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/ctfe/package.d:117",
+          "calls": 1336,
+          "wait_ns": 3265255800,
+          "hold_ns": 1365042200,
+          "cpu_ns": 1355895819
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/bytecode/compiler.d:540",
+          "calls": 12154,
+          "wait_ns": 34312904400,
+          "hold_ns": 2736646700,
+          "cpu_ns": 2144226078
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/interpreter/walker.d:1071",
+          "calls": 11665,
+          "wait_ns": 64003347000,
+          "hold_ns": 334477800,
+          "cpu_ns": 149290940
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:246",
+          "calls": 11863,
+          "wait_ns": 15394064500,
+          "hold_ns": 50755000,
+          "cpu_ns": 50619730
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/dmd/functions.d:99",
+          "calls": 3983,
+          "wait_ns": 26989811500,
+          "hold_ns": 257000300,
+          "cpu_ns": 77468559
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:231",
+          "calls": 1504,
+          "wait_ns": 9206792100,
+          "hold_ns": 4392800,
+          "cpu_ns": 4119720
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/dmd/mangle.d:122",
+          "calls": 863,
+          "wait_ns": 2612172500,
+          "hold_ns": 30646700,
+          "cpu_ns": 8748660
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/calls.d:125",
+          "calls": 1311,
+          "wait_ns": 7915399100,
+          "hold_ns": 5047800,
+          "cpu_ns": 4755100
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:641",
+          "calls": 2218,
+          "wait_ns": 16798424200,
+          "hold_ns": 90800100,
+          "cpu_ns": 28865780
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/ffi/plan.d:1403",
+          "calls": 4234,
+          "wait_ns": 19269638700,
+          "hold_ns": 306688500,
+          "cpu_ns": 92973380
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/interpreter/walker.d:1556",
+          "calls": 593,
+          "wait_ns": 3235156300,
+          "hold_ns": 79868800,
+          "cpu_ns": 65363120
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/ffi/callback.d:594",
+          "calls": 718,
+          "wait_ns": 457873900,
+          "hold_ns": 12900800,
+          "cpu_ns": 12793610
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/runtimetypes.d:149",
+          "calls": 1007,
+          "wait_ns": 7162566400,
+          "hold_ns": 93681900,
+          "cpu_ns": 55621570
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/classinfo.d:68",
+          "calls": 221,
+          "wait_ns": 896088700,
+          "hold_ns": 79042000,
+          "cpu_ns": 61290730
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:789",
+          "calls": 71,
+          "wait_ns": 260284400,
+          "hold_ns": 23022900,
+          "cpu_ns": 22781950
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:763",
+          "calls": 125,
+          "wait_ns": 560062400,
+          "hold_ns": 15056700,
+          "cpu_ns": 14852280
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:671",
+          "calls": 65,
+          "wait_ns": 553810000,
+          "hold_ns": 4246000,
+          "cpu_ns": 4199840
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:917",
+          "calls": 22,
+          "wait_ns": 272023700,
+          "hold_ns": 20265200,
+          "cpu_ns": 19948540
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/dmd/functions.d:73",
+          "calls": 61,
+          "wait_ns": 674542900,
+          "hold_ns": 283400,
+          "cpu_ns": 264660
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:562",
+          "calls": 32,
+          "wait_ns": 88099300,
+          "hold_ns": 3570500,
+          "cpu_ns": 3526580
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:816",
+          "calls": 14,
+          "wait_ns": 259452300,
+          "hold_ns": 1985705200,
+          "cpu_ns": 1779083468
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/ffi/callback.d:622",
+          "calls": 50,
+          "wait_ns": 927758400,
+          "hold_ns": 608600,
+          "cpu_ns": 588530
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:606",
+          "calls": 17,
+          "wait_ns": 28358900,
+          "hold_ns": 217600,
+          "cpu_ns": 203060
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/imagesource.d:14",
+          "calls": 14,
+          "wait_ns": 29937700,
+          "hold_ns": 728497900,
+          "cpu_ns": 20523880
+        },
+        {
+          "phase": "tests",
+          "site": "tests/ut/frontend/functions.d:24",
+          "calls": 1,
+          "wait_ns": 100,
+          "hold_ns": 5300,
+          "cpu_ns": 5360
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/repl/cell.d:99",
+          "calls": 97,
+          "wait_ns": 52980700,
+          "hold_ns": 3958900,
+          "cpu_ns": 3971670
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/repl/cell.d:140",
+          "calls": 86,
+          "wait_ns": 3884200,
+          "hold_ns": 2483300,
+          "cpu_ns": 2477440
+        },
+        {
+          "phase": "tests",
+          "site": "tests/ut/frontend/functions.d:67",
+          "calls": 1,
+          "wait_ns": 51716000,
+          "hold_ns": 50800,
+          "cpu_ns": 21200
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:509",
+          "calls": 10,
+          "wait_ns": 367577700,
+          "hold_ns": 20400,
+          "cpu_ns": 16710
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/project.d:381",
+          "calls": 6,
+          "wait_ns": 930800,
+          "hold_ns": 3297400,
+          "cpu_ns": 3245870
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/repl/cell.d:50",
+          "calls": 170,
+          "wait_ns": 855699800,
+          "hold_ns": 5815400,
+          "cpu_ns": 5690530
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/imagesource.d:47",
+          "calls": 1,
+          "wait_ns": 0,
+          "hold_ns": 860300,
+          "cpu_ns": 850860
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/repl/cell.d:72",
+          "calls": 93,
+          "wait_ns": 280343900,
+          "hold_ns": 1945100,
+          "cpu_ns": 1910740
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/ffi/callback.d:670",
+          "calls": 2,
+          "wait_ns": 0,
+          "hold_ns": 24900,
+          "cpu_ns": 25080
+        }
+      ],
+      "log": "/tmp/snakebite-ut-parallel/phase-2-j32.log"
+    },
+    {
+      "workers": 1,
+      "wall": 20.56,
+      "cpu": 25.52,
+      "rss_kib": 1008288.0,
+      "exit_code": 0,
+      "tests": 8078,
+      "phases": [
+        {
+          "name": "initialize",
+          "wall_ns": 22193000,
+          "cpu_ns": 21996590,
+          "gc_ns": 0,
+          "pause_ns": 0,
+          "collections": 0
+        },
+        {
+          "name": "prewarm",
+          "wall_ns": 3719514100,
+          "cpu_ns": 3685648076,
+          "gc_ns": 0,
+          "pause_ns": 0,
+          "collections": 0
+        },
+        {
+          "name": "selection",
+          "wall_ns": 11695500,
+          "cpu_ns": 16191400,
+          "gc_ns": 7145100,
+          "pause_ns": 7043300,
+          "collections": 1
+        },
+        {
+          "name": "forced",
+          "wall_ns": 14006700,
+          "cpu_ns": 14180750,
+          "gc_ns": 0,
+          "pause_ns": 0,
+          "collections": 0
+        },
+        {
+          "name": "selection",
+          "wall_ns": 4419700,
+          "cpu_ns": 4392380,
+          "gc_ns": 0,
+          "pause_ns": 0,
+          "collections": 0
+        },
+        {
+          "name": "tests",
+          "wall_ns": 16760068300,
+          "cpu_ns": 21696994344,
+          "gc_ns": 2072144500,
+          "pause_ns": 1921275900,
+          "collections": 88
+        },
+        {
+          "name": "cleanup",
+          "wall_ns": 5963100,
+          "cpu_ns": 5837340,
+          "gc_ns": 0,
+          "pause_ns": 0,
+          "collections": 0
+        }
+      ],
+      "locks": [
+        {
+          "phase": "initialize",
+          "site": "source/snakebite/frontend/compiler.d:509",
+          "calls": 1,
+          "wait_ns": 1000,
+          "hold_ns": 22016700,
+          "cpu_ns": 21823530
+        },
+        {
+          "phase": "prewarm",
+          "site": "source/snakebite/frontend/compiler.d:906",
+          "calls": 2,
+          "wait_ns": 100,
+          "hold_ns": 665916100,
+          "cpu_ns": 659830239
+        },
+        {
+          "phase": "prewarm",
+          "site": "source/snakebite/frontend/compiler.d:917",
+          "calls": 36,
+          "wait_ns": 100,
+          "hold_ns": 3050972400,
+          "cpu_ns": 3023263187
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/backend.d:74",
+          "calls": 10,
+          "wait_ns": 200,
+          "hold_ns": 81100,
+          "cpu_ns": 78340
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/bytecode/compiler.d:540",
+          "calls": 17,
+          "wait_ns": 1100,
+          "hold_ns": 7718900,
+          "cpu_ns": 7554180
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/interpreter/walker.d:1071",
+          "calls": 27,
+          "wait_ns": 800,
+          "hold_ns": 194100,
+          "cpu_ns": 192750
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/frontend/compiler.d:246",
+          "calls": 27,
+          "wait_ns": 100,
+          "hold_ns": 61100,
+          "cpu_ns": 62530
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/frontend/dmd/functions.d:99",
+          "calls": 5,
+          "wait_ns": 0,
+          "hold_ns": 11600,
+          "cpu_ns": 12060
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/frontend/compiler.d:231",
+          "calls": 12,
+          "wait_ns": 1500,
+          "hold_ns": 22100,
+          "cpu_ns": 22240
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/ffi/plan.d:1403",
+          "calls": 7,
+          "wait_ns": 300,
+          "hold_ns": 122900,
+          "cpu_ns": 122430
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/classinfo.d:68",
+          "calls": 7,
+          "wait_ns": 400,
+          "hold_ns": 1672500,
+          "cpu_ns": 1665070
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/calls.d:125",
+          "calls": 10,
+          "wait_ns": 100,
+          "hold_ns": 17300,
+          "cpu_ns": 16880
+        },
+        {
+          "phase": "forced",
+          "site": "source/snakebite/backends/runtimetypes.d:149",
+          "calls": 7,
+          "wait_ns": 100,
+          "hold_ns": 39800,
+          "cpu_ns": 39840
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:906",
+          "calls": 815,
+          "wait_ns": 36500,
+          "hold_ns": 548073400,
+          "cpu_ns": 541743250
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/backend.d:74",
+          "calls": 6126,
+          "wait_ns": 66300,
+          "hold_ns": 59675400,
+          "cpu_ns": 58714440
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/bytecode/compiler.d:540",
+          "calls": 12193,
+          "wait_ns": 647712900,
+          "hold_ns": 1274663300,
+          "cpu_ns": 1265776219
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/ctfe/package.d:117",
+          "calls": 1336,
+          "wait_ns": 15000,
+          "hold_ns": 1255729600,
+          "cpu_ns": 1247704810
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/interpreter/walker.d:1071",
+          "calls": 11665,
+          "wait_ns": 67992600,
+          "hold_ns": 56785800,
+          "cpu_ns": 55831760
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:246",
+          "calls": 11863,
+          "wait_ns": 17844200,
+          "hold_ns": 23238300,
+          "cpu_ns": 23826640
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/dmd/functions.d:99",
+          "calls": 3440,
+          "wait_ns": 68038000,
+          "hold_ns": 8753800,
+          "cpu_ns": 8719640
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/ffi/plan.d:1403",
+          "calls": 4234,
+          "wait_ns": 9586800,
+          "hold_ns": 37829600,
+          "cpu_ns": 37578470
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:641",
+          "calls": 2218,
+          "wait_ns": 6297900,
+          "hold_ns": 8908700,
+          "cpu_ns": 8744580
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:231",
+          "calls": 1500,
+          "wait_ns": 11154400,
+          "hold_ns": 2067600,
+          "cpu_ns": 2015290
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/calls.d:125",
+          "calls": 1311,
+          "wait_ns": 9580800,
+          "hold_ns": 1935800,
+          "cpu_ns": 1923850
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/runtimetypes.d:149",
+          "calls": 1007,
+          "wait_ns": 14713000,
+          "hold_ns": 24873100,
+          "cpu_ns": 24777680
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/interpreter/walker.d:1556",
+          "calls": 593,
+          "wait_ns": 2159100,
+          "hold_ns": 31361600,
+          "cpu_ns": 31113710
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/ffi/callback.d:594",
+          "calls": 718,
+          "wait_ns": 249000,
+          "hold_ns": 5634400,
+          "cpu_ns": 5643620
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:789",
+          "calls": 71,
+          "wait_ns": 600,
+          "hold_ns": 13326800,
+          "cpu_ns": 13211240
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/backends/classinfo.d:68",
+          "calls": 221,
+          "wait_ns": 0,
+          "hold_ns": 30535200,
+          "cpu_ns": 30257750
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:763",
+          "calls": 125,
+          "wait_ns": 1907200,
+          "hold_ns": 8859100,
+          "cpu_ns": 8803830
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/dmd/mangle.d:122",
+          "calls": 582,
+          "wait_ns": 39003500,
+          "hold_ns": 3626800,
+          "cpu_ns": 3548370
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:671",
+          "calls": 65,
+          "wait_ns": 500,
+          "hold_ns": 2822600,
+          "cpu_ns": 2816550
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:917",
+          "calls": 22,
+          "wait_ns": 800,
+          "hold_ns": 14801800,
+          "cpu_ns": 14585030
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/dmd/functions.d:73",
+          "calls": 58,
+          "wait_ns": 8137200,
+          "hold_ns": 175900,
+          "cpu_ns": 171050
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:816",
+          "calls": 14,
+          "wait_ns": 100,
+          "hold_ns": 1739620800,
+          "cpu_ns": 1727375087
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:562",
+          "calls": 32,
+          "wait_ns": 0,
+          "hold_ns": 1694500,
+          "cpu_ns": 1684780
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/ffi/callback.d:622",
+          "calls": 62,
+          "wait_ns": 13400,
+          "hold_ns": 433400,
+          "cpu_ns": 409190
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/nativelayout.d:606",
+          "calls": 17,
+          "wait_ns": 100,
+          "hold_ns": 122700,
+          "cpu_ns": 123200
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/ffi/callback.d:670",
+          "calls": 2,
+          "wait_ns": 0,
+          "hold_ns": 18200,
+          "cpu_ns": 18370
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/compiler.d:509",
+          "calls": 10,
+          "wait_ns": 2300,
+          "hold_ns": 15200,
+          "cpu_ns": 12260
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/imagesource.d:14",
+          "calls": 14,
+          "wait_ns": 0,
+          "hold_ns": 9768600,
+          "cpu_ns": 9694890
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/frontend/imagesource.d:47",
+          "calls": 1,
+          "wait_ns": 0,
+          "hold_ns": 437800,
+          "cpu_ns": 431400
+        },
+        {
+          "phase": "tests",
+          "site": "tests/ut/frontend/functions.d:24",
+          "calls": 1,
+          "wait_ns": 100,
+          "hold_ns": 4800,
+          "cpu_ns": 4830
+        },
+        {
+          "phase": "tests",
+          "site": "tests/ut/frontend/functions.d:67",
+          "calls": 1,
+          "wait_ns": 200,
+          "hold_ns": 27700,
+          "cpu_ns": 14450
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/project.d:381",
+          "calls": 6,
+          "wait_ns": 800,
+          "hold_ns": 3057000,
+          "cpu_ns": 2966190
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/repl/cell.d:50",
+          "calls": 170,
+          "wait_ns": 4200,
+          "hold_ns": 2916200,
+          "cpu_ns": 2857860
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/repl/cell.d:99",
+          "calls": 97,
+          "wait_ns": 300,
+          "hold_ns": 2084200,
+          "cpu_ns": 2064990
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/repl/cell.d:140",
+          "calls": 86,
+          "wait_ns": 3500,
+          "hold_ns": 1298200,
+          "cpu_ns": 1298510
+        },
+        {
+          "phase": "tests",
+          "site": "source/snakebite/repl/cell.d:72",
+          "calls": 93,
+          "wait_ns": 0,
+          "hold_ns": 1005000,
+          "cpu_ns": 930590
+        }
+      ],
+      "log": "/tmp/snakebite-ut-parallel/phase-3-j1.log"
+    }
+  ]
+}

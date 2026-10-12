@@ -1056,8 +1056,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import core.atomic: atomicLoad, MemoryOrder;
         import dmd.dsymbol: PASS;
         import dmd.funcsem: functionSemantic3;
-        import snakebite.frontend.compiler: forceIfNeeded, withCompilerLock;
-        import std.string: fromStringz;
+        import snakebite.frontend.compiler: forceIfNeeded;
+        import snakebite.frontend.dmd.functions: prettyNameOf;
 
         // Acquire load - see `forceIfNeeded`'s own doc
         // (`snakebite.frontend.compiler`) for why the unlocked check
@@ -1067,11 +1067,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 >= PASS.semantic3done,
             function_,
         );
-        // `toPrettyChars` is dmd work: it allocates and reads symbol state.
-        withCompilerLock({
-            _shared.names.insert(
-                function_, fromStringz(function_.toPrettyChars));
-        });
+        // Another interpreter may already have captured this name. Its
+        // completed snapshot avoids waiting for unrelated frontend work.
+        _shared.names.insert(function_, prettyNameOf(function_));
 
         return FrameLayout.of(function_);
     }
