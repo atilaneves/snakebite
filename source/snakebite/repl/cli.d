@@ -28,6 +28,7 @@ public int run(string[] args) {
     import snakebite.dependencyimage: DependencyImage;
     import snakebite.dub: fetchProject;
     import snakebite.execution: runProject;
+    import snakebite.project: EndsProcess;
     import snakebite.project: prepareStartupDependencies;
     import snakebite.gc: selectFrontendMemory;
     import snakebite.repl: Repl;
@@ -101,8 +102,11 @@ public int run(string[] args) {
         const importPaths = parsed.options.importPaths
             .map!(path => path.absolutePath).array;
         const files = parsed.options.files.map!(file => file.absolutePath).array;
+        const string[] noImportPaths = null;
+        const string[] noStringImportPaths = null;
         return runProject(
-            projectDirectory, null, null, parsed.options.versions, true,
+            projectDirectory, noImportPaths, noStringImportPaths,
+            parsed.options.versions, EndsProcess.yes,
             (directory, sources, discovery, enterWorkingDirectory) {
                 // The frontend analyses what the cells reach, as they reach
                 // it; the whole project only when its image must be built,
@@ -112,6 +116,7 @@ public int run(string[] args) {
                     directory, sources,
                 );
                 const inProject = (string path) => compilerPath(path, directory);
+                enterWorkingDirectory();
                 return startSession(
                     sources.importPaths.map!inProject.array ~ importPaths.dup,
                     files.dup,

@@ -121,36 +121,48 @@ shared static this() {
 }
 
 
-// The destructor goes back to where the host was, unless the process ends
-// with the guest: its module destructors then run after the guest returns
-// and see the directory that its constructors and `main` saw.
+// Whether the process ends when the guest returns.
+public enum EndsProcess { no, yes }
+
+
+// The frontend runs in the project directory, where dub builds. The guest
+// runs in the working directory, where `dub test` runs it; `enterWorking`
+// goes there, and goes there again after a guest has left it. The destructor
+// goes back to where the host was, unless the process ends with the guest: its
+// module destructors then run after the guest returns and see the directory
+// that its constructors and `main` saw.
 public struct ProjectDirectory {
-    private string _directory;
+    private string _project;
+    private string _working;
     private string _previous;
-    private bool _restore;
+    private EndsProcess _endsProcess;
 
     @disable this(this);
 
-    this(in string projectDirectory, in bool restore) {
-        import std.file: getcwd;
+    this(
+        in string project,
+        in string working,
+        in EndsProcess endsProcess,
+    ) {
+        import std.file: chdir, getcwd;
 
-        _directory = projectDirectory;
+        _project = project;
+        _working = working;
         _previous = getcwd;
-        _restore = restore;
-        enter;
+        _endsProcess = endsProcess;
+        chdir(_project);
     }
 
-    // Guest code can leave the directory; each run starts in it again.
-    void enter() const {
+    void enterWorking() const {
         import std.file: chdir;
 
-        chdir(_directory);
+        chdir(_working);
     }
 
     ~this() {
         import std.file: chdir;
 
-        if (_restore)
+        if (_endsProcess == EndsProcess.no)
             chdir(_previous);
     }
 }

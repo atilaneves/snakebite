@@ -28,6 +28,7 @@ public int run(string[] args) {
     import snakebite.dependencyimage: Optimise;
     import snakebite.dub: fetchProject;
     import snakebite.execution: executeBackend, prepareSources, runProject;
+    import snakebite.project: EndsProcess;
     import snakebite.gc: selectFrontendMemory;
     import std.file: exists, isDir;
     import std.stdio: stderr, stdout, write;
@@ -49,7 +50,7 @@ public int run(string[] args) {
             parsed.options.importPaths,
             parsed.options.stringImportPaths,
             parsed.options.versions,
-            true,
+            EndsProcess.yes,
             (directory, sources, discovery, enterWorkingDirectory) {
                 auto preparation = prepareSources(
                     directory,
@@ -58,6 +59,7 @@ public int run(string[] args) {
                     parsed.options.backend != BackendName.ctfe,
                     parsed.options.noOptimiseImage ? Optimise.no : Optimise.yes,
                 );
+                enterWorkingDirectory();
                 const report = executeBackend(
                     parsed.options.backend,
                     preparation.project.program,

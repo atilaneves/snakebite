@@ -37,6 +37,7 @@ public int run(string[] args) {
     import bench.report: printTable;
     import std.stdio: stderr, writeln;
     import snakebite.execution: PreparationReport, prepareSources, runProject;
+    import snakebite.project: EndsProcess;
     import snakebite.gc: selectFrontendMemory;
 
     Options options;
@@ -64,7 +65,7 @@ public int run(string[] args) {
             options.importPaths,
             options.stringImportPaths,
             options.versions,
-            false,
+            EndsProcess.no,
             (directory, sources, discovery, enterWorkingDirectory) {
                 preparation = prepareSources(
                     directory,

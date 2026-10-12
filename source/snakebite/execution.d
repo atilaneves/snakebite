@@ -41,22 +41,24 @@ public string discoveryLabel(in PreparationReport report) {
 }
 
 
-// Runs `body` the way `dub test` runs the project: with the working
+// Runs `body` the way `dub test` runs the project: the frontend in the
+// project directory, where dub builds, and the guest in the working
 // directory of the recipe, or the project directory when it names none.
 // Every front end that runs a project's code goes through here, and none
 // chooses a directory. The directory is state of the whole process, so only
 // a front end, never a function that a test calls on a thread, may set it.
 // Paths of the caller become absolute first: they are relative to where the
-// caller is, and `body` gets the absolute project directory and a function that
-// enters the working directory again. `endsProcess` leaves the directory in place: the module
-// destructors of the program run when the process ends and see the
-// directory that its constructors and `main` saw.
+// caller is. `body` gets the absolute project directory and a function that
+// enters the working directory: it calls it before each run of the guest.
+// `EndsProcess.yes` leaves the directory in place: the module destructors of
+// the program run when the process ends and see the directory that its
+// constructors and `main` saw.
 public int runProject(
     in string projectDirectory,
     in string[] callerImportPaths,
     in string[] callerStringImportPaths,
     in string[] versions,
-    in bool endsProcess,
+    in imported!"snakebite.project".EndsProcess endsProcess,
     in int delegate(
         string,
         imported!"snakebite.project".SourceSet,
@@ -78,10 +80,11 @@ public int runProject(
     auto sources = sourceSet(directory, importPaths, stringImportPaths, versions);
     const discovery = stopWatch.peek;
     scope entered = ProjectDirectory(
+        directory,
         sources.workingDirectory.length ? sources.workingDirectory : directory,
-        !endsProcess,
+        endsProcess,
     );
-    return body(directory, sources, discovery, &entered.enter);
+    return body(directory, sources, discovery, &entered.enterWorking);
 }
 
 
