@@ -227,14 +227,21 @@ public void buildDubDependencies(
     settings.buildType = description.project.buildType;
     settings.buildDeep = true;
 
-    // The compiler writes to the standard output and error of this process,
-    // so only the project is named here.
+    // A build that succeeds is silent, as `dub test` is with its compiler
+    // output kept; the output of a compiler that fails is in the error.
+    string failedOutput;
+    void keepFailure(int status, string output) {
+        if (status != 0)
+            failedOutput ~= output;
+    }
+    settings.compileCallback = &keepFailure;
+    settings.linkCallback = &keepFailure;
     try
         dub.generateProject("build", settings);
     catch (Exception exception)
         throw new SnakebiteException(text(
             "Dub dependency build failed for ", description.project.rootPackage,
-            " (the compiler output is above): ", exception.msg));
+            ": ", exception.msg, "\n", failedOutput));
     if (!linkerFiles.all!exists)
         throw new SnakebiteException("Dub build did not produce all dependency libraries");
     stateDirectory.mkdirRecurse;
