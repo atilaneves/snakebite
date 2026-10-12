@@ -16,6 +16,9 @@ public struct SourceSet {
     public string[string] sourceOverrides;
     public string[] linkerFiles;
     public DubDescription dubDescription;
+    // Where `dub test` runs the test binary; empty when the recipe sets no
+    // `workingDirectory`, and for a bare directory.
+    public string workingDirectory;
     // A bare directory is built as `dmd -i` builds it, which compiles a C
     // module that a D module imports. A dub recipe names its C files in
     // `sourceFiles`, and dub does not compile one that it does not name.
@@ -108,8 +111,8 @@ public bool isDubProject(in string directory) {
 
 
 // Project state lives under the directory snakebite started in. Guest code
-// runs in the project directory so that it sees the files it expects, and
-// that must not move the state with it.
+// runs in the directory of its project so that it sees the files it expects,
+// and that must not move the state with it.
 private immutable string _startDirectory;
 
 shared static this() {
@@ -118,22 +121,30 @@ shared static this() {
 }
 
 
-// Guest code runs where `dub test` runs it: in the project directory.
 // The destructor goes back to where the host was, unless the process ends
 // with the guest: its module destructors then run after the guest returns
 // and see the directory that its constructors and `main` saw.
 public struct ProjectDirectory {
+    private string _directory;
     private string _previous;
     private bool _restore;
 
     @disable this(this);
 
     this(in string projectDirectory, in bool restore) {
-        import std.file: chdir, getcwd;
+        import std.file: getcwd;
 
+        _directory = projectDirectory;
         _previous = getcwd;
         _restore = restore;
-        chdir(projectDirectory);
+        enter;
+    }
+
+    // Guest code can leave the directory; each run starts in it again.
+    void enter() const {
+        import std.file: chdir;
+
+        chdir(_directory);
     }
 
     ~this() {
@@ -287,7 +298,7 @@ private SourceSet dubSourceSet(
 
     import snakebite.frontend.checks: expandedCompilerArguments;
 
-    return SourceSet(
+    auto sources = SourceSet(
         files.dup,
         importPaths.dup,
         stringImportPaths.dup,
@@ -298,6 +309,11 @@ private SourceSet dubSourceSet(
         linkerFiles.dup,
         description,
     );
+    // dub describe makes the directory absolute and leaves it empty when
+    // the recipe names none.
+    if (packageSettings && "workingDirectory" in settings.object)
+        sources.workingDirectory = settings["workingDirectory"].str;
+    return sources;
 }
 
 

@@ -277,8 +277,20 @@ def test_module_constructor_uses_project_directory(
     assert (tmp_path / "app" / "test-ran.txt").exists()
 
 
-# Every front end runs the tests where `dub test` runs them: in the project
-# directory, whatever directory it starts in or a previous run leaves.
+def run_front_end(
+    frontend: str, backend: str, app: Path, cwd: Path,
+) -> subprocess.CompletedProcess[str]:
+    if frontend == "sb":
+        return run_sb(
+            f"--backend={backend}", "--no-optimise-image", str(app), cwd=cwd,
+        )
+    return run_bench(
+        str(app), f"--backend={backend}", "--runs=2", "--warmup=0", cwd=cwd,
+    )
+
+
+# Every front end runs the tests where `dub test` runs them, whatever
+# directory it starts in or a previous run leaves.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
 @pytest.mark.parametrize("frontend", ["sb", "bench"])
 def test_tests_run_in_project_directory(
@@ -300,16 +312,63 @@ def test_tests_run_in_project_directory(
         """,
     )
 
-    if frontend == "sb":
-        result = run_sb(
-            f"--backend={backend}", "--no-optimise-image",
-            str(tmp_path / "app"), cwd=tmp_path / "outside",
-        )
-    else:
-        result = run_bench(
-            str(tmp_path / "app"), f"--backend={backend}", "--runs=2",
-            "--warmup=0", cwd=tmp_path / "outside",
-        )
+    result = run_front_end(frontend, backend, tmp_path / "app", tmp_path / "outside")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+# The frontend runs in the directory that dub builds in: a relative path in
+# a flag of the recipe, and the full path of a source file, resolve there.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+@pytest.mark.parametrize("frontend", ["sb", "bench"])
+def test_frontend_runs_in_project_directory(
+    tmp_path: Path, backend: str, frontend: str,
+) -> None:
+    app = (tmp_path / "app").resolve()
+    write(tmp_path / "outside" / ".keep")
+    write(
+        app / "dub.sdl",
+        dub_project_recipe("frontend-cwd") + 'dflags "-Jstrings"\n',
+    )
+    write(app / "strings" / "payload.txt", "payload\n")
+    write(
+        app / "source" / "main.d",
+        f"""
+        module main;
+        static assert(import("payload.txt") == "payload\\n");
+        static assert(__FILE_FULL_PATH__ == "{app / "source" / "main.d"}");
+        int main() {{ return 0; }}
+        """,
+    )
+
+    result = run_front_end(frontend, backend, app, tmp_path / "outside")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+# `dub test` runs the test binary in the `workingDirectory` of the recipe.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+@pytest.mark.parametrize("frontend", ["sb", "bench"])
+def test_tests_run_in_working_directory_of_recipe(
+    tmp_path: Path, backend: str, frontend: str,
+) -> None:
+    write(tmp_path / "outside" / ".keep")
+    write(
+        tmp_path / "app" / "dub.sdl",
+        dub_project_recipe("recipe-cwd") + 'workingDirectory "data"\n',
+    )
+    write(tmp_path / "app" / "data" / "recipe-relative.txt", "ready\n")
+    write(
+        tmp_path / "app" / "source" / "main.d",
+        """
+        module main;
+        import std.file: readText;
+        unittest { assert("recipe-relative.txt".readText == "ready\\n"); }
+        int main() { return 0; }
+        """,
+    )
+
+    result = run_front_end(frontend, backend, tmp_path / "app", tmp_path / "outside")
 
     assert result.returncode == 0, result.stdout + result.stderr
 

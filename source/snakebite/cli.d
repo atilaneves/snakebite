@@ -27,10 +27,9 @@ public int run(string[] args) {
     import snakebite.backends: BackendName;
     import snakebite.dependencyimage: Optimise;
     import snakebite.dub: fetchProject;
-    import snakebite.execution: executeBackend, prepareProject;
+    import snakebite.execution: executeBackend, prepareSources, runProject;
     import snakebite.gc: selectFrontendMemory;
     import std.file: exists, isDir;
-    import std.path: absolutePath;
     import std.stdio: stderr, stdout, write;
 
     const parsed = parseArgs(args);
@@ -45,24 +44,32 @@ public int run(string[] args) {
         string projectDirectory = parsed.options.projectDirectory;
         if (!projectDirectory.exists || !projectDirectory.isDir)
             projectDirectory = fetchProject(projectDirectory);
-        projectDirectory = projectDirectory.absolutePath;
-        auto preparation = prepareProject(
+        return runProject(
             projectDirectory,
             parsed.options.importPaths,
             parsed.options.stringImportPaths,
-            parsed.options.backend != BackendName.ctfe,
             parsed.options.versions,
-            parsed.options.noOptimiseImage ? Optimise.no : Optimise.yes,
-        );
-        const report = executeBackend(
-            parsed.options.backend,
-            preparation.project.program,
-            [preparation.project.program.name] ~ parsed.options.programArguments,
-            false,
             true,
+            (directory, sources, discovery, enterWorkingDirectory) {
+                auto preparation = prepareSources(
+                    directory,
+                    sources,
+                    discovery,
+                    parsed.options.backend != BackendName.ctfe,
+                    parsed.options.noOptimiseImage ? Optimise.no : Optimise.yes,
+                );
+                const report = executeBackend(
+                    parsed.options.backend,
+                    preparation.project.program,
+                    [preparation.project.program.name]
+                        ~ parsed.options.programArguments,
+                    false,
+                    true,
+                );
+                _statistics = Statistics(true, preparation, report);
+                return report.status;
+            },
         );
-        _statistics = Statistics(true, preparation, report);
-        return report.status;
     } catch (Exception exception) {
         stderr.write("snakebite: ", exception.msg, "\n");
         return 1;

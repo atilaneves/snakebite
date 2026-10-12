@@ -27,12 +27,12 @@ public int run(string[] args) {
         compilerPath, FrontendFlags, initialize, Snippets;
     import snakebite.dependencyimage: DependencyImage;
     import snakebite.dub: fetchProject;
-    import snakebite.project: prepareStartupDependencies, sourceSet;
+    import snakebite.execution: runProject;
+    import snakebite.project: prepareStartupDependencies;
     import snakebite.gc: selectFrontendMemory;
     import snakebite.repl: Repl;
     import std.algorithm.iteration: map;
     import std.array: array;
-    import std.file: chdir;
     import std.path: absolutePath;
     import std.stdio: stderr, writeln;
 
@@ -52,67 +52,75 @@ public int run(string[] args) {
     initialize(Snippets.yes);
 
     try {
-        string[] importPaths = parsed.options.importPaths.dup;
-        string[] files = parsed.options.files.dup;
-        string[] stringImportPaths;
-        FrontendFlags flags;
-        const(DependencyImage)* dependencyImage;
+        int startSession(
+            string[] importPaths,
+            string[] files,
+            string[] stringImportPaths,
+            FrontendFlags flags,
+            const(DependencyImage)* dependencyImage,
+        ) {
+            auto repl = Repl(
+                parsed.options.backend,
+                importPaths,
+                stringImportPaths,
+                flags,
+                dependencyImage,
+            );
+
+            foreach (file; files)
+                repl.loadModuleFile(file);
+
+            if (parsed.options.hasCommand)
+                return runOneShotCommand(repl, parsed.options.command);
+
+            if (parsed.options.files.length != 0 && !parsed.options.liveAfterFiles)
+                return 0;
+
+            if (stdinIsTerminal) {
+                writeln("Snakebite REPL");
+                return runInteractiveRepl(repl);
+            }
+
+            return runPipedRepl(repl);
+        }
+
         string projectDirectory = parsed.options.projectDirectory;
         if (parsed.options.dubProject.length != 0) {
             if (projectDirectory.length != 0)
                 throw new Exception("--dub and --project cannot be used together");
             projectDirectory = fetchProject(parsed.options.dubProject);
         }
-        if (projectDirectory.length != 0) {
-            // Like sb, the session works in the project directory, where
-            // dub builds the project: a project module's `__FILE__` is
-            // relative to it and dmd resolves that name against it.
-            projectDirectory = projectDirectory.absolutePath;
-            importPaths = importPaths.map!(path => path.absolutePath).array;
-            files = files.map!(file => file.absolutePath).array;
-            chdir(projectDirectory);
-
-            // Mutable: `loadProject` keeps these in the `Project` it returns.
-            auto projectSources = sourceSet(
-                projectDirectory, [], [], parsed.options.versions,
+        if (projectDirectory.length == 0)
+            return startSession(
+                parsed.options.importPaths.dup, parsed.options.files.dup,
+                null, FrontendFlags.init, null,
             );
-            // The frontend analyses what the cells reach, as they reach
-            // it; the whole project only when its image must be built, and
-            // that analysis leaves nothing behind for the cells to reuse.
-            dependencyImage = prepareStartupDependencies(
-                projectDirectory, projectSources,
-            );
-            const inProject = (string path) => compilerPath(path, projectDirectory);
-            importPaths = projectSources.importPaths.map!inProject.array
-                ~ importPaths;
-            stringImportPaths = projectSources.stringImportPaths
-                .map!inProject.array;
-            flags = projectSources.flags;
-        }
 
-        auto repl = Repl(
-            parsed.options.backend,
-            importPaths,
-            stringImportPaths,
-            flags,
-            dependencyImage,
+        // The session works where the project runs, and the paths of the
+        // caller are relative to where it started.
+        const importPaths = parsed.options.importPaths
+            .map!(path => path.absolutePath).array;
+        const files = parsed.options.files.map!(file => file.absolutePath).array;
+        return runProject(
+            projectDirectory, null, null, parsed.options.versions, true,
+            (directory, sources, discovery, enterWorkingDirectory) {
+                // The frontend analyses what the cells reach, as they reach
+                // it; the whole project only when its image must be built,
+                // and that analysis leaves nothing behind for the cells to
+                // reuse.
+                const dependencyImage = prepareStartupDependencies(
+                    directory, sources,
+                );
+                const inProject = (string path) => compilerPath(path, directory);
+                return startSession(
+                    sources.importPaths.map!inProject.array ~ importPaths.dup,
+                    files.dup,
+                    sources.stringImportPaths.map!inProject.array,
+                    sources.flags,
+                    dependencyImage,
+                );
+            },
         );
-
-        foreach (file; files)
-            repl.loadModuleFile(file);
-
-        if (parsed.options.hasCommand)
-            return runOneShotCommand(repl, parsed.options.command);
-
-        if (parsed.options.files.length != 0 && !parsed.options.liveAfterFiles)
-            return 0;
-
-        if (stdinIsTerminal) {
-            writeln("Snakebite REPL");
-            return runInteractiveRepl(repl);
-        }
-
-        return runPipedRepl(repl);
     } catch (Exception exception) {
         writeln(errorDiagnostic(exception.msg));
         return 1;

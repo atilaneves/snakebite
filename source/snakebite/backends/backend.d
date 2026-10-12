@@ -38,9 +38,6 @@ public struct Program {
     // Whether the program starts as a project does: its unit tests run
     // before `main`, under the runner that the project's own images name.
     bool startsAsProject;
-    // Where `dub test` runs the project; empty for a program that is not a
-    // project, which runs where the host is.
-    string projectDirectory;
     TestHooks testHooks;
 
     // The entry point is found the way a compiled build finds it: the first

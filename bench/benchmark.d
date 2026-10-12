@@ -36,7 +36,7 @@ struct Options {
 public int run(string[] args) {
     import bench.report: printTable;
     import std.stdio: stderr, writeln;
-    import snakebite.execution: PreparationReport;
+    import snakebite.execution: PreparationReport, prepareSources, runProject;
     import snakebite.gc: selectFrontendMemory;
 
     Options options;
@@ -57,14 +57,32 @@ public int run(string[] args) {
     }
 
     PreparationReport preparation;
+    BackendReport[] reports;
     try
-        preparation = loadProject(options);
+        runProject(
+            options.projectDirectory,
+            options.importPaths,
+            options.stringImportPaths,
+            options.versions,
+            false,
+            (directory, sources, discovery, enterWorkingDirectory) {
+                preparation = prepareSources(
+                    directory,
+                    sources,
+                    discovery,
+                    selected(options, "interpreter")
+                        || selected(options, "bytecode"),
+                );
+                reports = benchmarkAll(
+                    preparation.project, options, enterWorkingDirectory,
+                );
+                return 0;
+            },
+        );
     catch (Exception exception) {
         stderr.writeln(exception.msg);
         return 1;
     }
-
-    const reports = benchmarkAll(preparation.project, options);
 
     writeln(headerLine(preparation, options));
     writeln;
@@ -203,25 +221,10 @@ private string validate(in Options options) {
     return null;
 }
 
-// The project under benchmark: its root modules as one `Program`, its
-// sources (the oracle rebuilds from them), and the complete frontend time.
-private imported!"snakebite.execution".PreparationReport loadProject(
-    in Options options,
-) {
-    import snakebite.execution: prepareProject;
-
-    return prepareProject(
-        options.projectDirectory,
-        options.importPaths,
-        options.stringImportPaths,
-        selected(options, "interpreter") || selected(options, "bytecode"),
-        options.versions,
-    );
-}
-
 private BackendReport[] benchmarkAll(
     imported!"snakebite.project".Project project,
     in Options options,
+    in void delegate() enterWorkingDirectory,
 ) {
     import bench.oracle: oracleName, oracleReport;
     import snakebite.backends: Backends, backendIdentity;
@@ -235,6 +238,7 @@ private BackendReport[] benchmarkAll(
                 project.program,
                 options.warmup,
                 options.runs,
+                enterWorkingDirectory,
             );
         }
 
@@ -264,6 +268,7 @@ public BackendReport benchmark(
     imported!"snakebite.backends".Program program,
     in uint warmup,
     in uint runs,
+    in void delegate() enterWorkingDirectory = null,
 ) {
     import bench.capture: captureStdout;
     import bench.report: timingStatistics, updateTestCounts;
@@ -294,6 +299,8 @@ public BackendReport benchmark(
         import core.memory: GC;
         GC.collect();
 
+        if (enterWorkingDirectory !is null)
+            enterWorkingDirectory();
         ExecutionReport execution;
         const result = captureStdout(() {
             execution = executeBackend(backendName_, program);
