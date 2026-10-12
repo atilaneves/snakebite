@@ -97,6 +97,7 @@ mixin Export!(aggregates, "snakebite_ut_aggregates_large_memory", "memoryClassPa
 mixin Export!(aggregates, "snakebite_ut_aggregates_owned_roundtrip", "nonPod.spilledArgumentAndCallback");
 mixin Export!(aggregates, "snakebite_ut_aggregates_five_bytes", "registerResult.fiveBytesFromNative");
 mixin Export!(aggregates, "snakebite_ut_aggregates_five_bytes_callback", "registerResult.fiveBytesFromGuestCallback");
+mixin Export!(aggregates, "snakebite_ut_aggregates_void_blob_echo", "voidArrayField.echoedByValue");
 mixin Export!(aggregates, "snakebite_ut_aggregates_void_array_echo", "voidStaticArray.echoedByValue");
 mixin Export!(aggregates, "snakebite_ut_aggregates_real_array_echo", "realStaticArray.echoedByValue");
 mixin Export!(aggregates, "snakebite_ut_aggregates_zero_length_echo", "zeroLengthArrayField.echoedByValue");
