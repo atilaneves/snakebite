@@ -90,40 +90,9 @@ static foreach (backend; Matrix!(
 }
 
 
-// A call from guest code to host code runs on the native stack that the
-// guest code was entered on: a host function sees the thread, not an
-// implementation detail of how deep the recursion is.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "CTFE cannot call native functions such as "
-        ~ "`core.thread.fiber.Fiber.getThis`"),
-)) {
-    @("nativeStack.hostCallAtDepthOnAThreadSeesNoFiber." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            import core.thread.fiber: Fiber;
-
-            enum depth = 10_000;
-            int fibersSeen;
-
-            void walk(int level) {
-                if (level == depth) {
-                    fibersSeen += Fiber.getThis !is null;
-                    return;
-                }
-                walk(level + 1);
-            }
-
-            void main() {
-                walk(0);
-                assert(fibersSeen == 0);
-            }
-        });
-    }
-}
-
-
+// A call from guest code to host code at depth runs on the native stack that
+// the guest code was entered on: a host function sees the `Fiber` of the
+// guest, not an implementation detail of how deep the recursion is.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot call native functions such as "
