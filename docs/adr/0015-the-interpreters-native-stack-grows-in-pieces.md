@@ -26,9 +26,9 @@ thread together are limited to 256 MiB (the constant `maxPieceBytes` in
 `stackpieces.d`). A piece holds guest calls in its upper half only, so the
 bound is about 55,400 guest calls in a release build and about 25,000 in the
 dmd debug build of `bin/ut` (measured with a function that counts its
-depth). A guest that needs more, such as one that recurses without end, stops the run with a
-message that names the cause and the bound (exit status 1, as for a Bytecode
-VM that runs out of frame stack). Compiled D ends such a program with
+depth). A guest that needs more, such as one that recurses without end,
+stops the run with a message that names the cause and the bound (exit
+status 1, as for a Bytecode VM that runs out of frame stack). Compiled D ends such a program with
 SIGSEGV after 8 MiB of stack. Without this bound the program takes memory
 until the system stops it.
 
