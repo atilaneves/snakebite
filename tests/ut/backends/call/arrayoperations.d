@@ -2,6 +2,7 @@ module ut.backends.call.arrayoperations;
 
 
 import ut.backends;
+import snakebite.frontend.compiler: parseSnippet;
 
 
 // druntime's array operations take a vector path for 16 bytes at a time and
@@ -270,44 +271,50 @@ static foreach (backend; Matrix!()) {
 
 // `core.simd`'s own unaligned load and store, which druntime's array
 // operations are written with.
-// LDC's `loadUnaligned` is LLVM inline IR, which no backend runs; the load
-// of such a program fails (`inlineasm.loadDiagnostic.
-// rootInstanceOfIrTemplateFailsLoad`).
-version (LDC)
-    private alias InlineIrLoad = AliasSeq!(
-        Omit!(Bytecode, Because.diverges, "the load fails"),
-        Omit!(Interpreter, Because.diverges, "the load fails"),
-    );
-else
-    private alias InlineIrLoad = AliasSeq!();
+//
+// LDC's `loadUnaligned` is LLVM inline IR, which no backend runs (ADR-0012).
+// A program that calls it from root code fails at load on the backends
+// that run a snippet from source, and runs where LDC compiles it.
+private enum loadAndStoreUnalignedProgram = q{
+    import core.simd: float4, int4, loadUnaligned, storeUnaligned;
+
+    void main() {
+        float[8] source = [1, 2, 3, 4, 5, 6, 7, 8];
+        float[8] target = 0;
+        foreach (offset; 0 .. 4) {
+            float4 loaded = loadUnaligned(
+                cast(const float4*) (source.ptr + offset));
+            storeUnaligned(cast(float4*) (target.ptr + offset), loaded);
+            foreach (i; 0 .. 4)
+                assert(target[offset + i] == source[offset + i]);
+        }
+
+        int[7] integers = [10, 20, 30, 40, 50, 60, 70];
+        int4 one = loadUnaligned(cast(const int4*) (integers.ptr + 1));
+        assert(one.array == [20, 30, 40, 50]);
+    }
+};
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "dmd's CTFE cannot evaluate `core.simd.__simd`"),
-    InlineIrLoad,
 )) {
     @("arrayOperations.loadAndStoreUnaligned." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.shouldBeStatusOf!(backend, q{
-            import core.simd: float4, int4, loadUnaligned, storeUnaligned;
+        version (LDC)
+            enum refusesInlineIr = !is(backend == Native);
+        else
+            enum refusesInlineIr = false;
 
-            void main() {
-                float[8] source = [1, 2, 3, 4, 5, 6, 7, 8];
-                float[8] target = 0;
-                foreach (offset; 0 .. 4) {
-                    float4 loaded = loadUnaligned(
-                        cast(const float4*) (source.ptr + offset));
-                    storeUnaligned(cast(float4*) (target.ptr + offset), loaded);
-                    foreach (i; 0 .. 4)
-                        assert(target[offset + i] == source[offset + i]);
-                }
-
-                int[7] integers = [10, 20, 30, 40, 50, 60, 70];
-                int4 one = loadUnaligned(cast(const int4*) (integers.ptr + 1));
-                assert(one.array == [20, 30, 40, 50]);
-            }
-        });
+        static if (refusesInlineIr) {
+            const message = parseSnippet(loadAndStoreUnalignedProgram)
+                .shouldThrow.msg;
+            ("LLVM inline IR (`pragma(LDC_inline_ir)`) is not supported in "
+                ~ "`ldc.simd.loadUnaligned!(__vector(float[4])).loadUnaligned`: "
+                ~ "no backend runs it").should.be in message;
+        } else
+            0.shouldBeStatusOf!(backend, loadAndStoreUnalignedProgram);
     }
 }
 
