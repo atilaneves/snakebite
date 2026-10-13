@@ -54,6 +54,16 @@ public struct ClosurePlan {
         FuncDeclaration from,
         FuncDeclaration to,
     ) {
+        return staticChainPath(from, to, &FrameLayout.of);
+    }
+
+    // The caller can reuse its complete layouts without changing the
+    // shared rules for frame, closure and dual-context hops.
+    public static Hop[] staticChainPath(LayoutOf)(
+        FuncDeclaration from,
+        FuncDeclaration to,
+        scope LayoutOf layoutOf,
+    ) {
         import dmd.aggregate: AggregateDeclaration;
         import snakebite.backends.dualcontext:
             fieldTowards, parentTowards, wordTowards;
@@ -62,7 +72,7 @@ public struct ClosurePlan {
         if (from is to)
             return null;
 
-        const layout = FrameLayout.of(from);
+        const layout = layoutOf(from);
         if (layout.hiddenThis.variable is null)
             return null;
 
@@ -100,7 +110,7 @@ public struct ClosurePlan {
             if (of(currentFunction).needsClosure)
                 hops ~= Hop(Hop.Kind.closureWord, 0);
             else {
-                const currentLayout = FrameLayout.of(currentFunction);
+                const currentLayout = layoutOf(currentFunction);
                 if (currentLayout.hiddenThis.variable is null)
                     return null;
 
