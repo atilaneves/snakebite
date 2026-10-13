@@ -21,16 +21,13 @@ large fixed size chosen for particular programs.
 The walker runs on the native stack that it is entered on, the base. Before
 each guest call it compares the stack pointer with a limit. Below the
 limit, the walk continues on a new `core.thread.Fiber` of 1 MiB, a piece,
-and returns to the base when the deep part is done. The pieces of one
-thread together are limited to 256 MiB (the constant `maxPieceBytes` in
-`stackpieces.d`). A piece holds guest calls in its upper half only, so the
-bound is about 55,400 guest calls in a release build and about 25,000 in the
-dmd debug build of `bin/ut` (measured with a function that counts its
-depth). A guest that needs more, such as one that recurses without end,
-stops the run with a message that names the cause and the bound (exit
-status 1, as for a Bytecode VM that runs out of frame stack). Compiled D ends such a program with
-SIGSEGV after 8 MiB of stack. Without this bound the program takes memory
-until the system stops it.
+and returns to the base when the deep part is done. Active pieces have no
+fixed byte or count bound. A finite recursion that compiled D accepts must
+not fail because it crosses an arbitrary walker stack bound. Resource
+exhaustion can still end the process. Compiled D also exhausts resources:
+an unbounded recursion ended with SIGSEGV in a separate native probe.
+The earlier 256 MiB bound instead stopped valid 100,000-call recursion,
+which completed in both compiled D and the Bytecode VM.
 
 - The limit of a thread's stack is its middle. The bounds come from
   `pthread_getattr_np` and `pthread_attr_getstack`, once for each thread.
@@ -52,7 +49,13 @@ until the system stops it.
   finalizer, `new` is not possible. Each thread keeps one more piece in
   reserve, made at the first entry outside a finalizer. A guest destructor
   that the collector runs takes a free piece, or the reserve. When it needs
-  more, the run stops with a message that says so.
+  more, the run stops with a message that says so. A process-wide spare is
+  made at startup for a collector that first enters guest code on a new
+  host thread. That thread borrows the spare for its first piece and
+  returns it when the piece ends. A mutex protects the spare for the whole
+  use. The public Fiber API permits transfer between threads when a Fiber
+  is not executing. This adds one 1 MiB stack per process and lock operations
+  only for finalizers on threads that have no local piece.
 - State that is local to a Fiber, such as the execution state, is looked up
   by the Fiber that the piece continues, or by the thread, and not by the
   piece (`Continuation` in `hostthreads.d`). Host code that runs on a piece,
@@ -119,7 +122,8 @@ These limits remain:
    `pthread_cancel` in guest code, and a guest `Fiber` that moves to another
    thread while it has pieces are not supported and were not run.
 8. A guest destructor that the collector runs has one reserve piece and the
-   free pieces, and no more. A destructor that recurses past them stops the
+   free pieces, and no more. A thread with no local piece borrows the process
+   spare for its first piece. A destructor that recurses past them stops the
    run with a message.
 9. Guest code in a guest `Fiber` always runs on a piece, because the size of
    the stack of a `Fiber` is not public, and so no room can be known. Each
@@ -127,7 +131,36 @@ These limits remain:
    200,000 ints with a guest comparator, inside a guest `Fiber` of 1 MiB,
    took 4.34 s on master and 6.87 s on this design. On the main thread the
    time is unchanged.
-10. The bound of 256 MiB is for the pieces of one thread. A program whose
-    recursion needs more than about 55,000 guest calls (fewer in a debug
-    build of the host) fails on the Interpreter, and compiled D reaches about
-    260,000 calls on an 8 MiB stack.
+10. Active recursion uses substantially more memory than compiled D. For
+    the function `int depth(int n) { return n == 0 ? 0 : 1 + depth(n - 1); }`
+    at 100,000 calls, the release Interpreter used 282,144 KiB peak RSS
+    and 0.32 s elapsed time. Compiled D used 5,752 KiB and less than 0.01 s;
+    the Bytecode VM used 40,964 KiB and 0.03 s. These process measurements
+    include frontend and runtime work, so they do not isolate stack cost.
+    The debug `bin/ut` stack tests used 774,032 KiB peak RSS in total.
+    Only two free pieces and one finalizer reserve remain after a walk;
+    other completed pieces are destroyed and their stacks are unmapped.
+
+## Stack cost and preserved guarantees
+
+The original problem is the walker host frames: they are much larger than
+compiled guest frames. Pieces prevent the thread or guest Fiber stack from
+setting an early recursion limit. They preserve host thread and Fiber
+identity at native calls, GC scanning of suspended stacks, native layout,
+and exception cleanup through the host unwinder.
+
+Only the upper 512 KiB of each 1 MiB piece holds guest calls. The lower
+512 KiB gives one guest function, native work without a crossing, and the
+collector room for frames that have no guest-call check. This reserve
+increases mapped address space; it does not require all reserved pages to
+be resident. The measurements above do not separate this reserve from
+active walker frames or other process memory. There is no measurement that
+supports reducing the reserve while preserving that stack-room guarantee.
+
+The cap did not reduce the cost of a successful walk. It rejected valid
+walks that needed more pieces. Removing it permits those walks, while the
+existing free list still limits retained stack storage after they return.
+Reducing active host frames requires a change to walker execution and
+exception handling, as described in the explicit-frame option above.
+This change does not attempt that redesign. Infinite recursion can consume
+more memory than compiled D before resource exhaustion ends the process.

@@ -2,6 +2,8 @@ module ut.backends.run.nativestack;
 
 
 import ut.backends;
+import core.memory: GC;
+import core.thread: Fiber, Thread;
 import snakebite.backends.backend: Program;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
@@ -91,28 +93,22 @@ static foreach (backend; Matrix!(
 }
 
 
-// A guest that recurses without end stops: the status is 1 and the message
-// is on stderr, as for a Bytecode VM that runs out of frame stack (that arm
-// is too slow). Compiled D ends with SIGSEGV, which would end `bin/ut`, so
-// `Native` has no arm.
+// Finite recursion must not stop at a fixed walker stack bound. Compiled D
+// completes this depth on a default thread stack.
 static foreach (backend; Matrix!(
-    Omit!(Native, Because.inexpressible,
-        "compiled D ends with SIGSEGV, and that ends the test process"),
     Omit!(Ctfe, Because.inexpressible,
         "dmd's CTFE stops at a fixed recursion limit far below this depth"),
-    Omit!(Bytecode, Because.unconfirmed,
-        "the arm takes 30 s and 1.1 GB because it fills the frame stack"),
 )) {
-    @("nativeStack.runawayRecursionStopsTheRun." ~ backend.stringof)
+    @("nativeStack.finiteRecursionHasNoWalkerStackBound." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        1.shouldBeStatusOf!(backend, q{
-            size_t walk(size_t n) {
-                return 1 + walk(n + 1);
+        0.shouldBeStatusOf!(backend, q{
+            int depth(int n) {
+                return n == 0 ? 0 : 1 + depth(n - 1);
             }
 
             void main() {
-                walk(0);
+                assert(depth(100_000) == 100_000);
             }
         });
     }
@@ -362,8 +358,6 @@ static foreach (backend; Matrix!(
         ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        import core.thread.fiber: Fiber;
-
         auto guestModule = parseSnippet(q{
             void forceCollection() {
                 import core.memory: GC;
@@ -395,5 +389,61 @@ static foreach (backend; Matrix!(
         fiber.call;
 
         survivorValue.should == 42;
+    }
+}
+
+
+// A host thread can collect guest objects before it first calls guest code.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the static counter changed by native finalizers"),
+)) {
+    @("nativeStack.firstGuestDestructorOnHostFiber." ~ backend.stringof)
+    @Tags(backend.stringof, "forced-finalizers")
+    unittest {
+        enum code = q{
+            static shared int destroyed;
+
+            class Dying {
+                ~this() {
+                    import core.atomic: atomicOp;
+
+                    atomicOp!"+="(destroyed, 1);
+                }
+            }
+
+            void garbage() {
+                foreach (_; 0 .. 1_000)
+                    new Dying;
+            }
+
+            int count() {
+                return destroyed;
+            }
+        };
+        static if (is(backend == Native)) {
+            mixin(code);
+            garbage;
+        } else {
+            auto guestModule = parseSnippet(code);
+            auto evaluator = Owned!backend(Program([guestModule]));
+            evaluator.call(findFunction(guestModule, "garbage"), null, []);
+        }
+        int before;
+        static if (is(backend == Native))
+            before = count;
+        else
+            evaluator.call(findFunction(guestModule, "count"), &before, []);
+        auto thread = new Thread({
+            auto fiber = new Fiber({ GC.collect; });
+            fiber.call;
+        });
+        thread.start.join;
+        int result;
+        static if (is(backend == Native))
+            result = count;
+        else
+            evaluator.call(findFunction(guestModule, "count"), &result, []);
+        (result > before).should == true;
     }
 }
