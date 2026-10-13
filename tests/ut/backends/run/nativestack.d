@@ -274,14 +274,16 @@ static foreach (backend; Matrix!(
     unittest {
         0.shouldBeStatusOf!(backend, q{
             import core.memory: GC;
+            import core.atomic: atomicLoad, atomicOp;
 
             class Dying {
                 ~this() {
-                    ++destroyed;
+                    atomicOp!"+="(destroyed, 1);
                 }
             }
 
-            int destroyed;
+            // A concurrent collection can run these finalizers on another thread.
+            shared int destroyed;
 
             void garbage() {
                 foreach (_; 0 .. 1_000)
@@ -299,7 +301,7 @@ static foreach (backend; Matrix!(
 
             void main() {
                 assert(walk(10_000) == 10_000);
-                assert(destroyed > 0);
+                assert(atomicLoad(destroyed) > 0);
             }
         });
     }
@@ -318,15 +320,17 @@ static foreach (backend; Matrix!(
     unittest {
         0.shouldBeStatusOf!(backend, q{
             import core.memory: GC;
+            import core.atomic: atomicLoad, atomicOp;
             import core.thread.fiber: Fiber;
 
             class Dying {
                 ~this() {
-                    ++destroyed;
+                    atomicOp!"+="(destroyed, 1);
                 }
             }
 
-            int destroyed;
+            // A concurrent collection can run these finalizers on another thread.
+            shared int destroyed;
 
             void garbage() {
                 foreach (_; 0 .. 1_000)
@@ -339,7 +343,7 @@ static foreach (backend; Matrix!(
                     GC.collect;
                 });
                 fiber.call;
-                assert(destroyed > 0);
+                assert(atomicLoad(destroyed) > 0);
             }
         });
     }
