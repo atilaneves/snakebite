@@ -8,6 +8,7 @@ import snakebite.dependencyimage:
 import core.thread: Thread;
 import snakebite.backends: BackendName, backendIdentity;
 import snakebite.execution: prepareProject, executeBackend;
+import snakebite.dependencypreparation: prepareDependencies;
 import snakebite.dependencyimage: Optimise;
 import snakebite.backends.backend: Program;
 import snakebite.frontend.compiler: parseSnippet;
@@ -536,6 +537,45 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// A live program remains executable after image analysis. A remembered
+// no-image result needs no new program from the caller.
+static foreach (backend; Matrix!()) {
+    @("image.livePreparationKeepsProgram." ~ backend.stringof)
+    unittest {
+        enum code = "int main() { return 42; }";
+        static if (is(backend == Native)) {
+            mixin(code);
+            main().should == 42;
+        } else {
+            const sandbox = Sandbox();
+            sandbox.writeFile("app/live_preparation.d",
+                "module live_preparation;\n" ~ code);
+            auto project = prepareProject(sandbox.inSandboxPath("app"),
+                nativeDependencies: false).project;
+            project.program.startsAsProject = false;
+            size_t analyses;
+            Program liveProgram() {
+                ++analyses;
+                return project.program;
+            }
+            const cold = prepareDependencies(project.directory,
+                project.sources, &liveProgram, Optimise.no);
+            (cold is null).should == true;
+            analyses.should == 1;
+            executeBackend(backendIdentity!backend, project.program,
+                collectGarbage: false).status.should == 42;
+
+            const warm = prepareDependencies(project.directory,
+                project.sources, &liveProgram, Optimise.no);
+            (warm is null).should == true;
+            analyses.should == 1;
+            executeBackend(backendIdentity!backend, project.program,
+                collectGarbage: false).status.should == 42;
+        }
+    }
+}
+
+
 @("image.projectCacheSkipsPreparation")
 unittest {
     const sandbox = Sandbox();
@@ -554,20 +594,19 @@ unittest {
         ++inputReads;
         return [dependency.idup];
     }
-    DependencyImage makeImage(in string) {
-        return loadImage(symbolsLibrary);
+    ProjectImageCache.Prepared makeImage(scope string delegate() source) {
+        source();
+        return ProjectImageCache.Prepared(loadImage(symbolsLibrary), dependencyInputs());
     }
     cache.prepare(*image,
         () {
             ++sources;
             return emptyImageSource;
         },
-        () {
+        (scope string delegate() source) {
             ++builds;
-        },
-        &makeImage,
-        true,
-        &dependencyInputs).should == true;
+            return makeImage(source);
+        }).should == true;
     builds.should == 1;
     sources.should == 1;
     inputReads.should == 1;
@@ -576,7 +615,7 @@ unittest {
     void failPreparation() {
         throw new Exception("An unchanged image must skip preparation");
     }
-    DependencyImage failImage(in string) {
+    ProjectImageCache.Prepared failImage(scope string delegate()) {
         failPreparation;
         assert(0);
     }
@@ -584,10 +623,7 @@ unittest {
             failPreparation;
             return "";
         },
-        &failPreparation,
-        &failImage,
-        true,
-        &dependencyInputs)
+        &failImage)
         .should == true;
     hit.path.should == image.path;
 
@@ -596,19 +632,14 @@ unittest {
             ++sources;
             return emptyImageSource;
         },
-        () {
-            throw new Exception("A root edit with the same source skips build");
-        },
-        &failImage,
-        true,
-        &dependencyInputs).should == true;
+        &failImage).should == true;
     sources.should == 2;
     inputReads.should == 1;
     auto changedSettings = ProjectImageCache(record, "other settings", [root]);
-    changedSettings.prepare(hit, () => emptyImageSource, () {
+    changedSettings.prepare(hit, () => emptyImageSource, (scope string delegate() source) {
             ++builds;
-        }, &makeImage, true,
-        &dependencyInputs).should == true;
+            return makeImage(source);
+        }).should == true;
     builds.should == 2;
     inputReads.should == 2;
 
@@ -616,10 +647,10 @@ unittest {
     const stamp = timeLastModified(dependency);
     sandbox.writeFile("dependency.d", "after!");
     setTimes(dependency, stamp, stamp);
-    changedSettings.prepare(hit, () => emptyImageSource, () {
+    changedSettings.prepare(hit, () => emptyImageSource, (scope string delegate() source) {
             ++builds;
-        }, &makeImage, true,
-        &dependencyInputs).should == true;
+            return makeImage(source);
+        }).should == true;
     builds.should == 3;
     inputReads.should == 3;
 
@@ -628,18 +659,20 @@ unittest {
             ++sources;
             return emptyImageSource ~ "\nenum changedSource = 1;\n";
         },
-        () {
+        (scope string delegate() source) {
             ++builds;
-        },
-        &makeImage, true, &dependencyInputs).should == true;
+            return makeImage(source);
+        }).should == true;
     sources.should == 3;
     builds.should == 4;
     inputReads.should == 4;
 
     auto empty = ProjectImageCache(buildPath(directory, "empty.json"),
         "settings", [root]);
-    empty.prepare(hit, () => "", () {}, &failImage, false,
-        &dependencyInputs).should == false;
+    empty.prepare(hit, () => "", (scope string delegate() source) {
+            source().should == "";
+            return ProjectImageCache.Prepared(DependencyImage.init, dependencyInputs());
+        }).should == false;
 }
 
 
@@ -658,11 +691,12 @@ unittest {
     string[] dependencyInputs() {
         return [dependency.idup];
     }
-    DependencyImage makeImage(in string) {
-        return loadImage(symbolsLibrary);
-    }
-    DependencyImage failImage(in string) {
-        throw new Exception("A project that needs no image must not build one");
+    ProjectImageCache.Prepared coldPreparation(scope string delegate() source) {
+        const generated = source();
+        DependencyImage image;
+        if (generated.length)
+            image = loadImage(symbolsLibrary);
+        return ProjectImageCache.Prepared(image, dependencyInputs());
     }
     size_t sources;
     string countedSource(in string source) {
@@ -672,35 +706,30 @@ unittest {
     DependencyImage image;
 
     ProjectImageCache(record, "settings", [root])
-        .prepare(image, () => countedSource(""), () {}, &failImage, false,
-            &dependencyInputs)
+        .prepare(image, () => countedSource(""), &coldPreparation)
         .should == false;
     sources.should == 1;
 
     ProjectImageCache(record, "settings", [root])
-        .prepare(image, () => countedSource(""), () {}, &failImage, false,
-            &dependencyInputs)
+        .prepare(image, () => countedSource(""), &coldPreparation)
         .should == false;
     sources.should == 1;
 
     // A root edit that still calls no dependency template.
     sandbox.writeFile("root.d", "changed root");
     ProjectImageCache(record, "settings", [root])
-        .prepare(image, () => countedSource(""), () {}, &failImage, false,
-            &dependencyInputs)
+        .prepare(image, () => countedSource(""), &coldPreparation)
         .should == false;
     sources.should == 2;
     ProjectImageCache(record, "settings", [root])
-        .prepare(image, () => countedSource(""), () {}, &failImage, false,
-            &dependencyInputs)
+        .prepare(image, () => countedSource(""), &coldPreparation)
         .should == false;
     sources.should == 2;
 
     // A root edit that now calls one.
     sandbox.writeFile("root.d", "root that calls a dependency template");
     ProjectImageCache(record, "settings", [root])
-        .prepare(image, () => countedSource(emptyImageSource), () {}, &makeImage,
-            false, &dependencyInputs)
+        .prepare(image, () => countedSource(emptyImageSource), &coldPreparation)
         .should == true;
     sources.should == 3;
     image.path.length.should.not == 0;
@@ -708,28 +737,24 @@ unittest {
     // And back again.
     sandbox.writeFile("root.d", "root");
     ProjectImageCache(record, "settings", [root])
-        .prepare(image, () => countedSource(""), () {}, &failImage, false,
-            &dependencyInputs)
+        .prepare(image, () => countedSource(""), &coldPreparation)
         .should == false;
     sources.should == 4;
 
     // A dependency edit asks again, even with the roots unchanged.
     sandbox.writeFile("dependency.d", "after");
     ProjectImageCache(record, "settings", [root])
-        .prepare(image, () => countedSource(emptyImageSource), () {}, &makeImage,
-            false, &dependencyInputs)
+        .prepare(image, () => countedSource(emptyImageSource), &coldPreparation)
         .should == true;
     sources.should == 5;
 
     // Settings are an input of the answer too.
     sandbox.writeFile("dependency.d", "before");
     ProjectImageCache(record, "settings", [root])
-        .prepare(image, () => countedSource(""), () {}, &failImage, false,
-            &dependencyInputs)
+        .prepare(image, () => countedSource(""), &coldPreparation)
         .should == false;
     ProjectImageCache(record, "other settings", [root])
-        .prepare(image, () => countedSource(""), () {}, &failImage, false,
-            &dependencyInputs)
+        .prepare(image, () => countedSource(""), &coldPreparation)
         .should == false;
     sources.should == 7;
 }
@@ -747,15 +772,14 @@ unittest {
     const record = buildPath(directory, "project.json");
     sandbox.writeFile("generator-stand-in", "generator v1");
     const generator = sandbox.inSandboxPath("generator-stand-in");
-    string[] noInputs() { return []; }
-    DependencyImage makeImage(in string) {
-        return loadImage(symbolsLibrary);
+    ProjectImageCache.Prepared makeImage(scope string delegate() source) {
+        source();
+        return ProjectImageCache.Prepared(loadImage(symbolsLibrary));
     }
 
     auto cache = ProjectImageCache(record, "settings", [root], defaultCompiler, generator);
     auto image = new DependencyImage;
-    cache.prepare(*image, () => emptyImageSource, () {}, &makeImage, true,
-        &noInputs).should == true;
+    cache.prepare(*image, () => emptyImageSource, &makeImage).should == true;
 
     // Same generator, unchanged: the recorded image is restored.
     auto unchanged = ProjectImageCache(record, "settings", [root], defaultCompiler, generator);
@@ -765,10 +789,9 @@ unittest {
             ++sourceCalls;
             return emptyImageSource;
         },
-        () {
+        delegate ProjectImageCache.Prepared(scope string delegate()) {
             throw new Exception("An unchanged generator must skip preparation");
-        },
-        &makeImage, true, &noInputs).should == true;
+        }).should == true;
     hit.path.should == image.path;
     sourceCalls.should == 0;
 
@@ -784,8 +807,10 @@ unittest {
             ++regeneratedSourceCalls;
             return emptyImageSource;
         },
-        () { ++builds; },
-        &makeImage, true, &noInputs).should == true;
+        (scope string delegate() source) {
+            ++builds;
+            return makeImage(source);
+        }).should == true;
     regeneratedSourceCalls.should == 1;
     builds.should == 1;
 }
@@ -805,9 +830,9 @@ unittest {
     sandbox.writeFile("generator-b", "generator b, a different build");
     const generatorA = sandbox.inSandboxPath("generator-a");
     const generatorB = sandbox.inSandboxPath("generator-b");
-    string[] noInputs() { return []; }
-    DependencyImage makeImage(in string) {
-        return loadImage(symbolsLibrary);
+    ProjectImageCache.Prepared makeImage(scope string delegate() source) {
+        source();
+        return ProjectImageCache.Prepared(loadImage(symbolsLibrary));
     }
 
     size_t builds;
@@ -815,8 +840,10 @@ unittest {
         auto cache = ProjectImageCache(record, "settings", [root],
             defaultCompiler, generator);
         DependencyImage image;
-        cache.prepare(image, () => emptyImageSource, () { ++builds; },
-            &makeImage, true, &noInputs).should == true;
+        cache.prepare(image, () => emptyImageSource, (scope string delegate() source) {
+                ++builds;
+                return makeImage(source);
+            }).should == true;
     }
 
     prepare(generatorA);

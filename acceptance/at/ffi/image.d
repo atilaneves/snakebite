@@ -12,7 +12,8 @@ import std.process: Config, environment, execute;
 import std.string: replace;
 import core.thread: Thread;
 import snakebite.frontend.compiler: parseSnippet;
-import snakebite.project: prepareStartupDependencies, sourceSet;
+import snakebite.project: sourceSet;
+import snakebite.dependencypreparation: prepareStartupDependencies;
 
 
 // `bin/at` is built with ldc2, so `defaultCompiler` is ldc2 here. The image
