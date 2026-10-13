@@ -16,7 +16,6 @@ int run(string[] args) {
         "at.runtime.arraycopy", "at.runtime.messaging",
         "at.cli", "at.runtime.startup", "at.dub",
         "at.runtime.threads", "at.runtime.registration",
-        "at.backends.interpreter.nativestack",
         "ut.process", "ut.backends.call.intrinsics",
         "ut.backends.call.arrayoperations", "ut.backends.run.hostfrontend", "ut.backends.run.inlineasm",
         "at.process",

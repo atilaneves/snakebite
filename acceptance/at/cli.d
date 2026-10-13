@@ -693,7 +693,7 @@ static foreach (backend; Matrix!(
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
-        "CTFE cannot read the native Fiber page size"),
+        "CTFE cannot create a native Fiber"),
 )) {
     @("fiberInterfaceRecursion." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -748,7 +748,7 @@ static foreach (backend; Matrix!(
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
-        "CTFE cannot read the native Fiber page size"),
+        "CTFE cannot create a native Fiber"),
 )) {
     @("fiberDeepRecursion." ~ backend.stringof)
     @Tags(backend.stringof)

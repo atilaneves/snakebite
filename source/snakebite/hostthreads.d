@@ -147,9 +147,8 @@ public struct PerThread(State, bool fiberLocal = false) {
     // one (ADR-0006's fast path).
     public State current() {
         static if (fiberLocal) {
-            import core.thread: Fiber;
             // The cache retains a mutable Fiber reference.
-            auto key = Key(_core.id, Fiber.getThis);
+            auto key = Key(_core.id, fiberOfHostCode);
         } else
             const key = Key(_core.id);
         if (key == _cachedKey)
@@ -227,6 +226,28 @@ public struct PerThread(State, bool fiberLocal = false) {
 
 
 private shared size_t nextId;
+
+
+// A Fiber that runs a part of the work of another stack, for example the
+// deep part of a recursion. State that is local to a Fiber belongs to the
+// Fiber that `of` names, or to the thread when it is null.
+public class Continuation: imported!"core.thread.fiber".Fiber {
+    public imported!"core.thread.fiber".Fiber of;
+
+    public this(void delegate() dg, in size_t stackBytes) {
+        super(dg, stackBytes);
+    }
+}
+
+
+private imported!"core.thread.fiber".Fiber fiberOfHostCode() {
+    import core.thread.fiber: Fiber;
+
+    auto fiber = Fiber.getThis;
+    if (auto continuation = cast(Continuation) fiber)
+        return continuation.of;
+    return fiber;
+}
 
 
 // The calling thread's druntime identity. A thread druntime does not

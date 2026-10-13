@@ -542,8 +542,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     import dmd.dclass: ClassDeclaration;
     import dmd.dstruct: StructDeclaration;
     import snakebite.framestack: FrameStack, defaultFrameCapacity;
-    import snakebite.backends.interpreter.nativestack:
-        InterpreterStack, interpreterStackBytes;
+    import snakebite.backends.interpreter.stackpieces: StackPieces;
     import snakebite.backends.druntimehooks: DruntimeHook;
     import snakebite.ffi:
         CallAdapter, CallbackCall, CallPlan, CallResult, PlanCache;
@@ -589,10 +588,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // bump-allocated on call and popped on return. Frames never move;
     // overflow throws loudly.
     private FrameStack _frames;
-    // The native stack every host-to-guest entry runs its recursive walk
-    // on, regardless of which stack it was reached on - see
-    // `InterpreterStack`'s own documentation (nativestack.d).
-    private InterpreterStack _interpreterStack;
+    private StackPieces _stack;
     private NativeData* _nativeData;
     // This thread's reads of the shared tables, counted.
     private Cache!(LayoutKey, FrameLayout) _layouts;
@@ -743,7 +739,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             Cache!(StaticChainKey, Hop[])(&shared_.staticChains);
         _catchTypes = Cache!(Catch, TypeInfo_Class)(&shared_.catchTypes);
         _frames = FrameStack(defaultFrameCapacity);
-        _interpreterStack = InterpreterStack(interpreterStackBytes);
         _temporaries = TemporaryLifetime(&destroyTemporary);
         // The first touch of this thread's thread-local table allocates,
         // and a destructor that the GC finalizer runs cannot.
@@ -818,19 +813,19 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return;
         }
 
-        _interpreterStack.run({
-            runHostToGuestOnDedicatedStack(
-                function_, returnPlace, args, variadicCursor, variadicTypes);
-        });
+        runHostToGuestInPlace(
+            function_, returnPlace, args, variadicCursor, variadicTypes);
     }
 
-    extern(D) private void runHostToGuestOnDedicatedStack(
+    extern(D) private void runHostToGuestInPlace(
         FuncDeclaration function_,
         void* returnPlace,
         scope const(void*)[] args,
         void* variadicCursor,
         const(void)* variadicTypes,
     ) {
+        import core.thread: thread_stackBottom;
+
         ubyte entry; // Only its address matters: it marks an active entry.
         auto parent = _frames.backendEntry; // Restored as a mutable entry link.
         const frameMark = _frames.mark;
@@ -842,9 +837,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 _frames.release(frameMark);
         }
         _frames.backendEntry = &entry;
+        const stackEntry = _stack.enter;
         _guestRun = GuestRun(
             cast(void*) this, &guestPosition,
-            _interpreterStack.bottom, _interpreterStack.top,
+            // The lower end of the native stack that the walker runs on is
+            // not known through the public API.
+            null, thread_stackBottom,
         );
         register(&_guestRun);
         executeHostToGuest(function_, returnPlace, args,
@@ -1294,6 +1292,15 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             break;
         }
 
+        ubyte here;
+        if (cast(size_t) &here < _stack.limit) {
+            _stack.continueOnNewPiece({
+                executeRaw(function_, returnPlace, frameBase, layout,
+                    callSite, arguments, argumentCount, callbackEntry);
+            });
+            return;
+        }
+
         returnPlace = layout.returnPlace.bind(&_frames, frameBase, returnPlace);
         const guard = CallStateGuard(this);
 
@@ -1384,7 +1391,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     pragma(inline, true)
     extern(D) private void crossNative(scope void delegate() call) {
         try {
-            call();
+            _stack.runOnBase(call);
         } catch (Throwable thrown) {
             if (isHalt(thrown)) {
                 _halted = true;
