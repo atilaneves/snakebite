@@ -57,9 +57,9 @@ private bool decode(in ubyte[] bytes, out imported!"std.json".JSONValue value) {
 }
 
 // A cache miss always delegates semantics and generation to DUB.
-public imported!"std.json".JSONValue cachedDubDescription(
+public imported!"snakebite.dub".DubDescription cachedDubDescription(
     in string directory, in string compiler, in string[] versions,
-    scope imported!"std.json".JSONValue delegate() describe,
+    scope imported!"snakebite.dub".DubDescription delegate() describe,
     in string generator = imported!"snakebite.dependencyimage".runningExecutable,
     in string mode = imported!"std.process".environment.get("SNAKEBITE_DUB_CACHE", "on"),
 ) {
@@ -90,21 +90,21 @@ public imported!"std.json".JSONValue cachedDubDescription(
                     inputStamps[path] = stamp(path);
                 if (mode != "refresh" && "result" in saved
                         && validWatches(saved["watches"]))
-                    return saved["result"];
+                    return descriptionFromJson(saved["result"]);
             }
         }
     } catch (FileException) {
         // Another process can remove the cache during a read.
     }
 
-    auto result = describe(); // The cache record stores mutable JSON values.
+    auto result = describe();
     try {
         // Creating the state directory makes `.snakebite` in the start
         // directory, which the watches below can include: create it first
         // or the first record is stale on the next start.
         cache.dirName.mkdirRecurse;
         bool cacheable = true;
-        auto watched = collectWatches(directory, compiler, result["value"], cacheable); // JSON stores mutable values.
+        auto watched = collectWatches(directory, compiler, result.project, cacheable);
         // Do not publish an input snapshot taken across a concurrent edit.
         foreach (path, value; watched.object) {
             const generated = path.baseName == "dub.selections.json"
@@ -114,7 +114,8 @@ public imported!"std.json".JSONValue cachedDubDescription(
         }
         if (cacheable && context == contextKey(directory, compiler, versions)) {
             const record = JSONValue([
-                "context": JSONValue(context), "watches": watched, "result": result,
+                "context": JSONValue(context), "watches": watched,
+                "result": toJson(result),
             ]);
             const bytes = encode(record);
             const temporary = text(cache, ".", randomUUID);
@@ -203,23 +204,25 @@ private string entries(in string path) {
 
 private imported!"std.json".JSONValue collectWatches(
     in string root, in string compiler,
-    in imported!"std.json".JSONValue description, ref bool cacheable,
+    in imported!"dub.description".ProjectDescription description,
+    ref bool cacheable,
 ) {
     import std.json: JSONValue;
-    import std.file: exists, isDir, isSymlink, dirEntries, SpanMode, readText, getcwd, readLink;
+    import std.file: exists, isDir, isSymlink, dirEntries, SpanMode, readText, getcwd, readLink, thisExePath;
     import std.path: buildPath, baseName, dirName, absolutePath, buildNormalizedPath;
     import std.process: environment;
     import std.string: split;
     import std.algorithm: canFind;
+    import snakebite.dub: dubHomeDirectory;
     import snakebite.project: projectStateDirectory;
 
     string[string] watched;
-    foreach (package_; description["packages"].array)
-        foreach (key; ["preGenerateCommands", "postGenerateCommands"])
-            if (package_["active"].boolean && package_[key].array.length) {
-                cacheable = false;
-                return JSONValue(watched);
-            }
+    foreach (package_; description.packages)
+        if (package_.active && (package_.preGenerateCommands.length
+                || package_.postGenerateCommands.length)) {
+            cacheable = false;
+            return JSONValue(watched);
+        }
     const state = projectStateDirectory(root).dirName;
     void file(in string path) {
         const value = stamp(path);
@@ -252,27 +255,25 @@ private imported!"std.json".JSONValue collectWatches(
             }
         }
     }
-    foreach (package_; description["packages"].array) {
-        const path = package_["path"].str;
+    foreach (package_; description.packages) {
+        const path = package_.path;
         directory(path);
         foreach (name; ["dub.json", "dub.sdl", "package.json", "dub.selections.json"])
             file(buildPath(path, name));
-        foreach (key; ["importPaths", "stringImportPaths"])
-            foreach (item; package_[key].array) directory(buildPath(path, item.str));
-        foreach (item; package_["files"].array) {
-            const source = buildPath(path, item["path"].str);
+        foreach (item; package_.importPaths ~ package_.stringImportPaths)
+            directory(buildPath(path, item));
+        foreach (item; package_.files) {
+            const source = buildPath(path, item.path);
             directory(source.dirName);
             // Generated runner contents are an input even when their name stays.
             if (source.canFind("/.dub/")) file(source);
             // DUB reads module declarations when it generates its test runner.
-            if (package_["name"].str == description["rootPackage"].str
-                    && package_["mainSourceFile"].str.canFind("dub_test_root.d"))
+            if (package_.name == description.rootPackage
+                    && package_.mainSourceFile.canFind("dub_test_root.d"))
                 file(source);
         }
     }
-    const dpath = environment.get("DPATH", "");
-    const dubHome = environment.get("DUB_HOME", dpath.length
-        ? buildPath(dpath, "dub") : buildPath(environment.get("HOME", ""), ".dub"));
+    const dubHome = dubHomeDirectory;
     void settings(in string path) {
         file(path);
         // Settings can redirect package storage and add package suppliers.
@@ -287,35 +288,33 @@ private imported!"std.json".JSONValue collectWatches(
                 "packages/local-overrides.json",
             ])
             file(buildPath(path, name));
-    foreach (binary; ["dub", compiler]) {
-        string resolved;
-        foreach (path; environment.get("PATH", "").split(":")) {
-            const candidate = buildPath(path, binary).absolutePath;
-            file(candidate);
-            if (candidate.exists) { resolved = candidate; break; }
+    // The library reads the settings next to the running executable.
+    settings(buildPath(thisExePath.dirName, "../etc/dub/settings.json").buildNormalizedPath);
+    string resolved;
+    foreach (path; environment.get("PATH", "").split(":")) {
+        const candidate = buildPath(path, compiler).absolutePath;
+        file(candidate);
+        if (candidate.exists) { resolved = candidate; break; }
+    }
+    if (resolved.length) {
+        // Compiler installations commonly expose binaries through links.
+        while (resolved.isSymlink) {
+            resolved = readLink(resolved).absolutePath(resolved.dirName).buildNormalizedPath;
+            file(resolved);
         }
-        if (resolved.length) {
-            // Compiler installations commonly expose binaries through links.
-            while (resolved.isSymlink) {
-                resolved = readLink(resolved).absolutePath(resolved.dirName).buildNormalizedPath;
-                file(resolved);
-            }
-            if (binary == "dub")
-                settings(buildPath(resolved.dirName, "../etc/dub/settings.json").buildNormalizedPath);
-            foreach (name; ["dmd.conf", "ldc2.conf"])
-                foreach (path; [root, getcwd, environment.get("HOME", ""), resolved.dirName,
-                        buildPath(resolved.dirName, "../etc"), "/etc",
-                        buildPath(environment.get("HOME", ""), ".ldc"), "/etc/ldc",
-                    ]) {
-                    const config = buildPath(path, name).absolutePath.buildNormalizedPath;
-                    file(config);
-                    if (config.exists && config.isDir) {
-                        directory(config);
-                        foreach (entry; dirEntries(config, SpanMode.depth))
-                            file(entry.name);
-                    }
+        foreach (name; ["dmd.conf", "ldc2.conf"])
+            foreach (path; [root, getcwd, environment.get("HOME", ""), resolved.dirName,
+                    buildPath(resolved.dirName, "../etc"), "/etc",
+                    buildPath(environment.get("HOME", ""), ".ldc"), "/etc/ldc",
+                ]) {
+                const config = buildPath(path, name).absolutePath.buildNormalizedPath;
+                file(config);
+                if (config.exists && config.isDir) {
+                    directory(config);
+                    foreach (entry; dirEntries(config, SpanMode.depth))
+                        file(entry.name);
                 }
-        }
+            }
     }
     return JSONValue(watched);
 }
@@ -348,4 +347,130 @@ private ubyte[] encode(in imported!"std.json".JSONValue value) {
     }
     item(value);
     return cast(ubyte[])output.data.sha256Of[] ~ output.data;
+}
+
+// The JSON of a description follows `dub describe`: a field `version_` is
+// `version`, an enum is its member name and a set of flags is the list of the
+// names that are set. A value of a type that this does not name is left out.
+public imported!"std.json".JSONValue toJson(T)(in T value) {
+    import dub.compilers.buildsettings: Flags;
+    import dub.dependency: Version;
+    import std.algorithm.iteration: map;
+    import std.array: array;
+    import std.conv: text;
+    import std.json: JSONValue;
+    import std.traits: EnumMembers, FieldNameTuple, isArray, isSomeString;
+
+    static if (isSomeString!T || is(T == bool))
+        return JSONValue(value);
+    else static if (is(T == enum))
+        return JSONValue(text(value));
+    else static if (is(T == Version))
+        return JSONValue(value.toString);
+    else static if (is(T : const(string)[string]))
+        return JSONValue(cast(string[string]) value);
+    else static if (is(T == Flags!E, E)) {
+        string[] names;
+        static foreach (member; EnumMembers!E)
+            static if (member != 0)
+                if (value.values & member)
+                    names ~= text(member);
+        return JSONValue(names);
+    } else static if (isArray!T)
+        return JSONValue(value.map!(item => toJson(item)).array);
+    else static if (is(T == struct)) {
+        JSONValue[string] fields;
+        static foreach (name; FieldNameTuple!T)
+            static if (isStored!(typeof(__traits(getMember, T, name))))
+                fields[jsonName(name)] = toJson(__traits(getMember, value, name));
+        return JSONValue(fields);
+    } else
+        static assert(false, "no JSON for " ~ T.stringof);
+}
+
+public T fromJson(T)(in imported!"std.json".JSONValue value) {
+    import dub.compilers.buildsettings: Flags;
+    import dub.dependency: Version;
+    import std.algorithm.iteration: map;
+    import std.array: array;
+    import std.conv: text;
+    import std.json: JSONType;
+    import std.range.primitives: ElementType;
+    import std.traits: EnumMembers, FieldNameTuple, isArray, isSomeString;
+
+    static if (isSomeString!T)
+        return value.type == JSONType.string ? value.str : T.init;
+    else static if (is(T == bool))
+        return value.type == JSONType.true_;
+    else static if (is(T == enum)) {
+        T result;
+        if (value.type == JSONType.string)
+            static foreach (member; EnumMembers!T)
+                if (value.str == text(member) || value.str ~ "_" == text(member))
+                    result = member;
+        return result;
+    } else static if (is(T == Version))
+        return value.type == JSONType.string && value.str.length ? Version(value.str) : T.init;
+    else static if (is(T == string[string])) {
+        string[string] result;
+        if (value.type == JSONType.object)
+            foreach (name, item; value.object)
+                result[name] = item.str;
+        return result;
+    } else static if (is(T == Flags!E, E)) {
+        T result;
+        if (value.type == JSONType.array)
+            foreach (item; value.array)
+                static foreach (member; EnumMembers!E)
+                    static if (member != 0)
+                        if (item.str == text(member))
+                            result.values |= member;
+        return result;
+    } else static if (isArray!T) {
+        if (value.type != JSONType.array)
+            return T.init;
+        return value.array.map!(item => fromJson!(ElementType!T)(item)).array;
+    } else static if (is(T == struct)) {
+        T result;
+        if (value.type == JSONType.object)
+            static foreach (name; FieldNameTuple!T)
+                static if (isStored!(typeof(__traits(getMember, T, name))))
+                    if (auto item = jsonName(name) in value.object)
+                        __traits(getMember, result, name) = fromJson!(typeof(__traits(getMember, T, name)))(*item);
+        return result;
+    } else
+        static assert(false, "no JSON for " ~ T.stringof);
+}
+
+// dub does not describe the lookup of targets, so it is made here.
+public imported!"dub.description".ProjectDescription projectDescriptionFromJson(
+    in imported!"std.json".JSONValue value,
+) {
+    import dub.description: ProjectDescription;
+
+    return withTargetLookup(fromJson!ProjectDescription(value));
+}
+
+private imported!"snakebite.dub".DubDescription descriptionFromJson(
+    in imported!"std.json".JSONValue value,
+) {
+    import snakebite.dub: DubDescription;
+
+    auto description = fromJson!DubDescription(value);
+    description.project = withTargetLookup(description.project);
+    return description;
+}
+
+private imported!"dub.description".ProjectDescription withTargetLookup(
+    imported!"dub.description".ProjectDescription description,
+) {
+    foreach (index, target; description.targets)
+        description.targetLookup[target.rootPackage] = index;
+    return description;
+}
+
+private enum isStored(T) = !is(T == V[K], V, K) || is(T : const(string)[string]);
+
+private string jsonName(in string field) {
+    return field.length && field[$ - 1] == '_' ? field[0 .. $ - 1] : field;
 }

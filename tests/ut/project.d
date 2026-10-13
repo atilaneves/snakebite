@@ -9,6 +9,7 @@ import snakebite.backends.backend: Program;
 import snakebite.dependencyimage: TestHooks;
 import snakebite.execution: prepareProject, executeBackend, runProject;
 import snakebite.dub: DubDescription;
+import snakebite.dubcache: projectDescriptionFromJson;
 import snakebite.project:
     dubSourceSetFromDescription, EndsProcess, ProjectDirectory,
     projectStateDirectory;
@@ -43,7 +44,7 @@ unittest {
 
     const directory = buildPath(__FILE__.dirName,
         "../fixtures/dub-package-settings").absolutePath;
-    auto description = DubDescription(parseJSON(`{
+    auto description = DubDescription(projectDescriptionFromJson(parseJSON(`{
         "rootPackage": "root",
         "configuration": "unittest",
         "targets": [],
@@ -63,7 +64,7 @@ unittest {
                 "importPaths": ["source"], "stringImportPaths": []
             }
         ]
-    }`));
+    }`)));
 
     const sources = dubSourceSetFromDescription(directory, description);
 
@@ -82,7 +83,7 @@ unittest {
 
     const directory = buildPath(__FILE__.dirName,
         "../fixtures/dub-package-settings").absolutePath;
-    auto description = DubDescription(parseJSON(`{
+    auto description = DubDescription(projectDescriptionFromJson(parseJSON(`{
         "rootPackage": "root",
         "configuration": "unittest",
         "targets": [],
@@ -97,13 +98,75 @@ unittest {
                 "versions": [], "lflags": [], "libs": []
             }
         ]
-    }`));
+    }`)));
 
     const sources = dubSourceSetFromDescription(directory, description);
 
     sources.flags.compilerArguments.should == [
         "-release", "-noboundscheck", "-betterC",
     ];
+}
+
+
+// Without a target, dub describes the packages only, and the packages that
+// the configuration does not use add nothing.
+@("sourceSet.skipsInactivePackages")
+unittest {
+    import std.json: parseJSON;
+
+    const directory = buildPath(__FILE__.dirName,
+        "../fixtures/dub-package-settings").absolutePath;
+    auto description = DubDescription(projectDescriptionFromJson(parseJSON(`{
+        "rootPackage": "root",
+        "configuration": "unittest",
+        "packages": [
+            {
+                "name": "root", "configuration": "unittest",
+                "active": true, "path": "` ~ directory ~ `",
+                "files": [{"role": "source", "path": "tests/main.d"}],
+                "importPaths": ["source"]
+            },
+            {
+                "name": "unused", "configuration": "library",
+                "active": false, "path": "` ~ directory ~ `",
+                "importPaths": ["tests"]
+            }
+        ]
+    }`)));
+
+    const sources = dubSourceSetFromDescription(directory, description);
+
+    sources.importPaths.length.should == 1;
+}
+
+
+// The options of a target reach the program as flags, as the options of a
+// package do.
+@("sourceSet.targetOptionsBecomeFlags")
+unittest {
+    import std.json: parseJSON;
+
+    const directory = buildPath(__FILE__.dirName,
+        "../fixtures/dub-package-settings").absolutePath;
+    auto description = DubDescription(projectDescriptionFromJson(parseJSON(`{
+        "rootPackage": "root",
+        "configuration": "unittest",
+        "targets": [{
+            "rootPackage": "root",
+            "buildSettings": {
+                "sourceFiles": ["` ~ directory ~ `/tests/main.d"],
+                "options": ["releaseMode"]
+            }
+        }],
+        "packages": [{
+            "name": "root", "configuration": "unittest",
+            "active": true, "path": "` ~ directory ~ `"
+        }]
+    }`)));
+
+    const sources = dubSourceSetFromDescription(directory, description);
+
+    sources.flags.compilerArguments.should == ["-release"];
 }
 
 
@@ -123,7 +186,7 @@ unittest {
 
     const directory = buildPath(__FILE__.dirName,
         "../fixtures/dub-package-settings").absolutePath;
-    auto description = DubDescription(parseJSON(`{
+    auto description = DubDescription(projectDescriptionFromJson(parseJSON(`{
         "rootPackage": "root",
         "configuration": "unittest",
         "packages": [{"name": "root", "path": "` ~ directory ~ `"}],
@@ -139,7 +202,7 @@ unittest {
                 "workingDirectory": "/data"
             }
         }]
-    }`));
+    }`)));
 
     dubSourceSetFromDescription(directory, description)
         .workingDirectory.should == "/data";

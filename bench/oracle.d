@@ -220,23 +220,18 @@ private struct TestBinary {
 // Where `dub test` leaves the test binary and where it runs it, so the run
 // alone can be timed the way dub does it.
 private TestBinary dubTestBinary(in string directory) {
-    import snakebite.dub: DubConfig, dubDescribe;
+    import snakebite.dub: dubDescribeProject, rootBuildSettings;
     import std.path: buildPath;
 
-    const described = dubDescribe(
-        directory,
-        ["target-path", "target-name", "working-directory"],
-        DubConfig.test,
-    );
-    foreach (list; described)
-        if (list.length == 0)
-            throw new Exception(
-                "dub describe did not say where the test binary of "
-                ~ directory ~ " is",
-            );
+    const settings = dubDescribeProject(directory).project.rootBuildSettings;
+    if (settings.targetPath.length == 0 || settings.targetName.length == 0)
+        throw new Exception(
+            "dub describe did not say where the test binary of "
+            ~ directory ~ " is",
+        );
     return TestBinary(
-        buildPath(described[0][0], described[1][0]),
-        described[2][0],
+        buildPath(settings.targetPath, settings.targetName),
+        settings.workingDirectory,
     );
 }
 

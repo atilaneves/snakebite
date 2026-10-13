@@ -238,74 +238,73 @@ private SourceSet dubSourceSet(
     import std.algorithm.iteration: filter, map;
     import std.array: array;
     import std.conv: text;
-    import std.json: JSONType, JSONValue;
+    import dub.compilers.buildsettings: BuildOption, BuildSettings;
+    import dub.description: SourceFileRole;
+    import snakebite.dub: rootBuildSettings;
     import std.path: buildNormalizedPath, buildPath;
+    import std.traits: EnumMembers;
 
-    JSONValue settings;
-    foreach (target; description.value["targets"].array)
-        if (target["rootPackage"].str == description.value["rootPackage"].str)
-            settings = target["buildSettings"];
-
-    const packageSettings = settings.type == JSONType.object;
-    if (!packageSettings)
-        foreach (package_; description.value["packages"].array)
-            if (package_["name"].str == description.value["rootPackage"].str
-                    && package_["configuration"].str
-                    == description.value["configuration"].str)
-                settings = package_;
-
-    string[] values(in string key) {
-        if (!packageSettings && key == "linkerFiles")
-            return null;
-        if (packageSettings || key != "sourceFiles" && key != "importPaths"
-                && key != "stringImportPaths")
-            return settings[key].array.map!(value => value.str).array;
-
-        string[] result;
-        foreach (package_; description.value["packages"].array)
-            if (package_["active"].boolean) {
-                if (key == "sourceFiles") {
-                    if (package_["name"].str
-                            != description.value["rootPackage"].str)
-                        continue;
-                    foreach (file; package_["files"].array)
-                        if (file["role"].str == "source")
-                            result ~= buildPath(
-                                package_["path"].str, file["path"].str);
-                } else {
-                    result ~= package_[key].array.map!(path => buildPath(
-                        package_["path"].str, path.str)).array;
-                }
+    const project = description.project;
+    const packageSettings = project.rootPackage in project.targetLookup;
+    BuildSettings settings;
+    string[] options;
+    if (packageSettings) {
+        settings = project.rootBuildSettings;
+        static foreach (option; EnumMembers!BuildOption)
+            static if (option != BuildOption.none)
+                if (settings.options.values & option)
+                    options ~= text(option);
+    } else {
+        foreach (package_; project.packages)
+            if (package_.name == project.rootPackage
+                    && package_.configuration == project.configuration) {
+                settings.dflags = package_.dflags.dup;
+                settings.lflags = package_.lflags.dup;
+                settings.libs = package_.libs.dup;
+                settings.versions = package_.versions.dup;
+                settings.debugVersions = package_.debugVersions.dup;
+                options = package_.options.map!(option => text(option)).array;
             }
-        return result;
     }
+
+    // Without a target, the files and paths of the active packages are all
+    // that dub describes.
+    string[] sourceFiles = settings.sourceFiles.dup;
+    string[] importPaths = settings.importPaths.dup;
+    string[] stringImportPaths = settings.stringImportPaths.dup;
+    if (!packageSettings)
+        foreach (package_; project.packages) {
+            if (!package_.active)
+                continue;
+            importPaths ~= package_.importPaths.map!(path => buildPath(package_.path, path)).array;
+            stringImportPaths ~= package_.stringImportPaths
+                .map!(path => buildPath(package_.path, path)).array;
+            if (package_.name != project.rootPackage)
+                continue;
+            foreach (file; package_.files)
+                if (file.role == SourceFileRole.source)
+                    sourceFiles ~= buildPath(package_.path, file.path);
+        }
     import std.algorithm: endsWith;
     const isLinkerFile = (string path) => path.endsWith(".a", ".o", ".so");
-    const files = values("sourceFiles").filter!(path => !isLinkerFile(path)).array;
+    const files = sourceFiles.filter!(path => !isLinkerFile(path)).array;
     // dub names each dependency by the copy it leaves in the package's
     // target path, and whichever compiler built that package last owns the
     // copy (issue #401). The artifact in dub's build cache is keyed by
     // compiler and build settings, so that is what the image links.
-    const artifacts = cacheArtifacts(description.value);
-    const linkerFiles = (values("linkerFiles")
-        ~ values("sourceFiles").filter!(isLinkerFile).array)
+    const artifacts = cacheArtifacts(project);
+    const linkerFiles = (settings.linkerFiles ~ sourceFiles.filter!(isLinkerFile).array)
         .map!(file => artifacts.get(file.buildNormalizedPath, file))
         .array;
-    const dflags = values("dflags");
-    const debugVersions = values("debugVersions");
-    const options = values("options");
-    const importPaths = values("importPaths");
-    const stringImportPaths = values("stringImportPaths");
-    const lflags = values("lflags");
 
     if (files.length == 0)
         throw new Exception(text("dub describe found no sources in ", directory));
 
-    string[] compilerArguments = dflags.dup;
-    compilerArguments ~= values("versions")
+    string[] compilerArguments = settings.dflags.dup;
+    compilerArguments ~= settings.versions
         .map!(version_ => "-version=" ~ version_)
         .array;
-    compilerArguments ~= debugVersions
+    compilerArguments ~= settings.debugVersions
         .map!(debugVersion => "-debug=" ~ debugVersion)
         .array;
     compilerArguments ~= options
@@ -319,8 +318,8 @@ private SourceSet dubSourceSet(
         files.dup,
         importPaths.dup,
         stringImportPaths.dup,
-        lflags.map!(flag => "-L" ~ flag).array
-            ~ values("libs").map!(library => "-L-l" ~ library).array,
+        settings.lflags.map!(flag => "-L" ~ flag).array
+            ~ settings.libs.map!(library => "-L-l" ~ library).array,
         FrontendFlags(expandedCompilerArguments(compilerArguments)),
         null,
         linkerFiles.dup,
@@ -328,27 +327,27 @@ private SourceSet dubSourceSet(
     );
     // dub describe makes the directory absolute and leaves it empty when
     // the recipe names none.
-    if (packageSettings && "workingDirectory" in settings.object)
-        sources.workingDirectory = settings["workingDirectory"].str;
+    sources.workingDirectory = settings.workingDirectory;
     return sources;
 }
 
 
 // Each target's build-cache artifact, keyed by the path of the copy dub
 // makes of it in the package's target path.
-private string[string] cacheArtifacts(in imported!"std.json".JSONValue description) {
+private string[string] cacheArtifacts(
+    in imported!"dub.description".ProjectDescription project,
+) {
     import std.path: baseName, buildNormalizedPath;
 
     string[string] packagePaths;
-    foreach (package_; description["packages"].array)
-        packagePaths[package_["name"].str] = package_["path"].str;
+    foreach (package_; project.packages)
+        packagePaths[package_.name] = package_.path;
     string[string] artifacts;
-    foreach (target; description["targets"].array) {
-        const artifact = target["cacheArtifactPath"].str;
+    foreach (target; project.targets) {
         const copy = buildNormalizedPath(
-            packagePaths[target["rootPackage"].str],
-            target["buildSettings"]["targetPath"].str, artifact.baseName);
-        artifacts[copy] = artifact;
+            packagePaths[target.rootPackage],
+            target.buildSettings.targetPath, target.cacheArtifactPath.baseName);
+        artifacts[copy] = target.cacheArtifactPath;
     }
     return artifacts;
 }
@@ -458,6 +457,7 @@ private const(imported!"snakebite.dependencyimage".DependencyImage)* prepareDepe
         DependencyImage, ProjectImageCache, prepareImage, defaultCompiler;
     import std.path: buildPath;
 
+    import snakebite.dubcache: toJson;
     import std.conv: text;
     import std.json: JSONValue;
     import std.process: environment;
@@ -477,7 +477,7 @@ private const(imported!"snakebite.dependencyimage".DependencyImage)* prepareDepe
     const settings = text(sources.flags, sources.importPaths,
         sources.stringImportPaths, sources.linkerFlags,
         sources.linkerFiles, JSONValue(sources.sourceOverrides),
-        sources.dubDescription.value, environment.get("DFLAGS", ""),
+        toJson(sources.dubDescription).toString, environment.get("DFLAGS", ""),
         environment.get("LFLAGS", ""), "\noptimise:", optimise,
         "\nprojectEntry:", projectEntry,
         projectEntry ? DependencyImage.entryStartupSettings : "");

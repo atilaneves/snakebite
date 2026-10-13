@@ -477,7 +477,8 @@ def test_unrelated_root_compiler_flag_failure_is_reported(
     )
     output = result.stdout + result.stderr
     assert result.returncode != 0, output
-    assert "Dub dependency build failed" in output, output
+    assert f"Dub dependency build failed for {dub_name('app')}" in output, output
+    assert "--not-a-real-compiler-option" in output, output
     assert not list((tmp_path / ".snakebite").rglob("dub-dependencies"))
 
 

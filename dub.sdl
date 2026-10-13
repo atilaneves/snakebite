@@ -5,6 +5,10 @@ license "BSL-1.0"
 
 dependency "dmd:frontend" version="~>2.113.0"
 dependency ":dmd-backend-vendor" version="*"
+// dub's default configuration is its executable, which needs
+// `-preview=in`; snakebite links the library configuration.
+dependency "dub" version="1.42.0"
+subConfiguration "dub" "library"
 
 // When bumping dmd:frontend, re-run scripts/vendor-dmd-backend.sh to
 // keep vendor/dmd-backend/ in sync with the new version.
