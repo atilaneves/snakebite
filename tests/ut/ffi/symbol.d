@@ -545,6 +545,19 @@ static foreach (backend; Matrix!()) {
             analyses.should == 1;
             executeBackend(backendIdentity!backend, project.program,
                 collectGarbage: false).status.should == 42;
+
+            // Entry startup settings differ from a live session. A separate
+            // record must still preserve this program and reuse its analysis.
+            const live = prepareDependencies(project.directory,
+                project.sources, &liveProgram, Optimise.no, projectEntry: false);
+            (live is null).should == true;
+            analyses.should == 2;
+            const liveHit = prepareDependencies(project.directory,
+                project.sources, &liveProgram, Optimise.no, projectEntry: false);
+            (liveHit is null).should == true;
+            analyses.should == 2;
+            executeBackend(backendIdentity!backend, project.program,
+                collectGarbage: false).status.should == 42;
         }
     }
 }

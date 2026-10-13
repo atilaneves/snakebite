@@ -277,16 +277,17 @@ static foreach (backend; Matrix!()) {
 unittest {
     import dmd.frontend: addImport;
 
-    const moduleName = "inlineasm_project_import";
+    const moduleName = "inlineasm_project_package.imported";
     const directory = buildPath(
         tempDir,
         text("inlineasm_project_import_", thisProcessID),
     );
     mkdirRecurse(directory);
     scope(exit) rmdirRecurse(directory);
+    mkdirRecurse(buildPath(directory, "inlineasm_project_package"));
 
     write(
-        buildPath(directory, moduleName ~ ".d"),
+        buildPath(directory, "inlineasm_project_package", "imported.d"),
         "module " ~ moduleName ~ ";\n"
         ~ "void asmFunction() { asm { nop; } }\n",
     );

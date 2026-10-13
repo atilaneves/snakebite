@@ -276,3 +276,42 @@ unittest {
     "/packages/unused/source/unused.d".should.not.be in inputs;
     sources.dependencies.identity.length.should.not == 0;
 }
+
+
+// DUB removes these options from dflags. The frontend still needs their
+// DMD equivalents, together with the versions and native link arguments.
+@("sources.preservesBuildOptionsAndArguments")
+unittest {
+    const options = [
+        "debugMode", "releaseMode", "coverage", "coverageCTFE",
+        "debugInfo", "debugInfoC", "alwaysStackFrame", "stackStomping",
+        "inline", "noBoundsCheck", "optimize", "profile", "unittests",
+        "verbose", "ignoreUnknownPragmas", "syntaxOnly", "warnings",
+        "warningsAsErrors", "ignoreDeprecations", "deprecationWarnings",
+        "deprecationErrors", "property", "profileGC", "betterC",
+        "lowmem", "color",
+    ];
+    const flags = [
+        "-debug", "-release", "-cov", "-cov=ctfe", "-g", "-g", "-gs",
+        "-gx", "-inline", "-noboundscheck", "-O", "-profile", "-unittest",
+        "-v", "-ignore", "-o-", "-wi", "-w", "-d", "-dw", "-de",
+        "-property", "-profile=gc", "-betterC", "-lowmem", "-color",
+    ];
+    foreach (index, option; options) {
+        auto description = DubDescription(projectDescriptionFromJson(parseJSON(`{
+            "rootPackage": "app", "configuration": "library",
+            "packages": [{"name": "app", "configuration": "library",
+                "active": true, "path": "/project",
+                "files": [{"role": "source", "path": "app.d"}],
+                "options": ["` ~ option ~ `"], "dflags": ["-dip1000"],
+                "versions": ["Feature"], "debugVersions": ["Trace"],
+                "lflags": ["--export-dynamic"], "libs": ["m"]}]
+        }`)));
+
+        const sources = dubSources("/project", description);
+        sources.flags.compilerArguments.should == [
+            "-dip1000", "-version=Feature", "-debug=Trace", flags[index],
+        ];
+        sources.linkerFlags.should == ["-L--export-dynamic", "-L-lm"];
+    }
+}
