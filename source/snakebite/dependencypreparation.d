@@ -70,25 +70,21 @@ private struct Preparation {
     import snakebite.dependencyimage: DependencyImage, Optimise;
     import snakebite.project: SourceSet;
 
-    private string _directory;
     private const(SourceSet) _sources;
     private Optimise _optimise;
     private Mode _mode;
-    private string _stateDirectory;
     private string _imageDirectory;
 
     private this(in string directory, in SourceSet sources,
         in Optimise optimise, in Mode mode,
     ) {
-        import snakebite.project: projectStateDirectory;
+        import snakebite.projectstate: projectStateDirectory;
         import std.path: buildPath;
 
-        _directory = directory;
         _sources = sources;
         _optimise = optimise;
         _mode = mode;
-        _stateDirectory = projectStateDirectory(directory);
-        _imageDirectory = buildPath(_stateDirectory, "images");
+        _imageDirectory = buildPath(projectStateDirectory(directory), "images");
     }
 
     private const(DependencyImage)* run(scope Program delegate() program) {
@@ -116,7 +112,7 @@ private struct Preparation {
         const prepared = cache.prepare(*image,
             () => analysis.source,
             (scope string delegate() source) {
-                buildDependencies;
+                _sources.dependencies.build;
                 const generated = source();
                 DependencyImage built;
                 if (generated.length || _sources.linkerFiles.length)
@@ -129,7 +125,6 @@ private struct Preparation {
     }
 
     private string settings() const {
-        import snakebite.dubcache: toJson;
         import std.conv: text;
         import std.json: JSONValue;
         import std.process: environment;
@@ -138,19 +133,10 @@ private struct Preparation {
         return text(_sources.flags, _sources.importPaths,
             _sources.stringImportPaths, _sources.linkerFlags,
             _sources.linkerFiles, JSONValue(_sources.sourceOverrides),
-            toJson(_sources.dubDescription).toString, environment.get("DFLAGS", ""),
+            _sources.dependencies.identity, environment.get("DFLAGS", ""),
             environment.get("LFLAGS", ""), "\noptimise:", _optimise,
             "\nprojectEntry:", projectEntry,
             projectEntry ? DependencyImage.entryStartupSettings : "");
-    }
-
-    private void buildDependencies() const {
-        import snakebite.dub: buildDubDependencies;
-        import snakebite.project: isDubProject;
-
-        if (_sources.linkerFiles.length && isDubProject(_directory))
-            buildDubDependencies(_directory, _stateDirectory,
-                _sources.dubDescription, _sources.linkerFiles);
     }
 
     private DependencyImage buildImage(in string source,
@@ -166,11 +152,7 @@ private struct Preparation {
     }
 
     private string[] watchedInputs(in string[] analysisInputs) const {
-        import snakebite.dub: dubInputs;
-        import snakebite.project: isDubProject;
-
         return analysisInputs ~ _sources.linkerFiles
-            ~ (isDubProject(_directory)
-                ? dubInputs(_directory, _sources.dubDescription) : null);
+            ~ _sources.dependencies.inputs;
     }
 }

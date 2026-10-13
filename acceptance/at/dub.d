@@ -150,8 +150,7 @@ unittest {
 // a pre-build command of the dependency prints the search path that it gets.
 @("buildDubDependencies.keepsTheSearchPathOfTheProcess")
 unittest {
-    import snakebite.dub: buildDubDependencies;
-    import snakebite.project: dubSourceSetFromDescription, projectStateDirectory;
+    import snakebite.dub: dubSources;
     import std.file: readText;
     import std.process: environment;
     import std.string: strip;
@@ -170,9 +169,8 @@ unittest {
     sandbox.writeFile("app/source/app.d", "module app;\n");
     const directory = sandbox.inSandboxPath("app");
 
-    auto description = dubDescribeProject(directory);
-    buildDubDependencies(directory, projectStateDirectory(directory), description,
-        dubSourceSetFromDescription(directory, description).linkerFiles);
+    const sources = dubSources(directory);
+    sources.dependencies.build;
 
     readText(searchPath).strip.should == environment["PATH"];
 }

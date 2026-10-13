@@ -8,10 +8,10 @@ import snakebite.backends: BackendName, backendIdentity;
 import snakebite.backends.backend: Program;
 import snakebite.dependencyimage: TestHooks;
 import snakebite.execution: prepareProject, executeBackend, runProject;
-import snakebite.dub: DubDescription;
+import snakebite.dub: DubDescription, dubSources;
 import snakebite.dubcache: projectDescriptionFromJson;
 import snakebite.project:
-    dubSourceSetFromDescription, EndsProcess, ProjectDirectory,
+    EndsProcess, ProjectDirectory,
     projectStateDirectory;
 import std.algorithm.searching: endsWith;
 import std.digest.sha: sha256Of;
@@ -66,7 +66,7 @@ unittest {
         ]
     }`)));
 
-    const sources = dubSourceSetFromDescription(directory, description);
+    const sources = dubSources(directory, description);
 
     sources.files.length.should == 1;
     sources.files[0].endsWith("tests/main.d").should == true;
@@ -100,7 +100,7 @@ unittest {
         ]
     }`)));
 
-    const sources = dubSourceSetFromDescription(directory, description);
+    const sources = dubSources(directory, description);
 
     sources.flags.compilerArguments.should == [
         "-release", "-noboundscheck", "-betterC",
@@ -134,7 +134,7 @@ unittest {
         ]
     }`)));
 
-    const sources = dubSourceSetFromDescription(directory, description);
+    const sources = dubSources(directory, description);
 
     sources.importPaths.length.should == 1;
 }
@@ -164,7 +164,7 @@ unittest {
         }]
     }`)));
 
-    const sources = dubSourceSetFromDescription(directory, description);
+    const sources = dubSources(directory, description);
 
     sources.flags.compilerArguments.should == ["-release"];
 }
@@ -204,7 +204,7 @@ unittest {
         }]
     }`)));
 
-    dubSourceSetFromDescription(directory, description)
+    dubSources(directory, description)
         .workingDirectory.should == "/data";
 }
 

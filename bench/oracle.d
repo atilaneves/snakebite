@@ -47,6 +47,7 @@ BackendReport oracleReport(
 ) {
     import bench.report: timingStatistics;
     import snakebite.project: isDubProject;
+    import snakebite.dub: DubTestProduct, dubTestProduct;
     import std.conv: text;
     import std.datetime.stopwatch: AutoStart, StopWatch;
     import std.file: exists, remove, tempDir;
@@ -71,7 +72,8 @@ BackendReport oracleReport(
         if (tmpBinary.exists)
             tmpBinary.remove;
 
-    const binary = dub ? dubTestBinary(directory) : TestBinary(tmpBinary, directory);
+    const binary = dub
+        ? dubTestProduct(directory) : DubTestProduct(tmpBinary, directory);
     if (dub)
         throwawayDubTestBuild(directory);
 
@@ -210,29 +212,6 @@ private void dmdParseOnly(in SourceSet sources) {
 // rebuild the project, as a real edit would.
 private void throwawayDubTestBuild(in string directory) {
     run(["dub", "test", "--compiler=dmd"], directory);
-}
-
-private struct TestBinary {
-    string path;
-    string workingDirectory;
-}
-
-// Where `dub test` leaves the test binary and where it runs it, so the run
-// alone can be timed the way dub does it.
-private TestBinary dubTestBinary(in string directory) {
-    import snakebite.dub: dubDescribeProject, rootBuildSettings;
-    import std.path: buildPath;
-
-    const settings = dubDescribeProject(directory).project.rootBuildSettings;
-    if (settings.targetPath.length == 0 || settings.targetName.length == 0)
-        throw new Exception(
-            "dub describe did not say where the test binary of "
-            ~ directory ~ " is",
-        );
-    return TestBinary(
-        buildPath(settings.targetPath, settings.targetName),
-        settings.workingDirectory,
-    );
 }
 
 // The bare-directory build: no dub, so a straight `-unittest -main` build

@@ -1,7 +1,7 @@
 module ut.dub;
 
 
-import snakebite.dub: DubDescription, dependencyFingerprint;
+import snakebite.dub: DubDescription, dependencyFingerprint, dubSources;
 import snakebite.dubcache: cachedDubDescription, projectDescriptionFromJson;
 import snakebite.dependencyimage: defaultCompiler, generatorKey;
 import snakebite.project: projectStateDirectory;
@@ -235,4 +235,44 @@ unittest {
     project.rootPackage.should == "app";
     project.packages.length.should == 0;
     project.targets.length.should == 0;
+}
+
+
+// A target-path copy can belong to another compiler. Only the artifact of
+// this description is safe to link, and root sources stay guest-owned.
+@("sources.usesCompilerSpecificArchiveAndDependencyInputs")
+unittest {
+    const directory = "/projects/root";
+    // DUB records have mutable lookup tables.
+    auto description = DubDescription(projectDescriptionFromJson(parseJSON(`{
+        "rootPackage": "root",
+        "configuration": "unittest",
+        "buildType": "unittest",
+        "packages": [
+            {"name": "root", "path": "/projects/root", "active": true,
+             "files": [{"role": "source", "path": "source/root.d"}]},
+            {"name": "dep", "path": "/packages/dep", "active": true,
+             "files": [{"role": "source", "path": "source/dep.d"}]},
+            {"name": "unused", "path": "/packages/unused", "active": false,
+             "files": [{"role": "source", "path": "source/unused.d"}]}
+        ],
+        "targets": [
+            {"rootPackage": "root", "buildSettings": {
+                "sourceFiles": ["/projects/root/source/root.d",
+                    "/packages/dep/libdep.a", "/projects/root/extra.o"],
+                "linkerFiles": ["/packages/dep/libdep.a"]}},
+            {"rootPackage": "dep", "cacheArtifactPath": "/cache/ldc/libdep.a",
+             "buildSettings": {"targetPath": "."}}
+        ]
+    }`)));
+
+    const sources = dubSources(directory, description);
+    sources.files.should == ["/projects/root/source/root.d"];
+    sources.linkerFiles.should == ["/cache/ldc/libdep.a", "/cache/ldc/libdep.a",
+        "/projects/root/extra.o"];
+    const inputs = sources.dependencies.inputs;
+    "/packages/dep/source/dep.d".should.be in inputs;
+    "/projects/root/source/root.d".should.not.be in inputs;
+    "/packages/unused/source/unused.d".should.not.be in inputs;
+    sources.dependencies.identity.length.should.not == 0;
 }

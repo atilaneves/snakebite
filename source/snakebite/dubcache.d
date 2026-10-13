@@ -69,7 +69,7 @@ public imported!"snakebite.dub".DubDescription cachedDubDescription(
     import std.uuid: randomUUID;
     import std.conv: text;
     import snakebite.dependencyimage: generatorKey;
-    import snakebite.project: projectStateDirectory;
+    import snakebite.projectstate: projectStateDirectory;
 
     if (mode == "off")
         return describe();
@@ -214,7 +214,7 @@ private imported!"std.json".JSONValue collectWatches(
     import std.string: split;
     import std.algorithm: canFind;
     import snakebite.dub: dubHomeDirectory;
-    import snakebite.project: projectStateDirectory;
+    import snakebite.projectstate: projectStateDirectory;
 
     string[string] watched;
     foreach (package_; description.packages)

@@ -16,9 +16,70 @@ public struct DubDescription {
 }
 
 
+// Guest source facts and dependency preparation share one DUB description.
+// Callers do not need its package records, target records, or cache format.
+public struct DubDependencies {
+    private string _directory;
+    private DubDescription _description;
+    private string[] _linkerFiles;
+
+    private this(in string directory, DubDescription description,
+        string[] linkerFiles,
+    ) {
+        _directory = directory;
+        _description = description;
+        _linkerFiles = linkerFiles;
+    }
+
+    public string identity() const {
+        import snakebite.dubcache: toJson;
+
+        return _directory.length ? toJson(_description).toString : null;
+    }
+
+    public void build() const {
+        import snakebite.projectstate: projectStateDirectory;
+
+        if (_directory.length && _linkerFiles.length)
+            buildDubDependencies(_directory, projectStateDirectory(_directory),
+                _description, _linkerFiles);
+    }
+
+    public string[] inputs() const {
+        return _directory.length ? dubInputs(_directory, _description) : null;
+    }
+}
+
+
+public imported!"snakebite.sources".SourceSet dubSources(
+    in string directory, in string[] versions = null,
+) {
+    return dubSources(directory, dubDescribeProject(directory, versions));
+}
+
+
+public struct DubTestProduct {
+    public string path;
+    public string workingDirectory;
+}
+
+
+public DubTestProduct dubTestProduct(in string directory) {
+    import std.path: buildPath;
+
+    const settings = dubDescribeProject(directory).project.rootBuildSettings;
+    if (settings.targetPath.length == 0 || settings.targetName.length == 0)
+        throw new Exception(
+            "dub describe did not say where the test binary of "
+            ~ directory ~ " is");
+    return DubTestProduct(buildPath(settings.targetPath, settings.targetName),
+        settings.workingDirectory);
+}
+
+
 // The build settings of the root package, which dub merges from the
 // dependencies that the root package is built with.
-public imported!"dub.compilers.buildsettings".BuildSettings rootBuildSettings(
+private imported!"dub.compilers.buildsettings".BuildSettings rootBuildSettings(
     in imported!"dub.description".ProjectDescription project,
 ) {
     return project.lookupTarget(project.rootPackage).buildSettings.dup;
@@ -255,7 +316,7 @@ public void buildDubDependencies(
 // written when the build knows the description.
 private string compilerBinary(in string directory, in string[] versions) {
     import snakebite.dependencyimage: defaultCompiler;
-    import snakebite.project: projectStateDirectory;
+    import snakebite.projectstate: projectStateDirectory;
     import std.digest.sha: sha256Of;
     import std.digest: toHexString;
     import std.path: absolutePath, buildPath;
@@ -431,4 +492,160 @@ private string fileFingerprint(in string[] files) {
         result ~= text(file.length, ":", file, ":",
             file.exists && file.isFile ? read(file).sha256Of.toHexString.idup : "missing");
     return result.sha256Of.toHexString.idup;
+}
+
+
+public imported!"snakebite.sources".SourceSet dubSources(
+    in string directory,
+    imported!"snakebite.dub".DubDescription description,
+) {
+    import snakebite.frontend.compiler: FrontendFlags;
+    import std.algorithm.iteration: filter, map;
+    import std.array: array;
+    import std.conv: text;
+    import dub.compilers.buildsettings: BuildOption, BuildSettings;
+    import dub.description: SourceFileRole;
+    import snakebite.sources: SourceSet;
+    import std.path: buildNormalizedPath, buildPath;
+    import std.traits: EnumMembers;
+
+    const project = description.project;
+    const packageSettings = project.rootPackage in project.targetLookup;
+    BuildSettings settings;
+    string[] options;
+    if (packageSettings) {
+        settings = project.rootBuildSettings;
+        static foreach (option; EnumMembers!BuildOption)
+            static if (option != BuildOption.none)
+                if (settings.options.values & option)
+                    options ~= text(option);
+    } else {
+        foreach (package_; project.packages)
+            if (package_.name == project.rootPackage
+                    && package_.configuration == project.configuration) {
+                settings.dflags = package_.dflags.dup;
+                settings.lflags = package_.lflags.dup;
+                settings.libs = package_.libs.dup;
+                settings.versions = package_.versions.dup;
+                settings.debugVersions = package_.debugVersions.dup;
+                options = package_.options.map!(option => text(option)).array;
+            }
+    }
+
+    // Without a target, the files and paths of the active packages are all
+    // that dub describes.
+    string[] sourceFiles = settings.sourceFiles.dup;
+    string[] importPaths = settings.importPaths.dup;
+    string[] stringImportPaths = settings.stringImportPaths.dup;
+    if (!packageSettings)
+        foreach (package_; project.packages) {
+            if (!package_.active)
+                continue;
+            importPaths ~= package_.importPaths.map!(path => buildPath(package_.path, path)).array;
+            stringImportPaths ~= package_.stringImportPaths
+                .map!(path => buildPath(package_.path, path)).array;
+            if (package_.name != project.rootPackage)
+                continue;
+            foreach (file; package_.files)
+                if (file.role == SourceFileRole.source)
+                    sourceFiles ~= buildPath(package_.path, file.path);
+        }
+    import std.algorithm: endsWith;
+    const isLinkerFile = (string path) => path.endsWith(".a", ".o", ".so");
+    const files = sourceFiles.filter!(path => !isLinkerFile(path)).array;
+    // dub names each dependency by the copy it leaves in the package's
+    // target path, and whichever compiler built that package last owns the
+    // copy (issue #401). The artifact in dub's build cache is keyed by
+    // compiler and build settings, so that is what the image links.
+    const artifacts = cacheArtifacts(project);
+    const linkerFiles = (settings.linkerFiles ~ sourceFiles.filter!(isLinkerFile).array)
+        .map!(file => artifacts.get(file.buildNormalizedPath, file))
+        .array;
+
+    if (files.length == 0)
+        throw new Exception(text("dub describe found no sources in ", directory));
+
+    string[] compilerArguments = settings.dflags.dup;
+    compilerArguments ~= settings.versions
+        .map!(version_ => "-version=" ~ version_)
+        .array;
+    compilerArguments ~= settings.debugVersions
+        .map!(debugVersion => "-debug=" ~ debugVersion)
+        .array;
+    compilerArguments ~= options
+        .map!(dmdFlagsForOption)
+        .filter!(flag => flag.length > 0)
+        .array;
+
+    import snakebite.frontend.checks: expandedCompilerArguments;
+
+    auto sources = SourceSet(
+        files.dup,
+        importPaths.dup,
+        stringImportPaths.dup,
+        settings.lflags.map!(flag => "-L" ~ flag).array
+            ~ settings.libs.map!(library => "-L-l" ~ library).array,
+        FrontendFlags(expandedCompilerArguments(compilerArguments)),
+        null,
+        linkerFiles.dup,
+        DubDependencies(directory, description, linkerFiles.dup),
+    );
+    // dub describe makes the directory absolute and leaves it empty when
+    // the recipe names none.
+    sources.workingDirectory = settings.workingDirectory;
+    return sources;
+}
+
+
+// Each target's build-cache artifact, keyed by the path of the copy dub
+// makes of it in the package's target path.
+private string[string] cacheArtifacts(
+    in imported!"dub.description".ProjectDescription project,
+) {
+    import std.path: baseName, buildNormalizedPath;
+
+    string[string] packagePaths;
+    foreach (package_; project.packages)
+        packagePaths[package_.name] = package_.path;
+    string[string] artifacts;
+    foreach (target; project.targets) {
+        const copy = buildNormalizedPath(
+            packagePaths[target.rootPackage],
+            target.buildSettings.targetPath, target.cacheArtifactPath.baseName);
+        artifacts[copy] = target.cacheArtifactPath;
+    }
+    return artifacts;
+}
+
+
+private string dmdFlagsForOption(in string option) {
+    switch (option) {
+        case "debugMode": return "-debug";
+        case "releaseMode": return "-release";
+        case "coverage": return "-cov";
+        case "coverageCTFE": return "-cov=ctfe";
+        case "debugInfo": return "-g";
+        case "debugInfoC": return "-g";
+        case "alwaysStackFrame": return "-gs";
+        case "stackStomping": return "-gx";
+        case "inline": return "-inline";
+        case "noBoundsCheck": return "-noboundscheck";
+        case "optimize": return "-O";
+        case "profile": return "-profile";
+        case "unittests": return "-unittest";
+        case "verbose": return "-v";
+        case "ignoreUnknownPragmas": return "-ignore";
+        case "syntaxOnly": return "-o-";
+        case "warnings": return "-wi";
+        case "warningsAsErrors": return "-w";
+        case "ignoreDeprecations": return "-d";
+        case "deprecationWarnings": return "-dw";
+        case "deprecationErrors": return "-de";
+        case "property": return "-property";
+        case "profileGC": return "-profile=gc";
+        case "betterC": return "-betterC";
+        case "lowmem": return "-lowmem";
+        case "color": return "-color";
+        default: return null;
+    }
 }
