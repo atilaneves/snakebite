@@ -121,7 +121,8 @@ public PreparationReport prepareSources(
         = imported!"snakebite.dependencyimage".Optimise.yes,
 ) {
     import snakebite.frontend.compiler: Snippets, initialize;
-    import snakebite.project: loadProject, prepareDependencies;
+    import snakebite.project: loadProject;
+    import snakebite.dependencypreparation: prepareDependencies;
     import std.datetime.stopwatch: AutoStart, StopWatch;
 
     auto stopWatch = StopWatch(AutoStart.yes);

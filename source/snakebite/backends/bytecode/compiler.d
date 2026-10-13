@@ -57,14 +57,15 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import snakebite.sharedtable: SharedTable;
     import snakebite.exception: SnakebiteException;
     import snakebite.framestack: defaultFrameCapacity;
-    import snakebite.hostthreads: heapNew, PerThread;
+    import snakebite.hostthreads: heapNew;
+    import snakebite.executionstates: ExecutionStates;
     import snakebite.nativelayout: NativeData, nativeSymbolName;
     import snakebite.backends.runtimetypes: RuntimeTypes;
 
     // Each native stack needs its own guest frame stack. Fibers can resume
     // out of nesting order, so they cannot share one LIFO stack.
     // Entries are owned and released by their host thread (ADR-0006).
-    private PerThread!(Vm*, true) _vms;
+    private ExecutionStates!(Vm*) _vms;
     private NativeData _nativeData;
     private PlanCache _plans;
     private CallSelection _callSelection;
@@ -120,16 +121,15 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             (name) => _plans.resolve(name), &callableAddress,
             &classRuntimeInfo,
             (type, loc) => _nativeData.initialValue(type, loc));
-        _vms = PerThread!(Vm*, true)(() {
+        _vms = ExecutionStates!(Vm*)(() {
             return heapNew!Vm(defaultFrameCapacity, _nativeData.tlsSlots);
-        });
+        }, () => _nativeData.release);
         _plans.useCallbacks(
             new CallbackBridge(&invokeCallback, cast(void*) this));
     }
 
     protected override void release() {
-        _vms.release;
-        _nativeData.release;
+        _vms.end;
     }
 
     private void* constantSymbolAddress(
@@ -150,6 +150,11 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             &isGuestFunction, hasNativeSymbol(function_),
             hasIndependentNativeSymbol(function_), &call,
             (callee, place, args) => _plans.of(callee).call(place, args));
+    }
+
+    version(unittest)
+    public size_t executionStatesOfThisThread() {
+        return _vms.count;
     }
 
     public override CompilationStatistics compilationStatistics() const {
@@ -246,7 +251,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                 layout.variadicTypes, &variadicTypes, size_t.sizeof);
         }
 
-        _vms.current.call(*compiled, returnPlace, arguments[0 .. filled]);
+        auto active = _vms.enter;
+        active.state.call(*compiled, returnPlace, arguments[0 .. filled]);
     }
 
     // `function_`'s frame layout, read without a lock once built

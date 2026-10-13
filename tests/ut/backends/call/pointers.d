@@ -6,6 +6,7 @@ import snakebite.backends.backend: Program;
 import snakebite.ffi.sysv: callbackEntriesPerChunk;
 import snakebite.frontend.compiler: parseSnippets;
 import snakebite.frontend.dmd.functions: findFunction;
+import ut.threadsync: beginExplicitCollect, endExplicitCollect;
 
 
 static foreach (backend; Matrix!()) {
@@ -75,7 +76,11 @@ public extern(C) bool snakebite_ut_collect_then_call_bool_callback(
 ) {
     import core.memory: GC;
 
-    GC.collect;
+    {
+        beginExplicitCollect;
+        scope(exit) endExplicitCollect;
+        GC.collect;
+    }
     return callback();
 }
 

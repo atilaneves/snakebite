@@ -44,19 +44,37 @@ is not how compiled D behaves.
 ## Consequences
 
 `synchronized` is not used, per project rule. Locks use `core.sync`
-primitives, and only on slow paths. Each backend must release a
-thread's state when the thread ends. The owner of a backend also
-releases the state that it made on its own thread when the owner ends.
-A guest finalizer that enters a backend after that makes a new state, which
-stays until its thread ends. In a full `bin/ut` run about 14 states stay this
-way. Nothing limits them in `sb-repl`: after 3000 cells that each leave an
-object with a guest destructor, 967 frame stacks stay with the bytecode backend
-(409 MiB resident, against 262 MiB without the destructor) and 2550 with the
-interpreter (1435 MiB, against 257 MiB). The numbers are from one run each. A
-rule that releases such a state needs a flag that the owner ended and a count of
-entries on the thread, so it is a design change of its own. Guest thread-local
-variables are not released with the owner, because live guest objects can point
-into them. The owner releases only the table of a thread that holds no variable.
+primitives, and only on slow paths. `PerThread` owns the thread-local table,
+Fiber keys, thread registration, and state destruction. `ExecutionStates`
+owns the lifetime of execution entries for both backends.
+
+An entry guard keeps its execution state active until the guest call returns
+or unwinds. Nested entries on one stack share that state. A suspended Fiber
+keeps its guard and its own state while another Fiber runs. When the owner
+ends, an atomic flag marks the execution states as ended. The owner releases
+idle entries on its thread. Active entries stay until their last guard ends;
+that thread then releases its idle entries. Later guest finalizers can still
+enter the reachable backend, but their completed entries no longer stay until
+the thread ends. The ordinary path takes no lock. Guards allocate no memory,
+and finalizer state still comes from the scanned C heap.
+
+Guest thread-local variables have a separate lifetime. Live guest objects can
+point into their storage after the owner ends. The execution-state module
+calls the backend's idle cleanup only when no execution entry remains on the
+calling thread. That cleanup releases an empty guest TLS table, including one
+that a late finalizer made, but retains a table with variables. This also
+keeps an empty table valid while an active VM or evaluator holds its address.
+
+The original change, commit `332c8d3e`, released state when the owner ended
+but kept state made by later finalizers until the thread ended. Historical
+measurements after 3000 REPL cells that each left an object with a guest
+destructor found 967 bytecode frame stacks (409 MiB resident, against 262 MiB
+without the destructor) and 2550 interpreter states (1435 MiB, against
+257 MiB). These were one run each, before the entry lifetime protocol. They
+identify retained execution state as a reducible cost; they are not a current
+benchmark of this decision. Backend reachability, late finalizers, guest TLS
+pointers, nested entries, Fiber isolation, prepared callback facts, GC root
+scanning, and native layout remain required.
 
 Automatic attach inherits druntime's own attach race (issue #40
 review, finding 3): `thread_attachThis` allocates a `Thread` object

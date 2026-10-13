@@ -2,6 +2,7 @@ module ut.backends.run.nativestack;
 
 
 import ut.backends;
+import ut.threadsync: beginExplicitCollect, endExplicitCollect;
 import core.memory: GC;
 import core.thread: Fiber, Thread;
 import snakebite.backends.backend: Program;
@@ -21,6 +22,9 @@ static foreach (backend; Matrix!(
     @("nativeStack.deepFiberRecursionSurvivesGcAndYield." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
+        beginExplicitCollect;
+        scope(exit) endExplicitCollect;
+
         0.shouldBeStatusOf!(backend, q{
             import core.memory: GC;
             import core.thread.fiber: Fiber;
@@ -272,16 +276,21 @@ static foreach (backend; Matrix!(
         ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
+        beginExplicitCollect;
+        scope(exit) endExplicitCollect;
+
         0.shouldBeStatusOf!(backend, q{
             import core.memory: GC;
+            import core.atomic: atomicLoad, atomicOp;
 
             class Dying {
                 ~this() {
-                    ++destroyed;
+                    atomicOp!"+="(destroyed, 1);
                 }
             }
 
-            int destroyed;
+            // A concurrent collection can run these finalizers on another thread.
+            shared int destroyed;
 
             void garbage() {
                 foreach (_; 0 .. 1_000)
@@ -299,7 +308,7 @@ static foreach (backend; Matrix!(
 
             void main() {
                 assert(walk(10_000) == 10_000);
-                assert(destroyed > 0);
+                assert(atomicLoad(destroyed) > 0);
             }
         });
     }
@@ -316,17 +325,22 @@ static foreach (backend; Matrix!(
     @("nativeStack.destructorRunByCollectionInAFiber." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
+        beginExplicitCollect;
+        scope(exit) endExplicitCollect;
+
         0.shouldBeStatusOf!(backend, q{
             import core.memory: GC;
+            import core.atomic: atomicLoad, atomicOp;
             import core.thread.fiber: Fiber;
 
             class Dying {
                 ~this() {
-                    ++destroyed;
+                    atomicOp!"+="(destroyed, 1);
                 }
             }
 
-            int destroyed;
+            // A concurrent collection can run these finalizers on another thread.
+            shared int destroyed;
 
             void garbage() {
                 foreach (_; 0 .. 1_000)
@@ -339,7 +353,7 @@ static foreach (backend; Matrix!(
                     GC.collect;
                 });
                 fiber.call;
-                assert(destroyed > 0);
+                assert(atomicLoad(destroyed) > 0);
             }
         });
     }
@@ -358,6 +372,9 @@ static foreach (backend; Matrix!(
         ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
+        beginExplicitCollect;
+        scope(exit) endExplicitCollect;
+
         auto guestModule = parseSnippet(q{
             void forceCollection() {
                 import core.memory: GC;
@@ -401,6 +418,9 @@ static foreach (backend; Matrix!(
     @("nativeStack.firstGuestDestructorOnHostFiber." ~ backend.stringof)
     @Tags(backend.stringof, "forced-finalizers")
     unittest {
+        beginExplicitCollect;
+        scope(exit) endExplicitCollect;
+
         enum code = q{
             static shared int destroyed;
 

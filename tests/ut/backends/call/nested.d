@@ -2,6 +2,7 @@ module ut.backends.call.nested;
 
 
 import ut.backends;
+import ut.threadsync: beginExplicitCollect, endExplicitCollect;
 
 
 static foreach (backend; Matrix!()) {
@@ -29,6 +30,9 @@ static foreach (backend; Matrix!(
     @("nested.closure.retainsCapturedObjectDuringCollection." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
+        beginExplicitCollect;
+        scope(exit) endExplicitCollect;
+
         0.shouldBeStatusOf!(backend, q{
             import core.memory: GC;
             class Box {

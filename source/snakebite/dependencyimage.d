@@ -541,14 +541,17 @@ public struct ProjectImageCache {
         _compiler = compilerPath(compiler);
     }
 
-    // Whether the project has an image, which is then in `image`.
+    public struct Prepared {
+        public DependencyImage image;
+        public string[] inputs;
+    }
+
+    // Source is requested only to check a changed root or prepare a cold
+    // record. Cold preparation owns its build order and returns host data.
     public bool prepare(
         ref DependencyImage image,
         scope string delegate() source,
-        scope void delegate() buildDependencies,
-        scope DependencyImage delegate(in string) buildImage,
-        in bool hasLinkerFiles,
-        scope string[] delegate() inputs,
+        scope Prepared delegate(scope string delegate()) coldPreparation,
     ) {
         string generated;
         bool generatedOnce;
@@ -566,16 +569,11 @@ public struct ProjectImageCache {
             return recorded.get.length != 0;
         }
 
-        buildDependencies();
-        const generatedSource = generateSource();
-        string path;
-        if (generatedSource.length || hasLinkerFiles) {
-            image = buildImage(generatedSource.length
-                ? generatedSource : "module snakebite_dependency_image;\n");
-            path = image.path;
-        }
-        save(path, generatedSource, inputs());
-        return path.length != 0;
+        // The image contains mutable loader addresses.
+        auto prepared = coldPreparation(&generateSource);
+        image = prepared.image;
+        save(image.path, generateSource(), prepared.inputs);
+        return image.path.length != 0;
     }
 
     // The recorded image's path while the record holds for the current

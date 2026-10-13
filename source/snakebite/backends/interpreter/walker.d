@@ -20,7 +20,8 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     import dmd.func: FuncDeclaration;
     import snakebite.backends.backend: Program;
     import snakebite.ffi: CallbackBridge, CallbackCall;
-    import snakebite.hostthreads: heapNew, PerThread;
+    import snakebite.hostthreads: heapNew;
+    import snakebite.executionstates: ExecutionStates;
 
     // What every thread that runs this program shares: the caches that
     // are filled once per key, and the plan cache with its callback
@@ -29,8 +30,8 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     // Each native stack needs independent execution state: a suspended Fiber
     // must not leave its active frame or expression state in another Fiber.
     // Entries are owned and released by their host thread (ADR-0006).
-    private PerThread!(Evaluator!false, true) _evaluators;
-    private PerThread!(Evaluator!true, true) _checkedEvaluators;
+    private ExecutionStates!(Evaluator!false) _evaluators;
+    private ExecutionStates!(Evaluator!true) _checkedEvaluators;
     // `-check=nullderef` is the one flag that the evaluator reads at its
     // dereference sites; the checked evaluator is a separate type so that
     // an unchecked one runs no code for it.
@@ -49,19 +50,22 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
 
         _checksNullDeref = nullDerefPlanOf(program.checks).kind
             != FailurePlan.Kind.ignore;
-        _evaluators = PerThread!(Evaluator!false, true)(
-            () => heapNew!(Evaluator!false)(_shared));
-        _checkedEvaluators = PerThread!(Evaluator!true, true)(
-            () => heapNew!(Evaluator!true)(_shared));
+        _evaluators = ExecutionStates!(Evaluator!false)(
+            () => heapNew!(Evaluator!false)(_shared),
+            () => _shared.nativeData.release);
+        _checkedEvaluators = ExecutionStates!(Evaluator!true)(
+            () => heapNew!(Evaluator!true)(_shared),
+            () => _shared.nativeData.release);
         _shared.prepare = (function_) {
             prepareOnEvaluator(function_);
         };
     }
 
     protected override void release() {
-        _checkedEvaluators.release;
-        _evaluators.release;
-        _shared.nativeData.release;
+        if (_checksNullDeref)
+            _checkedEvaluators.end;
+        else
+            _evaluators.end;
     }
 
     public override void call(
@@ -120,6 +124,11 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         return result;
     }
 
+    version(unittest)
+    public size_t executionStatesOfThisThread() {
+        return _evaluators.count + _checkedEvaluators.count;
+    }
+
     // These read the calling thread's own evaluator: correct for a
     // `version(unittest)` caller, which reads its own counters on the
     // same thread that made the calls being counted.
@@ -154,12 +163,15 @@ import snakebite.exception: SnakebiteException;
 import snakebite.faulthandler: GuestPosition, GuestRun, register, unregister;
 
 // Runs `action` on the evaluator of the calling thread: made on its first
-// entry, and kept until it ends. A free function, because a member that
-// takes a closure as an alias parameter needs two contexts.
+// entry, and guarded until the call returns. A free function, because a
+// member that takes a closure as an alias parameter needs two contexts.
 private auto onEvaluator(alias action)(Interpreter interpreter) {
-    if (interpreter._checksNullDeref)
-        return action(interpreter._checkedEvaluators.current);
-    return action(interpreter._evaluators.current);
+    if (interpreter._checksNullDeref) {
+        auto active = interpreter._checkedEvaluators.enter;
+        return action(active.state);
+    }
+    auto active = interpreter._evaluators.enter;
+    return action(active.state);
 }
 
 // A guest throw must remain distinguishable from a refusal to interpret a

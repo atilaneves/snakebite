@@ -29,7 +29,7 @@ public int run(string[] args) {
     import snakebite.dub: fetchProject;
     import snakebite.execution: runProject;
     import snakebite.project: EndsProcess;
-    import snakebite.project: prepareStartupDependencies;
+    import snakebite.dependencypreparation: prepareStartupDependencies;
     import snakebite.gc: selectFrontendMemory;
     import snakebite.repl: Repl;
     import std.algorithm.iteration: map;

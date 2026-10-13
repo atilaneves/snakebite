@@ -182,8 +182,9 @@ public struct PerThread(State, bool fiberLocal = false) {
     // and no other thread's: the owner calls it when it ends. Without it
     // the states, and the frame stacks they hold, stay until the thread
     // ends. A later entry on this thread makes a new state. A state stays,
-    // until the thread ends, when `releasable` says no.
-    public void release(bool function(State) releasable = null) {
+    // until the thread ends, when `releasable` says no. Returns true when
+    // no state of this owner remains on the calling thread.
+    public bool release(bool function(State) releasable = null) {
         import core.lifetime: move;
 
         CStack!(Held, true) all;
@@ -201,6 +202,19 @@ public struct PerThread(State, bool fiberLocal = false) {
         _cachedState = State.init;
         foreach (state; doomed[])
             heapDelete(state);
+        foreach (held; _held[])
+            if (held.key.owner == _core.id)
+                return false;
+        return true;
+    }
+
+    version(unittest)
+    public size_t count() {
+        size_t count;
+        foreach (held; _held[])
+            if (held.key.owner == _core.id)
+                ++count;
+        return count;
     }
 
     private static void releaseThisThread() {
@@ -208,8 +222,6 @@ public struct PerThread(State, bool fiberLocal = false) {
 
         CStack!(Held, true) released;
         move(_held, released);
-        foreach (held; released[])
-            heapDelete(held.state);
         // Drop the cache along with the table: a state it still points
         // to is about to be destroyed, and a later entry on the same
         // thread must go through `enter` again to notice.
@@ -221,6 +233,8 @@ public struct PerThread(State, bool fiberLocal = false) {
         // other destructors that then call guest code - would make a
         // state nothing ever releases (finding 10).
         _hooked = false;
+        foreach (held; released[])
+            heapDelete(held.state);
     }
 }
 
