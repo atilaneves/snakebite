@@ -24,4 +24,3 @@ public struct SourceSet {
     // `sourceFiles`, and dub does not compile one that it does not name.
     public bool importedCFilesAreRoots;
 }
-

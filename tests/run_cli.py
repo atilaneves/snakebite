@@ -3422,6 +3422,15 @@ NATIVE_AND_BACKENDS = ("native", *BACKENDS)
 NATIVE_AND_FILE_BACKENDS = ("native", *FILE_BACKENDS)
 
 IMAGE_SHAPES: dict[str, ImageShape] = {
+    # The frontend accepts a delegate type as callable. Image compilation
+    # must not call the lambda that this template uses to define a type.
+    "template_yielding_type": snippet_shape("""
+        import std.traits: SetFunctionAttributes;
+        int answer() {
+            return SetFunctionAttributes!(int delegate(), `D`, 0).sizeof
+                == (int delegate()).sizeof;
+        }
+        """, 1, NATIVE_AND_BACKENDS),
     # Two overloads of one template share the name `answer!int`.
     "overloaded_template": ImageShape(
         {

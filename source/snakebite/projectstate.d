@@ -24,5 +24,3 @@ public string projectStateDirectory(in string projectDirectory) {
     return buildPath(_startDirectory, ".snakebite",
         absolute.sha256Of.toHexString.idup);
 }
-
-
