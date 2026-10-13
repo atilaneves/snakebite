@@ -5,7 +5,10 @@ import core.memory: GC;
 import snakebite.backends: Program;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
-import snakebite.hostthreads: heapObjectsOfThisThread;
+import core.thread: Fiber, Thread;
+import core.sync.semaphore: Semaphore;
+import snakebite.executionstates: ExecutionStates;
+import snakebite.hostthreads: heapNew, heapObjectsOfThisThread;
 import ut.backends;
 
 
@@ -25,7 +28,11 @@ static foreach (backend; Matrix!(
         // runs must not write into the frame of a test that ended.
         static __gshared int[2] probe;
         probe = [-1, 0];
-        runResources!(backend, Touches.nothing)(probe);
+        foreach (run; 0 .. 4) {
+            auto instance = runResources!(backend, Touches.nothing)(probe);
+            static if (!is(backend == Native))
+                instance.executionStatesOfThisThread.should == 0;
+        }
         (probe[1] > 0).should == true;
     }
 }
@@ -99,14 +106,15 @@ private final class NativeResourceWithoutLocal {
 // Makes 100 guest objects through a backend that ends before this returns,
 // then collects. Each destructor counts itself in `probe[1]`, and one that
 // touches a thread-local variable stores its value in `probe[0]`.
-private void runResources(Backend, Touches touches)(ref int[2] probe) {
-    makeResources!(Backend, touches)(probe);
+private auto runResources(Backend, Touches touches)(ref int[2] probe) {
+    auto instance = makeResources!(Backend, touches)(probe);
     // Stack garbage must not keep an object alive.
     clobberStack;
     GC.collect;
+    return instance;
 }
 
-private void makeResources(Backend, Touches touches)(ref int[2] probe) {
+private auto makeResources(Backend, Touches touches)(ref int[2] probe) {
     static if (is(Backend == Native)) {
         foreach (i; 0 .. 100) {
             static if (touches == Touches.threadLocal)
@@ -114,6 +122,7 @@ private void makeResources(Backend, Touches touches)(ref int[2] probe) {
             else
                 new NativeResourceWithoutLocal(probe.ptr);
         }
+        return Native.init;
     } else {
         static if (touches == Touches.threadLocal) {
             enum source = q{
@@ -161,6 +170,7 @@ private void makeResources(Backend, Touches touches)(ref int[2] probe) {
         int* pointer = probe.ptr;
         void*[1] arguments = [cast(void*) &pointer];
         instance.call(findFunction(module_, "make"), null, arguments[]);
+        return instance.backend;
     }
 }
 
@@ -190,4 +200,143 @@ static foreach (backend; Matrix!(
                 backend, q{ int answer() { return 1; } }, "answer");
         heapObjectsOfThisThread.should == before;
     }
+}
+
+
+private struct LifetimeProbe {
+    int value;
+    int* destroyed;
+    void delegate() onDestroy;
+
+    @disable this(this);
+
+    this(int* destroyed, void delegate() onDestroy = null) {
+        this.destroyed = destroyed;
+        this.onDestroy = onDestroy;
+    }
+
+    ~this() {
+        ++*destroyed;
+        if (onDestroy !is null)
+            onDestroy();
+    }
+}
+
+@("executionStateOwnerEndPreservesNestedEntries")
+unittest {
+    int destroyed;
+    int cleanups;
+    auto states = ExecutionStates!(LifetimeProbe*)(
+        () => heapNew!LifetimeProbe(&destroyed), () { ++cleanups; });
+    {
+        auto outer = states.enter;
+        outer.state.value = 42;
+        {
+            auto inner = states.enter;
+            states.end;
+            inner.state.value.should == 42;
+            inner.state.value = 43;
+        }
+        destroyed.should == 0;
+        cleanups.should == 0;
+        outer.state.value.should == 43;
+    }
+    destroyed.should == 1;
+    cleanups.should == 1;
+    {
+        auto later = states.enter;
+        later.state.value.should == 0;
+    }
+    destroyed.should == 2;
+    cleanups.should == 2;
+}
+
+@("executionStateOwnerEndPreservesSuspendedFiber")
+unittest {
+    int destroyed;
+    int cleanups;
+    auto states = ExecutionStates!(LifetimeProbe*)(
+        () => heapNew!LifetimeProbe(&destroyed), () { ++cleanups; });
+    auto fiber = new Fiber({
+        auto active = states.enter;
+        active.state.value = 42;
+        Fiber.yield;
+        active.state.value.should == 42;
+    });
+    fiber.call;
+    {
+        auto active = states.enter;
+        active.state.value.should == 0;
+        states.end;
+    }
+    destroyed.should == 1;
+    cleanups.should == 0;
+    fiber.call;
+    destroyed.should == 2;
+    cleanups.should == 1;
+}
+
+@("executionStateOwnerEndIsObservedOnOtherThread")
+unittest {
+    int destroyed;
+    auto states = ExecutionStates!(LifetimeProbe*)(
+        () => heapNew!LifetimeProbe(&destroyed), () {});
+    auto entered = new Semaphore;
+    auto finish = new Semaphore;
+    int destroyedBeforeThreadEnd;
+    auto thread = new Thread({
+        {
+            auto active = states.enter;
+            entered.notify;
+            finish.wait;
+            active.state.value = 42;
+        }
+        destroyedBeforeThreadEnd = destroyed;
+    });
+    thread.start;
+    entered.wait;
+    states.end;
+    finish.notify;
+    thread.join;
+    destroyedBeforeThreadEnd.should == 1;
+}
+
+
+@("executionStateOwnerEndReleasesOnException")
+unittest {
+    int destroyed;
+    int cleanups;
+    auto states = ExecutionStates!(LifetimeProbe*)(
+        () => heapNew!LifetimeProbe(&destroyed), () { ++cleanups; });
+    (() {
+        auto active = states.enter;
+        states.end;
+        cleanups.should == 0;
+        throw new Exception("guest call failed");
+    })().shouldThrowWithMessage("guest call failed");
+    destroyed.should == 1;
+    cleanups.should == 1;
+}
+
+@("executionStateCleanupCanEnterAgain")
+unittest {
+    int destroyed;
+    bool reentered;
+    ExecutionStates!(LifetimeProbe*)* owner;
+    auto states = ExecutionStates!(LifetimeProbe*)(
+        () => heapNew!LifetimeProbe(&destroyed, () {
+            if (reentered)
+                return;
+            reentered = true;
+            auto active = owner.enter;
+            active.state.value.should == 0;
+        }), () {});
+    owner = &states;
+    {
+        auto active = states.enter;
+        active.state.value = 42;
+        states.end;
+    }
+    destroyed.should == 2;
+    states.count.should == 0;
 }

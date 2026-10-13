@@ -219,15 +219,10 @@ public abstract class Backend {
         _program = program;
     }
 
-    // Gives back the execution state, with its frame stacks, that this
-    // backend made for the calling thread. A later call of the backend on
-    // this thread, such as a GC finalizer that runs a guest destructor,
-    // makes a new state, and nothing releases that state before the thread
-    // ends. Nothing limits their number: a REPL session whose cells leave
-    // such objects keeps a state for most of them (ADR-0006 has measured
-    // numbers). Host callback entries stay, and so do the guest
-    // thread-local variables that a program touched: an object that is not
-    // finalized yet can still call through them or point into them.
+    // Ends the owner's execution-state lifetime. Active calls keep their
+    // state until return or unwind. Later callbacks can still enter the
+    // reachable backend, and release their state when they finish. Guest
+    // thread-local storage remains valid for pointers into its variables.
     protected void release() {
     }
 
