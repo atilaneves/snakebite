@@ -195,13 +195,16 @@ compilation is reached through that required preparation. This is not
 proof that the callback traversal itself consumes that share. Disabling
 preparation would break first execution from GC finalizers.
 
-The next lead is repeated native-symbol probing during call selection,
-including mangling and failed resolver lookups. Before changing it, count
-requests and unique declarations/names, then establish the validity period
-of both successful and failed answers. Preserve native-symbol precedence,
+The next lead is the cost of native-symbol probes during call selection,
+including mangling and failed resolver lookups. `PlanCache` already caches
+both successful and failed answers by declaration; `Resolver` caches by
+name. The profile therefore does not prove repeated work for the same key.
+Ordinary and independent-native probes use separate caches. Count cold
+requests, distinct declarations/names and overlap between these paths
+before proposing further reuse. Preserve native-symbol precedence,
 independently linked definitions, builtin selection and dependency-image
-lifetime. This profile supports an investigation, not a measured gain from
-such a change.
+lifetime. This supports an investigation, not a measured gain from another
+cache or from a change to probe selection.
 
 Stack sampling misses inlined or truncated frames. Unknown leaf symbols
 account for 17.56% of the conditional compilation weight. LLVM rejected
