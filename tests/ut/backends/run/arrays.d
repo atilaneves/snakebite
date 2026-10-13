@@ -7,6 +7,7 @@ module ut.backends.run.arrays;
 
 
 import ut.backends;
+import ut.threadsync: beginExplicitCollect, endExplicitCollect;
 
 
 // A materialized CTFE array can escape its function and hold the only
@@ -16,6 +17,9 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
     @("ctfeArrayRetainsRuntimeReferences." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
+        beginExplicitCollect;
+        scope(exit) endExplicitCollect;
+
         0.shouldBeStatusOf!(backend, q{
             import core.memory: GC;
 

@@ -2,6 +2,7 @@ module ut.backends.run.hostfrontend;
 
 
 import ut.backends;
+import ut.threadsync: beginExplicitCollect, endExplicitCollect;
 
 
 // A program for a given compiler may call the intrinsics of that compiler's
@@ -129,6 +130,9 @@ static foreach (backend; Matrix!(
     @("hostFrontend.vaCopyInFinalizer." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
+        beginExplicitCollect;
+        scope(exit) endExplicitCollect;
+
         1.shouldBeRetOf!(backend, q{
             import core.memory: GC;
             import core.stdc.stdarg: va_arg, va_copy, va_end, va_list, va_start;

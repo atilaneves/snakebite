@@ -7,6 +7,7 @@ module ut.backends.run.classes;
 
 
 import ut.backends;
+import ut.threadsync: beginExplicitCollect, endExplicitCollect;
 import snakebite.backends.backend: Program;
 import snakebite.frontend.compiler: parseSnippet, parseSnippets;
 import snakebite.frontend.dmd.functions: findFunction;
@@ -111,6 +112,9 @@ static foreach (backend; Matrix!(
     @("gcFinalizerRunsGuestDestructorAfterMain." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
+        beginExplicitCollect;
+        scope(exit) endExplicitCollect;
+
         import core.memory: GC;
         import std.array: replace;
         import std.conv: text;
@@ -3123,6 +3127,9 @@ static foreach (backend; Matrix!(
     @("gcFinalizerRunsDestructorOnThreadThatRanNoProgramCode." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
+        beginExplicitCollect;
+        scope(exit) endExplicitCollect;
+
         0.shouldBeStatusOf!(backend, q{
             __gshared int dead;
             int threadLocal;
@@ -3158,6 +3165,9 @@ static foreach (backend; Matrix!(
     @("gcFinalizerCallsFunctionPointerAndDelegate." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
+        beginExplicitCollect;
+        scope(exit) endExplicitCollect;
+
         0.shouldBeStatusOf!(backend, q{
             __gshared int dead;
             void bump() { ++dead; }

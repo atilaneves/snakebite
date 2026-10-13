@@ -10,6 +10,7 @@ import core.sync.semaphore: Semaphore;
 import snakebite.executionstates: ExecutionStates;
 import snakebite.hostthreads: heapNew, heapObjectsOfThisThread;
 import ut.backends;
+import ut.threadsync: beginExplicitCollect, endExplicitCollect;
 
 
 // A guest object that a collection finalizes after its backend's owner
@@ -110,6 +111,8 @@ private auto runResources(Backend, Touches touches)(ref int[2] probe) {
     auto instance = makeResources!(Backend, touches)(probe);
     // Stack garbage must not keep an object alive.
     clobberStack;
+    beginExplicitCollect;
+    scope(exit) endExplicitCollect;
     GC.collect;
     return instance;
 }

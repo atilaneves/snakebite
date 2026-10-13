@@ -2,6 +2,7 @@ module ut.backends.run.nativestack;
 
 
 import ut.backends;
+import ut.threadsync: beginExplicitCollect, endExplicitCollect;
 import core.memory: GC;
 import core.thread: Fiber, Thread;
 import snakebite.backends.backend: Program;
@@ -21,6 +22,9 @@ static foreach (backend; Matrix!(
     @("nativeStack.deepFiberRecursionSurvivesGcAndYield." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
+        beginExplicitCollect;
+        scope(exit) endExplicitCollect;
+
         0.shouldBeStatusOf!(backend, q{
             import core.memory: GC;
             import core.thread.fiber: Fiber;
@@ -272,6 +276,9 @@ static foreach (backend; Matrix!(
         ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
+        beginExplicitCollect;
+        scope(exit) endExplicitCollect;
+
         0.shouldBeStatusOf!(backend, q{
             import core.memory: GC;
             import core.atomic: atomicLoad, atomicOp;
@@ -318,6 +325,9 @@ static foreach (backend; Matrix!(
     @("nativeStack.destructorRunByCollectionInAFiber." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
+        beginExplicitCollect;
+        scope(exit) endExplicitCollect;
+
         0.shouldBeStatusOf!(backend, q{
             import core.memory: GC;
             import core.atomic: atomicLoad, atomicOp;
@@ -362,6 +372,9 @@ static foreach (backend; Matrix!(
         ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
+        beginExplicitCollect;
+        scope(exit) endExplicitCollect;
+
         auto guestModule = parseSnippet(q{
             void forceCollection() {
                 import core.memory: GC;
@@ -405,6 +418,9 @@ static foreach (backend; Matrix!(
     @("nativeStack.firstGuestDestructorOnHostFiber." ~ backend.stringof)
     @Tags(backend.stringof, "forced-finalizers")
     unittest {
+        beginExplicitCollect;
+        scope(exit) endExplicitCollect;
+
         enum code = q{
             static shared int destroyed;
 
