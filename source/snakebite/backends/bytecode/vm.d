@@ -177,6 +177,18 @@ public struct CallSite {
     package size_t returnWidth;
     package const(Function)* callee;
     package const(Function)* delegate() prepareGuest;
+
+    // Compiles the callee of a `guest` site on its first call and keeps it
+    // in `callee`: a later call reads the field, not `prepareGuest`. Two
+    // threads that race here store the same pointer.
+    package const(Function)* cacheCallee() const {
+        import core.atomic: atomicStore, MemoryOrder;
+
+        auto compiled = prepareGuest();
+        atomicStore!(MemoryOrder.rel)(
+            *cast(const(Function)**) &callee, compiled);
+        return compiled;
+    }
     package const(void)* nativePlan;
     package const(void)* delegate() prepareNativePlan;
     package BuiltinCall builtinEntry;
@@ -1102,9 +1114,10 @@ public const(Instruction)* opCall(
     import core.stdc.string: memcpy;
 
     const site = &active.callSites[pc.source];
-    const callee = site.callee;
-    if (site.kind != CallSite.Kind.guest || callee is null
-            || callee.closureOffset != size_t.max
+    if (site.kind != CallSite.Kind.guest)
+        return opCallGeneral(pc, active, state);
+    const callee = site.callee !is null ? site.callee : site.cacheCallee();
+    if (callee.closureOffset != size_t.max
             || (site.hasContext && callee.contextOffset == size_t.max))
         return opCallGeneral(pc, active, state);
     const hasPlace = site.returnWidth != 0 && pc.destination != discardResult;
