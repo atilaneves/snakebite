@@ -812,12 +812,8 @@ final class Compiler {
         scope(exit) leaveFrontend;
 
         resetErrors;
-        const savedFlags = saveFrontendFlags;
-        scope(exit) {
-            restoreFrontendFlags(savedFlags);
-            resetErrors;
-        }
-        applyFrontendFlags(flags);
+        scope(exit) resetErrors;
+        const appliedFlags = AppliedFrontendFlags(flags);
 
         const depth = suspendFrontend;
         scope(exit) resumeFrontend(depth);
@@ -865,9 +861,7 @@ final class Compiler {
         foreach (importPath; importPaths)
             addImport(importPath);
 
-        const savedFlags = saveFrontendFlags;
-        scope(exit) restoreFrontendFlags(savedFlags);
-        applyFrontendFlags(flags);
+        const appliedFlags = AppliedFrontendFlags(flags);
 
         resetErrors;
 
@@ -927,9 +921,7 @@ final class Compiler {
         in bool dependencyImage,
     ) {
         return inside(() {
-            const savedFlags = saveFrontendFlags;
-            scope(exit) restoreFrontendFlags(savedFlags);
-            applyFrontendFlags(flags);
+            const appliedFlags = AppliedFrontendFlags(flags);
 
             return parseSourceLocked(
                 owned(source), owned(rootImportPaths), flags, dependencyImage);
@@ -1592,6 +1584,31 @@ private void restoreFrontendFlags(ref const SavedFrontendFlags saved) {
     global.params.useGC = saved.useGC;
 }
 
+// Applies `flags` for the lifetime of the value and restores the previous
+// state afterwards. Flags without compiler arguments change nothing, so
+// they neither save nor restore.
+private struct AppliedFrontendFlags {
+    private bool _applied;
+    private SavedFrontendFlags _saved;
+
+    @disable this(this);
+
+    this(in FrontendFlags flags) {
+        if (flags.compilerArguments.length == 0)
+            return;
+
+        _saved = saveFrontendFlags;
+        _applied = true;
+        scope(failure) restoreFrontendFlags(_saved);
+        applyFrontendFlags(flags);
+    }
+
+    ~this() {
+        if (_applied)
+            restoreFrontendFlags(_saved);
+    }
+}
+
 private void applyFrontendFlags(in FrontendFlags flags) {
     import dmd.arraytypes: Strings;
     import dmd.cli: Usage;
@@ -1601,9 +1618,6 @@ private void applyFrontendFlags(in FrontendFlags flags) {
     import dmd.root.string: toDString;
     import std.algorithm.searching: startsWith;
     import std.conv: text;
-
-    if (flags.compilerArguments.length == 0)
-        return;
 
     Strings arguments;
     expandArguments(flags, arguments);
