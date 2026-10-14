@@ -544,7 +544,9 @@ private struct Activation {
     Activation* parent;
 
     void cleanup(FrameStack* frames) {
-        cleanupSince(cleanupMark, &this, frames);
+        // Most activations leave no temporary to destroy.
+        if (frames.cleanupMark > cleanupMark)
+            cleanupSince(cleanupMark, &this, frames);
     }
 
     // Forgets the temporaries that `cleanup` would destroy.
