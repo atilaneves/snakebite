@@ -2228,6 +2228,19 @@ public alias opLoadIndirect =
 package alias opLoadIndirectFixed(size_t width) =
     execute!(runLoadIndirect, OperandKind.storage, OperandKind.storage, width);
 
+// These memory operations cannot throw a D exception or transfer control.
+// Decode the copy after the load: its address slot can alias the load target.
+package const(Instruction)* opLoadThenCopy(size_t loadWidth, size_t copyWidth)(
+    const(Instruction)* pc,
+    Activation* activation,
+    DispatchState* state,
+) {
+    const next = opLoadIndirectFixed!loadWidth(pc, activation, state);
+    // A cleanup range can end between the two instructions.
+    return next is activation.end
+        ? next : opCopyFixed!copyWidth(next, activation, state);
+}
+
 private const(Instruction)* runLoadIndirect(size_t width = 0, Decoded)(
     ref Decoded execution,
 ) {
