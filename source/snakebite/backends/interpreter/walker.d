@@ -357,7 +357,8 @@ private struct Shared {
     this(const Program program, typeof(callGuest) callGuest) {
         this.program = program;
         this.callGuest = callGuest;
-        plans = PlanCache(program.dependencyImage);
+        plans = PlanCache(program.dependencyImage,
+            &this.program.isRootOwned);
         callSelection.linksFunctions = program.definesLinkableFunctions;
         nativeData = NativeData(&this.program.isRootOwned,
             (variable) => this.program.linkedVariableOf(variable),
