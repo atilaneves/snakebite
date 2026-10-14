@@ -412,10 +412,6 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             return _plans.addressOf(method);
         if (_callSelection.usesGuestBody(method, &isGuestFunction,
                 hasNativeSymbol, hasIndependentNativeSymbol(method))) {
-            // A function whose address a callee takes may never run, so
-            // a speculative compile must not compile it.
-            if (_speculating != 0)
-                throw new SpeculationRejected;
             word = compileFunction(method);
             registerGuestWord(method, cast(const(Function)*) word);
             _callbackRoots ~= cast(const(Function)*) word;
@@ -426,6 +422,17 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                 return cast(void*) word;
         }
         return _plans.callableAddress(word, method, adjustment);
+    }
+
+    // The address that a function body names with `&f`, a function literal
+    // or a delegate. A function whose address a callee takes may never run,
+    // so a speculative compile must not compile it. The rejection leaves
+    // only the callee's own compile to unwind: class runtime info, built
+    // through `callableAddress` itself, never sees it.
+    private void* operandAddress(FuncDeclaration method, ptrdiff_t adjustment) {
+        if (_speculating != 0)
+            throw new SpeculationRejected;
+        return callableAddress(method, adjustment);
     }
 
     // A callback can first execute during GC finalization. Compile every
@@ -4458,7 +4465,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             internalFailure("`FuncExp`'s constructor always resolves its declaration");
 
         if (expression.type.toBasetype.ty != Tdelegate) {
-            const address = _bytecode.callableAddress(expression.fd, 0);
+            const address = _bytecode.operandAddress(expression.fd, 0);
             emit(&opConstant, _destination,
                 addConstant(cast(long) cast(size_t) address), _width);
             return;
@@ -4528,7 +4535,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        const address = _bytecode.callableAddress(target.function_, 0);
+        const address = _bytecode.operandAddress(target.function_, 0);
         emit(&opConstant, _destination + delegateFunctionOffset,
             addConstant(cast(long) cast(size_t) address), size_t.sizeof);
     }
@@ -8033,7 +8040,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             if (auto function_ = expression.var.isFuncDeclaration) {
                 const result = compiler.reserveTemp(compiler.pointerFacts);
-                const address = compiler._bytecode.callableAddress(function_, 0);
+                const address = compiler._bytecode.operandAddress(function_, 0);
                 compiler.emit(&opConstant, result,
                     compiler.addConstant(cast(long) cast(size_t) address),
                     size_t.sizeof);
