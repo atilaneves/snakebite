@@ -536,7 +536,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         withCompilerLock({
             if (auto complete = function_ in _complete)
                 found = *complete;
-            else if (_speculating == 0 && function_ !in _compiled) {
+            else if (_speculating == 0 && function_ !in _compiled
+                    && hasTinyBody(function_)) {
                 ++_speculating;
                 scope(exit) --_speculating;
                 try
@@ -546,6 +547,36 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             }
         });
         return found is null ? null : found.inlineBody;
+    }
+
+    // Compiling a callee only so that a caller can copy it must not reach
+    // code that a plain call would never reach: `internalFailure` ends the
+    // process and cannot be recovered. A callee of at most this many
+    // statements, all of them `return` or expression statements, is the
+    // only one compiled that way.
+    private enum maxSpeculativeStatements = 3;
+
+    private static bool hasTinyBody(FuncDeclaration function_) {
+        import dmd.statement: Statement;
+
+        int budget = maxSpeculativeStatements;
+        bool tiny(Statement statement) {
+            if (statement is null)
+                return true;
+            if (--budget < 0)
+                return false;
+            if (auto compound = statement.isCompoundStatement) {
+                foreach (child; *compound.statements)
+                    if (!tiny(child))
+                        return false;
+                return true;
+            }
+            if (auto scoped = statement.isScopeStatement)
+                return tiny(scoped.statement);
+            return statement.isReturnStatement !is null
+                || statement.isExpStatement !is null;
+        }
+        return function_.fbody !is null && tiny(function_.fbody);
     }
 
     package const(Function)* compileFunction(FuncDeclaration function_) {
