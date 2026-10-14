@@ -48,6 +48,22 @@ instead of writing a new test.
 A new test should always be attempted on the full matrix of backends
 and only have `Omit` for the ones verified to fail.
 
+## Performance work
+
+Measure with the existing tools. Do not write a new benchmark harness.
+
+- `bin/bench <project directory or dub package> -w 0 -r 1` times the
+  backends and the native `dub test` edit cycle (`bench/oracle.d`).
+- `build/bench-corpus.sh` lists the corpus projects. They are already in
+  `~/.dub/packages`.
+- The native baseline is: edit a project source file, then plain
+  `dub test`. Use dub's default compiler and no `--force`.
+- Profile a `bin/sb` built with the release flags plus
+  `--frame-pointer=all -g`, and record with `perf record --call-graph fp`.
+  Use the plain release build only for timings.
+- See the "Native baseline" section of issue #718 before any native
+  comparison.
+
 ## Runtime semantics
 
 druntime is not be emulated or reimplemented. It is either interpreted,
