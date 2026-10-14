@@ -5,7 +5,9 @@ private:
 
 
 // Layout and execution must see the same variables after DMD expands
-// attributes, template mixins, and tuple declarations. The action runs
+// attributes, template mixins, and tuple declarations. A manifest constant
+// (`enum x = ...;`) is not a runtime variable: dmd semantic already
+// replaced each use with its value, so nothing reads a slot. The action runs
 // during traversal so execution does not allocate a variable collection.
 public void forEachRuntimeVariable(
     imported!"dmd.dsymbol".Dsymbol declaration,
@@ -28,10 +30,18 @@ private int visitRuntimeVariable(
     if (auto variable = symbol.isVarDeclaration) {
         if (auto tuple = variable.aliasTuple)
             tuple.foreachVar((member) {
-                action(member.isVarDeclaration);
+                if (!member.isVarDeclaration.isManifest)
+                    action(member.isVarDeclaration);
             });
-        else
+        else if (!variable.isManifest)
             action(variable);
     }
     return 0;
+}
+
+
+private bool isManifest(imported!"dmd.declaration".VarDeclaration variable) {
+    import dmd.astenums: STC;
+
+    return (variable.storage_class & STC.manifest) != 0;
 }
