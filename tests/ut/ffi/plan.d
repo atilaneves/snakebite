@@ -147,6 +147,38 @@ unittest {
 }
 
 
+// A function the program defines has no native copy, even when the process
+// has a symbol of the same linker name; a declaration without a body still
+// names native code.
+@("hasNativeSymbol.rootBodyIsNotNativeButRootDeclarationIs")
+unittest {
+    import snakebite.frontend.dmd.functions: moduleOf;
+
+    auto guestModule = parseSnippet(q{
+        pragma(mangle, "snakebite_ut_plan_executable_only_target")
+        extern(C) int declared();
+
+        pragma(mangle, "snakebite_ut_plan_executable_only_target")
+        extern(C) int defined() { return 1; }
+    });
+    auto declared = findFunction(guestModule, "declared");
+    auto defined = findFunction(guestModule, "defined");
+    assert(declared !is null && defined !is null);
+
+    static struct Ownership {
+        typeof(guestModule) root;
+        bool owns(imported!"dmd.dsymbol".Dsymbol symbol) const {
+            return moduleOf(symbol) is root;
+        }
+    }
+    const ownership = Ownership(guestModule);
+    auto cache = PlanCache(null, &ownership.owns);
+    cache.hasNativeSymbol(declared).should == true;
+    cache.hasNativeSymbol(defined).should == false;
+    cache.hasIndependentNativeSymbol(defined).should == false;
+}
+
+
 // The native side of the `ref` tests below: compiled functions in this
 // very test binary, reachable through the dynamic linker because the
 // binary exports its own symbols.
