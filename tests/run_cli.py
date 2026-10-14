@@ -9,6 +9,7 @@
 import json
 import os
 import re
+import resource
 import secrets
 import select
 import shutil
@@ -1492,6 +1493,51 @@ def guest_lines(result: subprocess.CompletedProcess[str]) -> list[str]:
         line for line in result.stdout.splitlines()
         if not is_timing_line(line)
     ]
+
+
+# A long run of guest instructions in one function, with asserts and
+# exceptions between them, finishes within a small native stack. A VM that
+# grows the native stack for each guest instruction overflows it.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_long_guest_loops_run_in_a_small_native_stack(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        import std.stdio: writeln;
+
+        void main() {
+            long sum;
+            foreach (i; 0 .. 3_000_000)
+                sum += i % 7;
+            foreach (i; 0 .. 1_000_000) {
+                assert(i >= 0);
+                sum += i % 5;
+            }
+            foreach (i; 0 .. 1_000_000) {
+                try {
+                    if (i % 1000 == 999)
+                        throw new Exception("tick");
+                    sum += i % 3;
+                } catch (Exception) {
+                    sum -= 1;
+                }
+            }
+            writeln(sum);
+        }
+        """,
+    )
+
+    one_mebibyte = 1 << 20
+    result = run_sb(
+        f"--backend={backend}", "--no-optimise-image", str(tmp_path / "app"),
+        cwd=tmp_path, stack_bytes=one_mebibyte,
+    )
+
+    assert result.returncode == 0, output(result)
+    assert guest_lines(result) == ["11997994"]
 
 
 # A `pragma(crt_constructor)` function runs before every module constructor,
@@ -5307,7 +5353,11 @@ def run_sb(
     cwd: Path,
     env: dict[str, str] | None = None,
     timeout_seconds: int = 120,
+    stack_bytes: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    def limit_stack() -> None:
+        resource.setrlimit(resource.RLIMIT_STACK, (stack_bytes, stack_bytes))
+
     return subprocess.run(
         [sb_path(), *args],
         capture_output=True,
@@ -5316,6 +5366,7 @@ def run_sb(
         timeout=timeout_seconds,
         cwd=cwd,
         env=None if env is None else {**os.environ, **env},
+        preexec_fn=None if stack_bytes is None else limit_stack,
     )
 
 

@@ -435,8 +435,11 @@ private const(Instruction)* execute(
         return next;
 }
 
-// As `execute`, for an operation whose frame outlives its decode: it cannot
-// make a tail call, so it returns to `dispatchLoop` rather than grow the stack.
+// As `execute`, for an operation that LDC does not inline. Such an operation
+// receives the address of `execution`, a local of this function, so the frame
+// stays live during the call and the call to the next handler cannot be a
+// tail call. This one returns to `dispatchLoop` rather than grow the stack.
+// `runAssert` throws, so LDC does not inline it, and it needs this.
 private const(Instruction)* executeOnce(
     alias operation,
     OperandKind destinationKind,
@@ -475,6 +478,11 @@ private const(Instruction)* executeCall(
 
 
 public struct Instruction {
+    // A handler stores `activation.pc = pc` before it can throw, because the
+    // position of a throw selects the exception handler. In an optimised LDC
+    // build it also ends with a tail call to the handler of the instruction it
+    // returns, unless that is null or `activation.end`, so it must not keep a
+    // local alive over that call. `dispatchLoop` runs what the chain returns.
     public alias Handler = const(Instruction)* function(
         const(Instruction)* pc,
         Activation* activation,
