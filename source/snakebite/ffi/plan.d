@@ -1215,8 +1215,15 @@ public struct PlanCache {
     // storage with the original until one side grows.
     @disable this(this);
 
-    public this(const(DependencyImage)* image) {
+    // `isRootOwned` is the owning program's own decision
+    // (`Program.isRootOwned`). Without it every function can have native
+    // code.
+    public this(
+        const(DependencyImage)* image,
+        bool delegate(imported!"dmd.dsymbol".Dsymbol) const isRootOwned = null,
+    ) {
         _resolver = Resolver(image);
+        _isRootOwned = isRootOwned;
     }
 
     import dmd.func: FuncDeclaration;
@@ -1341,6 +1348,7 @@ public struct PlanCache {
     private SharedTable!(FuncDeclaration, bool) _nativeSymbols;
     private SharedTable!(FuncDeclaration, bool) _independentNativeSymbols;
     private Resolver _resolver;
+    private bool delegate(imported!"dmd.dsymbol".Dsymbol) const _isRootOwned;
     private shared size_t _preparations;
     version(unittest) private size_t _nativeSymbolLookups;
 
@@ -1373,6 +1381,9 @@ public struct PlanCache {
         if (auto cached = function_ in _nativeSymbols)
             return *cached;
 
+        if (isInterpretedOnly(function_))
+            return *_nativeSymbols.insert(function_, false);
+
         version(unittest) ++_nativeSymbolLookups;
         auto target = nativeTarget(function_);
         const found = target.address !is null
@@ -1397,6 +1408,9 @@ public struct PlanCache {
         if (auto cached = function_ in _independentNativeSymbols)
             return *cached;
 
+        if (isInterpretedOnly(function_))
+            return *_independentNativeSymbols.insert(function_, false);
+
         import snakebite.frontend.compiler: withCompilerLock;
 
         bool found;
@@ -1412,6 +1426,85 @@ public struct PlanCache {
             _independentNativeSymbols.insert(function_, found);
         });
         return found;
+    }
+
+    // Whether `function_` has a body that only this program's interpreter
+    // or compiler can run: the dependency image and the prebuilt libraries
+    // are built without the root package (docs/adr/0009), so no native
+    // copy of it exists. A bodiless declaration is not one - it names
+    // native code, such as a designated test fixture. A template instance
+    // is one when an argument, or an argument of an enclosing instance,
+    // comes from a root module. An argument that this cannot classify
+    // leaves the answer to the lookup.
+    private bool isInterpretedOnly(
+        imported!"dmd.func".FuncDeclaration function_,
+    ) {
+        import dmd.dsymbol: Dsymbol;
+
+        if (_isRootOwned is null || function_.fbody is null)
+            return false;
+        if (_isRootOwned(function_))
+            return true;
+        for (Dsymbol symbol = function_; symbol !is null && !symbol.isModule;
+                symbol = symbol.parent) {
+            if (hasRootArgument(symbol, 0))
+                return true;
+        }
+        return false;
+    }
+
+    private bool hasRootArgument(
+        imported!"dmd.dsymbol".Dsymbol symbol,
+        in size_t depth,
+    ) {
+        import dmd.dsymbol: Dsymbol;
+        import dmd.dtemplate: isDsymbol, isTuple, isType;
+        import dmd.expression: Expression;
+        import dmd.rootobject: RootObject;
+        import dmd.typesem: nextOf, toDsymbol;
+
+        auto instance = symbol.isTemplateInstance;
+        if (instance is null || instance.tiargs is null)
+            return false;
+
+        // Bounds arguments that are themselves instances.
+        enum maxDepth = 8;
+        if (depth == maxDepth)
+            return false;
+
+        bool fromRoot(RootObject object) {
+            if (auto tuple = object.isTuple) {
+                foreach (element; tuple.objects[])
+                    if (fromRoot(element))
+                        return true;
+                return false;
+            }
+            Dsymbol argument;
+            if (auto type = object.isType) {
+                while (type.nextOf !is null)
+                    type = type.nextOf;
+                argument = type.toDsymbol(null);
+            } else if (auto expression = cast(Expression) object) {
+                if (auto literal = expression.isFuncExp)
+                    argument = literal.fd;
+            } else
+                argument = object.isDsymbol;
+            if (argument is null)
+                return false;
+            if (_isRootOwned(argument))
+                return true;
+            for (auto enclosing = argument;
+                    enclosing !is null && !enclosing.isModule;
+                    enclosing = enclosing.parent)
+                if (hasRootArgument(enclosing, depth + 1))
+                    return true;
+            return false;
+        }
+
+        foreach (argument; (*instance.tiargs)[])
+            if (fromRoot(argument))
+                return true;
+        return false;
     }
 
     version(unittest)
