@@ -814,7 +814,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private long[] _constants;
     private CallSite[] _callSites;
     // Instructions copied into this function in place of calls so far.
-    private size_t _inlinedInstructions;
+    private size_t _forwarderInstructions;
     private AssertSite[] _assertSites;
     private size_t _haltSite = size_t.max;
     private PendingExceptionHandler[] _exceptionHandlers;
@@ -1147,8 +1147,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // most this many instructions, and its calls are direct guest calls.
     private enum maxInlineInstructions = 8;
 
-    // A function receives at most this many copied instructions in total.
-    private enum maxInlinedInstructions = 64;
+    // Each copied call site keeps a call, so copying forwarders can grow
+    // the caller without bound. A function receives at most this many
+    // instructions from copies of callees that contain call sites. Copies
+    // of leaf callees add no call sites and are not counted.
+    private enum maxForwarderInstructions = 64;
 
     // How a copied instruction names frame storage. `ignored` marks a field
     // that holds no storage operand.
@@ -1258,7 +1261,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             // entries, which no `opCall` names, keep a callee out.
             const site = &_callSites[instruction.source];
             if (site.kind != CallSite.Kind.guest || site.hasContext
-                    || (site.callee is null && site.prepareGuest is null)
                     || site.cleanupStartIndex != size_t.max)
                 return null;
             ++calls;
@@ -1286,7 +1288,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void emitInlined(
         in InlineBody body_, Arg[] args, in size_t destOffset,
     ) {
-        _inlinedInstructions += body_.instructions.length;
+        if (body_.callSites.length != 0)
+            _forwarderInstructions += body_.instructions.length;
         const base = alignUp(_tempSize, body_.frameAlignment);
         _tempSize = base + body_.frameSize;
         if (body_.frameAlignment > _tempAlignment)
@@ -1351,11 +1354,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // argument sources are slots of the copied frame, which moved to `base`;
     // the slots of the target's frame stay. The copy starts unprepared.
     private size_t copyCallSite(in CallSite original, in size_t base) {
-        CallSite site;
-        site.kind = original.kind;
-        site.callee = original.callee;
-        site.prepareGuest = original.prepareGuest;
-        site.returnWidth = original.returnWidth;
+        CallSite site = cast() original;
+        site.fast = CallSite.FastCall.init;
+        site.args = null;
         foreach (arg; original.args)
             site.args ~= Arg(
                 inlineStorage(arg.callerOffset, base), arg.calleeOffset,
@@ -7174,8 +7175,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (calleeType.parameterList.varargs == VarArg.none) {
             auto inlinable = _bytecode.inlineBodyOf(callee);
-            if (inlinable !is null && _inlinedInstructions
-                    + inlinable.instructions.length <= maxInlinedInstructions) {
+            if (inlinable !is null && (inlinable.callSites.length == 0
+                    || _forwarderInstructions + inlinable.instructions.length
+                        <= maxForwarderInstructions)) {
                 emitInlined(*inlinable, args, destOffset);
                 emitReceiverResult(returnShape, destOffset, receiverOffset);
                 return;

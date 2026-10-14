@@ -311,3 +311,54 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.forwarder.methodCallsAnotherMethodOnSameReceiver." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Counter {
+                int value;
+                int get() { return value; }
+                int twice() { return get() * 2; }
+            }
+
+            void main() {
+                auto first = Counter(21);
+                auto second = Counter(5);
+                assert(first.twice == 42);
+                assert(second.twice == 10);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.forwarder.nestedFunctionReadsForwarderLocal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int outer(int times) {
+                int x = 5;
+                int h(int count) {
+                    int sum;
+                    foreach (_; 0 .. count)
+                        sum += x;
+                    return sum;
+                }
+                return h(times);
+            }
+
+            // Compiled after `outer` ran, so it copies `outer`.
+            int again(int extra) { return outer(3) + extra; }
+
+            void main() {
+                assert(outer(3) == 15);
+                assert(again(1) == 16);
+                assert(again(2) + again(3) == 35);
+            }
+        });
+    }
+}
