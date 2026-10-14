@@ -56,9 +56,9 @@ public struct GuestModules {
     private Run* _run;
     private Ends _ends;
     private bool _failed;
-    // The time to build the records and their entries, and the time druntime
+    // The time to build the `ModuleInfo` records and their entries, and the time druntime
     // took to order and run the constructors. Neither includes compilation.
-    public Duration preparation;
+    public Duration moduleInfo;
     public Duration constructors;
 
     // While it lives, the explicit runtime start and end of a program with
@@ -112,13 +112,13 @@ public struct GuestModules {
 
         GuestModules modules;
         modules._ends = ends;
-        const preparing = ExecutionClock.start(backend);
+        const buildingModuleInfo = ExecutionClock.start(backend);
         auto run = newRun(backend, program, tests);
         if (run is null)
             return modules;
 
         modules._run = run;
-        modules.preparation = preparing.peek;
+        modules.moduleInfo = buildingModuleInfo.peek;
         const registering = ExecutionClock.start(backend);
         try {
             run.owner = pthread_self;

@@ -9,7 +9,7 @@ public struct TestStartupReport {
 
     public int status;
     public Duration constructorDuration;
-    public Duration activationDuration;
+    public Duration moduleInfoDuration;
 }
 
 
@@ -61,7 +61,7 @@ public TestStartupReport runTestsAndMain(
         endsProcess ? GuestModules.Ends.process : GuestModules.Ends.program);
     TestStartupReport report;
     report.constructorDuration = modules.constructors;
-    report.activationDuration = modules.preparation;
+    report.moduleInfoDuration = modules.moduleInfo;
     if (modules.failed) {
         report.status = 1;
         return report;

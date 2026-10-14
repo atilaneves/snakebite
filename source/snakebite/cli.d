@@ -125,15 +125,15 @@ private void printStatistics(
     // The backend's own cost. Each line below it is a part of it that no
     // other line includes, and `other` is the rest.
     const compile = report.compilation.duration;
-    const other = report.latency - compile - report.activationDuration
+    const other = report.latency - compile - report.moduleInfoDuration
         - report.constructorDuration - report.programDuration;
     writefln("%-20s %8.1f ms", "backend latency:", milliseconds(report.latency));
     if (report.compilation.hasCompiler)
         writefln("%-20s %8.1f ms", "  compile:", milliseconds(compile));
     writefln(
         "%-20s %8.1f ms",
-        "  test registration:",
-        milliseconds(report.activationDuration),
+        "  ModuleInfo:",
+        milliseconds(report.moduleInfoDuration),
     );
     writefln(
         "%-20s %8.1f ms",

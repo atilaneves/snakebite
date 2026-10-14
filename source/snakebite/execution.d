@@ -13,7 +13,7 @@ public struct ExecutionReport {
     // durations below do not overlap and do not include compilation.
     public Duration latency;
     public Duration constructorDuration;
-    public Duration activationDuration;
+    public Duration moduleInfoDuration;
     // The unit tests and `main`.
     public Duration programDuration;
     public CompilationStatistics compilation;
@@ -190,7 +190,7 @@ public ExecutionReport executeBackend(
         status = startup.status;
     }
     const programDuration = running.peek
-        - startup.constructorDuration - startup.activationDuration;
+        - startup.constructorDuration - startup.moduleInfoDuration;
     // Native objects can hold callback entries for guest destructors. Run
     // their finalizers while the backend and the frontend declarations that
     // those entries name are still alive.
@@ -200,7 +200,7 @@ public ExecutionReport executeBackend(
         status,
         stopWatch.peek,
         startup.constructorDuration,
-        startup.activationDuration,
+        startup.moduleInfoDuration,
         programDuration,
         backend.compilationStatistics,
     );
