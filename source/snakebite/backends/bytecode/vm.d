@@ -1149,9 +1149,9 @@ private alias opCallGeneral =
 
 // A call of a compiled guest function whose activation needs no closure,
 // no discarded memory-class result slot and no context conversion: the
-// activation is built here without the generic `Execution` decoding. Any
-// other call, or one whose callee `prepareGuest` has not compiled yet,
-// takes `opCallGeneral`, which has the same effect.
+// activation is built here without the generic `Execution` decoding, from
+// the facts `CallSite.prepare` keeps. Any other call takes `opCallGeneral`,
+// which has the same effect.
 public const(Instruction)* opCall(
     const(Instruction)* pc,
     Activation* active,
