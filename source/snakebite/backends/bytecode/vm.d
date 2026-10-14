@@ -178,9 +178,25 @@ public struct CallSite {
     package const(Function)* callee;
     package const(Function)* delegate() prepareGuest;
 
+    // What `opCall` needs of a `guest` site whose callee is compiled, in
+    // one place. `callee` is null until `prepare`, and also stays null for
+    // a callee that `opCall` does not set up itself (see `prepare`).
+    package struct FastCall {
+        package const(Function)* callee;
+        package size_t frameBytes;
+        package uint alignment;
+        package size_t returnPlaceOffset = size_t.max;
+        package size_t returnWidth;
+        package const(Arg)* args;
+        package size_t argCount;
+    }
+
+    package FastCall fast;
+
     // Compiles the callee of a `guest` site on its first call and keeps it
-    // in `callee`: a later call reads the field, not `prepareGuest`. Two
-    // threads that race here store the same pointer.
+    // in `callee`: a later call reads the field, not `prepareGuest`.
+    // `fast.callee` is set last, so a thread that reads it sees every other
+    // field. Two threads that race here store the same values.
     package const(Function)* cacheCallee() const {
         import core.atomic: atomicStore, MemoryOrder;
 
@@ -189,6 +205,34 @@ public struct CallSite {
             *cast(const(Function)**) &callee, compiled);
         return compiled;
     }
+
+    // Fills `fast` for a callee whose activation `opCall` builds without
+    // the generic decoding: no closure and no context conversion. A
+    // callee with a return place also needs a result place at the site;
+    // `opCall` checks that per call.
+    package void prepare(const(Function)* function_) const {
+        import core.atomic: atomicStore, MemoryOrder;
+
+        if (function_.closureOffset != size_t.max
+                || (hasContext && function_.contextOffset == size_t.max))
+            return;
+        assert(function_.frameAlignment > 0
+            && (function_.frameAlignment & (function_.frameAlignment - 1)) == 0);
+        auto slot = cast(FastCall*) &fast;
+        const alignment = function_.frameAlignment > uint(Activation.alignof)
+            ? function_.frameAlignment : uint(Activation.alignof);
+        const frameOffset =
+            (Activation.sizeof + alignment - 1) & ~(size_t(alignment) - 1);
+        slot.alignment = alignment;
+        slot.frameBytes = frameOffset + function_.frameSize;
+        slot.returnPlaceOffset = function_.returnPlace.offset;
+        slot.returnWidth = returnWidth;
+        slot.args = args.ptr;
+        slot.argCount = args.length;
+        atomicStore!(MemoryOrder.rel)(
+            *cast(const(Function)**) &slot.callee, function_);
+    }
+
     package const(void)* nativePlan;
     package const(void)* delegate() prepareNativePlan;
     package BuiltinCall builtinEntry;
@@ -1116,14 +1160,21 @@ public const(Instruction)* opCall(
     import core.stdc.string: memcpy;
 
     const site = &active.callSites[pc.source];
-    if (site.kind != CallSite.Kind.guest)
-        return opCallGeneral(pc, active, state);
-    const callee = site.callee !is null ? site.callee : site.cacheCallee();
-    if (callee.closureOffset != size_t.max
-            || (site.hasContext && callee.contextOffset == size_t.max))
-        return opCallGeneral(pc, active, state);
-    const hasPlace = site.returnWidth != 0 && pc.destination != discardResult;
-    if (!hasPlace && callee.returnPlace.offset != size_t.max)
+    const(Function)* callee = site.fast.callee;
+    if (callee is null) {
+        if (site.kind != CallSite.Kind.guest)
+            return opCallGeneral(pc, active, state);
+        if (site.callee is null)
+            site.prepare(site.cacheCallee());
+        else
+            site.prepare(site.callee);
+        callee = site.fast.callee;
+        if (callee is null)
+            return opCallGeneral(pc, active, state);
+    }
+    const fast = &site.fast;
+    const hasPlace = fast.returnWidth != 0 && pc.destination != discardResult;
+    if (!hasPlace && fast.returnPlaceOffset != size_t.max)
         return opCallGeneral(pc, active, state);
 
     ubyte* storage(in size_t operand) {
@@ -1134,20 +1185,16 @@ public const(Instruction)* opCall(
     }
 
     auto frames = state.frames;
-    assert(callee.frameAlignment > 0
-        && (callee.frameAlignment & (callee.frameAlignment - 1)) == 0);
-    const alignment = callee.frameAlignment > uint(Activation.alignof)
-        ? callee.frameAlignment : uint(Activation.alignof);
-    const frameOffset =
-        (Activation.sizeof + alignment - 1) & ~(size_t(alignment) - 1);
     const mark = frames.mark;
     auto activation = cast(Activation*) frames.reserveCommitted(
-        frameOffset + callee.frameSize, alignment);
+        fast.frameBytes, fast.alignment);
     activation.frameMark = mark;
-    ubyte* frame = cast(ubyte*) activation + frameOffset;
+    ubyte* frame = cast(ubyte*) activation
+        + ((Activation.sizeof + fast.alignment - 1)
+            & ~(size_t(fast.alignment) - 1));
     activation.frame = frame;
 
-    foreach (arg; site.args) {
+    foreach (arg; fast.args[0 .. fast.argCount]) {
         auto destination = frame + arg.calleeOffset;
         const source = storage(arg.callerOffset);
         // Constant widths let the compiler copy without a call.
@@ -1167,8 +1214,8 @@ public const(Instruction)* opCall(
     void* place = null;
     if (hasPlace)
         place = storage(pc.destination);
-    if (callee.returnPlace.offset != size_t.max)
-        *cast(void**) (frame + callee.returnPlace.offset) = place;
+    if (fast.returnPlaceOffset != size_t.max)
+        *cast(void**) (frame + fast.returnPlaceOffset) = place;
     activation.returnPlace = place;
     activation.constants = callee.constants;
     activation.callSites = callee.callSites;
