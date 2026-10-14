@@ -1484,7 +1484,7 @@ def run_native_app(tmp_path: Path) -> subprocess.CompletedProcess[str]:
 # What the guest wrote to stdout, without the timing report `bin/sb` ends
 # its output with.
 def is_timing_line(line: str) -> bool:
-    return re.fullmatch(r"[a-z ]+:\s+[\d.]+ ms", line) is not None
+    return re.fullmatch(r"[A-Za-z ]+:\s+[\d.]+ ms", line) is not None
 
 
 def guest_lines(result: subprocess.CompletedProcess[str]) -> list[str]:
