@@ -824,8 +824,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Expression destructor;
     }
     private Temporary[] _temporaries;
-    private size_t[] _lifetimeMarkers;
-    private size_t[] _lifetimeFirstTemporaries;
     private FullExpressionScope _expressions;
     private bool _emittingCleanup;
     private size_t _closureOffset = size_t.max;
@@ -2479,7 +2477,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return;
             case struct_:
                 compileResolvedCall(plan.structInvariant, null,
-                    expression.loc, expressionText(expression), true,
+                    expression.loc, true,
                     () => objectOffset, discardResult);
                 return;
         }
@@ -2895,21 +2893,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Expression root,
         scope void delegate() evaluate,
     ) {
-        _expressions.run(position, cast(const(void)*) root,
-            { beginLifetime; }, evaluate, { endLifetime; });
+        size_t marker;
+        size_t firstTemporary;
+        _expressions.run(position, cast(const(void)*) root, {
+            marker = _instructions.length;
+            emit(null, 0, 0, 0);
+            firstTemporary = _temporaries.length;
+        }, evaluate, { endLifetime(marker, firstTemporary); });
     }
 
-    private void beginLifetime() {
-        _lifetimeMarkers ~= _instructions.length;
-        emit(null, 0, 0, 0);
-        _lifetimeFirstTemporaries ~= _temporaries.length;
-    }
-
-    private void endLifetime() {
-        const marker = _lifetimeMarkers[$ - 1];
-        const firstTemporary = _lifetimeFirstTemporaries[$ - 1];
-        _lifetimeMarkers.length -= 1;
-        _lifetimeFirstTemporaries.length -= 1;
+    private void endLifetime(in size_t marker, in size_t firstTemporary) {
         if (_temporaries.length == firstTemporary)
             return;
 
@@ -2932,6 +2925,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _callSites[temporary.site].cleanupEndIndex = _instructions.length;
         }
         _temporaries.length = firstTemporary;
+        _temporaries.assumeSafeAppend;
         _instructions[jump].destination = _instructions.length;
         emit(&opTemporaryEnd, marker, 0, 0);
     }
@@ -5344,7 +5338,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                         newPlan.argumentPrefix);
                 compileResolvedCall(
                     expression.member, expression.arguments, expression.loc,
-                    expressionText(expression), true, () => objectOffset,
+                    true, () => objectOffset,
                     discardResult);
             });
     }
@@ -6892,7 +6886,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const hasThis = hasHiddenThis(callee);
         compileResolvedCall(
             callee, expression.arguments, expression.loc,
-            expressionText(expression), hasThis,
+            hasThis,
             () => receiverOffsetOf(expression, callee),
             destOffset, expression);
     }
@@ -7003,7 +6997,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         FuncDeclaration callee,
         Expressions* arguments,
         Loc loc,
-        string exprText,
         bool hasThis,
         size_t delegate() thisOffsetOf,
         in size_t destOffset,
@@ -7019,7 +7012,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             receiverOffset = thisOffsetOf();
         constructTemporary(callee,
             { emit(&opTemporarySuspend, 0, receiverOffset, 0); },
-            { compileResolvedCallBody(callee, arguments, loc, exprText,
+            { compileResolvedCallBody(callee, arguments, loc,
                 hasThis, receiverOffset, destOffset, site); },
             { emit(&opTemporaryArm, 0, receiverOffset, 0); });
     }
@@ -7028,7 +7021,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         FuncDeclaration callee,
         Expressions* arguments,
         Loc loc,
-        string exprText,
         bool hasThis,
         size_t receiverOffset,
         size_t destOffset,
@@ -7052,20 +7044,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 initialArgs ~= Arg(receiverOffset, 0, size_t.sizeof);
 
             compileNativeCall(
-                callee, type, arguments, loc, exprText, initialArgs,
+                callee, type, arguments, loc, initialArgs,
                 destOffset, hasNativeSymbol);
             return;
         case builtin:
-            compileBuiltinCall(type, arguments, loc, exprText,
+            compileBuiltinCall(type, arguments, loc,
                 destOffset, decision.builtinEntry,
                 decision.destinationParameter);
             return;
         case vaStart:
-            compileVaStart(type, arguments, loc, exprText,
+            compileVaStart(type, arguments, loc,
                 destOffset, decision.builtinEntry);
             return;
         case vaCopy:
-            compileVaCopy(type, arguments, loc, exprText,
+            compileVaCopy(type, arguments, loc,
                 destOffset, decision.builtinEntry);
             return;
         case alloca:
@@ -7220,7 +7212,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         TypeFunction type,
         Expressions* arguments,
         Loc loc,
-        string exprText,
         Arg[] initialArgs,
         in size_t destOffset,
         in bool allowExtraArguments,
@@ -7268,14 +7259,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         TypeFunction type,
         Expressions* arguments,
         Loc loc,
-        string exprText,
         Arg[] initialArgs,
         in size_t destOffset,
         in bool hasNativeSymbol,
     ) {
         import snakebite.ffi.call: CallAdapter;
 
-        compileBarrierCall(type, arguments, loc, exprText, initialArgs,
+        compileBarrierCall(type, arguments, loc, initialArgs,
             destOffset, /* allowExtraArguments */ true,
             (args, returnWidth) {
                 auto preparation = CallAdapter.Arguments.of(type, arguments);
@@ -7314,12 +7304,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         TypeFunction type,
         Expressions* arguments,
         Loc loc,
-        string exprText,
         in size_t destOffset,
         BuiltinCall entry,
         in size_t destinationParameter,
     ) {
-        compileBarrierCall(type, arguments, loc, exprText, null,
+        compileBarrierCall(type, arguments, loc, null,
             destOffset, /* allowExtraArguments */ false,
             (args, returnWidth) => CallSite.builtin(entry, args, returnWidth),
             destinationParameter);
@@ -7332,7 +7321,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         TypeFunction type,
         Expressions* arguments,
         Loc loc,
-        string exprText,
         in size_t destOffset,
         BuiltinCall entry,
     ) {
@@ -7341,7 +7329,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             cursor = reserveTemp(pointerFacts);
             emit(&opZero, cursor, 0, size_t.sizeof);
         }
-        compileBarrierCall(type, arguments, loc, exprText,
+        compileBarrierCall(type, arguments, loc,
             null, destOffset, /* allowExtraArguments */ false,
             (args, returnWidth) => CallSite.builtin(
                 entry, args ~ Arg(cursor, 0, size_t.sizeof), returnWidth));
@@ -7354,7 +7342,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         TypeFunction type,
         Expressions* arguments,
         Loc loc,
-        string exprText,
         in size_t destOffset,
         BuiltinCall entry,
     ) {
@@ -7365,7 +7352,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             size_t.sizeof);
         const storage = reserveTemp(pointerFacts);
         emit(&opAlloca, storage, size, size_t.sizeof);
-        compileBarrierCall(type, arguments, loc, exprText,
+        compileBarrierCall(type, arguments, loc,
             null, destOffset, /* allowExtraArguments */ false,
             (args, returnWidth) => CallSite.builtin(
                 entry, args ~ Arg(storage, 0, size_t.sizeof), returnWidth));
