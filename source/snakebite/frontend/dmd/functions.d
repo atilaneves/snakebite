@@ -238,9 +238,10 @@ public imported!"dmd.func".FuncDeclaration[] findModuleConstructors(
 }
 
 // The module-level functions dmd's glue layer calls from a module's
-// `ModuleInfo`, in declaration order, found the way `findModuleConstructors`
-// finds the constructors. A `@standalone` shared constructor is run by
-// druntime before every other shared one, so it is kept apart.
+// `ModuleInfo`, in declaration order, found in one walk the way
+// `findModuleConstructors` finds the constructors and `findUnittests` the
+// unit tests. A `@standalone` shared constructor is run by druntime before
+// every other shared one, so it is kept apart.
 public struct ModuleFunctions {
     imported!"dmd.func".FuncDeclaration[] independentConstructors;
     imported!"dmd.func".FuncDeclaration[] sharedConstructors;
@@ -251,6 +252,7 @@ public struct ModuleFunctions {
     // `pragma(crt_destructor)`, in declaration order.
     imported!"dmd.func".FuncDeclaration[] crtConstructors;
     imported!"dmd.func".FuncDeclaration[] crtDestructors;
+    imported!"dmd.func".FuncDeclaration[] unittests;
 }
 
 public ModuleFunctions findModuleFunctions(
@@ -258,6 +260,9 @@ public ModuleFunctions findModuleFunctions(
 ) {
     ModuleFunctions functions;
     appendFromScope(module_.members, (member) {
+        if (appendUnittest(member, functions.unittests))
+            return true;
+
         if (auto constructor = member.isSharedStaticCtorDeclaration) {
             if (constructor.standalone)
                 functions.independentConstructors ~= constructor;
@@ -324,21 +329,27 @@ private void appendUnittests(
     imported!"dmd.arraytypes".Dsymbols* symbols,
     ref imported!"dmd.func".FuncDeclaration[] unittests,
 ) {
-    appendFromScope(symbols, (member) {
-        if (auto unittest_ = member.isUnitTestDeclaration) {
-            // DMD's parser skips the unittest blocks of a non-root module
-            // but still declares an empty placeholder for each one, so a
-            // scope's symbol count does not depend on `-unittest`. An
-            // instance of a Phobos template in a root module carries those
-            // placeholders. Compiled D never emits a function without a
-            // body, so `__modtest` never calls one; neither does this.
-            if (unittest_.fbody !is null)
-                unittests ~= unittest_;
-            return true;
-        }
+    appendFromScope(symbols, (member) => appendUnittest(member, unittests));
+}
 
+// Whether `member` is a unittest block, which is then a leaf of the walk.
+private bool appendUnittest(
+    imported!"dmd.dsymbol".Dsymbol member,
+    ref imported!"dmd.func".FuncDeclaration[] unittests,
+) {
+    auto unittest_ = member.isUnitTestDeclaration;
+    if (unittest_ is null)
         return false;
-    });
+
+    // DMD's parser skips the unittest blocks of a non-root module but still
+    // declares an empty placeholder for each one, so a scope's symbol count
+    // does not depend on `-unittest`. An instance of a Phobos template in a
+    // root module carries those placeholders. Compiled D never emits a
+    // function without a body, so `__modtest` never calls one; neither does
+    // this.
+    if (unittest_.fbody !is null)
+        unittests ~= unittest_;
+    return true;
 }
 
 // This is the traversal every walk over a module's symbol tree needs. It

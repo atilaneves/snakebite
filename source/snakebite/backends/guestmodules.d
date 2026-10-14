@@ -716,7 +716,6 @@ private ModuleInfo*[] recordsOf(
     in GuestModules.Tests tests,
 ) {
     import std.string: fromStringz;
-    import snakebite.frontend.dmd.functions: findUnittests;
 
     auto records = new ModuleInfo*[specs.length];
     auto nativeRecords = nativeRecordsOf(run); // Imports refer to these mutable copies.
@@ -766,7 +765,7 @@ private ModuleInfo*[] recordsOf(
         fields.threadDestructor = run.entryOf(threadDestructor);
         if (tests == GuestModules.Tests.yes)
             fields.unitTests = run.entryOf(run.phaseOf(
-                Phase.Kind.unitTests, findUnittests(spec.module_)));
+                Phase.Kind.unitTests, functions.unittests));
 
         records[i] = newRecord(fields, importSlots[i]);
     }
