@@ -234,6 +234,20 @@ public struct FrameStack {
         return _base + alignedUsed;
     }
 
+    // `reserve` for a power-of-two `alignment` that is no more than the
+    // page size, where the bytes are already committed: the bump alone.
+    // Every other case takes `reserve`, with the same result and errors.
+    pragma(inline, true)
+    public ubyte* reserveCommitted(in size_t size, in uint alignment) @system {
+        const alignedUsed = (_used + alignment - 1) & ~(size_t(alignment) - 1);
+        if (size != 0 && alignedUsed <= _committed
+                && size <= _committed - alignedUsed) {
+            _used = alignedUsed + size;
+            return _base + alignedUsed;
+        }
+        return reserve(size, alignment);
+    }
+
     // Gives back everything reserved since `mark`. Only for `reserve`d
     // bytes: a `push`ed `Frame` gives its own back.
     public void release(in Mark mark) {

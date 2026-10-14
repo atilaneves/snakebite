@@ -1086,8 +1086,85 @@ package const(Instruction)* opThrow(
 // through a prepared FFI plan, an indirect one whose own address sits in
 // the caller's frame, or a builtin one reached through its own resolved
 // entry directly. `execution.width` is unused.
-public alias opCall =
+private alias opCallGeneral =
     execute!(runCall, OperandKind.result, OperandKind.immediate);
+
+// A call of a compiled guest function whose activation needs no closure,
+// no discarded memory-class result slot and no context conversion: the
+// activation is built here without the generic `Execution` decoding. Any
+// other call, or one whose callee `prepareGuest` has not compiled yet,
+// takes `opCallGeneral`, which has the same effect.
+public const(Instruction)* opCall(
+    const(Instruction)* pc,
+    Activation* active,
+    DispatchState* state,
+) {
+    import core.stdc.string: memcpy;
+
+    const site = &active.callSites[pc.source];
+    const callee = site.callee;
+    if (site.kind != CallSite.Kind.guest || callee is null
+            || callee.closureOffset != size_t.max
+            || (site.hasContext && callee.contextOffset == size_t.max))
+        return opCallGeneral(pc, active, state);
+    const hasPlace = site.returnWidth != 0 && pc.destination != discardResult;
+    if (!hasPlace && callee.returnPlace.offset != size_t.max)
+        return opCallGeneral(pc, active, state);
+
+    ubyte* storage(in size_t operand) {
+        if ((operand & (1UL << 63)) == 0)
+            return active.frame + operand;
+        const addressSlot = (operand >> 32) & 0x7fff_ffffUL;
+        return *cast(ubyte**) (active.frame + addressSlot) + cast(uint) operand;
+    }
+
+    auto frames = state.frames;
+    assert(callee.frameAlignment > 0
+        && (callee.frameAlignment & (callee.frameAlignment - 1)) == 0);
+    const alignment = callee.frameAlignment > uint(Activation.alignof)
+        ? callee.frameAlignment : uint(Activation.alignof);
+    const frameOffset =
+        (Activation.sizeof + alignment - 1) & ~(size_t(alignment) - 1);
+    const mark = frames.mark;
+    auto activation = cast(Activation*) frames.reserveCommitted(
+        frameOffset + callee.frameSize, alignment);
+    activation.frameMark = mark;
+    ubyte* frame = cast(ubyte*) activation + frameOffset;
+    activation.frame = frame;
+
+    foreach (arg; site.args) {
+        auto destination = frame + arg.calleeOffset;
+        const source = storage(arg.callerOffset);
+        // Constant widths let the compiler copy without a call.
+        switch (arg.width) {
+        case 1: memcpy(destination, source, 1); break;
+        case 2: memcpy(destination, source, 2); break;
+        case 4: memcpy(destination, source, 4); break;
+        case 8: memcpy(destination, source, 8); break;
+        case 16: memcpy(destination, source, 16); break;
+        default: memcpy(destination, source, arg.width); break;
+        }
+    }
+
+    activation.pc = activation.start = callee.instructions.ptr;
+    activation.end = null;
+    activation.resume = null;
+    void* place = null;
+    if (hasPlace)
+        place = storage(pc.destination);
+    if (callee.returnPlace.offset != size_t.max)
+        *cast(void**) (frame + callee.returnPlace.offset) = place;
+    activation.returnPlace = place;
+    activation.constants = callee.constants;
+    activation.callSites = callee.callSites;
+    activation.assertSites = callee.assertSites;
+    activation.exceptionHandlers = callee.exceptionHandlers;
+    activation.cleanupMark = frames.cleanupMark;
+    activation.parent = state.current;
+    activation.parent.resume = pc + 1;
+    state.pending = activation;
+    return pc + 1;
+}
 
 private const(Instruction)* runCall(Decoded)(
     ref Decoded execution,
