@@ -649,7 +649,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opCastAs, opCastFixedAs,
         opCastToBool, opCastWidenSigned, opCastWidenUnsigned, opComplement,
         opAlloca, opArrayEqual, opComplex, opComplexNegate, opConstant, opCopy,
-        opCopyFixed, opThenReturn,
+        opCopyFixed, opThenReturn, opLoadIndirectFixed, opStoreIndirectFixed,
         opDivideSigned, opDivideSigned32, opDivideUnsigned,
         opEqual, opEqualBranch, opGreaterOrEqualSignedBranch,
         opGreaterOrEqualUnsignedBranch, opGreaterThanSignedBranch,
@@ -1055,6 +1055,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return cast(const(Instruction)*) (_instructions.ptr + index);
     }
 
+    // Bound handler growth while letting LDC inline small unaligned copies.
+    private enum indirectCopyWidths = [1, 2, 4, 8, 16, 32];
+
     private void emit(
         Instruction.Handler handler,
         in size_t destination,
@@ -1072,6 +1075,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             static foreach (size; [1, 2, 4, 8, 16]) {
                 if (width == size)
                     handler = &opCopyFixed!size;
+            }
+        }
+        static foreach (size; indirectCopyWidths) {
+            if (width == size) {
+                if (handler is &opLoadIndirect)
+                    handler = &opLoadIndirectFixed!size;
+                else if (handler is &opStoreIndirect)
+                    handler = &opStoreIndirectFixed!size;
             }
         }
         // `narrow`/`widenSigned`/`widenUnsigned` only ever see
@@ -1130,6 +1141,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             )) {
                 if (instruction.handler is &operation)
                     instruction.handler = &opThenReturn!operation;
+            }
+            static foreach (width; indirectCopyWidths) {
+                if (instruction.handler is &opLoadIndirectFixed!width)
+                    instruction.handler = &opThenReturn!(opLoadIndirectFixed!width);
             }
             static foreach (width; 1 .. 17) {
                 if (instruction.handler is &opCopyFixed!(width, true))

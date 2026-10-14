@@ -2225,13 +2225,19 @@ private const(Instruction)* runFloatWidthCast(Decoded)(
 public alias opLoadIndirect =
     execute!(runLoadIndirect, OperandKind.storage, OperandKind.storage);
 
-private const(Instruction)* runLoadIndirect(Decoded)(
+package alias opLoadIndirectFixed(size_t width) =
+    execute!(runLoadIndirect, OperandKind.storage, OperandKind.storage, width);
+
+private const(Instruction)* runLoadIndirect(size_t width = 0, Decoded)(
     ref Decoded execution,
 ) {
     import core.stdc.string: memcpy;
 
     auto address = *cast(void**) (execution.source);
-    memcpy(execution.destination, address, execution.width);
+    static if (width)
+        memcpy(execution.destination, address, width);
+    else
+        memcpy(execution.destination, address, execution.width);
     return execution.next;
 }
 
@@ -2307,13 +2313,19 @@ private const(Instruction)* runZero(Decoded)(
 package alias opStoreIndirect =
     execute!(runStoreIndirect, OperandKind.storage, OperandKind.storage);
 
-private const(Instruction)* runStoreIndirect(Decoded)(
+package alias opStoreIndirectFixed(size_t width) =
+    execute!(runStoreIndirect, OperandKind.storage, OperandKind.storage, width);
+
+private const(Instruction)* runStoreIndirect(size_t width = 0, Decoded)(
     ref Decoded execution,
 ) {
     import core.stdc.string: memcpy;
 
     auto address = *cast(void**) (execution.destination);
-    memcpy(address, execution.source, execution.width);
+    static if (width)
+        memcpy(address, execution.source, width);
+    else
+        memcpy(address, execution.source, execution.width);
     return execution.next;
 }
 
