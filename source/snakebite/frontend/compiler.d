@@ -1619,9 +1619,6 @@ private void applyFrontendFlags(in FrontendFlags flags) {
     import std.algorithm.searching: startsWith;
     import std.conv: text;
 
-    if (flags.compilerArguments.length == 0)
-        return;
-
     Strings arguments;
     expandArguments(flags, arguments);
     const checks = checksOfArguments(arguments);
