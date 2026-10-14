@@ -51,7 +51,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import snakebite.backends.backend: CompilationStatistics, Program;
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.classinfo;
-    import snakebite.backends.bytecode.vm: Function, Vm;
+    import snakebite.backends.bytecode.vm: Function, InlineBody, Vm;
     import snakebite.backends.layout: FrameLayout;
     import snakebite.frontend.checks: Checks;
     import snakebite.sharedtable: SharedTable;
@@ -98,6 +98,10 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // reuses the one already built.
     private snakebite.backends.classinfo.ClassRuntimeCache _classRuntime;
     private size_t _compilationDepth;
+    // Greater than zero while a callee compiles only so that its caller
+    // can copy it: that compile may copy callees that are already complete
+    // but compiles no further function.
+    private size_t _speculating;
     private size_t _cacheMisses;
     private Duration _compilationTime;
     // Complete declared-storage layouts, shared by compilation, context
@@ -521,6 +525,29 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // so an unfinished body and its whole compile stay under the one
     // lock. Completed bodies are published in `_complete`; every caller
     // can reuse them without waiting for unrelated frontend work.
+    // The body of `function_` for a caller to copy in place of a call, or
+    // null. It compiles `function_` when no function is compiling only for
+    // a caller, and a body that this compiler rejects stays uncompiled for
+    // the call that runs it to reject.
+    package const(InlineBody)* inlineBodyOf(FuncDeclaration function_) {
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        const(Function)* found;
+        withCompilerLock({
+            if (auto complete = function_ in _complete)
+                found = *complete;
+            else if (_speculating == 0 && function_ !in _compiled) {
+                ++_speculating;
+                scope(exit) --_speculating;
+                try
+                    found = compileFunction(function_);
+                catch (Exception)
+                    found = null;
+            }
+        });
+        return found is null ? null : found.inlineBody;
+    }
+
     package const(Function)* compileFunction(FuncDeclaration function_) {
         import dmd.astenums: STC, Tvoid;
         import dmd.funcsem: needsClosure;
@@ -643,7 +670,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.backends.bytecode.vm:
         Arg, AssertSite, CallSite, ClosureSlot, castSizeWithSignedness,
         discardResult, indirectStorage,
-        ExceptionHandler, Function,
+        ExceptionHandler, Function, InlineBody,
         Instruction,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall,
@@ -968,6 +995,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             internalFailure("every `default` a jump targets was compiled");
 
         removeEmptyLifetimes;
+        auto inlineBody = inlineBodyOfBuilt;
         resolveBranches();
 
         ExceptionHandler[] exceptionHandlers;
@@ -1034,6 +1062,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _layout.signature,
             _layout.returnPlace,
         );
+        result.inlineBody = inlineBody;
         return result;
     }
 
@@ -1055,6 +1084,182 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private const(Instruction)* instructionAt(in size_t index) const {
         return cast(const(Instruction)*) (_instructions.ptr + index);
+    }
+
+
+    // A caller copies a function in place of a call only when it is a
+    // leaf of at most this many instructions.
+    private enum maxInlineInstructions = 8;
+
+    // How a copied instruction names frame storage. `ignored` marks a field
+    // that holds no storage operand.
+    private enum Operand { ignored, storage, constant }
+
+    private static struct Operands {
+        Operand destination;
+        Operand source;
+    }
+
+    // The operand roles of every handler a copied function may use, and
+    // `false` for any other. A handler outside this list never gets copied,
+    // so a new opcode starts as not copyable.
+    private bool inlineOperandsOf(
+        Instruction.Handler handler, out Operands roles,
+    ) {
+        import std.meta: AliasSeq;
+
+        enum S = Operand.storage;
+        enum N = Operand.ignored;
+        static foreach (operation; AliasSeq!(
+            opCopy, opLoadIndirect, opStoreIndirect, opAdd, opSubtract,
+            opMultiply, opBitAnd, opBitOr, opBitXor, opShiftLeft,
+            opShiftRightLogical, opShiftRightArithmetic, opLessThanSigned,
+            opLessThanUnsigned, opLessOrEqualSigned, opLessOrEqualUnsigned,
+            opGreaterThanSigned, opGreaterThanUnsigned,
+            opGreaterOrEqualSigned, opGreaterOrEqualUnsigned, opEqual,
+            opNotEqual, opFrameAddress,
+            opLessThanSignedBranch, opLessThanUnsignedBranch,
+            opLessOrEqualSignedBranch, opLessOrEqualUnsignedBranch,
+            opGreaterThanSignedBranch, opGreaterThanUnsignedBranch,
+            opGreaterOrEqualSignedBranch, opGreaterOrEqualUnsignedBranch,
+            opEqualBranch, opNotEqualBranch,
+            opCopyFixed!1, opCopyFixed!2, opCopyFixed!4, opCopyFixed!8,
+            opCopyFixed!16,
+        )) {
+            if (handler is &operation) {
+                roles = Operands(S, S);
+                return true;
+            }
+        }
+        static foreach (width; indirectCopyWidths) {
+            if (handler is &opLoadIndirectFixed!width
+                    || handler is &opStoreIndirectFixed!width) {
+                roles = Operands(S, S);
+                return true;
+            }
+        }
+        static foreach (kind; [
+            CastKind.narrow, CastKind.widenSigned, CastKind.widenUnsigned,
+        ])
+            static foreach (destSize; [1UL, 2, 4, 8])
+                static foreach (sourceSize; [1UL, 2, 4, 8])
+                    if (handler is &opCastFixedAs!(kind, destSize, sourceSize)) {
+                        roles = Operands(S, S);
+                        return true;
+                    }
+        static foreach (operation; AliasSeq!(
+            opNegate, opComplement, opLogicalNot, opCastToBool,
+            opCastWidenSigned, opCastWidenUnsigned, opStaticLoad, opZero,
+            opThrow, opBranchTrue, opBranchFalse,
+        )) {
+            if (handler is &operation) {
+                roles = Operands(S, N);
+                return true;
+            }
+        }
+        if (handler is &opConstant) {
+            roles = Operands(S, Operand.constant);
+            return true;
+        }
+        if (handler is &opReturn) {
+            roles = Operands(N, S);
+            return true;
+        }
+        if (handler is &opJump || handler is &opReturnVoid) {
+            roles = Operands(N, N);
+            return true;
+        }
+        return false;
+    }
+
+    // The copyable form of the function this compiler just finished, or
+    // null. Called once the instructions are final except for fusing and
+    // the resolution of branch targets to addresses.
+    private InlineBody* inlineBodyOfBuilt() {
+        if (_callSites.length != 0 || _assertSites.length != 0
+                || _exceptionHandlers.length != 0
+                || _closureOffset != size_t.max
+                || _layout.returnPlace.offset != size_t.max
+                || _layout.variadicTypes != size_t.max
+                || _layout.variadicCursor != size_t.max
+                || _instructions.length > maxInlineInstructions)
+            return null;
+        foreach (instruction; _instructions) {
+            Operands roles;
+            if (!inlineOperandsOf(instruction.handler, roles))
+                return null;
+        }
+        return new InlineBody(
+            _instructions.dup, _constants.dup, _tempSize, _tempAlignment);
+    }
+
+    // A frame operand of the copied function, moved into the region of the
+    // caller's frame that starts at `base`. The top bit names an address
+    // slot, which moves, and a displacement, which does not.
+    private static size_t inlineStorage(in size_t operand, in size_t base) {
+        if ((operand & (1UL << 63)) == 0)
+            return operand + base;
+        const slot = (operand >> 32) & 0x7fff_ffffUL;
+        return indirectStorage(slot + base) | (operand & 0xffff_ffffUL);
+    }
+
+    // Copies `body` into this function in place of a call whose arguments
+    // are already in `args`. Its frame becomes a region of this frame, and
+    // each return copies the result to `destOffset` and jumps past the copy.
+    private void emitInlined(
+        in InlineBody body_, Arg[] args, in size_t destOffset,
+    ) {
+        const base = alignUp(_tempSize, body_.frameAlignment);
+        _tempSize = base + body_.frameSize;
+        if (body_.frameAlignment > _tempAlignment)
+            _tempAlignment = body_.frameAlignment;
+        foreach (arg; args)
+            emit(&opCopy, base + arg.calleeOffset, arg.callerOffset,
+                arg.width);
+
+        const instructions = body_.instructions;
+        const constantBase = _constants.length;
+        _constants ~= body_.constants;
+        const start = _instructions.length;
+        auto positions = new size_t[instructions.length + 1];
+        size_t next = start;
+        foreach (i, instruction; instructions) {
+            positions[i] = next;
+            if (instruction.handler is &opReturn)
+                next += (destOffset != discardResult ? 1 : 0)
+                    + (i + 1 == instructions.length ? 0 : 1);
+            else if (instruction.handler is &opReturnVoid)
+                next += i + 1 == instructions.length ? 0 : 1;
+            else
+                ++next;
+        }
+        positions[$ - 1] = next;
+        const end = next;
+
+        foreach (i, instruction; instructions) {
+            Operands roles;
+            inlineOperandsOf(instruction.handler, roles);
+            const isReturn = instruction.handler is &opReturn;
+            if (isReturn || instruction.handler is &opReturnVoid) {
+                if (isReturn && destOffset != discardResult)
+                    emit(&opCopy, destOffset,
+                        inlineStorage(instruction.source, base),
+                        instruction.width);
+                if (i + 1 != instructions.length)
+                    emit(&opJump, end, 0, 0);
+                continue;
+            }
+            Instruction copied = instruction;
+            if (roles.destination == Operand.storage)
+                copied.destination = inlineStorage(copied.destination, base);
+            if (roles.source == Operand.storage)
+                copied.source = inlineStorage(copied.source, base);
+            else if (roles.source == Operand.constant)
+                copied.source += constantBase;
+            if (auto target = branchTargetField(copied))
+                *target = positions[*target];
+            _instructions ~= copied;
+        }
     }
 
     // Bound handler growth while letting LDC inline small unaligned copies.
@@ -6864,6 +7069,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (isVoidCallee && !returnShape.resultIsReceiver
                 && destOffset != discardResult)
             internalFailure("a `void` call is only ever evaluated for effect");
+
+        if (calleeType.parameterList.varargs == VarArg.none) {
+            if (auto inlinable = _bytecode.inlineBodyOf(callee)) {
+                emitInlined(*inlinable, args, destOffset);
+                emitReceiverResult(returnShape, destOffset, receiverOffset);
+                return;
+            }
+        }
 
         const siteIndex = _callSites.length;
         // The delegate outlives this compiler, so it captures the backend
