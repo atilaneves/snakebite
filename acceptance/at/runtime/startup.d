@@ -109,7 +109,7 @@ static foreach (backend; Matrix!(
                     return UnitTestResult(1, 1, false, false);
                 };
             }
-        }], [], 0, is(backend == Native) ? [] : ["frontend time:", "run time:"], []);
+        }], [], 0, is(backend == Native) ? [] : ["frontend time:", "backend latency:"], []);
     }
 
     @("extendedTestRunnerArguments." ~ backend.stringof)
