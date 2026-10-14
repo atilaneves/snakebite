@@ -58,6 +58,9 @@ Measure with the existing tools. Do not write a new benchmark harness.
   `~/.dub/packages`.
 - The native baseline is: edit a project source file, then plain
   `dub test`. Use dub's default compiler and no `--force`.
+- Profile a `bin/sb` built with the release flags plus
+  `--frame-pointer=all -g`, and record with `perf record --call-graph fp`.
+  Use the plain release build only for timings.
 - See the "Native baseline" section of issue #718 before any native
   comparison.
 
