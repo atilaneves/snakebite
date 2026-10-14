@@ -100,13 +100,10 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     private size_t _compilationDepth;
     private size_t _cacheMisses;
     private Duration _compilationTime;
-    // The frame layout of every guest function reached through
-    // `runHostToGuest`, built once per declaration and shared by the
-    // program runner's top-level call and a callback's re-entry.
-    // `SharedTable` (not a plain AA): several threads reach this cache
-    // through the same object, one thread's call and another thread's
-    // callback among them (ADR-0006).
-    private SharedTable!(FuncDeclaration, FrameLayout) _hostLayouts;
+    // Complete declared-storage layouts, shared by compilation, context
+    // paths and host entry. Publication permits lock-free callback reads
+    // after preparation, including during GC finalization (ADR-0006).
+    private SharedTable!(FuncDeclaration, FrameLayout) _layouts;
 
     public this(const Program program) {
         super(program);
@@ -198,13 +195,13 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     //
     // `compiled` is already built, and `function_`'s frame layout below
     // is read from a cache built under the compiler lock the first time
-    // any thread needs it (`hostLayoutOf`): binding `args` into
+    // any thread needs it (`layoutOf`): binding `args` into
     // `Vm.HostArgument`s and running the compiled body touch no dmd
     // state, so this takes no lock of its own. A thread that held the
     // compiler lock here while it waited for another thread's callback -
     // the way `Thread.join` waits in `otherThread`/`concurrentThreads`
     // guest code - would never see that callback return, since the
-    // callback's own slow path (`hostLayoutOf`'s miss branch) needs that
+    // callback's own slow path (`layoutOf`'s miss branch) needs that
     // same, recursive lock to build a layout the first time (ADR-0006).
     private void runHostToGuest(
         const(Function)* compiled,
@@ -214,7 +211,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         void* variadicCursor = null,
         const(void)* variadicTypes = null,
     ) {
-        const layout = hostLayoutOf(function_);
+        const layout = layoutOf(function_);
         layout.checkHostArgumentCount(args.length, function_, "bytecode");
 
         Vm.HostArgument[16] inlineArguments = void;
@@ -255,23 +252,25 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         active.state.call(*compiled, returnPlace, arguments[0 .. filled]);
     }
 
-    // `function_`'s frame layout, read without a lock once built
-    // (ADR-0006): both host-to-guest entries share this cache instead of
-    // each keeping its own, and its value is a pure function of the
-    // declaration, worked out - no frontend lock needed, see below - the
-    // first time any thread needs it.
-    private const(FrameLayout)* hostLayoutOf(FuncDeclaration function_) {
-        if (auto found = function_ in _hostLayouts)
+    private const(FrameLayout)* layoutOf(FuncDeclaration function_) {
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        if (auto found = function_ in _layouts)
             return found;
 
-        // No frontend lock: `FrameLayout.of` forces whatever dmd forward
-        // reference it still needs itself, only while it is still
-        // unresolved (`hasHiddenThis`'s own `forceIfNeeded` guard), and
-        // `_hostLayouts` is a `SharedTable`, which brings its own insert
-        // lock (ADR-0006) - the same reasoning `snakebite.backends.
-        // interpreter.walker`'s `Cache.build` already applies to its own
-        // `FrameLayout` cache.
-        return _hostLayouts.insert(function_, FrameLayout.of(function_));
+        const(FrameLayout)* result;
+        withCompilerLock({
+            if (auto found = function_ in _layouts) {
+                result = found;
+                return;
+            }
+
+            // FrameLayout.of completes body semantics before collecting
+            // locals, including lowering temporaries. Publish only that
+            // complete layout, owned by this backend rather than the AST.
+            result = _layouts.insert(function_, FrameLayout.of(function_));
+        });
+        return result;
     }
 
     public override string eval(FuncDeclaration function_) {
@@ -315,7 +314,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     ) {
         // A callback can first run during GC finalization, when allocating
         // its argument layout is forbidden.
-        hostLayoutOf(function_);
+        layoutOf(function_);
         _plans.registerGuestFunction(compiled, function_);
     }
 
@@ -578,7 +577,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                 isVoidReturn ? TypeFacts.init : typeFacts(returnType);
             const returnFacts = isRefReturn ? pointerFactsOf : pointeeFacts;
 
-            auto layout = FrameLayout.of(function_);
+            const layout = *layoutOf(function_);
             auto body_ = function_.fbody;
             if (body_ is null)
                 internalFailure("`CallSelection` routes a bodyless function to "
@@ -2886,7 +2885,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return result;
         }
 
-        const path = ClosurePlan.staticChainPath(_function, owner);
+        const path = ClosurePlan.staticChainPath(_function, owner,
+            (FuncDeclaration function_) => *_bytecode.layoutOf(function_));
         if (path is null)
             internalFailure("dmd rejects a reference to a frame the function has "
                 ~ "no context chain to (`checkNestedReference`)");
@@ -2955,7 +2955,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             }
         }
 
-        const layout = FrameLayout.of(owner);
+        const layout = *_bytecode.layoutOf(owner);
         if (!layout.hasSlot(variable))
             internalFailure("a frame layout reserves a slot for each of its locals");
 
@@ -2990,7 +2990,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return addPointerOffset(context, closure.slotOf(variable).offset);
         }
 
-        const layout = FrameLayout.of(owner);
+        const layout = *_bytecode.layoutOf(owner);
         if (!layout.hasSlot(variable))
             internalFailure("a frame layout reserves a slot for each of its locals");
         return addPointerOffset(context, layout.offsetOf(variable));
@@ -3067,7 +3067,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             context = addPointerOffset(context, closure.slotOf(hiddenThis).offset);
         } else {
-            const layout = FrameLayout.of(owner);
+            const layout = *_bytecode.layoutOf(owner);
             if (!layout.hasSlot(hiddenThis))
                 internalFailure("an owner's frame layout reserves a slot for its `this`");
 
@@ -6785,7 +6785,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         case guest:
             break;
         }
-        auto calleeLayout = FrameLayout.of(callee);
+        const calleeLayout = *_bytecode.layoutOf(callee);
         auto calleeType = typeFunctionOf(callee);
 
         if (arityMismatches(calleeType.parameterList, arguments,
