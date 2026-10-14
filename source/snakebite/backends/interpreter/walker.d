@@ -714,6 +714,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // when it captures a variable from this function.
     private ubyte* _closureBase;
     private const(FrameLayout)* _layout;
+    private const(ClosurePlan)* _activeClosurePlan;
     // The currently executing function's own declaration - `frameOf`'s
     // starting point for walking the static chain up from wherever
     // execution currently is, one hop of `outerVars`' own reasoning per
@@ -1117,6 +1118,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private const(ClosureLayout)* closureLayoutOf(
         FuncDeclaration function_,
     ) {
+        if (function_ is _function && _activeClosurePlan !is null)
+            return &_activeClosurePlan.layout;
+
         return &closurePlanOf(function_).layout;
     }
 
@@ -1316,8 +1320,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         returnPlace = layout.returnPlace.bind(&_frames, frameBase, returnPlace);
         const guard = CallStateGuard(this);
 
+        const closurePlan = closurePlanOf(function_);
         _closureBase = null;
-        if (closurePlanOf(function_).needsClosure)
+        if (closurePlan.needsClosure)
             _closureBase = allocateClosure(function_, frameBase, layout);
 
         _type = function_.type.nextOf;
@@ -1326,6 +1331,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _frameBase = frameBase;
         _layout = layout;
         _function = function_;
+        _activeClosurePlan = closurePlan;
         _pendingLoopLabel = null;
         _controlFlow = ControlFlowState.init;
         _returned = ReturnedLvalue.init;
@@ -1800,6 +1806,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         private ubyte* _frameBase;
         private ubyte* _closureBase;
         private const(FrameLayout)* _layout;
+        private const(ClosurePlan)* _activeClosurePlan;
         private FuncDeclaration _function;
         private Identifier _pendingLoopLabel;
         private ControlFlowState _controlFlow;
@@ -1818,6 +1825,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             _frameBase = evaluator._frameBase;
             _closureBase = evaluator._closureBase;
             _layout = evaluator._layout;
+            _activeClosurePlan = evaluator._activeClosurePlan;
             _function = evaluator._function;
             _pendingLoopLabel = evaluator._pendingLoopLabel;
             _controlFlow = evaluator._controlFlow;
@@ -1833,6 +1841,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             _evaluator._frameBase = _frameBase;
             _evaluator._closureBase = _closureBase;
             _evaluator._layout = _layout;
+            _evaluator._activeClosurePlan = _activeClosurePlan;
             _evaluator._function = _function;
             _evaluator._pendingLoopLabel = _pendingLoopLabel;
             _evaluator._controlFlow = _controlFlow;
@@ -3131,6 +3140,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     private bool functionNeedsClosure(FuncDeclaration function_) {
+        if (function_ is _function && _activeClosurePlan !is null)
+            return _activeClosurePlan.needsClosure;
+
         return closurePlanOf(function_).needsClosure;
     }
 
