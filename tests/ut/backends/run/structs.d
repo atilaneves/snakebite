@@ -1882,6 +1882,14 @@ static foreach (backend; Matrix!(
                 assert(source.value[0] == 1);
                 assert(source.prefix == 91);
                 assert(source.suffix == 92);
+
+                auto pointer = &source;
+                pointer.value = copy;
+                assert(pointer.value[0] == 99);
+                foreach (i; 1 .. width)
+                    assert(pointer.value[i] == i + 1);
+                assert(pointer.prefix == 91);
+                assert(pointer.suffix == 92);
             }
 
             void main() {
@@ -1892,6 +1900,8 @@ static foreach (backend; Matrix!(
                 check!16;
                 check!3;
                 check!24;
+                check!32;
+                check!33;
             }
         });
     }
