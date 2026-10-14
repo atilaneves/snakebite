@@ -649,7 +649,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opCastAs, opCastFixedAs,
         opCastToBool, opCastWidenSigned, opCastWidenUnsigned, opComplement,
         opAlloca, opArrayEqual, opComplex, opComplexNegate, opConstant, opCopy,
-        opCopyFixed, opThenReturn, opLoadIndirectFixed, opStoreIndirectFixed,
+        opCopyFixed, opLoadThenCopy, opThenReturn, opLoadIndirectFixed, opStoreIndirectFixed,
         opDivideSigned, opDivideSigned32, opDivideUnsigned,
         opEqual, opEqualBranch, opGreaterOrEqualSignedBranch,
         opGreaterOrEqualUnsignedBranch, opGreaterThanSignedBranch,
@@ -990,6 +990,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         optimizeStaticLoads;
         fuseReturns;
+        fuseLoadCopies;
 
         foreach (ref site; _callSites)
             if (site.cleanupStartIndex != size_t.max) {
@@ -1116,6 +1117,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 static foreach (width; 1 .. 17)
                     if (instruction.width == width)
                         instruction.handler = &opCopyFixed!(width, true);
+            }
+        }
+    }
+
+    private void fuseLoadCopies() {
+        foreach (index, ref instruction; _instructions) {
+            if (index + 1 == _instructions.length)
+                break;
+            const next = &_instructions[index + 1];
+            // Keep both writes and the separate copy as a branch target.
+            static foreach (loadWidth; indirectCopyWidths) {
+                if (instruction.handler is &opLoadIndirectFixed!loadWidth) {
+                    static foreach (copyWidth; [1, 2, 4, 8, 16]) {
+                        if (next.handler is &opCopyFixed!copyWidth)
+                            instruction.handler = &opLoadThenCopy!(
+                                loadWidth, copyWidth);
+                    }
+                }
             }
         }
     }
