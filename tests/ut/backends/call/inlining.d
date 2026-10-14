@@ -213,3 +213,101 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+// A small callee that only forwards to another function is copied with its
+// call. These tests pin what the copied call must still do.
+
+static foreach (backend; Matrix!()) {
+    @("inlining.forwarder.innerCallTakesArgumentsFromForwarderParameters." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int difference(int left, int right) { return left - right; }
+            int swapped(int first, int second) { return difference(second, first); }
+
+            void main() {
+                assert(swapped(3, 10) == 7);
+                assert(swapped(10, 3) == -7);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.forwarder.calledTwiceInOneCaller." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int scale(int number, int factor) { return number * factor; }
+            int triple(int number) { return scale(number, 3); }
+
+            void main() {
+                assert(triple(4) + triple(5) == 27);
+                int total;
+                foreach (number; 0 .. 4)
+                    total += triple(number) + triple(number + 1);
+                assert(total == 3 * (0 + 1 + 1 + 2 + 2 + 3 + 3 + 4));
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.forwarder.throwFromInnerCallIsCaughtByCaller." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void thrower(Exception thrown) { throw thrown; }
+            void forward(Exception thrown) { thrower(thrown); }
+
+            void main() {
+                auto expected = new Exception("forwarded");
+                bool caught;
+                try
+                    forward(expected);
+                catch (Exception actual)
+                    caught = actual is expected;
+                assert(caught);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.forwarder.manyCallsInOneCallerStayCorrect." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int add(int left, int right) { return left + right; }
+            int addOne(int number) { return add(number, 1); }
+
+            void main() {
+                int total;
+                static foreach (index; 0 .. 100)
+                    total = addOne(total) + index - index;
+                assert(total == 100);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.forwarder.mutualRecursionStaysCorrect." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int count(int number) { return number <= 0 ? 0 : countDown(number - 1) + 1; }
+            int countDown(int number) { return count(number); }
+
+            void main() {
+                assert(count(0) == 0);
+                assert(count(6) == 6);
+            }
+        });
+    }
+}

@@ -813,6 +813,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private Instruction[] _instructions;
     private long[] _constants;
     private CallSite[] _callSites;
+    // Instructions copied into this function in place of calls so far.
+    private size_t _inlinedInstructions;
     private AssertSite[] _assertSites;
     private size_t _haltSite = size_t.max;
     private PendingExceptionHandler[] _exceptionHandlers;
@@ -1141,13 +1143,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
 
-    // A caller copies a function in place of a call only when it is a
-    // leaf of at most this many instructions.
+    // A caller copies a function in place of a call only when it has at
+    // most this many instructions, and its calls are direct guest calls.
     private enum maxInlineInstructions = 8;
+
+    // A function receives at most this many copied instructions in total.
+    private enum maxInlinedInstructions = 64;
 
     // How a copied instruction names frame storage. `ignored` marks a field
     // that holds no storage operand.
-    private enum Operand { ignored, storage, constant }
+    private enum Operand { ignored, storage, constant, result, callSite }
 
     private static struct Operands {
         Operand destination;
@@ -1211,6 +1216,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return true;
             }
         }
+        if (handler is &opCall) {
+            roles = Operands(Operand.result, Operand.callSite);
+            return true;
+        }
         if (handler is &opConstant) {
             roles = Operands(S, Operand.constant);
             return true;
@@ -1230,7 +1239,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // null. Called once the instructions are final except for fusing and
     // the resolution of branch targets to addresses.
     private InlineBody* inlineBodyOfBuilt() {
-        if (_callSites.length != 0 || _assertSites.length != 0
+        if (_assertSites.length != 0
                 || _exceptionHandlers.length != 0
                 || _closureOffset != size_t.max
                 || _layout.returnPlace.offset != size_t.max
@@ -1238,13 +1247,27 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 || _layout.variadicCursor != size_t.max
                 || _instructions.length > maxInlineInstructions)
             return null;
+        size_t calls;
         foreach (instruction; _instructions) {
             Operands roles;
             if (!inlineOperandsOf(instruction.handler, roles))
                 return null;
+            if (roles.source != Operand.callSite)
+                continue;
+            // Only a direct guest call is copied. Temporary-cleanup
+            // entries, which no `opCall` names, keep a callee out.
+            const site = &_callSites[instruction.source];
+            if (site.kind != CallSite.Kind.guest || site.hasContext
+                    || (site.callee is null && site.prepareGuest is null)
+                    || site.cleanupStartIndex != size_t.max)
+                return null;
+            ++calls;
         }
+        if (calls != _callSites.length)
+            return null;
         return new InlineBody(
-            _instructions.dup, _constants.dup, _tempSize, _tempAlignment);
+            _instructions.dup, _constants.dup, _callSites.dup, _tempSize,
+            _tempAlignment);
     }
 
     // A frame operand of the copied function, moved into the region of the
@@ -1263,6 +1286,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void emitInlined(
         in InlineBody body_, Arg[] args, in size_t destOffset,
     ) {
+        _inlinedInstructions += body_.instructions.length;
         const base = alignUp(_tempSize, body_.frameAlignment);
         _tempSize = base + body_.frameSize;
         if (body_.frameAlignment > _tempAlignment)
@@ -1310,10 +1334,34 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 copied.source = inlineStorage(copied.source, base);
             else if (roles.source == Operand.constant)
                 copied.source += constantBase;
+            else if (roles.source == Operand.callSite) {
+                copied.source = copyCallSite(
+                    body_.callSites[instruction.source], base);
+                if (copied.destination != discardResult)
+                    copied.destination = inlineStorage(
+                        copied.destination, base);
+            }
             if (auto target = branchTargetField(copied))
                 *target = positions[*target];
             _instructions ~= copied;
         }
+    }
+
+    // A call site of a copied function, for the copy of its `opCall`. Its
+    // argument sources are slots of the copied frame, which moved to `base`;
+    // the slots of the target's frame stay. The copy starts unprepared.
+    private size_t copyCallSite(in CallSite original, in size_t base) {
+        CallSite site;
+        site.kind = original.kind;
+        site.callee = original.callee;
+        site.prepareGuest = original.prepareGuest;
+        site.returnWidth = original.returnWidth;
+        foreach (arg; original.args)
+            site.args ~= Arg(
+                inlineStorage(arg.callerOffset, base), arg.calleeOffset,
+                arg.width);
+        _callSites ~= site;
+        return _callSites.length - 1;
     }
 
     // Bound handler growth while letting LDC inline small unaligned copies.
@@ -7125,7 +7173,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             internalFailure("a `void` call is only ever evaluated for effect");
 
         if (calleeType.parameterList.varargs == VarArg.none) {
-            if (auto inlinable = _bytecode.inlineBodyOf(callee)) {
+            auto inlinable = _bytecode.inlineBodyOf(callee);
+            if (inlinable !is null && _inlinedInstructions
+                    + inlinable.instructions.length <= maxInlinedInstructions) {
                 emitInlined(*inlinable, args, destOffset);
                 emitReceiverResult(returnShape, destOffset, receiverOffset);
                 return;

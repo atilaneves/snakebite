@@ -563,6 +563,7 @@ package struct ExceptionHandler {
 package struct InlineBody {
     package Instruction[] instructions;
     package long[] constants;
+    package CallSite[] callSites;
     package size_t frameSize;
     package uint frameAlignment;
 }
