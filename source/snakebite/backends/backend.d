@@ -168,6 +168,31 @@ public struct CompilationStatistics {
 }
 
 
+// Wall time since `start`, less the time `backend` compiled in it, so that
+// an interval and the compilation it causes are reported once each.
+public struct ExecutionClock {
+    import core.time: Duration, MonoTime;
+
+    private const(Backend) _backend;
+    private MonoTime _start;
+    private Duration _compiledAtStart;
+
+    public static ExecutionClock start(const(Backend) backend) {
+        return ExecutionClock(
+            backend,
+            MonoTime.currTime,
+            backend.compilationStatistics.duration,
+        );
+    }
+
+    public Duration peek() const {
+        const compiled =
+            _backend.compilationStatistics.duration - _compiledAtStart;
+        return MonoTime.currTime - _start - compiled;
+    }
+}
+
+
 // Owns one backend: the only release of the execution state the backend
 // made for the calling thread while that thread lives (its frame stacks
 // stay GC roots until then; the end of a thread also releases it). A site

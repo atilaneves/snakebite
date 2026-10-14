@@ -9,9 +9,13 @@ public struct ExecutionReport {
     import snakebite.backends: CompilationStatistics;
 
     public int status;
-    public Duration runTime;
+    // Everything from making the backend to the end of the program. The
+    // durations below do not overlap and do not include compilation.
+    public Duration latency;
     public Duration constructorDuration;
     public Duration activationDuration;
+    // The unit tests and `main`.
+    public Duration programDuration;
     public CompilationStatistics compilation;
 }
 
@@ -170,6 +174,8 @@ public ExecutionReport executeBackend(
 
     auto stopWatch = StopWatch(AutoStart.yes);
     auto backend = makeBackend(name, program);
+    import snakebite.backends.backend: ExecutionClock;
+    const running = ExecutionClock.start(backend);
     import snakebite.backends.guestmodules: GuestModules;
     const entry = GuestModules.Entry(backend, program);
     TestStartupReport startup;
@@ -183,6 +189,8 @@ public ExecutionReport executeBackend(
             backend, program, hostArguments, endsProcess);
         status = startup.status;
     }
+    const programDuration = running.peek
+        - startup.constructorDuration - startup.activationDuration;
     // Native objects can hold callback entries for guest destructors. Run
     // their finalizers while the backend and the frontend declarations that
     // those entries name are still alive.
@@ -193,6 +201,7 @@ public ExecutionReport executeBackend(
         stopWatch.peek,
         startup.constructorDuration,
         startup.activationDuration,
+        programDuration,
         backend.compilationStatistics,
     );
 }

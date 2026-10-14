@@ -122,27 +122,30 @@ private void printStatistics(
         "image time:",
         milliseconds(preparation.imageDuration),
     );
+    // The backend's own cost. Each line below it is a part of it that no
+    // other line includes, and `other` is the rest.
+    const compile = report.compilation.duration;
+    const other = report.latency - compile - report.activationDuration
+        - report.constructorDuration - report.programDuration;
+    writefln("%-20s %8.1f ms", "backend latency:", milliseconds(report.latency));
+    if (report.compilation.hasCompiler)
+        writefln("%-20s %8.1f ms", "  compile:", milliseconds(compile));
     writefln(
         "%-20s %8.1f ms",
-        "module constructors:",
-        milliseconds(report.constructorDuration),
-    );
-    writefln(
-        "%-20s %8.1f ms",
-        "test registration:",
+        "  test registration:",
         milliseconds(report.activationDuration),
     );
     writefln(
         "%-20s %8.1f ms",
-        "run time:",
-        milliseconds(report.runTime),
+        "  module ctors:",
+        milliseconds(report.constructorDuration),
     );
-    if (report.compilation.hasCompiler)
-        writefln(
-            "%-20s %8.1f ms",
-            "compile time:",
-            milliseconds(report.compilation.duration),
-        );
+    writefln(
+        "%-20s %8.1f ms",
+        "  tests and main:",
+        milliseconds(report.programDuration),
+    );
+    writefln("%-20s %8.1f ms", "  other:", milliseconds(other));
 }
 
 

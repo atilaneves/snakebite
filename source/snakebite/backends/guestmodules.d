@@ -57,7 +57,7 @@ public struct GuestModules {
     private Ends _ends;
     private bool _failed;
     // The time to build the records and their entries, and the time druntime
-    // took to order and run the constructors.
+    // took to order and run the constructors. Neither includes compilation.
     public Duration preparation;
     public Duration constructors;
 
@@ -108,18 +108,18 @@ public struct GuestModules {
         in Ends ends,
     ) {
         import core.sys.posix.pthread: pthread_self;
-        import core.time: MonoTime;
+        import snakebite.backends.backend: ExecutionClock;
 
         GuestModules modules;
         modules._ends = ends;
-        const preparing = MonoTime.currTime;
+        const preparing = ExecutionClock.start(backend);
         auto run = newRun(backend, program, tests);
         if (run is null)
             return modules;
 
         modules._run = run;
-        modules.preparation = MonoTime.currTime - preparing;
-        const registering = MonoTime.currTime;
+        modules.preparation = preparing.peek;
+        const registering = ExecutionClock.start(backend);
         try {
             run.owner = pthread_self;
             run.threadsAtStart = kernelThreads;
@@ -152,7 +152,7 @@ public struct GuestModules {
                 run.end;
             }
         }
-        modules.constructors = MonoTime.currTime - registering;
+        modules.constructors = registering.peek;
         return modules;
     }
 

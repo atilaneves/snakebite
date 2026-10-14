@@ -311,7 +311,7 @@ public BackendReport benchmark(
         report.hasCompile = report.hasCompile || compilation.hasCompiler;
         if (round >= warmup) {
             report.passed = report.passed && result.status == 0;
-            times ~= execution.runTime;
+            times ~= execution.latency;
             if (compilation.hasCompiler)
                 compileTimes ~= compilation.duration;
             report.updateTestCounts(result.output);
