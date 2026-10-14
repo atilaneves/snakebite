@@ -69,7 +69,7 @@ static foreach (backend; Matrix!()) {
 
 
 static foreach (backend; Matrix!()) {
-    @("inlining.recursion.tinyFunctionStaysCorrect." ~ backend.stringof)
+    @("inlining.recursion.selfCallingFunctionStaysCorrect." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
@@ -130,6 +130,85 @@ static foreach (backend; Matrix!(
 
             void main() {
                 assert(caller(false) == 0);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.branch.conditionalExpressionCalleeTakesBothArms." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int pick(bool first) { return first ? 11 : 22; }
+
+            void main() {
+                assert(pick(true) == 11);
+                assert(pick(false) == 22);
+                int total;
+                foreach (index; 0 .. 3)
+                    total += pick(index == 1);
+                assert(total == 22 + 11 + 22);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.return.earlyReturnJumpsToEndOfCallee." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int sign(int number) {
+                if (number < 0)
+                    return -1;
+                return 1;
+            }
+
+            // Has an `if`, so it compiles when it first runs, after `sign`
+            // is complete and can be copied into it.
+            int scaled(int number) {
+                const factor = sign(number);
+                if (factor > 0)
+                    return factor * 10;
+                return factor * 100;
+            }
+
+            void main() {
+                assert(sign(-3) == -1);
+                assert(scaled(4) == 10);
+                assert(scaled(-4) == -100);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.address.calleeReturningFunctionAddressStaysCorrect." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int larger(int number) {
+                int total;
+                foreach (digit; 0 .. number)
+                    total += digit;
+                return total;
+            }
+
+            int function(int) pick() { return &larger; }
+
+            int caller(bool call) {
+                if (call)
+                    return pick()(5);
+                return 0;
+            }
+
+            void main() {
+                assert(caller(false) == 0);
+                assert(caller(true) == 10);
             }
         });
     }

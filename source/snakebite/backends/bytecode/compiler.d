@@ -102,6 +102,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // can copy it: that compile may copy callees that are already complete
     // but compiles no further function.
     private size_t _speculating;
+    private bool[FuncDeclaration] _rejectedForInlining;
     private size_t _cacheMisses;
     private Duration _compilationTime;
     // Complete declared-storage layouts, shared by compilation, context
@@ -411,6 +412,10 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             return _plans.addressOf(method);
         if (_callSelection.usesGuestBody(method, &isGuestFunction,
                 hasNativeSymbol, hasIndependentNativeSymbol(method))) {
+            // A function whose address a callee takes may never run, so
+            // a speculative compile must not compile it.
+            if (_speculating != 0)
+                throw new SpeculationRejected;
             word = compileFunction(method);
             registerGuestWord(method, cast(const(Function)*) word);
             _callbackRoots ~= cast(const(Function)*) word;
@@ -482,6 +487,71 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     ) {
         _nativeData.fillFields(declaration, base);
     }
+
+    // The body of `function_` for a caller to copy in place of a call, or
+    // null. It compiles a tiny `function_` unless a function is already
+    // compiling only for a caller. A callee that this compiler rejects, or
+    // whose compile would reach another function's address, is recorded
+    // once and stays a normal call.
+    package const(InlineBody)* inlineBodyOf(FuncDeclaration function_) {
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        const(Function)* found;
+        withCompilerLock({
+            if (auto complete = function_ in _complete)
+                found = *complete;
+            else if (_speculating == 0 && function_ !in _compiled
+                    && function_ !in _rejectedForInlining
+                    && hasTinyBody(function_)) {
+                ++_speculating;
+                scope(exit) --_speculating;
+                try
+                    found = compileFunction(function_);
+                catch (Exception) {
+                    found = null;
+                    _rejectedForInlining[function_] = true;
+                }
+            }
+        });
+        return found is null ? null : found.inlineBody;
+    }
+
+    // Compiling a callee only so that a caller can copy it must not reach
+    // code that a plain call would never reach: `internalFailure` ends the
+    // process and cannot be recovered. A callee of at most this many
+    // statements, all of them `return` or expression statements, is the
+    // only one compiled that way.
+    private enum maxSpeculativeStatements = 3;
+
+    private static class SpeculationRejected: Exception {
+        this() @safe pure nothrow {
+            super("a speculative compile must not compile another function");
+        }
+    }
+
+    private static bool hasTinyBody(FuncDeclaration function_) {
+        import dmd.statement: Statement;
+
+        int budget = maxSpeculativeStatements;
+        bool tiny(Statement statement) {
+            if (statement is null)
+                return true;
+            if (--budget < 0)
+                return false;
+            if (auto compound = statement.isCompoundStatement) {
+                foreach (child; *compound.statements)
+                    if (!tiny(child))
+                        return false;
+                return true;
+            }
+            if (auto scoped = statement.isScopeStatement)
+                return tiny(scoped.statement);
+            return statement.isReturnStatement !is null
+                || statement.isExpStatement !is null;
+        }
+        return function_.fbody !is null && tiny(function_.fbody);
+    }
+
     // `function_`'s compiled form, compiling its body on first use.
     // Reused on every later call to the
     // same function, the way compiled code only ever compiles a function
@@ -519,66 +589,12 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // `_compiled` is a plain AA, not a `SharedTable`: it needs the
     // placeholder registered below to keep one fixed address for as
     // long as a recursive or concurrent reach of the same function
-    // might already be holding a `CallSite` that points at it (this
-    // function's own first doc paragraph), which a `SharedTable`'s
+    // might already be holding a `CallSite` that points at it (the
+    // stable pointer that the first paragraph above describes), which a `SharedTable`'s
     // "first write wins, never overwritten" insert does not provide -
     // so an unfinished body and its whole compile stay under the one
     // lock. Completed bodies are published in `_complete`; every caller
     // can reuse them without waiting for unrelated frontend work.
-    // The body of `function_` for a caller to copy in place of a call, or
-    // null. It compiles `function_` when no function is compiling only for
-    // a caller, and a body that this compiler rejects stays uncompiled for
-    // the call that runs it to reject.
-    package const(InlineBody)* inlineBodyOf(FuncDeclaration function_) {
-        import snakebite.frontend.compiler: withCompilerLock;
-
-        const(Function)* found;
-        withCompilerLock({
-            if (auto complete = function_ in _complete)
-                found = *complete;
-            else if (_speculating == 0 && function_ !in _compiled
-                    && hasTinyBody(function_)) {
-                ++_speculating;
-                scope(exit) --_speculating;
-                try
-                    found = compileFunction(function_);
-                catch (Exception)
-                    found = null;
-            }
-        });
-        return found is null ? null : found.inlineBody;
-    }
-
-    // Compiling a callee only so that a caller can copy it must not reach
-    // code that a plain call would never reach: `internalFailure` ends the
-    // process and cannot be recovered. A callee of at most this many
-    // statements, all of them `return` or expression statements, is the
-    // only one compiled that way.
-    private enum maxSpeculativeStatements = 3;
-
-    private static bool hasTinyBody(FuncDeclaration function_) {
-        import dmd.statement: Statement;
-
-        int budget = maxSpeculativeStatements;
-        bool tiny(Statement statement) {
-            if (statement is null)
-                return true;
-            if (--budget < 0)
-                return false;
-            if (auto compound = statement.isCompoundStatement) {
-                foreach (child; *compound.statements)
-                    if (!tiny(child))
-                        return false;
-                return true;
-            }
-            if (auto scoped = statement.isScopeStatement)
-                return tiny(scoped.statement);
-            return statement.isReturnStatement !is null
-                || statement.isExpStatement !is null;
-        }
-        return function_.fbody !is null && tiny(function_.fbody);
-    }
-
     package const(Function)* compileFunction(FuncDeclaration function_) {
         import dmd.astenums: STC, Tvoid;
         import dmd.funcsem: needsClosure;
