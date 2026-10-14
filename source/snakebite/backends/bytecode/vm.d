@@ -179,11 +179,20 @@ public struct CallSite {
     package const(Function)* delegate() prepareGuest;
 
     // What `opCall` needs of a `guest` site whose callee is compiled, in
-    // one place. `callee` is null until `prepare`, and also stays null for
-    // a callee that `opCall` does not set up itself (see `prepare`).
+    // one place. The fields other than `state` are valid once `state` is
+    // `ready`.
     package struct FastCall {
+        package enum State : uint {
+            unprepared,
+            preparing,
+            ready,
+            notEligible,
+        }
+
+        package uint state;
         package const(Function)* callee;
         package size_t frameBytes;
+        package size_t frameOffset;
         package uint alignment;
         package size_t returnPlaceOffset = size_t.max;
         package size_t returnWidth;
@@ -194,43 +203,71 @@ public struct CallSite {
     package FastCall fast;
 
     // Compiles the callee of a `guest` site on its first call and keeps it
-    // in `callee`: a later call reads the field, not `prepareGuest`.
-    // `fast.callee` is set last, so a thread that reads it sees every other
-    // field. Two threads that race here store the same values.
+    // in `callee`: a later call reads the field, not `prepareGuest`. Two
+    // threads that race here store the same value.
     package const(Function)* cacheCallee() const {
-        import core.atomic: atomicStore, MemoryOrder;
+        import core.atomic: atomicLoad, atomicStore, MemoryOrder;
 
+        auto cached = atomicLoad!(MemoryOrder.acq)(
+            *cast(const(Function)**) &callee);
+        if (cached !is null)
+            return cached;
         auto compiled = prepareGuest();
         atomicStore!(MemoryOrder.rel)(
             *cast(const(Function)**) &callee, compiled);
         return compiled;
     }
 
-    // Fills `fast` for a callee whose activation `opCall` builds without
+    // True when `opCall` builds the activation of this site itself. The
+    // first call decides once, for good: a site whose callee has a closure
+    // or needs a context conversion stays `notEligible`. Only the thread
+    // that wins the `preparing` state writes the fields, and it publishes
+    // `state` last; a thread that loses takes the generic path for that
+    // call.
+    package bool prepareFast() const {
+        import core.atomic: atomicLoad, atomicStore, cas, MemoryOrder;
+
+        auto slot = cast(FastCall*) &fast;
+        const state = atomicLoad!(MemoryOrder.acq)(
+            *cast(shared(uint)*) &slot.state);
+        if (state == FastCall.State.ready)
+            return true;
+        if (state != FastCall.State.unprepared)
+            return false;
+        if (!cas(cast(shared(uint)*) &slot.state,
+                uint(FastCall.State.unprepared),
+                uint(FastCall.State.preparing)))
+            return false;
+        const eligible = kind == Kind.guest && fill(*slot);
+        atomicStore!(MemoryOrder.rel)(
+            *cast(shared(uint)*) &slot.state,
+            uint(eligible ? FastCall.State.ready : FastCall.State.notEligible));
+        return eligible;
+    }
+
+    // Fills `slot` for a callee whose activation `opCall` builds without
     // the generic decoding: no closure and no context conversion. A
     // callee with a return place also needs a result place at the site;
     // `opCall` checks that per call.
-    package void prepare(const(Function)* function_) const {
-        import core.atomic: atomicStore, MemoryOrder;
-
+    private bool fill(ref FastCall slot) const {
+        const function_ = cacheCallee();
         if (function_.closureOffset != size_t.max
                 || (hasContext && function_.contextOffset == size_t.max))
-            return;
+            return false;
         assert(function_.frameAlignment > 0
             && (function_.frameAlignment & (function_.frameAlignment - 1)) == 0);
-        auto slot = cast(FastCall*) &fast;
         const alignment = function_.frameAlignment > uint(Activation.alignof)
             ? function_.frameAlignment : uint(Activation.alignof);
-        const frameOffset =
+        slot.frameOffset =
             (Activation.sizeof + alignment - 1) & ~(size_t(alignment) - 1);
         slot.alignment = alignment;
-        slot.frameBytes = frameOffset + function_.frameSize;
+        slot.frameBytes = slot.frameOffset + function_.frameSize;
         slot.returnPlaceOffset = function_.returnPlace.offset;
         slot.returnWidth = returnWidth;
         slot.args = args.ptr;
         slot.argCount = args.length;
-        atomicStore!(MemoryOrder.rel)(
-            *cast(const(Function)**) &slot.callee, function_);
+        slot.callee = function_;
+        return true;
     }
 
     package const(void)* nativePlan;
@@ -348,11 +385,19 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind) {
     }
 
     public ubyte* storage(in size_t operand) pure nothrow @nogc {
-        if ((operand & (1UL << 63)) == 0)
-            return _frame + operand;
-        const addressSlot = (operand >> 32) & 0x7fff_ffffUL;
-        return *cast(ubyte**) (_frame + addressSlot) + cast(uint) operand;
+        return operandStorage(_frame, operand);
     }
+}
+
+// A frame offset, or an address held in a frame slot plus an offset when the
+// top bit is set.
+pragma(inline, true)
+package ubyte* operandStorage(ubyte* frame, in size_t operand)
+        pure nothrow @nogc {
+    if ((operand & (1UL << 63)) == 0)
+        return frame + operand;
+    const addressSlot = (operand >> 32) & 0x7fff_ffffUL;
+    return *cast(ubyte**) (frame + addressSlot) + cast(uint) operand;
 }
 
 private const(Instruction)* execute(
@@ -1159,29 +1204,21 @@ public const(Instruction)* opCall(
 ) {
     import core.stdc.string: memcpy;
 
+    import core.atomic: atomicLoad, MemoryOrder;
+
     const site = &active.callSites[pc.source];
-    const(Function)* callee = site.fast.callee;
-    if (callee is null) {
-        if (site.kind != CallSite.Kind.guest)
-            return opCallGeneral(pc, active, state);
-        if (site.callee is null)
-            site.prepare(site.cacheCallee());
-        else
-            site.prepare(site.callee);
-        callee = site.fast.callee;
-        if (callee is null)
-            return opCallGeneral(pc, active, state);
-    }
+    const ready = atomicLoad!(MemoryOrder.acq)(
+        *cast(shared(uint)*) &site.fast.state) == CallSite.FastCall.State.ready;
+    if (!ready && !site.prepareFast)
+        return opCallGeneral(pc, active, state);
     const fast = &site.fast;
+    const callee = fast.callee;
     const hasPlace = fast.returnWidth != 0 && pc.destination != discardResult;
     if (!hasPlace && fast.returnPlaceOffset != size_t.max)
         return opCallGeneral(pc, active, state);
 
     ubyte* storage(in size_t operand) {
-        if ((operand & (1UL << 63)) == 0)
-            return active.frame + operand;
-        const addressSlot = (operand >> 32) & 0x7fff_ffffUL;
-        return *cast(ubyte**) (active.frame + addressSlot) + cast(uint) operand;
+        return operandStorage(active.frame, operand);
     }
 
     auto frames = state.frames;
@@ -1189,9 +1226,7 @@ public const(Instruction)* opCall(
     auto activation = cast(Activation*) frames.reserveCommitted(
         fast.frameBytes, fast.alignment);
     activation.frameMark = mark;
-    ubyte* frame = cast(ubyte*) activation
-        + ((Activation.sizeof + fast.alignment - 1)
-            & ~(size_t(fast.alignment) - 1));
+    ubyte* frame = cast(ubyte*) activation + fast.frameOffset;
     activation.frame = frame;
 
     foreach (arg; fast.args[0 .. fast.argCount]) {

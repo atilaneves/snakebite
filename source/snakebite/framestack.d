@@ -239,8 +239,12 @@ public struct FrameStack {
     // Every other case takes `reserve`, with the same result and errors.
     pragma(inline, true)
     public ubyte* reserveCommitted(in size_t size, in uint alignment) @system {
+        import core.memory: pageSize;
+
         const alignedUsed = (_used + alignment - 1) & ~(size_t(alignment) - 1);
-        if (size != 0 && alignedUsed <= _committed
+        if (size != 0 && alignment - 1 < pageSize
+                && alignedUsed <= _limit && size <= _limit - alignedUsed
+                && alignedUsed <= _committed
                 && size <= _committed - alignedUsed) {
             _used = alignedUsed + size;
             return _base + alignedUsed;
