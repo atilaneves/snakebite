@@ -400,6 +400,16 @@ package ubyte* operandStorage(ubyte* frame, in size_t operand)
     return *cast(ubyte**) (frame + addressSlot) + cast(uint) operand;
 }
 
+// An optimising build chains handlers: each one ends with a tail call to the
+// next instruction's handler, so every handler has its own indirect jump and
+// the branch predictor sees one history per handler instead of one per loop.
+// Only a compiler that makes the tail call lets the stack stay flat. Other
+// builds return to `dispatchLoop` after each instruction.
+version (LDC) version (D_Optimized)
+    private enum chainedDispatch = true;
+private static if (!is(typeof(chainedDispatch)))
+    private enum chainedDispatch = false;
+
 private const(Instruction)* execute(
     alias operation,
     OperandKind destinationKind,
@@ -410,15 +420,69 @@ private const(Instruction)* execute(
     Activation* activation,
     DispatchState* state,
 ) {
+    // The position of a throw selects its handler.
+    activation.pc = pc;
     // const would prevent operations from writing through storage pointers.
+    auto execution = Execution!(destinationKind, sourceKind)(
+        pc, activation, state,
+    );
+    const next = operation!Parameters(execution);
+    static if (chainedDispatch) {
+        if (next is null || next is activation.end)
+            return next;
+        return next.handler(next, activation, state);
+    } else
+        return next;
+}
+
+// As `execute`, for an operation that LDC does not inline. Such an operation
+// receives the address of `execution`, a local of this function, so the frame
+// stays live during the call and the call to the next handler cannot be a
+// tail call. This one returns to `dispatchLoop` rather than grow the stack.
+// `runAssert` throws, so LDC does not inline it, and it needs this.
+private const(Instruction)* executeOnce(
+    alias operation,
+    OperandKind destinationKind,
+    OperandKind sourceKind,
+    Parameters...,
+)(
+    const(Instruction)* pc,
+    Activation* activation,
+    DispatchState* state,
+) {
+    activation.pc = pc;
     auto execution = Execution!(destinationKind, sourceKind)(
         pc, activation, state,
     );
     return operation!Parameters(execution);
 }
 
+// As `execute`, for the instruction that can switch the activation. It
+// returns to `dispatchLoop`, which owns that switch.
+private const(Instruction)* executeCall(
+    alias operation,
+    OperandKind destinationKind,
+    OperandKind sourceKind,
+)(
+    const(Instruction)* pc,
+    Activation* activation,
+    DispatchState* state,
+) {
+    activation.pc = pc;
+    state.current = activation;
+    auto execution = Execution!(destinationKind, sourceKind)(
+        pc, activation, state,
+    );
+    return operation(execution);
+}
+
 
 public struct Instruction {
+    // A handler stores `activation.pc = pc` before it can throw, because the
+    // position of a throw selects the exception handler. In an optimised LDC
+    // build it also ends with a tail call to the handler of the instruction it
+    // returns, unless that is null or `activation.end`, so it must not keep a
+    // local alive over that call. `dispatchLoop` runs what the chain returns.
     public alias Handler = const(Instruction)* function(
         const(Instruction)* pc,
         Activation* activation,
@@ -738,6 +802,7 @@ private void dispatchLoop(
     while (true) {
         try {
             if (pc is null || pc is active.end) {
+                active.pc = pc;
                 active.cleanup(frames);
                 if (active.parent is null)
                     return;
@@ -746,22 +811,13 @@ private void dispatchLoop(
                 continue;
             }
 
-            const instruction = pc;
-            const handler = instruction.handler;
-            if (handler is &opCall) {
-                active.pc = instruction;
-                state.current = active;
-                const next = handler(instruction, active, state);
-                if (state.pending !is null) {
-                    active = state.pending;
-                    state.pending = null;
-                    pc = active.pc;
-                } else
-                    pc = next;
-            } else
-                pc = handler(instruction, active, state);
+            pc = pc.handler(pc, active, state);
+            if (state.pending !is null) {
+                active = state.pending;
+                state.pending = null;
+                pc = active.pc;
+            }
         } catch (Throwable throwable) {
-            active.pc = pc;
             active = handleException(active, frames, throwable, state.vm);
             pc = active.pc;
         }
@@ -1151,7 +1207,7 @@ private const(Instruction)* runTlsAddress(Decoded)(
 // its own callee `Frame` via that struct's destructor (see
 // `snakebite.framestack`), so no explicit cleanup is needed here.
 package alias opAssert =
-    execute!(runAssert, OperandKind.storage, OperandKind.immediate);
+    executeOnce!(runAssert, OperandKind.storage, OperandKind.immediate);
 
 private const(Instruction)* runAssert(Decoded)(
     ref Decoded execution,
@@ -1176,6 +1232,7 @@ package const(Instruction)* opThrow(
     Activation* activation,
     DispatchState* state,
 ) {
+    activation.pc = pc;
     auto execution = Execution!(OperandKind.storage, OperandKind.immediate)(
         pc, activation, state);
     auto throwable = cast(Throwable) *cast(void**) (execution.destination);
@@ -1190,7 +1247,7 @@ package const(Instruction)* opThrow(
 // the caller's frame, or a builtin one reached through its own resolved
 // entry directly. `execution.width` is unused.
 private alias opCallGeneral =
-    execute!(runCall, OperandKind.result, OperandKind.immediate);
+    executeCall!(runCall, OperandKind.result, OperandKind.immediate);
 
 // A call of a compiled guest function whose activation needs no closure,
 // no discarded memory-class result slot and no context conversion: the
@@ -1206,6 +1263,10 @@ public const(Instruction)* opCall(
 
     import core.atomic: atomicLoad, MemoryOrder;
 
+    // The position of a throw selects its handler, and the new activation
+    // resumes this one.
+    active.pc = pc;
+    state.current = active;
     const site = &active.callSites[pc.source];
     const ready = atomicLoad!(MemoryOrder.acq)(
         *cast(shared(uint)*) &site.fast.state) == CallSite.FastCall.State.ready;
@@ -1488,10 +1549,16 @@ package const(Instruction)* opThenReturn(alias operation)(
     Activation* activation,
     DispatchState* state,
 ) {
-    const next = operation(pc, activation, state);
-    // Cleanup can execute only the producer, with the return outside its
-    // instruction range.
-    return next is activation.end ? next : opReturn(next, activation, state);
+    static if (chainedDispatch)
+        // The chain reaches the separate return by itself.
+        return operation(pc, activation, state);
+    else {
+        const next = operation(pc, activation, state);
+        // Cleanup can execute only the producer, with the return outside its
+        // instruction range.
+        return next is activation.end
+            ? next : opReturn(next, activation, state);
+    }
 }
 
 private const(Instruction)* runReturn(Decoded)(
@@ -1650,7 +1717,7 @@ private const(Instruction)* runFloatBinary(string operation, Decoded)(
 // the answer on exit, `source` the right operand, `width` the part width,
 // and `sourceWidth` what each operand holds, as `ComplexOperands.packed`.
 package alias opComplex(ComplexOperation operation) =
-    execute!(runComplex, OperandKind.storage, OperandKind.storage, operation);
+    executeOnce!(runComplex, OperandKind.storage, OperandKind.storage, operation);
 
 private const(Instruction)* runComplex(ComplexOperation operation, Decoded)(
     ref Decoded execution,
@@ -2409,10 +2476,15 @@ package const(Instruction)* opLoadThenCopy(size_t loadWidth, size_t copyWidth)(
     Activation* activation,
     DispatchState* state,
 ) {
-    const next = opLoadIndirectFixed!loadWidth(pc, activation, state);
-    // A cleanup range can end between the two instructions.
-    return next is activation.end
-        ? next : opCopyFixed!copyWidth(next, activation, state);
+    static if (chainedDispatch)
+        // The chain reaches the copy by itself.
+        return opLoadIndirectFixed!loadWidth(pc, activation, state);
+    else {
+        const next = opLoadIndirectFixed!loadWidth(pc, activation, state);
+        // A cleanup range can end between the two instructions.
+        return next is activation.end
+            ? next : opCopyFixed!copyWidth(next, activation, state);
+    }
 }
 
 private const(Instruction)* runLoadIndirect(size_t width = 0, Decoded)(
