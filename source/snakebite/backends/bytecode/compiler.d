@@ -743,8 +743,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Expression destructor;
     }
     private Temporary[] _temporaries;
-    private size_t[] _lifetimeMarkers;
-    private size_t[] _lifetimeFirstTemporaries;
     private FullExpressionScope _expressions;
     private bool _emittingCleanup;
     private size_t _closureOffset = size_t.max;
@@ -2636,21 +2634,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Expression root,
         scope void delegate() evaluate,
     ) {
-        _expressions.run(position, cast(const(void)*) root,
-            { beginLifetime; }, evaluate, { endLifetime; });
+        size_t marker;
+        size_t firstTemporary;
+        _expressions.run(position, cast(const(void)*) root, {
+            marker = _instructions.length;
+            emit(null, 0, 0, 0);
+            firstTemporary = _temporaries.length;
+        }, evaluate, { endLifetime(marker, firstTemporary); });
     }
 
-    private void beginLifetime() {
-        _lifetimeMarkers ~= _instructions.length;
-        emit(null, 0, 0, 0);
-        _lifetimeFirstTemporaries ~= _temporaries.length;
-    }
-
-    private void endLifetime() {
-        const marker = _lifetimeMarkers[$ - 1];
-        const firstTemporary = _lifetimeFirstTemporaries[$ - 1];
-        _lifetimeMarkers.length -= 1;
-        _lifetimeFirstTemporaries.length -= 1;
+    private void endLifetime(in size_t marker, in size_t firstTemporary) {
         if (_temporaries.length == firstTemporary)
             return;
 
@@ -2673,6 +2666,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _callSites[temporary.site].cleanupEndIndex = _instructions.length;
         }
         _temporaries.length = firstTemporary;
+        _temporaries.assumeSafeAppend;
         _instructions[jump].destination = _instructions.length;
         emit(&opTemporaryEnd, marker, 0, 0);
     }
