@@ -557,6 +557,17 @@ package struct ExceptionHandler {
 }
 
 
+// What a caller needs to copy a small leaf function into its own
+// instruction stream: the instructions before the compiler fuses them and
+// resolves their branches, so a branch target is still an index.
+package struct InlineBody {
+    package Instruction[] instructions;
+    package long[] constants;
+    package size_t frameSize;
+    package uint frameAlignment;
+}
+
+
 public struct Function {
     package Instruction[] instructions;
     package long[] constants;
@@ -580,6 +591,8 @@ public struct Function {
     package size_t declaredParameters;
     package const(Signature)* signature;
     package imported!"snakebite.backends.returnplace".ReturnPlace returnPlace;
+    // Not null when a caller can copy this function in place of a call.
+    package const(InlineBody)* inlineBody;
 }
 
 
