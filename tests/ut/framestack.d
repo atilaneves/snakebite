@@ -371,6 +371,43 @@ unittest {
 }
 
 
+private void reserveCommittedBeyondCapacity() @system {
+    auto stack = FrameStack(4, 4);
+    cast(void) stack.reserveCommitted(100, 1);
+}
+
+
+@("reserveCommitted.overflow")
+unittest {
+    // The limit, not the committed pages, bounds a reservation: the
+    // stack commits whole pages, so the committed size is larger than 4.
+    reserveCommittedBeyondCapacity.shouldThrowWithMessage(
+        "frame stack overflow: need 100 byte(s) at "
+        ~ "offset 0 of 4");
+}
+
+
+private void reserveCommittedBeyondPageAlignment() @system {
+    import core.memory: pageSize;
+
+    auto stack = FrameStack(1, pageSize * 4);
+    cast(void) stack.reserveCommitted(8, cast(uint) pageSize * 2);
+}
+
+
+@("reserveCommitted.alignmentAbovePageSize")
+unittest {
+    // The backing buffer is only page-aligned, so a larger alignment can
+    // not be honored; `reserve` refuses it and so does `reserveCommitted`.
+    import core.memory: pageSize;
+    import std.conv: text;
+
+    reserveCommittedBeyondPageAlignment.shouldThrowWithMessage(
+        text("frame stack cannot honor a ", pageSize * 2,
+            "-byte alignment: the backing buffer is page-aligned"));
+}
+
+
 @("push.growsWithoutMoving")
 unittest {
     import core.memory: pageSize;
