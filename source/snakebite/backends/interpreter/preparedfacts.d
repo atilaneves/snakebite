@@ -3,7 +3,7 @@ module snakebite.backends.interpreter.preparedfacts;
 private:
 
 import dmd.declaration: VarDeclaration;
-import dmd.expression: CallExp, StructLiteralExp, StringExp;
+import dmd.expression: CallExp, CastExp, StructLiteralExp, StringExp;
 import dmd.func: FuncDeclaration;
 import dmd.mtype: Type;
 import dmd.astenums: Tfunction, Ttuple, Terror;
@@ -11,6 +11,7 @@ import dmd.typesem: toBasetype, baseElemOf;
 import dmd.location: Loc;
 import snakebite.backends.runtimetypes: RuntimeTypes;
 import snakebite.backends.aggregateinit: AggregateInitPlan, planStructLiteral;
+import snakebite.backends.casts: CastPlan, classify;
 import snakebite.backends.dualcontext: ContextSource, calleeContextSourceOf;
 import snakebite.frontend.compiler: gagged;
 import snakebite.nativelayout:
@@ -24,6 +25,7 @@ package struct PreparedFacts {
     private SharedTable!(Type, TypeFacts) _types;
     private SharedTable!(VarDeclaration, BitfieldAccess) _bitfields;
     private SharedTable!(StructLiteralExp, AggregateInitPlan) _literals;
+    private SharedTable!(CastExp, CastPlan) _casts;
     private struct ContextKey {
         const(void)* site;
         const(void)* callee;
@@ -110,6 +112,14 @@ package struct PreparedFacts {
         attempt({ _nativeData.stringData(expression); });
     }
 
+    package void prepareCast(CastExp expression) {
+        import dmd.astenums: Tvoid;
+
+        if (expression.type is null || expression.type.toBasetype.ty == Tvoid)
+            return;
+        attempt({ castOf(expression); });
+    }
+
     package void prepareTypeInfo(Type type) {
         attempt({ _runtimeTypes.get(type); });
     }
@@ -132,6 +142,16 @@ package struct PreparedFacts {
         if (auto found = expression in _literals)
             return found;
         return _literals.insert(expression, planStructLiteral(expression));
+    }
+
+    package const(CastPlan)* castOf(CastExp expression) {
+        if (auto found = expression in _casts)
+            return found;
+        // `.im` keeps the type of dmd's `castTo` in `.to`, then overwrites
+        // `.type` with the matching real type. Use `.to` to retain that cast.
+        auto destType = expression.to !is null
+            ? expression.to : expression.type;
+        return _casts.insert(expression, classify(expression.e1, destType));
     }
 
     package const(ContextSource)* contextOf(

@@ -6,7 +6,7 @@ private:
 import dmd.dclass: ClassDeclaration;
 import dmd.declaration: Declaration, VarDeclaration;
 import dmd.expression:
-    AddAssignExp, AddExp, AssignExp, CallExp, ClassReferenceExp, CmpExp,
+    AddAssignExp, AddExp, AssignExp, CallExp, CastExp, ClassReferenceExp, CmpExp,
     DeclarationExp, DelegateExp, DeleteExp, DotVarExp, EqualExp, Expression,
     FuncExp, IndexExp, MinAssignExp, MinExp, NewExp, PostExp,
     SliceExp, StringExp, StructLiteralExp, SymOffExp, ThisExp, TypeidExp,
@@ -161,6 +161,11 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
     private extern(D) void handle(VarExp expression) {
         if (auto variable = expression.var.isVarDeclaration)
             _preparation.variable(variable);
+    }
+
+    private extern(D) void handle(CastExp expression) {
+        if (expression.lowering is null)
+            _facts.prepareCast(expression);
     }
 
     private extern(D) void handle(DelegateExp expression) {
