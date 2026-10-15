@@ -277,3 +277,85 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+// The element is the one that `a[i]` named before the value ran, however
+// the value changes the index or the slice.
+static foreach (backend; Matrix!()) {
+    @("places.write.indexChangedByValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                int reset(size_t* index) {
+                    *index = 0;
+                    return 1;
+                }
+
+                int replace(int[]* slice, int[] other) {
+                    *slice = other;
+                    return 9;
+                }
+
+                bool check() {
+                    int[4] array = [10, 20, 30, 40];
+                    size_t i = 2;
+                    array[i] = reset(&i);
+                    int[3] first = [1, 2, 3];
+                    int[3] second = [7, 8, 9];
+                    int[] slice = first[];
+                    slice[1] = replace(&slice, second[]);
+                    size_t j = 3;
+                    array[j] += reset(&j);
+                    int[] other = first[];
+                    other[2] += replace(&other, second[]);
+                    return array == [10, 20, 1, 41] && i == 0 && j == 0
+                        && first == [1, 9, 12] && second == [7, 8, 9]
+                        && slice is second[] && other is second[];
+                }
+            },
+            "check",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("places.read.indexOperands." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                struct Row { int[3] cells; int[] more; }
+
+                class Table {
+                    Row[] rows;
+                    ubyte* bytes;
+                }
+
+                long total(int[] numbers, Table table, size_t shift) {
+                    int[4] fixed = [5, 6, 7, 8];
+                    long sum;
+                    for (size_t i = 0; i < numbers.length; ++i)
+                        sum += numbers[i] * fixed[i % 4];
+                    sum += numbers[$ - 1] + fixed[3] + numbers[0];
+                    sum += table.rows[1].cells[2] + table.rows[0].more[$ - 1];
+                    sum += table.bytes[0] + table.bytes[shift];
+                    if (numbers[1] < fixed[1]) sum += 1000;
+                    if (table.rows[1].cells[0] > numbers[2]) sum += 10000;
+                    return sum;
+                }
+
+                bool check() {
+                    auto table = new Table;
+                    table.rows = [Row([1, 2, 3], [4, 5]),
+                        Row([6, 7, 8], null)];
+                    ubyte[3] bytes = [50, 60, 70];
+                    table.bytes = bytes.ptr;
+                    return total([3, 1, 4, 1, 5], table, 2) == 11231;
+                }
+            },
+            "check",
+        );
+    }
+}

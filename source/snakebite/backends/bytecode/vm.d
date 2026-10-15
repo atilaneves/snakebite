@@ -2248,6 +2248,43 @@ package alias opFloatGreaterThan = opFloatComparison!">";
 package alias opFloatGreaterOrEqual = opFloatComparison!">=";
 
 
+// Element addressing. `destination` receives the address of an element:
+// `source` is the array operand, `sourceWidth` the index operand (a
+// `size_t`) and `width` the element size. The compiler emits the bounds
+// check as a branch before them, so they cannot throw.
+private enum IndexBase {
+    // `source` holds a `{length, pointer}` slice.
+    slice,
+    // `source` is the storage of the elements.
+    staticArray,
+    // `source` holds a pointer to the elements.
+    pointer,
+}
+
+private alias opIndex(IndexBase base) =
+    execute!(runIndex, OperandKind.storage, OperandKind.storage, base);
+
+private const(Instruction)* runIndex(IndexBase base, Decoded)(
+    ref Decoded execution,
+) {
+    import snakebite.nativevalue: arrayPointerOffset;
+
+    static if (base == IndexBase.slice)
+        auto first = *cast(ubyte**) (execution.source + arrayPointerOffset);
+    else static if (base == IndexBase.staticArray)
+        auto first = execution.source;
+    else
+        auto first = *cast(ubyte**) execution.source;
+    const index = *cast(const(size_t)*) execution.storage(execution.sourceWidth);
+    *cast(ubyte**) execution.destination = first + index * execution.width;
+    return execution.next;
+}
+
+package alias opIndexSlice = opIndex!(IndexBase.slice);
+package alias opIndexStatic = opIndex!(IndexBase.staticArray);
+package alias opIndexPointer = opIndex!(IndexBase.pointer);
+
+
 // Three-address forms. `source` is the left operand,
 // `sourceWidth` the right operand, `destination` the result. All three are
 // storage operands, except that with `constant` the right operand is the

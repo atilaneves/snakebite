@@ -734,6 +734,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opGreaterOrEqualUnsigned3, opEqual3, opNotEqual3, opFloatEqual3,
         opFloatNotEqual3, opFloatLessThan3, opFloatLessOrEqual3,
         opFloatGreaterThan3, opFloatGreaterOrEqual3,
+        opIndexPointer, opIndexSlice, opIndexStatic,
         opBitAnd3, opBitOr3, opBitXor3, opShiftLeft3, opShiftRightLogical3,
         opShiftRightArithmetic3, opDivideSigned3, opDivideUnsigned3,
         opModuloSigned3, opModuloUnsigned3,
@@ -1200,6 +1201,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             // `sourceWidth`; it does not move.
             if (handler is &threeAddressConstantHandlers[index]) {
                 roles = Operands(S, S, N);
+                return true;
+            }
+        }
+        static foreach (operation; AliasSeq!(
+            opIndexSlice, opIndexStatic, opIndexPointer,
+        )) {
+            if (handler is &operation) {
+                roles = Operands(S, S, S);
                 return true;
             }
         }
@@ -5028,8 +5037,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         requireDestination(expression);
-        const addressOffset = compileAddress(expression);
-        emit(&opLoadIndirect, _destination, addressOffset, _width);
+        const place = placeOf(expression, true);
+        emit(&opCopy, _destination, place, _width);
     }
 
     protected override void visitStoredArrayLiteral(
@@ -6007,6 +6016,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return size_t.max;
             return indirectStorage(hiddenThisOffset(this_.var));
         }
+        if (auto index = expression.isIndexExp)
+            return placeOfIndex(index, inPlace);
         if (auto length = expression.isArrayLengthExp) {
             import snakebite.nativelayout: arrayLengthOffset;
 
@@ -6057,6 +6068,203 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const aggregatePlace = placeOf(expression.e1, inPlace);
         return aggregatePlace == size_t.max
             ? size_t.max : placeAt(aggregatePlace, field.offset);
+    }
+
+    // The element `expression` names. The address is computed here, after
+    // the bounds check, so the place stays valid when the base changes
+    // while a later operand is evaluated.
+    private size_t placeOfIndex(IndexExp expression, in bool inPlace) {
+        import dmd.astenums: Tarray, Tpointer, Tsarray;
+
+        auto arrayType = expression.e1.type.toBasetype;
+        switch (arrayType.ty) {
+            case Tsarray:
+                return placeOfStaticIndex(expression, arrayType, inPlace);
+            case Tarray:
+                return placeOfSliceIndex(expression, arrayType, inPlace);
+            case Tpointer:
+                return placeOfPointerIndex(expression, arrayType, inPlace);
+            default:
+                return size_t.max;
+        }
+    }
+
+    // The value of a literal index that `$` does not depend on, or
+    // `size_t.max`.
+    private size_t literalIndex(IndexExp expression) {
+        auto literal = expression.e2.isIntegerExp;
+        if (literal is null || expression.lengthVar !is null)
+            return size_t.max;
+        return cast(size_t) literal.toInteger;
+    }
+
+    private size_t placeOfStaticIndex(
+        IndexExp expression, Type arrayType, in bool inPlace,
+    ) {
+        import snakebite.nativelayout: arrayLengthOffset;
+
+        const stride = typeFacts(arrayType.nextOf).size;
+        const dimension = cast(size_t) arrayType.isTypeSArray.dim.toInteger;
+        const literal = literalIndex(expression);
+        if (literal < dimension)
+            return placeAt(staticArrayPlace(expression.e1, inPlace),
+                literal * stride);
+
+        size_t dimensionSlot = size_t.max;
+        if (expression.lengthVar !is null) {
+            dimensionSlot = reserveTemp(pointerFacts);
+            emit(&opConstant, dimensionSlot, addConstant(cast(long) dimension),
+                size_t.sizeof);
+        }
+        const index = indexOperand(expression, dimensionSlot, expression.e1);
+        compileIndexCheck(Comparison.lessThan, index,
+            constantWord(dimension), Yes.constant,
+            () => Arg(index, 0, size_t.sizeof),
+            () => constantArgument(dimension, size_t.sizeof),
+            expression.loc);
+        const array = staticArrayPlace(expression.e1, true);
+        const address = reserveTemp(pointerFacts);
+        emit(&opIndexStatic, address, array, stride, index);
+        return indirectStorage(address);
+    }
+
+    // Where the elements of the static array `array` are.
+    private size_t staticArrayPlace(Expression array, in bool inPlace) {
+        const place = placeOf(array, inPlace);
+        return place != size_t.max
+            ? place : indirectStorage(compileAddress(array));
+    }
+
+    private size_t placeOfSliceIndex(
+        IndexExp expression, Type arrayType, in bool inPlace,
+    ) {
+        import dmd.sideeffect: hasSideEffect;
+        import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
+
+        const stride = typeFacts(arrayType.nextOf).size;
+        const literal = literalIndex(expression);
+        size_t array, index;
+        if (expression.lengthVar !is null) {
+            // `$` is the length before the index runs, and the index runs
+            // after the array is read.
+            array = sliceOperand(expression.e1, !hasSideEffect(expression.e2));
+            const length = reserveTemp(pointerFacts);
+            emit(&opCopy, length, placeAt(array, arrayLengthOffset),
+                size_t.sizeof);
+            index = indexOperand(expression, length, null);
+        } else {
+            if (literal != size_t.max && inPlace) {
+                array = placeOf(expression.e1, true);
+                if (array != size_t.max && !isIndirect(array)) {
+                    compileIndexCheck(Comparison.greaterThan,
+                        array + arrayLengthOffset, constantWord(literal),
+                        Yes.constant,
+                        () => constantArgument(literal, size_t.sizeof),
+                        () => Arg(array + arrayLengthOffset, 0, size_t.sizeof),
+                        expression.loc);
+                    return placeAt(
+                        indirectStorage(array + arrayPointerOffset),
+                        literal * stride);
+                }
+                if (array != size_t.max)
+                    return placeOfSliceAt(expression, array, stride,
+                        literalOperand(literal));
+            }
+            index = indexOperand(expression, size_t.max, expression.e1);
+            array = sliceOperand(expression.e1, true);
+        }
+        return placeOfSliceAt(expression, array, stride, index);
+    }
+
+    // A slice operand: the place of the slice, or a temporary that holds it.
+    private size_t sliceOperand(Expression slice, in bool inPlace) {
+        const place = placeOf(slice, inPlace);
+        if (place != size_t.max)
+            return place;
+        const facts = typeFacts(slice.type);
+        const temp = reserveTemp(facts);
+        evalInto(slice, temp, facts.size);
+        return temp;
+    }
+
+    private size_t placeOfSliceAt(
+        IndexExp expression, in size_t array, in size_t stride,
+        in size_t index,
+    ) {
+        import snakebite.nativelayout: arrayLengthOffset;
+
+        const length = placeAt(array, arrayLengthOffset);
+        compileIndexCheck(Comparison.lessThan, index, length, No.constant,
+            () => Arg(index, 0, size_t.sizeof),
+            () => Arg(length, 0, size_t.sizeof),
+            expression.loc);
+        const address = reserveTemp(pointerFacts);
+        emit(&opIndexSlice, address, array, stride, index);
+        return indirectStorage(address);
+    }
+
+    private size_t placeOfPointerIndex(
+        IndexExp expression, Type pointerType, in bool inPlace,
+    ) {
+        import dmd.sideeffect: hasSideEffect;
+
+        const stride = typeFacts(pointerType.nextOf).size;
+        const readInPlace = !hasSideEffect(expression.e2);
+        auto pointer = isPlainPlace(expression.e1)
+            ? operandPlace(expression.e1, size_t.sizeof, false, readInPlace)
+            : size_t.max;
+        if (pointer == size_t.max) {
+            pointer = reserveTemp(pointerFacts);
+            evalInto(expression.e1, pointer, size_t.sizeof);
+        }
+        const literal = literalIndex(expression);
+        if (literal != size_t.max && inPlace && !isIndirect(pointer))
+            return placeAt(indirectStorage(pointer), literal * stride);
+        const index = indexOperand(expression, size_t.max, null);
+        const address = reserveTemp(pointerFacts);
+        emit(&opIndexPointer, address, pointer, stride, index);
+        return indirectStorage(address);
+    }
+
+    // The index of `expression` as an operand of `size_t.sizeof` bytes.
+    // `length` is `$` while the index is evaluated, and `later` is the
+    // expression that runs after the index and before the instruction
+    // that reads it.
+    private size_t indexOperand(
+        IndexExp expression, in size_t length, Expression later,
+    ) {
+        import dmd.sideeffect: hasSideEffect;
+
+        auto savedDollarVariable = _dollarVariable;
+        auto savedDollarOffset = _dollarOffset;
+        scope (exit) {
+            _dollarVariable = savedDollarVariable;
+            _dollarOffset = savedDollarOffset;
+        }
+        if (expression.lengthVar !is null) {
+            _dollarVariable = expression.lengthVar;
+            _dollarOffset = length;
+        }
+
+        const place = operandPlace(expression.e2, size_t.sizeof, false,
+            later is null || !hasSideEffect(later));
+        if (place != size_t.max)
+            return place;
+        const index = reserveTemp(pointerFacts);
+        evalOperandInto(expression.e2, index, size_t.sizeof);
+        return index;
+    }
+
+    private size_t literalOperand(in size_t value) {
+        const slot = reserveTemp(pointerFacts);
+        emit(&opConstant, slot, addConstant(cast(long) value), size_t.sizeof);
+        return slot;
+    }
+
+    // The address in the native constant pool of `value` as a `size_t`.
+    private size_t constantWord(in size_t value) {
+        return cast(size_t) _bytecode._nativeData.value(
+            Type.tuns64, (&value)[0 .. 1]).ptr;
     }
 
     // A frame slot that holds the value of `pointer`. A plain local is that
@@ -6114,6 +6322,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return isPlainPlace(expression.isPtrExp.e1);
             case arrayLength:
                 return isPlainPlace(expression.isArrayLengthExp.e1);
+            case index:
+                auto indexed = expression.isIndexExp;
+                return isPlainPlace(indexed.e1)
+                    && isPlainCondition(indexed.e2);
             default:
                 return false;
         }
@@ -6289,7 +6501,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 auto binary = expression.isBinExp;
                 return isPlainCondition(binary.e1)
                     && isPlainCondition(binary.e2);
-            case dotVariable, star, arrayLength:
+            case dotVariable, star, arrayLength, index:
                 return isPlainPlace(expression);
             case identity, notIdentity:
                 auto binary = expression.isBinExp;
@@ -6519,7 +6731,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return isReference(value.type);
             case variable:
                 return operandOf(value, facts.size, floating) != size_t.max;
-            case dotVariable, star, arrayLength:
+            case dotVariable, star, arrayLength, index:
                 return isPlainPlace(value)
                     && isScalarOperand(value.type, facts.size, floating);
             case add, min, mul, div: {
@@ -8413,6 +8625,53 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
+    // Fails through the plan for an index check unless `left comparison
+    // right` holds, both read unsigned. The check is one compare-and-branch
+    // over the code that fails; the arguments of the druntime hook are made
+    // in that code, where they cost nothing when the index is in bounds.
+    private void compileIndexCheck(
+        in Comparison comparison, in size_t left, in size_t right,
+        in Flag!"constant" rightIsConstant,
+        scope Arg delegate() indexArgument,
+        scope Arg delegate() lengthArgument,
+        in Loc loc,
+    ) {
+        import snakebite.backends.checkplan:
+            boundsPlanOf, cMessageOf, FailurePlan;
+        import snakebite.backends.exceptions: cAssertCallOf;
+
+        const plan = boundsPlanOf(_bytecode.checks, _function);
+        if (plan.kind == FailurePlan.Kind.ignore)
+            return;
+
+        const branchIndex = _instructions.length;
+        emit(fusedBranchHandler(comparison, CompareKind.unsigned, true,
+                rightIsConstant == Yes.constant),
+            left, right, size_t.sizeof, 0);
+        final switch (plan.kind) with (FailurePlan.Kind) {
+            case ignore:
+                internalFailure();
+            case halt: {
+                const never = reserveTemp(pointerFacts);
+                emit(&opConstant, never, addConstant(0), size_t.sizeof);
+                emit(&opAssert, never, haltSite, size_t.sizeof);
+                break;
+            }
+            case cAssert: {
+                const call = cAssertCallOf(
+                    cMessageOf(BoundsCheck.index).ptr, loc, _function);
+                compileCAssertCall(call, constantArgument(
+                    cast(size_t) call.assertion, size_t.sizeof));
+                break;
+            }
+            case raise:
+                compileFileLineHookCall(hookOf(BoundsCheck.index),
+                    [indexArgument(), lengthArgument()], loc);
+                break;
+        }
+        patchTarget(branchIndex, _instructions.length);
+    }
+
     // `-check=nullderef`: dmd's glue layer branches around druntime's
     // `_d_nullpointerp` the same way, on the pointer itself, which is
     // nonzero when it is not null. Without the flag nothing is emitted.
@@ -8821,11 +9080,35 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
+    // The address of `expression` as a pointer in a frame slot. A place is
+    // its own address: a frame offset needs `opFrameAddress`, and memory
+    // behind a pointer already has the pointer in a slot.
     private size_t compileAddress(Expression expression) {
         import snakebite.frontend.storage: StorageResolver;
 
+        with (EXP) switch (expression.op) {
+            case variable, dotVariable, star, index: {
+                const place = placeOf(expression, false);
+                if (place != size_t.max)
+                    return addressOfPlace(place);
+                break;
+            }
+            default:
+                break;
+        }
         return StorageResolver!(size_t, StorageAdapter)(StorageAdapter(this))
             .resolve(expression);
+    }
+
+    private size_t addressOfPlace(in size_t place) {
+        if (!isIndirect(place)) {
+            const address = reserveTemp(pointerFacts);
+            emit(&opFrameAddress, address, place, size_t.sizeof);
+            return address;
+        }
+        const slot = (place >> 32) & 0x7fff_ffffUL;
+        const displacement = cast(uint) place;
+        return displacement == 0 ? slot : addPointerOffset(slot, displacement);
     }
 
     private size_t compileSymbolAddress(SymOffExp expression) {

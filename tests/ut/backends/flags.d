@@ -633,6 +633,62 @@ static foreach (backend; Compiled) {
 }
 
 
+private enum indexWriteBody = q{
+    int[4] storage = [1, 2, 3, 4];
+    int[] slice = storage[0 .. 2];
+    slice[3] = 7;
+};
+
+private enum indexCompoundBody = q{
+    int[4] storage = [1, 2, 3, 4];
+    int[] slice = storage[0 .. 2];
+    slice[3] += 7;
+};
+
+// The index of a static array is not a literal, so dmd does not reject it
+// when it compiles.
+private enum staticIndexBody = q{
+    int[4] storage = [1, 2, 3, 4];
+    size_t index = 4;
+    storage[index] = 7;
+};
+
+
+static foreach (backend; Compiled) {
+    @("flags.boundsIndexWrite." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        foreach (row; boundsRows(indexWriteBody, indexError))
+            shouldRun!backend(row);
+    }
+}
+
+
+static foreach (backend; Compiled) {
+    @("flags.boundsIndexCompoundWrite." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        foreach (row; boundsRows(indexCompoundBody, indexError))
+            shouldRun!backend(row);
+    }
+}
+
+
+static foreach (backend; Compiled) {
+    @("flags.boundsStaticArrayIndex." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        foreach (row; [
+            Row([], unittestOf("@system", staticIndexBody),
+                Expect.raised(indexError)),
+            Row(haltFlags, unittestOf("@system", staticIndexBody),
+                Expect.halted),
+        ])
+            shouldRun!backend(row);
+    }
+}
+
+
 // What the bounds check does, by the check that the flags end up with and by
 // the safety of the function that holds the access: on checks all, safeonly
 // checks `@safe` code only, off checks none. Reading past a slice but inside
