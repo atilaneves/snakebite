@@ -66,6 +66,13 @@ Measure with the existing tools. Do not write a new benchmark harness.
   Use the plain release build only for timings.
 - See the "Native baseline" section of issue #718 before any native
   comparison.
+- `bin/sb-count` is `bin/sb` built with `-version=BytecodeCount`. At exit
+  it prints `BCOUNT <count> <handler name>` to stderr, one line for each
+  handler that ran. Counts are not atomic, so a guest with several threads
+  gives approximate counts. To count bytecodes for a loop body, run the
+  guest with two iteration counts and divide the difference of the totals
+  by the difference of the iterations. The counts of one run include
+  start-up work; the difference removes it.
 
 ## Runtime semantics
 

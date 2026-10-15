@@ -462,6 +462,9 @@ Build reggaeBuild() {
     // Function alignment fixes the addresses of the VM handlers.
     auto releaseFlags = CompilerFlags("-release", "-O", "-flto=thin",
         "-L-plugin-opt=-align-all-functions=6");
+    // `bin/sb` with the bytecode counter; see "Performance work" in CLAUDE.md.
+    auto countFlags = CompilerFlags("-release", "-O", "-flto=thin",
+        "-L-plugin-opt=-align-all-functions=6", "-d-version=BytecodeCount");
     Target[] targets = assembledSources.map!assembledObject.array ~ [
         registryImageObject,
     ]
@@ -469,6 +472,7 @@ Build reggaeBuild() {
         ~ dubTarget("dmd", "arena-validation", "arena-validation", "arena")
         ~ dubTarget("ldc2", "acceptance-test", "release", "at", releaseFlags)
         ~ dubTarget("ldc2", "sb", "release", "sb", releaseFlags)
+        ~ dubTarget("ldc2", "sb", "sb-count", "sb-count", countFlags)
         ~ dubTarget("ldc2", "sb-repl", "release", "sb-repl", releaseFlags)
         ~ dubTarget("ldc2", "bench", "release", "bench", releaseFlags);
     return Build(targets);

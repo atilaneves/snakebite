@@ -410,6 +410,46 @@ version (LDC) version (D_Optimized)
 private static if (!is(typeof(chainedDispatch)))
     private enum chainedDispatch = false;
 
+// Under `-version=BytecodeCount` (the `bin/sb-count` build), every handler
+// instantiation owns one counter slot. Its first execution registers the slot;
+// the slots are printed to stderr at exit as `BCOUNT <count> <handler name>`.
+// The counts are not atomic: a guest with several threads gives approximate
+// counts.
+version (BytecodeCount) {
+    private struct CountSlot {
+        ulong n;
+        string name;
+    }
+
+    private enum maxCountSlots = 4096;
+    private __gshared CountSlot*[maxCountSlots] _countSlots;
+    private __gshared size_t _countUsed;
+
+    private enum countName(string op, OperandKind d, OperandKind s, P...) =
+        op ~ "/" ~ d.stringof ~ "/" ~ s.stringof ~ P.stringof;
+
+    private extern(C) void dumpCounts() {
+        import core.stdc.stdio: fprintf, stderr;
+        foreach (slot; _countSlots[0 .. _countUsed])
+            fprintf(stderr, "BCOUNT %llu %.*s\n", slot.n,
+                cast(int) slot.name.length, slot.name.ptr);
+    }
+
+    private void registerCount(CountSlot* slot, string name) {
+        import core.stdc.stdio: fprintf, stderr;
+        import core.stdc.stdlib: atexit, abort;
+        if (_countUsed == 0)
+            atexit(&dumpCounts);
+        if (_countUsed == maxCountSlots) {
+            fprintf(stderr, "bin/sb-count: more than %zu handler instantiations; raise maxCountSlots\n",
+                maxCountSlots);
+            abort;
+        }
+        slot.name = name;
+        _countSlots[_countUsed++] = slot;
+    }
+}
+
 private const(Instruction)* execute(
     alias operation,
     OperandKind destinationKind,
@@ -420,6 +460,12 @@ private const(Instruction)* execute(
     Activation* activation,
     DispatchState* state,
 ) {
+    version (BytecodeCount) {
+        static __gshared CountSlot slot;
+        if (slot.n++ == 0)
+            registerCount(&slot, countName!(__traits(identifier, operation),
+                destinationKind, sourceKind, Parameters));
+    }
     // The position of a throw selects its handler.
     activation.pc = pc;
     // const would prevent operations from writing through storage pointers.
@@ -450,6 +496,12 @@ private const(Instruction)* executeOnce(
     Activation* activation,
     DispatchState* state,
 ) {
+    version (BytecodeCount) {
+        static __gshared CountSlot slot;
+        if (slot.n++ == 0)
+            registerCount(&slot, countName!(__traits(identifier, operation),
+                destinationKind, sourceKind, Parameters));
+    }
     activation.pc = pc;
     auto execution = Execution!(destinationKind, sourceKind)(
         pc, activation, state,
@@ -468,6 +520,12 @@ private const(Instruction)* executeCall(
     Activation* activation,
     DispatchState* state,
 ) {
+    version (BytecodeCount) {
+        static __gshared CountSlot slot;
+        if (slot.n++ == 0)
+            registerCount(&slot, countName!(__traits(identifier, operation),
+                destinationKind, sourceKind));
+    }
     activation.pc = pc;
     state.current = activation;
     auto execution = Execution!(destinationKind, sourceKind)(
