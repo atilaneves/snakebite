@@ -30,6 +30,7 @@ import snakebite.backends.druntimehooks: DruntimeHook, planOf;
 import snakebite.backends.sliceplan: planSlice;
 import snakebite.backends.exceptions: AssertFailure, CAssertCall;
 import snakebite.ffi: CallbackBridge, CallbackCall, PlanCache;
+import std.typecons: Flag, No, Yes;
 
 
 // A pointer-sized temporary's facts: the shape every address this compiler
@@ -734,6 +735,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opFloatNotEqual3, opFloatLessThan3, opFloatLessOrEqual3,
         opFloatGreaterThan3, opFloatGreaterOrEqual3,
         CompareKind, Comparison, constantForm, fusedBranchHandler, fusesConstant,
+        threeAddressConstantHandlers, threeAddressHandlers,
         isFusedBranch,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall,
@@ -1186,22 +1188,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return true;
             }
         }
-        static foreach (operation; AliasSeq!(
-            opAdd3, opSubtract3, opMultiply3, opFloatAdd3, opFloatSubtract3,
-            opFloatMultiply3, opFloatDivide3, opLessThanSigned3,
-            opLessThanUnsigned3, opLessOrEqualSigned3, opLessOrEqualUnsigned3,
-            opGreaterThanSigned3, opGreaterThanUnsigned3,
-            opGreaterOrEqualSigned3, opGreaterOrEqualUnsigned3, opEqual3,
-            opNotEqual3, opFloatEqual3, opFloatNotEqual3, opFloatLessThan3,
-            opFloatLessOrEqual3, opFloatGreaterThan3, opFloatGreaterOrEqual3,
-        )) {
+        static foreach (index, operation; threeAddressHandlers) {
             if (handler is &operation) {
                 roles = Operands(S, S, S);
                 return true;
             }
             // The constant form holds the address of a native constant in
             // `sourceWidth`; it does not move.
-            if (handler is constantForm(&operation)) {
+            if (handler is &threeAddressConstantHandlers[index]) {
                 roles = Operands(S, S, N);
                 return true;
             }
@@ -1698,7 +1692,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const guarded = !isTriviallyTrueCondition(statement.condition);
         if (guarded) {
             size_t[] repeats;
-            branchOn(statement.condition, true, repeats);
+            branchOn(statement.condition, Jump.onTrue, repeats);
             foreach (index; repeats)
                 patchTarget(index, bodyStart);
         } else {
@@ -2249,7 +2243,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `else` target is patched into each of them once it is known.
     private size_t[] compileConditionBranch(Expression condition) {
         size_t[] branches;
-        branchOn(condition, false, branches);
+        branchOn(condition, Jump.onFalse, branches);
         return branches;
     }
 
@@ -5754,7 +5748,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             case integral: {
                 if (auto handler3 = threeAddress(handler)) {
                     emitBinary3(handler3, destOffset, expression.e1,
-                        expression.e2, plan.facts, width, false);
+                        expression.e2, plan.facts, width, No.floating);
                     return;
                 }
                 const leftOffset = reserveTemp(plan.facts);
@@ -5768,7 +5762,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             case floating: {
                 if (auto handler3 = threeAddress(floatingBinaryHandler(expression))) {
                     emitBinary3(handler3, destOffset, expression.e1,
-                        expression.e2, plan.facts, plan.facts.size, true);
+                        expression.e2, plan.facts, plan.facts.size, Yes.floating);
                     return;
                 }
                 const leftOffset = reserveTemp(plan.facts);
@@ -6045,8 +6039,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Instruction.Handler handler, in size_t destOffset,
         Expression left, Expression right,
         in imported!"snakebite.nativelayout".TypeFacts facts,
-        in size_t width, in bool floating,
+        in size_t width, in Flag!"floating" floatingOperands,
     ) {
+        const floating = floatingOperands == Yes.floating;
         if (isConstantOperand(left, width, floating)
                 && !isConstantOperand(right, width, floating)) {
             if (auto swapped = swappedForm(handler)) {
@@ -6110,6 +6105,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
+    private enum Jump : bool { onFalse = false, onTrue = true }
+
     // Code that jumps when `condition` is `jumpWhen` and falls through
     // otherwise. The jumps are appended to `branches` to be patched once
     // their target is known. An integral or floating comparison is one
@@ -6121,29 +6118,46 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in FullExpressionScope.Position position
             = FullExpressionScope.Position.condition,
     ) {
+        const splittable = condition.op == EXP.andAnd
+            || condition.op == EXP.orOr || condition.op == EXP.not;
+        const plain = splittable && isPlainCondition(condition);
+        branchOnChecked(condition, jumpWhen, branches, position,
+            plain ? Yes.plain : No.plain);
+    }
+
+    // Every operand of a plain condition is itself plain, so the check is
+    // made once for the whole condition.
+    private void branchOnChecked(
+        Expression condition, in bool jumpWhen, ref size_t[] branches,
+        in FullExpressionScope.Position position,
+        in Flag!"plain" plain,
+    ) {
         import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
 
         const logical = condition.op == EXP.andAnd
             || condition.op == EXP.orOr;
-        if (logical && isPlainCondition(condition)) {
+        if (logical && plain == Yes.plain) {
             auto binary = condition.isBinExp;
             if ((condition.op == EXP.andAnd) != jumpWhen) {
-                branchOn(binary.e1, jumpWhen, branches, position);
-                branchOn(binary.e2, jumpWhen, branches,
-                    FullExpressionScope.Position.logicalOperand);
+                branchOnChecked(binary.e1, jumpWhen, branches, position,
+                    Yes.plain);
+                branchOnChecked(binary.e2, jumpWhen, branches,
+                    FullExpressionScope.Position.logicalOperand, Yes.plain);
             } else {
                 size_t[] decided;
-                branchOn(binary.e1, !jumpWhen, decided, position);
-                branchOn(binary.e2, jumpWhen, branches,
-                    FullExpressionScope.Position.logicalOperand);
+                branchOnChecked(binary.e1, !jumpWhen, decided, position,
+                    Yes.plain);
+                branchOnChecked(binary.e2, jumpWhen, branches,
+                    FullExpressionScope.Position.logicalOperand, Yes.plain);
                 foreach (index; decided)
                     patchTarget(index, _instructions.length);
             }
             return;
         }
 
-        if (condition.op == EXP.not && isPlainCondition(condition)) {
-            branchOn(condition.isUnaExp.e1, !jumpWhen, branches, position);
+        if (condition.op == EXP.not && plain == Yes.plain) {
+            branchOnChecked(condition.isUnaExp.e1, !jumpWhen, branches,
+                position, Yes.plain);
             return;
         }
 
@@ -6492,7 +6506,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
                 emitBinary3(threeAddress(floatHandler), destOffset,
                     expression.e1, expression.e2, operandFacts,
-                    operandFacts.size, true);
+                    operandFacts.size, Yes.floating);
                 return;
             }
 
@@ -6536,7 +6550,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 auto handler = comparisonHandler(expression, operandFacts.isUnsigned);
 
                 emitBinary3(threeAddress(handler), destOffset, expression.e1,
-                    expression.e2, operandFacts, operandFacts.size, false);
+                    expression.e2, operandFacts, operandFacts.size, No.floating);
                 return;
             }
         }

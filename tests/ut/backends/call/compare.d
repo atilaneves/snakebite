@@ -1377,9 +1377,9 @@ static foreach (backend; Matrix!()) {
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            double nan() { return double.nan; }
+            T nan(T)() { return T.nan; }
 
-            int ifBits(double a, double b) {
+            int ifBits(T)(T a, T b) {
                 int bits;
                 if (a < b) bits |= 1;
                 if (a <= b) bits |= 2;
@@ -1390,7 +1390,7 @@ static foreach (backend; Matrix!()) {
                 return bits;
             }
 
-            int notBits(double a, double b) {
+            int notBits(T)(T a, T b) {
                 int bits;
                 if (!(a < b)) bits |= 1;
                 if (!(a <= b)) bits |= 2;
@@ -1401,7 +1401,7 @@ static foreach (backend; Matrix!()) {
                 return bits;
             }
 
-            int rightLiteralBits(double a) {
+            int rightLiteralBits(T)(T a) {
                 int bits;
                 if (a < 1.0) bits |= 1;
                 if (a <= 1.0) bits |= 2;
@@ -1412,7 +1412,7 @@ static foreach (backend; Matrix!()) {
                 return bits;
             }
 
-            int leftLiteralBits(double a) {
+            int leftLiteralBits(T)(T a) {
                 int bits;
                 if (1.0 < a) bits |= 1;
                 if (1.0 <= a) bits |= 2;
@@ -1423,44 +1423,77 @@ static foreach (backend; Matrix!()) {
                 return bits;
             }
 
-            int whileCount(double a, double b) {
+            int nanLiteralBits(T)(T a) {
+                int bits;
+                if (a < T.nan) bits |= 1;
+                if (a <= T.nan) bits |= 2;
+                if (a > T.nan) bits |= 4;
+                if (a >= T.nan) bits |= 8;
+                if (a == T.nan) bits |= 16;
+                if (a != T.nan) bits |= 32;
+                if (T.nan < a) bits |= 64;
+                if (T.nan != a) bits |= 128;
+                return bits;
+            }
+
+            int notNanLiteralBits(T)(T a) {
+                int bits;
+                if (!(a < T.nan)) bits |= 1;
+                if (!(a >= T.nan)) bits |= 2;
+                if (!(a == T.nan)) bits |= 4;
+                if (!(a != T.nan)) bits |= 8;
+                return bits;
+            }
+
+            int whileCount(T)(T a, T b) {
                 int n;
                 while (a < b && n < 3) ++n;
                 return n;
             }
 
-            int doCount(double a, double b) {
+            int doCount(T)(T a, T b) {
                 int n;
                 do ++n; while (a < b && n < 3);
                 return n;
             }
 
+            int checkType(T)() {
+                if (ifBits!T(nan!T, 1) != 32) return 1;
+                if (ifBits!T(1, nan!T) != 32) return 2;
+                if (ifBits!T(nan!T, nan!T) != 32) return 3;
+                if (ifBits!T(1, 2) != 35) return 4;
+                if (ifBits!T(2, 1) != 44) return 5;
+                if (ifBits!T(1, 1) != 26) return 6;
+                if (notBits!T(nan!T, 1) != 31) return 7;
+                if (notBits!T(1, nan!T) != 31) return 8;
+                if (notBits!T(1, 2) != 28) return 9;
+                if (notBits!T(2, 1) != 19) return 10;
+                if (notBits!T(1, 1) != 37) return 11;
+                if (rightLiteralBits!T(nan!T) != 32) return 12;
+                if (rightLiteralBits!T(0.5) != 35) return 13;
+                if (rightLiteralBits!T(1) != 26) return 14;
+                if (rightLiteralBits!T(2) != 44) return 15;
+                if (leftLiteralBits!T(nan!T) != 32) return 16;
+                if (leftLiteralBits!T(0.5) != 44) return 17;
+                if (leftLiteralBits!T(1) != 26) return 18;
+                if (leftLiteralBits!T(2) != 35) return 19;
+                if (whileCount!T(nan!T, 1) != 0) return 20;
+                if (whileCount!T(1, nan!T) != 0) return 21;
+                if (whileCount!T(1, 2) != 3) return 22;
+                if (doCount!T(nan!T, 1) != 1) return 23;
+                if (doCount!T(1, nan!T) != 1) return 24;
+                if (doCount!T(1, 2) != 3) return 25;
+                if (nanLiteralBits!T(1) != 160) return 26;
+                if (nanLiteralBits!T(nan!T) != 160) return 27;
+                if (notNanLiteralBits!T(1) != 7) return 28;
+                if (notNanLiteralBits!T(nan!T) != 7) return 29;
+                return 0;
+            }
+
             int main() {
-                if (ifBits(nan, 1) != 32) return 1;
-                if (ifBits(1, nan) != 32) return 2;
-                if (ifBits(nan, nan) != 32) return 3;
-                if (ifBits(1, 2) != 35) return 4;
-                if (ifBits(2, 1) != 44) return 5;
-                if (ifBits(1, 1) != 26) return 6;
-                if (notBits(nan, 1) != 31) return 7;
-                if (notBits(1, nan) != 31) return 8;
-                if (notBits(1, 2) != 28) return 9;
-                if (notBits(2, 1) != 19) return 10;
-                if (notBits(1, 1) != 37) return 11;
-                if (rightLiteralBits(nan) != 32) return 12;
-                if (rightLiteralBits(0.5) != 35) return 13;
-                if (rightLiteralBits(1) != 26) return 14;
-                if (rightLiteralBits(2) != 44) return 15;
-                if (leftLiteralBits(nan) != 32) return 16;
-                if (leftLiteralBits(0.5) != 44) return 17;
-                if (leftLiteralBits(1) != 26) return 18;
-                if (leftLiteralBits(2) != 35) return 19;
-                if (whileCount(nan, 1) != 0) return 20;
-                if (whileCount(1, nan) != 0) return 21;
-                if (whileCount(1, 2) != 3) return 22;
-                if (doCount(nan, 1) != 1) return 23;
-                if (doCount(1, nan) != 1) return 24;
-                if (doCount(1, 2) != 3) return 25;
+                if (const status = checkType!double) return status;
+                if (const status = checkType!float) return 100 + status;
+                if (const status = checkType!real) return 200 + status;
                 return 0;
             }
         });
@@ -1685,13 +1718,19 @@ static foreach (backend; Matrix!(
 }
 
 
-// `&&`, `||` and `!` over scalars give the same answer as the value form
-// for every combination, in `if`, `while` and `do`.
+// `&&`, `||` and `!` over scalars give the fixed answers below for every
+// combination, in `if`, `while` and `do`.
 static foreach (backend; Matrix!()) {
     @("compare.logicalBranches." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
+            // Bit 0 is (a && b) || c, bit 1 is !(a || b) && c, bit 2 is
+            // x < 3 || (x == 5 && !c) || x >= 7, bit 3 is !(x < 3 && x != 1).
+            immutable int[8] conditions = [4, 12, 4, 9, 11, 9, 9, 13];
+            immutable int[8] whileCounts = [0, 2, 0, 0, 2, 2, 0, 0];
+            immutable int[8] doCounts = [1, 1, 3, 3, 3, 1, 3, 3];
+
             int main() {
                 foreach (bits; 0 .. 8) {
                     const bool a = (bits & 1) != 0;
@@ -1699,32 +1738,20 @@ static foreach (backend; Matrix!()) {
                     const bool c = (bits & 4) != 0;
                     const int x = bits;
 
-                    const v1 = (a && b) || c;
-                    bool r1;
-                    if ((a && b) || c) r1 = true;
-                    if (r1 != v1) return 1;
-
-                    const v2 = !(a || b) && c;
-                    bool r2;
-                    if (!(a || b) && c) r2 = true;
-                    if (r2 != v2) return 2;
-
-                    const v3 = x < 3 || (x == 5 && !c) || x >= 7;
-                    bool r3;
-                    if (x < 3 || (x == 5 && !c) || x >= 7) r3 = true;
-                    if (r3 != v3) return 3;
-
-                    bool r4;
-                    if (!(x < 3 && x != 1)) r4 = true;
-                    if (r4 != !(x < 3 && x != 1)) return 4;
+                    int got;
+                    if ((a && b) || c) got |= 1;
+                    if (!(a || b) && c) got |= 2;
+                    if (x < 3 || (x == 5 && !c) || x >= 7) got |= 4;
+                    if (!(x < 3 && x != 1)) got |= 8;
+                    if (got != conditions[bits]) return 1;
 
                     int n;
                     while (n < 2 && (a || c) && !b) ++n;
-                    if (n != (((a || c) && !b) ? 2 : 0)) return 5;
+                    if (n != whileCounts[bits]) return 2;
 
                     int m;
                     do ++m; while (m < 3 && (b || x == 4));
-                    if (m != ((b || x == 4) ? 3 : 1)) return 6;
+                    if (m != doCounts[bits]) return 3;
                 }
                 return 0;
             }

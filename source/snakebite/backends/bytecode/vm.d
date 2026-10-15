@@ -31,6 +31,8 @@ import snakebite.nativevalue:
     CastKind, ComplexOperation, floatingToBool, loadFloating, loadSigned,
     loadUnsigned, shiftCount, storeFloating, storeIntegral;
 import object: Throwable, TypeInfo_Class;
+import core.bitop: bsf;
+import std.meta: AliasSeq;
 import std.traits: EnumMembers;
 
 private alias storeWidth = storeIntegral;
@@ -2281,6 +2283,18 @@ static foreach (triple; threeAddressNames) {
         ~ triple[2] ~ ", true);");
 }
 
+// Every three-address handler, and the form of each with a constant right
+// operand at the same position.
+package alias threeAddressHandlers = mixin(handlerList(""));
+package alias threeAddressConstantHandlers = mixin(handlerList("K"));
+
+private string handlerList(in string suffix) {
+    string list = "AliasSeq!(";
+    foreach (triple; threeAddressNames)
+        list ~= triple[0] ~ suffix ~ ", ";
+    return list ~ ")";
+}
+
 // The form of a three-address handler whose right operand is a constant, or
 // null.
 package Instruction.Handler constantForm(Instruction.Handler handler) {
@@ -2373,8 +2387,12 @@ static assert(fusedSlots >= 2 * fusedCount);
 private __gshared Instruction.Handler[fusedCount] fusedHandlers;
 private __gshared Instruction.Handler[fusedSlots] fusedSet;
 
+static assert((fusedSlots & (fusedSlots - 1)) == 0,
+    "the hash keeps the top bits, so the slot count is a power of two");
+private enum fusedSlotShift = size_t.sizeof * 8 - bsf(fusedSlots);
+
 private size_t fusedSlot(in Instruction.Handler handler) {
-    return (cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL) >> (64 - 8);
+    return (cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL) >> fusedSlotShift;
 }
 
 shared static this() {
