@@ -5936,16 +5936,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Expression expression, in size_t width, in bool floating,
     ) {
         const slot = localSlot(expression);
-        if (slot == size_t.max)
-            return size_t.max;
-        const facts = typeFacts(expression.type);
-        if (facts.size != width)
-            return size_t.max;
-        if (floating ? !isRealFloatType(expression.type)
-                : !((facts.isIntegral || isReference(expression.type))
-                    && isIntegralSize(facts.size)))
+        if (slot == size_t.max || !isScalarOperand(expression.type, width, floating))
             return size_t.max;
         return slot;
+    }
+
+    // Whether `type` is a scalar that a three-address instruction reads at
+    // `width` bytes: integral, floating, or a one-word reference.
+    private bool isScalarOperand(
+        Type type, in size_t width, in bool floating,
+    ) {
+        const facts = typeFacts(type);
+        if (facts.size != width)
+            return false;
+        return floating
+            ? isRealFloatType(type)
+            : (facts.isIntegral || isReference(type))
+                && isIntegralSize(facts.size);
     }
 
     // A pointer, a class reference or `typeof(null)`: one word that is
@@ -6084,12 +6091,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return local;
         if (!isPlainPlace(operand))
             return size_t.max;
-        const facts = typeFacts(operand.type);
-        if (facts.size != width)
-            return size_t.max;
-        if (floating ? !isRealFloatType(operand.type)
-                : !((facts.isIntegral || isReference(operand.type))
-                    && isIntegralSize(facts.size)))
+        if (!isScalarOperand(operand.type, width, floating))
             return size_t.max;
         return placeOf(operand, true);
     }
@@ -6449,74 +6451,108 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
-    // `x = e` for a plain scalar local `x`, with `e` a binary operation of
-    // the three-address kind, a literal or a plain local. The result is
-    // written straight into `x`; the instruction that writes it is the last
-    // one and reads its operands first. Every other `e` keeps
-    // `executeAssignment`: some of them (`x = x++`) write their destination
-    // before they finish.
+    // `x = e` for a scalar target `x` that is a plain local or a place
+    // (a field, a dereference), with `e` a literal, a read of a plain
+    // local or of a place, or a binary operation of the three-address
+    // kind: the result is written straight into the target. The instruction
+    // that writes it is the last one and reads its operands first. Every
+    // other `e` is evaluated into a temporary and copied to a place target,
+    // and keeps `executeAssignment` for a local: some of them (`x = x++`)
+    // write their destination before they finish.
     private bool compileDirectAssign(
         AssignExp expression, in size_t destOffset,
+    ) {
+        import dmd.expression: MemorySet;
+        import dmd.sideeffect: hasSideEffect;
+
+        // Binding a `ref` variable writes the pointer in its slot, not the
+        // `int` it will refer to.
+        if (expression.memset == MemorySet.referenceInit)
+            return false;
+        const facts = typeFacts(expression.e1.type);
+        const floating = isRealFloatType(expression.e1.type);
+        if (!isScalarOperand(expression.e1.type, facts.size, floating))
+            return false;
+
+        auto value = expression.e2;
+        const direct = writesTargetLast(value, facts, floating);
+        const local = operandOf(expression.e1, facts.size, floating);
+        if (local != size_t.max) {
+            if (!direct)
+                return false;
+            evalInto(value, local, facts.size, expression.e1.type);
+            if (destOffset != discardResult && destOffset != local)
+                emit(&opCopy, destOffset, local, facts.size);
+            return true;
+        }
+
+        const target = placeOf(expression.e1, !hasSideEffect(value));
+        if (target == size_t.max)
+            return false;
+        if (direct)
+            evalInto(value, target, facts.size, expression.e1.type);
+        else {
+            const temp = reserveTemp(facts);
+            evalInto(value, temp, facts.size, expression.e1.type);
+            emit(&opCopy, target, temp, facts.size);
+        }
+        if (destOffset != discardResult)
+            emit(&opCopy, destOffset, target, facts.size);
+        return true;
+    }
+
+    // Whether evaluating `value` into its destination writes the
+    // destination once, as the last thing it does.
+    private bool writesTargetLast(
+        Expression value, in imported!"snakebite.nativelayout".TypeFacts facts,
+        in bool floating,
     ) {
         import snakebite.backends.arithmetic:
             ArithmeticPlan, arithmeticPlan;
 
-        const facts = typeFacts(expression.e1.type);
-        const floating = isRealFloatType(expression.e1.type);
-        const slot = operandOf(expression.e1, facts.size, floating);
-        if (slot == size_t.max)
-            return false;
-
-        auto value = expression.e2;
         const valueFacts = typeFacts(value.type);
-        bool eligible;
         with (EXP) switch (value.op) {
             case int64, float64:
-                eligible = valueFacts.size == facts.size
+                return valueFacts.size == facts.size
                     && isRealFloatType(value.type) == floating;
-                break;
+            case null_:
+                return isReference(value.type);
             case variable:
-                eligible = operandOf(value, facts.size, floating)
-                    != size_t.max;
-                break;
+                return operandOf(value, facts.size, floating) != size_t.max;
+            case dotVariable, star, arrayLength:
+                return isPlainPlace(value)
+                    && isScalarOperand(value.type, facts.size, floating);
             case add, min, mul, div: {
                 if (valueFacts.size != facts.size
                         || isRealFloatType(value.type) != floating)
-                    break;
+                    return false;
                 const plan = arithmeticPlan(value.isBinExp);
-                eligible = floating
+                return floating
                     ? plan.kind == ArithmeticPlan.Kind.floating
                         && plan.facts.size == facts.size
                     : plan.kind == ArithmeticPlan.Kind.integral
                         && plan.facts.size == facts.size;
-                break;
             }
             case and, or, xor, mod, leftShift, rightShift, unsignedRightShift: {
                 if (floating || valueFacts.size != facts.size)
-                    break;
+                    return false;
                 const plan = arithmeticPlan(value.isBinExp);
-                eligible = plan.kind == ArithmeticPlan.Kind.integral
+                return plan.kind == ArithmeticPlan.Kind.integral
                     && plan.facts.size == facts.size;
-                break;
             }
             default:
-                break;
+                return false;
         }
-        if (!eligible)
-            return false;
-
-        evalInto(value, slot, facts.size, expression.e1.type);
-        if (destOffset != discardResult && destOffset != slot)
-            emit(&opCopy, destOffset, slot, facts.size);
-        return true;
     }
 
-    // `x op= e` for a plain scalar local `x` when no conversion is needed
-    // (the operation has `x`'s type): one three-address operation
-    // `x = x op e`. The right operand goes first, as in the general path.
+    // `x op= e` for a scalar `x` that is a plain local or a place, when no
+    // conversion is needed (the operation has `x`'s type): one
+    // three-address operation `x = x op e`. The right operand goes first,
+    // as in the general path.
     private bool compileDirectCompound(
         BinAssignExp expression, in size_t destOffset,
     ) {
+        import dmd.sideeffect: hasSideEffect;
         import snakebite.backends.arithmetic:
             ArithmeticPlan, arithmeticPlan;
         import snakebite.frontend.storage: compoundTarget;
@@ -6525,8 +6561,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return false;
         const facts = typeFacts(expression.e1.type);
         const floating = isRealFloatType(expression.e1.type);
-        const slot = operandOf(expression.e1, facts.size, floating);
-        if (slot == size_t.max)
+        if (!isScalarOperand(expression.e1.type, facts.size, floating))
             return false;
 
         const plan = arithmeticPlan(expression);
@@ -6548,6 +6583,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (handler is null)
             return false;
 
+        const slot = targetPlace(expression.e1, facts.size, floating, step);
+        if (slot == size_t.max)
+            return false;
+
         emitWithRight(handler, slot, slot, expression.e2, facts, facts.size,
             floating);
         if (destOffset != discardResult)
@@ -6555,8 +6594,25 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return true;
     }
 
-    // `x++` and `x--` for a plain scalar local `x` of integral or floating
-    // type. The old value is copied out first, and only when it is used.
+    // The operand for the scalar `target` that an instruction writes, or
+    // `size_t.max` with no code emitted. A pointer it is reached through is
+    // read in place only if `later`, which runs before the write, has no
+    // side effect.
+    private size_t targetPlace(
+        Expression target, in size_t width, in bool floating,
+        Expression later,
+    ) {
+        import dmd.sideeffect: hasSideEffect;
+
+        const local = operandOf(target, width, floating);
+        if (local != size_t.max)
+            return local;
+        return placeOf(target, later is null || !hasSideEffect(later));
+    }
+
+    // `x++` and `x--` for a scalar `x` of integral or floating type that is
+    // a plain local or a place. The old value is copied out first, and only
+    // when it is used.
     private bool compileDirectPost(
         PostExp expression, in size_t destOffset,
     ) {
@@ -6565,8 +6621,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const facts = typeFacts(expression.e1.type);
         const floating = isRealFloatType(expression.e1.type);
-        const slot = operandOf(expression.e1, facts.size, floating);
-        if (slot == size_t.max)
+        if (!isScalarOperand(expression.e1.type, facts.size, floating))
             return false;
 
         const plan = arithmeticPlan(expression);
@@ -6574,6 +6629,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return false;
         if (floating ? plan.kind != ArithmeticPlan.Kind.floating
                 : plan.kind != ArithmeticPlan.Kind.integral)
+            return false;
+
+        const slot = targetPlace(expression.e1, facts.size, floating, null);
+        if (slot == size_t.max)
             return false;
 
         const increment = expression.op == EXP.plusPlus;

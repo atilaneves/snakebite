@@ -150,3 +150,130 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+// The store goes to the field of the pointer that `p.f` named before the
+// value ran. Only dmd differs: it evaluates the value first and then loads
+// `p`, so the store lands in `b`; ldc2 agrees with the guests.
+private enum pointerChangedByValue = q{
+    struct S { int f; }
+
+    int swing(S** where, S* other) {
+        *where = other;
+        return 5;
+    }
+
+    int run() {
+        S a = S(1);
+        S b = S(2);
+        S* p = &a;
+        p.f = swing(&p, &b);
+        return a.f * 100 + b.f * 10 + (p is &b ? 1 : 0);
+    }
+};
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd loads the pointer after the value runs, ldc2 before - pinned below"),
+)) {
+    @("places.write.pointerChangedByValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        521.shouldBeRetOf!(backend, pointerChangedByValue, "run");
+    }
+}
+
+@("places.write.pointerChangedByValue.Native.diverges")
+@Tags("Native")
+unittest {
+    151.shouldBeRetOf!(Native, pointerChangedByValue, "run");
+}
+
+// As above for `+=`: the target is the field of the old pointer, and it is
+// read after the value ran.
+private enum compoundPointerChangedByValue = q{
+    struct S { int f; }
+
+    int swing(S** where, S* other) {
+        *where = other;
+        return 5;
+    }
+
+    int run() {
+        S a = S(1);
+        S b = S(2);
+        S* p = &a;
+        p.f += swing(&p, &b);
+        return a.f * 100 + b.f * 10 + (p is &b ? 1 : 0);
+    }
+};
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd loads the pointer after the value runs, ldc2 before - pinned below"),
+)) {
+    @("places.write.compoundPointerChangedByValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        621.shouldBeRetOf!(backend, compoundPointerChangedByValue, "run");
+    }
+}
+
+@("places.write.compoundPointerChangedByValue.Native.diverges")
+@Tags("Native")
+unittest {
+    171.shouldBeRetOf!(Native, compoundPointerChangedByValue, "run");
+}
+
+// Every kind of write to a field or a dereference, and the value of the
+// assignment, compound assignment and post-increment expressions.
+static foreach (backend; Matrix!()) {
+    @("places.write.fieldOperands." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                struct Inner { int a; long b; }
+                struct Outer { int x; Inner inner; double d; Outer* next; }
+                class Box { int count; long wide; Box next; }
+
+                long writes(ref Outer r, Outer* p, Box b) {
+                    Outer local;
+                    local.x = 3;
+                    local.inner.a = local.x + 4;
+                    r.x = 10;
+                    r.inner.b = local.inner.a * 5;
+                    p.inner.a = r.x + local.inner.a;
+                    (*p).x = p.inner.a;
+                    b.count = 7;
+                    b.wide = b.count + r.inner.b;
+                    b.next = null;
+                    p.d = 1.5;
+                    p.d += 2.25;
+                    b.count += 5;
+                    b.wide *= 3;
+                    b.wide -= 1;
+                    b.wide <<= 1;
+                    p.inner.a++;
+                    ++p.inner.a;
+                    const old = b.count++;
+                    const result = (p.x = 20) + (b.wide += 1)
+                        + (p.inner.a -= 2);
+                    return local.x + local.inner.a + r.x + r.inner.b
+                        + p.inner.a + p.x + b.count + b.wide + old + result
+                        + cast(long) p.d + (b.next is null ? 1000 : 0);
+                }
+
+                bool check() {
+                    Outer base;
+                    Outer other;
+                    other.next = &base;
+                    auto b = new Box;
+                    b.next = new Box;
+                    return writes(other, &base, b) == 1659;
+                }
+            },
+            "check",
+        );
+    }
+}

@@ -500,6 +500,33 @@ static foreach (backend; Guests) {
 }
 
 
+// The null check of the base runs before the value of the assignment, so
+// the value is never computed.
+static foreach (backend; Guests) {
+    @("flags.nullDerefClassFieldWriteBeforeValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        shouldRun!backend(Row(["-check=nullderef"], q{
+            class C { int x; }
+            int ran;
+            int mark() {
+                ran = 1;
+                return 2;
+            }
+            @system unittest {
+                C c;
+                try
+                    c.x = mark();
+                catch (Error error) {
+                    assert(ran == 0);
+                    throw error;
+                }
+            }
+        }, Expect.raised(nullPointerError), Expect.same));
+    }
+}
+
+
 static foreach (backend; Guests) {
     @("flags.nullDerefDelegateCall." ~ backend.stringof)
     @Tags(backend.stringof)
