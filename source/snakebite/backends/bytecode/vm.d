@@ -3798,7 +3798,7 @@ private size_t roleSlot(in Instruction.Handler handler) {
 private void addRoles(Instruction.Handler handler, in Roles roles) {
     if ((roleCount + 1) * 2 > roleEntries.length) {
         auto old = roleEntries;
-        const capacity = old.length == 0 ? 4096 : old.length * 2;
+        const capacity = old.length == 0 ? 2048 : old.length * 2;
         roleEntries = new RoleEntry[capacity];
         roleShift = size_t.sizeof * 8 - bsf(capacity);
         roleCount = 0;
@@ -3816,9 +3816,8 @@ private void addRoles(Instruction.Handler handler, in Roles roles) {
     ++roleCount;
 }
 
-// Whether this VM knows the handler's roles, and what they are. Handlers of
-// instructions that hold no address and no instruction address may be unknown
-// unless a specialisation covers them.
+// Whether the table holds the handler's roles, and what they are. A handler
+// that is not in the table holds no address and no instruction address.
 package bool rolesOf(in Instruction.Handler handler, out Roles roles) {
     if (roleEntries.length == 0)
         return false;
@@ -3848,17 +3847,24 @@ package size_t* branchTargetField(ref Instruction instruction) {
     return null;
 }
 
-// The specialised handlers that have no entry in the role table.
+// The specialised handlers whose roles the table does not hold. A handler
+// that holds an address or an instruction address has an entry for each
+// instance that a specialisation makes of it, so that the roles stay known
+// after `specialiseHandlers` swaps the handler.
 version (unittest)
 public size_t specialisedHandlersWithoutRoles() {
     size_t missing;
-    foreach (entry; specialisations)
+    foreach (entry; specialisations) {
+        if (entry.general is null || entry.roles == Roles.init)
+            continue;
         foreach (frame; entry.handlers)
             foreach (handler; frame) {
                 Roles roles;
-                if (handler !is null && !rolesOf(handler, roles))
+                if (handler !is null
+                        && (!rolesOf(handler, roles) || roles != entry.roles))
                     ++missing;
             }
+    }
     return missing;
 }
 
@@ -3895,6 +3901,7 @@ private struct Specialisation {
     bool right;
     // The fused load-then-copy also runs the next instruction.
     bool pairWithNext;
+    Roles roles;
 }
 
 private __gshared Specialisation[] specialisations;
@@ -3907,10 +3914,15 @@ private size_t specialisationSlot(in Instruction.Handler handler) {
 }
 
 private void addSpecialisation(Specialisation entry, in Roles roles) {
-    foreach (frame; entry.handlers)
-        foreach (handler; frame)
-            if (handler !is null)
-                addRoles(handler, roles);
+    entry.roles = roles;
+    // The table keeps only the handlers that hold an address or an
+    // instruction address. It is searched for every instruction of a
+    // function, so it stays small.
+    if (roles != Roles.init)
+        foreach (frame; entry.handlers)
+            foreach (handler; frame)
+                if (handler !is null)
+                    addRoles(handler, roles);
     insertSpecialisation(entry);
 }
 
