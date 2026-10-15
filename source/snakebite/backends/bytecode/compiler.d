@@ -740,7 +740,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opModuloSigned3, opModuloUnsigned3,
         CompareKind, Comparison, constantForm, fusedBranchHandler, fusesConstant,
         threeAddressConstantHandlers, threeAddressHandlers,
-        isFusedBranch,
+        isFusedBranch, specialiseHandlers,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall,
         opCastAs, opCastFixedAs,
@@ -1083,6 +1083,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         optimizeStaticLoads;
         fuseReturns;
         fuseLoadCopies;
+        specialiseHandlers(_instructions);
 
         foreach (ref site; _callSites)
             if (site.cleanupStartIndex != size_t.max) {
