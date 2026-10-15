@@ -2340,6 +2340,17 @@ private const(Instruction)* runDivide3(string operation, bool signed,
     bool constant, Decoded)(
     ref Decoded execution,
 ) {
+    // Signed 32-bit division is native `int` division, so `int.min / -1`
+    // traps as it does in compiled D. The widened path below would not.
+    static if (signed) {
+        if (execution.width == int.sizeof) {
+            const dividend = *cast(const int*) execution.source;
+            const divisor = *cast(const int*) rightOperand!constant(execution);
+            *cast(int*) execution.destination = mixin("dividend "
+                ~ operation ~ " divisor");
+            return execution.next;
+        }
+    }
     static if (signed)
         alias load = loadSigned;
     else
