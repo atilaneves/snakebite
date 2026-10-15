@@ -410,6 +410,68 @@ version (LDC) version (D_Optimized)
 private static if (!is(typeof(chainedDispatch)))
     private enum chainedDispatch = false;
 
+// Under `-version=BytecodeCount` (the `bin/sb-count` build), every handler
+// instantiation owns one counter slot. Its first execution registers the slot;
+// the slots are printed to stderr at exit as `BCOUNT <count> <handler name>`.
+// The counts are not atomic: a guest with several threads gives approximate
+// counts.
+version (BytecodeCount) {
+    private struct CountSlot {
+        ulong n;
+        string name;
+        shared bool registered;
+    }
+
+    private enum maxCountSlots = 4096;
+    private __gshared CountSlot*[maxCountSlots] _countSlots;
+    private shared size_t _countUsed;
+    private shared bool _countExitHooked;
+
+    private enum countName(string op, OperandKind d, OperandKind s, P...) =
+        op ~ "/" ~ d.stringof ~ "/" ~ s.stringof ~ P.stringof;
+
+    private extern(C) void dumpCounts() {
+        import core.atomic: atomicLoad;
+        import core.stdc.stdio: fprintf, stderr;
+        const used = atomicLoad(_countUsed);
+        foreach (slot; _countSlots[0 .. used < maxCountSlots ? used : maxCountSlots]) {
+            if (slot is null)
+                continue;
+            fprintf(stderr, "BCOUNT %llu %.*s\n", slot.n,
+                cast(int) slot.name.length, slot.name.ptr);
+        }
+    }
+
+    // Exactly once for each slot, whatever the number of threads: the thread
+    // that wins the compare-and-swap on `registered` appends the slot.
+    private void registerCount(CountSlot* slot, string name) {
+        import core.atomic: atomicOp, atomicStore, cas, MemoryOrder;
+        import core.stdc.stdio: fprintf, stderr;
+        import core.stdc.stdlib: atexit, abort;
+        if (!cas(&slot.registered, false, true))
+            return;
+        if (cas(&_countExitHooked, false, true))
+            atexit(&dumpCounts);
+        const index = atomicOp!"+="(_countUsed, 1) - 1;
+        if (index >= maxCountSlots) {
+            fprintf(stderr, "bin/sb-count: more than %zu handler instantiations; raise maxCountSlots\n",
+                maxCountSlots);
+            abort;
+        }
+        slot.name = name;
+        atomicStore!(MemoryOrder.rel)(*cast(shared) &_countSlots[index], cast(shared) slot);
+    }
+
+    // Counts one execution of a handler. The counts are not atomic; the
+    // registration is.
+    private void countExecution(CountSlot* slot, string name) {
+        import core.atomic: atomicLoad, MemoryOrder;
+        if (!atomicLoad!(MemoryOrder.raw)(slot.registered))
+            registerCount(slot, name);
+        slot.n++;
+    }
+}
+
 private const(Instruction)* execute(
     alias operation,
     OperandKind destinationKind,
@@ -420,6 +482,11 @@ private const(Instruction)* execute(
     Activation* activation,
     DispatchState* state,
 ) {
+    version (BytecodeCount) {
+        static __gshared CountSlot slot;
+        countExecution(&slot, countName!(__traits(identifier, operation),
+            destinationKind, sourceKind, Parameters));
+    }
     // The position of a throw selects its handler.
     activation.pc = pc;
     // const would prevent operations from writing through storage pointers.
@@ -450,6 +517,11 @@ private const(Instruction)* executeOnce(
     Activation* activation,
     DispatchState* state,
 ) {
+    version (BytecodeCount) {
+        static __gshared CountSlot slot;
+        countExecution(&slot, countName!(__traits(identifier, operation),
+            destinationKind, sourceKind, Parameters));
+    }
     activation.pc = pc;
     auto execution = Execution!(destinationKind, sourceKind)(
         pc, activation, state,
@@ -468,6 +540,11 @@ private const(Instruction)* executeCall(
     Activation* activation,
     DispatchState* state,
 ) {
+    version (BytecodeCount) {
+        static __gshared CountSlot slot;
+        countExecution(&slot, countName!(__traits(identifier, operation),
+            destinationKind, sourceKind));
+    }
     activation.pc = pc;
     state.current = activation;
     auto execution = Execution!(destinationKind, sourceKind)(
@@ -1012,6 +1089,10 @@ public const(Instruction)* opTemporaryEnd(
     Activation* activation,
     DispatchState* state,
 ) {
+    version (BytecodeCount) {
+        static __gshared CountSlot slot;
+        countExecution(&slot, "opTemporaryEnd");
+    }
     auto execution = Execution!(OperandKind.storage, OperandKind.immediate)(
         pc, activation, state);
     const mark = loadUnsigned(execution.destination, size_t.sizeof);
@@ -1245,6 +1326,10 @@ package const(Instruction)* opThrow(
     Activation* activation,
     DispatchState* state,
 ) {
+    version (BytecodeCount) {
+        static __gshared CountSlot slot;
+        countExecution(&slot, "opThrow");
+    }
     activation.pc = pc;
     auto execution = Execution!(OperandKind.storage, OperandKind.immediate)(
         pc, activation, state);
@@ -1272,6 +1357,10 @@ public const(Instruction)* opCall(
     Activation* active,
     DispatchState* state,
 ) {
+    version (BytecodeCount) {
+        static __gshared CountSlot slot;
+        countExecution(&slot, "opCall");
+    }
     import core.stdc.string: memcpy;
 
     import core.atomic: atomicLoad, MemoryOrder;
