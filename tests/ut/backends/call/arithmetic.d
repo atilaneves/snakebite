@@ -1497,11 +1497,6 @@ static foreach (backend; Matrix!()) {
                     return 5;
                 }
 
-                int bump(int* p) {
-                    *p = 10;
-                    return 1;
-                }
-
                 int sum() {
                     int x = two();
                     return x + (x = five());
@@ -1522,10 +1517,6 @@ static foreach (backend; Matrix!()) {
             q{
                 int two() {
                     return 2;
-                }
-
-                int five() {
-                    return 5;
                 }
 
                 int bump(int* p) {
@@ -1555,10 +1546,6 @@ static foreach (backend; Matrix!()) {
                     return 2;
                 }
 
-                int five() {
-                    return 5;
-                }
-
                 int bump(int* p) {
                     *p = 10;
                     return 1;
@@ -1583,17 +1570,8 @@ static foreach (backend; Matrix!()) {
         43.shouldBeRetOf!(
             backend,
             q{
-                int two() {
-                    return 2;
-                }
-
                 int five() {
                     return 5;
-                }
-
-                int bump(int* p) {
-                    *p = 10;
-                    return 1;
                 }
 
                 int steps() {
@@ -1617,19 +1595,6 @@ static foreach (backend; Matrix!()) {
         8.shouldBeRetOf!(
             backend,
             q{
-                int two() {
-                    return 2;
-                }
-
-                int five() {
-                    return 5;
-                }
-
-                int bump(int* p) {
-                    *p = 10;
-                    return 1;
-                }
-
                 double half() {
                     return 1.5;
                 }

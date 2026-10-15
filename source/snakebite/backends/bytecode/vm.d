@@ -2199,7 +2199,7 @@ package alias opFloatGreaterThan = opFloatComparison!">";
 package alias opFloatGreaterOrEqual = opFloatComparison!">=";
 
 
-// PROTOTYPE (three-address forms). `source` is the left operand,
+// Three-address forms. `source` is the left operand,
 // `sourceWidth` the right operand, `destination` the result. All three are
 // storage operands; the result is written after both operands are read.
 private alias opInt3(string operation) =

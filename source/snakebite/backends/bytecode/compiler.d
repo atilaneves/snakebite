@@ -1157,6 +1157,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private static struct Operands {
         Operand destination;
         Operand source;
+        // The right operand of a three-address instruction, held in
+        // `sourceWidth`.
+        Operand right;
     }
 
     // The operand roles of every handler a copied function may use, and
@@ -1187,6 +1190,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         )) {
             if (handler is &operation) {
                 roles = Operands(S, S);
+                return true;
+            }
+        }
+        static foreach (operation; AliasSeq!(
+            opAdd3, opSubtract3, opMultiply3, opFloatAdd3, opFloatSubtract3,
+            opFloatMultiply3, opFloatDivide3, opLessThanSigned3,
+            opLessThanUnsigned3, opLessOrEqualSigned3, opLessOrEqualUnsigned3,
+            opGreaterThanSigned3, opGreaterThanUnsigned3,
+            opGreaterOrEqualSigned3, opGreaterOrEqualUnsigned3, opEqual3,
+            opNotEqual3, opFloatEqual3, opFloatNotEqual3, opFloatLessThan3,
+            opFloatLessOrEqual3, opFloatGreaterThan3, opFloatGreaterOrEqual3,
+        )) {
+            if (handler is &operation) {
+                roles = Operands(S, S, S);
                 return true;
             }
         }
@@ -1315,6 +1332,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 copied.source = inlineStorage(copied.source, base);
             else if (roles.source == Operand.constant)
                 copied.source += constantBase;
+            if (roles.right == Operand.storage)
+                copied.sourceWidth = inlineStorage(copied.sourceWidth, base);
             if (auto target = branchTargetField(copied))
                 *target = positions[*target];
             _instructions ~= copied;
@@ -2246,11 +2265,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             expression, facts.isUnsigned);
         if (handler is null)
             return size_t.max;
-        const leftOffset = reserveTemp(facts);
-        const rightOffset = reserveTemp(facts);
+        size_t leftOffset;
+        size_t rightOffset;
         fullExpression(FullExpressionScope.Position.condition, expression, {
-            evalInto(expression.e1, leftOffset, facts.size);
-            evalInto(expression.e2, rightOffset, facts.size);
+            leftOffset = operandInto(expression.e1, expression.e2, facts,
+                facts.size, false);
+            rightOffset = operandInto(expression.e2, null, facts,
+                facts.size, false);
         });
         const index = _instructions.length;
         emit(handler, leftOffset, rightOffset, facts.size, 0);
