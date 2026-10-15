@@ -1481,6 +1481,172 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// The left operand is read before a right operand that assigns it.
+static foreach (backend; Matrix!()) {
+    @("arithmetic.operandAssignedByRightOperand." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(
+            backend,
+            q{
+                int two() {
+                    return 2;
+                }
+
+                int five() {
+                    return 5;
+                }
+
+                int bump(int* p) {
+                    *p = 10;
+                    return 1;
+                }
+
+                int sum() {
+                    int x = two();
+                    return x + (x = five());
+                }
+            },
+            "sum",
+        );
+    }
+}
+
+// The left operand is read before a call that writes it through a pointer.
+static foreach (backend; Matrix!()) {
+    @("arithmetic.operandWrittenByCallThroughPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        3.shouldBeRetOf!(
+            backend,
+            q{
+                int two() {
+                    return 2;
+                }
+
+                int five() {
+                    return 5;
+                }
+
+                int bump(int* p) {
+                    *p = 10;
+                    return 1;
+                }
+
+                int sum() {
+                    int x = two();
+                    return x + bump(&x);
+                }
+            },
+            "sum",
+        );
+    }
+}
+
+// `x += f(&x)`: the right operand runs before the target is read.
+static foreach (backend; Matrix!()) {
+    @("arithmetic.compoundAssignWithCallThroughPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        11.shouldBeRetOf!(
+            backend,
+            q{
+                int two() {
+                    return 2;
+                }
+
+                int five() {
+                    return 5;
+                }
+
+                int bump(int* p) {
+                    *p = 10;
+                    return 1;
+                }
+
+                int sum() {
+                    int x = two();
+                    x += bump(&x);
+                    return x;
+                }
+            },
+            "sum",
+        );
+    }
+}
+
+// Compound assignment and postfix on a plain local, with the old value used.
+static foreach (backend; Matrix!()) {
+    @("arithmetic.compoundAssignAndPostfixOnLocals." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        43.shouldBeRetOf!(
+            backend,
+            q{
+                int two() {
+                    return 2;
+                }
+
+                int five() {
+                    return 5;
+                }
+
+                int bump(int* p) {
+                    *p = 10;
+                    return 1;
+                }
+
+                int steps() {
+                    int x = five() - 2;
+                    int old = x++;
+                    x *= 1;
+                    x -= 0;
+                    return x * 10 + old;
+                }
+            },
+            "steps",
+        );
+    }
+}
+
+// Compound assignment and postfix on a floating local.
+static foreach (backend; Matrix!()) {
+    @("arithmetic.compoundAssignAndPostfixOnFloatingLocals." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        8.shouldBeRetOf!(
+            backend,
+            q{
+                int two() {
+                    return 2;
+                }
+
+                int five() {
+                    return 5;
+                }
+
+                int bump(int* p) {
+                    *p = 10;
+                    return 1;
+                }
+
+                double half() {
+                    return 1.5;
+                }
+
+                int steps() {
+                    double d = half();
+                    d += 2.0;
+                    d *= 2.0;
+                    d++;
+                    return cast(int) d;
+                }
+            },
+            "steps",
+        );
+    }
+}
+
 // A shift's right operand keeps its own type - dmd does not promote it to
 // match the left operand the way it does for every other binary
 // operator - so it can be narrower than the left operand it is shifting.
