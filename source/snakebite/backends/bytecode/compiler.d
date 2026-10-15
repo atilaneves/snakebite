@@ -733,7 +733,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opGreaterOrEqualUnsigned3, opEqual3, opNotEqual3, opFloatEqual3,
         opFloatNotEqual3, opFloatLessThan3, opFloatLessOrEqual3,
         opFloatGreaterThan3, opFloatGreaterOrEqual3,
-        CompareKind, constantForm, fusedBranchHandler, isFusedBranch,
+        CompareKind, Comparison, constantForm, fusedBranchHandler, isFusedBranch,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall,
         opCastAs, opCastFixedAs,
@@ -6133,17 +6133,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        string operation;
+        Comparison operation;
+        bool isComparison = true;
         with (EXP) switch (condition.op) {
-            case lessThan: operation = "<"; break;
-            case lessOrEqual: operation = "<="; break;
-            case greaterThan: operation = ">"; break;
-            case greaterOrEqual: operation = ">="; break;
-            case equal: operation = "=="; break;
-            case notEqual: operation = "!="; break;
-            default: break;
+            case lessThan: operation = Comparison.lessThan; break;
+            case lessOrEqual: operation = Comparison.lessOrEqual; break;
+            case greaterThan: operation = Comparison.greaterThan; break;
+            case greaterOrEqual: operation = Comparison.greaterOrEqual; break;
+            case equal: operation = Comparison.equal; break;
+            case notEqual: operation = Comparison.notEqual; break;
+            default: isComparison = false; break;
         }
-        if (operation !is null) {
+        if (isComparison) {
             auto comparison = condition.isBinExp;
             const plan = comparisonPlan(comparison);
             const floating = plan.kind == ComparisonPlan.Kind.floating;
@@ -6161,7 +6162,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private void emitCompareBranch(
-        BinExp comparison, string operation,
+        BinExp comparison, Comparison operation,
         in imported!"snakebite.nativelayout".TypeFacts facts,
         in bool floating, in bool jumpWhen,
         in FullExpressionScope.Position position, ref size_t[] branches,
@@ -6198,13 +6199,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             leftOffset, rightOffset, facts.size, 0);
     }
 
-    private static string mirrored(string operation) {
-        switch (operation) {
-            case "<": return ">";
-            case "<=": return ">=";
-            case ">": return "<";
-            case ">=": return "<=";
-            default: return operation;
+    private static Comparison mirrored(in Comparison operation) {
+        final switch (operation) with (Comparison) {
+            case lessThan: return greaterThan;
+            case lessOrEqual: return greaterOrEqual;
+            case greaterThan: return lessThan;
+            case greaterOrEqual: return lessOrEqual;
+            case equal: return equal;
+            case notEqual: return notEqual;
         }
     }
 

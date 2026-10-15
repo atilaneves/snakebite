@@ -2299,14 +2299,25 @@ package enum CompareKind {
     floating,
 }
 
+package enum Comparison {
+    lessThan,
+    lessOrEqual,
+    greaterThan,
+    greaterOrEqual,
+    equal,
+    notEqual,
+}
+
+private enum comparisonSymbols = ["<", "<=", ">", ">=", "==", "!="];
+
 // Compare and branch in one instruction. `destination` is the left operand,
 // `source` the right operand (or, with `constant`, the address of a
 // constant in the native constant pool), `sourceWidth` the branch target.
-private alias opFusedBranch(string operation, CompareKind kind,
+private alias opFusedBranch(Comparison comparison, CompareKind kind,
     bool jumpWhen, bool constant) =
     execute!(runFusedBranch, OperandKind.storage,
         constant ? OperandKind.immediate : OperandKind.storage,
-        operation, kind, jumpWhen);
+        comparisonSymbols[comparison], kind, jumpWhen);
 
 private const(Instruction)* runFusedBranch(string operation, CompareKind kind,
     bool jumpWhen, Decoded)(
@@ -2344,28 +2355,56 @@ private const(Instruction)* runFusedBranch(string operation, CompareKind kind,
     return execution.next;
 }
 
-private enum fusedOperations = ["<", "<=", ">", ">=", "==", "!="];
+private enum fusedCount = EnumMembers!Comparison.length
+    * EnumMembers!CompareKind.length * 2 * 2;
+
+private size_t fusedIndex(
+    in Comparison comparison, in CompareKind kind, in bool jumpWhen,
+    in bool constant,
+) {
+    return ((comparison * EnumMembers!CompareKind.length + kind) * 2
+        + jumpWhen) * 2 + constant;
+}
+
+// The compiler asks about every instruction it has emitted whether it is a
+// branch, so the handlers are also kept in a hash set.
+private enum fusedSlots = 256;
+static assert(fusedSlots >= 2 * fusedCount);
+private __gshared Instruction.Handler[fusedCount] fusedHandlers;
+private __gshared Instruction.Handler[fusedSlots] fusedSet;
+
+private size_t fusedSlot(in Instruction.Handler handler) {
+    return (cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL) >> (64 - 8);
+}
+
+shared static this() {
+    static foreach (comparison; EnumMembers!Comparison)
+        static foreach (kind; EnumMembers!CompareKind)
+            static foreach (jumpWhen; [false, true])
+                static foreach (constant; [false, true])
+                    fusedHandlers[fusedIndex(comparison, kind, jumpWhen,
+                        constant)] = &opFusedBranch!(comparison, kind,
+                        jumpWhen, constant);
+    foreach (handler; fusedHandlers) {
+        auto slot = fusedSlot(handler);
+        while (fusedSet[slot] !is null)
+            slot = (slot + 1) % fusedSlots;
+        fusedSet[slot] = handler;
+    }
+}
 
 package Instruction.Handler fusedBranchHandler(
-    string operation, CompareKind kind, bool jumpWhen, bool constant,
+    in Comparison comparison, in CompareKind kind, in bool jumpWhen,
+    in bool constant,
 ) {
-    static foreach (o; fusedOperations)
-        static foreach (k; [EnumMembers!CompareKind])
-            static foreach (j; [false, true])
-                static foreach (c; [false, true])
-                    if (operation == o && kind == k && jumpWhen == j
-                            && constant == c)
-                        return &opFusedBranch!(o, k, j, c);
-    return null;
+    return fusedHandlers[fusedIndex(comparison, kind, jumpWhen, constant)];
 }
 
 package bool isFusedBranch(Instruction.Handler handler) {
-    static foreach (o; fusedOperations)
-        static foreach (k; [EnumMembers!CompareKind])
-            static foreach (j; [false, true])
-                static foreach (c; [false, true])
-                    if (handler is &opFusedBranch!(o, k, j, c))
-                        return true;
+    for (auto slot = fusedSlot(handler); fusedSet[slot] !is null;
+            slot = (slot + 1) % fusedSlots)
+        if (fusedSet[slot] is handler)
+            return true;
     return false;
 }
 
