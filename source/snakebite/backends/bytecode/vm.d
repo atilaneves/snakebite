@@ -201,6 +201,8 @@ public struct CallSite {
         package size_t returnWidth;
         package const(Arg)* args;
         package size_t argCount;
+        // Every argument is a plain frame offset of width 1, 2, 4 or 8.
+        package bool plainArgs;
     }
 
     package FastCall fast;
@@ -269,6 +271,12 @@ public struct CallSite {
         slot.returnWidth = returnWidth;
         slot.args = args.ptr;
         slot.argCount = args.length;
+        slot.plainArgs = true;
+        foreach (arg; args)
+            if ((arg.callerOffset & (1UL << 63)) != 0
+                    || (arg.width != 1 && arg.width != 2 && arg.width != 4
+                        && arg.width != 8))
+                slot.plainArgs = false;
         slot.callee = function_;
         return true;
     }
@@ -1459,7 +1467,21 @@ public const(Instruction)* opCall(
     ubyte* calleeFrame = cast(ubyte*) activation + fast.frameOffset;
     activation.frame = calleeFrame;
 
-    foreach (arg; fast.args[0 .. fast.argCount]) {
+    if (fast.plainArgs)
+        foreach (arg; fast.args[0 .. fast.argCount]) {
+            auto destination = calleeFrame + arg.calleeOffset;
+            const source = frame + arg.callerOffset;
+            // Compares, not a jump table: a site always takes the same one.
+            if (arg.width == 8)
+                *cast(ulong*) destination = *cast(const(ulong)*) source;
+            else if (arg.width == 4)
+                *cast(uint*) destination = *cast(const(uint)*) source;
+            else if (arg.width == 1)
+                *destination = *source;
+            else
+                *cast(ushort*) destination = *cast(const(ushort)*) source;
+        }
+    else foreach (arg; fast.args[0 .. fast.argCount]) {
         auto destination = calleeFrame + arg.calleeOffset;
         const source = storage(arg.callerOffset);
         // Constant widths let the compiler copy without a call.
