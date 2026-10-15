@@ -41,19 +41,19 @@ public string[] unrecordedWords(
         Roles roles;
         const known = rolesOf(instruction.handler, roles);
         if (!known || roles.destination != Role.instruction)
-            check(Place(Place.Section.instruction, index,
-                Place.Field.destination), instruction.destination);
+            check(Place(Place.Section.instruction,
+                Place.Field.destination, index), instruction.destination);
         if (!known || roles.source != Role.instruction)
-            check(Place(Place.Section.instruction, index,
-                Place.Field.source), instruction.source);
+            check(Place(Place.Section.instruction,
+                Place.Field.source, index), instruction.source);
         if (!known || roles.sourceWidth != Role.instruction)
-            check(Place(Place.Section.instruction, index,
-                Place.Field.sourceWidth), instruction.sourceWidth);
+            check(Place(Place.Section.instruction,
+                Place.Field.sourceWidth, index), instruction.sourceWidth);
         if (isMapped(instruction.width))
             found ~= text("instruction ", index, " has an address as width");
     }
     foreach (index, constant; function_.constants)
-        check(Place(Place.Section.constant, index, Place.Field.word),
+        check(Place(Place.Section.constant, Place.Field.word, index),
             cast(size_t) constant);
     return found;
 }

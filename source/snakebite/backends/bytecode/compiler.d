@@ -1506,7 +1506,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             internalFailure(text("this handler holds no address in `", field,
                 "`"));
         _relocs ~= Reloc(
-            Place(Place.Section.instruction, _instructions.length, field),
+            Place(Place.Section.instruction, field, _instructions.length),
             address.target);
     }
 
@@ -1517,8 +1517,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private size_t addConstant(in Address address) {
         _relocs ~= Reloc(
-            Place(Place.Section.constant, _constants.length,
-                Place.Field.word),
+            Place(Place.Section.constant, Place.Field.word,
+                _constants.length),
             address.target);
         return addConstant(cast(long) address.word);
     }

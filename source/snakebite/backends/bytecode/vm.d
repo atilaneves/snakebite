@@ -835,7 +835,7 @@ private void recordAddress(
     in Place.Field field, in Target.Kind kind, in size_t address,
 ) {
     if (address != 0)
-        relocs ~= Reloc(Place(section, index, field), Target(kind, address));
+        relocs ~= Reloc(Place(section, field, index), Target(kind, address));
 }
 
 package void recordCallSiteRelocs(

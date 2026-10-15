@@ -106,10 +106,11 @@ public struct Place {
         type,
     }
 
+    // The two enums come first so that a `Place` is 16 bytes.
     public Section section;
+    public Field field;
     // The instruction, constant, call site, assert site or exception handler.
     public size_t index;
-    public Field field;
 }
 
 
@@ -117,3 +118,5 @@ public struct Reloc {
     public Place place;
     public Target target;
 }
+
+static assert(Reloc.sizeof == 32, "a function keeps one Reloc for each address");
