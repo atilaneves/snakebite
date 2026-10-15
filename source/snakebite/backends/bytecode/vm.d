@@ -1426,10 +1426,12 @@ private alias opCallGeneral =
     executeCall!(runCall, OperandKind.result, OperandKind.immediate);
 
 // A call of a compiled guest function whose activation needs no closure,
-// no discarded memory-class result slot and no context conversion: the
-// activation is built here without the generic `Execution` decoding, from
-// the facts `CallSite.prepare` keeps. Any other call takes `opCallGeneral`,
-// which has the same effect.
+// no discarded memory-class result slot and no context conversion, with
+// plain arguments and room on the committed frame stack: the activation is
+// built here without the generic `Execution` decoding, from the facts
+// `CallSite.prepare` keeps. Everything else takes `opCallSlow`, which has the
+// same effect. This function calls nothing, so it keeps no value in a
+// callee-saved register.
 public const(Instruction)* opCall(
     const(Instruction)* pc,
     Activation* active,
@@ -1440,6 +1442,78 @@ public const(Instruction)* opCall(
         static __gshared CountSlot slot;
         countExecution(&slot, "opCall");
     }
+    import core.atomic: atomicLoad, MemoryOrder;
+
+    const site = &active.callSites[pc.source];
+    const fast = &site.fast;
+    const ready = atomicLoad!(MemoryOrder.acq)(
+        *cast(shared(uint)*) &fast.state) == CallSite.FastCall.State.ready;
+    const hasPlace = fast.returnWidth != 0 && pc.destination != discardResult;
+    if (!ready || !fast.plainArgs
+            || (!hasPlace && fast.returnPlaceOffset != size_t.max))
+        return opCallSlow(pc, active, state, frame);
+
+    auto frames = state.frames;
+    const mark = frames.mark;
+    auto activation = cast(Activation*) frames.reserveFast(
+        fast.frameBytes, fast.alignment);
+    if (activation is null)
+        return opCallSlow(pc, active, state, frame);
+
+    // The position of a throw selects its handler, and the new activation
+    // resumes this one.
+    active.pc = pc;
+    state.current = active;
+    activation.frameMark = mark;
+    ubyte* calleeFrame = cast(ubyte*) activation + fast.frameOffset;
+    activation.frame = calleeFrame;
+
+    const callee = fast.callee;
+    activation.pc = activation.start = callee.instructions.ptr;
+    activation.end = null;
+    activation.resume = null;
+    void* place = null;
+    if (hasPlace)
+        place = operandStorage(frame, pc.destination);
+    if (fast.returnPlaceOffset != size_t.max)
+        *cast(void**) (calleeFrame + fast.returnPlaceOffset) = place;
+    activation.returnPlace = place;
+    activation.constants = callee.constants;
+    activation.callSites = callee.callSites;
+    activation.assertSites = callee.assertSites;
+    activation.exceptionHandlers = callee.exceptionHandlers;
+    activation.cleanupMark = frames.cleanupMark;
+    activation.parent = active;
+    active.resume = pc + 1;
+    state.pending = activation;
+
+    // Last, so that few values stay live through the loop.
+    foreach (arg; fast.args[0 .. fast.argCount]) {
+        auto destination = calleeFrame + arg.calleeOffset;
+        const source = frame + arg.callerOffset;
+        // Compares, not a jump table: a site always takes the same one.
+        if (arg.width == 8)
+            *cast(ulong*) destination = *cast(const(ulong)*) source;
+        else if (arg.width == 4)
+            *cast(uint*) destination = *cast(const(uint)*) source;
+        else if (arg.width == 1)
+            *destination = *source;
+        else
+            *cast(ushort*) destination = *cast(const(ushort)*) source;
+    }
+    return pc + 1;
+}
+
+
+// Every call `opCall` does not take, and the same call with a general
+// frame reserve and argument copy.
+pragma(inline, false)
+private const(Instruction)* opCallSlow(
+    const(Instruction)* pc,
+    Activation* active,
+    DispatchState* state,
+    ubyte* frame,
+) {
     import core.stdc.string: memcpy;
 
     import core.atomic: atomicLoad, MemoryOrder;
@@ -1465,27 +1539,13 @@ public const(Instruction)* opCall(
 
     auto frames = state.frames;
     const mark = frames.mark;
-    auto activation = cast(Activation*) frames.reserveFast(
+    auto activation = cast(Activation*) frames.reserveCommitted(
         fast.frameBytes, fast.alignment);
     activation.frameMark = mark;
     ubyte* calleeFrame = cast(ubyte*) activation + fast.frameOffset;
     activation.frame = calleeFrame;
 
-    if (fast.plainArgs)
-        foreach (arg; fast.args[0 .. fast.argCount]) {
-            auto destination = calleeFrame + arg.calleeOffset;
-            const source = frame + arg.callerOffset;
-            // Compares, not a jump table: a site always takes the same one.
-            if (arg.width == 8)
-                *cast(ulong*) destination = *cast(const(ulong)*) source;
-            else if (arg.width == 4)
-                *cast(uint*) destination = *cast(const(uint)*) source;
-            else if (arg.width == 1)
-                *destination = *source;
-            else
-                *cast(ushort*) destination = *cast(const(ushort)*) source;
-        }
-    else foreach (arg; fast.args[0 .. fast.argCount]) {
+    foreach (arg; fast.args[0 .. fast.argCount]) {
         auto destination = calleeFrame + arg.calleeOffset;
         const source = storage(arg.callerOffset);
         // Constant widths let the compiler copy without a call.

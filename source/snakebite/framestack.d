@@ -258,14 +258,14 @@ public struct FrameStack {
 
     // As `reserveCommitted`, for a caller that checked once that `size` is
     // not 0 and that `alignment` is a power of two below the page size.
+    // `null` when the bytes are not committed: the caller takes `reserve`.
     pragma(inline, true)
     public ubyte* reserveFast(in size_t size, in uint alignment) @system {
         const alignedUsed = (_used + alignment - 1) & ~(size_t(alignment) - 1);
-        if (alignedUsed <= _fastEnd && size <= _fastEnd - alignedUsed) {
-            _used = alignedUsed + size;
-            return _base + alignedUsed;
-        }
-        return reserve(size, alignment);
+        if (alignedUsed > _fastEnd || size > _fastEnd - alignedUsed)
+            return null;
+        _used = alignedUsed + size;
+        return _base + alignedUsed;
     }
 
     // Gives back everything reserved since `mark`. Only for `reserve`d
