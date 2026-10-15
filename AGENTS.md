@@ -53,7 +53,7 @@ and only have `Omit` for the ones verified to fail.
 Measure with the existing tools. Do not write a new benchmark harness.
 
 - `bin/bench <project directory or dub package> -w 0 -r 1` times the
-  backends and the native `dub test` edit cycle (`bench/oracle.d`).
+  backends and the native `dub test` edit cycle (`bench/source/bench/oracle.d`).
 - `build/bench-corpus.sh` lists the corpus projects. They are already in
   `~/.dub/packages`.
 - The native baseline is: edit a project source file, then plain
