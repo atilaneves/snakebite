@@ -213,3 +213,41 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+// A callee whose operands are places moves into the caller's frame with
+// their address slots, and it is copied more than once.
+static foreach (backend; Matrix!()) {
+    @("inlining.places.calleeOperandsMoveWithTheFrame." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Node { int value; Node* next; }
+            class Counter { int count; }
+
+            int second(Node* node) { return node.next.value; }
+            void bump(Counter counter, int by) { counter.count += by; }
+            int viaPointer(int* pointer, size_t index) {
+                return pointer[index] * 10 + pointer[0];
+            }
+
+            void main() {
+                Node c = Node(3, null);
+                Node b = Node(2, &c);
+                Node a = Node(1, &b);
+                assert(second(&a) == 2);
+                assert(second(&b) + second(&a) == 5);
+
+                auto counter = new Counter;
+                bump(counter, 4);
+                bump(counter, 5);
+                assert(counter.count == 9);
+
+                int[3] values = [7, 8, 9];
+                assert(viaPointer(values.ptr, 2) == 97);
+                assert(viaPointer(values.ptr, 1) + viaPointer(values.ptr, 0)
+                    == 87 + 77);
+            }
+        });
+    }
+}
