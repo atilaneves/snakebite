@@ -4,6 +4,9 @@ Alternative backends for the D programming language that shorten the
 edit-to-unittest feedback cycle. One context: executing D code either
 by interpreting it or by calling compiled code.
 
+`bin/sb` runs a program the way its compiled `-unittest` build runs,
+with the arguments after `--`.
+
 ## Language
 
 **Backend**:

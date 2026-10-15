@@ -206,7 +206,8 @@ public CliResult parseArgs(string[] args) {
 private enum helpText =
     "Usage: sb [options] <directory> [-- program arguments...]\n" ~
     "\n" ~
-    "Run the D unit tests in a project directory.\n" ~
+    "Run `main` of the D program in a project directory.\n" ~
+    "The program is built with -unittest.\n" ~
     "Pass arguments after -- to the program (for example: -- -d).\n" ~
     "\n" ~
     "Options:\n" ~

@@ -1,10 +1,10 @@
-module snakebite.teststartup;
+module snakebite.druntimemain;
 
 
 private:
 
 
-public struct TestStartupReport {
+public struct StartupReport {
     import core.time: Duration;
 
     public int status;
@@ -13,13 +13,14 @@ public struct TestStartupReport {
 }
 
 
-// Runs the unit tests and then `main` of `program` the way a compiled build
-// does. The module constructors and destructors belong to druntime
-// (`GuestModules`). `endsProcess` says that the process ends with this
-// program: its own `rt_term` and `exit` then run the destructors, with the
-// threads joined at the point druntime joins them. A caller that goes on
-// running programs in one process has its destructors run before this returns.
-public TestStartupReport runTestsAndMain(
+// Runs `program` the way its compiled `-unittest` build runs: through
+// druntime's `_d_run_main`. The module constructors and destructors belong
+// to druntime (`GuestModules`). `endsProcess` says that the process ends
+// with this program: its own `rt_term` and `exit` then run the destructors,
+// with the threads joined at the point druntime joins them. A caller that
+// goes on running programs in one process has its destructors run before
+// this returns.
+public StartupReport runDruntimeMain(
     imported!"snakebite.backends.backend".Backend backend,
     imported!"snakebite.backends.backend".Program program,
     in string[] arguments,
@@ -59,7 +60,7 @@ public TestStartupReport runTestsAndMain(
     auto modules = GuestModules.start(
         backend, program, GuestModules.Tests.yes,
         endsProcess ? GuestModules.Ends.process : GuestModules.Ends.program);
-    TestStartupReport report;
+    StartupReport report;
     report.constructorDuration = modules.constructors;
     report.moduleInfoDuration = modules.moduleInfo;
     if (modules.failed) {

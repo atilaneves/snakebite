@@ -155,7 +155,7 @@ public ExecutionReport executeBackend(
 ) {
     import snakebite.backends: makeBackend;
     import snakebite.backends.backend: run;
-    import snakebite.teststartup: TestStartupReport, runTestsAndMain;
+    import snakebite.druntimemain: StartupReport, runDruntimeMain;
     import std.datetime.stopwatch: AutoStart, StopWatch;
     import core.memory: GC;
 
@@ -178,14 +178,14 @@ public ExecutionReport executeBackend(
     const running = ExecutionClock.start(backend);
     import snakebite.backends.guestmodules: GuestModules;
     const entry = GuestModules.Entry(backend, program);
-    TestStartupReport startup;
+    StartupReport startup;
     int status;
     // Snippet callers construct Programs that do not start as a project,
     // and a program with a C `main` is not started as a project either.
     if (!program.startsAsProject || program.hasCEntryPoint || program.checks.betterC)
         status = run(backend, program, hostArguments);
     else {
-        startup = runTestsAndMain(
+        startup = runDruntimeMain(
             backend, program, hostArguments, endsProcess);
         status = startup.status;
     }
