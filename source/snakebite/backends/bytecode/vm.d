@@ -325,9 +325,23 @@ private enum OperandKind {
     storage,
     immediate,
     result,
+    // Storage known to be a plain frame offset, never an address slot plus a
+    // displacement: decoding has no test of the indirect bit.
+    frame,
 }
 
-private struct Execution(OperandKind destinationKind, OperandKind sourceKind) {
+// The kind a specialised handler decodes in place of `kind`.
+private enum frameKind(OperandKind kind) = kind == OperandKind.storage
+    ? OperandKind.frame : kind;
+
+// `fixedWidth` is the width of the instruction's operands when the compiler
+// chose a handler for exactly that width, or 0 to read it from the instruction.
+private struct Execution(OperandKind destinationKind, OperandKind sourceKind,
+    size_t fixedWidth = 0)
+{
+    private enum frameOnly = destinationKind == OperandKind.frame
+        || sourceKind == OperandKind.frame;
+
     static if (destinationKind == OperandKind.immediate)
         public size_t destination;
     else
@@ -369,7 +383,10 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind) {
     }
 
     public size_t width() const @safe pure nothrow @nogc {
-        return _pc.width;
+        static if (fixedWidth == 0)
+            return _pc.width;
+        else
+            return fixedWidth;
     }
 
     public size_t sourceWidth() const @safe pure nothrow @nogc {
@@ -381,6 +398,8 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind) {
     {
         static if (kind == OperandKind.immediate)
             return operand;
+        else static if (kind == OperandKind.frame)
+            return _frame + operand;
         else static if (kind == OperandKind.result)
             return operand == discardResult ? null : storage(operand);
         else
@@ -388,7 +407,10 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind) {
     }
 
     public ubyte* storage(in size_t operand) pure nothrow @nogc {
-        return operandStorage(_frame, operand);
+        static if (frameOnly)
+            return _frame + operand;
+        else
+            return operandStorage(_frame, operand);
     }
 }
 
@@ -430,8 +452,10 @@ version (BytecodeCount) {
     private shared size_t _countUsed;
     private shared bool _countExitHooked;
 
-    private enum countName(string op, OperandKind d, OperandKind s, P...) =
-        op ~ "/" ~ d.stringof ~ "/" ~ s.stringof ~ P.stringof;
+    private enum countName(string op, OperandKind d, OperandKind s,
+        size_t width, P...) =
+        op ~ "/" ~ d.stringof ~ "/" ~ s.stringof ~ "/w" ~ width.stringof
+            ~ P.stringof;
 
     private extern(C) void dumpCounts() {
         import core.atomic: atomicLoad;
@@ -475,10 +499,12 @@ version (BytecodeCount) {
     }
 }
 
-private const(Instruction)* execute(
+// `width` is 0 to read the operand width from the instruction.
+private const(Instruction)* executeWith(
     alias operation,
     OperandKind destinationKind,
     OperandKind sourceKind,
+    size_t width,
     Parameters...,
 )(
     const(Instruction)* pc,
@@ -488,12 +514,12 @@ private const(Instruction)* execute(
     version (BytecodeCount) {
         static __gshared CountSlot slot;
         countExecution(&slot, countName!(__traits(identifier, operation),
-            destinationKind, sourceKind, Parameters));
+            destinationKind, sourceKind, width, Parameters));
     }
     // The position of a throw selects its handler.
     activation.pc = pc;
     // const would prevent operations from writing through storage pointers.
-    auto execution = Execution!(destinationKind, sourceKind)(
+    auto execution = Execution!(destinationKind, sourceKind, width)(
         pc, activation, state,
     );
     const next = operation!Parameters(execution);
@@ -504,6 +530,13 @@ private const(Instruction)* execute(
     } else
         return next;
 }
+
+private alias execute(
+    alias operation,
+    OperandKind destinationKind,
+    OperandKind sourceKind,
+    Parameters...,
+) = executeWith!(operation, destinationKind, sourceKind, 0, Parameters);
 
 // As `execute`, for an operation that LDC does not inline. Such an operation
 // receives the address of `execution`, a local of this function, so the frame
@@ -523,7 +556,7 @@ private const(Instruction)* executeOnce(
     version (BytecodeCount) {
         static __gshared CountSlot slot;
         countExecution(&slot, countName!(__traits(identifier, operation),
-            destinationKind, sourceKind, Parameters));
+            destinationKind, sourceKind, 0, Parameters));
     }
     activation.pc = pc;
     auto execution = Execution!(destinationKind, sourceKind)(
@@ -546,7 +579,7 @@ private const(Instruction)* executeCall(
     version (BytecodeCount) {
         static __gshared CountSlot slot;
         countExecution(&slot, countName!(__traits(identifier, operation),
-            destinationKind, sourceKind));
+            destinationKind, sourceKind, 0));
     }
     activation.pc = pc;
     state.current = activation;
@@ -2908,19 +2941,29 @@ package alias opLoadIndirectFixed(size_t width) =
 
 // These memory operations cannot throw a D exception or transfer control.
 // Decode the copy after the load: its address slot can alias the load target.
-package const(Instruction)* opLoadThenCopy(size_t loadWidth, size_t copyWidth)(
+package const(Instruction)* opLoadThenCopy(size_t loadWidth, size_t copyWidth,
+    bool frame = false)(
     const(Instruction)* pc,
     Activation* activation,
     DispatchState* state,
 ) {
+    static if (frame) {
+        alias load = executeWith!(runLoadIndirect, OperandKind.frame,
+            OperandKind.frame, 0, loadWidth);
+        alias copy = executeWith!(runCopyFixed, OperandKind.frame,
+            OperandKind.frame, 0, copyWidth, false);
+    } else {
+        alias load = opLoadIndirectFixed!loadWidth;
+        alias copy = opCopyFixed!copyWidth;
+    }
     static if (chainedDispatch)
         // The chain reaches the copy by itself.
-        return opLoadIndirectFixed!loadWidth(pc, activation, state);
+        return load(pc, activation, state);
     else {
-        const next = opLoadIndirectFixed!loadWidth(pc, activation, state);
+        const next = load(pc, activation, state);
         // A cleanup range can end between the two instructions.
         return next is activation.end
-            ? next : opCopyFixed!copyWidth(next, activation, state);
+            ? next : copy(next, activation, state);
     }
 }
 
@@ -3110,4 +3153,192 @@ private const(Instruction)* runSliceFill(Decoded)(
     }
 
     return execution.next;
+}
+
+
+// Handler specialisation. The compiler emits general handlers; once a
+// function is complete, `specialiseHandlers` swaps each for the instance that
+// decodes frame operands without testing the indirect bit and/or has its
+// operand width fixed at compile time. Both are decided by the instruction
+// alone, so behaviour does not change.
+private enum widthSlots = 5;
+private enum integralWidths = [1UL, 2, 4, 8];
+private enum floatingWidths = [4UL, 8];
+private enum noWidths = cast(ulong[]) [];
+
+// Slot 0 is the instance that reads the width from the instruction.
+private size_t widthSlot(in size_t width) @safe pure nothrow @nogc {
+    switch (width) {
+        case 1: return 1;
+        case 2: return 2;
+        case 4: return 3;
+        case 8: return 4;
+        default: return 0;
+    }
+}
+
+private enum indirectBit = 1UL << 63;
+
+private struct Specialisation {
+    Instruction.Handler general;
+    // [0] keeps indirect operands possible, [1] is frame-only; by width slot.
+    Instruction.Handler[widthSlots][2] handlers;
+    bool destination;
+    bool source;
+    bool right;
+    // The fused load-then-copy also runs the next instruction.
+    bool pairWithNext;
+}
+
+private __gshared Specialisation[] specialisations;
+private __gshared size_t specialisationCount;
+private __gshared size_t specialisationShift;
+
+private size_t specialisationSlot(in Instruction.Handler handler) {
+    return (cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL)
+        >> specialisationShift;
+}
+
+private void addSpecialisation(Specialisation entry) {
+    if ((specialisationCount + 1) * 2 > specialisations.length) {
+        auto old = specialisations;
+        const capacity = old.length == 0 ? 1024 : old.length * 2;
+        specialisations = new Specialisation[capacity];
+        specialisationShift = size_t.sizeof * 8 - bsf(capacity);
+        specialisationCount = 0;
+        foreach (ref previous; old)
+            if (previous.general !is null)
+                addSpecialisation(previous);
+    }
+    auto slot = specialisationSlot(entry.general);
+    while (specialisations[slot].general !is null)
+        slot = (slot + 1) & (specialisations.length - 1);
+    specialisations[slot] = entry;
+    ++specialisationCount;
+}
+
+private void specialise(alias operation, OperandKind destinationKind,
+    OperandKind sourceKind, immutable(ulong)[] widths, bool right,
+    Parameters...)()
+{
+    alias general = execute!(operation, destinationKind, sourceKind,
+        Parameters);
+    Specialisation entry;
+    entry.general = &general;
+    entry.handlers[0][0] = &general;
+    entry.handlers[1][0] = &executeWith!(operation,
+        frameKind!destinationKind, frameKind!sourceKind, 0, Parameters);
+    entry.destination = destinationKind == OperandKind.storage;
+    entry.source = sourceKind == OperandKind.storage;
+    entry.right = right;
+    static foreach (width; widths) {
+        entry.handlers[0][widthSlot(width)] = &executeWith!(operation,
+            destinationKind, sourceKind, width, Parameters);
+        entry.handlers[1][widthSlot(width)] = &executeWith!(operation,
+            frameKind!destinationKind, frameKind!sourceKind, width,
+            Parameters);
+    }
+    addSpecialisation(entry);
+}
+
+shared static this() {
+    enum S = OperandKind.storage;
+    enum I = OperandKind.immediate;
+    static foreach (triple; threeAddressNames) {{
+        static if (triple[1] == "opInt3" || triple[1] == "opCompare3")
+            enum widths = integralWidths;
+        else static if (triple[1] == "opFloat3"
+                || triple[1] == "opFloatCompare3")
+            enum widths = floatingWidths;
+        else
+            enum widths = noWidths;
+        enum runner = "run" ~ triple[1][2 .. $];
+        mixin("specialise!(" ~ runner ~ ", S, S, widths, true, " ~ triple[2]
+            ~ ", false)();");
+        mixin("specialise!(" ~ runner ~ ", S, S, widths, false, " ~ triple[2]
+            ~ ", true)();");
+    }}
+    static foreach (comparison; EnumMembers!Comparison)
+        static foreach (kind; EnumMembers!CompareKind)
+            static foreach (jumpWhen; [false, true])
+                static foreach (constant; [false, true])
+                    specialise!(runFusedBranch, S, constant ? I : S,
+                        kind == CompareKind.floating
+                            ? floatingWidths : integralWidths,
+                        false, comparisonSymbols[comparison], kind, jumpWhen)();
+    static foreach (name; AliasSeq!("runBranchFalse", "runBranchTrue",
+        "runCastToBool", "runLogicalNot"))
+        specialise!(mixin(name), S, I, integralWidths, false)();
+    static foreach (name; AliasSeq!("runAdd", "runSubtract", "runMultiply",
+        "runBitAnd", "runBitOr", "runBitXor", "runLessThanSigned",
+        "runLessThanUnsigned", "runLessOrEqualSigned", "runLessOrEqualUnsigned",
+        "runGreaterThanSigned", "runGreaterThanUnsigned",
+        "runGreaterOrEqualSigned", "runGreaterOrEqualUnsigned", "runEqual",
+        "runNotEqual"))
+        specialise!(mixin(name), S, S, integralWidths, false)();
+    static foreach (name; AliasSeq!("runShiftLeft", "runShiftRightLogical",
+        "runShiftRightArithmetic", "runCopy", "runFrameAddress",
+        "runLoadIndirect", "runStoreIndirect", "runStaticArrayEqual"))
+        specialise!(mixin(name), S, S, noWidths, false)();
+    static foreach (name; AliasSeq!("runConstant", "runZero", "runNegate",
+        "runStaticLoad"))
+        specialise!(mixin(name), S, I, noWidths, false)();
+    static foreach (width; [1, 2, 4, 8, 16, 32]) {
+        specialise!(runLoadIndirect, S, S, noWidths, false, width)();
+        specialise!(runStoreIndirect, S, S, noWidths, false, width)();
+        static foreach (copyWidth; [1, 2, 4, 8, 16]) {{
+            Specialisation entry;
+            entry.general = &opLoadThenCopy!(width, copyWidth);
+            entry.handlers[0][0] = entry.general;
+            entry.handlers[1][0] = &opLoadThenCopy!(width, copyWidth, true);
+            entry.destination = true;
+            entry.source = true;
+            entry.pairWithNext = true;
+            addSpecialisation(entry);
+        }}
+    }
+    static foreach (width; [1, 2, 4, 8, 16])
+        specialise!(runCopyFixed, S, S, noWidths, false, width, false)();
+    static foreach (width; 1 .. 17)
+        specialise!(runCopyFixed, S, I, noWidths, false, width, true)();
+}
+
+// The specialised instance of `instruction`'s handler: frame-only when every
+// storage operand it reads is a plain frame offset, and fixed-width when one
+// exists for the instruction's width. Else the handler itself.
+package void specialiseHandlers(Instruction[] instructions) {
+    foreach (index, ref instruction; instructions) {
+        const entry = lookupSpecialisation(instruction.handler);
+        if (entry is null)
+            continue;
+        bool frame = !(entry.destination
+                && (instruction.destination & indirectBit))
+            && !(entry.source && (instruction.source & indirectBit))
+            && !(entry.right && (instruction.sourceWidth & indirectBit));
+        if (frame && entry.pairWithNext) {
+            const next = index + 1 < instructions.length
+                ? &instructions[index + 1] : null;
+            frame = next !is null
+                && !((next.destination | next.source) & indirectBit);
+        }
+        const slot = widthSlot(instruction.width);
+        Instruction.Handler chosen = entry.handlers[frame][slot];
+        if (chosen is null)
+            chosen = entry.handlers[frame][0];
+        instruction.handler = chosen;
+    }
+}
+
+private const(Specialisation)* lookupSpecialisation(
+    in Instruction.Handler handler,
+) {
+    if (specialisations.length == 0)
+        return null;
+    auto slot = specialisationSlot(handler);
+    while (specialisations[slot].general !is null) {
+        if (specialisations[slot].general is handler)
+            return &specialisations[slot];
+        slot = (slot + 1) & (specialisations.length - 1);
+    }
+    return null;
 }
