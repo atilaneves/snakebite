@@ -44,6 +44,7 @@ BackendReport oracleReport(
     in string directory,
     in uint warmup,
     in uint runs,
+    in string[] programArguments = null,
 ) {
     import bench.report: timingStatistics;
     import snakebite.project: isDubProject;
@@ -112,7 +113,7 @@ BackendReport oracleReport(
         }
 
         auto binaryWatch = StopWatch(AutoStart.yes);
-        const binaryRun = run([binary.path], binary.workingDirectory);
+        const binaryRun = run([binary.path] ~ programArguments, binary.workingDirectory);
         const binaryElapsed = binaryWatch.peek;
 
         // The bare build does not run the tests, so its cycle is the
