@@ -6,7 +6,9 @@ status: accepted
 
 DMD retains syntax trees and other compiler state for the life of the
 process. Snakebite allocates that state from an arena by default, while
-host and guest allocations continue to use druntime's conservative GC.
+host and guest allocations use the selected process collector. The default
+is druntime's conservative GC. Experimental symgc selection is described in
+[Process collector selection](../process-gc.md).
 This keeps retained frontend state out of repeated GC scans.
 
 The [original change][origin] records the problem: parsing `import std;`
@@ -18,7 +20,7 @@ same process, with ordinary collection and finalizer behavior.
 
 ## Decision
 
-The process GC is a proxy around druntime's conservative collector. In
+The process GC is a proxy around the selected collector. In
 the default mode, allocations from a thread executing DMD code inside
 the frontend boundary go to the arena. Allocations from other threads,
 and from the same thread outside that boundary, go to the collector.

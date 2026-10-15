@@ -1,4 +1,4 @@
-// The process GC: druntime's own conservative GC behind a thin proxy.
+// The process GC: the selected collector behind a thin proxy.
 //
 // dmd allocates its AST from a bump allocator that is never freed and
 // never scanned (`dmd.root.rmem`); the AST lives until the compiler
@@ -8,7 +8,7 @@
 // inside the frontend - running dmd code that `snakebite.frontend.
 // compiler` entered on its behalf - gets every allocation from the arena
 // (`snakebite.arena`). Every other thread, and the same thread outside
-// the frontend, goes to the conservative GC unchanged, host code that
+// the frontend, goes to the selected GC unchanged, host code that
 // holds the frontend lock included. The GC never sees the arena: no
 // collection marks the AST.
 //
@@ -352,7 +352,7 @@ private final class SnakebiteGC : GC {
 
     // @trusted: reads a variable that is set once, before any other thread.
     private GC _gc() @trusted nothrow @nogc {
-        return _conservative;
+        return _collector;
     }
 
     void enable() {
@@ -610,14 +610,20 @@ private __gshared SnakebiteGC _instance = new SnakebiteGC;
 // a thread that is still running calls the GC after that. Only calls through
 // the `GC` interface work then, not a virtual call through the class. Nothing
 // releases this GC unless the profile option is on (see `~this`).
-private __gshared GC _conservative;
+private __gshared GC _collector;
+
+
+// Selected by the C constructor, before druntime initializes its threads.
+private __gshared bool _useSymgc;
 
 
 private GC createSnakebiteGC() {
     import core.gc.registry: createGCInstance;
 
-    _conservative = createGCInstance("conservative");
-    assert(_conservative !is null, "druntime registers the conservative GC");
+    const name = _useSymgc ? "sdcq" : "conservative";
+    _collector = createGCInstance(name);
+    if (_collector is null)
+        internalFailure("the selected process GC is not registered");
     return _instance;
 }
 
@@ -627,6 +633,12 @@ private GC createSnakebiteGC() {
 pragma(crt_constructor)
 private extern(C) void registerSnakebiteGC() {
     import core.gc.registry: registerGCFactory;
+    import core.stdc.stdlib: getenv;
+    import core.stdc.string: strcmp;
+    import symgc.gcobj: initSDCThread;
 
-    registerGCFactory(gcName, &createSnakebiteGC);
+    const selected = getenv("DGC");
+    _useSymgc = selected !is null && strcmp(selected, "symgc") == 0;
+    registerGCFactory(gcName, &createSnakebiteGC,
+        _useSymgc ? &initSDCThread : null);
 }

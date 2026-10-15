@@ -5,6 +5,8 @@ license "BSL-1.0"
 
 dependency "dmd:frontend" version="~>2.113.0"
 dependency ":dmd-backend-vendor" version="*"
+dependency "symgc" version="0.0.9"
+subConfiguration "symgc" "standard"
 // dub's default configuration is its executable, which needs
 // `-preview=in`; snakebite links the library configuration.
 dependency "dub" version="1.42.0"
