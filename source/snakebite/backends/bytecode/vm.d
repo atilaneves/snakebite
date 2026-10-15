@@ -32,7 +32,7 @@ import snakebite.nativevalue:
     loadUnsigned, shiftCount, storeFloating, storeIntegral;
 import object: Throwable, TypeInfo_Class;
 import core.bitop: bsf;
-import std.meta: AliasSeq;
+import std.meta: AliasSeq, staticIndexOf;
 import std.traits: EnumMembers;
 
 private alias storeWidth = storeIntegral;
@@ -500,6 +500,28 @@ version (BytecodeCount) {
     }
 }
 
+// Operations that cannot throw a D exception or call out. They never need
+// the position of the running instruction, so their handlers do not store it.
+private alias positionFree = AliasSeq!(
+    runAdd, runArrayEqual, runBitAnd, runBitOr, runBitXor,
+    runBranchFalse, runBranchTrue, runCastAs, runCastToBool,
+    runCastWidenSigned, runCastWidenUnsigned, runCompare3, runComplement,
+    runComplexNegate, runConstant, runCopy, runCopyFixed, runEqual, runFloat3,
+    runFloatBinary, runFloatCompare3, runFloatComparison, runFloatToBool,
+    runFloatUnary, runFloatWidthCast, runFrameAddress, runFusedBranch,
+    runGreaterOrEqualSigned, runGreaterOrEqualUnsigned, runGreaterThanSigned,
+    runGreaterThanUnsigned, runIndex, runInt3, runJump, runLessOrEqualSigned,
+    runLessOrEqualUnsigned, runLessThanSigned, runLessThanUnsigned,
+    runLoadBitfield, runLoadIndirect, runLogicalNot, runMultiply, runNegate,
+    runNotEqual, runReturn, runReturnVoid, runShift3, runShiftLeft,
+    runShiftRightArithmetic, runShiftRightLogical, runSliceCopy, runSliceFill,
+    runSlicesConform, runStaticAddress, runStaticArrayEqual, runStaticLoad,
+    runStaticStore, runStoreBitfield, runStoreIndirect, runSubtract, runZero,
+);
+
+private enum storesPosition(alias operation) =
+    staticIndexOf!(operation, positionFree) < 0;
+
 // `width` is 0 to read the operand width from the instruction.
 private const(Instruction)* executeWith(
     alias operation,
@@ -519,7 +541,8 @@ private const(Instruction)* executeWith(
             destinationKind, sourceKind, width, Parameters));
     }
     // The position of a throw selects its handler.
-    activation.pc = pc;
+    static if (storesPosition!operation)
+        activation.pc = pc;
     // const would prevent operations from writing through storage pointers.
     auto execution = Execution!(destinationKind, sourceKind, width)(
         pc, activation, state, frame,
