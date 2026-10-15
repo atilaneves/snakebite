@@ -1366,3 +1366,395 @@ static foreach (backend; Matrix!(
         );
     }
 }
+
+
+// A comparison with a NaN operand is false except `!=`, and the opposite
+// of a false `<` is not `>=`. The same operands go through the branch that
+// is taken when the comparison is false (`if`, `while`) and the one taken
+// when it is true (`!`, `do`), with and without a literal operand.
+static foreach (backend; Matrix!()) {
+    @("compare.floatingNaNBranches." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            T nan(T)() { return T.nan; }
+
+            int ifBits(T)(T a, T b) {
+                int bits;
+                if (a < b) bits |= 1;
+                if (a <= b) bits |= 2;
+                if (a > b) bits |= 4;
+                if (a >= b) bits |= 8;
+                if (a == b) bits |= 16;
+                if (a != b) bits |= 32;
+                return bits;
+            }
+
+            int notBits(T)(T a, T b) {
+                int bits;
+                if (!(a < b)) bits |= 1;
+                if (!(a <= b)) bits |= 2;
+                if (!(a > b)) bits |= 4;
+                if (!(a >= b)) bits |= 8;
+                if (!(a == b)) bits |= 16;
+                if (!(a != b)) bits |= 32;
+                return bits;
+            }
+
+            int rightLiteralBits(T)(T a) {
+                int bits;
+                if (a < 1.0) bits |= 1;
+                if (a <= 1.0) bits |= 2;
+                if (a > 1.0) bits |= 4;
+                if (a >= 1.0) bits |= 8;
+                if (a == 1.0) bits |= 16;
+                if (a != 1.0) bits |= 32;
+                return bits;
+            }
+
+            int leftLiteralBits(T)(T a) {
+                int bits;
+                if (1.0 < a) bits |= 1;
+                if (1.0 <= a) bits |= 2;
+                if (1.0 > a) bits |= 4;
+                if (1.0 >= a) bits |= 8;
+                if (1.0 == a) bits |= 16;
+                if (1.0 != a) bits |= 32;
+                return bits;
+            }
+
+            int nanLiteralBits(T)(T a) {
+                int bits;
+                if (a < T.nan) bits |= 1;
+                if (a <= T.nan) bits |= 2;
+                if (a > T.nan) bits |= 4;
+                if (a >= T.nan) bits |= 8;
+                if (a == T.nan) bits |= 16;
+                if (a != T.nan) bits |= 32;
+                if (T.nan < a) bits |= 64;
+                if (T.nan != a) bits |= 128;
+                return bits;
+            }
+
+            int notNanLiteralBits(T)(T a) {
+                int bits;
+                if (!(a < T.nan)) bits |= 1;
+                if (!(a >= T.nan)) bits |= 2;
+                if (!(a == T.nan)) bits |= 4;
+                if (!(a != T.nan)) bits |= 8;
+                return bits;
+            }
+
+            int whileCount(T)(T a, T b) {
+                int n;
+                while (a < b && n < 3) ++n;
+                return n;
+            }
+
+            int doCount(T)(T a, T b) {
+                int n;
+                do ++n; while (a < b && n < 3);
+                return n;
+            }
+
+            int checkType(T)() {
+                if (ifBits!T(nan!T, 1) != 32) return 1;
+                if (ifBits!T(1, nan!T) != 32) return 2;
+                if (ifBits!T(nan!T, nan!T) != 32) return 3;
+                if (ifBits!T(1, 2) != 35) return 4;
+                if (ifBits!T(2, 1) != 44) return 5;
+                if (ifBits!T(1, 1) != 26) return 6;
+                if (notBits!T(nan!T, 1) != 31) return 7;
+                if (notBits!T(1, nan!T) != 31) return 8;
+                if (notBits!T(1, 2) != 28) return 9;
+                if (notBits!T(2, 1) != 19) return 10;
+                if (notBits!T(1, 1) != 37) return 11;
+                if (rightLiteralBits!T(nan!T) != 32) return 12;
+                if (rightLiteralBits!T(0.5) != 35) return 13;
+                if (rightLiteralBits!T(1) != 26) return 14;
+                if (rightLiteralBits!T(2) != 44) return 15;
+                if (leftLiteralBits!T(nan!T) != 32) return 16;
+                if (leftLiteralBits!T(0.5) != 44) return 17;
+                if (leftLiteralBits!T(1) != 26) return 18;
+                if (leftLiteralBits!T(2) != 35) return 19;
+                if (whileCount!T(nan!T, 1) != 0) return 20;
+                if (whileCount!T(1, nan!T) != 0) return 21;
+                if (whileCount!T(1, 2) != 3) return 22;
+                if (doCount!T(nan!T, 1) != 1) return 23;
+                if (doCount!T(1, nan!T) != 1) return 24;
+                if (doCount!T(1, 2) != 3) return 25;
+                if (nanLiteralBits!T(1) != 160) return 26;
+                if (nanLiteralBits!T(nan!T) != 160) return 27;
+                if (notNanLiteralBits!T(1) != 7) return 28;
+                if (notNanLiteralBits!T(nan!T) != 7) return 29;
+                return 0;
+            }
+
+            int main() {
+                if (const status = checkType!double) return status;
+                if (const status = checkType!float) return 100 + status;
+                if (const status = checkType!real) return 200 + status;
+                return 0;
+            }
+        });
+    }
+}
+
+
+// A literal on the left of a comparison gives the same answer as the
+// mirrored comparison with the literal on the right, whether the answer
+// chooses a branch or is a value. A literal on the left of `-` and `/`
+// stays on the left.
+static foreach (backend; Matrix!()) {
+    @("compare.integralLiteralOnLeft." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int branchBits(long a) {
+                int bits;
+                if (0 < a) bits |= 1;
+                if (0 <= a) bits |= 2;
+                if (0 > a) bits |= 4;
+                if (0 >= a) bits |= 8;
+                if (0 == a) bits |= 16;
+                if (0 != a) bits |= 32;
+                return bits;
+            }
+
+            int unsignedBranchBits(ulong a) {
+                int bits;
+                if (0 < a) bits |= 1;
+                if (0 <= a) bits |= 2;
+                if (0 > a) bits |= 4;
+                if (0 >= a) bits |= 8;
+                if (0 == a) bits |= 16;
+                if (0 != a) bits |= 32;
+                return bits;
+            }
+
+            int valueBits(int a) {
+                const lt = 5 < a;
+                const le = 5 <= a;
+                const gt = 5 > a;
+                const ge = 5 >= a;
+                const eq = 5 == a;
+                const ne = 5 != a;
+                return lt | le << 1 | gt << 2 | ge << 3 | eq << 4 | ne << 5;
+            }
+
+            int ten() { return 10; }
+
+            int main() {
+                if (branchBits(-1) != 44) return 1;
+                if (branchBits(0) != 26) return 2;
+                if (branchBits(1) != 35) return 3;
+                if (unsignedBranchBits(0) != 26) return 4;
+                if (unsignedBranchBits(ulong.max) != 35) return 5;
+                if (valueBits(4) != 44) return 6;
+                if (valueBits(5) != 26) return 7;
+                if (valueBits(6) != 35) return 8;
+                const three = ten - 7;
+                if (10 - three != 7) return 9;
+                if (21 / three != 7) return 10;
+                return 0;
+            }
+        });
+    }
+}
+
+
+// The same, for a floating operand, where a NaN on the right of the
+// mirrored comparison still makes every ordering false.
+static foreach (backend; Matrix!()) {
+    @("compare.floatingLiteralOnLeft." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            double nan() { return double.nan; }
+            double three() { return 3.0; }
+
+            int valueBits(double a) {
+                const lt = 5.0 < a;
+                const le = 5.0 <= a;
+                const gt = 5.0 > a;
+                const ge = 5.0 >= a;
+                const eq = 5.0 == a;
+                const ne = 5.0 != a;
+                return lt | le << 1 | gt << 2 | ge << 3 | eq << 4 | ne << 5;
+            }
+
+            int main() {
+                if (valueBits(nan) != 32) return 1;
+                if (valueBits(4) != 44) return 2;
+                if (valueBits(5) != 26) return 3;
+                if (valueBits(6) != 35) return 4;
+                if (6.0 - three != 3.0) return 5;
+                if (6.0 / three != 2.0) return 6;
+                if (2.0 * three != 6.0) return 7;
+                return 0;
+            }
+        });
+    }
+}
+
+
+// The ends of every integral range, against variables and against literals,
+// signed and unsigned, narrow and wide.
+static foreach (backend; Matrix!()) {
+    @("compare.integralEdges." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                byte bmin = byte.min;
+                byte bmax = byte.max;
+                ubyte ubmax = ubyte.max;
+                short smin = short.min;
+                ushort usmax = ushort.max;
+                int imin = int.min;
+                int imax = int.max;
+                uint uimax = uint.max;
+                long lmin = long.min;
+                long lmax = long.max;
+                ulong ulmax = ulong.max;
+                long minusOne = -1;
+                ulong zero = 0;
+
+                if (!(bmin < bmax)) return 1;
+                if (!(bmin < -127)) return 2;
+                if (!(bmax > 126)) return 3;
+                if (!(ubmax > 254)) return 4;
+                if (!(ubmax == 255)) return 5;
+                if (!(smin < -32767)) return 6;
+                if (!(usmax >= 65535)) return 7;
+                if (!(imin < imax)) return 8;
+                if (!(imin <= int.min)) return 9;
+                if (imax < int.max) return 10;
+                if (!(imax >= int.max)) return 11;
+                if (!(int.max > imax - 1)) return 12;
+                if (!(uimax > 0)) return 13;
+                if (!(uimax == uint.max)) return 14;
+                if (!(0 < uimax)) return 15;
+                if (!(lmin < lmax)) return 16;
+                if (!(lmin <= long.min)) return 17;
+                if (!(lmax > long.max - 1)) return 18;
+                if (!(minusOne < 0)) return 19;
+                if (!(0 > minusOne)) return 20;
+                if (!(ulmax > zero)) return 21;
+                if (!(ulmax >= ulong.max)) return 22;
+                if (!(ulmax > 0)) return 23;
+                if (ulmax < 1) return 24;
+                if (!(zero < ulmax)) return 25;
+                if (!(zero == 0)) return 26;
+                if (!(ulmax != 0)) return 27;
+                return 0;
+            }
+        });
+    }
+}
+
+
+// A temporary with a destructor in a condition dies at the same point
+// whether or not the operands of `&&` and `||` are branches: the temporary
+// of a right operand when that operand ends, the one of a left operand when
+// the whole condition ends.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "dmd's CTFE runs no destructor of a temporary in a condition"),
+)) {
+    @("compare.logicalConditionWithDestructors." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Probe {
+                int* log;
+                int id;
+                bool value;
+                ~this() { *log = *log * 10 + id; }
+            }
+
+            Probe probe(int* log, int id, bool value) {
+                return Probe(log, id, value);
+            }
+
+            int both(bool first, bool second, int x) {
+                int log;
+                if (x < 3 && probe(&log, 1, first).value
+                        && probe(&log, 2, second).value)
+                    log = log * 10 + 9;
+                return log;
+            }
+
+            int either(bool first, bool second, int x) {
+                int log;
+                if (probe(&log, 1, first).value
+                        || x > 3 || probe(&log, 2, second).value)
+                    log = log * 10 + 9;
+                return log;
+            }
+
+            int loop(int x) {
+                int log;
+                int n;
+                while (n < x && probe(&log, 1, true).value)
+                    ++n;
+                return log;
+            }
+
+            int main() {
+                if (both(true, true, 1) != 129) return 1;
+                if (both(true, false, 1) != 12) return 2;
+                if (both(false, true, 1) != 1) return 3;
+                if (both(true, true, 5) != 0) return 4;
+                if (either(true, true, 1) != 19) return 5;
+                if (either(false, true, 1) != 219) return 6;
+                if (either(false, false, 1) != 21) return 7;
+                if (either(false, false, 5) != 19) return 8;
+                if (loop(2) != 11) return 9;
+                return 0;
+            }
+        });
+    }
+}
+
+
+// `&&`, `||` and `!` over scalars give the fixed answers below for every
+// combination, in `if`, `while` and `do`.
+static foreach (backend; Matrix!()) {
+    @("compare.logicalBranches." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            // Bit 0 is (a && b) || c, bit 1 is !(a || b) && c, bit 2 is
+            // x < 3 || (x == 5 && !c) || x >= 7, bit 3 is !(x < 3 && x != 1).
+            immutable int[8] conditions = [4, 12, 4, 9, 11, 9, 9, 13];
+            immutable int[8] whileCounts = [0, 2, 0, 0, 2, 2, 0, 0];
+            immutable int[8] doCounts = [1, 1, 3, 3, 3, 1, 3, 3];
+
+            int main() {
+                foreach (bits; 0 .. 8) {
+                    const bool a = (bits & 1) != 0;
+                    const bool b = (bits & 2) != 0;
+                    const bool c = (bits & 4) != 0;
+                    const int x = bits;
+
+                    int got;
+                    if ((a && b) || c) got |= 1;
+                    if (!(a || b) && c) got |= 2;
+                    if (x < 3 || (x == 5 && !c) || x >= 7) got |= 4;
+                    if (!(x < 3 && x != 1)) got |= 8;
+                    if (got != conditions[bits]) return 1;
+
+                    int n;
+                    while (n < 2 && (a || c) && !b) ++n;
+                    if (n != whileCounts[bits]) return 2;
+
+                    int m;
+                    do ++m; while (m < 3 && (b || x == 4));
+                    if (m != doCounts[bits]) return 3;
+                }
+                return 0;
+            }
+        });
+    }
+}
