@@ -733,6 +733,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opGreaterOrEqualUnsigned3, opEqual3, opNotEqual3, opFloatEqual3,
         opFloatNotEqual3, opFloatLessThan3, opFloatLessOrEqual3,
         opFloatGreaterThan3, opFloatGreaterOrEqual3,
+        CompareKind, constantForm, fusedBranchHandler, isFusedBranch,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall,
         opCastAs, opCastFixedAs,
@@ -740,11 +741,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opAlloca, opArrayEqual, opComplex, opComplexNegate, opConstant, opCopy,
         opCopyFixed, opLoadThenCopy, opThenReturn, opLoadIndirectFixed, opStoreIndirectFixed,
         opDivideSigned, opDivideSigned32, opDivideUnsigned,
-        opEqual, opEqualBranch, opGreaterOrEqualSignedBranch,
-        opGreaterOrEqualUnsignedBranch, opGreaterThanSignedBranch,
-        opGreaterThanUnsignedBranch, opLessOrEqualSignedBranch,
-        opLessOrEqualUnsignedBranch, opLessThanSignedBranch,
-        opLessThanUnsignedBranch, opNotEqualBranch,
+        opEqual,
         opFloatAdd, opFloatDivide, opFloatEqual, opFloatGreaterOrEqual,
         opFloatGreaterThan, opFloatLessOrEqual, opFloatLessThan,
         opFloatModulo, opFloatMultiply, opFloatNegate, opFloatNotEqual,
@@ -1180,11 +1177,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             opGreaterThanSigned, opGreaterThanUnsigned,
             opGreaterOrEqualSigned, opGreaterOrEqualUnsigned, opEqual,
             opNotEqual, opFrameAddress,
-            opLessThanSignedBranch, opLessThanUnsignedBranch,
-            opLessOrEqualSignedBranch, opLessOrEqualUnsignedBranch,
-            opGreaterThanSignedBranch, opGreaterThanUnsignedBranch,
-            opGreaterOrEqualSignedBranch, opGreaterOrEqualUnsignedBranch,
-            opEqualBranch, opNotEqualBranch,
             opCopyFixed!1, opCopyFixed!2, opCopyFixed!4, opCopyFixed!8,
             opCopyFixed!16,
         )) {
@@ -1550,23 +1542,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 || instruction.handler is &opBranchTrue)
             return &instruction.source;
 
-        if (isComparisonBranch(instruction.handler))
+        if (isFusedBranch(instruction.handler))
             return &instruction.sourceWidth;
 
         return null;
-    }
-
-    private bool isComparisonBranch(Instruction.Handler handler) {
-        return handler is &opLessThanSignedBranch
-            || handler is &opLessThanUnsignedBranch
-            || handler is &opLessOrEqualSignedBranch
-            || handler is &opLessOrEqualUnsignedBranch
-            || handler is &opGreaterThanSignedBranch
-            || handler is &opGreaterThanUnsignedBranch
-            || handler is &opGreaterOrEqualSignedBranch
-            || handler is &opGreaterOrEqualUnsignedBranch
-            || handler is &opEqualBranch
-            || handler is &opNotEqualBranch;
     }
 
     private void compileStatement(Statement statement) {
@@ -1704,9 +1683,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // an unconditional jump back to the body instead of a real test.
         const guarded = !isTriviallyTrueCondition(statement.condition);
         if (guarded) {
-            const conditionOffset = compileCondition(statement.condition);
-            const width = conditionWidth(statement.condition);
-            emit(&opBranchTrue, conditionOffset, bodyStart, width);
+            size_t[] repeats;
+            branchOn(statement.condition, true, repeats);
+            foreach (index; repeats)
+                patchTarget(index, bodyStart);
         } else {
             emit(&opJump, bodyStart, 0, 0);
         }
@@ -2251,75 +2231,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return offset;
     }
 
-    // Emits one integral comparison and its false branch. This path is only
-    // used when the comparison result is consumed by an enclosing statement;
-    // value-producing comparisons keep the existing lowering.
-    private size_t compileIntegralComparisonBranch(
-        BinExp expression,
-    ) {
-        const facts = typeFacts(expression.e1.type);
-        if (!facts.isIntegral || !isIntegralSize(facts.size))
-            return size_t.max;
-
-        auto handler = comparisonBranchHandler(
-            expression, facts.isUnsigned);
-        if (handler is null)
-            return size_t.max;
-        size_t leftOffset;
-        size_t rightOffset;
-        fullExpression(FullExpressionScope.Position.condition, expression, {
-            leftOffset = operandInto(expression.e1, expression.e2, facts,
-                facts.size, false);
-            rightOffset = operandInto(expression.e2, null, facts,
-                facts.size, false);
-        });
-        const index = _instructions.length;
-        emit(handler, leftOffset, rightOffset, facts.size, 0);
-        return index;
-    }
-
-    private size_t compileConditionBranch(Expression condition) {
-        auto comparison = condition.isBinExp;
-        const comparisonIndex = comparison is null
-            ? size_t.max : compileIntegralComparisonBranch(comparison);
-        if (comparisonIndex != size_t.max)
-            return comparisonIndex;
-
-        const offset = compileCondition(condition,
-            FullExpressionScope.Position.condition, true);
-        const index = _instructions.length;
-        emit(&opBranchFalse, offset, 0, conditionWidth(condition));
-        return index;
-    }
-
-    private Instruction.Handler comparisonBranchHandler(
-        BinExp expression, in bool unsigned,
-    ) {
-        import dmd.tokens: EXP;
-
-        with (EXP) switch (expression.op) {
-            case lessThan:
-                return unsigned
-                    ? &opLessThanUnsignedBranch : &opLessThanSignedBranch;
-            case lessOrEqual:
-                return unsigned
-                    ? &opLessOrEqualUnsignedBranch
-                    : &opLessOrEqualSignedBranch;
-            case greaterThan:
-                return unsigned
-                    ? &opGreaterThanUnsignedBranch
-                    : &opGreaterThanSignedBranch;
-            case greaterOrEqual:
-                return unsigned
-                    ? &opGreaterOrEqualUnsignedBranch
-                    : &opGreaterOrEqualSignedBranch;
-            case equal:
-                return &opEqualBranch;
-            case notEqual:
-                return &opNotEqualBranch;
-            default:
-                return null;
-        }
+    // The branch instructions for `if`, `for` and `while`: the loop or
+    // `else` target is patched into each of them once it is known.
+    private size_t[] compileConditionBranch(Expression condition) {
+        size_t[] branches;
+        branchOn(condition, false, branches);
+        return branches;
     }
 
     private size_t conditionWidth(Expression condition) {
@@ -2551,14 +2468,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        const branchIndex = compileConditionBranch(statement.condition);
+        const branchIndices = compileConditionBranch(statement.condition);
 
         compileStatement(statement.ifbody);
         const ifFinished = _finished;
 
         if (statement.elsebody is null) {
-            *branchTargetField(_instructions[branchIndex]) =
-                _instructions.length;
+            foreach (branchIndex; branchIndices)
+                patchTarget(branchIndex, _instructions.length);
             _finished = false;
             return;
         }
@@ -2576,8 +2493,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             jumpIndex = _instructions.length;
             emit(&opJump, 0, 0, 0);
         }
-        *branchTargetField(_instructions[branchIndex]) =
-            _instructions.length;
+        foreach (branchIndex; branchIndices)
+            patchTarget(branchIndex, _instructions.length);
 
         compileStatement(statement.elsebody);
         const elseFinished = _finished;
@@ -2660,9 +2577,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const guarded = statement.condition !is null
             && !isTriviallyTrueCondition(statement.condition);
         const conditionIndex = _instructions.length;
-        size_t branchIndex = size_t.max;
+        size_t[] branchIndices;
         if (guarded)
-            branchIndex = compileConditionBranch(statement.condition);
+            branchIndices = compileConditionBranch(statement.condition);
 
         _loops ~= LoopContext(label, size_t.max, null, _scopePaths.enclosing(statement));
         _breakables ~= Breakable(label, null, _scopePaths.enclosing(statement));
@@ -2684,8 +2601,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opJump, conditionIndex, 0, 0);
 
         const afterLoop = _instructions.length;
-        if (branchIndex != size_t.max)
-            *branchTargetField(_instructions[branchIndex]) = afterLoop;
+        foreach (branchIndex; branchIndices)
+            patchTarget(branchIndex, afterLoop);
 
         foreach (index; breakable.pendingBreakJumps)
             patchTarget(index, afterLoop);
@@ -5822,11 +5739,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         with (ArithmeticPlan.Kind) final switch (plan.kind) {
             case integral: {
                 if (auto handler3 = threeAddress(handler)) {
-                    const left = operandInto(expression.e1, expression.e2,
-                        plan.facts, width, false);
-                    const right = operandInto(expression.e2, null,
-                        plan.facts, width, false);
-                    emit(handler3, destOffset, left, width, right);
+                    emitBinary3(handler3, destOffset, expression.e1,
+                        expression.e2, plan.facts, width, false);
                     return;
                 }
                 const leftOffset = reserveTemp(plan.facts);
@@ -5839,11 +5753,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             case floating: {
                 if (auto handler3 = threeAddress(floatingBinaryHandler(expression))) {
-                    const left = operandInto(expression.e1, expression.e2,
-                        plan.facts, plan.facts.size, true);
-                    const right = operandInto(expression.e2, null,
-                        plan.facts, plan.facts.size, true);
-                    emit(handler3, destOffset, left, plan.facts.size, right);
+                    emitBinary3(handler3, destOffset, expression.e1,
+                        expression.e2, plan.facts, plan.facts.size, true);
                     return;
                 }
                 const leftOffset = reserveTemp(plan.facts);
@@ -6044,6 +5955,259 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return temp;
     }
 
+    // The address of a literal operand in the native constant pool, or 0
+    // when `operand` is not a literal that reads as `width` bytes of the
+    // operation's own kind. An integer literal narrower than the operation
+    // is stored widened, as `evalOperandInto` does.
+    private size_t constantOf(
+        Expression operand, in size_t width, in bool floating,
+    ) {
+        Type type;
+        if (!literalType(operand, width, floating, type))
+            return 0;
+        return cast(size_t) _bytecode._nativeData.value(type, operand).ptr;
+    }
+
+    private bool isConstantOperand(
+        Expression operand, in size_t width, in bool floating,
+    ) {
+        Type type;
+        return literalType(operand, width, floating, type);
+    }
+
+    private bool literalType(
+        Expression operand, in size_t width, in bool floating,
+        out Type type,
+    ) {
+        if (floating ? operand.isRealExp is null : operand.isIntegerExp is null)
+            return false;
+        const facts = typeFacts(operand.type);
+        type = operand.type;
+        if (floating)
+            return isRealFloatType(operand.type) && facts.size == width;
+        if (!facts.isIntegral || !isIntegralSize(facts.size)
+                || facts.size > width)
+            return false;
+        if (facts.size == width)
+            return true;
+        type = facts.isUnsigned
+            ? (width == 8 ? Type.tuns64 : Type.tuns32)
+            : (width == 8 ? Type.tint64 : Type.tint32);
+        return typeFacts(type).size == width;
+    }
+
+    // The handler that gives the same answer with its operands swapped, or
+    // null. A literal on the left is moved to the right through it.
+    private Instruction.Handler swappedForm(Instruction.Handler handler) {
+        static foreach (pair; [
+            ["opAdd3", "opAdd3"], ["opMultiply3", "opMultiply3"],
+            ["opFloatAdd3", "opFloatAdd3"],
+            ["opFloatMultiply3", "opFloatMultiply3"],
+            ["opEqual3", "opEqual3"], ["opNotEqual3", "opNotEqual3"],
+            ["opFloatEqual3", "opFloatEqual3"],
+            ["opFloatNotEqual3", "opFloatNotEqual3"],
+            ["opLessThanSigned3", "opGreaterThanSigned3"],
+            ["opGreaterThanSigned3", "opLessThanSigned3"],
+            ["opLessThanUnsigned3", "opGreaterThanUnsigned3"],
+            ["opGreaterThanUnsigned3", "opLessThanUnsigned3"],
+            ["opLessOrEqualSigned3", "opGreaterOrEqualSigned3"],
+            ["opGreaterOrEqualSigned3", "opLessOrEqualSigned3"],
+            ["opLessOrEqualUnsigned3", "opGreaterOrEqualUnsigned3"],
+            ["opGreaterOrEqualUnsigned3", "opLessOrEqualUnsigned3"],
+            ["opFloatLessThan3", "opFloatGreaterThan3"],
+            ["opFloatGreaterThan3", "opFloatLessThan3"],
+            ["opFloatLessOrEqual3", "opFloatGreaterOrEqual3"],
+            ["opFloatGreaterOrEqual3", "opFloatLessOrEqual3"],
+        ])
+            if (handler is mixin("&" ~ pair[0]))
+                return mixin("&" ~ pair[1]);
+        return null;
+    }
+
+    // One three-address instruction. A literal right operand is read from
+    // the constant pool, and so is a literal left one when the operation
+    // swaps; a literal left operand of `-` or `/` is loaded.
+    private void emitBinary3(
+        Instruction.Handler handler, in size_t destOffset,
+        Expression left, Expression right,
+        in imported!"snakebite.nativelayout".TypeFacts facts,
+        in size_t width, in bool floating,
+    ) {
+        if (isConstantOperand(left, width, floating)
+                && !isConstantOperand(right, width, floating)) {
+            if (auto swapped = swappedForm(handler)) {
+                handler = swapped;
+                auto literal = left;
+                left = right;
+                right = literal;
+            }
+        }
+        const leftOffset = operandInto(left, right, facts, width, floating);
+        emitWithRight(handler, destOffset, leftOffset, right, facts, width,
+            floating);
+    }
+
+    // `handler` on the operand at `left`, already evaluated, and `right`,
+    // which is evaluated here.
+    private void emitWithRight(
+        Instruction.Handler handler, in size_t destOffset, in size_t left,
+        Expression right, in imported!"snakebite.nativelayout".TypeFacts facts,
+        in size_t width, in bool floating,
+    ) {
+        const constant = constantOf(right, width, floating);
+        if (constant != 0)
+            return emit(constantForm(handler), destOffset, left, width,
+                constant);
+        const rightOffset = operandInto(right, null, facts, width, floating);
+        emit(handler, destOffset, left, width, rightOffset);
+    }
+
+    // A condition that creates no temporary with a lifetime of its own, so
+    // that splitting `&&` and `||` into branches changes no destructor
+    // order: scalar operations on scalar variables and literals. Calls,
+    // aggregates, and everything else keep the value path.
+    private bool isPlainCondition(Expression expression) {
+        import dmd.astenums: STC, Tpointer;
+        import dmd.typesem: toBasetype;
+
+        const facts = typeFacts(expression.type);
+        const scalar = (facts.isIntegral && isIntegralSize(facts.size))
+            || isRealFloatType(expression.type)
+            || expression.type.toBasetype.ty == Tpointer;
+        if (!scalar)
+            return false;
+
+        with (EXP) switch (expression.op) {
+            case int64, float64:
+                return true;
+            case variable:
+                auto variable = expression.isVarExp.var.isVarDeclaration;
+                return variable !is null
+                    && !(variable.storage_class & STC.lazy_);
+            case add, min, mul, div, lessThan, lessOrEqual, greaterThan,
+                    greaterOrEqual, equal, notEqual, andAnd, orOr:
+                auto binary = expression.isBinExp;
+                return isPlainCondition(binary.e1)
+                    && isPlainCondition(binary.e2);
+            case cast_, negate, not:
+                return isPlainCondition(expression.isUnaExp.e1);
+            default:
+                return false;
+        }
+    }
+
+    // Code that jumps when `condition` is `jumpWhen` and falls through
+    // otherwise. The jumps are appended to `branches` to be patched once
+    // their target is known. An integral or floating comparison is one
+    // compare-and-branch instruction. Jump-on-false of `a < b` is not
+    // `a >= b` for NaN, so a comparison never changes its operator.
+    // `&&`, `||` and `!` become branches only when `isPlainCondition`.
+    private void branchOn(
+        Expression condition, in bool jumpWhen, ref size_t[] branches,
+        in FullExpressionScope.Position position
+            = FullExpressionScope.Position.condition,
+    ) {
+        import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
+
+        const logical = condition.op == EXP.andAnd
+            || condition.op == EXP.orOr;
+        if (logical && isPlainCondition(condition)) {
+            auto binary = condition.isBinExp;
+            if ((condition.op == EXP.andAnd) != jumpWhen) {
+                branchOn(binary.e1, jumpWhen, branches, position);
+                branchOn(binary.e2, jumpWhen, branches,
+                    FullExpressionScope.Position.logicalOperand);
+            } else {
+                size_t[] decided;
+                branchOn(binary.e1, !jumpWhen, decided, position);
+                branchOn(binary.e2, jumpWhen, branches,
+                    FullExpressionScope.Position.logicalOperand);
+                foreach (index; decided)
+                    patchTarget(index, _instructions.length);
+            }
+            return;
+        }
+
+        if (condition.op == EXP.not && isPlainCondition(condition)) {
+            branchOn(condition.isUnaExp.e1, !jumpWhen, branches, position);
+            return;
+        }
+
+        string operation;
+        with (EXP) switch (condition.op) {
+            case lessThan: operation = "<"; break;
+            case lessOrEqual: operation = "<="; break;
+            case greaterThan: operation = ">"; break;
+            case greaterOrEqual: operation = ">="; break;
+            case equal: operation = "=="; break;
+            case notEqual: operation = "!="; break;
+            default: break;
+        }
+        if (operation !is null) {
+            auto comparison = condition.isBinExp;
+            const plan = comparisonPlan(comparison);
+            const floating = plan.kind == ComparisonPlan.Kind.floating;
+            if (floating || plan.kind == ComparisonPlan.Kind.integral) {
+                emitCompareBranch(comparison, operation, plan.facts,
+                    floating, jumpWhen, position, branches);
+                return;
+            }
+        }
+
+        const offset = compileCondition(condition, position, true);
+        branches ~= _instructions.length;
+        emit(jumpWhen ? &opBranchTrue : &opBranchFalse, offset, 0,
+            conditionWidth(condition));
+    }
+
+    private void emitCompareBranch(
+        BinExp comparison, string operation,
+        in imported!"snakebite.nativelayout".TypeFacts facts,
+        in bool floating, in bool jumpWhen,
+        in FullExpressionScope.Position position, ref size_t[] branches,
+    ) {
+        auto left = comparison.e1;
+        auto right = comparison.e2;
+        if (isConstantOperand(left, facts.size, floating)
+                && !isConstantOperand(right, facts.size, floating)) {
+            auto literal = left;
+            left = right;
+            right = literal;
+            operation = mirrored(operation);
+        }
+
+        size_t leftOffset, rightOffset;
+        bool constant;
+        fullExpression(position, comparison, {
+            rightOffset = constantOf(right, facts.size, floating);
+            constant = rightOffset != 0;
+            if (constant)
+                leftOffset = operandInto(left, null, facts, facts.size,
+                    floating);
+            else {
+                leftOffset = operandInto(left, right, facts, facts.size,
+                    floating);
+                rightOffset = operandInto(right, null, facts, facts.size,
+                    floating);
+            }
+        });
+        const kind = floating ? CompareKind.floating
+            : facts.isUnsigned ? CompareKind.unsigned : CompareKind.signed;
+        branches ~= _instructions.length;
+        emit(fusedBranchHandler(operation, kind, jumpWhen, constant),
+            leftOffset, rightOffset, facts.size, 0);
+    }
+
+    private static string mirrored(string operation) {
+        switch (operation) {
+            case "<": return ">";
+            case "<=": return ">=";
+            case ">": return "<";
+            case ">=": return "<=";
+            default: return operation;
+        }
+    }
+
     // `x = e` for a plain scalar local `x`, with `e` a binary operation of
     // the three-address kind, a literal or a plain local. The result is
     // written straight into `x`; the instruction that writes it is the last
@@ -6093,7 +6257,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return false;
 
         evalInto(value, slot, facts.size, expression.e1.type);
-        if (destOffset != discardResult)
+        if (destOffset != discardResult && destOffset != slot)
             emit(&opCopy, destOffset, slot, facts.size);
         return true;
     }
@@ -6135,9 +6299,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (handler is null)
             return false;
 
-        const right = operandInto(expression.e2, null, facts, facts.size,
+        emitWithRight(handler, slot, slot, expression.e2, facts, facts.size,
             floating);
-        emit(handler, slot, slot, facts.size, right);
         if (destOffset != discardResult)
             emit(&opCopy, destOffset, slot, facts.size);
         return true;
@@ -6172,9 +6335,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (destOffset != discardResult)
             emit(&opCopy, destOffset, slot, facts.size);
-        const step = operandInto(expression.e2, null, facts, facts.size,
+        emitWithRight(handler, slot, slot, expression.e2, facts, facts.size,
             floating);
-        emit(handler, slot, slot, facts.size, step);
         return true;
     }
 
@@ -6312,12 +6474,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             case floating: {
                 auto floatHandler = floatComparisonHandler(expression);
 
-                const left = operandInto(expression.e1, expression.e2,
-                    operandFacts, operandFacts.size, true);
-                const right = operandInto(expression.e2, null,
-                    operandFacts, operandFacts.size, true);
-                emit(threeAddress(floatHandler), destOffset, left,
-                    operandFacts.size, right);
+                emitBinary3(threeAddress(floatHandler), destOffset,
+                    expression.e1, expression.e2, operandFacts,
+                    operandFacts.size, true);
                 return;
             }
 
@@ -6360,12 +6519,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
                 auto handler = comparisonHandler(expression, operandFacts.isUnsigned);
 
-                const left = operandInto(expression.e1, expression.e2,
-                    operandFacts, operandFacts.size, false);
-                const right = operandInto(expression.e2, null,
-                    operandFacts, operandFacts.size, false);
-                emit(threeAddress(handler), destOffset, left,
-                    operandFacts.size, right);
+                emitBinary3(threeAddress(handler), destOffset, expression.e1,
+                    expression.e2, operandFacts, operandFacts.size, false);
                 return;
             }
         }

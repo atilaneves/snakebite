@@ -31,6 +31,7 @@ import snakebite.nativevalue:
     CastKind, ComplexOperation, floatingToBool, loadFloating, loadSigned,
     loadUnsigned, shiftCount, storeFloating, storeIntegral;
 import object: Throwable, TypeInfo_Class;
+import std.traits: EnumMembers;
 
 private alias storeWidth = storeIntegral;
 
@@ -2055,49 +2056,6 @@ private const(Instruction)* runEqual(Decoded)(
     return execution.next;
 }
 
-// Integral comparison whose result is used only to choose a control-flow
-// target. `sourceWidth` stores the resolved target address; unlike the
-// value-producing comparison handlers this does not write a temporary bool.
-private alias opCompareBranch(string operation, bool unsigned,
-    bool branchWhenTrue) =
-    execute!(runCompareBranch, OperandKind.storage, OperandKind.storage,
-        operation, unsigned, branchWhenTrue);
-
-private const(Instruction)* runCompareBranch(string operation, bool unsigned,
-    bool branchWhenTrue, Decoded)(
-    ref Decoded execution,
-) {
-    static if (unsigned)
-        alias load = loadUnsigned;
-    else
-        alias load = loadSigned;
-    const left = load(execution.destination, execution.width);
-    const right = load(execution.source, execution.width);
-    const result = mixin("left " ~ operation ~ " right");
-    if (result == branchWhenTrue)
-        return cast(const(Instruction)*) execution.sourceWidth;
-    return execution.next;
-}
-
-package alias opLessThanSignedBranch =
-    opCompareBranch!("<", false, false);
-package alias opLessThanUnsignedBranch =
-    opCompareBranch!("<", true, false);
-package alias opLessOrEqualSignedBranch =
-    opCompareBranch!("<=", false, false);
-package alias opLessOrEqualUnsignedBranch =
-    opCompareBranch!("<=", true, false);
-package alias opGreaterThanSignedBranch =
-    opCompareBranch!(">", false, false);
-package alias opGreaterThanUnsignedBranch =
-    opCompareBranch!(">", true, false);
-package alias opGreaterOrEqualSignedBranch =
-    opCompareBranch!(">=", false, false);
-package alias opGreaterOrEqualUnsignedBranch =
-    opCompareBranch!(">=", true, false);
-package alias opEqualBranch = opCompareBranch!("==", false, false);
-package alias opNotEqualBranch = opCompareBranch!("!=", false, false);
-
 // Bytewise equality for two native dynamic-array values. The compiler emits
 // this only when DMD left EqualExp.lowering null, which means the element
 // types are safe for memcmp. `destination` holds the left array on entry and
@@ -2201,32 +2159,38 @@ package alias opFloatGreaterOrEqual = opFloatComparison!">=";
 
 // Three-address forms. `source` is the left operand,
 // `sourceWidth` the right operand, `destination` the result. All three are
-// storage operands; the result is written after both operands are read.
-private alias opInt3(string operation) =
-    execute!(runInt3, OperandKind.storage, OperandKind.storage, operation);
+// storage operands, except that with `constant` the right operand is the
+// address of a constant in the native constant pool; the result is written
+// after both operands are read.
+private ubyte* rightOperand(bool constant, Decoded)(ref Decoded execution) {
+    static if (constant)
+        return cast(ubyte*) execution.sourceWidth;
+    else
+        return execution.storage(execution.sourceWidth);
+}
 
-private const(Instruction)* runInt3(string operation, Decoded)(
+private alias opInt3(string operation, bool constant = false) =
+    execute!(runInt3, OperandKind.storage, OperandKind.storage, operation,
+        constant);
+
+private const(Instruction)* runInt3(string operation, bool constant, Decoded)(
     ref Decoded execution,
 ) {
     const a = loadUnsigned(execution.source, execution.width);
-    const b = loadUnsigned(execution.storage(execution.sourceWidth),
-        execution.width);
+    const b = loadUnsigned(rightOperand!constant(execution), execution.width);
     storeWidth(execution.destination,
         cast(long) mixin("a " ~ operation ~ " b"), execution.width);
     return execution.next;
 }
 
-package alias opAdd3 = opInt3!"+";
-package alias opSubtract3 = opInt3!"-";
-package alias opMultiply3 = opInt3!"*";
+private alias opFloat3(string operation, bool constant = false) =
+    execute!(runFloat3, OperandKind.storage, OperandKind.storage, operation,
+        constant);
 
-private alias opFloat3(string operation) =
-    execute!(runFloat3, OperandKind.storage, OperandKind.storage, operation);
-
-private const(Instruction)* runFloat3(string operation, Decoded)(
+private const(Instruction)* runFloat3(string operation, bool constant, Decoded)(
     ref Decoded execution,
 ) {
-    const right = execution.storage(execution.sourceWidth);
+    const right = rightOperand!constant(execution);
     if (execution.width == double.sizeof)
         *cast(double*) execution.destination = applyFloatBinary!operation(
             *cast(const double*) execution.source,
@@ -2242,16 +2206,12 @@ private const(Instruction)* runFloat3(string operation, Decoded)(
     return execution.next;
 }
 
-package alias opFloatAdd3 = opFloat3!"+";
-package alias opFloatSubtract3 = opFloat3!"-";
-package alias opFloatMultiply3 = opFloat3!"*";
-package alias opFloatDivide3 = opFloat3!"/";
-
-private alias opCompare3(string operation, bool signed) =
+private alias opCompare3(string operation, bool signed, bool constant = false) =
     execute!(runCompare3, OperandKind.storage, OperandKind.storage,
-        operation, signed);
+        operation, signed, constant);
 
-private const(Instruction)* runCompare3(string operation, bool signed, Decoded)(
+private const(Instruction)* runCompare3(string operation, bool signed,
+    bool constant, Decoded)(
     ref Decoded execution,
 ) {
     static if (signed)
@@ -2259,31 +2219,21 @@ private const(Instruction)* runCompare3(string operation, bool signed, Decoded)(
     else
         alias load = loadUnsigned;
     const a = load(execution.source, execution.width);
-    const b = load(execution.storage(execution.sourceWidth), execution.width);
+    const b = load(rightOperand!constant(execution), execution.width);
     *cast(ubyte*) execution.destination = mixin("a " ~ operation ~ " b")
         ? 1 : 0;
     return execution.next;
 }
 
-package alias opLessThanSigned3 = opCompare3!("<", true);
-package alias opLessThanUnsigned3 = opCompare3!("<", false);
-package alias opLessOrEqualSigned3 = opCompare3!("<=", true);
-package alias opLessOrEqualUnsigned3 = opCompare3!("<=", false);
-package alias opGreaterThanSigned3 = opCompare3!(">", true);
-package alias opGreaterThanUnsigned3 = opCompare3!(">", false);
-package alias opGreaterOrEqualSigned3 = opCompare3!(">=", true);
-package alias opGreaterOrEqualUnsigned3 = opCompare3!(">=", false);
-package alias opEqual3 = opCompare3!("==", false);
-package alias opNotEqual3 = opCompare3!("!=", false);
-
-private alias opFloatCompare3(string operation) =
+private alias opFloatCompare3(string operation, bool constant = false) =
     execute!(runFloatCompare3, OperandKind.storage, OperandKind.storage,
-        operation);
+        operation, constant);
 
-private const(Instruction)* runFloatCompare3(string operation, Decoded)(
+private const(Instruction)* runFloatCompare3(string operation, bool constant,
+    Decoded)(
     ref Decoded execution,
 ) {
-    const right = execution.storage(execution.sourceWidth);
+    const right = rightOperand!constant(execution);
     bool result;
     if (execution.width == double.sizeof)
         result = applyFloatComparison!operation(
@@ -2298,12 +2248,126 @@ private const(Instruction)* runFloatCompare3(string operation, Decoded)(
     return execution.next;
 }
 
-package alias opFloatEqual3 = opFloatCompare3!"==";
-package alias opFloatNotEqual3 = opFloatCompare3!"!=";
-package alias opFloatLessThan3 = opFloatCompare3!"<";
-package alias opFloatLessOrEqual3 = opFloatCompare3!"<=";
-package alias opFloatGreaterThan3 = opFloatCompare3!">";
-package alias opFloatGreaterOrEqual3 = opFloatCompare3!">=";
+private enum threeAddressNames = [
+    ["opAdd3", "opInt3", `"+"`],
+    ["opSubtract3", "opInt3", `"-"`],
+    ["opMultiply3", "opInt3", `"*"`],
+    ["opFloatAdd3", "opFloat3", `"+"`],
+    ["opFloatSubtract3", "opFloat3", `"-"`],
+    ["opFloatMultiply3", "opFloat3", `"*"`],
+    ["opFloatDivide3", "opFloat3", `"/"`],
+    ["opLessThanSigned3", "opCompare3", `"<", true`],
+    ["opLessThanUnsigned3", "opCompare3", `"<", false`],
+    ["opLessOrEqualSigned3", "opCompare3", `"<=", true`],
+    ["opLessOrEqualUnsigned3", "opCompare3", `"<=", false`],
+    ["opGreaterThanSigned3", "opCompare3", `">", true`],
+    ["opGreaterThanUnsigned3", "opCompare3", `">", false`],
+    ["opGreaterOrEqualSigned3", "opCompare3", `">=", true`],
+    ["opGreaterOrEqualUnsigned3", "opCompare3", `">=", false`],
+    ["opEqual3", "opCompare3", `"==", false`],
+    ["opNotEqual3", "opCompare3", `"!=", false`],
+    ["opFloatEqual3", "opFloatCompare3", `"=="`],
+    ["opFloatNotEqual3", "opFloatCompare3", `"!="`],
+    ["opFloatLessThan3", "opFloatCompare3", `"<"`],
+    ["opFloatLessOrEqual3", "opFloatCompare3", `"<="`],
+    ["opFloatGreaterThan3", "opFloatCompare3", `">"`],
+    ["opFloatGreaterOrEqual3", "opFloatCompare3", `">="`],
+];
+
+static foreach (triple; threeAddressNames) {
+    mixin("package alias " ~ triple[0] ~ " = " ~ triple[1] ~ "!("
+        ~ triple[2] ~ ", false);");
+    mixin("package alias " ~ triple[0] ~ "K = " ~ triple[1] ~ "!("
+        ~ triple[2] ~ ", true);");
+}
+
+// The form of a three-address handler whose right operand is a constant, or
+// null.
+package Instruction.Handler constantForm(Instruction.Handler handler) {
+    static foreach (triple; threeAddressNames)
+        if (handler is mixin("&" ~ triple[0]))
+            return mixin("&" ~ triple[0] ~ "K");
+    return null;
+}
+
+// How a fused compare-and-branch reads its operands. A floating compare is
+// never rewritten as the opposite compare (`!(a < b)` is not `a >= b` for
+// NaN): each handler jumps when its own answer equals `jumpWhen`.
+package enum CompareKind {
+    signed,
+    unsigned,
+    floating,
+}
+
+// Compare and branch in one instruction. `destination` is the left operand,
+// `source` the right operand (or, with `constant`, the address of a
+// constant in the native constant pool), `sourceWidth` the branch target.
+private alias opFusedBranch(string operation, CompareKind kind,
+    bool jumpWhen, bool constant) =
+    execute!(runFusedBranch, OperandKind.storage,
+        constant ? OperandKind.immediate : OperandKind.storage,
+        operation, kind, jumpWhen);
+
+private const(Instruction)* runFusedBranch(string operation, CompareKind kind,
+    bool jumpWhen, Decoded)(
+    ref Decoded execution,
+) {
+    static if (is(typeof(execution.source) == size_t))
+        const right = cast(const(ubyte)*) execution.source;
+    else
+        const right = execution.source;
+    bool result;
+    static if (kind == CompareKind.floating) {
+        if (execution.width == double.sizeof)
+            result = applyFloatComparison!operation(
+                *cast(const double*) execution.destination,
+                *cast(const double*) right);
+        else if (execution.width == float.sizeof)
+            result = applyFloatComparison!operation(
+                *cast(const float*) execution.destination,
+                *cast(const float*) right);
+        else
+            result = applyFloatComparison!operation(
+                *cast(const real*) execution.destination,
+                *cast(const real*) right);
+    } else {
+        static if (kind == CompareKind.signed)
+            alias load = loadSigned;
+        else
+            alias load = loadUnsigned;
+        const a = load(execution.destination, execution.width);
+        const b = load(right, execution.width);
+        result = mixin("a " ~ operation ~ " b");
+    }
+    if (result == jumpWhen)
+        return cast(const(Instruction)*) execution.sourceWidth;
+    return execution.next;
+}
+
+private enum fusedOperations = ["<", "<=", ">", ">=", "==", "!="];
+
+package Instruction.Handler fusedBranchHandler(
+    string operation, CompareKind kind, bool jumpWhen, bool constant,
+) {
+    static foreach (o; fusedOperations)
+        static foreach (k; [EnumMembers!CompareKind])
+            static foreach (j; [false, true])
+                static foreach (c; [false, true])
+                    if (operation == o && kind == k && jumpWhen == j
+                            && constant == c)
+                        return &opFusedBranch!(o, k, j, c);
+    return null;
+}
+
+package bool isFusedBranch(Instruction.Handler handler) {
+    static foreach (o; fusedOperations)
+        static foreach (k; [EnumMembers!CompareKind])
+            static foreach (j; [false, true])
+                static foreach (c; [false, true])
+                    if (handler is &opFusedBranch!(o, k, j, c))
+                        return true;
+    return false;
+}
 
 
 // `-x` and `~x`: `destination` holds the one operand on entry and the
