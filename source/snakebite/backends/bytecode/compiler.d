@@ -13,7 +13,7 @@ import dmd.mtype: Type;
 import object: TypeInfo_Class;
 import snakebite.backends.argumentflow: Shape;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
-import snakebite.backends.identity: IdentityPlan;
+import snakebite.backends.identity: IdentityPlan, identityPlan;
 import snakebite.backends.ifplan: IfPlan;
 import snakebite.backends.logical: LogicalPlan;
 import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
@@ -734,6 +734,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opGreaterOrEqualUnsigned3, opEqual3, opNotEqual3, opFloatEqual3,
         opFloatNotEqual3, opFloatLessThan3, opFloatLessOrEqual3,
         opFloatGreaterThan3, opFloatGreaterOrEqual3,
+        opBitAnd3, opBitOr3, opBitXor3, opShiftLeft3, opShiftRightLogical3,
+        opShiftRightArithmetic3, opDivideSigned3, opDivideUnsigned3,
+        opModuloSigned3, opModuloUnsigned3,
         CompareKind, Comparison, constantForm, fusedBranchHandler, fusesConstant,
         threeAddressConstantHandlers, threeAddressHandlers,
         isFusedBranch,
@@ -5870,6 +5873,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         static foreach (pair; [
             ["opAdd", "opAdd3"], ["opSubtract", "opSubtract3"],
             ["opMultiply", "opMultiply3"],
+            ["opBitAnd", "opBitAnd3"], ["opBitOr", "opBitOr3"],
+            ["opBitXor", "opBitXor3"], ["opShiftLeft", "opShiftLeft3"],
+            ["opShiftRightLogical", "opShiftRightLogical3"],
+            ["opShiftRightArithmetic", "opShiftRightArithmetic3"],
+            ["opDivideSigned", "opDivideSigned3"],
+            ["opDivideUnsigned", "opDivideUnsigned3"],
+            ["opModuloSigned", "opModuloSigned3"],
+            ["opModuloUnsigned", "opModuloUnsigned3"],
             ["opFloatAdd", "opFloatAdd3"],
             ["opFloatSubtract", "opFloatSubtract3"],
             ["opFloatMultiply", "opFloatMultiply3"],
@@ -5925,18 +5936,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 || (variable.storage_class & (STC.lazy_ | STC.ref_ | STC.out_)))
             return size_t.max;
 
-        import dmd.astenums: Tpointer;
-        import dmd.typesem: toBasetype;
-
         const facts = typeFacts(expression.type);
         if (facts.size != width)
             return size_t.max;
-        const isPointer = expression.type.toBasetype.ty == Tpointer;
         if (floating ? !isRealFloatType(expression.type)
-                : !((facts.isIntegral || isPointer)
+                : !((facts.isIntegral || isReference(expression.type))
                     && isIntegralSize(facts.size)))
             return size_t.max;
         return _layout.offsetOf(variable);
+    }
+
+    // A pointer, a class reference or `typeof(null)`: one word that is
+    // compared as an integer.
+    private static bool isReference(Type type) {
+        import dmd.astenums: Tclass, Tnull, Tpointer;
+        import dmd.typesem: toBasetype;
+
+        const ty = type.toBasetype.ty;
+        return ty == Tpointer || ty == Tclass || ty == Tnull;
     }
 
     // Where an operand of a three-address instruction is. A plain local is
@@ -5956,7 +5973,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return offset;
         }
         const temp = reserveTemp(facts);
-        if (floating)
+        if (floating || isReference(operand.type)
+                || operand.op == EXP.null_)
             evalInto(operand, temp, width);
         else
             evalOperandInto(operand, temp, width);
@@ -5973,6 +5991,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Type type;
         if (!literalType(operand, width, floating, type))
             return 0;
+        if (operand.op == EXP.null_) {
+            const size_t zero;
+            return cast(size_t) _bytecode._nativeData.value(
+                type, (&zero)[0 .. 1]).ptr;
+        }
         return cast(size_t) _bytecode._nativeData.value(type, operand).ptr;
     }
 
@@ -5987,6 +6010,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Expression operand, in size_t width, in bool floating,
         out Type type,
     ) {
+        if (operand.op == EXP.null_) {
+            type = Type.tuns64;
+            return !floating && width == size_t.sizeof;
+        }
         if (floating ? operand.isRealExp is null : operand.isIntegerExp is null)
             return false;
         const facts = typeFacts(operand.type);
@@ -6009,6 +6036,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private Instruction.Handler swappedForm(Instruction.Handler handler) {
         static foreach (pair; [
             ["opAdd3", "opAdd3"], ["opMultiply3", "opMultiply3"],
+            ["opBitAnd3", "opBitAnd3"], ["opBitOr3", "opBitOr3"],
+            ["opBitXor3", "opBitXor3"],
             ["opFloatAdd3", "opFloatAdd3"],
             ["opFloatMultiply3", "opFloatMultiply3"],
             ["opEqual3", "opEqual3"], ["opNotEqual3", "opNotEqual3"],
@@ -6087,7 +6116,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return false;
 
         with (EXP) switch (expression.op) {
-            case int64, float64:
+            case int64, float64, null_:
                 return true;
             case variable:
                 auto variable = expression.isVarExp.var.isVarDeclaration;
@@ -6097,6 +6126,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     greaterOrEqual, equal, notEqual, andAnd, orOr:
                 auto binary = expression.isBinExp;
                 return isPlainCondition(binary.e1)
+                    && isPlainCondition(binary.e2);
+            case identity, notIdentity:
+                auto binary = expression.isBinExp;
+                return identityPlan(binary.isIdentityExp).reference
+                    && isPlainCondition(binary.e1)
                     && isPlainCondition(binary.e2);
             case cast_, negate, not:
                 return isPlainCondition(expression.isUnaExp.e1);
@@ -6176,9 +6210,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             auto comparison = condition.isBinExp;
             const plan = comparisonPlan(comparison);
             const floating = plan.kind == ComparisonPlan.Kind.floating;
-            if (floating || plan.kind == ComparisonPlan.Kind.integral) {
+            if (floating || plan.kind == ComparisonPlan.Kind.integral
+                    || plan.kind == ComparisonPlan.Kind.reference) {
                 emitCompareBranch(comparison, operation, plan.facts,
                     floating, jumpWhen, position, branches);
+                return;
+            }
+        }
+
+        if (condition.op == EXP.identity || condition.op == EXP.notIdentity) {
+            auto identity = condition.isIdentityExp;
+            const plan = identityPlan(identity);
+            if (plan.reference) {
+                emitCompareBranch(identity,
+                    condition.op == EXP.identity
+                        ? Comparison.equal : Comparison.notEqual,
+                    typeFacts(identity.e1.type), false, jumpWhen,
+                    position, branches);
                 return;
             }
         }
@@ -6221,7 +6269,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             }
         });
         const kind = floating ? CompareKind.floating
-            : facts.isUnsigned ? CompareKind.unsigned : CompareKind.signed;
+            : facts.isUnsigned || isReference(comparison.e1.type)
+                ? CompareKind.unsigned : CompareKind.signed;
         branches ~= _instructions.length;
         emit(fusedBranchHandler(operation, kind, jumpWhen, constant),
             leftOffset, rightOffset, facts.size, 0);
@@ -6277,7 +6326,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     ? plan.kind == ArithmeticPlan.Kind.floating
                         && plan.facts.size == facts.size
                     : plan.kind == ArithmeticPlan.Kind.integral
-                        && value.op != div && plan.facts.size == facts.size;
+                        && plan.facts.size == facts.size;
+                break;
+            }
+            case and, or, xor, mod, leftShift, rightShift, unsignedRightShift: {
+                if (floating || valueFacts.size != facts.size)
+                    break;
+                const plan = arithmeticPlan(value.isBinExp);
+                eligible = plan.kind == ArithmeticPlan.Kind.integral
+                    && plan.facts.size == facts.size;
                 break;
             }
             default:
@@ -6486,14 +6543,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     default: internalFailure();
                 }
 
-                const leftOffset = reserveTemp(operandFacts);
-                evalInto(expression.e1, leftOffset, operandFacts.size);
-                const rightOffset = reserveTemp(operandFacts);
-                evalInto(expression.e2, rightOffset, operandFacts.size);
-                emit(pointerHandler, leftOffset, rightOffset, operandFacts.size);
-
-                if (destOffset != leftOffset)
-                    emit(&opCopy, destOffset, leftOffset, 1);
+                emitBinary3(threeAddress(pointerHandler), destOffset,
+                    expression.e1, expression.e2, operandFacts,
+                    operandFacts.size, No.floating);
                 return;
             }
 
@@ -6676,6 +6728,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 addConstant(expression.op == EXP.identity ? 1 : 0), 1);
             return;
         }
+
+        if (plan.reference)
+            return compileComparison(expression,
+                ComparisonPlan(ComparisonPlan.Kind.reference,
+                    typeFacts(expression.e1.type)),
+                destOffset);
 
         const facts = typeFacts(expression.e1.type);
         const arrayFacts = TypeFacts(

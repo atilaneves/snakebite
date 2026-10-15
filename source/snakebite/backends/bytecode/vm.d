@@ -2274,6 +2274,46 @@ private const(Instruction)* runInt3(string operation, bool constant, Decoded)(
     return execution.next;
 }
 
+private alias opShift3(string operation, bool signed, bool constant = false) =
+    execute!(runShift3, OperandKind.storage, OperandKind.storage, operation,
+        signed, constant);
+
+private const(Instruction)* runShift3(string operation, bool signed,
+    bool constant, Decoded)(
+    ref Decoded execution,
+) {
+    static if (signed)
+        const a = loadSigned(execution.source, execution.width);
+    else
+        const a = loadUnsigned(execution.source, execution.width);
+    const b = shiftCount(
+        loadUnsigned(rightOperand!constant(execution), execution.width),
+        execution.width);
+    storeWidth(execution.destination,
+        cast(long) mixin("a " ~ operation ~ " b"), execution.width);
+    return execution.next;
+}
+
+// `/` and `%` read both operands with the signedness of the operation.
+private alias opDivide3(string operation, bool signed, bool constant = false) =
+    execute!(runDivide3, OperandKind.storage, OperandKind.storage, operation,
+        signed, constant);
+
+private const(Instruction)* runDivide3(string operation, bool signed,
+    bool constant, Decoded)(
+    ref Decoded execution,
+) {
+    static if (signed)
+        alias load = loadSigned;
+    else
+        alias load = loadUnsigned;
+    const a = load(execution.source, execution.width);
+    const b = load(rightOperand!constant(execution), execution.width);
+    storeWidth(execution.destination, cast(long) mixin("a " ~ operation ~ " b"),
+        execution.width);
+    return execution.next;
+}
+
 private alias opFloat3(string operation, bool constant = false) =
     execute!(runFloat3, OperandKind.storage, OperandKind.storage, operation,
         constant);
@@ -2343,6 +2383,16 @@ private enum threeAddressNames = [
     ["opAdd3", "opInt3", `"+"`],
     ["opSubtract3", "opInt3", `"-"`],
     ["opMultiply3", "opInt3", `"*"`],
+    ["opBitAnd3", "opInt3", `"&"`],
+    ["opBitOr3", "opInt3", `"|"`],
+    ["opBitXor3", "opInt3", `"^"`],
+    ["opShiftLeft3", "opShift3", `"<<", false`],
+    ["opShiftRightLogical3", "opShift3", `">>", false`],
+    ["opShiftRightArithmetic3", "opShift3", `">>", true`],
+    ["opDivideSigned3", "opDivide3", `"/", true`],
+    ["opDivideUnsigned3", "opDivide3", `"/", false`],
+    ["opModuloSigned3", "opDivide3", `"%", true`],
+    ["opModuloUnsigned3", "opDivide3", `"%", false`],
     ["opFloatAdd3", "opFloat3", `"+"`],
     ["opFloatSubtract3", "opFloat3", `"-"`],
     ["opFloatMultiply3", "opFloat3", `"*"`],

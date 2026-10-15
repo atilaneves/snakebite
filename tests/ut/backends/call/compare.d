@@ -1758,3 +1758,116 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+// Pointers and class references compare as one-word integers. The answers
+// cover a null on either side, equal and different operands, and the value
+// and the branch form of each test.
+static foreach (backend; Matrix!()) {
+    @("compare.pointerIdentity.values." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                int answers(int* p, int* q, int* r) {
+                    const a = p is null;
+                    const b = p !is null;
+                    const c = q is null;
+                    const d = q !is null;
+                    const e = p is r;
+                    const f = p !is r;
+                    const g = null is q;
+                    const h = p == q;
+                    const i = p != q;
+                    return (a ? 1 : 0) | (b ? 2 : 0) | (c ? 4 : 0)
+                        | (d ? 8 : 0) | (e ? 16 : 0) | (f ? 32 : 0)
+                        | (g ? 64 : 0) | (h ? 128 : 0) | (i ? 256 : 0);
+                }
+
+                bool check() {
+                    int x, y;
+                    return answers(&x, null, &x) == 342
+                        && answers(&x, &y, &y) == 298
+                        && answers(null, &y, null) == 281;
+                }
+            },
+            "check",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("compare.pointerIdentity.branches." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                int answers(int* p, int* q, int* r) {
+                    int bits;
+                    if (p is null) bits |= 1;
+                    if (p !is null) bits |= 2;
+                    if (q is null) bits |= 4;
+                    if (q !is null) bits |= 8;
+                    if (p is r) bits |= 16;
+                    if (p !is r) bits |= 32;
+                    if (p !is null && q is null) bits |= 64;
+                    if (p is null || q is null) bits |= 128;
+                    if (q !is null && p !is null) bits |= 256;
+                    if (null !is p) bits |= 512;
+                    if (p == r) bits |= 1024;
+                    if (p != q) bits |= 2048;
+                    if (!(p is null)) bits |= 4096;
+                    return bits;
+                }
+
+                bool check() {
+                    int x, y;
+                    return answers(&x, null, &x) == 7894
+                        && answers(&x, &y, &y) == 6954
+                        && answers(null, &y, null) == 3225;
+                }
+            },
+            "check",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("compare.classIdentity." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                class Node {
+                    int value;
+                }
+
+                int answers(Node a, Node b, Node c) {
+                    int bits;
+                    if (a is null) bits |= 1;
+                    if (a !is null) bits |= 2;
+                    if (b is null) bits |= 4;
+                    if (a is c) bits |= 8;
+                    if (a !is c) bits |= 16;
+                    if (a !is null && b is null) bits |= 32;
+                    const e = b is null;
+                    const f = a is c;
+                    if (e) bits |= 64;
+                    if (f) bits |= 128;
+                    return bits;
+                }
+
+                bool check() {
+                    auto n = new Node;
+                    return answers(n, null, n) == 238
+                        && answers(n, n, null) == 18
+                        && answers(null, n, n) == 17;
+                }
+            },
+            "check",
+        );
+    }
+}
