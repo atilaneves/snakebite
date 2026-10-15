@@ -2,10 +2,11 @@ module ut.bench.timing;
 
 
 import bench.benchmark: benchmark;
-import snakebite.backends: backendIdentity, BackendName, Backends, Program;
+import snakebite.backends: backendIdentity, Backends, Program;
 import snakebite.frontend.compiler: parseSnippets;
 import std.conv: text;
 import ut;
+import ut.backends: Because, Ctfe, Matrix, Native, Omit;
 
 
 @("benchmark.runTime.includesCompilation")
@@ -36,17 +37,23 @@ unittest {
 
 
 // `main` fails unless it gets the program arguments.
-@("benchmark.passesProgramArguments")
-unittest {
-    auto module_ = parseSnippets([
-        "module benchmarkArguments;
-        int main(string[] args) { return args.length == 3 && args[1] == `a` && args[2] == `-b` ? 0 : 1; }",
-    ])[0];
-    auto program = Program([module_]);
+static foreach (BackendType; Matrix!(
+    Omit!(Native, Because.inexpressible, "the benchmark times a backend, " ~
+        "and the native oracle is none"),
+    Omit!(Ctfe, Because.unconfirmed, "the CTFE backend takes no host " ~
+        "arguments"),
+)) {
+    @("benchmark.passesProgramArguments." ~ BackendType.stringof)
+    unittest {
+        auto module_ = parseSnippets([
+            "module benchmarkArguments;
+            int main(string[] args) {
+                return args.length == 3 && args[1] == `a` && args[2] == `-b`
+                    ? 0 : 1;
+            }",
+        ])[0];
+        auto program = Program([module_]);
 
-    static foreach (BackendType; Backends) {{
-        // The CTFE backend cannot pass arguments to `main` at all.
-        static if (backendIdentity!BackendType != BackendName.ctfe) {
         const report = benchmark(
             BackendType.stringof,
             backendIdentity!BackendType,
@@ -58,6 +65,5 @@ unittest {
         );
 
         report.passed.should == true;
-        }
-    }}
+    }
 }

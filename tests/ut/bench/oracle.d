@@ -1,8 +1,13 @@
 module ut.bench.oracle;
 
 
-import bench.oracle: cyclePieces;
+import bench.oracle: cyclePieces, oracleReport;
 import core.time: Duration, msecs;
+import snakebite.project: sourceSet;
+import std.conv: text;
+import std.file: mkdirRecurse, rmdirRecurse, tempDir, write;
+import std.path: buildPath;
+import std.process: thisProcessID;
 import ut;
 
 
@@ -39,4 +44,30 @@ unittest {
     pieces.overhead.should == Duration.zero;
     pieces.compile.should == Duration.zero;
     pieces.run.should == 13.msecs;
+}
+
+
+// The test runner of the `dub test` row gets the program arguments, as the
+// other rows give them to `main`.
+@("oracleReport.dub.passesProgramArguments")
+unittest {
+    const directory =
+        buildPath(tempDir, text("snakebite-ut-oracle-", thisProcessID));
+    mkdirRecurse(buildPath(directory, "source"));
+    scope(exit) directory.rmdirRecurse;
+    buildPath(directory, "dub.sdl").write(
+        "name \"oraclearguments\"\nconfiguration \"library\" {\n"
+        ~ "    targetType \"library\"\n}\n",
+    );
+    buildPath(directory, "source", "arguments.d").write(
+        "module arguments;\n"
+        ~ "unittest {\n"
+        ~ "    import core.runtime: Runtime;\n"
+        ~ "    assert(Runtime.args.length == 2 && Runtime.args[1] == `x`);\n"
+        ~ "}\n",
+    );
+
+    const report = oracleReport(sourceSet(directory, null, null), directory, 0, 1, ["x"]);
+
+    report.passed.should == true;
 }
