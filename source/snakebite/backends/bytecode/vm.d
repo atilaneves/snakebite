@@ -525,7 +525,7 @@ private alias positionFree = AliasSeq!(
     runIndex, runInt3, runJump, runLessOrEqualSigned, runLessOrEqualUnsigned,
     runLessThanSigned, runLessThanUnsigned, runLoadBitfield, runLoadIndirect,
     runLogicalNot, runMultiply, runNegate, runNotEqual, runRangeEndPass,
-    runReturn, runReturnVoid, runShift3, runShiftLeft, runShiftRightArithmetic,
+    runReturnVoid, runShift3, runShiftLeft, runShiftRightArithmetic,
     runShiftRightLogical, runSliceCopy, runSliceFill, runSlicesConform,
     runStaticAddress, runStaticArrayEqual, runStaticLoad, runStaticStore,
     runStoreBitfield, runStoreIndirect, runSubtract, runZero,
@@ -1732,12 +1732,39 @@ private const(Instruction)* callFunction(bool redirected = false, Decoded)(
 }
 
 
-// Copies `execution.width` bytes from `execution.source` to `returnPlace` -
+// Copies `Instruction.width` bytes from `Instruction.source` to `returnPlace` -
 // `null` when the caller discarded the result, the same convention every
-// backend uses for a call whose value nothing reads. `execution.destination` is
-// unused: there is no frame slot on the receiving end, only `returnPlace`.
-public alias opReturn =
-    executeOnce!(runReturn, OperandKind.immediate, OperandKind.storage);
+// backend uses for a call whose value nothing reads. `Instruction.destination`
+// is unused: there is no frame slot on the receiving end, only `returnPlace`.
+// `width` is 0 to read the width from the instruction, and `frameOnly` says the
+// source is a plain frame offset. It returns `null`, which ends the activation.
+package const(Instruction)* returnHandler(size_t width, bool frameOnly)(
+    const(Instruction)* pc,
+    Activation* activation,
+    DispatchState* state,
+    ubyte* frame,
+) {
+    import core.stdc.string: memcpy;
+
+    version (BytecodeCount) {
+        static __gshared CountSlot slot;
+        countExecution(&slot, "opReturn");
+    }
+    static if (frameOnly)
+        const source = frame + pc.source;
+    else
+        const source = operandStorage(frame, pc.source);
+    auto place = activation.returnPlace;
+    if (place !is null && place != source) {
+        static if (width == 0)
+            memcpy(place, source, pc.width);
+        else
+            memcpy(place, source, width);
+    }
+    return null;
+}
+
+public alias opReturn = returnHandler!(0, false);
 
 package const(Instruction)* opThenReturn(alias operation)(
     const(Instruction)* pc,
@@ -1753,18 +1780,6 @@ package const(Instruction)* opThenReturn(alias operation)(
         return opReturn(next, activation, state, frame);
     }
 }
-
-private const(Instruction)* runReturn(Decoded)(
-    ref Decoded execution,
-) {
-    import core.stdc.string: memcpy;
-
-    if (execution.returnPlace !is null
-            && execution.returnPlace != execution.source)
-        memcpy(execution.returnPlace, execution.source, execution.width);
-    return null;
-}
-
 
 public alias opReturnVoid =
     executeOnce!(runReturnVoid, OperandKind.immediate, OperandKind.immediate);
@@ -3377,6 +3392,18 @@ shared static this() {
         specialise!(runCopyFixed, S, S, noWidths, false, width, false)();
     static foreach (width; 1 .. 17)
         specialise!(runCopyFixed, S, I, noWidths, false, width, true)();
+    {
+        Specialisation entry;
+        entry.general = &opReturn;
+        entry.handlers[0][0] = entry.general;
+        entry.handlers[1][0] = &returnHandler!(0, true);
+        entry.source = true;
+        static foreach (width; integralWidths) {
+            entry.handlers[0][widthSlot(width)] = &returnHandler!(width, false);
+            entry.handlers[1][widthSlot(width)] = &returnHandler!(width, true);
+        }
+        addSpecialisation(entry);
+    }
 }
 
 // The specialised instance of `instruction`'s handler: frame-only when every
