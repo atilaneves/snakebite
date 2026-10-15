@@ -13,7 +13,7 @@ import dmd.mtype: Type;
 import object: TypeInfo_Class;
 import snakebite.backends.argumentflow: Shape;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
-import snakebite.backends.identity: IdentityPlan;
+import snakebite.backends.identity: IdentityPlan, identityPlan;
 import snakebite.backends.ifplan: IfPlan;
 import snakebite.backends.logical: LogicalPlan;
 import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
@@ -734,6 +734,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opGreaterOrEqualUnsigned3, opEqual3, opNotEqual3, opFloatEqual3,
         opFloatNotEqual3, opFloatLessThan3, opFloatLessOrEqual3,
         opFloatGreaterThan3, opFloatGreaterOrEqual3,
+        opIndexPointer, opIndexSlice, opIndexStatic,
+        opBitAnd3, opBitOr3, opBitXor3, opShiftLeft3, opShiftRightLogical3,
+        opShiftRightArithmetic3, opDivideSigned3, opDivideUnsigned3,
+        opModuloSigned3, opModuloUnsigned3,
         CompareKind, Comparison, constantForm, fusedBranchHandler, fusesConstant,
         threeAddressConstantHandlers, threeAddressHandlers,
         isFusedBranch,
@@ -1197,6 +1201,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             // `sourceWidth`; it does not move.
             if (handler is &threeAddressConstantHandlers[index]) {
                 roles = Operands(S, S, N);
+                return true;
+            }
+        }
+        static foreach (operation; AliasSeq!(
+            opIndexSlice, opIndexStatic, opIndexPointer,
+        )) {
+            if (handler is &operation) {
+                roles = Operands(S, S, S);
                 return true;
             }
         }
@@ -2209,7 +2221,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const facts = typeFacts(condition.type);
         if (inPlace && !truth.isFloat && truth.offset == 0
                 && truth.secondOffset == TypeFacts.Truth.noSecondWord) {
-            const place = operandOf(condition, facts.size, false);
+            const place = operandPlace(condition, facts.size, false, true);
             if (place != size_t.max)
                 return place;
         }
@@ -4604,16 +4616,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     override void visit(PtrExp expression) {
         requireDestination(expression);
 
-        const addressOffset = compileAddress(expression);
-        emit(&opLoadIndirect, _destination, addressOffset, _width);
+        const place = placeOf(expression, true);
+        emit(&opCopy, _destination, place, _width);
     }
 
-    // `s.field`, read as a value. `expression.e1` is evaluated into a
-    // temporary of its own first, whatever kind of expression it is - a
-    // local, an array element, another field access - the same way any
-    // other sub-expression this compiler evaluates is; the field then
-    // reads out of that temporary at its own `field.offset`, laid out by
-    // dmd's own native semantics rather than recomputed here.
+    // `s.field`, read as a value: a copy from the place of the field. An
+    // aggregate that has no place (the result of a call) is evaluated into
+    // a temporary first, and the field read out of that.
     override void visit(DotVarExp expression) {
         if (_destination == discardResult) {
             const facts = typeFacts(expression.type);
@@ -4635,21 +4644,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        import dmd.astenums: Tclass, Tpointer;
-        auto aggregateType = expression.e1.type.toBasetype;
-        if (aggregateType.ty == Tclass || aggregateType.ty == Tpointer) {
-            const facts = typeFacts(field.type);
-            const objectOffset = reserveTemp(pointerFacts);
-            evalInto(expression.e1, objectOffset, size_t.sizeof);
-            compileNullCheck(objectOffset, expression.e1.loc);
-            const fieldOffset = reserveTemp(pointerFacts);
-            emit(&opConstant, fieldOffset,
-                addConstant(cast(long) field.offset), size_t.sizeof);
-            emit(&opAdd, objectOffset, fieldOffset, size_t.sizeof);
-            emit(&opLoadIndirect, _destination, objectOffset, _width);
+        const place = placeOf(expression, true);
+        if (place != size_t.max) {
+            emit(&opCopy, _destination, place, _width);
             return;
         }
 
+        auto aggregateType = expression.e1.type.toBasetype;
         assert(aggregateType.isTypeStruct !is null,
             "a struct field has a struct or class receiver");
 
@@ -4774,6 +4775,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.nativelayout: arrayLengthOffset;
 
         requireDestination(expression);
+
+        const length = placeOf(expression, true);
+        if (length != size_t.max) {
+            emit(&opCopy, _destination, length, _width);
+            return;
+        }
 
         const facts = typeFacts(expression.e1.type);
         assert(facts.isDynamicArray);
@@ -5030,8 +5037,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         requireDestination(expression);
-        const addressOffset = compileAddress(expression);
-        emit(&opLoadIndirect, _destination, addressOffset, _width);
+        const place = placeOf(expression, true);
+        emit(&opCopy, _destination, place, _width);
     }
 
     protected override void visitStoredArrayLiteral(
@@ -5870,6 +5877,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         static foreach (pair; [
             ["opAdd", "opAdd3"], ["opSubtract", "opSubtract3"],
             ["opMultiply", "opMultiply3"],
+            ["opBitAnd", "opBitAnd3"], ["opBitOr", "opBitOr3"],
+            ["opBitXor", "opBitXor3"], ["opShiftLeft", "opShiftLeft3"],
+            ["opShiftRightLogical", "opShiftRightLogical3"],
+            ["opShiftRightArithmetic", "opShiftRightArithmetic3"],
+            ["opDivideSigned", "opDivideSigned3"],
+            ["opDivideUnsigned", "opDivideUnsigned3"],
+            ["opModuloSigned", "opModuloSigned3"],
+            ["opModuloUnsigned", "opModuloUnsigned3"],
             ["opFloatAdd", "opFloatAdd3"],
             ["opFloatSubtract", "opFloatSubtract3"],
             ["opFloatMultiply", "opFloatMultiply3"],
@@ -5903,13 +5918,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return ty == Tfloat32 || ty == Tfloat64 || ty == Tfloat80;
     }
 
-    // The frame offset of a plain scalar local that `expression` reads, or
+    // The frame offset of a plain local that `expression` reads, or
     // `size_t.max`. Plain: has a frame slot, not `ref`, not a closure
-    // variable, not `$`, not a return place, not lazy. Integral, floating
-    // and pointer types only.
-    private size_t operandOf(
-        Expression expression, in size_t width, in bool floating,
-    ) {
+    // variable, not `$`, not a return place, not lazy.
+    private size_t localSlot(Expression expression) {
         import dmd.astenums: STC;
         import snakebite.frontend.dmd.delegates: isCtfeVariable;
 
@@ -5924,19 +5936,399 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 || _layout.isRef(variable) || _layout.isReturnPlace(variable)
                 || (variable.storage_class & (STC.lazy_ | STC.ref_ | STC.out_)))
             return size_t.max;
+        return _layout.offsetOf(variable);
+    }
 
-        import dmd.astenums: Tpointer;
+    // The frame offset of a plain scalar local that `expression` reads, or
+    // `size_t.max`. Integral, floating and pointer types only.
+    private size_t operandOf(
+        Expression expression, in size_t width, in bool floating,
+    ) {
+        const slot = localSlot(expression);
+        if (slot == size_t.max || !isScalarOperand(expression.type, width, floating))
+            return size_t.max;
+        return slot;
+    }
+
+    // Whether `type` is a scalar that a three-address instruction reads at
+    // `width` bytes: integral, floating, or a one-word reference.
+    private bool isScalarOperand(
+        Type type, in size_t width, in bool floating,
+    ) {
+        const facts = typeFacts(type);
+        if (facts.size != width)
+            return false;
+        return floating
+            ? isRealFloatType(type)
+            : (facts.isIntegral || isReference(type))
+                && isIntegralSize(facts.size);
+    }
+
+    // A pointer, a class reference or `typeof(null)`: one word that is
+    // compared as an integer.
+    private static bool isReference(Type type) {
+        import dmd.astenums: Tclass, Tnull, Tpointer;
         import dmd.typesem: toBasetype;
 
-        const facts = typeFacts(expression.type);
-        if (facts.size != width)
+        const ty = type.toBasetype.ty;
+        return ty == Tpointer || ty == Tclass || ty == Tnull;
+    }
+
+    // A place is a storage operand: a frame offset, or an address held in a
+    // frame slot plus a displacement (`indirectStorage`). Any handler
+    // reads and writes either, so memory behind a pointer is an operand of
+    // the instruction that uses it.
+    private static bool isIndirect(in size_t place) {
+        return (place & (1UL << 63)) != 0;
+    }
+
+    // `place` moved forward by `offset` bytes. A displacement that does not
+    // fit its 32 bits goes through a pointer sum instead.
+    private size_t placeAt(in size_t place, in size_t offset) {
+        if (!isIndirect(place))
+            return place + offset;
+        const displacement = cast(uint) place;
+        if (displacement + offset <= uint.max)
+            return place + offset;
+        const slot = (place >> 32) & 0x7fff_ffffUL;
+        return indirectStorage(addPointerOffset(slot, displacement + offset));
+    }
+
+    // The place of the lvalue `expression` names, or `size_t.max` with no
+    // code emitted. Code that must run first (loading a pointer, a null
+    // check) is emitted in the order D evaluates it. A pointer held in a
+    // plain local is used in place only when `inPlace` says that nothing
+    // evaluated later can change it.
+    private size_t placeOf(Expression expression, in bool inPlace) {
+        import dmd.astenums: Tarray, Tclass;
+
+        if (auto read = expression.isVarExp)
+            return placeOfVariable(read);
+        if (auto field = expression.isDotVarExp)
+            return placeOfField(field, inPlace);
+        if (auto dereference = expression.isPtrExp) {
+            const slot = baseSlot(dereference.e1, inPlace);
+            compileNullCheck(slot, dereference.loc);
+            return indirectStorage(slot);
+        }
+        if (auto this_ = expression.isThisExp) {
+            if (this_.type.toBasetype.ty == Tclass)
+                return size_t.max;
+            return indirectStorage(hiddenThisOffset(this_.var));
+        }
+        if (auto index = expression.isIndexExp)
+            return placeOfIndex(index, inPlace);
+        if (auto length = expression.isArrayLengthExp) {
+            import snakebite.nativelayout: arrayLengthOffset;
+
+            if (length.e1.type.toBasetype.ty != Tarray)
+                return size_t.max;
+            const array = placeOf(length.e1, inPlace);
+            return array == size_t.max
+                ? size_t.max : placeAt(array, arrayLengthOffset);
+        }
+        return size_t.max;
+    }
+
+    private size_t placeOfVariable(VarExp read) {
+        import dmd.astenums: STC;
+        import snakebite.frontend.dmd.delegates: isCtfeVariable;
+
+        auto variable = read.var.isVarDeclaration;
+        if (variable is null || read.var.isSymbolDeclaration !is null
+                || isCtfeVariable(read.var) || variable.isDataseg
+                || variable is _dollarVariable
+                || variable.isBitFieldDeclaration !is null)
             return size_t.max;
-        const isPointer = expression.type.toBasetype.ty == Tpointer;
-        if (floating ? !isRealFloatType(expression.type)
-                : !((facts.isIntegral || isPointer)
-                    && isIntegralSize(facts.size)))
+        if (isThisField(variable))
+            return placeAt(indirectStorage(hiddenThisOffset()),
+                fieldOffset(variable));
+        if (!_layout.hasSlot(variable) || isClosureVariable(variable)
+                || (variable.storage_class & STC.lazy_))
             return size_t.max;
-        return _layout.offsetOf(variable);
+        const offset = _layout.offsetOf(variable);
+        return _layout.isRef(variable)
+            ? indirectStorage(offset) : variableStorage(variable);
+    }
+
+    private size_t placeOfField(DotVarExp expression, in bool inPlace) {
+        import dmd.astenums: Tclass, Tpointer;
+
+        auto field = expression.var.isVarDeclaration;
+        if (field is null || field.isBitFieldDeclaration !is null
+                || field.isDataseg)
+            return size_t.max;
+
+        const aggregate = expression.e1.type.toBasetype.ty;
+        if (aggregate == Tclass || aggregate == Tpointer) {
+            const slot = baseSlot(expression.e1, inPlace);
+            compileNullCheck(slot, expression.e1.loc);
+            return placeAt(indirectStorage(slot), field.offset);
+        }
+        const aggregatePlace = placeOf(expression.e1, inPlace);
+        return aggregatePlace == size_t.max
+            ? size_t.max : placeAt(aggregatePlace, field.offset);
+    }
+
+    // The element `expression` names. The address is computed here, after
+    // the bounds check, so the place stays valid when the base changes
+    // while a later operand is evaluated.
+    private size_t placeOfIndex(IndexExp expression, in bool inPlace) {
+        import dmd.astenums: Tarray, Tpointer, Tsarray;
+
+        auto arrayType = expression.e1.type.toBasetype;
+        switch (arrayType.ty) {
+            case Tsarray:
+                return placeOfStaticIndex(expression, arrayType, inPlace);
+            case Tarray:
+                return placeOfSliceIndex(expression, arrayType, inPlace);
+            case Tpointer:
+                return placeOfPointerIndex(expression, arrayType, inPlace);
+            default:
+                return size_t.max;
+        }
+    }
+
+    // The value of a literal index that `$` does not depend on, or
+    // `size_t.max`.
+    private size_t literalIndex(IndexExp expression) {
+        auto literal = expression.e2.isIntegerExp;
+        if (literal is null || expression.lengthVar !is null)
+            return size_t.max;
+        return cast(size_t) literal.toInteger;
+    }
+
+    private size_t placeOfStaticIndex(
+        IndexExp expression, Type arrayType, in bool inPlace,
+    ) {
+        import snakebite.nativelayout: arrayLengthOffset;
+
+        const stride = typeFacts(arrayType.nextOf).size;
+        const dimension = cast(size_t) arrayType.isTypeSArray.dim.toInteger;
+        const literal = literalIndex(expression);
+        if (literal < dimension)
+            return placeAt(staticArrayPlace(expression.e1, inPlace),
+                literal * stride);
+
+        size_t dimensionSlot = size_t.max;
+        if (expression.lengthVar !is null) {
+            dimensionSlot = reserveTemp(pointerFacts);
+            emit(&opConstant, dimensionSlot, addConstant(cast(long) dimension),
+                size_t.sizeof);
+        }
+        const index = indexOperand(expression, dimensionSlot, expression.e1);
+        compileIndexCheck(Comparison.lessThan, index,
+            constantWord(dimension), Yes.constant,
+            () => Arg(index, 0, size_t.sizeof),
+            () => constantArgument(dimension, size_t.sizeof),
+            expression.loc);
+        const array = staticArrayPlace(expression.e1, true);
+        const address = reserveTemp(pointerFacts);
+        emit(&opIndexStatic, address, array, stride, index);
+        return indirectStorage(address);
+    }
+
+    // Where the elements of the static array `array` are.
+    private size_t staticArrayPlace(Expression array, in bool inPlace) {
+        const place = placeOf(array, inPlace);
+        return place != size_t.max
+            ? place : indirectStorage(compileAddress(array));
+    }
+
+    private size_t placeOfSliceIndex(
+        IndexExp expression, Type arrayType, in bool inPlace,
+    ) {
+        import dmd.sideeffect: hasSideEffect;
+        import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
+
+        const stride = typeFacts(arrayType.nextOf).size;
+        const literal = literalIndex(expression);
+        size_t array, index;
+        if (expression.lengthVar !is null) {
+            // `$` is the length before the index runs, and the index runs
+            // after the array is read.
+            array = sliceOperand(expression.e1, !hasSideEffect(expression.e2));
+            const length = reserveTemp(pointerFacts);
+            emit(&opCopy, length, placeAt(array, arrayLengthOffset),
+                size_t.sizeof);
+            index = indexOperand(expression, length, null);
+        } else {
+            if (literal != size_t.max && inPlace) {
+                array = placeOf(expression.e1, true);
+                if (array != size_t.max && !isIndirect(array)) {
+                    compileIndexCheck(Comparison.greaterThan,
+                        array + arrayLengthOffset, constantWord(literal),
+                        Yes.constant,
+                        () => constantArgument(literal, size_t.sizeof),
+                        () => Arg(array + arrayLengthOffset, 0, size_t.sizeof),
+                        expression.loc);
+                    return placeAt(
+                        indirectStorage(array + arrayPointerOffset),
+                        literal * stride);
+                }
+                if (array != size_t.max)
+                    return placeOfSliceAt(expression, array, stride,
+                        literalOperand(literal));
+            }
+            index = indexOperand(expression, size_t.max, expression.e1);
+            array = sliceOperand(expression.e1, true);
+        }
+        return placeOfSliceAt(expression, array, stride, index);
+    }
+
+    // A slice operand: the place of the slice, or a temporary that holds it.
+    private size_t sliceOperand(Expression slice, in bool inPlace) {
+        const place = placeOf(slice, inPlace);
+        if (place != size_t.max)
+            return place;
+        const facts = typeFacts(slice.type);
+        const temp = reserveTemp(facts);
+        evalInto(slice, temp, facts.size);
+        return temp;
+    }
+
+    private size_t placeOfSliceAt(
+        IndexExp expression, in size_t array, in size_t stride,
+        in size_t index,
+    ) {
+        import snakebite.nativelayout: arrayLengthOffset;
+
+        const length = placeAt(array, arrayLengthOffset);
+        compileIndexCheck(Comparison.lessThan, index, length, No.constant,
+            () => Arg(index, 0, size_t.sizeof),
+            () => Arg(length, 0, size_t.sizeof),
+            expression.loc);
+        const address = reserveTemp(pointerFacts);
+        emit(&opIndexSlice, address, array, stride, index);
+        return indirectStorage(address);
+    }
+
+    private size_t placeOfPointerIndex(
+        IndexExp expression, Type pointerType, in bool inPlace,
+    ) {
+        import dmd.sideeffect: hasSideEffect;
+
+        const stride = typeFacts(pointerType.nextOf).size;
+        const readInPlace = !hasSideEffect(expression.e2);
+        auto pointer = isPlainPlace(expression.e1)
+            ? operandPlace(expression.e1, size_t.sizeof, false, readInPlace)
+            : size_t.max;
+        if (pointer == size_t.max) {
+            pointer = reserveTemp(pointerFacts);
+            evalInto(expression.e1, pointer, size_t.sizeof);
+        }
+        const literal = literalIndex(expression);
+        if (literal != size_t.max && inPlace && !isIndirect(pointer))
+            return placeAt(indirectStorage(pointer), literal * stride);
+        const index = indexOperand(expression, size_t.max, null);
+        const address = reserveTemp(pointerFacts);
+        emit(&opIndexPointer, address, pointer, stride, index);
+        return indirectStorage(address);
+    }
+
+    // The index of `expression` as an operand of `size_t.sizeof` bytes.
+    // `length` is `$` while the index is evaluated, and `later` is the
+    // expression that runs after the index and before the instruction
+    // that reads it.
+    private size_t indexOperand(
+        IndexExp expression, in size_t length, Expression later,
+    ) {
+        import dmd.sideeffect: hasSideEffect;
+
+        auto savedDollarVariable = _dollarVariable;
+        auto savedDollarOffset = _dollarOffset;
+        scope (exit) {
+            _dollarVariable = savedDollarVariable;
+            _dollarOffset = savedDollarOffset;
+        }
+        if (expression.lengthVar !is null) {
+            _dollarVariable = expression.lengthVar;
+            _dollarOffset = length;
+        }
+
+        const place = operandPlace(expression.e2, size_t.sizeof, false,
+            later is null || !hasSideEffect(later));
+        if (place != size_t.max)
+            return place;
+        const index = reserveTemp(pointerFacts);
+        evalOperandInto(expression.e2, index, size_t.sizeof);
+        return index;
+    }
+
+    private size_t literalOperand(in size_t value) {
+        const slot = reserveTemp(pointerFacts);
+        emit(&opConstant, slot, addConstant(cast(long) value), size_t.sizeof);
+        return slot;
+    }
+
+    // The address in the native constant pool of `value` as a `size_t`.
+    private size_t constantWord(in size_t value) {
+        return cast(size_t) _bytecode._nativeData.value(
+            Type.tuns64, (&value)[0 .. 1]).ptr;
+    }
+
+    // A frame slot that holds the value of `pointer`. A plain local is that
+    // slot when nothing evaluated later can change it.
+    private size_t baseSlot(Expression pointer, in bool inPlace) {
+        import dmd.astenums: Tclass;
+
+        if (inPlace) {
+            const local = localSlot(pointer);
+            if (local != size_t.max)
+                return local;
+            if (auto this_ = pointer.isThisExp)
+                if (this_.type.toBasetype.ty == Tclass)
+                    return hiddenThisOffset(this_.var);
+        }
+        const slot = reserveTemp(pointerFacts);
+        evalInto(pointer, slot, size_t.sizeof);
+        return slot;
+    }
+
+    // A place for the scalar `operand` of `width` bytes, or `size_t.max`
+    // with no code emitted. Only reads that start no call: the place is
+    // used after the full expression of the operand ends.
+    private size_t operandPlace(
+        Expression operand, in size_t width, in bool floating,
+        in bool inPlace,
+    ) {
+        if (!inPlace)
+            return size_t.max;
+        const local = operandOf(operand, width, floating);
+        if (local != size_t.max)
+            return local;
+        if (!isPlainPlace(operand))
+            return size_t.max;
+        if (!isScalarOperand(operand.type, width, floating))
+            return size_t.max;
+        return placeOf(operand, true);
+    }
+
+    // A chain of fields, dereferences and `this` over variables: reading
+    // it creates no temporary with a lifetime of its own.
+    private bool isPlainPlace(Expression expression) {
+        import dmd.astenums: STC;
+
+        with (EXP) switch (expression.op) {
+            case variable:
+                auto variable = expression.isVarExp.var.isVarDeclaration;
+                return variable !is null
+                    && !(variable.storage_class & STC.lazy_);
+            case this_:
+                return true;
+            case dotVariable:
+                return isPlainPlace(expression.isDotVarExp.e1);
+            case star:
+                return isPlainPlace(expression.isPtrExp.e1);
+            case arrayLength:
+                return isPlainPlace(expression.isArrayLengthExp.e1);
+            case index:
+                auto indexed = expression.isIndexExp;
+                return isPlainPlace(indexed.e1)
+                    && isPlainCondition(indexed.e2);
+            default:
+                return false;
+        }
     }
 
     // Where an operand of a three-address instruction is. A plain local is
@@ -5950,13 +6342,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import dmd.sideeffect: hasSideEffect;
 
-        if (later is null || !hasSideEffect(later)) {
-            const offset = operandOf(operand, width, floating);
-            if (offset != size_t.max)
-                return offset;
-        }
+        const offset = operandPlace(operand, width, floating,
+            later is null || !hasSideEffect(later));
+        if (offset != size_t.max)
+            return offset;
         const temp = reserveTemp(facts);
-        if (floating)
+        if (floating || isReference(operand.type)
+                || operand.op == EXP.null_)
             evalInto(operand, temp, width);
         else
             evalOperandInto(operand, temp, width);
@@ -5973,6 +6365,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Type type;
         if (!literalType(operand, width, floating, type))
             return 0;
+        if (operand.op == EXP.null_) {
+            const size_t zero;
+            return cast(size_t) _bytecode._nativeData.value(
+                type, (&zero)[0 .. 1]).ptr;
+        }
         return cast(size_t) _bytecode._nativeData.value(type, operand).ptr;
     }
 
@@ -5987,6 +6384,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Expression operand, in size_t width, in bool floating,
         out Type type,
     ) {
+        if (operand.op == EXP.null_) {
+            type = Type.tuns64;
+            return !floating && width == size_t.sizeof;
+        }
         if (floating ? operand.isRealExp is null : operand.isIntegerExp is null)
             return false;
         const facts = typeFacts(operand.type);
@@ -6009,6 +6410,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private Instruction.Handler swappedForm(Instruction.Handler handler) {
         static foreach (pair; [
             ["opAdd3", "opAdd3"], ["opMultiply3", "opMultiply3"],
+            ["opBitAnd3", "opBitAnd3"], ["opBitOr3", "opBitOr3"],
+            ["opBitXor3", "opBitXor3"],
             ["opFloatAdd3", "opFloatAdd3"],
             ["opFloatMultiply3", "opFloatMultiply3"],
             ["opEqual3", "opEqual3"], ["opNotEqual3", "opNotEqual3"],
@@ -6087,7 +6490,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return false;
 
         with (EXP) switch (expression.op) {
-            case int64, float64:
+            case int64, float64, null_:
                 return true;
             case variable:
                 auto variable = expression.isVarExp.var.isVarDeclaration;
@@ -6097,6 +6500,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     greaterOrEqual, equal, notEqual, andAnd, orOr:
                 auto binary = expression.isBinExp;
                 return isPlainCondition(binary.e1)
+                    && isPlainCondition(binary.e2);
+            case dotVariable, star, arrayLength, index:
+                return isPlainPlace(expression);
+            case identity, notIdentity:
+                auto binary = expression.isBinExp;
+                return identityPlan(binary.isIdentityExp).reference
+                    && isPlainCondition(binary.e1)
                     && isPlainCondition(binary.e2);
             case cast_, negate, not:
                 return isPlainCondition(expression.isUnaExp.e1);
@@ -6176,9 +6586,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             auto comparison = condition.isBinExp;
             const plan = comparisonPlan(comparison);
             const floating = plan.kind == ComparisonPlan.Kind.floating;
-            if (floating || plan.kind == ComparisonPlan.Kind.integral) {
+            if (floating || plan.kind == ComparisonPlan.Kind.integral
+                    || plan.kind == ComparisonPlan.Kind.reference) {
                 emitCompareBranch(comparison, operation, plan.facts,
                     floating, jumpWhen, position, branches);
+                return;
+            }
+        }
+
+        if (condition.op == EXP.identity || condition.op == EXP.notIdentity) {
+            auto identity = condition.isIdentityExp;
+            const plan = identityPlan(identity);
+            if (plan.reference) {
+                emitCompareBranch(identity,
+                    condition.op == EXP.identity
+                        ? Comparison.equal : Comparison.notEqual,
+                    typeFacts(identity.e1.type), false, jumpWhen,
+                    position, branches);
                 return;
             }
         }
@@ -6221,7 +6645,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             }
         });
         const kind = floating ? CompareKind.floating
-            : facts.isUnsigned ? CompareKind.unsigned : CompareKind.signed;
+            : facts.isUnsigned || isReference(comparison.e1.type)
+                ? CompareKind.unsigned : CompareKind.signed;
         branches ~= _instructions.length;
         emit(fusedBranchHandler(operation, kind, jumpWhen, constant),
             leftOffset, rightOffset, facts.size, 0);
@@ -6238,66 +6663,110 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
-    // `x = e` for a plain scalar local `x`, with `e` a binary operation of
-    // the three-address kind, a literal or a plain local. The result is
-    // written straight into `x`; the instruction that writes it is the last
-    // one and reads its operands first. Every other `e` keeps
-    // `executeAssignment`: some of them (`x = x++`) write their destination
-    // before they finish.
+    // `x = e` for a scalar target `x` that is a plain local or a place
+    // (a field, a dereference), with `e` a literal, a read of a plain
+    // local or of a place, or a binary operation of the three-address
+    // kind: the result is written straight into the target. The instruction
+    // that writes it is the last one and reads its operands first. Every
+    // other `e` is evaluated into a temporary and copied to a place target,
+    // and keeps `executeAssignment` for a local: some of them (`x = x++`)
+    // write their destination before they finish.
     private bool compileDirectAssign(
         AssignExp expression, in size_t destOffset,
+    ) {
+        import dmd.expression: MemorySet;
+        import dmd.sideeffect: hasSideEffect;
+
+        // Binding a `ref` variable writes the pointer in its slot, not the
+        // `int` it will refer to.
+        if (expression.memset == MemorySet.referenceInit)
+            return false;
+        const facts = typeFacts(expression.e1.type);
+        const floating = isRealFloatType(expression.e1.type);
+        if (!isScalarOperand(expression.e1.type, facts.size, floating))
+            return false;
+
+        auto value = expression.e2;
+        const direct = writesTargetLast(value, facts, floating);
+        const local = operandOf(expression.e1, facts.size, floating);
+        if (local != size_t.max) {
+            // A call writes its result when it returns, after its arguments
+            // were read, and an inlined one copies it last.
+            if (!direct && value.op != EXP.call)
+                return false;
+            evalInto(value, local, facts.size, expression.e1.type);
+            if (destOffset != discardResult && destOffset != local)
+                emit(&opCopy, destOffset, local, facts.size);
+            return true;
+        }
+
+        const target = placeOf(expression.e1, !hasSideEffect(value));
+        if (target == size_t.max)
+            return false;
+        if (direct)
+            evalInto(value, target, facts.size, expression.e1.type);
+        else {
+            const temp = reserveTemp(facts);
+            evalInto(value, temp, facts.size, expression.e1.type);
+            emit(&opCopy, target, temp, facts.size);
+        }
+        if (destOffset != discardResult)
+            emit(&opCopy, destOffset, target, facts.size);
+        return true;
+    }
+
+    // Whether evaluating `value` into its destination writes the
+    // destination once, as the last thing it does.
+    private bool writesTargetLast(
+        Expression value, in imported!"snakebite.nativelayout".TypeFacts facts,
+        in bool floating,
     ) {
         import snakebite.backends.arithmetic:
             ArithmeticPlan, arithmeticPlan;
 
-        const facts = typeFacts(expression.e1.type);
-        const floating = isRealFloatType(expression.e1.type);
-        const slot = operandOf(expression.e1, facts.size, floating);
-        if (slot == size_t.max)
-            return false;
-
-        auto value = expression.e2;
         const valueFacts = typeFacts(value.type);
-        bool eligible;
         with (EXP) switch (value.op) {
             case int64, float64:
-                eligible = valueFacts.size == facts.size
+                return valueFacts.size == facts.size
                     && isRealFloatType(value.type) == floating;
-                break;
+            case null_:
+                return isReference(value.type);
             case variable:
-                eligible = operandOf(value, facts.size, floating)
-                    != size_t.max;
-                break;
+                return operandOf(value, facts.size, floating) != size_t.max;
+            case dotVariable, star, arrayLength, index:
+                return isPlainPlace(value)
+                    && isScalarOperand(value.type, facts.size, floating);
             case add, min, mul, div: {
                 if (valueFacts.size != facts.size
                         || isRealFloatType(value.type) != floating)
-                    break;
+                    return false;
                 const plan = arithmeticPlan(value.isBinExp);
-                eligible = floating
+                return floating
                     ? plan.kind == ArithmeticPlan.Kind.floating
                         && plan.facts.size == facts.size
                     : plan.kind == ArithmeticPlan.Kind.integral
-                        && value.op != div && plan.facts.size == facts.size;
-                break;
+                        && plan.facts.size == facts.size;
+            }
+            case and, or, xor, mod, leftShift, rightShift, unsignedRightShift: {
+                if (floating || valueFacts.size != facts.size)
+                    return false;
+                const plan = arithmeticPlan(value.isBinExp);
+                return plan.kind == ArithmeticPlan.Kind.integral
+                    && plan.facts.size == facts.size;
             }
             default:
-                break;
+                return false;
         }
-        if (!eligible)
-            return false;
-
-        evalInto(value, slot, facts.size, expression.e1.type);
-        if (destOffset != discardResult && destOffset != slot)
-            emit(&opCopy, destOffset, slot, facts.size);
-        return true;
     }
 
-    // `x op= e` for a plain scalar local `x` when no conversion is needed
-    // (the operation has `x`'s type): one three-address operation
-    // `x = x op e`. The right operand goes first, as in the general path.
+    // `x op= e` for a scalar `x` that is a plain local or a place, when no
+    // conversion is needed (the operation has `x`'s type): one
+    // three-address operation `x = x op e`. The right operand goes first,
+    // as in the general path.
     private bool compileDirectCompound(
         BinAssignExp expression, in size_t destOffset,
     ) {
+        import dmd.sideeffect: hasSideEffect;
         import snakebite.backends.arithmetic:
             ArithmeticPlan, arithmeticPlan;
         import snakebite.frontend.storage: compoundTarget;
@@ -6306,8 +6775,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return false;
         const facts = typeFacts(expression.e1.type);
         const floating = isRealFloatType(expression.e1.type);
-        const slot = operandOf(expression.e1, facts.size, floating);
-        if (slot == size_t.max)
+        if (!isScalarOperand(expression.e1.type, facts.size, floating))
             return false;
 
         const plan = arithmeticPlan(expression);
@@ -6329,6 +6797,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (handler is null)
             return false;
 
+        const slot = targetPlace(expression.e1, facts.size, floating, step);
+        if (slot == size_t.max)
+            return false;
+
         emitWithRight(handler, slot, slot, expression.e2, facts, facts.size,
             floating);
         if (destOffset != discardResult)
@@ -6336,8 +6808,25 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return true;
     }
 
-    // `x++` and `x--` for a plain scalar local `x` of integral or floating
-    // type. The old value is copied out first, and only when it is used.
+    // The operand for the scalar `target` that an instruction writes, or
+    // `size_t.max` with no code emitted. A pointer it is reached through is
+    // read in place only if `later`, which runs before the write, has no
+    // side effect.
+    private size_t targetPlace(
+        Expression target, in size_t width, in bool floating,
+        Expression later,
+    ) {
+        import dmd.sideeffect: hasSideEffect;
+
+        const local = operandOf(target, width, floating);
+        if (local != size_t.max)
+            return local;
+        return placeOf(target, later is null || !hasSideEffect(later));
+    }
+
+    // `x++` and `x--` for a scalar `x` of integral or floating type that is
+    // a plain local or a place. The old value is copied out first, and only
+    // when it is used.
     private bool compileDirectPost(
         PostExp expression, in size_t destOffset,
     ) {
@@ -6346,8 +6835,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const facts = typeFacts(expression.e1.type);
         const floating = isRealFloatType(expression.e1.type);
-        const slot = operandOf(expression.e1, facts.size, floating);
-        if (slot == size_t.max)
+        if (!isScalarOperand(expression.e1.type, facts.size, floating))
             return false;
 
         const plan = arithmeticPlan(expression);
@@ -6355,6 +6843,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return false;
         if (floating ? plan.kind != ArithmeticPlan.Kind.floating
                 : plan.kind != ArithmeticPlan.Kind.integral)
+            return false;
+
+        const slot = targetPlace(expression.e1, facts.size, floating, null);
+        if (slot == size_t.max)
             return false;
 
         const increment = expression.op == EXP.plusPlus;
@@ -6486,14 +6978,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     default: internalFailure();
                 }
 
-                const leftOffset = reserveTemp(operandFacts);
-                evalInto(expression.e1, leftOffset, operandFacts.size);
-                const rightOffset = reserveTemp(operandFacts);
-                evalInto(expression.e2, rightOffset, operandFacts.size);
-                emit(pointerHandler, leftOffset, rightOffset, operandFacts.size);
-
-                if (destOffset != leftOffset)
-                    emit(&opCopy, destOffset, leftOffset, 1);
+                emitBinary3(threeAddress(pointerHandler), destOffset,
+                    expression.e1, expression.e2, operandFacts,
+                    operandFacts.size, No.floating);
                 return;
             }
 
@@ -6676,6 +7163,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 addConstant(expression.op == EXP.identity ? 1 : 0), 1);
             return;
         }
+
+        if (plan.reference)
+            return compileComparison(expression,
+                ComparisonPlan(ComparisonPlan.Kind.reference,
+                    typeFacts(expression.e1.type)),
+                destOffset);
 
         const facts = typeFacts(expression.e1.type);
         const arrayFacts = TypeFacts(
@@ -8134,6 +8627,53 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
+    // Fails through the plan for an index check unless `left comparison
+    // right` holds, both read unsigned. The check is one compare-and-branch
+    // over the code that fails; the arguments of the druntime hook are made
+    // in that code, where they cost nothing when the index is in bounds.
+    private void compileIndexCheck(
+        in Comparison comparison, in size_t left, in size_t right,
+        in Flag!"constant" rightIsConstant,
+        scope Arg delegate() indexArgument,
+        scope Arg delegate() lengthArgument,
+        in Loc loc,
+    ) {
+        import snakebite.backends.checkplan:
+            boundsPlanOf, cMessageOf, FailurePlan;
+        import snakebite.backends.exceptions: cAssertCallOf;
+
+        const plan = boundsPlanOf(_bytecode.checks, _function);
+        if (plan.kind == FailurePlan.Kind.ignore)
+            return;
+
+        const branchIndex = _instructions.length;
+        emit(fusedBranchHandler(comparison, CompareKind.unsigned, true,
+                rightIsConstant == Yes.constant),
+            left, right, size_t.sizeof, 0);
+        final switch (plan.kind) with (FailurePlan.Kind) {
+            case ignore:
+                internalFailure();
+            case halt: {
+                const never = reserveTemp(pointerFacts);
+                emit(&opConstant, never, addConstant(0), size_t.sizeof);
+                emit(&opAssert, never, haltSite, size_t.sizeof);
+                break;
+            }
+            case cAssert: {
+                const call = cAssertCallOf(
+                    cMessageOf(BoundsCheck.index).ptr, loc, _function);
+                compileCAssertCall(call, constantArgument(
+                    cast(size_t) call.assertion, size_t.sizeof));
+                break;
+            }
+            case raise:
+                compileFileLineHookCall(hookOf(BoundsCheck.index),
+                    [indexArgument(), lengthArgument()], loc);
+                break;
+        }
+        patchTarget(branchIndex, _instructions.length);
+    }
+
     // `-check=nullderef`: dmd's glue layer branches around druntime's
     // `_d_nullpointerp` the same way, on the pointer itself, which is
     // nonzero when it is not null. Without the flag nothing is emitted.
@@ -8542,11 +9082,35 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
+    // The address of `expression` as a pointer in a frame slot. A place is
+    // its own address: a frame offset needs `opFrameAddress`, and memory
+    // behind a pointer already has the pointer in a slot.
     private size_t compileAddress(Expression expression) {
         import snakebite.frontend.storage: StorageResolver;
 
+        with (EXP) switch (expression.op) {
+            case variable, dotVariable, star, index: {
+                const place = placeOf(expression, false);
+                if (place != size_t.max)
+                    return addressOfPlace(place);
+                break;
+            }
+            default:
+                break;
+        }
         return StorageResolver!(size_t, StorageAdapter)(StorageAdapter(this))
             .resolve(expression);
+    }
+
+    private size_t addressOfPlace(in size_t place) {
+        if (!isIndirect(place)) {
+            const address = reserveTemp(pointerFacts);
+            emit(&opFrameAddress, address, place, size_t.sizeof);
+            return address;
+        }
+        const slot = (place >> 32) & 0x7fff_ffffUL;
+        const displacement = cast(uint) place;
+        return displacement == 0 ? slot : addPointerOffset(slot, displacement);
     }
 
     private size_t compileSymbolAddress(SymOffExp expression) {

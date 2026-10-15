@@ -2320,6 +2320,63 @@ def test_guest_fault_ends_the_process_with_the_signal(
     ) + "\n", output(result)
 
 
+# `int.min / -1` and `int.min % -1` trap in compiled D, whatever form the
+# operation takes. The interpreter does not trap on them yet.
+OVERFLOWING_DIVISIONS = [
+    ("division",
+     "int fault(int lowest, int minusOne) { return lowest / minusOne; }"),
+    ("modulo",
+     "int fault(int lowest, int minusOne) { return lowest % minusOne; }"),
+    ("division assignment to a local",
+     "int fault(int lowest, int minusOne) {\n"
+     "    int value = lowest;\n"
+     "    value /= minusOne;\n"
+     "    return value;\n"
+     "}"),
+    ("modulo assignment to a local",
+     "int fault(int lowest, int minusOne) {\n"
+     "    int value = lowest;\n"
+     "    value %= minusOne;\n"
+     "    return value;\n"
+     "}"),
+    ("division assignment to a field",
+     "struct S { int v; }\n"
+     "int fault(int lowest, int minusOne) {\n"
+     "    S s = S(lowest);\n"
+     "    s.v /= minusOne;\n"
+     "    return s.v;\n"
+     "}"),
+    ("modulo assignment to a field",
+     "struct S { int v; }\n"
+     "int fault(int lowest, int minusOne) {\n"
+     "    S s = S(lowest);\n"
+     "    s.v %= minusOne;\n"
+     "    return s.v;\n"
+     "}"),
+]
+
+
+@pytest.mark.parametrize(
+    "function", [case[1] for case in OVERFLOWING_DIVISIONS],
+    ids=[case[0] for case in OVERFLOWING_DIVISIONS],
+)
+def test_bytecode_signed_int_overflowing_division_traps(
+    tmp_path: Path, function: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        "module main;\n" + function + "\n"
+        "int main() { return fault(int.min, -1); }\n",
+    )
+
+    result = run_sb("--backend=bytecode", str(tmp_path / "app"), cwd=tmp_path)
+
+    assert result.returncode == -signal.SIGFPE, output(result)
+    assert result.stderr == (
+        "fatal: integer division by zero or overflow\n"
+    ), output(result)
+
+
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
 def test_virtual_call_on_null_receiver_evaluates_arguments_first(
     tmp_path: Path, backend: str,

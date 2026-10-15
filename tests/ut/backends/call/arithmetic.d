@@ -1873,3 +1873,129 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+
+// Operands are locals and literals so the instruction reads them in place:
+// the answers differ for a wrong signedness, a wrong operand order or a
+// result written before the operands were read.
+static foreach (backend; Matrix!()) {
+    @("arithmetic.bitwiseShiftDivideModulo.signedOperands." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                long operations(long a, long b) {
+                    long r = a & b;
+                    r += a | b;
+                    r += a ^ b;
+                    r += a << 4;
+                    r += a >> 2;
+                    r += a / b;
+                    r += a % b;
+                    r += a & 0xff;
+                    r += 0x0f | a;
+                    r += a ^ 0x55;
+                    r += a << 3;
+                    r += a >> 1;
+                    r += a / 7;
+                    r += a % 7;
+                    r += 1000 / b;
+                    r += 1000 % b;
+                    return r;
+                }
+
+                bool check() {
+                    return operations(-123456789, -37) == -3316769001L;
+                }
+            },
+            "check",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arithmetic.bitwiseShiftDivideModulo.unsignedOperands."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                ulong operations(ulong a, ulong b, uint count) {
+                    ulong r = a & b;
+                    r += a >>> count;
+                    r += a >> (count + 1);
+                    r += a / b;
+                    r += a % b;
+                    r += a / 10;
+                    r += a % 10;
+                    r += a >> 7;
+                    r += a >>> 9;
+                    return r;
+                }
+
+                bool check() {
+                    return operations(0xF123_4567_89AB_CDEFUL, 1_000_003, 5)
+                        == 2721774816157766393UL;
+                }
+            },
+            "check",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arithmetic.bitwiseShiftDivideModulo.narrowShiftCount."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                int operations(int a, int b, byte count) {
+                    int r = a << count;
+                    r += a >> count;
+                    r += a / b;
+                    r += a % b;
+                    r += (a & b) * 3;
+                    return r;
+                }
+
+                bool check() {
+                    return operations(-1_234_567, 89, 5) == -39558377;
+                }
+            },
+            "check",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arithmetic.bitwiseShiftDivideModulo.resultOverwritesOperand."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                long operations(long a, long b) {
+                    a = b & a;
+                    b = a | b;
+                    a = a ^ b;
+                    a = a << 2;
+                    b = b / 3;
+                    a = a % 1000;
+                    b = b >> 1;
+                    return a * 1000003 + b;
+                }
+
+                bool check() {
+                    return operations(0x1234_5678_9ABC, 0xFF00_FF00_FF00)
+                        == 46730045223304L;
+                }
+            },
+            "check",
+        );
+    }
+}

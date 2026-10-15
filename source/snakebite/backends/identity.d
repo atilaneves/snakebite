@@ -12,12 +12,15 @@ package struct IdentityPlan {
     bool skipCompare;
     bool leftStorage;
     bool rightStorage;
+    // A pointer or class reference is one word, and `is` on it compares
+    // the words as integers.
+    bool reference;
 }
 
 package IdentityPlan identityPlan(
     imported!"dmd.expression".IdentityExp expression,
 ) {
-    import dmd.astenums: Tfloat80, Tsarray;
+    import dmd.astenums: Tclass, Tfloat80, Tnull, Tpointer, Tsarray;
     import dmd.expressionsem: isLvalue, toInteger;
     import dmd.sideeffect: isTrivialExp;
     import dmd.target: target;
@@ -38,5 +41,7 @@ package IdentityPlan identityPlan(
         && type.isTypeStruct.sym.fields.length == 0;
     const skipCompare = emptyStruct
         && isTrivialExp(expression.e1) && isTrivialExp(expression.e2);
-    return IdentityPlan(width, false, 0, skipCompare, false, false);
+    const reference = type.ty == Tpointer || type.ty == Tclass
+        || type.ty == Tnull;
+    return IdentityPlan(width, false, 0, skipCompare, false, false, reference);
 }
