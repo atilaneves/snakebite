@@ -3325,6 +3325,68 @@ def test_bench_gives_program_arguments_to_every_row(
     assert result.returncode == 0, output(result)
 
 
+# Loading std makes the frontend large while the executable does no work.
+# Native RAM must exclude that frontend; backend RAM must include the
+# frontend that stays loaded, without accumulating repeated runs.
+@pytest.mark.parametrize("backend", ["dmd", *BACKENDS])
+@pytest.mark.parametrize("dub_project", [False, True])
+def test_bench_ram_scope(
+    tmp_path: Path, backend: str, dub_project: bool,
+) -> None:
+    app = tmp_path / "app"
+    if dub_project:
+        write(app / "dub.sdl", dub_project_recipe("bench-ram"))
+    source = app / "source" if dub_project else app
+    write(source / "app.d", "module app; import std; void main() {}")
+    peaks = []
+    for warmup, runs in ((0, 1), (2, 4)):
+        result = run_bench(
+            str(app), f"--backend={backend}", f"--runs={runs}",
+            f"--warmup={warmup}", cwd=tmp_path,
+        )
+        assert result.returncode == 0, output(result)
+        row_name = "dub" if backend == "dmd" and dub_project else backend
+        table = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
+        row = next(line for line in table.splitlines()
+                   if line.startswith(row_name + " ") and "PASS" in line)
+        match = re.search(r"([0-9.]+) (MiB|KiB|B)$", row)
+        assert match, row
+        scales = {"MiB": 1024 * 1024, "KiB": 1024, "B": 1}
+        peaks.append(float(match[1]) * scales[match[2]])
+    if backend == "dmd":
+        assert max(peaks) < 32 * 1024 * 1024, peaks
+    else:
+        assert min(peaks) > 64 * 1024 * 1024, peaks
+    assert max(peaks) < min(peaks) * 1.25 + 4 * 1024 * 1024, peaks
+
+
+# A later run can fail even when the timing run printed passing counts.
+# CTFE cannot call lstat64 from std.file.exists (verified on this fixture).
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_bench_reports_memory_run_failure(tmp_path: Path, backend: str) -> None:
+    app = tmp_path / "app"
+    write(app / "dub.sdl", dub_project_recipe("bench-ram-failure"))
+    write(app / "source" / "app.d", """
+        module app;
+        import std.file: exists, write;
+        import std.stdio: writeln;
+        int main() {
+            if (exists("ran")) return 1;
+            write("ran", "done");
+            writeln("1 test(s) run, 0 failed");
+            return 0;
+        }
+    """)
+    result = run_bench(
+        str(app), f"--backend={backend}", "--runs=1", "--warmup=0",
+        cwd=tmp_path,
+    )
+    assert result.returncode != 0, output(result)
+    assert "memory run failed" in result.stderr, output(result)
+    assert "1/1" in result.stdout, output(result)
+    assert "FAIL" in result.stdout, output(result)
+
+
 # A throw from a `crt_destructor` function makes the program fail. Compiled D
 # aborts there, so only the backends have a row.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)

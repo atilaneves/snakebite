@@ -85,7 +85,7 @@ void printTable(in BackendReport[] reports) {
     string[][] rows = [
         [
             "backend", "pass", "run min", "run med", "run σ",
-            "cmp min", "cmp med", "cmp σ", "RAM",
+            "cmp min", "cmp med", "cmp σ", "peak RSS",
         ],
     ];
     rows ~= [""];
@@ -130,6 +130,9 @@ void printTable(in BackendReport[] reports) {
         writeln(line);
     }
 
+    writeln("\nPeak RSS: backends use one fresh process, including the frontend;"
+        ~ " native rows use only the test executable (maximum measured run).");
+
     if (oracleFailed)
         writeln("\n* dmd oracle failed this run; pass columns unverified");
 
@@ -167,16 +170,16 @@ BackendReport[] orderByMedianRunTime(in BackendReport[] reports) {
 }
 
 private bool clean(in BackendReport report) {
-    return report.haveCounts
-        ? report.passCount == report.totalCount
-        : report.passed;
+    return report.passed
+        && (!report.haveCounts || report.passCount == report.totalCount);
 }
 
 private string passCellText(in BackendReport report) {
     import std.conv: text;
 
     return report.haveCounts
-        ? text(report.passCount, "/", report.totalCount)
+        ? text(report.passCount, "/", report.totalCount,
+            report.passed ? "" : " FAIL")
         : (report.passed ? "PASS" : "FAIL");
 }
 

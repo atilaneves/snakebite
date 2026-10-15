@@ -8,7 +8,7 @@
 // `Backend.run` - the backend does whatever compiled D would do, the
 // harness never collects or runs tests itself - and the table reports the
 // verdict, run-time statistics, the backend's own compile time (for
-// backends that have a compile step) and resident memory growth. A `dmd`
+// backends that have a compile step) and peak resident memory. A `dmd`
 // row (bench.oracle) benchmarks the real workflow as subprocesses, its
 // cells split the same way and its own per-cycle frontend and overhead
 // reported under the table, and doubles as the correctness oracle.
@@ -58,7 +58,7 @@ public int run(string[] args) {
 
     PreparationReport preparation;
     BackendReport[] reports;
-    try
+    try {
         runProject(
             options.projectDirectory,
             options.importPaths,
@@ -79,7 +79,10 @@ public int run(string[] args) {
                 return 0;
             },
         );
-    catch (Exception exception) {
+        foreach (ref report; reports)
+            if (!report.isOracle)
+                measureMemory(report, options);
+    } catch (Exception exception) {
         stderr.writeln(exception.msg);
         return 1;
     }
@@ -278,8 +281,6 @@ public BackendReport benchmark(
     report.name = name;
     report.passed = true;
 
-    const residentBefore = residentSetBytes;
-
     // A failing backend's diagnostics go to stderr, repeated over warmup +
     // measured runs. Noisy, but silencing them left failures with no
     // explanation at all; the noise is the lesser evil.
@@ -324,10 +325,6 @@ public BackendReport benchmark(
     report.runTime = timingStatistics(times);
     if (report.hasCompile)
         report.compileTime = timingStatistics(compileTimes);
-
-    report.ramBytes = residentSetBytes - residentBefore;
-    if (report.ramBytes < 0)
-        report.ramBytes = 0;
 
     return report;
 }
@@ -414,15 +411,30 @@ private string[] benchmarkNames() {
         .release;
 }
 
-// This process's resident set, from /proc/self/statm. In-process backends
-// have no per-run peak to isolate, so the table reports how much the
-// resident set grew across one backend's whole benchmark.
-private long residentSetBytes() {
-    import core.sys.posix.unistd: _SC_PAGESIZE, sysconf;
-    import std.conv: to;
-    import std.file: readText;
-    import std.string: split;
+// Measure once outside the timing loop. A fresh process cannot retain
+// allocations from earlier rounds or from another backend.
+private void measureMemory(ref BackendReport report, in Options options) {
+    import bench.capture: captureProcess;
+    import std.file: thisExePath;
+    import std.stdio: stderr;
 
-    const fields = readText("/proc/self/statm").split;
-    return fields[1].to!long * sysconf(_SC_PAGESIZE);
+    string[] command = [thisExePath, "--memory-run", "--backend", report.name];
+    foreach (path; options.importPaths)
+        command ~= ["--import-path", path];
+    foreach (path; options.stringImportPaths)
+        command ~= ["--string-import-path", path];
+    foreach (identifier; options.versions)
+        command ~= ["--version", identifier];
+    if (options.lowmem)
+        command ~= "--lowmem";
+    command ~= options.projectDirectory;
+    command ~= "--" ~ options.programArguments;
+
+    const sample = captureProcess(command);
+    report.ramBytes = sample.ramBytes;
+    if (sample.status != 0) {
+        report.passed = false;
+        stderr.writeln(report.name, " memory run failed:\n",
+            sample.stderr_, sample.stdout_);
+    }
 }

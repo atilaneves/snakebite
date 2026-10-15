@@ -1,6 +1,7 @@
 module bench.oracle;
 
 
+import bench.capture: ProcessResult, run = captureProcess;
 import bench.report: BackendReport, updateTestCounts;
 import core.time: Duration;
 import snakebite.project: SourceSet;
@@ -11,9 +12,8 @@ import snakebite.project: SourceSet;
 // real backend.
 enum oracleName = "dmd";
 
-// Not a `Backend`: the real workflow, spawned as subprocesses, always the
-// `dmd` binary (never `$DC`) so the numbers don't shift with CI's compiler
-// matrix.
+// Not a `Backend`: the real workflow, spawned as subprocesses, using
+// `dmd` for a bare directory and dub's default compiler for a dub project.
 //
 // Its cells mean what they mean in the in-process rows, so that the rows
 // can be compared: `cmp` is what makes the analysed program runnable
@@ -136,10 +136,6 @@ BackendReport oracleReport(
         compileTimes ~= pieces.compile;
         times ~= pieces.run;
 
-        // The build is the memory-hungry step for a dub project too: dub
-        // spawns dmd, and `time -v` reports the largest of the tree.
-        if (result.ramBytes > report.ramBytes)
-            report.ramBytes = result.ramBytes;
         if (binaryRun.ramBytes > report.ramBytes)
             report.ramBytes = binaryRun.ramBytes;
 
@@ -147,11 +143,13 @@ BackendReport oracleReport(
         // verdict, are the binary's.
         const tests = dub ? result : binaryRun;
         report.updateTestCounts(tests.stdout_);
-        if (tests.status != 0) {
+        if (tests.status != 0 || binaryRun.status != 0) {
             report.passed = false;
             if (failureOutput.length == 0)
                 failureOutput =
-                    tests.stderr_.length ? tests.stderr_ : tests.stdout_;
+                    binaryRun.status != 0
+                        ? binaryRun.stderr_ ~ binaryRun.stdout_
+                        : tests.stderr_ ~ tests.stdout_;
         }
     }
 
@@ -221,7 +219,7 @@ private void throwawayDubTestBuild(
 // `dub test` hands everything after `--` to the test binary, so the row
 // runs the tests with the same program arguments as the other rows.
 private string[] dubTestCommand(in string[] programArguments) {
-    return ["dub", "test", "--compiler=dmd"]
+    return ["dub", "test"]
         ~ (programArguments.length ? "--" ~ programArguments : null);
 }
 
@@ -243,68 +241,6 @@ private string[] dmdArguments(in SourceSet sources) {
         ~ sources.importPaths.map!(path => "-I" ~ path).array
         ~ sources.stringImportPaths.map!(path => "-J" ~ path).array
         ~ sources.linkerFlags.map!(flag => "-L" ~ flag).array;
-}
-
-private struct ProcessResult {
-    int status;
-    string stdout_;
-    string stderr_;
-    long ramBytes;
-}
-
-// The two streams stay separate: the test runner's summary is parsed from
-// stdout, while stderr carries the diagnostics worth showing on failure.
-// Temp files rather than pipes, so a chatty child can never deadlock on a
-// full pipe buffer.
-//
-// The command runs under `/usr/bin/time -v`, its own report going to a
-// third file so it never mixes into the command's real output; `time`
-// propagates the command's own exit status. This process (holding a parsed
-// frontend, possibly a whole `Program`) can be memory-heavy itself, and
-// `getrusage(RUSAGE_CHILDREN)` measured directly from it is unusable: a
-// forked child inherits the parent's resident pages copy-on-write, and that
-// briefly-shared memory counts toward the child's reported peak too - a
-// small `dmd` invocation read back as using a gigabyte. `time` is a
-// lightweight process with nothing of its own to inherit, so what it
-// reports for its child is the child's actual usage.
-private ProcessResult run(in string[] command, in string workDir = null) {
-    import std.conv: text, to;
-    import std.file: readText, remove, tempDir;
-    import std.path: buildPath;
-    import std.process: Config, spawnProcess, thisProcessID, wait;
-    import std.regex: matchFirst, regex;
-    import std.stdio: File, stdin;
-
-    const prefix = buildPath(
-        tempDir, "snakebite-bench-capture-" ~ thisProcessID.text,
-    );
-    const stdoutPath = prefix ~ ".out";
-    const stderrPath = prefix ~ ".err";
-    const timePath = prefix ~ ".time";
-    scope(exit) {
-        stdoutPath.remove;
-        stderrPath.remove;
-        timePath.remove;
-    }
-
-    auto stdoutFile = File(stdoutPath, "w");
-    auto stderrFile = File(stderrPath, "w");
-    auto pid = spawnProcess(
-        ["/usr/bin/time", "-v", "-o", timePath] ~ command,
-        stdin, stdoutFile, stderrFile, null,
-        Config.none, workDir,
-    );
-    const status = wait(pid);
-    stdoutFile.close;
-    stderrFile.close;
-
-    long ramBytes;
-    static rssPattern = regex(`Maximum resident set size \(kbytes\): (\d+)`);
-    const match = timePath.readText.matchFirst(rssPattern);
-    if (!match.empty)
-        ramBytes = match[1].to!long * 1024;
-
-    return ProcessResult(status, readText(stdoutPath), readText(stderrPath), ramBytes);
 }
 
 // Makes the file newer than its build products, so the next `dub test`
