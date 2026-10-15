@@ -740,7 +740,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opModuloSigned3, opModuloUnsigned3,
         CompareKind, Comparison, constantForm, fusedBranchHandler, fusesConstant,
         threeAddressConstantHandlers, threeAddressHandlers,
-        isFusedBranch, specialiseHandlers,
+        isFusedBranch, specialiseHandlers, RegisterFamily, registerFamily,
+        fusedRegisterFamily, registerForm, fusedRegisterForm,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall,
         opCastAs, opCastFixedAs,
@@ -829,6 +830,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private PendingExceptionHandler[] _exceptionHandlers;
     private size_t _tempSize;
     private uint _tempAlignment;
+    // Temporaries made for an operand and read by its one parent.
+    private bool[size_t] _operandTemps;
     private struct Temporary {
         size_t base;
         size_t site;
@@ -1090,6 +1093,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         optimizeStaticLoads;
         fuseReturns;
         fuseLoadCopies;
+        assignRegisters;
         specialiseHandlers(_instructions);
 
         foreach (ref site; _callSites)
@@ -1421,6 +1425,80 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 static foreach (width; 1 .. 17)
                     if (instruction.width == width)
                         instruction.handler = &opCopyFixed!(width, true);
+            }
+        }
+    }
+
+    // Keeps the result of an arithmetic instruction in a register when the
+    // next instruction is its only reader: the operand temporary is read by
+    // that instruction alone, and the next instruction is not a branch
+    // target, an exception handler entry or a cleanup bound.
+    private void assignRegisters() {
+        const count = _instructions.length;
+        if (count < 2)
+            return;
+        size_t[size_t] mentions;
+        auto isTarget = new bool[count + 1];
+        foreach (index, ref instruction; _instructions) {
+            mentions[instruction.destination]++;
+            if (instruction.source != instruction.destination)
+                mentions[instruction.source]++;
+            if (instruction.sourceWidth != instruction.source
+                    && instruction.sourceWidth != instruction.destination)
+                mentions[instruction.sourceWidth]++;
+            if (auto field = branchTargetField(instruction)) {
+                const target = cast(const(Instruction)*) *field;
+                isTarget[target - _instructions.ptr] = true;
+            }
+        }
+        foreach (handler; _exceptionHandlers) {
+            foreach (index; [handler._bodyStart, handler._bodyEnd,
+                    handler._handler, handler._cleanupEnd])
+                if (index <= count)
+                    isTarget[index] = true;
+        }
+        foreach (ref site; _callSites)
+            if (site.cleanupStartIndex != size_t.max) {
+                isTarget[site.cleanupStartIndex] = true;
+                isTarget[site.cleanupEndIndex] = true;
+            }
+
+        auto readsRegister = new bool[count];
+        auto writesRegister = new bool[count];
+        auto fused = new bool[count];
+        foreach (index; 0 .. count - 1) {
+            auto producer = &_instructions[index];
+            auto consumer = &_instructions[index + 1];
+            if (isTarget[index + 1])
+                continue;
+            const family = registerFamily(producer.handler, producer.width);
+            if (family == RegisterFamily.none)
+                continue;
+            const temp = producer.destination;
+            if (temp !in _operandTemps || mentions[temp] != 2)
+                continue;
+            if (consumer.width != producer.width)
+                continue;
+            if (registerFamily(consumer.handler, consumer.width) == family) {
+                if (consumer.source != temp || consumer.sourceWidth == temp
+                        || consumer.destination == temp)
+                    continue;
+            } else if (fusedRegisterFamily(consumer.handler, consumer.width)
+                    == family) {
+                if (consumer.destination != temp || consumer.source == temp)
+                    continue;
+                fused[index + 1] = true;
+            } else
+                continue;
+            writesRegister[index] = true;
+            readsRegister[index + 1] = true;
+        }
+        foreach (index, ref instruction; _instructions) {
+            if (fused[index]) {
+                instruction.handler = fusedRegisterForm(instruction.handler);
+            } else if (readsRegister[index] || writesRegister[index]) {
+                instruction.handler = registerForm(instruction.handler,
+                    readsRegister[index], writesRegister[index]);
             }
         }
     }
@@ -6357,6 +6435,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (offset != size_t.max)
             return offset;
         const temp = reserveTemp(facts);
+        _operandTemps[temp] = true;
         if (floating || isReference(operand.type)
                 || operand.op == EXP.null_)
             evalInto(operand, temp, width);
@@ -9183,3 +9262,4 @@ private void assertEveryNodeHandled() {
     static assert(
         imported!"snakebite.backends.nodecoverage".AssertEveryNodeHandled!FunctionCompiler);
 }
+

@@ -340,10 +340,15 @@ private enum OperandKind {
     // Storage known to be a plain frame offset, never an address slot plus a
     // displacement: decoding has no test of the indirect bit.
     frame,
+    // An operand the handler does not read, because the register argument
+    // holds it. Its specialised form is `frame`, so that the handler's other
+    // operands are decoded without the test too.
+    unused,
 }
 
 // The kind a specialised handler decodes in place of `kind`.
 private enum frameKind(OperandKind kind) = kind == OperandKind.storage
+        || kind == OperandKind.unused
     ? OperandKind.frame : kind;
 
 // `fixedWidth` is the width of the instruction's operands when the compiler
@@ -354,11 +359,13 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind,
     private enum frameOnly = destinationKind == OperandKind.frame
         || sourceKind == OperandKind.frame;
 
-    static if (destinationKind == OperandKind.immediate)
+    static if (destinationKind == OperandKind.immediate
+            || destinationKind == OperandKind.unused)
         public size_t destination;
     else
         public ubyte* destination;
-    static if (sourceKind == OperandKind.immediate)
+    static if (sourceKind == OperandKind.immediate
+            || sourceKind == OperandKind.unused)
         public size_t source;
     else
         public ubyte* source;
@@ -373,6 +380,14 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind,
     private const(Instruction)* _pc;
     private ubyte* _frame;
     private size_t _cleanupMark;
+
+    // The register arguments: what the previous handler left, and what this
+    // one leaves for the next. An operation that leaves nothing leaves
+    // `void`, so the tail call below sets no register for it.
+    public ulong inR0 = void;
+    public double inFp0 = void;
+    public ulong outR0 = void;
+    public double outFp0 = void;
 
     public this(
         const(Instruction)* pc, Activation* activation, DispatchState* state,
@@ -409,7 +424,8 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind,
     private auto decode(OperandKind kind)(in size_t operand)
         pure nothrow @nogc
     {
-        static if (kind == OperandKind.immediate)
+        static if (kind == OperandKind.immediate
+                || kind == OperandKind.unused)
             return operand;
         else static if (kind == OperandKind.frame)
             return _frame + operand;
@@ -546,6 +562,8 @@ private const(Instruction)* executeWith(
     Activation* activation,
     DispatchState* state,
     ubyte* frame,
+    ulong r0,
+    double fp0,
 ) {
     version (BytecodeCount) {
         static __gshared CountSlot slot;
@@ -562,8 +580,11 @@ private const(Instruction)* executeWith(
     const next = operation!Parameters(execution);
     static if (chainedDispatch) {
         // Every instruction stream ends in an instruction that ends the
-        // activation, and that one does not use `execute`.
-        return next.handler(next, activation, state, frame);
+        // activation, and that one does not use `execute`. This handler
+        // leaves nothing in the registers.
+        ulong none0 = void;
+        double none1 = void;
+        return next.handler(next, activation, state, frame, none0, none1);
     } else
         return next;
 }
@@ -574,6 +595,49 @@ private alias execute(
     OperandKind sourceKind,
     Parameters...,
 ) = executeWith!(operation, destinationKind, sourceKind, 0, Parameters);
+
+// As `execute`, for an operation that reads and writes the register
+// arguments: `execution.inR0` and `inFp0` hold what the previous handler left,
+// `outR0` and `outFp0` what the next one gets.
+private const(Instruction)* executeRegister(
+    alias operation,
+    OperandKind destinationKind,
+    OperandKind sourceKind,
+    size_t fixedWidth,
+    Parameters...,
+)(
+    const(Instruction)* pc,
+    Activation* activation,
+    DispatchState* state,
+    ubyte* frame,
+    ulong r0,
+    double fp0,
+) {
+    version (BytecodeCount) {
+        static __gshared CountSlot slot;
+        countExecution(&slot, countName!(__traits(identifier, operation),
+            destinationKind, sourceKind, fixedWidth, Parameters));
+    }
+    static if (storesPosition!operation)
+        activation.pc = pc;
+    auto execution = Execution!(destinationKind, sourceKind, fixedWidth)(
+        pc, activation, state, frame,
+    );
+    execution.inR0 = r0;
+    execution.inFp0 = fp0;
+    // An operation writes the register its family uses; the other stays.
+    execution.outR0 = r0;
+    execution.outFp0 = fp0;
+    const next = operation!Parameters(execution);
+    static if (chainedDispatch)
+        return next.handler(next, activation, state, frame,
+            execution.outR0, execution.outFp0);
+    else {
+        state.r0 = execution.outR0;
+        state.fp0 = execution.outFp0;
+        return next;
+    }
+}
 
 // As `execute`, for an operation that LDC does not inline. Such an operation
 // receives the address of `execution`, a local of this function, so the frame
@@ -590,6 +654,8 @@ private const(Instruction)* executeOnce(
     Activation* activation,
     DispatchState* state,
     ubyte* frame,
+    ulong r0,
+    double fp0,
 ) {
     version (BytecodeCount) {
         static __gshared CountSlot slot;
@@ -614,6 +680,8 @@ private const(Instruction)* executeCall(
     Activation* activation,
     DispatchState* state,
     ubyte* frame,
+    ulong r0,
+    double fp0,
 ) {
     version (BytecodeCount) {
         static __gshared CountSlot slot;
@@ -640,6 +708,8 @@ public struct Instruction {
         Activation* activation,
         DispatchState* state,
         ubyte* frame,
+        ulong r0,
+        double fp0,
     );
 
     package Handler handler;
@@ -884,6 +954,10 @@ private struct DispatchState {
     size_t nextHandler;
     Vm* vm;
     DispatchState* parent;
+    // The register arguments between two handlers when `dispatchLoop` runs
+    // each of them.
+    ulong r0;
+    double fp0;
 }
 
 // Thrown after guest code has resumed from a handler that took an exception
@@ -977,7 +1051,7 @@ private void dispatchLoop(
                 continue;
             }
 
-            pc = pc.handler(pc, active, state, active.frame);
+            pc = pc.handler(pc, active, state, active.frame, state.r0, state.fp0);
             if (state.pending !is null) {
                 active = state.pending;
                 state.pending = null;
@@ -1165,6 +1239,8 @@ public const(Instruction)* opTemporaryEnd(
     Activation* activation,
     DispatchState* state,
     ubyte* frame,
+    ulong r0,
+    double fp0,
 ) {
     version (BytecodeCount) {
         static __gshared CountSlot slot;
@@ -1403,6 +1479,8 @@ package const(Instruction)* opThrow(
     Activation* activation,
     DispatchState* state,
     ubyte* frame,
+    ulong r0,
+    double fp0,
 ) {
     version (BytecodeCount) {
         static __gshared CountSlot slot;
@@ -1437,6 +1515,8 @@ public const(Instruction)* opCall(
     Activation* active,
     DispatchState* state,
     ubyte* frame,
+    ulong r0,
+    double fp0,
 ) {
     version (BytecodeCount) {
         static __gshared CountSlot slot;
@@ -1451,14 +1531,14 @@ public const(Instruction)* opCall(
     const hasPlace = fast.returnWidth != 0 && pc.destination != discardResult;
     if (!ready || !fast.plainArgs
             || (!hasPlace && fast.returnPlaceOffset != size_t.max))
-        return opCallSlow(pc, active, state, frame);
+        return opCallSlow(pc, active, state, frame, r0, fp0);
 
     auto frames = state.frames;
     const mark = frames.mark;
     auto activation = cast(Activation*) frames.reserveFast(
         fast.frameBytes, fast.alignment);
     if (activation is null)
-        return opCallSlow(pc, active, state, frame);
+        return opCallSlow(pc, active, state, frame, r0, fp0);
 
     // The position of a throw selects its handler, and the new activation
     // resumes this one.
@@ -1513,6 +1593,8 @@ private const(Instruction)* opCallSlow(
     Activation* active,
     DispatchState* state,
     ubyte* frame,
+    ulong r0,
+    double fp0,
 ) {
     import core.stdc.string: memcpy;
 
@@ -1526,12 +1608,12 @@ private const(Instruction)* opCallSlow(
     const ready = atomicLoad!(MemoryOrder.acq)(
         *cast(shared(uint)*) &site.fast.state) == CallSite.FastCall.State.ready;
     if (!ready && !site.prepareFast)
-        return opCallGeneral(pc, active, state, frame);
+        return opCallGeneral(pc, active, state, frame, r0, fp0);
     const fast = &site.fast;
     const callee = fast.callee;
     const hasPlace = fast.returnWidth != 0 && pc.destination != discardResult;
     if (!hasPlace && fast.returnPlaceOffset != size_t.max)
-        return opCallGeneral(pc, active, state, frame);
+        return opCallGeneral(pc, active, state, frame, r0, fp0);
 
     ubyte* storage(in size_t operand) {
         return operandStorage(frame, operand);
@@ -1803,6 +1885,8 @@ package const(Instruction)* returnHandler(size_t width, bool frameOnly)(
     Activation* activation,
     DispatchState* state,
     ubyte* frame,
+    ulong r0,
+    double fp0,
 ) {
     import core.stdc.string: memcpy;
 
@@ -1831,13 +1915,15 @@ package const(Instruction)* opThenReturn(alias operation)(
     Activation* activation,
     DispatchState* state,
     ubyte* frame,
+    ulong r0,
+    double fp0,
 ) {
     static if (chainedDispatch)
         // The chain reaches the separate return by itself.
-        return operation(pc, activation, state, frame);
+        return operation(pc, activation, state, frame, r0, fp0);
     else {
-        const next = operation(pc, activation, state, frame);
-        return opReturn(next, activation, state, frame);
+        const next = operation(pc, activation, state, frame, r0, fp0);
+        return opReturn(next, activation, state, frame, r0, fp0);
     }
 }
 
@@ -1851,10 +1937,12 @@ package const(Instruction)* opRangeEnd(
     Activation* activation,
     DispatchState* state,
     ubyte* frame,
+    ulong r0,
+    double fp0,
 ) {
     if (pc is activation.end)
         return null;
-    return opRangeEndPass(pc, activation, state, frame);
+    return opRangeEndPass(pc, activation, state, frame, r0, fp0);
 }
 
 private alias opRangeEndPass =
@@ -2808,6 +2896,206 @@ package bool isFusedBranch(Instruction.Handler handler) {
 }
 
 
+// Register forms. A result that only the next instruction reads travels in
+// the `r0` (integer) or `fp0` (double) argument of the handler chain instead
+// of through its frame slot. The compiler picks these forms; see
+// `registerForm`. An integer travels with its high bits unspecified: the
+// reader applies its own width.
+private ulong registerUnsigned(in ulong value, in size_t width) {
+    switch (width) {
+        case 1: return cast(ubyte) value;
+        case 2: return cast(ushort) value;
+        case 4: return cast(uint) value;
+        case 8: return value;
+        default: internalFailure("no native layout for this integral width");
+    }
+    internalFailure();
+    return 0;
+}
+
+private long registerSigned(in ulong value, in size_t width) {
+    switch (width) {
+        case 1: return cast(byte) value;
+        case 2: return cast(short) value;
+        case 4: return cast(int) value;
+        case 8: return cast(long) value;
+        default: internalFailure("no native layout for this integral width");
+    }
+    internalFailure();
+    return 0;
+}
+
+// The operand a register form takes from or leaves in a register is not
+// decoded.
+private enum registerKind(bool inRegister) = inRegister
+    ? OperandKind.unused : OperandKind.storage;
+
+private alias opInt3R(string operation, bool constant, bool fromRegister,
+        bool toRegister) =
+    executeRegister!(runInt3R, registerKind!toRegister,
+        registerKind!fromRegister, 0, operation, constant, fromRegister,
+        toRegister);
+
+private const(Instruction)* runInt3R(string operation, bool constant,
+    bool fromRegister, bool toRegister, Decoded)(
+    ref Decoded execution,
+) {
+    static if (fromRegister)
+        const a = registerUnsigned(execution.inR0, execution.width);
+    else
+        const a = loadUnsigned(execution.source, execution.width);
+    const b = loadUnsigned(rightOperand!constant(execution), execution.width);
+    const result = cast(long) mixin("a " ~ operation ~ " b");
+    static if (toRegister)
+        execution.outR0 = result;
+    else
+        storeWidth(execution.destination, result, execution.width);
+    return execution.next;
+}
+
+// Only `double`: a `float` or `real` result keeps its slot.
+private alias opFloat3R(string operation, bool constant, bool fromRegister,
+        bool toRegister) =
+    executeRegister!(runFloat3R, registerKind!toRegister,
+        registerKind!fromRegister, 0, operation, constant, fromRegister,
+        toRegister);
+
+private const(Instruction)* runFloat3R(string operation, bool constant,
+    bool fromRegister, bool toRegister, Decoded)(
+    ref Decoded execution,
+) {
+    static if (fromRegister)
+        const a = execution.inFp0;
+    else
+        const a = *cast(const double*) execution.source;
+    const b = *cast(const double*) rightOperand!constant(execution);
+    const result = applyFloatBinary!operation(a, b);
+    static if (toRegister)
+        execution.outFp0 = result;
+    else
+        *cast(double*) execution.destination = result;
+    return execution.next;
+}
+
+// A fused compare-and-branch whose left operand is in the register.
+private alias opFusedBranchR(Comparison comparison, CompareKind kind,
+    bool jumpWhen, bool constant) =
+    executeRegister!(runFusedBranchR, OperandKind.unused,
+        constant ? OperandKind.immediate : OperandKind.storage, 0,
+        comparisonSymbols[comparison], kind, jumpWhen);
+
+private const(Instruction)* runFusedBranchR(string operation, CompareKind kind,
+    bool jumpWhen, Decoded)(
+    ref Decoded execution,
+) {
+    static if (is(typeof(execution.source) == size_t))
+        const right = cast(const(ubyte)*) execution.source;
+    else
+        const right = execution.source;
+    bool result;
+    static if (kind == CompareKind.floating)
+        result = applyFloatComparison!operation(
+            execution.inFp0, *cast(const double*) right);
+    else static if (kind == CompareKind.signed) {
+        const a = registerSigned(execution.inR0, execution.width);
+        const b = loadSigned(right, execution.width);
+        result = mixin("a " ~ operation ~ " b");
+    } else {
+        const a = registerUnsigned(execution.inR0, execution.width);
+        const b = loadUnsigned(right, execution.width);
+        result = mixin("a " ~ operation ~ " b");
+    }
+    if (result == jumpWhen)
+        return cast(const(Instruction)*) execution.sourceWidth;
+    return execution.next;
+}
+
+private __gshared Instruction.Handler[fusedCount] fusedRegisterHandlers;
+
+shared static this() {
+    static foreach (comparison; EnumMembers!Comparison)
+        static foreach (kind; EnumMembers!CompareKind)
+            static foreach (jumpWhen; [false, true])
+                static foreach (constant; [false, true])
+                    fusedRegisterHandlers[fusedIndex(comparison, kind,
+                        jumpWhen, constant)] = &opFusedBranchR!(comparison,
+                        kind, jumpWhen, constant);
+}
+
+package enum RegisterFamily {
+    none,
+    integer,
+    floating,
+}
+
+private enum registerNames = [
+    ["opAdd3", "opInt3R", `"+"`],
+    ["opSubtract3", "opInt3R", `"-"`],
+    ["opMultiply3", "opInt3R", `"*"`],
+    ["opFloatAdd3", "opFloat3R", `"+"`],
+    ["opFloatSubtract3", "opFloat3R", `"-"`],
+    ["opFloatMultiply3", "opFloat3R", `"*"`],
+    ["opFloatDivide3", "opFloat3R", `"/"`],
+];
+
+// The register family a three-address handler produces and consumes.
+package RegisterFamily registerFamily(
+    Instruction.Handler handler, in size_t width,
+) {
+    static foreach (triple; registerNames)
+        static foreach (suffix; ["", "K"])
+            if (handler is mixin("&" ~ triple[0] ~ suffix))
+                return triple[1] == "opInt3R" ? RegisterFamily.integer
+                    : width == double.sizeof ? RegisterFamily.floating
+                    : RegisterFamily.none;
+    return RegisterFamily.none;
+}
+
+// The family of the left operand of a fused branch, or `none`.
+package RegisterFamily fusedRegisterFamily(
+    Instruction.Handler handler, in size_t width,
+) {
+    foreach (index, candidate; fusedHandlers)
+        if (candidate is handler) {
+            const kind = (index / 4) % EnumMembers!CompareKind.length;
+            if (kind == CompareKind.floating)
+                return width == double.sizeof
+                    ? RegisterFamily.floating : RegisterFamily.none;
+            return width == 1 || width == 2 || width == 4 || width == 8
+                ? RegisterFamily.integer : RegisterFamily.none;
+        }
+    return RegisterFamily.none;
+}
+
+// The variant of a three-address handler that reads its left operand from the
+// register, writes its result to it, or both; null when there is none.
+package Instruction.Handler registerForm(
+    Instruction.Handler handler, in bool fromRegister, in bool toRegister,
+) {
+    static foreach (triple; registerNames)
+        static foreach (constant; [false, true])
+            if (handler is mixin("&" ~ triple[0] ~ (constant ? "K" : "")))
+                static foreach (from; [false, true])
+                    static foreach (to; [false, true])
+                        static if (from || to)
+                            if (from == fromRegister && to == toRegister)
+                                return mixin("&" ~ triple[1] ~ "!("
+                                    ~ triple[2] ~ ", " ~ constant.stringof
+                                    ~ ", " ~ from.stringof ~ ", "
+                                    ~ to.stringof ~ ")");
+    return null;
+}
+
+// The variant of a fused branch that reads its left operand from the
+// register, or null.
+package Instruction.Handler fusedRegisterForm(Instruction.Handler handler) {
+    foreach (index, candidate; fusedHandlers)
+        if (candidate is handler)
+            return fusedRegisterHandlers[index];
+    return null;
+}
+
+
 // `-x` and `~x`: `destination` holds the one operand on entry and the
 // answer on exit; `source` is unused. Neither depends on the operand's
 // signedness - the same low bits result whichever way it was widened.
@@ -3099,6 +3387,8 @@ package const(Instruction)* opLoadThenCopy(size_t loadWidth, size_t copyWidth,
     Activation* activation,
     DispatchState* state,
     ubyte* frame,
+    ulong r0,
+    double fp0,
 ) {
     static if (frameOnly) {
         alias load = executeWith!(runLoadIndirect, OperandKind.frame,
@@ -3111,10 +3401,10 @@ package const(Instruction)* opLoadThenCopy(size_t loadWidth, size_t copyWidth,
     }
     static if (chainedDispatch)
         // The chain reaches the copy by itself.
-        return load(pc, activation, state, frame);
+        return load(pc, activation, state, frame, r0, fp0);
     else {
-        const next = load(pc, activation, state, frame);
-        return copy(next, activation, state, frame);
+        const next = load(pc, activation, state, frame, r0, fp0);
+        return copy(next, activation, state, frame, r0, fp0);
     }
 }
 
@@ -3372,20 +3662,28 @@ private void specialise(alias operation, OperandKind destinationKind,
     OperandKind sourceKind, immutable(ulong)[] widths, bool right,
     Parameters...)()
 {
-    alias general = execute!(operation, destinationKind, sourceKind,
+    specialiseWith!(executeWith, operation, destinationKind, sourceKind,
+        widths, right, Parameters)();
+}
+
+private void specialiseWith(alias executor, alias operation,
+    OperandKind destinationKind, OperandKind sourceKind,
+    immutable(ulong)[] widths, bool right, Parameters...)()
+{
+    alias general = executor!(operation, destinationKind, sourceKind, 0,
         Parameters);
     Specialisation entry;
     entry.general = &general;
     entry.handlers[0][0] = &general;
-    entry.handlers[1][0] = &executeWith!(operation,
+    entry.handlers[1][0] = &executor!(operation,
         frameKind!destinationKind, frameKind!sourceKind, 0, Parameters);
     entry.destination = destinationKind == OperandKind.storage;
     entry.source = sourceKind == OperandKind.storage;
     entry.right = right;
     static foreach (width; widths) {
-        entry.handlers[0][widthSlot(width)] = &executeWith!(operation,
+        entry.handlers[0][widthSlot(width)] = &executor!(operation,
             destinationKind, sourceKind, width, Parameters);
-        entry.handlers[1][widthSlot(width)] = &executeWith!(operation,
+        entry.handlers[1][widthSlot(width)] = &executor!(operation,
             frameKind!destinationKind, frameKind!sourceKind, width,
             Parameters);
     }
@@ -3434,6 +3732,27 @@ shared static this() {
     static foreach (name; AliasSeq!("runConstant", "runZero", "runNegate",
         "runStaticLoad"))
         specialise!(mixin(name), S, I, noWidths, false)();
+    static foreach (triple; registerNames)
+        static foreach (constant; [false, true])
+            static foreach (from; [false, true])
+                static foreach (to; [false, true])
+                    static if (from || to)
+                        specialiseWith!(executeRegister,
+                            mixin("run" ~ triple[1][2 .. $]),
+                            registerKind!to, registerKind!from,
+                            triple[1] == "opInt3R"
+                                ? integralWidths : noWidths,
+                            !constant, mixin(triple[2]), constant, from, to)();
+    static foreach (comparison; EnumMembers!Comparison)
+        static foreach (kind; EnumMembers!CompareKind)
+            static foreach (jumpWhen; [false, true])
+                static foreach (constant; [false, true])
+                    specialiseWith!(executeRegister, runFusedBranchR,
+                        OperandKind.unused,
+                        constant ? I : S,
+                        kind == CompareKind.floating
+                            ? noWidths : integralWidths,
+                        false, comparisonSymbols[comparison], kind, jumpWhen)();
     static foreach (width; [1, 2, 4, 8, 16, 32]) {
         specialise!(runLoadIndirect, S, S, noWidths, false, width)();
         specialise!(runStoreIndirect, S, S, noWidths, false, width)();
