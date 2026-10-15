@@ -463,8 +463,7 @@ Build reggaeBuild() {
     auto releaseFlags = CompilerFlags("-release", "-O", "-flto=thin",
         "-L-plugin-opt=-align-all-functions=6");
     // `bin/sb` with the bytecode counter; see "Performance work" in CLAUDE.md.
-    auto countFlags = CompilerFlags("-release", "-O", "-flto=thin",
-        "-L-plugin-opt=-align-all-functions=6", "-d-version=BytecodeCount");
+    auto countFlags = CompilerFlags(releaseFlags.value ~ "-d-version=BytecodeCount");
     Target[] targets = assembledSources.map!assembledObject.array ~ [
         registryImageObject,
     ]
