@@ -1,6 +1,7 @@
 bin
 coverage
 /tmp/unit-threaded/
+/tmp/snakebite-ut/
 *.so
 *.a
 *.o
