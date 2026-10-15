@@ -459,15 +459,18 @@ Target[] dubTarget(string compiler, string config, string objectSet,
 }
 
 Build reggaeBuild() {
+    // Function alignment fixes the addresses of the VM handlers.
+    auto releaseFlags = CompilerFlags("-release", "-O", "-flto=thin",
+        "-L-plugin-opt=-align-all-functions=6");
     Target[] targets = assembledSources.map!assembledObject.array ~ [
         registryImageObject,
     ]
         ~ dubTarget("dmd", "unittest", "unittest", "ut")
         ~ dubTarget("dmd", "arena-validation", "arena-validation", "arena")
-        ~ dubTarget("ldc2", "acceptance-test", "release", "at", CompilerFlags("-release", "-O", "-flto=thin"))
-        ~ dubTarget("ldc2", "sb", "release", "sb", CompilerFlags("-release", "-O", "-flto=thin"))
-        ~ dubTarget("ldc2", "sb-repl", "release", "sb-repl", CompilerFlags("-release", "-O", "-flto=thin"))
-        ~ dubTarget("ldc2", "bench", "release", "bench", CompilerFlags("-release", "-O", "-flto=thin"));
+        ~ dubTarget("ldc2", "acceptance-test", "release", "at", releaseFlags)
+        ~ dubTarget("ldc2", "sb", "release", "sb", releaseFlags)
+        ~ dubTarget("ldc2", "sb-repl", "release", "sb-repl", releaseFlags)
+        ~ dubTarget("ldc2", "bench", "release", "bench", releaseFlags);
     return Build(targets);
 }
 
