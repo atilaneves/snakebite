@@ -359,3 +359,37 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+// A call assigned to a local writes the local only when it returns.
+static foreach (backend; Matrix!()) {
+    @("places.write.callResultToLocal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                int twice(int value) {
+                    return value * 2;
+                }
+
+                int refuse(int value) {
+                    if (value > 0)
+                        throw new Exception("refused");
+                    return value;
+                }
+
+                bool check() {
+                    int x = 3;
+                    x = twice(x);
+                    int y = 5;
+                    try
+                        y = refuse(y);
+                    catch (Exception) {
+                    }
+                    return x == 6 && y == 5;
+                }
+            },
+            "check",
+        );
+    }
+}

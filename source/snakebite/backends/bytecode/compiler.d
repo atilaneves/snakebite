@@ -6690,7 +6690,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const direct = writesTargetLast(value, facts, floating);
         const local = operandOf(expression.e1, facts.size, floating);
         if (local != size_t.max) {
-            if (!direct)
+            // A call writes its result when it returns, after its arguments
+            // were read, and an inlined one copies it last.
+            if (!direct && value.op != EXP.call)
                 return false;
             evalInto(value, local, facts.size, expression.e1.type);
             if (destOffset != discardResult && destOffset != local)
