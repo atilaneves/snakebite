@@ -3271,6 +3271,33 @@ def dub_project_recipe(name: str) -> str:
     )
 
 
+# The `dub test` row of `bin/bench` runs the tests with the program
+# arguments, as the other rows give them to `main`.
+@pytest.mark.parametrize("backend", ["dmd", "bytecode"])
+def test_bench_gives_program_arguments_to_every_row(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(tmp_path / "app" / "dub.sdl", dub_project_recipe("bench-arguments"))
+    write(
+        tmp_path / "app" / "source" / "app.d",
+        """
+        module app;
+        import core.runtime: Runtime;
+        unittest {
+            assert(Runtime.args.length == 2 && Runtime.args[1] == "x");
+        }
+        int main(string[] args) { return args.length == 2 ? 0 : 1; }
+        """,
+    )
+
+    result = run_bench(
+        str(tmp_path / "app"), f"--backend={backend}", "--runs=1",
+        "--warmup=0", "--", "x", cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, output(result)
+
+
 # A throw from a `crt_destructor` function makes the program fail. Compiled D
 # aborts there, so only the backends have a row.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
