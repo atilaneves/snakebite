@@ -263,6 +263,10 @@ public struct CallSite {
             && (function_.frameAlignment & (function_.frameAlignment - 1)) == 0);
         const alignment = function_.frameAlignment > uint(Activation.alignof)
             ? function_.frameAlignment : uint(Activation.alignof);
+        import core.memory: pageSize;
+        // `opCall` reserves with `reserveFast`.
+        if (alignment >= pageSize)
+            return false;
         slot.frameOffset =
             (Activation.sizeof + alignment - 1) & ~(size_t(alignment) - 1);
         slot.alignment = alignment;
@@ -1461,7 +1465,7 @@ public const(Instruction)* opCall(
 
     auto frames = state.frames;
     const mark = frames.mark;
-    auto activation = cast(Activation*) frames.reserveCommitted(
+    auto activation = cast(Activation*) frames.reserveFast(
         fast.frameBytes, fast.alignment);
     activation.frameMark = mark;
     ubyte* calleeFrame = cast(ubyte*) activation + fast.frameOffset;
