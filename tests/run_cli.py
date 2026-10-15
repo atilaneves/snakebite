@@ -37,6 +37,33 @@ FILE_BACKENDS = ["bytecode", "interpreter"]
 PROGRAM_BACKENDS = ["native", *FILE_BACKENDS]
 
 
+@pytest.mark.parametrize("collector", ["", "symgc", "unknown"])
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_process_collector_choice(
+    tmp_path: Path, collector: str, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    write(app / "dub.sdl", dub_project_recipe("collector-choice"))
+    write(
+        app / "source" / "main.d",
+        """
+        module main;
+        unittest {
+            int[] values;
+            foreach (i; 0 .. 2000) values ~= i;
+            assert(values.length == 2000);
+            assert(values[1999] == 1999);
+        }
+        int main() { return 0; }
+        """,
+    )
+    result = run_sb(
+        f"--backend={backend}", str(app), cwd=tmp_path,
+        env={"DGC": collector},
+    )
+    assert result.returncode == 0, output(result)
+
+
 # The DMD source declarations are @trusted; LDC exports @safe symbols.
 # ADR-0009 requires the original bodies, not renamed host declarations,
 # when these exact native symbols are absent from the release process.
