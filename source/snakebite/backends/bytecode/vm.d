@@ -32,7 +32,7 @@ import snakebite.nativevalue:
     loadUnsigned, shiftCount, storeFloating, storeIntegral;
 import object: Throwable, TypeInfo_Class;
 import core.bitop: bsf;
-import std.meta: AliasSeq;
+import std.meta: AliasSeq, staticIndexOf;
 import std.traits: EnumMembers;
 
 private alias storeWidth = storeIntegral;
@@ -364,9 +364,10 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind,
 
     public this(
         const(Instruction)* pc, Activation* activation, DispatchState* state,
+        ubyte* frame,
     ) pure nothrow @nogc {
         _pc = pc;
-        _frame = activation.frame;
+        _frame = frame;
         _cleanupMark = activation.cleanupMark;
         this.returnPlace = activation.returnPlace;
         this.constants = activation.constants;
@@ -499,6 +500,28 @@ version (BytecodeCount) {
     }
 }
 
+// Operations that cannot throw a D exception or call out. They never need
+// the position of the running instruction, so their handlers do not store it.
+private alias positionFree = AliasSeq!(
+    runAdd, runArrayEqual, runBitAnd, runBitOr, runBitXor, runBranchFalse,
+    runBranchTrue, runCastAs, runCastToBool, runCastWidenSigned,
+    runCastWidenUnsigned, runCompare3, runComplement, runComplexNegate,
+    runConstant, runCopy, runCopyFixed, runEqual, runFloat3, runFloatBinary,
+    runFloatCompare3, runFloatComparison, runFloatToBool, runFloatUnary,
+    runFloatWidthCast, runFrameAddress, runFusedBranch, runGreaterOrEqualSigned,
+    runGreaterOrEqualUnsigned, runGreaterThanSigned, runGreaterThanUnsigned,
+    runIndex, runInt3, runJump, runLessOrEqualSigned, runLessOrEqualUnsigned,
+    runLessThanSigned, runLessThanUnsigned, runLoadBitfield, runLoadIndirect,
+    runLogicalNot, runMultiply, runNegate, runNotEqual, runRangeEndPass,
+    runReturn, runReturnVoid, runShift3, runShiftLeft, runShiftRightArithmetic,
+    runShiftRightLogical, runSliceCopy, runSliceFill, runSlicesConform,
+    runStaticAddress, runStaticArrayEqual, runStaticLoad, runStaticStore,
+    runStoreBitfield, runStoreIndirect, runSubtract, runZero,
+);
+
+private enum storesPosition(alias operation) =
+    staticIndexOf!(operation, positionFree) < 0;
+
 // `width` is 0 to read the operand width from the instruction.
 private const(Instruction)* executeWith(
     alias operation,
@@ -510,6 +533,7 @@ private const(Instruction)* executeWith(
     const(Instruction)* pc,
     Activation* activation,
     DispatchState* state,
+    ubyte* frame,
 ) {
     version (BytecodeCount) {
         static __gshared CountSlot slot;
@@ -517,16 +541,17 @@ private const(Instruction)* executeWith(
             destinationKind, sourceKind, width, Parameters));
     }
     // The position of a throw selects its handler.
-    activation.pc = pc;
+    static if (storesPosition!operation)
+        activation.pc = pc;
     // const would prevent operations from writing through storage pointers.
     auto execution = Execution!(destinationKind, sourceKind, width)(
-        pc, activation, state,
+        pc, activation, state, frame,
     );
     const next = operation!Parameters(execution);
     static if (chainedDispatch) {
-        if (next is null || next is activation.end)
-            return next;
-        return next.handler(next, activation, state);
+        // Every instruction stream ends in an instruction that ends the
+        // activation, and that one does not use `execute`.
+        return next.handler(next, activation, state, frame);
     } else
         return next;
 }
@@ -552,6 +577,7 @@ private const(Instruction)* executeOnce(
     const(Instruction)* pc,
     Activation* activation,
     DispatchState* state,
+    ubyte* frame,
 ) {
     version (BytecodeCount) {
         static __gshared CountSlot slot;
@@ -560,7 +586,7 @@ private const(Instruction)* executeOnce(
     }
     activation.pc = pc;
     auto execution = Execution!(destinationKind, sourceKind)(
-        pc, activation, state,
+        pc, activation, state, frame,
     );
     return operation!Parameters(execution);
 }
@@ -575,6 +601,7 @@ private const(Instruction)* executeCall(
     const(Instruction)* pc,
     Activation* activation,
     DispatchState* state,
+    ubyte* frame,
 ) {
     version (BytecodeCount) {
         static __gshared CountSlot slot;
@@ -584,7 +611,7 @@ private const(Instruction)* executeCall(
     activation.pc = pc;
     state.current = activation;
     auto execution = Execution!(destinationKind, sourceKind)(
-        pc, activation, state,
+        pc, activation, state, frame,
     );
     return operation(execution);
 }
@@ -600,6 +627,7 @@ public struct Instruction {
         const(Instruction)* pc,
         Activation* activation,
         DispatchState* state,
+        ubyte* frame,
     );
 
     package Handler handler;
@@ -927,7 +955,7 @@ private void dispatchLoop(
 
     while (true) {
         try {
-            if (pc is null || pc is active.end) {
+            if (pc is null) {
                 active.pc = pc;
                 active.cleanup(frames);
                 if (active.parent is null)
@@ -937,7 +965,7 @@ private void dispatchLoop(
                 continue;
             }
 
-            pc = pc.handler(pc, active, state);
+            pc = pc.handler(pc, active, state, active.frame);
             if (state.pending !is null) {
                 active = state.pending;
                 state.pending = null;
@@ -1124,13 +1152,14 @@ public const(Instruction)* opTemporaryEnd(
     const(Instruction)* pc,
     Activation* activation,
     DispatchState* state,
+    ubyte* frame,
 ) {
     version (BytecodeCount) {
         static __gshared CountSlot slot;
         countExecution(&slot, "opTemporaryEnd");
     }
     auto execution = Execution!(OperandKind.storage, OperandKind.immediate)(
-        pc, activation, state);
+        pc, activation, state, frame);
     const mark = loadUnsigned(execution.destination, size_t.sizeof);
     activation.pc = pc;
     cleanupSince(mark, activation, execution.frames);
@@ -1361,6 +1390,7 @@ package const(Instruction)* opThrow(
     const(Instruction)* pc,
     Activation* activation,
     DispatchState* state,
+    ubyte* frame,
 ) {
     version (BytecodeCount) {
         static __gshared CountSlot slot;
@@ -1368,7 +1398,7 @@ package const(Instruction)* opThrow(
     }
     activation.pc = pc;
     auto execution = Execution!(OperandKind.storage, OperandKind.immediate)(
-        pc, activation, state);
+        pc, activation, state, frame);
     auto throwable = cast(Throwable) *cast(void**) (execution.destination);
     throw throwable;
 }
@@ -1392,6 +1422,7 @@ public const(Instruction)* opCall(
     const(Instruction)* pc,
     Activation* active,
     DispatchState* state,
+    ubyte* frame,
 ) {
     version (BytecodeCount) {
         static __gshared CountSlot slot;
@@ -1409,15 +1440,15 @@ public const(Instruction)* opCall(
     const ready = atomicLoad!(MemoryOrder.acq)(
         *cast(shared(uint)*) &site.fast.state) == CallSite.FastCall.State.ready;
     if (!ready && !site.prepareFast)
-        return opCallGeneral(pc, active, state);
+        return opCallGeneral(pc, active, state, frame);
     const fast = &site.fast;
     const callee = fast.callee;
     const hasPlace = fast.returnWidth != 0 && pc.destination != discardResult;
     if (!hasPlace && fast.returnPlaceOffset != size_t.max)
-        return opCallGeneral(pc, active, state);
+        return opCallGeneral(pc, active, state, frame);
 
     ubyte* storage(in size_t operand) {
-        return operandStorage(active.frame, operand);
+        return operandStorage(frame, operand);
     }
 
     auto frames = state.frames;
@@ -1425,11 +1456,11 @@ public const(Instruction)* opCall(
     auto activation = cast(Activation*) frames.reserveCommitted(
         fast.frameBytes, fast.alignment);
     activation.frameMark = mark;
-    ubyte* frame = cast(ubyte*) activation + fast.frameOffset;
-    activation.frame = frame;
+    ubyte* calleeFrame = cast(ubyte*) activation + fast.frameOffset;
+    activation.frame = calleeFrame;
 
     foreach (arg; fast.args[0 .. fast.argCount]) {
-        auto destination = frame + arg.calleeOffset;
+        auto destination = calleeFrame + arg.calleeOffset;
         const source = storage(arg.callerOffset);
         // Constant widths let the compiler copy without a call.
         switch (arg.width) {
@@ -1449,7 +1480,7 @@ public const(Instruction)* opCall(
     if (hasPlace)
         place = storage(pc.destination);
     if (fast.returnPlaceOffset != size_t.max)
-        *cast(void**) (frame + fast.returnPlaceOffset) = place;
+        *cast(void**) (calleeFrame + fast.returnPlaceOffset) = place;
     activation.returnPlace = place;
     activation.constants = callee.constants;
     activation.callSites = callee.callSites;
@@ -1680,22 +1711,20 @@ private const(Instruction)* callFunction(bool redirected = false, Decoded)(
 // backend uses for a call whose value nothing reads. `execution.destination` is
 // unused: there is no frame slot on the receiving end, only `returnPlace`.
 public alias opReturn =
-    execute!(runReturn, OperandKind.immediate, OperandKind.storage);
+    executeOnce!(runReturn, OperandKind.immediate, OperandKind.storage);
 
 package const(Instruction)* opThenReturn(alias operation)(
     const(Instruction)* pc,
     Activation* activation,
     DispatchState* state,
+    ubyte* frame,
 ) {
     static if (chainedDispatch)
         // The chain reaches the separate return by itself.
-        return operation(pc, activation, state);
+        return operation(pc, activation, state, frame);
     else {
-        const next = operation(pc, activation, state);
-        // Cleanup can execute only the producer, with the return outside its
-        // instruction range.
-        return next is activation.end
-            ? next : opReturn(next, activation, state);
+        const next = operation(pc, activation, state, frame);
+        return opReturn(next, activation, state, frame);
     }
 }
 
@@ -1712,7 +1741,29 @@ private const(Instruction)* runReturn(Decoded)(
 
 
 public alias opReturnVoid =
-    execute!(runReturnVoid, OperandKind.immediate, OperandKind.immediate);
+    executeOnce!(runReturnVoid, OperandKind.immediate, OperandKind.immediate);
+
+// Ends a cleanup range, which `dispatch` runs up to the instruction at
+// `Activation.end`. Anywhere else it does nothing.
+package const(Instruction)* opRangeEnd(
+    const(Instruction)* pc,
+    Activation* activation,
+    DispatchState* state,
+    ubyte* frame,
+) {
+    if (pc is activation.end)
+        return null;
+    return opRangeEndPass(pc, activation, state, frame);
+}
+
+private alias opRangeEndPass =
+    execute!(runRangeEndPass, OperandKind.immediate, OperandKind.immediate);
+
+private const(Instruction)* runRangeEndPass(Decoded)(
+    ref Decoded execution,
+) {
+    return execution.next;
+}
 
 private const(Instruction)* runReturnVoid(Decoded)(
     ref Decoded execution,
@@ -2942,12 +2993,13 @@ package alias opLoadIndirectFixed(size_t width) =
 // These memory operations cannot throw a D exception or transfer control.
 // Decode the copy after the load: its address slot can alias the load target.
 package const(Instruction)* opLoadThenCopy(size_t loadWidth, size_t copyWidth,
-    bool frame = false)(
+    bool frameOnly = false)(
     const(Instruction)* pc,
     Activation* activation,
     DispatchState* state,
+    ubyte* frame,
 ) {
-    static if (frame) {
+    static if (frameOnly) {
         alias load = executeWith!(runLoadIndirect, OperandKind.frame,
             OperandKind.frame, 0, loadWidth);
         alias copy = executeWith!(runCopyFixed, OperandKind.frame,
@@ -2958,12 +3010,10 @@ package const(Instruction)* opLoadThenCopy(size_t loadWidth, size_t copyWidth,
     }
     static if (chainedDispatch)
         // The chain reaches the copy by itself.
-        return load(pc, activation, state);
+        return load(pc, activation, state, frame);
     else {
-        const next = load(pc, activation, state);
-        // A cleanup range can end between the two instructions.
-        return next is activation.end
-            ? next : copy(next, activation, state);
+        const next = load(pc, activation, state, frame);
+        return copy(next, activation, state, frame);
     }
 }
 
