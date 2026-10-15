@@ -7,18 +7,17 @@ private:
 public struct Options {
     import snakebite.backends: BackendName;
 
+    import snakebite.projectoptions: ProjectOptions;
+
+    public ProjectOptions project;
+    alias project this;
     public BackendName backend;
-    public string[] importPaths;
-    public string[] stringImportPaths;
-    public string[] versions;
     public string projectDirectory;
-    public string[] programArguments;
     public bool showHelp;
     // Real `bin/sb` use keeps optimisation: a guest run pays the image's
     // run time, not just its build time. This flag trades that away for
     // faster image builds, for a caller that only checks behaviour.
     public bool noOptimiseImage;
-    public bool lowmem;
 }
 
 
@@ -163,33 +162,21 @@ public struct CliResult {
 
 public CliResult parseArgs(string[] args) {
     import snakebite.backends: parseBackendName, validBackendNames;
-    import snakebite.gc: lowmemHelp;
-    import std.algorithm.searching: countUntil;
-    import std.getopt: getopt, GetOptException;
+    import snakebite.projectoptions: parseProjectOptions;
+    import std.getopt: GetOptException;
 
     CliResult result;
-    const separator = args.countUntil("--");
-    if (separator >= 0) {
-        result.options.programArguments = args[separator + 1 .. $].dup;
-        args = args[0 .. separator];
-    }
     string backendName = "bytecode";
 
-    typeof(getopt(args)) helpInfo;
+    typeof(parseProjectOptions(args, result.options.project)) helpInfo;
     try {
-        helpInfo = getopt(
+        helpInfo = parseProjectOptions(
             args,
+            result.options.project,
             "b|backend", "Select the backend (default: bytecode).",
                 &backendName,
-            "I|import-path", "Add an import path.",
-                &result.options.importPaths,
-            "J|string-import-path", "Add a string import path.",
-                &result.options.stringImportPaths,
-            "version", "Define a version identifier (repeatable).",
-                &result.options.versions,
             "no-optimise-image", "Build the dependency image without optimisation (faster build, slower run).",
                 &result.options.noOptimiseImage,
-            "lowmem", lowmemHelp, &result.options.lowmem,
         );
     } catch (GetOptException exception) {
         return CliResult(1, exception.msg);

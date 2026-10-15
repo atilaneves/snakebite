@@ -44,6 +44,7 @@ BackendReport oracleReport(
     in string directory,
     in uint warmup,
     in uint runs,
+    in string[] programArguments = null,
 ) {
     import bench.report: timingStatistics;
     import snakebite.project: isDubProject;
@@ -75,7 +76,7 @@ BackendReport oracleReport(
     const binary = dub
         ? dubTestProduct(directory) : DubTestProduct(tmpBinary, directory);
     if (dub)
-        throwawayDubTestBuild(directory);
+        throwawayDubTestBuild(directory, programArguments);
 
     Duration[] overheads;
     Duration[] frontends;
@@ -97,7 +98,7 @@ BackendReport oracleReport(
 
         auto touchedWatch = StopWatch(AutoStart.yes);
         const result = dub
-            ? run(["dub", "test", "--compiler=dmd"], directory)
+            ? run(dubTestCommand(programArguments), directory)
             : bareBuild(sources, tmpBinary);
         const touched = touchedWatch.peek;
 
@@ -112,7 +113,7 @@ BackendReport oracleReport(
         }
 
         auto binaryWatch = StopWatch(AutoStart.yes);
-        const binaryRun = run([binary.path], binary.workingDirectory);
+        const binaryRun = run([binary.path] ~ programArguments, binary.workingDirectory);
         const binaryElapsed = binaryWatch.peek;
 
         // The bare build does not run the tests, so its cycle is the
@@ -122,7 +123,7 @@ BackendReport oracleReport(
         if (dub) {
             cycle = touched;
             auto untouchedWatch = StopWatch(AutoStart.yes);
-            run(["dub", "test", "--compiler=dmd"], directory);
+            run(dubTestCommand(programArguments), directory);
             untouched = untouchedWatch.peek;
         }
 
@@ -210,8 +211,18 @@ private void dmdParseOnly(in SourceSet sources) {
 
 // Builds the dependencies (and the project) once so the timed rounds only
 // rebuild the project, as a real edit would.
-private void throwawayDubTestBuild(in string directory) {
-    run(["dub", "test", "--compiler=dmd"], directory);
+private void throwawayDubTestBuild(
+    in string directory,
+    in string[] programArguments,
+) {
+    run(dubTestCommand(programArguments), directory);
+}
+
+// `dub test` hands everything after `--` to the test binary, so the row
+// runs the tests with the same program arguments as the other rows.
+private string[] dubTestCommand(in string[] programArguments) {
+    return ["dub", "test", "--compiler=dmd"]
+        ~ (programArguments.length ? "--" ~ programArguments : null);
 }
 
 // The bare-directory build: no dub, so a straight `-unittest -main` build

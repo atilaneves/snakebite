@@ -17,6 +17,7 @@ module bench.benchmark;
 
 import bench.report: BackendReport;
 import core.time: Duration;
+import snakebite.projectoptions: ProjectOptions;
 
 
 struct Options {
@@ -25,12 +26,10 @@ struct Options {
     string[] backends;
     string[] excluded;
     string[] declared;          // what the benchmark itself asks for
-    string[] importPaths;       // bare directories only; dub knows its own
-    string[] stringImportPaths; // ditto
-    string[] versions;
+    ProjectOptions project;
+    alias project this;
     string projectDirectory;
     bool helpWanted;
-    bool lowmem;
 }
 
 public int run(string[] args) {
@@ -97,12 +96,13 @@ public int run(string[] args) {
 }
 
 private Options parseOptions(string[] args) {
-    import snakebite.gc: lowmemHelp;
-    import std.getopt: defaultGetoptPrinter, getopt;
+    import snakebite.projectoptions: parseProjectOptions;
+    import std.getopt: defaultGetoptPrinter;
 
     Options options;
-    auto result = getopt(
+    auto result = parseProjectOptions(
         args,
+        options.project,
         "runs|r", "How many measured runs (default 10).", &options.runs,
         "warmup|w", "How many warmup runs (default 1).", &options.warmup,
         "backend|b", "Benchmark only this backend; repeatable (default: "
@@ -110,18 +110,11 @@ private Options parseOptions(string[] args) {
         &options.backends,
         "exclude|e", "Do not benchmark this backend; repeatable. Applies "
         ~ "after --backend.", &options.excluded,
-        "import-path|I", "Import path for a bare directory of .d files; "
-        ~ "repeatable.", &options.importPaths,
-        "string-import-path|J", "String import path for a bare directory of "
-        ~ ".d files; repeatable.", &options.stringImportPaths,
-        "version", "Define a version identifier (repeatable).",
-        &options.versions,
-        "lowmem", lowmemHelp, &options.lowmem,
     );
 
     if (result.helpWanted) {
         defaultGetoptPrinter(
-            "usage: bench [options] [benchmark]\n\n"
+            "usage: bench [options] [benchmark] [-- program arguments...]\n\n"
             ~ "A benchmark is a name under examples/ (default "
             ~ defaultBenchmark ~ "), a project directory, or a Dub package.",
             result.options,
@@ -240,12 +233,17 @@ private BackendReport[] benchmarkAll(
                 options.warmup,
                 options.runs,
                 enterWorkingDirectory,
+                options.programArguments,
             );
         }
 
     if (selected(options, oracleName))
         reports ~= oracleReport(
-            project.sources, project.directory, options.warmup, options.runs,
+            project.sources,
+            project.directory,
+            options.warmup,
+            options.runs,
+            options.programArguments,
         );
 
     return reports;
@@ -270,6 +268,7 @@ public BackendReport benchmark(
     in uint warmup,
     in uint runs,
     in void delegate() enterWorkingDirectory = null,
+    in string[] programArguments = null,
 ) {
     import bench.capture: captureStdout;
     import bench.report: timingStatistics, updateTestCounts;
@@ -304,7 +303,11 @@ public BackendReport benchmark(
             enterWorkingDirectory();
         ExecutionReport execution;
         const result = captureStdout(() {
-            execution = executeBackend(backendName_, program);
+            execution = executeBackend(
+                backendName_,
+                program,
+                [program.name] ~ programArguments,
+            );
             return execution.status;
         });
         const compilation = execution.compilation;
