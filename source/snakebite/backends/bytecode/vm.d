@@ -2400,6 +2400,15 @@ package Instruction.Handler fusedBranchHandler(
     return fusedHandlers[fusedIndex(comparison, kind, jumpWhen, constant)];
 }
 
+// Whether a fused compare-and-branch compares against a constant, so that
+// its `source` is a constant-pool address and not a frame operand.
+package bool fusesConstant(Instruction.Handler handler) {
+    foreach (index, candidate; fusedHandlers)
+        if (candidate is handler)
+            return index % 2 == 1;
+    return false;
+}
+
 package bool isFusedBranch(Instruction.Handler handler) {
     for (auto slot = fusedSlot(handler); fusedSet[slot] !is null;
             slot = (slot + 1) % fusedSlots)

@@ -733,7 +733,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opGreaterOrEqualUnsigned3, opEqual3, opNotEqual3, opFloatEqual3,
         opFloatNotEqual3, opFloatLessThan3, opFloatLessOrEqual3,
         opFloatGreaterThan3, opFloatGreaterOrEqual3,
-        CompareKind, Comparison, constantForm, fusedBranchHandler, isFusedBranch,
+        CompareKind, Comparison, constantForm, fusedBranchHandler, fusesConstant,
+        isFusedBranch,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall,
         opCastAs, opCastFixedAs,
@@ -1198,6 +1199,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 roles = Operands(S, S, S);
                 return true;
             }
+            // The constant form holds the address of a native constant in
+            // `sourceWidth`; it does not move.
+            if (handler is constantForm(&operation)) {
+                roles = Operands(S, S, N);
+                return true;
+            }
+        }
+        // A fused compare-and-branch: the left operand is in `destination`
+        // and the branch target in `sourceWidth`, which the caller of this
+        // method moves as it moves every branch target.
+        if (isFusedBranch(handler)) {
+            roles = Operands(S, fusesConstant(handler) ? N : S);
+            return true;
         }
         static foreach (width; indirectCopyWidths) {
             if (handler is &opLoadIndirectFixed!width
