@@ -2212,7 +2212,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const facts = typeFacts(condition.type);
         if (inPlace && !truth.isFloat && truth.offset == 0
                 && truth.secondOffset == TypeFacts.Truth.noSecondWord) {
-            const place = operandOf(condition, facts.size, false);
+            const place = operandPlace(condition, facts.size, false, true);
             if (place != size_t.max)
                 return place;
         }
@@ -4607,16 +4607,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     override void visit(PtrExp expression) {
         requireDestination(expression);
 
-        const addressOffset = compileAddress(expression);
-        emit(&opLoadIndirect, _destination, addressOffset, _width);
+        const place = placeOf(expression, true);
+        emit(&opCopy, _destination, place, _width);
     }
 
-    // `s.field`, read as a value. `expression.e1` is evaluated into a
-    // temporary of its own first, whatever kind of expression it is - a
-    // local, an array element, another field access - the same way any
-    // other sub-expression this compiler evaluates is; the field then
-    // reads out of that temporary at its own `field.offset`, laid out by
-    // dmd's own native semantics rather than recomputed here.
+    // `s.field`, read as a value: a copy from the place of the field. An
+    // aggregate that has no place (the result of a call) is evaluated into
+    // a temporary first, and the field read out of that.
     override void visit(DotVarExp expression) {
         if (_destination == discardResult) {
             const facts = typeFacts(expression.type);
@@ -4638,21 +4635,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        import dmd.astenums: Tclass, Tpointer;
-        auto aggregateType = expression.e1.type.toBasetype;
-        if (aggregateType.ty == Tclass || aggregateType.ty == Tpointer) {
-            const facts = typeFacts(field.type);
-            const objectOffset = reserveTemp(pointerFacts);
-            evalInto(expression.e1, objectOffset, size_t.sizeof);
-            compileNullCheck(objectOffset, expression.e1.loc);
-            const fieldOffset = reserveTemp(pointerFacts);
-            emit(&opConstant, fieldOffset,
-                addConstant(cast(long) field.offset), size_t.sizeof);
-            emit(&opAdd, objectOffset, fieldOffset, size_t.sizeof);
-            emit(&opLoadIndirect, _destination, objectOffset, _width);
+        const place = placeOf(expression, true);
+        if (place != size_t.max) {
+            emit(&opCopy, _destination, place, _width);
             return;
         }
 
+        auto aggregateType = expression.e1.type.toBasetype;
         assert(aggregateType.isTypeStruct !is null,
             "a struct field has a struct or class receiver");
 
@@ -4777,6 +4766,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.nativelayout: arrayLengthOffset;
 
         requireDestination(expression);
+
+        const length = placeOf(expression, true);
+        if (length != size_t.max) {
+            emit(&opCopy, _destination, length, _width);
+            return;
+        }
 
         const facts = typeFacts(expression.e1.type);
         assert(facts.isDynamicArray);
@@ -5914,13 +5909,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return ty == Tfloat32 || ty == Tfloat64 || ty == Tfloat80;
     }
 
-    // The frame offset of a plain scalar local that `expression` reads, or
+    // The frame offset of a plain local that `expression` reads, or
     // `size_t.max`. Plain: has a frame slot, not `ref`, not a closure
-    // variable, not `$`, not a return place, not lazy. Integral, floating
-    // and pointer types only.
-    private size_t operandOf(
-        Expression expression, in size_t width, in bool floating,
-    ) {
+    // variable, not `$`, not a return place, not lazy.
+    private size_t localSlot(Expression expression) {
         import dmd.astenums: STC;
         import snakebite.frontend.dmd.delegates: isCtfeVariable;
 
@@ -5935,7 +5927,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 || _layout.isRef(variable) || _layout.isReturnPlace(variable)
                 || (variable.storage_class & (STC.lazy_ | STC.ref_ | STC.out_)))
             return size_t.max;
+        return _layout.offsetOf(variable);
+    }
 
+    // The frame offset of a plain scalar local that `expression` reads, or
+    // `size_t.max`. Integral, floating and pointer types only.
+    private size_t operandOf(
+        Expression expression, in size_t width, in bool floating,
+    ) {
+        const slot = localSlot(expression);
+        if (slot == size_t.max)
+            return size_t.max;
         const facts = typeFacts(expression.type);
         if (facts.size != width)
             return size_t.max;
@@ -5943,7 +5945,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 : !((facts.isIntegral || isReference(expression.type))
                     && isIntegralSize(facts.size)))
             return size_t.max;
-        return _layout.offsetOf(variable);
+        return slot;
     }
 
     // A pointer, a class reference or `typeof(null)`: one word that is
@@ -5954,6 +5956,165 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const ty = type.toBasetype.ty;
         return ty == Tpointer || ty == Tclass || ty == Tnull;
+    }
+
+    // A place is a storage operand: a frame offset, or an address held in a
+    // frame slot plus a displacement (`indirectStorage`). Any handler
+    // reads and writes either, so memory behind a pointer is an operand of
+    // the instruction that uses it.
+    private static bool isIndirect(in size_t place) {
+        return (place & (1UL << 63)) != 0;
+    }
+
+    // `place` moved forward by `offset` bytes. A displacement that does not
+    // fit its 32 bits goes through a pointer sum instead.
+    private size_t placeAt(in size_t place, in size_t offset) {
+        if (!isIndirect(place))
+            return place + offset;
+        const displacement = cast(uint) place;
+        if (displacement + offset <= uint.max)
+            return place + offset;
+        const slot = (place >> 32) & 0x7fff_ffffUL;
+        return indirectStorage(addPointerOffset(slot, displacement + offset));
+    }
+
+    // The place of the lvalue `expression` names, or `size_t.max` with no
+    // code emitted. Code that must run first (loading a pointer, a null
+    // check) is emitted in the order D evaluates it. A pointer held in a
+    // plain local is used in place only when `inPlace` says that nothing
+    // evaluated later can change it.
+    private size_t placeOf(Expression expression, in bool inPlace) {
+        import dmd.astenums: Tarray, Tclass;
+
+        if (auto read = expression.isVarExp)
+            return placeOfVariable(read);
+        if (auto field = expression.isDotVarExp)
+            return placeOfField(field, inPlace);
+        if (auto dereference = expression.isPtrExp) {
+            const slot = baseSlot(dereference.e1, inPlace);
+            compileNullCheck(slot, dereference.loc);
+            return indirectStorage(slot);
+        }
+        if (auto this_ = expression.isThisExp) {
+            if (this_.type.toBasetype.ty == Tclass)
+                return size_t.max;
+            return indirectStorage(hiddenThisOffset(this_.var));
+        }
+        if (auto length = expression.isArrayLengthExp) {
+            import snakebite.nativelayout: arrayLengthOffset;
+
+            if (length.e1.type.toBasetype.ty != Tarray)
+                return size_t.max;
+            const array = placeOf(length.e1, inPlace);
+            return array == size_t.max
+                ? size_t.max : placeAt(array, arrayLengthOffset);
+        }
+        return size_t.max;
+    }
+
+    private size_t placeOfVariable(VarExp read) {
+        import dmd.astenums: STC;
+        import snakebite.frontend.dmd.delegates: isCtfeVariable;
+
+        auto variable = read.var.isVarDeclaration;
+        if (variable is null || read.var.isSymbolDeclaration !is null
+                || isCtfeVariable(read.var) || variable.isDataseg
+                || variable is _dollarVariable
+                || variable.isBitFieldDeclaration !is null)
+            return size_t.max;
+        if (isThisField(variable))
+            return placeAt(indirectStorage(hiddenThisOffset()),
+                fieldOffset(variable));
+        if (!_layout.hasSlot(variable) || isClosureVariable(variable)
+                || (variable.storage_class & STC.lazy_))
+            return size_t.max;
+        const offset = _layout.offsetOf(variable);
+        return _layout.isRef(variable)
+            ? indirectStorage(offset) : variableStorage(variable);
+    }
+
+    private size_t placeOfField(DotVarExp expression, in bool inPlace) {
+        import dmd.astenums: Tclass, Tpointer;
+
+        auto field = expression.var.isVarDeclaration;
+        if (field is null || field.isBitFieldDeclaration !is null
+                || field.isDataseg)
+            return size_t.max;
+
+        const aggregate = expression.e1.type.toBasetype.ty;
+        if (aggregate == Tclass || aggregate == Tpointer) {
+            const slot = baseSlot(expression.e1, inPlace);
+            compileNullCheck(slot, expression.e1.loc);
+            return placeAt(indirectStorage(slot), field.offset);
+        }
+        const aggregatePlace = placeOf(expression.e1, inPlace);
+        return aggregatePlace == size_t.max
+            ? size_t.max : placeAt(aggregatePlace, field.offset);
+    }
+
+    // A frame slot that holds the value of `pointer`. A plain local is that
+    // slot when nothing evaluated later can change it.
+    private size_t baseSlot(Expression pointer, in bool inPlace) {
+        import dmd.astenums: Tclass;
+
+        if (inPlace) {
+            const local = localSlot(pointer);
+            if (local != size_t.max)
+                return local;
+            if (auto this_ = pointer.isThisExp)
+                if (this_.type.toBasetype.ty == Tclass)
+                    return hiddenThisOffset(this_.var);
+        }
+        const slot = reserveTemp(pointerFacts);
+        evalInto(pointer, slot, size_t.sizeof);
+        return slot;
+    }
+
+    // A place for the scalar `operand` of `width` bytes, or `size_t.max`
+    // with no code emitted. Only reads that start no call: the place is
+    // used after the full expression of the operand ends.
+    private size_t operandPlace(
+        Expression operand, in size_t width, in bool floating,
+        in bool inPlace,
+    ) {
+        if (!inPlace)
+            return size_t.max;
+        const local = operandOf(operand, width, floating);
+        if (local != size_t.max)
+            return local;
+        if (!isPlainPlace(operand))
+            return size_t.max;
+        const facts = typeFacts(operand.type);
+        if (facts.size != width)
+            return size_t.max;
+        if (floating ? !isRealFloatType(operand.type)
+                : !((facts.isIntegral || isReference(operand.type))
+                    && isIntegralSize(facts.size)))
+            return size_t.max;
+        return placeOf(operand, true);
+    }
+
+    // A chain of fields, dereferences and `this` over variables: reading
+    // it creates no temporary with a lifetime of its own.
+    private bool isPlainPlace(Expression expression) {
+        import dmd.astenums: STC;
+
+        with (EXP) switch (expression.op) {
+            case variable:
+                auto variable = expression.isVarExp.var.isVarDeclaration;
+                return variable !is null
+                    && !(variable.storage_class & STC.lazy_);
+            case this_:
+                return true;
+            case dotVariable:
+                return isPlainPlace(expression.isDotVarExp.e1);
+            case star:
+                return isPlainPlace(expression.isPtrExp.e1);
+            case arrayLength:
+                return isPlainPlace(expression.isArrayLengthExp.e1);
+            default:
+                return false;
+        }
     }
 
     // Where an operand of a three-address instruction is. A plain local is
@@ -5967,11 +6128,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import dmd.sideeffect: hasSideEffect;
 
-        if (later is null || !hasSideEffect(later)) {
-            const offset = operandOf(operand, width, floating);
-            if (offset != size_t.max)
-                return offset;
-        }
+        const offset = operandPlace(operand, width, floating,
+            later is null || !hasSideEffect(later));
+        if (offset != size_t.max)
+            return offset;
         const temp = reserveTemp(facts);
         if (floating || isReference(operand.type)
                 || operand.op == EXP.null_)
@@ -6127,6 +6287,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 auto binary = expression.isBinExp;
                 return isPlainCondition(binary.e1)
                     && isPlainCondition(binary.e2);
+            case dotVariable, star, arrayLength:
+                return isPlainPlace(expression);
             case identity, notIdentity:
                 auto binary = expression.isBinExp;
                 return identityPlan(binary.isIdentityExp).reference
