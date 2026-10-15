@@ -2199,6 +2199,113 @@ package alias opFloatGreaterThan = opFloatComparison!">";
 package alias opFloatGreaterOrEqual = opFloatComparison!">=";
 
 
+// Three-address forms. `source` is the left operand,
+// `sourceWidth` the right operand, `destination` the result. All three are
+// storage operands; the result is written after both operands are read.
+private alias opInt3(string operation) =
+    execute!(runInt3, OperandKind.storage, OperandKind.storage, operation);
+
+private const(Instruction)* runInt3(string operation, Decoded)(
+    ref Decoded execution,
+) {
+    const a = loadUnsigned(execution.source, execution.width);
+    const b = loadUnsigned(execution.storage(execution.sourceWidth),
+        execution.width);
+    storeWidth(execution.destination,
+        cast(long) mixin("a " ~ operation ~ " b"), execution.width);
+    return execution.next;
+}
+
+package alias opAdd3 = opInt3!"+";
+package alias opSubtract3 = opInt3!"-";
+package alias opMultiply3 = opInt3!"*";
+
+private alias opFloat3(string operation) =
+    execute!(runFloat3, OperandKind.storage, OperandKind.storage, operation);
+
+private const(Instruction)* runFloat3(string operation, Decoded)(
+    ref Decoded execution,
+) {
+    const right = execution.storage(execution.sourceWidth);
+    if (execution.width == double.sizeof)
+        *cast(double*) execution.destination = applyFloatBinary!operation(
+            *cast(const double*) execution.source,
+            *cast(const double*) right);
+    else if (execution.width == float.sizeof)
+        *cast(float*) execution.destination = applyFloatBinary!operation(
+            *cast(const float*) execution.source,
+            *cast(const float*) right);
+    else
+        *cast(real*) execution.destination = applyFloatBinary!operation(
+            *cast(const real*) execution.source,
+            *cast(const real*) right);
+    return execution.next;
+}
+
+package alias opFloatAdd3 = opFloat3!"+";
+package alias opFloatSubtract3 = opFloat3!"-";
+package alias opFloatMultiply3 = opFloat3!"*";
+package alias opFloatDivide3 = opFloat3!"/";
+
+private alias opCompare3(string operation, bool signed) =
+    execute!(runCompare3, OperandKind.storage, OperandKind.storage,
+        operation, signed);
+
+private const(Instruction)* runCompare3(string operation, bool signed, Decoded)(
+    ref Decoded execution,
+) {
+    static if (signed)
+        alias load = loadSigned;
+    else
+        alias load = loadUnsigned;
+    const a = load(execution.source, execution.width);
+    const b = load(execution.storage(execution.sourceWidth), execution.width);
+    *cast(ubyte*) execution.destination = mixin("a " ~ operation ~ " b")
+        ? 1 : 0;
+    return execution.next;
+}
+
+package alias opLessThanSigned3 = opCompare3!("<", true);
+package alias opLessThanUnsigned3 = opCompare3!("<", false);
+package alias opLessOrEqualSigned3 = opCompare3!("<=", true);
+package alias opLessOrEqualUnsigned3 = opCompare3!("<=", false);
+package alias opGreaterThanSigned3 = opCompare3!(">", true);
+package alias opGreaterThanUnsigned3 = opCompare3!(">", false);
+package alias opGreaterOrEqualSigned3 = opCompare3!(">=", true);
+package alias opGreaterOrEqualUnsigned3 = opCompare3!(">=", false);
+package alias opEqual3 = opCompare3!("==", false);
+package alias opNotEqual3 = opCompare3!("!=", false);
+
+private alias opFloatCompare3(string operation) =
+    execute!(runFloatCompare3, OperandKind.storage, OperandKind.storage,
+        operation);
+
+private const(Instruction)* runFloatCompare3(string operation, Decoded)(
+    ref Decoded execution,
+) {
+    const right = execution.storage(execution.sourceWidth);
+    bool result;
+    if (execution.width == double.sizeof)
+        result = applyFloatComparison!operation(
+            *cast(const double*) execution.source, *cast(const double*) right);
+    else if (execution.width == float.sizeof)
+        result = applyFloatComparison!operation(
+            *cast(const float*) execution.source, *cast(const float*) right);
+    else
+        result = applyFloatComparison!operation(
+            *cast(const real*) execution.source, *cast(const real*) right);
+    *cast(ubyte*) execution.destination = result ? 1 : 0;
+    return execution.next;
+}
+
+package alias opFloatEqual3 = opFloatCompare3!"==";
+package alias opFloatNotEqual3 = opFloatCompare3!"!=";
+package alias opFloatLessThan3 = opFloatCompare3!"<";
+package alias opFloatLessOrEqual3 = opFloatCompare3!"<=";
+package alias opFloatGreaterThan3 = opFloatCompare3!">";
+package alias opFloatGreaterOrEqual3 = opFloatCompare3!">=";
+
+
 // `-x` and `~x`: `destination` holds the one operand on entry and the
 // answer on exit; `source` is unused. Neither depends on the operand's
 // signedness - the same low bits result whichever way it was widened.
