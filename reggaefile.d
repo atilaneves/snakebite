@@ -9,7 +9,6 @@ import std.algorithm: canFind, endsWith, filter, map, sort, startsWith;
 import std.array: array;
 import std.process: environment, executeShell, escapeShellCommand;
 import std.exception: enforce;
-import std.file: getcwd;
 import std.path: baseName, buildPath, dirName, stripExtension;
 import std.string: chomp, split, stripRight;
 
@@ -132,7 +131,7 @@ string hostCompilerRecordDirectory(in string compiler, in string objectSet) {
     const probe = pinnedFrontendProbe(compiler);
     record ~= "vendor " ~ probe.vendor ~ "\n";
     record ~= "compiler " ~ binary ~ "\n";
-    const directory = buildPath(getcwd, ".reggae", "host-compiler", objectSet);
+    const directory = buildPath(options.projectPath, ".reggae", "host-compiler", objectSet);
     mkdirRecurse(directory);
     write(buildPath(directory, "snakebite_host_compiler.txt"), record);
     write(buildPath(directory, "snakebite_host_features.txt"),
@@ -251,7 +250,7 @@ DmdLibraryVersion dmdLibraryVersion() {
     import std.file: readText;
     import std.json: parseJSON;
 
-    const text = readText(buildPath(getcwd, "dub.selections.json"))
+    const text = readText(buildPath(options.projectPath, "dub.selections.json"))
         .parseJSON["versions"]["dmd"].str;
     const parts = text.split(".");
     return DmdLibraryVersion(text, parts[0].to!uint * 1000 + parts[1].to!uint);
@@ -275,7 +274,7 @@ DubInfo withLdcFrontend(DubInfo info, in string compiler, in CompilerProbe probe
     enforce(ldcVersion, compiler ~ " --version does not give an LDC version: " ~ versionText);
 
     const prefix = "dmd-" ~ pin ~ "-ldc-";
-    const patches = buildPath(getcwd, "vendor", "ldc-frontend");
+    const patches = buildPath(options.projectPath, "vendor", "ldc-frontend");
     const patchDirectory = buildPath(patches, prefix ~ ldcVersion[1]);
     if (!patchDirectory.exists || !patchDirectory.isDir) {
         import std.array: join;
@@ -326,7 +325,7 @@ string patchedFrontendDirectory(in string packageDirectory, in string patchDirec
     import std.file: copy, dirEntries, exists, isDir, mkdirRecurse, readText, rmdirRecurse, SpanMode, write;
     import std.process: execute;
 
-    const root = buildPath(getcwd, ".reggae", "ldc-frontend", pin);
+    const root = buildPath(options.projectPath, ".reggae", "ldc-frontend", pin);
     const patchFile = buildPath(patchDirectory, patchDirectory.baseName ~ ".patch");
     const generatedSources = dirEntries(buildPath(patchDirectory, "gen"), "*.d", SpanMode.shallow)
         .map!(entry => entry.name).array.sort.release;

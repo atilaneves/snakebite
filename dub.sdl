@@ -12,6 +12,9 @@ subConfiguration "symgc" "standard"
 dependency "dub" version="1.42.0"
 subConfiguration "dub" "library"
 
+// A dedicated root resolves bench.* without making DUB scan the repository.
+importPaths "source" "bench/source"
+
 // When bumping dmd:frontend, re-run scripts/vendor-dmd-backend.sh to
 // keep vendor/dmd-backend/ in sync with the new version.
 subPackage {
@@ -42,11 +45,10 @@ configuration "unittest" {
 
     mainSourceFile "tests/main.d"
     sourcePaths "tests"
-    sourcePaths "bench"
-    excludedSourceFiles "bench/main.d"
+    sourcePaths "bench/source"
+    excludedSourceFiles "bench/source/bench/main.d"
     importPaths "tests"
     importPaths "acceptance"
-    importPaths "."
 
     dependency "unit-threaded" version="*"
     // The REPL's console loop is library code (`snakebite.repl.cli`),
@@ -65,9 +67,9 @@ configuration "arena-validation" {
     lflags "--export-dynamic" "--version-script=$PACKAGE_DIR/build/host-exports.map" platform="linux"
 
     mainSourceFile "validation/main.d"
-    sourcePaths "validation" "tests" "bench"
-    excludedSourceFiles "tests/main.d" "bench/main.d"
-    importPaths "validation" "tests" "acceptance" "."
+    sourcePaths "validation" "tests" "bench/source"
+    excludedSourceFiles "tests/main.d" "bench/source/bench/main.d"
+    importPaths "validation" "tests" "acceptance"
 
     dependency "unit-threaded" version="*"
     dependency "readline" version="0.3.0"
@@ -88,11 +90,10 @@ configuration "acceptance-test" {
     sourceFiles "tests/ut/backends/call/arrayoperations.d"
     sourceFiles "tests/ut/backends/run/hostfrontend.d"
     sourceFiles "tests/ut/backends/run/inlineasm.d"
-    sourcePaths "bench"
-    excludedSourceFiles "bench/main.d"
+    sourcePaths "bench/source"
+    excludedSourceFiles "bench/source/bench/main.d"
     importPaths "acceptance"
     importPaths "tests"
-    importPaths "."
 
     dependency "unit-threaded" version="*"
     // The REPL's console loop is library code (`snakebite.repl.cli`),
@@ -109,7 +110,6 @@ configuration "sb" {
 
     mainSourceFile "source/snakebite/main.d"
     dependency "readline" version="0.3.0"
-    importPaths "."
 }
 
 // The interactive REPL: the Reggae build produces `bin/sb-repl`.
@@ -120,7 +120,6 @@ configuration "sb-repl" {
     lflags "--export-dynamic-symbol=rt_options" "--version-script=$PACKAGE_DIR/build/host-exports.map" platform="linux"
 
     mainSourceFile "source/snakebite/repl/main.d"
-    importPaths "."
 
     dependency "readline" version="0.3.0"
 }
@@ -133,8 +132,7 @@ configuration "bench" {
     targetPath "bin"
     lflags "--export-dynamic-symbol=rt_options" "--version-script=$PACKAGE_DIR/build/host-exports.map" platform="linux"
 
-    mainSourceFile "bench/main.d"
-    sourcePaths "bench"
+    mainSourceFile "bench/source/bench/main.d"
+    sourcePaths "bench/source"
     dependency "readline" version="0.3.0"
-    importPaths "."
 }
