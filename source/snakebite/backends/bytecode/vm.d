@@ -503,20 +503,20 @@ version (BytecodeCount) {
 // Operations that cannot throw a D exception or call out. They never need
 // the position of the running instruction, so their handlers do not store it.
 private alias positionFree = AliasSeq!(
-    runAdd, runArrayEqual, runBitAnd, runBitOr, runBitXor,
-    runBranchFalse, runBranchTrue, runCastAs, runCastToBool,
-    runCastWidenSigned, runCastWidenUnsigned, runCompare3, runComplement,
-    runComplexNegate, runConstant, runCopy, runCopyFixed, runEqual, runFloat3,
-    runFloatBinary, runFloatCompare3, runFloatComparison, runFloatToBool,
-    runFloatUnary, runFloatWidthCast, runFrameAddress, runFusedBranch,
-    runGreaterOrEqualSigned, runGreaterOrEqualUnsigned, runGreaterThanSigned,
-    runGreaterThanUnsigned, runIndex, runInt3, runJump, runLessOrEqualSigned,
-    runLessOrEqualUnsigned, runLessThanSigned, runLessThanUnsigned,
-    runLoadBitfield, runLoadIndirect, runLogicalNot, runMultiply, runNegate,
-    runNotEqual, runReturn, runReturnVoid, runShift3, runShiftLeft,
-    runShiftRightArithmetic, runShiftRightLogical, runSliceCopy, runSliceFill,
-    runSlicesConform, runStaticAddress, runStaticArrayEqual, runStaticLoad,
-    runStaticStore, runStoreBitfield, runStoreIndirect, runSubtract, runZero,
+    runAdd, runArrayEqual, runBitAnd, runBitOr, runBitXor, runBranchFalse,
+    runBranchTrue, runCastAs, runCastToBool, runCastWidenSigned,
+    runCastWidenUnsigned, runCompare3, runComplement, runComplexNegate,
+    runConstant, runCopy, runCopyFixed, runEqual, runFloat3, runFloatBinary,
+    runFloatCompare3, runFloatComparison, runFloatToBool, runFloatUnary,
+    runFloatWidthCast, runFrameAddress, runFusedBranch, runGreaterOrEqualSigned,
+    runGreaterOrEqualUnsigned, runGreaterThanSigned, runGreaterThanUnsigned,
+    runIndex, runInt3, runJump, runLessOrEqualSigned, runLessOrEqualUnsigned,
+    runLessThanSigned, runLessThanUnsigned, runLoadBitfield, runLoadIndirect,
+    runLogicalNot, runMultiply, runNegate, runNotEqual, runRangeEndPass,
+    runReturn, runReturnVoid, runShift3, runShiftLeft, runShiftRightArithmetic,
+    runShiftRightLogical, runSliceCopy, runSliceFill, runSlicesConform,
+    runStaticAddress, runStaticArrayEqual, runStaticLoad, runStaticStore,
+    runStoreBitfield, runStoreIndirect, runSubtract, runZero,
 );
 
 private enum storesPosition(alias operation) =
@@ -549,8 +549,8 @@ private const(Instruction)* executeWith(
     );
     const next = operation!Parameters(execution);
     static if (chainedDispatch) {
-        if (next is null || next is activation.end)
-            return next;
+        // Every instruction stream ends in an instruction that ends the
+        // activation, and that one does not use `execute`.
         return next.handler(next, activation, state, frame);
     } else
         return next;
@@ -955,7 +955,7 @@ private void dispatchLoop(
 
     while (true) {
         try {
-            if (pc is null || pc is active.end) {
+            if (pc is null) {
                 active.pc = pc;
                 active.cleanup(frames);
                 if (active.parent is null)
@@ -1711,7 +1711,7 @@ private const(Instruction)* callFunction(bool redirected = false, Decoded)(
 // backend uses for a call whose value nothing reads. `execution.destination` is
 // unused: there is no frame slot on the receiving end, only `returnPlace`.
 public alias opReturn =
-    execute!(runReturn, OperandKind.immediate, OperandKind.storage);
+    executeOnce!(runReturn, OperandKind.immediate, OperandKind.storage);
 
 package const(Instruction)* opThenReturn(alias operation)(
     const(Instruction)* pc,
@@ -1724,10 +1724,7 @@ package const(Instruction)* opThenReturn(alias operation)(
         return operation(pc, activation, state, frame);
     else {
         const next = operation(pc, activation, state, frame);
-        // Cleanup can execute only the producer, with the return outside its
-        // instruction range.
-        return next is activation.end
-            ? next : opReturn(next, activation, state, frame);
+        return opReturn(next, activation, state, frame);
     }
 }
 
@@ -1744,7 +1741,29 @@ private const(Instruction)* runReturn(Decoded)(
 
 
 public alias opReturnVoid =
-    execute!(runReturnVoid, OperandKind.immediate, OperandKind.immediate);
+    executeOnce!(runReturnVoid, OperandKind.immediate, OperandKind.immediate);
+
+// Ends a cleanup range, which `dispatch` runs up to the instruction at
+// `Activation.end`. Anywhere else it does nothing.
+package const(Instruction)* opRangeEnd(
+    const(Instruction)* pc,
+    Activation* activation,
+    DispatchState* state,
+    ubyte* frame,
+) {
+    if (pc is activation.end)
+        return null;
+    return opRangeEndPass(pc, activation, state, frame);
+}
+
+private alias opRangeEndPass =
+    execute!(runRangeEndPass, OperandKind.immediate, OperandKind.immediate);
+
+private const(Instruction)* runRangeEndPass(Decoded)(
+    ref Decoded execution,
+) {
+    return execution.next;
+}
 
 private const(Instruction)* runReturnVoid(Decoded)(
     ref Decoded execution,
@@ -2994,9 +3013,7 @@ package const(Instruction)* opLoadThenCopy(size_t loadWidth, size_t copyWidth,
         return load(pc, activation, state, frame);
     else {
         const next = load(pc, activation, state, frame);
-        // A cleanup range can end between the two instructions.
-        return next is activation.end
-            ? next : copy(next, activation, state, frame);
+        return copy(next, activation, state, frame);
     }
 }
 

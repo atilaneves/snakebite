@@ -759,7 +759,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opLessThanUnsigned, opLoadBitfield, opLoadIndirect, opLogicalNot,
         opModuloSigned, opModuloSigned32,
         opModuloUnsigned, opMultiply, opNegate, opNotEqual,
-        opReturn,
+        opRangeEnd, opReturn,
         opReturnVoid, opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
         opTemporaryArm, opTemporaryArmAddress, opTemporaryBegin,
         opTemporaryEnd,
@@ -1058,6 +1058,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             internalFailure("every `default` a jump targets was compiled");
 
         removeEmptyLifetimes;
+        // Dispatch tests no end of stream: the last instruction ends the
+        // activation.
+        if (_instructions.length == 0
+                || (_instructions[$ - 1].handler !is &opReturn
+                    && _instructions[$ - 1].handler !is &opReturnVoid
+                    && _instructions[$ - 1].handler !is &opJump))
+            emit(&opReturnVoid, 0, 0, 0);
         auto inlineBody = inlineBodyOfBuilt;
         resolveBranches();
 
@@ -1859,6 +1866,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileFinallyBody(statement.finalbody);
         const cleanupFinished = _finished;
         const cleanupEnd = _instructions.length;
+        emit(&opRangeEnd, 0, 0, 0);
         foreach (range; protectedRanges(bodyStart, bodyEnd, finallyDepth))
             _exceptionHandlers ~= PendingExceptionHandler(
                 typeid(Throwable), range.start, range.end, handler,
@@ -2897,6 +2905,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             compileEffect(temporary.destructor);
             _emittingCleanup = false;
             _callSites[temporary.site].cleanupEndIndex = _instructions.length;
+            emit(&opRangeEnd, 0, 0, 0);
         }
         _temporaries.length = firstTemporary;
         _temporaries.assumeSafeAppend;
