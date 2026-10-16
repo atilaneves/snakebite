@@ -678,6 +678,7 @@ private const(Instruction)* executeRegister(
     OperandKind destinationKind,
     OperandKind sourceKind,
     size_t fixedWidth,
+    OperandKind rightKind,
     Parameters...,
 )(
     const(Instruction)* pc,
@@ -690,11 +691,12 @@ private const(Instruction)* executeRegister(
     version (BytecodeCount) {
         static __gshared CountSlot slot;
         countExecution(&slot, countName!(__traits(identifier, operation),
-            destinationKind, sourceKind, fixedWidth, OperandKind.storage, Parameters));
+            destinationKind, sourceKind, fixedWidth, rightKind, Parameters));
     }
     static if (storesPosition!operation)
         activation.pc = pc;
-    auto execution = Execution!(destinationKind, sourceKind, fixedWidth)(
+    auto execution = Execution!(destinationKind, sourceKind, fixedWidth,
+        rightKind)(
         pc, activation, state, frame,
     );
     execution.inR0 = r0;
@@ -2945,10 +2947,15 @@ package enum CheckedAccess {
 // length of a static array. `sourceWidth` is the instruction that runs when
 // the access succeeded. When the index is out of bounds, the next
 // instruction runs: the failure code the compiler emitted after this one.
+// With `constantValue`, a store reads the value from the constant pool: its
+// `destination` is the address of the value.
 private alias opCheckedIndex(CheckedAccess access, bool fixedLength,
-        size_t indexWidth, bool signed, size_t elementSize) =
-    execute!(runCheckedIndex, OperandKind.storage, OperandKind.storage,
-        access, fixedLength, indexWidth, signed, elementSize);
+        size_t indexWidth, bool signed, size_t elementSize,
+        bool constantValue = false) =
+    execute!(runCheckedIndex,
+        constantValue ? OperandKind.immediate : OperandKind.storage,
+        OperandKind.storage, access, fixedLength, indexWidth, signed,
+        elementSize);
 
 private const(Instruction)* runCheckedIndex(CheckedAccess access,
     bool fixedLength, size_t indexWidth, bool signed, size_t elementSize,
@@ -3015,7 +3022,7 @@ private enum checkedIndexElementSizes = [1UL, 2UL, 4UL, 8UL];
 // A `check` does not read an element, so one size stands for all.
 package Instruction.Handler checkedIndexHandler(
     in CheckedAccess access, in bool fixedLength, in size_t indexWidth,
-    in bool signed, in size_t elementSize,
+    in bool signed, in size_t elementSize, in bool constantValue = false,
 ) {
     import std.conv: text;
 
@@ -3028,9 +3035,18 @@ package Instruction.Handler checkedIndexHandler(
                         if (access == kind && fixedLength == fixed
                                 && indexWidth == shape[0]
                                 && signed == (shape[1] == 1)
-                                && handlerSize == size)
-                            return &opCheckedIndex!(kind, fixed, shape[0],
-                                shape[1] == 1, size);
+                                && handlerSize == size) {
+                            if (constantValue) {
+                                static if (kind == CheckedAccess.store)
+                                    return &opCheckedIndex!(kind, fixed,
+                                        shape[0], shape[1] == 1, size, true);
+                                else
+                                    internalFailure("only a checked store "
+                                        ~ "has a constant");
+                            } else
+                                return &opCheckedIndex!(kind, fixed, shape[0],
+                                    shape[1] == 1, size);
+                        }
     internalFailure(text("no checked-index handler for a ", indexWidth,
         "-byte ", signed ? "signed" : "unsigned", " index and ", handlerSize,
         "-byte elements"));
@@ -3435,8 +3451,8 @@ private enum registerKind(bool inRegister) = inRegister
 private alias opInt3R(string operation, bool constant, bool fromRegister,
         bool toRegister) =
     executeRegister!(runInt3R, registerKind!toRegister,
-        registerKind!fromRegister, 0, operation, constant, fromRegister,
-        toRegister);
+        registerKind!fromRegister, 0, OperandKind.storage, operation, constant,
+        fromRegister, toRegister);
 
 private const(Instruction)* runInt3R(string operation, bool constant,
     bool fromRegister, bool toRegister, Decoded)(
@@ -3459,8 +3475,8 @@ private const(Instruction)* runInt3R(string operation, bool constant,
 private alias opFloat3R(string operation, bool constant, bool fromRegister,
         bool toRegister) =
     executeRegister!(runFloat3R, registerKind!toRegister,
-        registerKind!fromRegister, 0, operation, constant, fromRegister,
-        toRegister);
+        registerKind!fromRegister, 0, OperandKind.storage, operation, constant,
+        fromRegister, toRegister);
 
 private const(Instruction)* runFloat3R(string operation, bool constant,
     bool fromRegister, bool toRegister, Decoded)(
@@ -3484,7 +3500,7 @@ private alias opFusedBranchR(Comparison comparison, CompareKind kind,
     bool jumpWhen, bool constant) =
     executeRegister!(runFusedBranchR, OperandKind.unused,
         constant ? OperandKind.immediate : OperandKind.storage, 0,
-        comparisonSymbols[comparison], kind, jumpWhen);
+        OperandKind.storage, comparisonSymbols[comparison], kind, jumpWhen);
 
 private const(Instruction)* runFusedBranchR(string operation, CompareKind kind,
     bool jumpWhen, Decoded)(
@@ -4270,16 +4286,24 @@ public size_t specialisedHandlersWithoutRoles() {
         if (entry.general is null || entry.roles == Roles.init)
             continue;
         foreach (frame; entry.handlers)
-            foreach (handler; frame) {
-                Roles roles;
-                if (handler !is null
-                        && (!rolesOf(handler, roles) || roles != entry.roles))
+            foreach (handler; frame)
+                if (!hasRoles(handler, entry.roles))
                     ++missing;
-            }
+        if (entry.masked !is null)
+            foreach (frame; *entry.masked)
+                foreach (handler; frame)
+                    if (!hasRoles(handler, entry.roles))
+                        ++missing;
     }
     return missing;
 }
 
+version (unittest)
+private bool hasRoles(in Instruction.Handler handler, in Roles expected) {
+    Roles roles;
+    return handler is null
+        || (rolesOf(handler, roles) && roles == expected);
+}
 
 // The register form of a handler is a different handler that replaces the
 // original after the compiler recorded the original's addresses, so it has to
@@ -4335,7 +4359,8 @@ private size_t widthSlot(in size_t width) @safe pure nothrow @nogc {
 // storage operands, so that none of them tests the indirect bit.
 private alias kindOperations = AliasSeq!(
     runCopyFixed, runIndex, runInt3, runFloat3, runFusedBranch,
-    runLoadIndirect, runStoreIndirect,
+    runLoadIndirect, runStoreIndirect, runCompare3, runShift3, runDivide3,
+    runFloatCompare3, runInt3R, runFloat3R, runFusedBranchR,
 );
 
 private alias MaskedHandlers = Instruction.Handler[widthSlots][7];
@@ -4408,17 +4433,14 @@ private template instance(alias executor, alias operation,
     OperandKind destinationKind, OperandKind sourceKind, size_t width,
     OperandKind rightKind, Parameters...)
 {
-    static if (__traits(isSame, executor, executeWith))
-        alias instance = executeWith!(operation, destinationKind, sourceKind,
-            width, rightKind, Parameters);
-    else
-        alias instance = executor!(operation, destinationKind, sourceKind,
-            width, Parameters);
+    alias instance = executor!(operation, destinationKind, sourceKind,
+        width, rightKind, Parameters);
 }
 
 // Fills `entry` with the instances for the operands named by `mask`, if the
 // operation has all of them.
-private void maskedInstances(alias operation, OperandKind destinationKind,
+private void maskedInstances(alias executor, alias operation,
+    OperandKind destinationKind,
     OperandKind sourceKind, immutable(ulong)[] widths, bool right, int mask,
     Parameters...)(ref Specialisation entry)
 {
@@ -4436,10 +4458,10 @@ private void maskedInstances(alias operation, OperandKind destinationKind,
         enum r = rightIndirect ? OperandKind.indirect : OperandKind.frame;
         if (entry.masked is null)
             entry.masked = &(new MaskedHandlers[1])[0];
-        (*entry.masked)[mask - 1][0] = &executeWith!(operation, d, s, 0, r,
-            Parameters);
+        (*entry.masked)[mask - 1][0] = &instance!(executor, operation, d, s, 0,
+            r, Parameters);
         static foreach (width; widths)
-            (*entry.masked)[mask - 1][widthSlot(width)] = &executeWith!(
+            (*entry.masked)[mask - 1][widthSlot(width)] = &instance!(executor,
                 operation, d, s, width, r, Parameters);
     }
 }
@@ -4475,12 +4497,12 @@ private void specialiseWith(alias executor, alias operation,
             frameKind!destinationKind, frameKind!sourceKind, width,
             OperandKind.storage, Parameters);
     }
-    static if (__traits(isSame, executor, executeWith)
-            && staticIndexOf!(operation, kindOperations) >= 0)
+    static if (staticIndexOf!(operation, kindOperations) >= 0)
         static foreach (mask; 1 .. 8)
-            maskedInstances!(operation, destinationKind, sourceKind, widths,
-                right, mask, Parameters)(entry);
-    addSpecialisation(entry, rolesOfOperation!(operation, sourceKind, Parameters));
+            maskedInstances!(executor, operation, destinationKind, sourceKind,
+                widths, right, mask, Parameters)(entry);
+    addSpecialisation(entry,
+        rolesOfOperation!(operation, sourceKind, Parameters));
 }
 
 // `opCopyFixed` takes a `size_t` width, and a handler registered with another
@@ -4489,6 +4511,15 @@ private void specialiseCopyFixed(size_t width, bool staticSource)() {
     specialise!(runCopyFixed, OperandKind.storage,
         staticSource ? OperandKind.immediate : OperandKind.storage, noWidths,
         false, width, staticSource)();
+}
+
+// `opLoadIndirectFixed` and `opStoreIndirectFixed` take a `size_t` width, and
+// a handler registered with another type of width would never be found.
+private void specialiseIndirect(size_t width)() {
+    specialise!(runLoadIndirect, OperandKind.storage, OperandKind.storage,
+        noWidths, false, width)();
+    specialise!(runStoreIndirect, OperandKind.storage, OperandKind.storage,
+        noWidths, false, width)();
 }
 
 shared static this() {
@@ -4505,7 +4536,7 @@ shared static this() {
         static foreach (fixed; [false, true])
             static foreach (shape; checkedIndexShapes)
                 static foreach (size; checkedIndexElementSizes)
-                    static if (kind != CheckedAccess.check || size == 1)
+                    static if (kind != CheckedAccess.check || size == 1) {
                         addRoles(&opCheckedIndex!(kind, fixed, shape[0],
                             shape[1] == 1, size),
                             kind == CheckedAccess.storeUnchecked
@@ -4513,6 +4544,12 @@ shared static this() {
                                     true)
                                 : Roles(Role.other, Role.other,
                                     Role.instruction, true));
+                        static if (kind == CheckedAccess.store)
+                            addRoles(&opCheckedIndex!(kind, fixed, shape[0],
+                                shape[1] == 1, size, true),
+                                Roles(Role.address, Role.other,
+                                    Role.instruction, true));
+                    }
     // The fused return keeps the roles of the producer it replaces.
     static foreach (width; 1 .. 17)
         addRoles(&opThenReturn!(opCopyFixed!(width, true)),
@@ -4578,8 +4615,7 @@ shared static this() {
                             ? noWidths : integralWidths,
                         false, comparisonSymbols[comparison], kind, jumpWhen)();
     static foreach (width; [1, 2, 4, 8, 16, 32]) {
-        specialise!(runLoadIndirect, S, S, noWidths, false, width)();
-        specialise!(runStoreIndirect, S, S, noWidths, false, width)();
+        specialiseIndirect!width;
         static foreach (copyWidth; [1, 2, 4, 8, 16]) {{
             Specialisation entry;
             entry.general = &opLoadThenCopy!(width, copyWidth);
@@ -4612,12 +4648,50 @@ shared static this() {
     foreach (handler; branchHandlers)
         if (!holdsInstruction(handler))
             internalFailure("a branch handler has no instruction role");
-    static foreach (width; [1, 2, 4, 8, 16])
-        if (lookupSpecialisation(&opCopyFixed!width) is null)
-            internalFailure("opCopyFixed has no specialisation");
+    checkSpecialised;
+}
+
+// The table finds a handler by its address, so a specialisation registered
+// under a different template instance than the one the compiler emits (an
+// `int` where `size_t` is declared) would never match. This checks, at start
+// up, the handler families that have value template parameters (widths and
+// flags). It does not check the other families.
+private void checkSpecialised() {
+    void check(in Instruction.Handler handler, in string family) {
+        if (lookupSpecialisation(handler) is null)
+            internalFailure(family ~ " has no specialisation");
+    }
+    static foreach (handler; threeAddressHandlers)
+        check(&handler, "a three-address handler");
+    static foreach (handler; threeAddressConstantHandlers)
+        check(&handler, "a three-address handler with a constant");
+    foreach (handler; fusedHandlers)
+        check(handler, "a fused branch");
+    foreach (base; EnumMembers!IndexBase)
+        check(&opIndex!base, "opIndex");
+    static foreach (width; [1, 2, 4, 8, 16]) {
+        check(&opCopyFixed!width, "opCopyFixed");
+        static foreach (loadWidth; [1, 2, 4, 8, 16, 32])
+            check(&opLoadThenCopy!(loadWidth, width), "opLoadThenCopy");
+    }
     static foreach (width; 1 .. 17)
-        if (lookupSpecialisation(&opCopyFixed!(width, true)) is null)
-            internalFailure("opCopyFixed has no specialisation");
+        check(&opCopyFixed!(width, true), "opCopyFixed");
+    static foreach (width; [1, 2, 4, 8, 16, 32]) {
+        check(&opLoadIndirectFixed!width, "opLoadIndirectFixed");
+        check(&opStoreIndirectFixed!width, "opStoreIndirectFixed");
+    }
+    static foreach (handler; AliasSeq!(opLoadIndirect, opStoreIndirect))
+        check(&handler, "an indirect memory operation");
+    foreach (handler; fusedHandlers)
+        check(fusedRegisterForm(handler), "a fused register branch");
+    static foreach (triple; registerNames)
+        static foreach (constant; [false, true])
+            static foreach (from; [false, true])
+                static foreach (to; [false, true])
+                    static if (from || to)
+                        check(registerForm(mixin("&" ~ triple[0]
+                            ~ (constant ? "K" : "")), from, to),
+                            "a register form");
 }
 
 // The handlers that the compiler emits with a branch target. A target that

@@ -4164,11 +4164,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (byteOffset == 0)
             return result;
 
-        const offset = reserveTemp(pointerFacts);
-        emit(&opConstant, offset, addConstant(cast(long) byteOffset),
-            size_t.sizeof);
-        emit(&opAdd, result, offset, size_t.sizeof);
+        emitAddConstant(result, result, cast(size_t) byteOffset);
         return result;
+    }
+
+    // `destination = left + value`, with `value` read from the constant pool.
+    private void emitAddConstant(
+        in size_t destination, in size_t left, in size_t value,
+    ) {
+        emit(constantForm(&opAdd3), destination, left, size_t.sizeof,
+            constantWord(value));
+    }
+
+    // `destination = left * value`, with `value` read from the constant pool.
+    private void emitMultiplyConstant(
+        in size_t destination, in size_t left, in size_t value,
+    ) {
+        emit(constantForm(&opMultiply3), destination, left, size_t.sizeof,
+            constantWord(value));
     }
 
     // The context of `owner`, as a pointer value in a temporary frame slot.
@@ -4512,9 +4525,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return addressOffset;
 
         const result = reserveTemp(pointerFacts);
-        emit(&opConstant, result,
-            addConstant(cast(long) offset), size_t.sizeof);
-        emit(&opAdd, result, addressOffset, size_t.sizeof);
+        emitAddConstant(result, addressOffset, offset);
         return result;
     }
 
@@ -6160,10 +6171,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const addressOffset = reserveTemp(pointerFacts);
         emit(&opCopy, addressOffset, _destination, size_t.sizeof);
         if (byteOffset != 0) {
-            const offset = reserveTemp(pointerFacts);
-            emit(&opConstant, offset, addConstant(cast(long) byteOffset),
-                size_t.sizeof);
-            emit(&opAdd, addressOffset, offset, size_t.sizeof);
+            emitAddConstant(addressOffset, addressOffset, byteOffset);
         }
         emit(&opStoreIndirect, addressOffset, elementOffset, facts.size);
     }
@@ -7339,6 +7347,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return true;
         }
         if (operand == size_t.max) {
+            const constant = constantOf(value, width, floating);
+            if (!constant.isNull && typeFacts(value.type).size == width) {
+                emitCheckedIndex(expression, shape, CheckedAccess.store, 0,
+                    array, constant);
+                return true;
+            }
             operand = reserveTemp(typeFacts(expression.type));
             evalInto(value, operand, width, expression.type);
         }
@@ -7384,13 +7398,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void emitCheckedIndex(
         IndexExp expression, CheckedIndex shape, in CheckedAccess access,
         in size_t value, in size_t array,
+        in Address constantValue = Address.init,
     ) {
         import snakebite.nativelayout: arrayLengthOffset;
 
         resolveIndexSlot(shape);
         const element = typeFacts(expression.type).size;
         const handler = checkedIndexHandler(access, shape.fixedLength,
-            shape.width, shape.signed, element);
+            shape.width, shape.signed, element, !constantValue.isNull);
         const second = shape.fixedLength
             ? shape.dimension : cast(size_t) cast(uint) cast(int) shape.offset;
         const packed = shape.slot | (second << 32);
@@ -7402,7 +7417,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             : placeAt(array, arrayLengthOffset);
         auto indexType = shape.expression.type;
         compileIndexCheckWith({
-            emit(handler, value, array, packed, 0);
+            if (constantValue.isNull)
+                emit(handler, value, array, packed, 0);
+            else
+                emit(handler, constantValue, array, packed);
         }, () {
             // The index the hook reports: the index plus the offset, in
             // the width of the index, then widened in place.
@@ -9871,9 +9889,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return Arg(offset, 0, value.facts.size);
 
         const addressOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, addressOffset,
-            addConstant(cast(long) value.fieldOffset), size_t.sizeof);
-        emit(&opAdd, addressOffset, offset, size_t.sizeof);
+        emitAddConstant(addressOffset, offset, value.fieldOffset);
         const fieldOffset = reserveTemp(value.fieldFacts);
         emit(&opLoadIndirect, fieldOffset, addressOffset, value.fieldFacts.size);
         return Arg(fieldOffset, 0, value.fieldFacts.size);
@@ -10447,10 +10463,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             const stride =
                 typeFacts(expression.e1.type.toBasetype.nextOf).size;
-            const strideOffset = compiler.reserveTemp(compiler.pointerFacts);
-            compiler.emit(&opConstant, strideOffset,
-                compiler.addConstant(cast(long) stride), size_t.sizeof);
-            compiler.emit(&opMultiply, index, strideOffset, size_t.sizeof);
+            compiler.emitMultiplyConstant(index, index, stride);
 
             const facts = typeFacts(expression.e1.type);
             const array = compiler.reserveTemp(facts);
@@ -10469,10 +10482,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             const stride =
                 typeFacts(expression.e1.type.toBasetype.nextOf).size;
-            const strideOffset = compiler.reserveTemp(compiler.pointerFacts);
-            compiler.emit(&opConstant, strideOffset,
-                compiler.addConstant(cast(long) stride), size_t.sizeof);
-            compiler.emit(&opMultiply, index, strideOffset, size_t.sizeof);
+            compiler.emitMultiplyConstant(index, index, stride);
 
             const address = compiler.reserveTemp(compiler.pointerFacts);
             compiler.emit(&opCopy, address, base, size_t.sizeof);
@@ -10487,10 +10497,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             const stride =
                 typeFacts(expression.e1.type.toBasetype.nextOf).size;
-            const strideOffset = compiler.reserveTemp(compiler.pointerFacts);
-            compiler.emit(&opConstant, strideOffset,
-                compiler.addConstant(cast(long) stride), size_t.sizeof);
-            compiler.emit(&opMultiply, index, strideOffset, size_t.sizeof);
+            compiler.emitMultiplyConstant(index, index, stride);
 
             const address = compiler.reserveTemp(compiler.pointerFacts);
             compiler.emit(&opCopy, address, pointer, size_t.sizeof);
