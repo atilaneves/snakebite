@@ -2768,14 +2768,18 @@ private const(Instruction)* runIndex(IndexBase base, Decoded)(
 // signed 32-bit offset that is added to the index, in the index's own width,
 // in the high 32 bits. `sourceWidth` is the instruction that runs when the
 // access succeeded. When the index is out of bounds, the next instruction
-// runs: the failure code the compiler emitted after this one.
+// runs: the failure code the compiler emitted after this one. With
+// `constantValue`, a store reads the value from the constant pool: its
+// `destination` is the address of the value.
 private alias opCheckedIndex(bool store, size_t indexWidth, bool signed,
-        size_t elementSize) =
-    execute!(runCheckedIndex, OperandKind.storage, OperandKind.storage,
-        store, indexWidth, signed, elementSize);
+        size_t elementSize, bool constantValue = false) =
+    execute!(runCheckedIndex,
+        constantValue ? OperandKind.immediate : OperandKind.storage,
+        OperandKind.storage, store, indexWidth, signed, elementSize,
+        constantValue);
 
 private const(Instruction)* runCheckedIndex(bool store, size_t indexWidth,
-    bool signed, size_t elementSize, Decoded)(
+    bool signed, size_t elementSize, bool constantValue, Decoded)(
     ref Decoded execution,
 ) {
     import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset;
@@ -2817,7 +2821,7 @@ private enum checkedIndexElementSizes = [1UL, 2UL, 4UL, 8UL];
 
 package Instruction.Handler checkedIndexHandler(
     in bool store, in size_t indexWidth, in bool signed,
-    in size_t elementSize,
+    in size_t elementSize, in bool constantValue = false,
 ) {
     import std.conv: text;
 
@@ -2825,9 +2829,17 @@ package Instruction.Handler checkedIndexHandler(
         static foreach (shape; checkedIndexShapes)
             static foreach (size; checkedIndexElementSizes)
                 if (store == isStore && indexWidth == shape[0]
-                        && signed == (shape[1] == 1) && elementSize == size)
-                    return &opCheckedIndex!(isStore, shape[0],
-                        shape[1] == 1, size);
+                        && signed == (shape[1] == 1) && elementSize == size) {
+                    if (constantValue) {
+                        static if (isStore)
+                            return &opCheckedIndex!(true, shape[0],
+                                shape[1] == 1, size, true);
+                        else
+                            internalFailure("a checked load has no constant");
+                    } else
+                        return &opCheckedIndex!(isStore, shape[0],
+                            shape[1] == 1, size);
+                }
     internalFailure(text("no checked-index handler for a ", indexWidth,
         "-byte ", signed ? "signed" : "unsigned", " index and ", elementSize,
         "-byte elements"));
@@ -4312,8 +4324,14 @@ shared static this() {
     static foreach (isStore; [false, true])
         static foreach (shape; checkedIndexShapes)
             static foreach (size; checkedIndexElementSizes)
+{
                 addRoles(&opCheckedIndex!(isStore, shape[0], shape[1] == 1,
                     size), Roles(Role.other, Role.other, Role.instruction));
+                static if (isStore)
+                    addRoles(&opCheckedIndex!(true, shape[0], shape[1] == 1,
+                        size, true),
+                        Roles(Role.address, Role.other, Role.instruction));
+            }
     // The fused return keeps the roles of the producer it replaces.
     static foreach (width; 1 .. 17)
         addRoles(&opThenReturn!(opCopyFixed!(width, true)),

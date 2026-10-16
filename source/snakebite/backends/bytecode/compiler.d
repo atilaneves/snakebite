@@ -6566,6 +6566,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return false;
         size_t operand = operandOf(value, width, floating);
         if (operand == size_t.max) {
+            const constant = constantOf(value, width, floating);
+            if (!constant.isNull && typeFacts(value.type).size == width) {
+                emitCheckedIndex(expression, shape, true, 0, array, constant);
+                return true;
+            }
             // Native order checks the left side first; the instruction checks
             // it after the value, so the value must not be able to fail.
             if (!cannotFail(value))
@@ -6602,6 +6607,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void emitCheckedIndex(
         IndexExp expression, CheckedIndex shape, in bool store,
         in size_t value, in size_t array,
+        in Address constantValue = Address.init,
     ) {
         import snakebite.nativelayout: arrayLengthOffset;
 
@@ -6612,12 +6618,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
         const element = typeFacts(expression.type).size;
         const handler = checkedIndexHandler(store, shape.width, shape.signed,
-            element);
+            element, !constantValue.isNull);
         const packed = shape.slot
             | (cast(size_t) cast(uint) cast(int) shape.offset << 32);
         const length = placeAt(array, arrayLengthOffset);
         compileIndexCheckWith({
-            emit(handler, value, array, packed, 0);
+            if (constantValue.isNull)
+                emit(handler, value, array, packed, 0);
+            else
+                emit(handler, constantValue, array, packed);
         }, () {
             // The index the hook reports: the index plus the offset, in
             // the width of the index, then widened in place.
