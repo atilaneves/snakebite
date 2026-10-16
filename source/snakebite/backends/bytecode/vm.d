@@ -2840,6 +2840,16 @@ private size_t fusedIndex(
         + jumpWhen) * 2 + constant;
 }
 
+// The comparison kind of the fused handler at `index`: `fusedIndex` inverted.
+private CompareKind fusedKindOf(in size_t index) @safe pure nothrow @nogc {
+    return cast(CompareKind) ((index / 4) % EnumMembers!CompareKind.length);
+}
+
+static foreach (comparison; EnumMembers!Comparison)
+    static foreach (kind; EnumMembers!CompareKind)
+        static assert(fusedKindOf(fusedIndex(comparison, kind, true, true))
+            == kind);
+
 // The compiler asks about every instruction it has emitted whether it is a
 // branch, so the handlers are also kept in a hash set.
 private enum fusedSlots = 256;
@@ -2901,7 +2911,7 @@ package bool isFusedBranch(Instruction.Handler handler) {
 // of through its frame slot. The compiler picks these forms; see
 // `registerForm`. An integer travels with its high bits unspecified: the
 // reader applies its own width.
-private ulong registerUnsigned(in ulong value, in size_t width) {
+private ulong registerUnsigned(in ulong value, in size_t width) @safe {
     switch (width) {
         case 1: return cast(ubyte) value;
         case 2: return cast(ushort) value;
@@ -2913,7 +2923,7 @@ private ulong registerUnsigned(in ulong value, in size_t width) {
     return 0;
 }
 
-private long registerSigned(in ulong value, in size_t width) {
+private long registerSigned(in ulong value, in size_t width) @safe {
     switch (width) {
         case 1: return cast(byte) value;
         case 2: return cast(short) value;
@@ -3029,13 +3039,13 @@ package enum RegisterFamily {
 }
 
 private enum registerNames = [
-    ["opAdd3", "opInt3R", `"+"`],
-    ["opSubtract3", "opInt3R", `"-"`],
-    ["opMultiply3", "opInt3R", `"*"`],
-    ["opFloatAdd3", "opFloat3R", `"+"`],
-    ["opFloatSubtract3", "opFloat3R", `"-"`],
-    ["opFloatMultiply3", "opFloat3R", `"*"`],
-    ["opFloatDivide3", "opFloat3R", `"/"`],
+    ["opAdd3", "opInt3R", `"+"`, "integer"],
+    ["opSubtract3", "opInt3R", `"-"`, "integer"],
+    ["opMultiply3", "opInt3R", `"*"`, "integer"],
+    ["opFloatAdd3", "opFloat3R", `"+"`, "floating"],
+    ["opFloatSubtract3", "opFloat3R", `"-"`, "floating"],
+    ["opFloatMultiply3", "opFloat3R", `"*"`, "floating"],
+    ["opFloatDivide3", "opFloat3R", `"/"`, "floating"],
 ];
 
 // The register family a three-address handler produces and consumes.
@@ -3045,7 +3055,8 @@ package RegisterFamily registerFamily(
     static foreach (triple; registerNames)
         static foreach (suffix; ["", "K"])
             if (handler is mixin("&" ~ triple[0] ~ suffix))
-                return triple[1] == "opInt3R" ? RegisterFamily.integer
+                return mixin("RegisterFamily." ~ triple[3])
+                        == RegisterFamily.integer ? RegisterFamily.integer
                     : width == double.sizeof ? RegisterFamily.floating
                     : RegisterFamily.none;
     return RegisterFamily.none;
@@ -3057,8 +3068,7 @@ package RegisterFamily fusedRegisterFamily(
 ) {
     foreach (index, candidate; fusedHandlers)
         if (candidate is handler) {
-            const kind = (index / 4) % EnumMembers!CompareKind.length;
-            if (kind == CompareKind.floating)
+            if (fusedKindOf(index) == CompareKind.floating)
                 return width == double.sizeof
                     ? RegisterFamily.floating : RegisterFamily.none;
             return width == 1 || width == 2 || width == 4 || width == 8

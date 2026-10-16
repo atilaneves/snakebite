@@ -1439,23 +1439,34 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         size_t[size_t] mentions;
         auto isTarget = new bool[count + 1];
-        foreach (index, ref instruction; _instructions) {
+        foreach (ref instruction; _instructions) {
             mentions[instruction.destination]++;
             if (instruction.source != instruction.destination)
                 mentions[instruction.source]++;
             if (instruction.sourceWidth != instruction.source
                     && instruction.sourceWidth != instruction.destination)
                 mentions[instruction.sourceWidth]++;
+            // A temp that holds an address is mentioned by every indirect
+            // operand that reads through it. A field that is not an operand
+            // can only add mentions, which only stops a pairing.
+            static foreach (field; ["destination", "source", "sourceWidth"])
+                if (mixin("instruction." ~ field) & (1UL << 63))
+                    mentions[(mixin("instruction." ~ field) >> 32)
+                        & 0x7fff_ffffUL]++;
             if (auto field = branchTargetField(instruction)) {
                 const target = cast(const(Instruction)*) *field;
                 isTarget[target - _instructions.ptr] = true;
             }
         }
+        void markTarget(in size_t index) {
+            if (index <= count)
+                isTarget[index] = true;
+        }
         foreach (handler; _exceptionHandlers) {
-            foreach (index; [handler._bodyStart, handler._bodyEnd,
-                    handler._handler, handler._cleanupEnd])
-                if (index <= count)
-                    isTarget[index] = true;
+            markTarget(handler._bodyStart);
+            markTarget(handler._bodyEnd);
+            markTarget(handler._handler);
+            markTarget(handler._cleanupEnd);
         }
         foreach (ref site; _callSites)
             if (site.cleanupStartIndex != size_t.max) {
@@ -9262,4 +9273,3 @@ private void assertEveryNodeHandled() {
     static assert(
         imported!"snakebite.backends.nodecoverage".AssertEveryNodeHandled!FunctionCompiler);
 }
-
