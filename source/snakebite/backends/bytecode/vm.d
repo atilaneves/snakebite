@@ -1142,14 +1142,23 @@ private void dispatchLoop(
     // Cleanup writes the frame stack.
     auto frames = state.frames;
 
+    // A chain of handlers calls and returns by itself, so the activation
+    // that runs when the chain ends or throws is `state.current`.
+    static if (chainedDispatch)
+        state.current = active;
+
     while (true) {
         try {
+            static if (chainedDispatch)
+                active = state.current;
             if (pc is null) {
                 active.pc = pc;
                 active.cleanup(frames);
                 if (active.parent is null)
                     return;
                 active = popActivation(active, frames);
+                static if (chainedDispatch)
+                    state.current = active;
                 pc = active.resume;
                 continue;
             }
@@ -1158,10 +1167,16 @@ private void dispatchLoop(
             if (state.pending !is null) {
                 active = state.pending;
                 state.pending = null;
+                static if (chainedDispatch)
+                    state.current = active;
                 pc = active.pc;
             }
         } catch (Throwable throwable) {
+            static if (chainedDispatch)
+                active = state.current;
             active = handleException(active, frames, throwable, state.vm);
+            static if (chainedDispatch)
+                state.current = active;
             pc = active.pc;
         }
     }
@@ -1646,7 +1661,8 @@ public const(Instruction)* opCall(
     // The position of a throw selects its handler, and the new activation
     // resumes this one.
     active.pc = pc;
-    state.current = active;
+    static if (!chainedDispatch)
+        state.current = active;
     activation.frameMark = mark;
     ubyte* calleeFrame = cast(ubyte*) activation + fast.frameOffset;
     activation.frame = calleeFrame;
@@ -1668,7 +1684,8 @@ public const(Instruction)* opCall(
     activation.cleanupMark = frames.cleanupMark;
     activation.parent = active;
     active.resume = pc + 1;
-    state.pending = activation;
+    static if (!chainedDispatch)
+        state.pending = activation;
 
     // Last, so that few values stay live through the loop.
     foreach (arg; fast.args[0 .. fast.argCount]) {
@@ -1684,7 +1701,16 @@ public const(Instruction)* opCall(
         else
             *cast(ushort*) destination = *cast(const(ushort)*) source;
     }
-    return pc + 1;
+    static if (chainedDispatch) {
+        // The callee's first handler runs from here, so the native stack
+        // stays flat however deep the guest calls go.
+        state.current = activation;
+        const first = activation.pc;
+        ulong none0 = void;
+        double none1 = void;
+        return first.handler(first, activation, state, calleeFrame, none0, none1);
+    } else
+        return pc + 1;
 }
 
 
@@ -2007,6 +2033,20 @@ package const(Instruction)* returnHandler(size_t width, bool frameOnly)(
             memcpy(place, source, pc.width);
         else
             memcpy(place, source, width);
+    }
+    static if (chainedDispatch) {
+        // An activation with no temporary to destroy resumes its caller
+        // from here. `dispatchLoop` ends the others.
+        auto parent = activation.parent;
+        auto frames = state.frames;
+        if (parent !is null && frames.cleanupMark == activation.cleanupMark) {
+            frames.release(activation.frameMark);
+            state.current = parent;
+            const resume = parent.resume;
+            ulong none0 = void;
+            double none1 = void;
+            return resume.handler(resume, parent, state, parent.frame, none0, none1);
+        }
     }
     return null;
 }

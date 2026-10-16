@@ -1567,6 +1567,40 @@ def test_long_guest_loops_run_in_a_small_native_stack(
     assert guest_lines(result) == ["11997994"]
 
 
+# Guest recursion that is not a tail call finishes within a small native
+# stack: the depth of the guest calls does not set the native stack use.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_deep_guest_recursion_runs_in_a_small_native_stack(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        """
+        module main;
+        import std.stdio: writeln;
+
+        long depth(long n) {
+            if (n == 0)
+                return 0;
+            return 1 + depth(n - 1);
+        }
+
+        void main() {
+            writeln(depth(100_000));
+        }
+        """,
+    )
+
+    one_mebibyte = 1 << 20
+    result = run_sb(
+        f"--backend={backend}", "--no-optimise-image", str(tmp_path / "app"),
+        cwd=tmp_path, stack_bytes=one_mebibyte,
+    )
+
+    assert result.returncode == 0, output(result)
+    assert guest_lines(result) == ["100000"]
+
+
 # A `pragma(crt_constructor)` function runs before every module constructor,
 # and a `pragma(crt_destructor)` function runs after every module destructor.
 @pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
