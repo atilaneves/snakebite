@@ -1340,3 +1340,112 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// An element of a slice read or written with a 32-bit or 64-bit index and a
+// constant offset, for each element size.
+static foreach (backend; Matrix!()) {
+    @("checkedIndex.offsetReadsAndWrites." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                auto flags = new bool[5];
+                auto shorts = new short[5];
+                auto ints = new int[5];
+                auto longs = new long[5];
+                int k = 3;
+                uint u = 4;
+                long l = 5;
+                flags[k - 1] = true;
+                shorts[k + 1] = 7;
+                ints[u - 1] = 11;
+                longs[l - 1] = 13;
+                assert(!flags[0] && flags[2] && !flags[3]);
+                assert(flags[k - 1] && !flags[k]);
+                assert(shorts[k + 1] == 7 && shorts[3] == 0);
+                assert(ints[u - 1] == 11 && ints[3] == 11 && ints[2] == 0);
+                assert(longs[l - 1] == 13 && longs[4] == 13);
+                assert(ints[k] == 11);
+            }
+        });
+    }
+}
+
+// An index below zero or past the end, after the offset, is a `RangeError`
+// that names the line of the access, and a read leaves its destination alone.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "an out-of-bounds index is a compile-time error in CTFE"),
+)) {
+    @("checkedIndex.outOfBoundsRead." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+            void main() {
+                auto a = new int[3];
+                a[] = 5;
+                int k = 0;
+                int low = 1;
+                int high = 3;
+                size_t expected;
+                size_t line;
+                int seen = 42;
+                try {
+                    expected = __LINE__ + 1;
+                    seen = a[k - 1];
+                } catch (RangeError error) {
+                    line = error.line;
+                }
+                assert(line == expected);
+                assert(seen == 42);
+                line = 0;
+                try {
+                    seen = a[high + 1];
+                } catch (RangeError error) {
+                    line = error.line;
+                }
+                assert(line != 0);
+                assert(seen == 42);
+                seen = a[low + 1];
+                assert(seen == 5);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "an out-of-bounds index is a compile-time error in CTFE"),
+)) {
+    @("checkedIndex.outOfBoundsWrite." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+            void main() {
+                auto a = new int[3];
+                int k = 0;
+                int high = 3;
+                bool caught;
+                try {
+                    a[k - 1] = 9;
+                } catch (RangeError) {
+                    caught = true;
+                }
+                assert(caught);
+                caught = false;
+                try {
+                    a[high] = 9;
+                } catch (RangeError) {
+                    caught = true;
+                }
+                assert(caught);
+                assert(a[0] == 0 && a[1] == 0 && a[2] == 0);
+                a[high - 1] = 9;
+                assert(a[2] == 9);
+            }
+        });
+    }
+}
