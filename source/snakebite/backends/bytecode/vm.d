@@ -3224,30 +3224,42 @@ private const(Instruction)* runNegate(Decoded)(
     return execution.next;
 }
 
-private T applyFloatUnary(string operation, T)(T value) @nogc nothrow pure {
-    return mixin(operation ~ "value");
+private T negateOf(T)(T value) @nogc nothrow pure {
+    return -value;
 }
 
-private alias opFloatUnary(string operation) =
-    execute!(runFloatUnary, OperandKind.storage, OperandKind.immediate, operation);
+private T sqrtOf(T)(T value) @nogc nothrow pure {
+    import core.math: sqrt;
+    return sqrt(value);
+}
 
-private const(Instruction)* runFloatUnary(string operation, Decoded)(
+private T absOf(T)(T value) @nogc nothrow pure {
+    import core.math: fabs;
+    return fabs(value);
+}
+
+// `core.math.sqrt` and `core.math.fabs` run in place, like `opFloatNegate`.
+package alias opFloatNegate = opFloatUnary!negateOf;
+package alias opFloatSqrt = opFloatUnary!sqrtOf;
+package alias opFloatAbs = opFloatUnary!absOf;
+
+private alias opFloatUnary(alias function_) =
+    execute!(runFloatUnary, OperandKind.storage, OperandKind.immediate, function_);
+
+private const(Instruction)* runFloatUnary(alias function_, Decoded)(
     ref Decoded execution,
 ) {
     auto place = execution.destination;
     if (execution.width == float.sizeof)
-        *cast(float*) place = applyFloatUnary!operation(*cast(float*) place);
+        *cast(float*) place = function_(*cast(float*) place);
     else if (execution.width == double.sizeof)
-        *cast(double*) place =
-            applyFloatUnary!operation(*cast(double*) place);
+        *cast(double*) place = function_(*cast(double*) place);
     else {
         assert(execution.width == real.sizeof);
-        *cast(real*) place = applyFloatUnary!operation(*cast(real*) place);
+        *cast(real*) place = function_(*cast(real*) place);
     }
     return execution.next;
 }
-
-package alias opFloatNegate = opFloatUnary!"-";
 
 package alias opComplement =
     execute!(runComplement, OperandKind.storage, OperandKind.immediate);

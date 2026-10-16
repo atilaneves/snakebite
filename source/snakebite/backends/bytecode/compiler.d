@@ -778,10 +778,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opCopyFixed, opLoadThenCopy, opThenReturn, opLoadIndirectFixed, opStoreIndirectFixed,
         opDivideSigned, opDivideSigned32, opDivideUnsigned,
         opEqual,
-        opFloatAdd, opFloatDivide, opFloatEqual, opFloatGreaterOrEqual,
+        opFloatAbs, opFloatAdd, opFloatDivide, opFloatEqual, opFloatGreaterOrEqual,
         opFloatGreaterThan, opFloatLessOrEqual, opFloatLessThan,
         opFloatModulo, opFloatMultiply, opFloatNegate, opFloatNotEqual,
-        opFloatSubtract, opFloatToBool,
+        opFloatSqrt, opFloatSubtract, opFloatToBool,
         opFloatWidthCast, opFrameAddress, opGreaterOrEqualSigned,
         opGreaterOrEqualUnsigned, opGreaterThanSigned, opGreaterThanUnsigned,
         opJump, opLessOrEqualSigned, opLessOrEqualUnsigned, opLessThanSigned,
@@ -8091,6 +8091,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return compileIndirectCall(expression, destOffset);
 
         callee = _bytecode.definitionOf(callee);
+        if (compileFloatIntrinsic(expression, callee, destOffset))
+            return;
         if (expression.readsVtable(callee))
             return compileVirtualCall(expression, callee, destOffset);
 
@@ -8104,6 +8106,35 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             hasThis,
             () => receiverOffsetOf(expression, callee),
             destOffset, expression);
+    }
+
+    // `core.math.sqrt` and `core.math.fabs` on a float type: the operand is
+    // evaluated into the destination and a handler applies the operation in
+    // place. Returns false when `expression` is not such a call.
+    private bool compileFloatIntrinsic(
+        CallExp expression, FuncDeclaration callee, in size_t destOffset,
+    ) {
+        import dmd.astenums: Tfloat32, Tfloat64, Tfloat80;
+
+        if (destOffset == discardResult)
+            return false;
+        Instruction.Handler handler;
+        final switch (_bytecode._callSelection.floatIntrinsicOf(expression, callee))
+            with (CallSelection.FloatIntrinsic) {
+            case none: return false;
+            case sqrt: handler = &opFloatSqrt; break;
+            case fabs: handler = &opFloatAbs; break;
+        }
+        const ty = expression.type.ty;
+        // A declaration whose operand differs from its result (`double
+        // fabs(real)`) is not the host's operation: it stays a call.
+        if (ty != Tfloat32 && ty != Tfloat64 && ty != Tfloat80
+                || (*expression.arguments)[0].type.ty != ty)
+            return false;
+        const width = typeFacts(expression.type).size;
+        evalInto((*expression.arguments)[0], destOffset, width);
+        emit(handler, destOffset, 0, width);
+        return true;
     }
 
     // The address of `callee`'s own hidden `this` argument for `expression`
