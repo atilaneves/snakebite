@@ -5800,6 +5800,54 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileCast(expression, _destination, _width);
     }
 
+    // `cast(Derived) base` for D classes: dmd lowers it to `_d_cast`, whose
+    // guest code walks the class chain. druntime's compiled `_d_isbaseof`
+    // answers the same question for a class, so a null reference stays
+    // null and any other reference stays itself or becomes null.
+    protected override bool visitLoweredClassCast(CastExp expression) {
+        import dmd.typesem: toBasetype;
+
+        auto from = expression.e1.type.toBasetype.isTypeClass;
+        auto to = expression.to.toBasetype.isTypeClass;
+        if (from is null || to is null
+                || from.sym.isInterfaceDeclaration !is null
+                || to.sym.isInterfaceDeclaration !is null
+                || !from.sym.isBaseOf(to.sym, null))
+            return false;
+
+        requireDestination(expression);
+        const object = _destination;
+        evalInto(expression.e1, object, size_t.sizeof);
+
+        const nullIndex = _instructions.length;
+        emit(&opBranchFalse, object, 0, size_t.sizeof);
+
+        const objectInfo = reserveTemp(pointerFacts);
+        emit(&opLoadIndirect, objectInfo, object, size_t.sizeof);
+        emit(&opLoadIndirect, objectInfo, objectInfo, size_t.sizeof);
+        const targetInfo = reserveTemp(pointerFacts);
+        emitTypeInfoConstant(
+            _bytecode._runtimeTypes.unqualifiedClassInfo(expression.to),
+            targetInfo, size_t.sizeof);
+
+        enum resultWidth = int.sizeof;
+        const result = reserveTemp(pointerFacts);
+        auto plan = planOf(_bytecode._plans, DruntimeHook.isBaseOf);
+        _callSites ~= CallSite.native(plan, [
+            Arg(objectInfo, 0, size_t.sizeof),
+            Arg(targetInfo, 0, size_t.sizeof),
+        ], resultWidth);
+        emit(&opCall, result, _callSites.length - 1, 0);
+
+        const successIndex = _instructions.length;
+        emit(&opBranchTrue, result, 0, resultWidth);
+        emit(&opZero, object, 0, size_t.sizeof);
+        _instructions[nullIndex].source = _instructions.length;
+        _instructions[successIndex].source = _instructions.length;
+        _finished = false;
+        return true;
+    }
+
     override void visit(NotExp expression) {
         requireDestination(expression);
         compileNot(expression, _destination);
