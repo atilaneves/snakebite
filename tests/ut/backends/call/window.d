@@ -197,14 +197,30 @@ static foreach (backend; Matrix!()) {
                 return w;
             }
 
+            // Called by pointer, so its frame is reserved the generic way,
+            // above whatever the throw gave back.
+            long spread(long a, long b, long c) {
+                long[8] cells;
+                foreach (i, ref cell; cells)
+                    cell = a * i + b - c;
+                long sum;
+                foreach (cell; cells)
+                    sum += cell;
+                return sum;
+            }
+
             void main() {
                 long kept = 41;
+                long local = 7;
                 long caught;
                 try
                     kept += outer(kept, 2) + after(1, 2, 3);
                 catch (Exception thrown)
                     caught = thrown.msg.length;
+                auto indirect = &spread;
+                assert(indirect(1, 2, 3) == 28 + 8 * (2 - 3));
                 assert(kept == 41);
+                assert(local == 7);
                 assert(caught == 5);
                 assert(after(1, 2, 3) == 26);
             }
