@@ -3298,8 +3298,8 @@ private enum registerKind(bool inRegister) = inRegister
 private alias opInt3R(string operation, bool constant, bool fromRegister,
         bool toRegister) =
     executeRegister!(runInt3R, registerKind!toRegister,
-        registerKind!fromRegister, 0, OperandKind.storage, operation, constant, fromRegister,
-        toRegister);
+        registerKind!fromRegister, 0, OperandKind.storage, operation, constant,
+        fromRegister, toRegister);
 
 private const(Instruction)* runInt3R(string operation, bool constant,
     bool fromRegister, bool toRegister, Decoded)(
@@ -3322,8 +3322,8 @@ private const(Instruction)* runInt3R(string operation, bool constant,
 private alias opFloat3R(string operation, bool constant, bool fromRegister,
         bool toRegister) =
     executeRegister!(runFloat3R, registerKind!toRegister,
-        registerKind!fromRegister, 0, OperandKind.storage, operation, constant, fromRegister,
-        toRegister);
+        registerKind!fromRegister, 0, OperandKind.storage, operation, constant,
+        fromRegister, toRegister);
 
 private const(Instruction)* runFloat3R(string operation, bool constant,
     bool fromRegister, bool toRegister, Decoded)(
@@ -4131,16 +4131,24 @@ public size_t specialisedHandlersWithoutRoles() {
         if (entry.general is null || entry.roles == Roles.init)
             continue;
         foreach (frame; entry.handlers)
-            foreach (handler; frame) {
-                Roles roles;
-                if (handler !is null
-                        && (!rolesOf(handler, roles) || roles != entry.roles))
+            foreach (handler; frame)
+                if (!hasRoles(handler, entry.roles))
                     ++missing;
-            }
+        if (entry.masked !is null)
+            foreach (frame; *entry.masked)
+                foreach (handler; frame)
+                    if (!hasRoles(handler, entry.roles))
+                        ++missing;
     }
     return missing;
 }
 
+version (unittest)
+private bool hasRoles(in Instruction.Handler handler, in Roles expected) {
+    Roles roles;
+    return handler is null
+        || (rolesOf(handler, roles) && roles == expected);
+}
 
 // The register form of a handler is a different handler that replaces the
 // original after the compiler recorded the original's addresses, so it has to
@@ -4273,12 +4281,8 @@ private template instance(alias executor, alias operation,
     OperandKind destinationKind, OperandKind sourceKind, size_t width,
     OperandKind rightKind, Parameters...)
 {
-    static if (__traits(isSame, executor, executeWith))
-        alias instance = executeWith!(operation, destinationKind, sourceKind,
-            width, rightKind, Parameters);
-    else
-        alias instance = executor!(operation, destinationKind, sourceKind,
-            width, rightKind, Parameters);
+    alias instance = executor!(operation, destinationKind, sourceKind,
+        width, rightKind, Parameters);
 }
 
 // Fills `entry` with the instances for the operands named by `mask`, if the
@@ -4343,9 +4347,10 @@ private void specialiseWith(alias executor, alias operation,
     }
     static if (staticIndexOf!(operation, kindOperations) >= 0)
         static foreach (mask; 1 .. 8)
-            maskedInstances!(executor, operation, destinationKind, sourceKind, widths,
-                right, mask, Parameters)(entry);
-    addSpecialisation(entry, rolesOfOperation!(operation, sourceKind, Parameters));
+            maskedInstances!(executor, operation, destinationKind, sourceKind,
+                widths, right, mask, Parameters)(entry);
+    addSpecialisation(entry,
+        rolesOfOperation!(operation, sourceKind, Parameters));
 }
 
 // `opCopyFixed` takes a `size_t` width, and a handler registered with another
@@ -4496,7 +4501,8 @@ shared static this() {
 // The table finds a handler by its address, so a specialisation registered
 // under a different template instance than the one the compiler emits (an
 // `int` where `size_t` is declared) would never match. This checks, at start
-// up, every handler family that the compiler emits.
+// up, the handler families that have value template parameters (widths and
+// flags). It does not check the other families.
 private void checkSpecialised() {
     void check(in Instruction.Handler handler, in string family) {
         if (lookupSpecialisation(handler) is null)
