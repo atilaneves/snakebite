@@ -1463,12 +1463,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             auto previous = &_instructions[index - 1];
             if (instruction.handler !is &opReturn || targets[index]
                     || instruction.source != previous.destination
-                    || (instruction.source & (1UL << 63)) != 0
-                    || !writesWholeWord(*previous, instruction.width))
+                    || (instruction.source & (1UL << 63)) != 0)
+                continue;
+            // A call that hands its own place on writes the result of this
+            // function when it returns.
+            const forwardsCall = (previous.handler is &opCallWindowFrame
+                    || previous.handler is &opCall)
+                && _callSites[previous.source].returnWidth == instruction.width;
+            if (!forwardsCall && !writesWholeWord(*previous, instruction.width))
                 continue;
             if (slot == size_t.max)
                 slot = reserveTemp(pointerFacts);
             previous.destination = indirectStorage(slot);
+            if (previous.handler is &opCallWindowFrame)
+                previous.handler = &opCallWindowIndirect;
             instruction.handler = &opReturnVoid;
         }
         if (slot == size_t.max)
