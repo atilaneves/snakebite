@@ -7,6 +7,10 @@ private:
 import snakebite.internalfailure: internalFailure;
 
 
+extern(C) const(void)* directWordCallTarget(
+    const(void)* opaquePlan, out bool swapped, out size_t resultWidth,
+);
+
 extern(C) void executeCallPlan(
     const(void)* opaquePlan,
     void* returnPlace,
@@ -288,6 +292,14 @@ public struct CallSite {
 
     package const(void)* nativePlan;
     package const(void)* delegate() prepareNativePlan;
+
+    // A `native` site whose plan is one or two word arguments and one
+    // integer result called directly. `directState` is 0 when not yet
+    // decided, 1 for a direct call and 2 for the general path. Filled only
+    // at run time.
+    package uint directState;
+    package const(void)* directTarget;
+    package bool directSwapped;
     package BuiltinCall builtinEntry;
     package size_t calleeSlotOffset;
     package bool hasContext;
@@ -856,6 +868,7 @@ package void recordCallSiteRelocs(
         "kind", "value", "args", "nativeArgs", "returnWidth", "fast",
         "calleeSlotOffset", "hasContext", "cleanupStartIndex",
         "cleanupEndIndex", "cleanupStart", "cleanupEnd",
+        "directState", "directTarget", "directSwapped",
     );
     enum addressFields = AliasSeq!(
         "callee", "prepareGuest", "nativePlan", "prepareNativePlan",
@@ -1719,6 +1732,59 @@ public const(Instruction)* opCall(
 }
 
 
+// A `native` site: decided once whether the plan is a direct word call.
+pragma(inline, false)
+private const(Instruction)* opCallNative(
+    CallSite* site,
+    const(Instruction)* pc,
+    Activation* active,
+    DispatchState* state,
+    ubyte* frame,
+    ulong r0,
+    double fp0,
+) {
+    if (site.directState == 0) {
+        const plan = site.nativePlan !is null
+            ? site.nativePlan : site.prepareNativePlan();
+        bool swapped;
+        size_t resultWidth;
+        const target = directWordCallTarget(plan, swapped, resultWidth);
+        const eligible = target !is null && site.args.length >= 1
+            && site.args.length <= 2 && site.args[0].width == 8
+            && (site.args.length == 1 || site.args[1].width == 8)
+            && site.returnWidth == resultWidth;
+        site.directTarget = target;
+        site.directSwapped = swapped;
+        site.directState = eligible ? 1 : 2;
+    }
+    if (site.directState != 1)
+        return opCallSlow(pc, active, state, frame, r0, fp0);
+
+    alias Word2 = extern(C) ulong function(ulong, ulong);
+    // The position of a throw selects its handler.
+    active.pc = pc;
+    state.current = active;
+    ulong first = *cast(ulong*) operandStorage(frame, site.args[0].callerOffset);
+    ulong second = site.args.length == 2
+        ? *cast(ulong*) operandStorage(frame, site.args[1].callerOffset) : 0;
+    if (site.directSwapped) {
+        const swap = first;
+        first = second;
+        second = swap;
+    }
+    const result = (cast(Word2) site.directTarget)(first, second);
+    if (pc.destination != discardResult) {
+        auto place = operandStorage(frame, pc.destination);
+        switch (site.returnWidth) {
+        case 1: *place = cast(ubyte) result; break;
+        case 2: *cast(ushort*) place = cast(ushort) result; break;
+        case 4: *cast(uint*) place = cast(uint) result; break;
+        default: *cast(ulong*) place = result; break;
+        }
+    }
+    return pc + 1;
+}
+
 // Every call `opCall` does not take, and the same call with a general
 // frame reserve and argument copy.
 pragma(inline, false)
@@ -1733,6 +1799,14 @@ private const(Instruction)* opCallSlow(
     import core.stdc.string: memcpy;
 
     import core.atomic: atomicLoad, MemoryOrder;
+
+    {
+        auto nativeSite = cast(CallSite*) &active.callSites[pc.source];
+        if (nativeSite.kind == CallSite.Kind.native
+                && nativeSite.directState != 2)
+            return opCallNative(
+                nativeSite, pc, active, state, frame, r0, fp0);
+    }
 
     // The position of a throw selects its handler, and the new activation
     // resumes this one.

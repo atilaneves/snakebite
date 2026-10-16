@@ -1181,6 +1181,50 @@ public extern(C) void executeCallPlan(
     plan.call(returnPlace, arguments[0 .. argumentCount]);
 }
 
+// The address to call as `ulong function(ulong, ulong)` when this plan is
+// one or two word arguments in the first two integer registers and one
+// integer result of 1, 2, 4 or 8 bytes (`resultWidth`), with nothing else
+// for `callAt` to do. `swapped` says the second parameter goes in the
+// first register. Null otherwise.
+public extern(C) const(void)* directWordCallTarget(
+    const(void)* opaquePlan, out bool swapped, out size_t resultWidth,
+) {
+    import snakebite.ffi.sysv: CallFrame;
+
+    const plan = cast(const(CallPlan)*) opaquePlan;
+    if (!plan._integerOnly || plan._hiddenReturnPointer || plan._hiddenContext
+            || plan._callbackArguments.length != 0
+            || plan._parameterCount < 1 || plan._parameterCount > 2
+            || plan._moveCount != plan._parameterCount
+            || plan._realResultCount != 0 || plan._resultCount != 1
+            || plan._resultMoves[0].sourceOffset
+                != CallFrame.integerResult.offsetof)
+        return null;
+    size_t[2] seen = [0, 1];
+    foreach (move; plan._moves[0 .. plan._moveCount]) {
+        if (move.load != CallPlan.Load.word64 || move.byteOffset != 0
+                || move.destinationOffset >= 2 * size_t.sizeof
+                || move.parameterIndex > 1)
+            return null;
+        seen[move.parameterIndex] = move.destinationOffset / size_t.sizeof;
+    }
+    if (plan._moveCount == 2 && seen[0] == seen[1])
+        return null;
+    if (plan._moveCount == 1 && seen[0] != 0)
+        return null;
+    swapped = plan._moveCount == 2 && seen[0] == 1;
+    final switch (plan._resultMoves[0].store) with (CallPlan.Store) {
+        case byte1: resultWidth = 1; break;
+        case byte2: resultWidth = 2; break;
+        case byte4: resultWidth = 4; break;
+        case byte8: resultWidth = 8; break;
+        case copy16:
+        case partial:
+            return null;
+    }
+    return plan._address;
+}
+
 public extern(C) bool executeIndirectCallPlan(
     const(void)* opaquePlan, ref const(void)* address, void* returnPlace,
     scope const(void*)* arguments, size_t argumentCount,
