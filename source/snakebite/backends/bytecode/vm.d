@@ -7,6 +7,11 @@ private:
 import snakebite.internalfailure: internalFailure;
 
 
+extern(C) const(void)* directWordCallTarget(
+    const(void)* opaquePlan, out bool swapped, out size_t resultWidth,
+    out size_t parameterCount,
+);
+
 extern(C) void executeCallPlan(
     const(void)* opaquePlan,
     void* returnPlace,
@@ -288,6 +293,22 @@ public struct CallSite {
 
     package const(void)* nativePlan;
     package const(void)* delegate() prepareNativePlan;
+
+    // A `native` site whose plan is one or two word arguments and one
+    // integer result called directly. Filled only at run time, with the
+    // protocol of `fast`: the thread that wins the `preparing` state writes
+    // `directTarget` and `directSwapped`, then publishes `directState`
+    // last. The two fields are valid once `directState` is `direct`.
+    package enum DirectState : uint {
+        unprepared,
+        preparing,
+        direct,
+        general,
+    }
+
+    package uint directState;
+    package const(void)* directTarget;
+    package bool directSwapped;
     package BuiltinCall builtinEntry;
     package size_t calleeSlotOffset;
     package bool hasContext;
@@ -877,13 +898,14 @@ package void recordCallSiteRelocs(
     // `prepareNativePlan`, `builtinEntry` and `value.signature`. A
     // delegate is kept by its function; its context is state of the
     // compiler. The instruction addresses `cleanupStart` and `cleanupEnd`
-    // follow from the two indexes. `fast` is not listed as an address field:
-    // it is filled only at run time, when a call first runs, so a compiled
-    // function never holds an address in it.
+    // follow from the two indexes. `fast` and `directTarget` are not listed
+    // as address fields: they are filled only at run time, when a call first
+    // runs, so a compiled function never holds an address in them.
     enum plainFields = AliasSeq!(
         "kind", "value", "args", "nativeArgs", "returnWidth", "fast",
         "calleeSlotOffset", "hasContext", "cleanupStartIndex",
         "cleanupEndIndex", "cleanupStart", "cleanupEnd",
+        "directState", "directTarget", "directSwapped",
     );
     enum addressFields = AliasSeq!(
         "callee", "prepareGuest", "nativePlan", "prepareNativePlan",
@@ -1770,10 +1792,118 @@ public const(Instruction)* opCall(
 }
 
 
+// A `native` site: decided once whether the plan is a direct word call.
+// Only the thread that wins the `preparing` state decides and writes the
+// fields; it publishes `directState` last. A thread that loses takes the
+// general path for that call.
+pragma(inline, false)
+private const(Instruction)* opCallNative(
+    CallSite* site,
+    const(Instruction)* pc,
+    Activation* active,
+    DispatchState* state,
+    ubyte* frame,
+    ulong r0,
+    double fp0,
+) {
+    import core.atomic: atomicLoad, atomicStore, cas, MemoryOrder;
+
+    alias State = CallSite.DirectState;
+    auto stateSlot = cast(shared(uint)*) &site.directState;
+    auto current = atomicLoad!(MemoryOrder.acq)(*stateSlot);
+    if (current == State.unprepared) {
+        if (!cas(stateSlot, uint(State.unprepared), uint(State.preparing)))
+            return opCallNotDirect(pc, active, state, frame, r0, fp0);
+        const plan = site.nativePlan !is null
+            ? site.nativePlan : site.prepareNativePlan();
+        bool swapped;
+        size_t resultWidth;
+        size_t parameterCount;
+        const target = directWordCallTarget(
+            plan, swapped, resultWidth, parameterCount);
+        const eligible = target !is null
+            && site.args.length == parameterCount
+            && site.args.length >= 1 && site.args.length <= 2
+            && site.args[0].width == 8
+            && (site.args.length == 1 || site.args[1].width == 8)
+            && site.returnWidth == resultWidth;
+        site.directTarget = target;
+        site.directSwapped = swapped;
+        atomicStore!(MemoryOrder.rel)(
+            *stateSlot,
+            uint(eligible ? State.direct : State.general));
+        current = eligible ? State.direct : State.general;
+    }
+    if (current != State.direct)
+        return opCallNotDirect(pc, active, state, frame, r0, fp0);
+
+    alias Word2 = extern(C) ulong function(ulong, ulong);
+    // The position of a throw selects its handler.
+    active.pc = pc;
+    state.current = active;
+    ulong first = *cast(ulong*) operandStorage(frame, site.args[0].callerOffset);
+    ulong second = site.args.length == 2
+        ? *cast(ulong*) operandStorage(frame, site.args[1].callerOffset) : 0;
+    if (site.directSwapped) {
+        const swap = first;
+        first = second;
+        second = swap;
+    }
+    const result = (cast(Word2) site.directTarget)(first, second);
+    if (pc.destination != discardResult) {
+        auto place = operandStorage(frame, pc.destination);
+        switch (site.returnWidth) {
+        case 1: *place = cast(ubyte) result; break;
+        case 2: *cast(ushort*) place = cast(ushort) result; break;
+        case 4: *cast(uint*) place = cast(uint) result; break;
+        default: *cast(ulong*) place = result; break;
+        }
+    }
+    return pc + 1;
+}
+
 // Every call `opCall` does not take, and the same call with a general
 // frame reserve and argument copy.
 pragma(inline, false)
 private const(Instruction)* opCallSlow(
+    const(Instruction)* pc,
+    Activation* active,
+    DispatchState* state,
+    ubyte* frame,
+    ulong r0,
+    double fp0,
+) {
+    import core.atomic: atomicLoad, MemoryOrder;
+
+    auto nativeSite = cast(CallSite*) &active.callSites[pc.source];
+    // A native site that is decided to be general pays for no extra call.
+    if (nativeSite.kind == CallSite.Kind.native
+            && atomicLoad!(MemoryOrder.acq)(
+                *cast(shared(uint)*) &nativeSite.directState)
+                != CallSite.DirectState.general)
+        return opCallNative(nativeSite, pc, active, state, frame, r0, fp0);
+    return opCallPlain(pc, active, state, frame, r0, fp0);
+}
+
+// `opCallPlain` for `opCallNative`, as a call and not a second copy of the
+// body.
+pragma(inline, false)
+private const(Instruction)* opCallNotDirect(
+    const(Instruction)* pc,
+    Activation* active,
+    DispatchState* state,
+    ubyte* frame,
+    ulong r0,
+    double fp0,
+) {
+    return opCallPlain(pc, active, state, frame, r0, fp0);
+}
+
+// Every call that `opCall` and `opCallNative` do not take. `opCallSlow`
+// holds it inline, so that a call that is not native pays for no extra
+// call.
+pragma(inline, true)
+private const(Instruction)* opCallPlain(
     const(Instruction)* pc,
     Activation* active,
     DispatchState* state,

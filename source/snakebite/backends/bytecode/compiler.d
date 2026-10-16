@@ -5975,6 +5975,79 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileCast(expression, _destination, _width);
     }
 
+    // `cast(Derived) base` for D classes: dmd lowers it to `_d_cast`, whose
+    // guest code walks the class chain. druntime's compiled `_d_isbaseof`
+    // answers the same question for a class, so a null reference stays
+    // null and any other reference stays itself or becomes null.
+    //
+    // This path does not use the frontend's `_d_cast!To` lowering. It does
+    // the null check and the base-class test in bytecode with
+    // `_d_isbaseof`. That departs from the runtime rule in CLAUDE.md and
+    // from the use of frontend lowerings. The reason: druntime 2.113 has no
+    // exported compiled class-cast hook, and the interpreted `_d_cast!To`
+    // template makes two native calls for each cast, about 22% of the
+    // instructions of Richards. Revisit this if druntime exports a
+    // compiled hook.
+    protected override bool visitLoweredClassCast(CastExp expression) {
+        import dmd.astenums: STC;
+        import dmd.typesem: toBasetype;
+
+        auto from = expression.e1.type.toBasetype.isTypeClass;
+        auto to = expression.to.toBasetype.isTypeClass;
+        if (from is null || to is null
+                || from.sym.isInterfaceDeclaration !is null
+                || to.sym.isInterfaceDeclaration !is null
+                || !from.sym.isBaseOf(to.sym, null))
+            return false;
+
+        requireDestination(expression);
+        const object = _destination;
+        evalInto(expression.e1, object, size_t.sizeof);
+
+        const nullIndex = _instructions.length;
+        emit(&opBranchFalse, object, 0, size_t.sizeof);
+
+        const objectInfo = reserveTemp(pointerFacts);
+        emit(&opLoadIndirect, objectInfo, object, size_t.sizeof);
+        emit(&opLoadIndirect, objectInfo, objectInfo, size_t.sizeof);
+        const targetInfo = reserveTemp(pointerFacts);
+        emitTypeInfoConstant(
+            _bytecode._runtimeTypes.unqualifiedClassInfo(expression.to),
+            targetInfo, size_t.sizeof);
+
+        // The `final` rule of druntime's `_d_cast`: no class derives from a
+        // `final` target, so `_d_paint_cast` compares the exact class of the
+        // object. The comparison is done here, with the same exception to
+        // the runtime rule as for `_d_isbaseof`.
+        if ((to.sym.storage_class & STC.final_) != 0) {
+            emit(&opEqual, objectInfo, targetInfo, size_t.sizeof);
+            const exactIndex = _instructions.length;
+            emit(&opBranchTrue, objectInfo, 0, 1);
+            emit(&opZero, object, 0, size_t.sizeof);
+            _instructions[nullIndex].source = _instructions.length;
+            _instructions[exactIndex].source = _instructions.length;
+            _finished = false;
+            return true;
+        }
+
+        enum resultWidth = int.sizeof;
+        const result = reserveTemp(pointerFacts);
+        auto plan = planOf(_bytecode._plans, DruntimeHook.isBaseOf);
+        _callSites ~= CallSite.native(plan, [
+            Arg(objectInfo, 0, size_t.sizeof),
+            Arg(targetInfo, 0, size_t.sizeof),
+        ], resultWidth);
+        emit(&opCall, result, _callSites.length - 1, 0);
+
+        const successIndex = _instructions.length;
+        emit(&opBranchTrue, result, 0, resultWidth);
+        emit(&opZero, object, 0, size_t.sizeof);
+        _instructions[nullIndex].source = _instructions.length;
+        _instructions[successIndex].source = _instructions.length;
+        _finished = false;
+        return true;
+    }
+
     override void visit(NotExp expression) {
         requireDestination(expression);
         compileNot(expression, _destination);
