@@ -328,8 +328,9 @@ static foreach (backend; Matrix!()) {
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            int clobber(int x) { x = x + 100; return x; }
-            int clobberTwo(int x, int y) { x = y; y = 0; return x; }
+            int clobber(int x) { return x += 100; }
+            int clobberTwo(int x, int y) { return x = y; }
+            int clearSecond(int x, int y) { return y = x - x; }
 
             void main() {
                 int a = 5;
@@ -338,6 +339,12 @@ static foreach (backend; Matrix!()) {
                 assert(a == 5);
                 assert(clobberTwo(a, b) == 6);
                 assert(a == 5);
+                assert(b == 6);
+                assert(clearSecond(a, b) == 0);
+                assert(a == 5);
+                assert(b == 6);
+                int c = clobber(b);
+                assert(c == 106);
                 assert(b == 6);
             }
         });
@@ -379,6 +386,100 @@ static foreach (backend; Matrix!()) {
                 int a = 5;
                 assert(add3(a, a = 1, 10) == 16);
                 assert(a == 1);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.parameters.pointerArithmeticResultIntoAnArgumentDestination." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Pair { int first; int second; }
+
+            int* advance(int* pointer, size_t count) { return pointer + count; }
+            int* secondOf(Pair* pair) { return &pair.second; }
+
+            void main() {
+                int[4] values = [10, 20, 30, 40];
+                int* p = values.ptr;
+                size_t step = 2;
+                p = advance(p, step);
+                assert(*p == 30);
+                p = advance(p, 1);
+                assert(*p == 40);
+                assert(*advance(values.ptr, step) == 30);
+
+                Pair pair = Pair(1, 2);
+                Pair* q = &pair;
+                int* r = secondOf(q);
+                assert(*r == 2);
+                assert(*secondOf(q) == 2);
+                assert(q.first == 1);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.parameters.compoundAssignmentResultIntoAnArgumentDestination." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int addTo(int x, int y) { return x += y; }
+            int subtractFrom(int x, int y) { return x -= y; }
+            int incremented(int x) { return ++x; }
+
+            void main() {
+                int a = 3;
+                int b = 4;
+                a = addTo(a, b);
+                assert(a == 7);
+                b = addTo(a, b);
+                assert(b == 11);
+                a = subtractFrom(b, a);
+                assert(a == 4);
+                a = incremented(a);
+                assert(a == 5);
+                assert(addTo(a, b) == 16);
+                assert(a == 5);
+                assert(b == 11);
+            }
+        });
+    }
+}
+
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.parameters.receiverIsFixedBeforeArgumentsRun." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Box {
+                int value;
+                Box* next;
+                int plus(int by) { return value + by; }
+                Box* following() { return next; }
+                int bump() { return ++value; }
+            }
+
+            void main() {
+                Box second = Box(20, null);
+                Box first = Box(1, &second);
+                Box* p = &first;
+                assert(p.plus((p = &second).value) == 21);
+                assert(p is &second);
+
+                p = &first;
+                p = p.following();
+                assert(p is &second);
+
+                assert(first.plus(first.bump()) == 4);
+                assert(first.value == 2);
             }
         });
     }
