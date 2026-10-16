@@ -341,6 +341,9 @@ private enum OperandKind {
     // Storage known to be a plain frame offset, never an address slot plus a
     // displacement: decoding has no test of the indirect bit.
     frame,
+    // Storage known to be an address slot plus a displacement: decoding has no
+    // test of the indirect bit either.
+    indirect,
     // An operand the handler does not read, because the register argument
     // holds it. Its specialised form is `frame`, so that the handler's other
     // operands are decoded without the test too.
@@ -354,8 +357,10 @@ private enum frameKind(OperandKind kind) = kind == OperandKind.storage
 
 // `fixedWidth` is the width of the instruction's operands when the compiler
 // chose a handler for exactly that width, or 0 to read it from the instruction.
+// `rightKind` is the kind of the right operand, which only `rightStorage`
+// decodes; `storage` decodes any other operand and ignores it.
 private struct Execution(OperandKind destinationKind, OperandKind sourceKind,
-    size_t fixedWidth = 0)
+    size_t fixedWidth = 0, OperandKind rightKind = OperandKind.storage)
 {
     private enum frameOnly = destinationKind == OperandKind.frame
         || sourceKind == OperandKind.frame;
@@ -430,6 +435,8 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind,
             return operand;
         else static if (kind == OperandKind.frame)
             return _frame + operand;
+        else static if (kind == OperandKind.indirect)
+            return indirectStorageAt(_frame, operand);
         else static if (kind == OperandKind.result)
             return operand == discardResult ? null : storage(operand);
         else
@@ -442,6 +449,24 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind,
         else
             return operandStorage(_frame, operand);
     }
+
+    public ubyte* rightStorage(in size_t operand) pure nothrow @nogc {
+        static if (rightKind == OperandKind.frame)
+            return _frame + operand;
+        else static if (rightKind == OperandKind.indirect)
+            return indirectStorageAt(_frame, operand);
+        else
+            return storage(operand);
+    }
+}
+
+// The address held in a frame slot plus an offset, for an operand that the
+// compiler knows has the top bit set.
+pragma(inline, true)
+private ubyte* indirectStorageAt(ubyte* frame, in size_t operand)
+        pure nothrow @nogc {
+    const addressSlot = (operand >> 32) & 0x7fff_ffffUL;
+    return *cast(ubyte**) (frame + addressSlot) + cast(uint) operand;
 }
 
 // A frame offset, or an address held in a frame slot plus an offset when the
@@ -483,8 +508,9 @@ version (BytecodeCount) {
     private shared bool _countExitHooked;
 
     private enum countName(string op, OperandKind d, OperandKind s,
-        size_t width, P...) =
+        size_t width, OperandKind r, P...) =
         op ~ "/" ~ d.stringof ~ "/" ~ s.stringof ~ "/w" ~ width.stringof
+            ~ (r == OperandKind.storage ? "" : "/r/" ~ r.stringof)
             ~ P.stringof;
 
     private extern(C) void dumpCounts() {
@@ -539,10 +565,11 @@ private alias positionFree = AliasSeq!(
     runFloatCompare3, runFloatComparison, runFloatToBool, runFloatUnary,
     runFloatWidthCast, runFrameAddress, runFusedBranch, runGreaterOrEqualSigned,
     runGreaterOrEqualUnsigned, runGreaterThanSigned, runGreaterThanUnsigned,
-    runIndex, runInt3, runJump, runLessOrEqualSigned, runLessOrEqualUnsigned,
+    runIndex, runCheckedIndex,
+    runInt3, runJump, runLessOrEqualSigned, runLessOrEqualUnsigned,
     runLessThanSigned, runLessThanUnsigned, runLoadBitfield, runLoadIndirect,
     runLogicalNot, runMultiply, runNegate, runNotEqual, runRangeEndPass,
-    runReturnVoid, runShift3, runShiftLeft, runShiftRightArithmetic,
+    runShift3, runShiftLeft, runShiftRightArithmetic,
     runShiftRightLogical, runSliceCopy, runSliceFill, runSlicesConform,
     runStaticAddress, runStaticArrayEqual, runStaticLoad, runStaticStore,
     runStoreBitfield, runStoreIndirect, runSubtract, runZero,
@@ -557,6 +584,7 @@ private const(Instruction)* executeWith(
     OperandKind destinationKind,
     OperandKind sourceKind,
     size_t width,
+    OperandKind rightKind,
     Parameters...,
 )(
     const(Instruction)* pc,
@@ -569,13 +597,13 @@ private const(Instruction)* executeWith(
     version (BytecodeCount) {
         static __gshared CountSlot slot;
         countExecution(&slot, countName!(__traits(identifier, operation),
-            destinationKind, sourceKind, width, Parameters));
+            destinationKind, sourceKind, width, rightKind, Parameters));
     }
     // The position of a throw selects its handler.
     static if (storesPosition!operation)
         activation.pc = pc;
     // const would prevent operations from writing through storage pointers.
-    auto execution = Execution!(destinationKind, sourceKind, width)(
+    auto execution = Execution!(destinationKind, sourceKind, width, rightKind)(
         pc, activation, state, frame,
     );
     const next = operation!Parameters(execution);
@@ -595,7 +623,8 @@ private alias execute(
     OperandKind destinationKind,
     OperandKind sourceKind,
     Parameters...,
-) = executeWith!(operation, destinationKind, sourceKind, 0, Parameters);
+) = executeWith!(operation, destinationKind, sourceKind, 0, OperandKind.storage,
+    Parameters);
 
 // As `execute`, for an operation that reads and writes the register
 // arguments: `execution.inR0` and `inFp0` hold what the previous handler left,
@@ -617,7 +646,7 @@ private const(Instruction)* executeRegister(
     version (BytecodeCount) {
         static __gshared CountSlot slot;
         countExecution(&slot, countName!(__traits(identifier, operation),
-            destinationKind, sourceKind, fixedWidth, Parameters));
+            destinationKind, sourceKind, fixedWidth, OperandKind.storage, Parameters));
     }
     static if (storesPosition!operation)
         activation.pc = pc;
@@ -661,7 +690,7 @@ private const(Instruction)* executeOnce(
     version (BytecodeCount) {
         static __gshared CountSlot slot;
         countExecution(&slot, countName!(__traits(identifier, operation),
-            destinationKind, sourceKind, 0, Parameters));
+            destinationKind, sourceKind, 0, OperandKind.storage, Parameters));
     }
     activation.pc = pc;
     auto execution = Execution!(destinationKind, sourceKind)(
@@ -670,8 +699,9 @@ private const(Instruction)* executeOnce(
     return operation!Parameters(execution);
 }
 
-// As `execute`, for the instruction that can switch the activation. It
-// returns to `dispatchLoop`, which owns that switch.
+// As `execute`, for the instruction that can switch the activation. Outside a
+// chained build it returns to `dispatchLoop`, which owns that switch; a chained
+// build switches in the handler itself.
 private const(Instruction)* executeCall(
     alias operation,
     OperandKind destinationKind,
@@ -687,7 +717,7 @@ private const(Instruction)* executeCall(
     version (BytecodeCount) {
         static __gshared CountSlot slot;
         countExecution(&slot, countName!(__traits(identifier, operation),
-            destinationKind, sourceKind, 0));
+            destinationKind, sourceKind, 0, OperandKind.storage));
     }
     activation.pc = pc;
     state.current = activation;
@@ -1080,6 +1110,8 @@ private struct RootActivation {
 
 private struct DispatchState {
     FrameStack* frames;
+    // The activation that runs. A chained build keeps it up to date at every
+    // call and return; other builds set it only where a handler can throw.
     Activation* current;
     Activation* pending;
     // The first handler of `current` that an exception that is no
@@ -1168,14 +1200,23 @@ private void dispatchLoop(
     // Cleanup writes the frame stack.
     auto frames = state.frames;
 
+    // A chain of handlers calls and returns by itself, so the activation
+    // that runs when the chain ends or throws is `state.current`.
+    static if (chainedDispatch)
+        state.current = active;
+
     while (true) {
         try {
+            static if (chainedDispatch)
+                active = state.current;
             if (pc is null) {
                 active.pc = pc;
                 active.cleanup(frames);
                 if (active.parent is null)
                     return;
                 active = popActivation(active, frames);
+                static if (chainedDispatch)
+                    state.current = active;
                 pc = active.resume;
                 continue;
             }
@@ -1185,9 +1226,15 @@ private void dispatchLoop(
             if (state.pending !is null) {
                 active = state.pending;
                 state.pending = null;
+                static if (chainedDispatch)
+                    state.current = active;
             }
         } catch (Throwable throwable) {
+            static if (chainedDispatch)
+                active = state.current;
             active = handleException(active, frames, throwable, state.vm);
+            static if (chainedDispatch)
+                state.current = active;
             pc = active.pc;
         }
     }
@@ -1634,8 +1681,9 @@ private alias opCallGeneral =
 // plain arguments and room on the committed frame stack: the activation is
 // built here without the generic `Execution` decoding, from the facts
 // `CallSite.prepare` keeps. Everything else takes `opCallSlow`, which has the
-// same effect. This function calls nothing, so it keeps no value in a
-// callee-saved register.
+// same effect. In a chained build it ends with a tail call to the callee's
+// first handler, so it keeps no value in a callee-saved register over that
+// call.
 public const(Instruction)* opCall(
     const(Instruction)* pc,
     Activation* active,
@@ -1669,7 +1717,8 @@ public const(Instruction)* opCall(
     // The position of a throw selects its handler, and the new activation
     // resumes this one.
     active.pc = pc;
-    state.current = active;
+    static if (!chainedDispatch)
+        state.current = active;
     activation.frameMark = mark;
     ubyte* calleeFrame = cast(ubyte*) activation + fast.frameOffset;
     activation.frame = calleeFrame;
@@ -1685,7 +1734,8 @@ public const(Instruction)* opCall(
     activation.cleanupMark = frames.cleanupMark;
     activation.parent = active;
     active.resume = pc + 1;
-    state.pending = activation;
+    static if (!chainedDispatch)
+        state.pending = activation;
 
     // Last, so that few values stay live through the loop.
     foreach (arg; fast.args[0 .. fast.argCount]) {
@@ -1701,7 +1751,16 @@ public const(Instruction)* opCall(
         else
             *cast(ushort*) destination = *cast(const(ushort)*) source;
     }
-    return callee.instructions.ptr;
+    static if (chainedDispatch) {
+        // The callee's first handler runs from here, so the native stack
+        // stays flat however deep the guest calls go.
+        state.current = activation;
+        const first = callee.instructions.ptr;
+        ulong none0 = void;
+        double none1 = void;
+        return first.handler(first, activation, state, calleeFrame, none0, none1);
+    } else
+        return callee.instructions.ptr;
 }
 
 
@@ -1987,7 +2046,9 @@ private const(Instruction)* callFunction(bool redirected = false, Decoded)(
 // backend uses for a call whose value nothing reads. `Instruction.destination`
 // is unused: there is no frame slot on the receiving end, only `returnPlace`.
 // `width` is 0 to read the width from the instruction, and `frameOnly` says the
-// source is a plain frame offset. It returns `null`, which ends the activation.
+// source is a plain frame offset. In a chained build an activation with no
+// cleanup resumes its caller by tail call; in every other case it returns
+// `null`, which ends the activation.
 package const(Instruction)* returnHandler(size_t width, bool frameOnly)(
     const(Instruction)* pc,
     Activation* activation,
@@ -2013,7 +2074,33 @@ package const(Instruction)* returnHandler(size_t width, bool frameOnly)(
         else
             memcpy(place, source, width);
     }
+    static if (chainedDispatch) {
+        const resume = leaveToCaller(activation, state);
+        if (resume !is null) {
+            ulong none0 = void;
+            double none1 = void;
+            return resume.handler(resume, state.current, state, state.current.frame,
+                none0, none1);
+        }
+    }
     return null;
+}
+
+// An activation with no temporary to destroy leaves for its caller from the
+// returning handler: it releases its frame, makes the caller current and
+// gives the caller's resume point. `null` means `dispatchLoop` must end the
+// activation, because it has a cleanup to run or no caller.
+private const(Instruction)* leaveToCaller(
+    Activation* activation,
+    DispatchState* state,
+) {
+    auto parent = activation.parent;
+    auto frames = state.frames;
+    if (parent is null || frames.cleanupMark != activation.cleanupMark)
+        return null;
+    frames.release(activation.frameMark);
+    state.current = parent;
+    return parent.resume;
 }
 
 public alias opReturn = returnHandler!(0, false);
@@ -2035,8 +2122,30 @@ package const(Instruction)* opThenReturn(alias operation)(
     }
 }
 
-public alias opReturnVoid =
-    executeOnce!(runReturnVoid, OperandKind.immediate, OperandKind.immediate);
+public const(Instruction)* opReturnVoid(
+    const(Instruction)* pc,
+    Activation* activation,
+    DispatchState* state,
+    ubyte* frame,
+    ulong r0,
+    double fp0,
+) {
+    version (BytecodeCount) {
+        static __gshared CountSlot slot;
+        countExecution(&slot, "opReturnVoid");
+    }
+    activation.pc = pc;
+    static if (chainedDispatch) {
+        const resume = leaveToCaller(activation, state);
+        if (resume !is null) {
+            ulong none0 = void;
+            double none1 = void;
+            return resume.handler(resume, state.current, state, state.current.frame,
+                none0, none1);
+        }
+    }
+    return null;
+}
 
 // Ends a cleanup range, which `dispatch` runs up to the instruction at
 // `Activation.end`. Anywhere else it does nothing.
@@ -2060,12 +2169,6 @@ private const(Instruction)* runRangeEndPass(Decoded)(
     ref Decoded execution,
 ) {
     return execution.next;
-}
-
-private const(Instruction)* runReturnVoid(Decoded)(
-    ref Decoded execution,
-) {
-    return null;
 }
 
 
@@ -2656,9 +2759,81 @@ private const(Instruction)* runIndex(IndexBase base, Decoded)(
         auto first = execution.source;
     else
         auto first = *cast(ubyte**) execution.source;
-    const index = *cast(const(size_t)*) execution.storage(execution.sourceWidth);
+    const index = *cast(const(size_t)*) execution.rightStorage(
+        execution.sourceWidth);
     *cast(ubyte**) execution.destination = first + index * execution.width;
     return execution.next;
+}
+
+// A bounds-checked element access in one instruction. `destination` is the
+// value operand (read by a store, written by a load), `source` the slice
+// operand, `width` the frame offset of the index in its low 32 bits and a
+// signed 32-bit offset that is added to the index, in the index's own width,
+// in the high 32 bits. `sourceWidth` is the instruction that runs when the
+// access succeeded. When the index is out of bounds, the next instruction
+// runs: the failure code the compiler emitted after this one.
+private alias opCheckedIndex(bool store, size_t indexWidth, bool signed,
+        size_t elementSize) =
+    execute!(runCheckedIndex, OperandKind.storage, OperandKind.storage,
+        store, indexWidth, signed, elementSize);
+
+private const(Instruction)* runCheckedIndex(bool store, size_t indexWidth,
+    bool signed, size_t elementSize, Decoded)(
+    ref Decoded execution,
+) {
+    import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset;
+
+    const packed = execution.width;
+    const offset = cast(int) (packed >> 32);
+    const indexPlace = execution.storage(cast(uint) packed);
+    static if (indexWidth == 4 && signed) {
+        const sum = *cast(const(int)*) indexPlace + offset;
+        const index = cast(size_t) cast(long) sum;
+    } else static if (indexWidth == 4) {
+        const sum = *cast(const(uint)*) indexPlace + cast(uint) offset;
+        const index = cast(size_t) sum;
+    } else
+        const index = *cast(const(size_t)*) indexPlace
+            + cast(size_t) cast(long) offset;
+    const length = *cast(const(size_t)*) (execution.source + arrayLengthOffset);
+    if (index >= length)
+        return execution.next;
+    static if (elementSize == 1)
+        alias Element = ubyte;
+    else static if (elementSize == 2)
+        alias Element = ushort;
+    else static if (elementSize == 4)
+        alias Element = uint;
+    else
+        alias Element = ulong;
+    auto element = cast(Element*) (*cast(ubyte**) (execution.source
+        + arrayPointerOffset) + index * elementSize);
+    static if (store)
+        *element = *cast(const(Element)*) execution.destination;
+    else
+        *cast(Element*) execution.destination = *element;
+    return cast(const(Instruction)*) execution.sourceWidth;
+}
+
+private enum checkedIndexShapes = [[4UL, 1UL], [4UL, 0UL], [8UL, 0UL]];
+private enum checkedIndexElementSizes = [1UL, 2UL, 4UL, 8UL];
+
+package Instruction.Handler checkedIndexHandler(
+    in bool store, in size_t indexWidth, in bool signed,
+    in size_t elementSize,
+) {
+    import std.conv: text;
+
+    static foreach (isStore; [false, true])
+        static foreach (shape; checkedIndexShapes)
+            static foreach (size; checkedIndexElementSizes)
+                if (store == isStore && indexWidth == shape[0]
+                        && signed == (shape[1] == 1) && elementSize == size)
+                    return &opCheckedIndex!(isStore, shape[0],
+                        shape[1] == 1, size);
+    internalFailure(text("no checked-index handler for a ", indexWidth,
+        "-byte ", signed ? "signed" : "unsigned", " index and ", elementSize,
+        "-byte elements"));
 }
 
 package alias opIndexSlice = opIndex!(IndexBase.slice);
@@ -2675,7 +2850,7 @@ private ubyte* rightOperand(bool constant, Decoded)(ref Decoded execution) {
     static if (constant)
         return cast(ubyte*) execution.sourceWidth;
     else
-        return execution.storage(execution.sourceWidth);
+        return execution.rightStorage(execution.sourceWidth);
 }
 
 private alias opInt3(string operation, bool constant = false) =
@@ -2855,6 +3030,15 @@ static foreach (triple; threeAddressNames) {
 // operand at the same position.
 package alias threeAddressHandlers = mixin(handlerList(""));
 package alias threeAddressConstantHandlers = mixin(handlerList("K"));
+
+// The index in `threeAddressHandlers` of the first comparison, which writes
+// one byte whatever its operand width. Every later handler is a comparison.
+package enum firstComparisonHandler = () {
+    foreach (index, triple; threeAddressNames)
+        if (triple[1] == "opCompare3")
+            return index;
+    assert(false, "no comparison handler");
+}();
 
 private string handlerList(in string suffix) {
     string list = "AliasSeq!(";
@@ -3229,30 +3413,42 @@ private const(Instruction)* runNegate(Decoded)(
     return execution.next;
 }
 
-private T applyFloatUnary(string operation, T)(T value) @nogc nothrow pure {
-    return mixin(operation ~ "value");
+private T negateOf(T)(T value) @nogc nothrow pure {
+    return -value;
 }
 
-private alias opFloatUnary(string operation) =
-    execute!(runFloatUnary, OperandKind.storage, OperandKind.immediate, operation);
+private T sqrtOf(T)(T value) @nogc nothrow pure {
+    import core.math: sqrt;
+    return sqrt(value);
+}
 
-private const(Instruction)* runFloatUnary(string operation, Decoded)(
+private T absOf(T)(T value) @nogc nothrow pure {
+    import core.math: fabs;
+    return fabs(value);
+}
+
+// `core.math.sqrt` and `core.math.fabs` run in place, like `opFloatNegate`.
+package alias opFloatNegate = opFloatUnary!negateOf;
+package alias opFloatSqrt = opFloatUnary!sqrtOf;
+package alias opFloatAbs = opFloatUnary!absOf;
+
+private alias opFloatUnary(alias function_) =
+    execute!(runFloatUnary, OperandKind.storage, OperandKind.immediate, function_);
+
+private const(Instruction)* runFloatUnary(alias function_, Decoded)(
     ref Decoded execution,
 ) {
     auto place = execution.destination;
     if (execution.width == float.sizeof)
-        *cast(float*) place = applyFloatUnary!operation(*cast(float*) place);
+        *cast(float*) place = function_(*cast(float*) place);
     else if (execution.width == double.sizeof)
-        *cast(double*) place =
-            applyFloatUnary!operation(*cast(double*) place);
+        *cast(double*) place = function_(*cast(double*) place);
     else {
         assert(execution.width == real.sizeof);
-        *cast(real*) place = applyFloatUnary!operation(*cast(real*) place);
+        *cast(real*) place = function_(*cast(real*) place);
     }
     return execution.next;
 }
-
-package alias opFloatNegate = opFloatUnary!"-";
 
 package alias opComplement =
     execute!(runComplement, OperandKind.storage, OperandKind.immediate);
@@ -3510,9 +3706,9 @@ package const(Instruction)* opLoadThenCopy(size_t loadWidth, size_t copyWidth,
 ) {
     static if (frameOnly) {
         alias load = executeWith!(runLoadIndirect, OperandKind.frame,
-            OperandKind.frame, 0, loadWidth);
+            OperandKind.frame, 0, OperandKind.storage, loadWidth);
         alias copy = executeWith!(runCopyFixed, OperandKind.frame,
-            OperandKind.frame, 0, copyWidth, false);
+            OperandKind.frame, 0, OperandKind.storage, copyWidth, false);
     } else {
         alias load = opLoadIndirectFixed!loadWidth;
         alias copy = opCopyFixed!copyWidth;
@@ -3745,7 +3941,7 @@ private alias plainOperations = AliasSeq!(
     runGreaterOrEqualSigned, runGreaterOrEqualUnsigned, runEqual, runNotEqual,
     runShiftLeft, runShiftRightLogical, runShiftRightArithmetic, runCopy,
     runFrameAddress, runLoadIndirect, runStoreIndirect, runStaticArrayEqual,
-    runConstant, runZero, runNegate, runCastToBool, runLogicalNot,
+    runConstant, runZero, runNegate, runCastToBool, runLogicalNot, runIndex,
 );
 
 // The operations with a constant right operand in `sourceWidth` or not.
@@ -3935,10 +4131,25 @@ private size_t widthSlot(in size_t width) @safe pure nothrow @nogc {
 
 private enum indirectBit = 1UL << 63;
 
+
+// The operations whose instances exist for each mix of frame and indirect
+// storage operands, so that none of them tests the indirect bit.
+private alias kindOperations = AliasSeq!(
+    runCopyFixed, runIndex, runInt3, runFloat3, runFusedBranch,
+    runLoadIndirect, runStoreIndirect,
+);
+
+private alias MaskedHandlers = Instruction.Handler[widthSlots][7];
+
 private struct Specialisation {
     Instruction.Handler general;
-    // [0] keeps indirect operands possible, [1] is frame-only; by width slot.
+    // [0] keeps indirect operands possible, [1] is frame-only. By width slot.
     Instruction.Handler[widthSlots][2] handlers;
+    // Only an operation in `kindOperations` has these, so most entries do not
+    // pay for them: `masked[mask - 1]` is for the operands that `mask` names
+    // as indirect (bit 0 the destination, bit 1 the source, bit 2 the right
+    // operand) and the others frame.
+    MaskedHandlers* masked;
     bool destination;
     bool source;
     bool right;
@@ -3962,10 +4173,17 @@ private void addSpecialisation(Specialisation entry, in Roles roles) {
     // instruction address. It is searched for every instruction of a
     // function, so it stays small.
     if (roles != Roles.init)
+    {
         foreach (frame; entry.handlers)
             foreach (handler; frame)
                 if (handler !is null)
                     addRoles(handler, roles);
+        if (entry.masked !is null)
+            foreach (frame; *entry.masked)
+                foreach (handler; frame)
+                    if (handler !is null)
+                        addRoles(handler, roles);
+    }
     insertSpecialisation(entry);
 }
 
@@ -3987,6 +4205,46 @@ private void insertSpecialisation(Specialisation entry) {
     ++specialisationCount;
 }
 
+private template instance(alias executor, alias operation,
+    OperandKind destinationKind, OperandKind sourceKind, size_t width,
+    OperandKind rightKind, Parameters...)
+{
+    static if (__traits(isSame, executor, executeWith))
+        alias instance = executeWith!(operation, destinationKind, sourceKind,
+            width, rightKind, Parameters);
+    else
+        alias instance = executor!(operation, destinationKind, sourceKind,
+            width, Parameters);
+}
+
+// Fills `entry` with the instances for the operands named by `mask`, if the
+// operation has all of them.
+private void maskedInstances(alias operation, OperandKind destinationKind,
+    OperandKind sourceKind, immutable(ulong)[] widths, bool right, int mask,
+    Parameters...)(ref Specialisation entry)
+{
+    enum destinationIndirect = (mask & 1) != 0;
+    enum sourceIndirect = (mask & 2) != 0;
+    enum rightIndirect = (mask & 4) != 0;
+    static if ((!destinationIndirect || destinationKind == OperandKind.storage)
+            && (!sourceIndirect || sourceKind == OperandKind.storage)
+            && (!rightIndirect || right))
+    {
+        enum d = destinationKind != OperandKind.storage ? destinationKind
+            : destinationIndirect ? OperandKind.indirect : OperandKind.frame;
+        enum s = sourceKind != OperandKind.storage ? sourceKind
+            : sourceIndirect ? OperandKind.indirect : OperandKind.frame;
+        enum r = rightIndirect ? OperandKind.indirect : OperandKind.frame;
+        if (entry.masked is null)
+            entry.masked = &(new MaskedHandlers[1])[0];
+        (*entry.masked)[mask - 1][0] = &executeWith!(operation, d, s, 0, r,
+            Parameters);
+        static foreach (width; widths)
+            (*entry.masked)[mask - 1][widthSlot(width)] = &executeWith!(
+                operation, d, s, width, r, Parameters);
+    }
+}
+
 private void specialise(alias operation, OperandKind destinationKind,
     OperandKind sourceKind, immutable(ulong)[] widths, bool right,
     Parameters...)()
@@ -3999,24 +4257,39 @@ private void specialiseWith(alias executor, alias operation,
     OperandKind destinationKind, OperandKind sourceKind,
     immutable(ulong)[] widths, bool right, Parameters...)()
 {
-    alias general = executor!(operation, destinationKind, sourceKind, 0,
-        Parameters);
+    alias general = instance!(executor, operation, destinationKind, sourceKind,
+        0, OperandKind.storage, Parameters);
     Specialisation entry;
     entry.general = &general;
     entry.handlers[0][0] = &general;
-    entry.handlers[1][0] = &executor!(operation,
-        frameKind!destinationKind, frameKind!sourceKind, 0, Parameters);
+    entry.handlers[1][0] = &instance!(executor, operation,
+        frameKind!destinationKind, frameKind!sourceKind, 0, OperandKind.storage,
+        Parameters);
     entry.destination = destinationKind == OperandKind.storage;
     entry.source = sourceKind == OperandKind.storage;
     entry.right = right;
     static foreach (width; widths) {
-        entry.handlers[0][widthSlot(width)] = &executor!(operation,
-            destinationKind, sourceKind, width, Parameters);
-        entry.handlers[1][widthSlot(width)] = &executor!(operation,
-            frameKind!destinationKind, frameKind!sourceKind, width,
+        entry.handlers[0][widthSlot(width)] = &instance!(executor, operation,
+            destinationKind, sourceKind, width, OperandKind.storage,
             Parameters);
+        entry.handlers[1][widthSlot(width)] = &instance!(executor, operation,
+            frameKind!destinationKind, frameKind!sourceKind, width,
+            OperandKind.storage, Parameters);
     }
+    static if (__traits(isSame, executor, executeWith)
+            && staticIndexOf!(operation, kindOperations) >= 0)
+        static foreach (mask; 1 .. 8)
+            maskedInstances!(operation, destinationKind, sourceKind, widths,
+                right, mask, Parameters)(entry);
     addSpecialisation(entry, rolesOfOperation!(operation, sourceKind, Parameters));
+}
+
+// `opCopyFixed` takes a `size_t` width, and a handler registered with another
+// type of width would never be found.
+private void specialiseCopyFixed(size_t width, bool staticSource)() {
+    specialise!(runCopyFixed, OperandKind.storage,
+        staticSource ? OperandKind.immediate : OperandKind.storage, noWidths,
+        false, width, staticSource)();
 }
 
 shared static this() {
@@ -4029,6 +4302,11 @@ shared static this() {
     addRoles(&opTlsLoad, rolesOfOperation!(runTlsLoad, I));
     addRoles(&opTlsStore, rolesOfOperation!(runTlsStore, S));
     addRoles(&opTlsAddress, rolesOfOperation!(runTlsAddress, I));
+    static foreach (isStore; [false, true])
+        static foreach (shape; checkedIndexShapes)
+            static foreach (size; checkedIndexElementSizes)
+                addRoles(&opCheckedIndex!(isStore, shape[0], shape[1] == 1,
+                    size), Roles(Role.other, Role.other, Role.instruction));
     // The fused return keeps the roles of the producer it replaces.
     static foreach (width; 1 .. 17)
         addRoles(&opThenReturn!(opCopyFixed!(width, true)),
@@ -4108,9 +4386,11 @@ shared static this() {
         }}
     }
     static foreach (width; [1, 2, 4, 8, 16])
-        specialise!(runCopyFixed, S, S, noWidths, false, width, false)();
+        specialiseCopyFixed!(width, false);
     static foreach (width; 1 .. 17)
-        specialise!(runCopyFixed, S, I, noWidths, false, width, true)();
+        specialiseCopyFixed!(width, true);
+    static foreach (base; EnumMembers!IndexBase)
+        specialise!(runIndex, S, S, noWidths, true, base)();
     {
         Specialisation entry;
         entry.general = &opReturn;
@@ -4126,6 +4406,12 @@ shared static this() {
     foreach (handler; branchHandlers)
         if (!holdsInstruction(handler))
             internalFailure("a branch handler has no instruction role");
+    static foreach (width; [1, 2, 4, 8, 16])
+        if (lookupSpecialisation(&opCopyFixed!width) is null)
+            internalFailure("opCopyFixed has no specialisation");
+    static foreach (width; 1 .. 17)
+        if (lookupSpecialisation(&opCopyFixed!(width, true)) is null)
+            internalFailure("opCopyFixed has no specialisation");
 }
 
 // The handlers that the compiler emits with a branch target. A target that
@@ -4151,10 +4437,11 @@ package void specialiseHandlers(Instruction[] instructions) {
         const entry = lookupSpecialisation(instruction.handler);
         if (entry is null)
             continue;
-        bool frame = !(entry.destination
-                && (instruction.destination & indirectBit))
-            && !(entry.source && (instruction.source & indirectBit))
-            && !(entry.right && (instruction.sourceWidth & indirectBit));
+        const mask = (entry.destination
+                && (instruction.destination & indirectBit) ? 1 : 0)
+            | (entry.source && (instruction.source & indirectBit) ? 2 : 0)
+            | (entry.right && (instruction.sourceWidth & indirectBit) ? 4 : 0);
+        bool frame = mask == 0;
         if (frame && entry.pairWithNext) {
             const next = index + 1 < instructions.length
                 ? &instructions[index + 1] : null;
@@ -4162,9 +4449,14 @@ package void specialiseHandlers(Instruction[] instructions) {
                 && !((next.destination | next.source) & indirectBit);
         }
         const slot = widthSlot(instruction.width);
-        Instruction.Handler chosen = entry.handlers[frame][slot];
+        const(Instruction.Handler)[] row = entry.handlers[0][];
+        if (frame)
+            row = entry.handlers[1][];
+        else if (entry.masked !is null && (*entry.masked)[mask - 1][0] !is null)
+            row = (*entry.masked)[mask - 1][];
+        Instruction.Handler chosen = row[slot];
         if (chosen is null)
-            chosen = entry.handlers[frame][0];
+            chosen = row[0];
         instruction.handler = chosen;
     }
 }
