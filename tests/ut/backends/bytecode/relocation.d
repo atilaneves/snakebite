@@ -5,7 +5,7 @@ import ut.backends;
 import dmd.func: FuncDeclaration;
 import snakebite.backends.backend: Program;
 import snakebite.backends.bytecode.inspection:
-    misplacedRelocs, relocsOf, unrecordedWords;
+    handlerRoleMismatches, misplacedRelocs, relocsOf, unrecordedWords;
 import snakebite.backends.bytecode.relocation: Place, Target;
 import snakebite.backends.bytecode.vm:
     Function, Instruction, opConstant, specialisedHandlersWithoutRoles;
@@ -103,12 +103,105 @@ package enum addressPrograms = q{
 };
 
 
-package string[] entryPoints() {
-    return [
-        "runStatics", "runPointers", "runStackClass", "runChecks",
-        "runThrow", "runLiterals", "runRemap",
-    ];
+// The kinds of call that tests/ut/backends/call exercise: function pointer
+// tables, native calls, a callback that host code calls, interface and
+// delegate calls, and assertions with a message.
+package enum callPrograms = q{
+    module relocation_calls;
+
+    import core.stdc.stdlib: abs, free, malloc, qsort;
+    import core.stdc.string: strlen;
+    import core.math: fabs;
+    import core.stdc.stdarg: va_arg;
+
+    int addOne(int x) { return x + 1; }
+    int timesThree(int x) { return x * 3; }
+
+    extern(C) int compareInts(const(void)* first, const(void)* second) {
+        return *cast(const(int)*) first - *cast(const(int)*) second;
+    }
+
+    extern(C) int sumVariadic(int fixed, ...) {
+        return fixed + va_arg!int(_argptr);
+    }
+
+    interface Shape { int area(); }
+
+    class Square : Shape {
+        int side;
+        this(int side) { this.side = side; }
+        int area() { return side * side; }
+    }
+
+    struct Accumulator {
+        int total;
+        void add(int x) { total += x; }
+    }
+
+    long runFunctionPointers() {
+        int function(int)[2] table = [&addOne, &timesThree];
+        auto literal = function int(int x) { return x + 1; };
+        auto variadic = &sumVariadic;
+        return table[0](4) + table[1](5) + literal(1)
+            + (variadic is null ? 0 : sumVariadic(1, 2));
+    }
+
+    long runNativeCalls() {
+        int[4] values = [3, 1, 2, 0];
+        qsort(values.ptr, 4, int.sizeof, &compareInts);
+        auto memory = cast(int*) malloc(2 * int.sizeof);
+        memory[0] = 7;
+        memory[1] = 9;
+        const sum = memory[0] + memory[1];
+        free(memory);
+        auto nativePointer = &abs;
+        return values[0] * 1000 + values[1] * 100 + values[2] * 10 + values[3]
+            + strlen("hello") + abs(-3) + sum + nativePointer(-5)
+            + cast(long) fabs(-2.0);
+    }
+
+    long runInterface() {
+        Shape shape = new Square(3);
+        return shape.area();
+    }
+
+    long runDelegates() {
+        Accumulator accumulator;
+        auto add = &accumulator.add;
+        add(2);
+        add(5);
+        return accumulator.total;
+    }
+
+    long runAssertMessage() {
+        int x = 4;
+        assert(x == 4, "x is four");
+        assert(x > 0);
+        return x;
+    }
+};
+
+
+private struct Checksum {
+    string entryPoint;
+    long expected;
 }
+
+// What each entry point of `addressPrograms` returns, in the order that they
+// run: `runPointers` reads the thread-local variable that `runStatics` set.
+private enum addressChecksums = [
+    Checksum("runStatics", 31), Checksum("runPointers", 25),
+    Checksum("runStackClass", 7), Checksum("runChecks", 10),
+    Checksum("runThrow", 6), Checksum("runLiterals", 43),
+    Checksum("runRemap", 15),
+];
+
+// What each entry point of `callPrograms` returns.
+private enum callChecksums = [
+    Checksum("runFunctionPointers", 25), Checksum("runNativeCalls", 154),
+    Checksum("runInterface", 9), Checksum("runDelegates", 7),
+    Checksum("runAssertMessage", 4),
+];
 
 
 private struct Range {
@@ -132,21 +225,33 @@ private bool isMapped(in Range[] ranges, in size_t word) {
     return false;
 }
 
-// Compiles and runs every entry point of `addressPrograms`, then shows each
-// function that the backend compiled to `visit`.
-private void withCompiledPrograms(
+// Compiles and runs every entry point of `source`, checks what each returns
+// against `checksums`, then shows each function that the backend compiled to
+// `visit`.
+private void withCompiledProgram(
+    string source, in Checksum[] checksums,
     scope void delegate(string, const(Function)*) visit,
 ) {
-    auto guestModule = parseSnippet(addressPrograms);
+    auto guestModule = parseSnippet(source);
     auto program = Program([guestModule]);
     auto backend = Owned!Bytecode(program);
-    foreach (name; entryPoints) {
+    foreach (checksum; checksums) {
         long result;
-        backend.call(findFunction(guestModule, name), &result, []);
+        backend.call(findFunction(guestModule, checksum.entryPoint),
+            &result, []);
+        result.should == checksum.expected;
     }
     backend.eachCompiled((FuncDeclaration declaration, const(Function)* function_) {
         visit(declaration.toPrettyChars.fromStringz.idup, function_);
     });
+}
+
+// Both groups of programs.
+private void withCompiledPrograms(
+    scope void delegate(string, const(Function)*) visit,
+) {
+    withCompiledProgram(addressPrograms, addressChecksums, visit);
+    withCompiledProgram(callPrograms, callChecksums, visit);
 }
 
 // A stored image has to find every address of the process in a function.
@@ -158,26 +263,43 @@ unittest {
     string[] unrecorded;
     string[] misplaced;
     bool[Target.Kind] seen;
+    bool[Place.Section] seenSections;
     withCompiledPrograms((name, function_) {
         foreach (word; unrecordedWords(function_, w => ranges.isMapped(w)))
             unrecorded ~= name ~ ": " ~ word;
         foreach (word; misplacedRelocs(function_))
             misplaced ~= name ~ ": " ~ word;
         foreach (reloc; relocsOf(function_))
+        {
             seen[reloc.target.kind] = true;
+            seenSections[reloc.place.section] = true;
+        }
     });
 
     unrecorded.should == string[].init;
     misplaced.should == string[].init;
     // The programs reach every kind of address, so an empty scan is not a
     // scan that looked at nothing.
+    Target.Kind[] missingKinds;
     foreach (kind; [
         Target.Kind.staticData, Target.Kind.tlsDescriptor,
         Target.Kind.typeInfo, Target.Kind.functionWord,
         Target.Kind.constantPool, Target.Kind.nativePlan,
-        Target.Kind.frontendString,
+        Target.Kind.frontendString, Target.Kind.hostSymbol,
+        Target.Kind.callbackEntry, Target.Kind.callback, Target.Kind.signature,
     ])
-        seen.get(kind, false).should == true;
+        if (!seen.get(kind, false))
+            missingKinds ~= kind;
+    missingKinds.should == Target.Kind[].init;
+    Place.Section[] missingSections;
+    foreach (section; [
+        Place.Section.instruction, Place.Section.constant,
+        Place.Section.callSite, Place.Section.assertSite,
+        Place.Section.exceptionHandler,
+    ])
+        if (!seenSections.get(section, false))
+            missingSections ~= section;
+    missingSections.should == Place.Section[].init;
 }
 
 @("relocation.scanFlagsAnAddressNoRelocNames")
@@ -203,6 +325,12 @@ unittest {
 @("relocation.everySpecialisedHandlerHasRoles")
 unittest {
     specialisedHandlersWithoutRoles.should == 0;
+}
+
+// The handlers that no specialisation covers are registered by hand.
+@("relocation.handRegisteredHandlersHaveRoles")
+unittest {
+    handlerRoleMismatches.should == string[].init;
 }
 
 // Removing the lifetime markers of statements without temporaries moves

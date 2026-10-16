@@ -847,7 +847,9 @@ package void recordCallSiteRelocs(
     // `prepareNativePlan`, `builtinEntry` and `value.signature`. A
     // delegate is kept by its function; its context is state of the
     // compiler. The instruction addresses `cleanupStart` and `cleanupEnd`
-    // follow from the two indexes.
+    // follow from the two indexes. `fast` is not listed as an address field:
+    // it is filled only at run time, when a call first runs, so a compiled
+    // function never holds an address in it.
     enum plainFields = AliasSeq!(
         "kind", "value", "args", "nativeArgs", "returnWidth", "fast",
         "calleeSlotOffset", "hasContext", "cleanupStartIndex",
@@ -4078,8 +4080,26 @@ shared static this() {
             entry.handlers[0][widthSlot(width)] = &returnHandler!(width, false);
             entry.handlers[1][widthSlot(width)] = &returnHandler!(width, true);
         }
-        addSpecialisation(entry);
+        addSpecialisation(entry, Roles.init);
     }
+    foreach (handler; branchHandlers)
+        if (!holdsInstruction(handler))
+            internalFailure("a branch handler has no instruction role");
+}
+
+// The handlers that the compiler emits with a branch target. A target that
+// the table does not know would be skipped when the compiler remaps
+// instruction indexes, so the table is checked when the program starts.
+private Instruction.Handler[] branchHandlers() {
+    return [&opJump, &opBranchFalse, &opBranchTrue];
+}
+
+private bool holdsInstruction(in Instruction.Handler handler) {
+    Roles roles;
+    return rolesOf(handler, roles)
+        && (roles.destination == Role.instruction
+            || roles.source == Role.instruction
+            || roles.sourceWidth == Role.instruction);
 }
 
 // The specialised instance of `instruction`'s handler: frame-only when every

@@ -55,6 +55,96 @@ public string[] unrecordedWords(
     foreach (index, constant; function_.constants)
         check(Place(Place.Section.constant, Place.Field.word, index),
             cast(size_t) constant);
+    static foreach (table; tableFields) {
+        foreach (index; 0 .. tableLength(function_, table.section))
+            foreach (field; table.fields) {
+                const place = Place(table.section, field, index);
+                size_t word;
+                if (!isRunTimeCache(function_, place)
+                        && wordAt(function_, place, word))
+                    check(place, word);
+            }
+    }
+    return found;
+}
+
+// A call site that has a delegate to prepare its callee or its plan keeps
+// the result in `callee` or `nativePlan` when it first runs. The scan runs
+// after the programs did, so the cache holds an address that the compiler
+// never wrote.
+private bool isRunTimeCache(const(Function)* function_, in Place place) {
+    if (place.section != Place.Section.callSite)
+        return false;
+    const site = &function_.callSites[place.index];
+    return (place.field == Place.Field.callee
+            && site.prepareGuest.funcptr !is null)
+        || (place.field == Place.Field.nativePlan
+            && site.prepareNativePlan.funcptr !is null);
+}
+
+private struct TableFields {
+    Place.Section section;
+    Place.Field[] fields;
+}
+
+private enum tableFields = [
+    TableFields(Place.Section.callSite, [
+        Place.Field.callee, Place.Field.prepareGuest, Place.Field.nativePlan,
+        Place.Field.prepareNativePlan, Place.Field.builtinEntry,
+        Place.Field.valueSignature,
+    ]),
+    TableFields(Place.Section.assertSite, [
+        Place.Field.message, Place.Field.file, Place.Field.halt,
+    ]),
+    TableFields(Place.Section.exceptionHandler, [Place.Field.type]),
+];
+
+private size_t tableLength(
+    const(Function)* function_, in Place.Section section,
+) {
+    final switch (section) with (Place.Section) {
+        case instruction: return function_.instructions.length;
+        case constant: return function_.constants.length;
+        case callSite: return function_.callSites.length;
+        case assertSite: return function_.assertSites.length;
+        case exceptionHandler: return function_.exceptionHandlers.length;
+    }
+}
+
+// Whether the role table says that the handler's `field` holds an address
+// (`Role.address`) or an instruction (`Role.instruction`); "none" when the
+// table does not know the handler.
+public string rolesOfHandler(const Instruction.Handler handler) {
+    Roles roles;
+    if (!rolesOf(handler, roles))
+        return "none";
+    return text(roles.destination, "/", roles.source, "/", roles.sourceWidth);
+}
+
+// The handlers that no specialisation covers, with the roles that they have
+// to hold, as `destination/source/sourceWidth`. The fused returns keep the
+// roles of the copy they replace.
+public string[] handlerRoleMismatches() {
+    import snakebite.backends.bytecode.vm: opJump, opStaticAddress,
+        opStaticStore, opThenReturn, opTlsAddress, opTlsLoad, opTlsStore,
+        opCopyFixed;
+
+    string[] found;
+    void expect(string name, const Instruction.Handler handler, string roles) {
+        const actual = rolesOfHandler(handler);
+        if (actual != roles)
+            found ~= text(name, " has roles ", actual, ", not ", roles);
+    }
+
+    expect("opJump", &opJump, "instruction/other/other");
+    expect("opStaticStore", &opStaticStore, "address/other/other");
+    expect("opStaticAddress", &opStaticAddress, "other/address/other");
+    expect("opTlsLoad", &opTlsLoad, "other/address/other");
+    expect("opTlsStore", &opTlsStore, "address/other/other");
+    expect("opTlsAddress", &opTlsAddress, "other/address/other");
+    static foreach (width; 1 .. 17)
+        expect("opThenReturn!(opCopyFixed!(" ~ width.stringof ~ ", true))",
+            &opThenReturn!(opCopyFixed!(width, true)), "other/address/other");
     return found;
 }
 

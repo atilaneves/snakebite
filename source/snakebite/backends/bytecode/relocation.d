@@ -33,6 +33,8 @@ public struct Target {
         nativePlan,
         // The signature of a function type.
         signature,
+        // The entry that host code calls to reach a guest function.
+        callbackEntry,
         // A delegate that prepares a call site when it first runs.
         callback,
     }
@@ -55,7 +57,7 @@ public struct Address {
         _target = Target(kind, address);
     }
 
-    public this(in Target.Kind kind, in void* address) @trusted pure nothrow @nogc {
+    public this(in Target.Kind kind, in void* address) @safe pure nothrow @nogc {
         _target = Target(kind, cast(size_t) address);
     }
 

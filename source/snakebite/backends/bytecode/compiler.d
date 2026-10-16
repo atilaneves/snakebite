@@ -440,10 +440,27 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // so a speculative compile must not compile it. The rejection leaves
     // only the callee's own compile to unwind: class runtime info, built
     // through `callableAddress` itself, never sees it.
-    private void* operandAddress(FuncDeclaration method, ptrdiff_t adjustment) {
+    private imported!"snakebite.backends.bytecode.relocation".Address
+    operandAddress(FuncDeclaration method, ptrdiff_t adjustment) {
+        import snakebite.backends.bytecode.relocation: Address;
+
         if (_speculating != 0)
             throw new SpeculationRejected;
-        return callableAddress(method, adjustment);
+        const address = callableAddress(method, adjustment);
+        return Address(callableKind(address), address);
+    }
+
+    // What `callableAddress` returned: a guest function, the callback entry
+    // that host code calls for one, or code of the host.
+    private imported!"snakebite.backends.bytecode.relocation".Target.Kind
+    callableKind(in void* address) {
+        import snakebite.backends.bytecode.relocation: Target;
+
+        if (address is null || _plans.isGuestWord(address))
+            return Target.Kind.functionWord;
+        if (_plans.guestTarget(address).word !is null)
+            return Target.Kind.callbackEntry;
+        return Target.Kind.hostSymbol;
     }
 
     // A callback can first execute during GC finalization. Compile every
@@ -1505,9 +1522,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (!known || role != Role.address)
             internalFailure(text("this handler holds no address in `", field,
                 "`"));
-        _relocs ~= Reloc(
-            Place(Place.Section.instruction, field, _instructions.length),
-            address.target);
+        if (!address.isNull)
+            _relocs ~= Reloc(
+                Place(Place.Section.instruction, field, _instructions.length),
+                address.target);
     }
 
     private size_t addConstant(in long value) {
@@ -1516,7 +1534,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private size_t addConstant(in Address address) {
-        _relocs ~= Reloc(
+        if (!address.isNull)
+            _relocs ~= Reloc(
             Place(Place.Section.constant, Place.Field.word,
                 _constants.length),
             address.target);
@@ -2540,7 +2559,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const branchIndex = _instructions.length;
         emit(&opBranchTrue, conditionOffset, 0, width);
         failure();
-        *branchTargetField(_instructions[branchIndex]) = _instructions.length;
+        patchTarget(branchIndex, _instructions.length);
     }
 
     // `assert(c, m())`: druntime's own `_d_assert_msg` builds and throws the
@@ -2590,11 +2609,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileCAssertCall(in CAssertCall call, in Arg assertion) {
         import snakebite.backends.druntimehooks: DruntimeHook, planOf;
 
+        // Without a function, `cAssertCallOf` names it with a literal of the
+        // host.
+        const functionKind = call.function_[0] == 0
+            ? Target.Kind.hostSymbol : Target.Kind.frontendString;
         Arg[] args = [
             assertion,
             constantArgument(Address(Target.Kind.frontendString, call.file), size_t.sizeof),
             constantArgument(call.line, uint.sizeof),
-            constantArgument(Address(Target.Kind.frontendString, call.function_), size_t.sizeof),
+            constantArgument(
+                Address(functionKind, call.function_), size_t.sizeof),
         ];
         auto plan = planOf(_bytecode._plans, DruntimeHook.cAssertFail);
         _callSites ~= CallSite.native(cast(const(void)*) plan, args, 0);
@@ -2998,7 +3022,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // the same field each opcode keeps it in (`branchTargetField`).
     private void patchTarget(in size_t instructionIndex, in size_t target) {
         auto field = branchTargetField(_instructions[instructionIndex]);
-        assert(field !is null);
+        if (field is null)
+            internalFailure("patchTarget met an instruction without a branch target");
         *field = target;
     }
 
@@ -4645,7 +4670,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (expression.type.toBasetype.ty != Tdelegate) {
             const address = _bytecode.operandAddress(expression.fd, 0);
             emit(&opConstant, _destination,
-                addConstant(Address(Target.Kind.functionWord, address)),
+                addConstant(address),
                 _width);
             return;
         }
@@ -4716,7 +4741,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const address = _bytecode.operandAddress(target.function_, 0);
         emit(&opConstant, _destination + delegateFunctionOffset,
-            addConstant(Address(Target.Kind.functionWord, address)),
+            addConstant(address),
             size_t.sizeof);
     }
 
@@ -9291,8 +9316,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 const result = compiler.reserveTemp(compiler.pointerFacts);
                 const address = compiler._bytecode.operandAddress(function_, 0);
                 compiler.emit(&opConstant, result,
-                    compiler.addConstant(
-                        Address(Target.Kind.functionWord, address)),
+                    compiler.addConstant(address),
                     size_t.sizeof);
                 return result;
             }
