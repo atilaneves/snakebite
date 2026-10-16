@@ -51,6 +51,9 @@ public struct FrameStack {
     private ubyte* _base;
     private size_t _committed;
     private size_t _limit;
+    // The end of the bytes `reserveFast` can hand out: committed, and
+    // inside the limit.
+    private size_t _fastEnd;
     private size_t _reservation;
     private size_t _used;
     private void[][] _allocations;
@@ -108,6 +111,7 @@ public struct FrameStack {
             );
 
         _committed = roundUpToPage(capacity);
+        _fastEnd = _committed < _limit ? _committed : _limit;
         if (mprotect(_base, _committed, PROT_READ | PROT_WRITE) != 0) {
             import core.sys.posix.sys.mman: munmap;
 
@@ -252,6 +256,18 @@ public struct FrameStack {
         return reserve(size, alignment);
     }
 
+    // As `reserveCommitted`, for a caller that checked once that `size` is
+    // not 0 and that `alignment` is a power of two below the page size.
+    // `null` when the bytes are not committed: the caller takes `reserve`.
+    pragma(inline, true)
+    public ubyte* reserveFast(in size_t size, in uint alignment) @system {
+        const alignedUsed = (_used + alignment - 1) & ~(size_t(alignment) - 1);
+        if (alignedUsed > _fastEnd || size > _fastEnd - alignedUsed)
+            return null;
+        _used = alignedUsed + size;
+        return _base + alignedUsed;
+    }
+
     // Gives back everything reserved since `mark`. Only for `reserve`d
     // bytes: a `push`ed `Frame` gives its own back.
     public void release(in Mark mark) {
@@ -338,6 +354,7 @@ public struct FrameStack {
         GC.addRange(grown, committed - _committed);
         _registeredRanges.push(grown);
         _committed = committed;
+        _fastEnd = _committed < _limit ? _committed : _limit;
     }
 
     private static size_t roundUpToPage(in size_t value)

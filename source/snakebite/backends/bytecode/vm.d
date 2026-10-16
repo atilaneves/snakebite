@@ -201,6 +201,8 @@ public struct CallSite {
         package size_t returnWidth;
         package const(Arg)* args;
         package size_t argCount;
+        // Every argument is a plain frame offset of width 1, 2, 4 or 8.
+        package bool plainArgs;
     }
 
     package FastCall fast;
@@ -261,6 +263,10 @@ public struct CallSite {
             && (function_.frameAlignment & (function_.frameAlignment - 1)) == 0);
         const alignment = function_.frameAlignment > uint(Activation.alignof)
             ? function_.frameAlignment : uint(Activation.alignof);
+        import core.memory: pageSize;
+        // `opCall` reserves with `reserveFast`.
+        if (alignment >= pageSize)
+            return false;
         slot.frameOffset =
             (Activation.sizeof + alignment - 1) & ~(size_t(alignment) - 1);
         slot.alignment = alignment;
@@ -269,6 +275,12 @@ public struct CallSite {
         slot.returnWidth = returnWidth;
         slot.args = args.ptr;
         slot.argCount = args.length;
+        slot.plainArgs = true;
+        foreach (arg; args)
+            if ((arg.callerOffset & (1UL << 63)) != 0
+                    || (arg.width != 1 && arg.width != 2 && arg.width != 4
+                        && arg.width != 8))
+                slot.plainArgs = false;
         slot.callee = function_;
         return true;
     }
@@ -513,7 +525,7 @@ private alias positionFree = AliasSeq!(
     runIndex, runInt3, runJump, runLessOrEqualSigned, runLessOrEqualUnsigned,
     runLessThanSigned, runLessThanUnsigned, runLoadBitfield, runLoadIndirect,
     runLogicalNot, runMultiply, runNegate, runNotEqual, runRangeEndPass,
-    runReturn, runReturnVoid, runShift3, runShiftLeft, runShiftRightArithmetic,
+    runReturnVoid, runShift3, runShiftLeft, runShiftRightArithmetic,
     runShiftRightLogical, runSliceCopy, runSliceFill, runSlicesConform,
     runStaticAddress, runStaticArrayEqual, runStaticLoad, runStaticStore,
     runStoreBitfield, runStoreIndirect, runSubtract, runZero,
@@ -1414,10 +1426,12 @@ private alias opCallGeneral =
     executeCall!(runCall, OperandKind.result, OperandKind.immediate);
 
 // A call of a compiled guest function whose activation needs no closure,
-// no discarded memory-class result slot and no context conversion: the
-// activation is built here without the generic `Execution` decoding, from
-// the facts `CallSite.prepare` keeps. Any other call takes `opCallGeneral`,
-// which has the same effect.
+// no discarded memory-class result slot and no context conversion, with
+// plain arguments and room on the committed frame stack: the activation is
+// built here without the generic `Execution` decoding, from the facts
+// `CallSite.prepare` keeps. Everything else takes `opCallSlow`, which has the
+// same effect. This function calls nothing, so it keeps no value in a
+// callee-saved register.
 public const(Instruction)* opCall(
     const(Instruction)* pc,
     Activation* active,
@@ -1428,6 +1442,78 @@ public const(Instruction)* opCall(
         static __gshared CountSlot slot;
         countExecution(&slot, "opCall");
     }
+    import core.atomic: atomicLoad, MemoryOrder;
+
+    const site = &active.callSites[pc.source];
+    const fast = &site.fast;
+    const ready = atomicLoad!(MemoryOrder.acq)(
+        *cast(shared(uint)*) &fast.state) == CallSite.FastCall.State.ready;
+    const hasPlace = fast.returnWidth != 0 && pc.destination != discardResult;
+    if (!ready || !fast.plainArgs
+            || (!hasPlace && fast.returnPlaceOffset != size_t.max))
+        return opCallSlow(pc, active, state, frame);
+
+    auto frames = state.frames;
+    const mark = frames.mark;
+    auto activation = cast(Activation*) frames.reserveFast(
+        fast.frameBytes, fast.alignment);
+    if (activation is null)
+        return opCallSlow(pc, active, state, frame);
+
+    // The position of a throw selects its handler, and the new activation
+    // resumes this one.
+    active.pc = pc;
+    state.current = active;
+    activation.frameMark = mark;
+    ubyte* calleeFrame = cast(ubyte*) activation + fast.frameOffset;
+    activation.frame = calleeFrame;
+
+    const callee = fast.callee;
+    activation.pc = activation.start = callee.instructions.ptr;
+    activation.end = null;
+    activation.resume = null;
+    void* place = null;
+    if (hasPlace)
+        place = operandStorage(frame, pc.destination);
+    if (fast.returnPlaceOffset != size_t.max)
+        *cast(void**) (calleeFrame + fast.returnPlaceOffset) = place;
+    activation.returnPlace = place;
+    activation.constants = callee.constants;
+    activation.callSites = callee.callSites;
+    activation.assertSites = callee.assertSites;
+    activation.exceptionHandlers = callee.exceptionHandlers;
+    activation.cleanupMark = frames.cleanupMark;
+    activation.parent = active;
+    active.resume = pc + 1;
+    state.pending = activation;
+
+    // Last, so that few values stay live through the loop.
+    foreach (arg; fast.args[0 .. fast.argCount]) {
+        auto destination = calleeFrame + arg.calleeOffset;
+        const source = frame + arg.callerOffset;
+        // Compares, not a jump table: a site always takes the same one.
+        if (arg.width == 8)
+            *cast(ulong*) destination = *cast(const(ulong)*) source;
+        else if (arg.width == 4)
+            *cast(uint*) destination = *cast(const(uint)*) source;
+        else if (arg.width == 1)
+            *destination = *source;
+        else
+            *cast(ushort*) destination = *cast(const(ushort)*) source;
+    }
+    return pc + 1;
+}
+
+
+// Every call `opCall` does not take, and the same call with a general
+// frame reserve and argument copy.
+pragma(inline, false)
+private const(Instruction)* opCallSlow(
+    const(Instruction)* pc,
+    Activation* active,
+    DispatchState* state,
+    ubyte* frame,
+) {
     import core.stdc.string: memcpy;
 
     import core.atomic: atomicLoad, MemoryOrder;
@@ -1706,12 +1792,39 @@ private const(Instruction)* callFunction(bool redirected = false, Decoded)(
 }
 
 
-// Copies `execution.width` bytes from `execution.source` to `returnPlace` -
+// Copies `Instruction.width` bytes from `Instruction.source` to `returnPlace` -
 // `null` when the caller discarded the result, the same convention every
-// backend uses for a call whose value nothing reads. `execution.destination` is
-// unused: there is no frame slot on the receiving end, only `returnPlace`.
-public alias opReturn =
-    executeOnce!(runReturn, OperandKind.immediate, OperandKind.storage);
+// backend uses for a call whose value nothing reads. `Instruction.destination`
+// is unused: there is no frame slot on the receiving end, only `returnPlace`.
+// `width` is 0 to read the width from the instruction, and `frameOnly` says the
+// source is a plain frame offset. It returns `null`, which ends the activation.
+package const(Instruction)* returnHandler(size_t width, bool frameOnly)(
+    const(Instruction)* pc,
+    Activation* activation,
+    DispatchState* state,
+    ubyte* frame,
+) {
+    import core.stdc.string: memcpy;
+
+    version (BytecodeCount) {
+        static __gshared CountSlot slot;
+        countExecution(&slot, "opReturn");
+    }
+    static if (frameOnly)
+        const source = frame + pc.source;
+    else
+        const source = operandStorage(frame, pc.source);
+    auto place = activation.returnPlace;
+    if (place !is null && place != source) {
+        static if (width == 0)
+            memcpy(place, source, pc.width);
+        else
+            memcpy(place, source, width);
+    }
+    return null;
+}
+
+public alias opReturn = returnHandler!(0, false);
 
 package const(Instruction)* opThenReturn(alias operation)(
     const(Instruction)* pc,
@@ -1727,18 +1840,6 @@ package const(Instruction)* opThenReturn(alias operation)(
         return opReturn(next, activation, state, frame);
     }
 }
-
-private const(Instruction)* runReturn(Decoded)(
-    ref Decoded execution,
-) {
-    import core.stdc.string: memcpy;
-
-    if (execution.returnPlace !is null
-            && execution.returnPlace != execution.source)
-        memcpy(execution.returnPlace, execution.source, execution.width);
-    return null;
-}
-
 
 public alias opReturnVoid =
     executeOnce!(runReturnVoid, OperandKind.immediate, OperandKind.immediate);
@@ -3351,6 +3452,18 @@ shared static this() {
         specialise!(runCopyFixed, S, S, noWidths, false, width, false)();
     static foreach (width; 1 .. 17)
         specialise!(runCopyFixed, S, I, noWidths, false, width, true)();
+    {
+        Specialisation entry;
+        entry.general = &opReturn;
+        entry.handlers[0][0] = entry.general;
+        entry.handlers[1][0] = &returnHandler!(0, true);
+        entry.source = true;
+        static foreach (width; integralWidths) {
+            entry.handlers[0][widthSlot(width)] = &returnHandler!(width, false);
+            entry.handlers[1][widthSlot(width)] = &returnHandler!(width, true);
+        }
+        addSpecialisation(entry);
+    }
 }
 
 // The specialised instance of `instruction`'s handler: frame-only when every
