@@ -715,6 +715,7 @@ private ModuleInfo*[] recordsOf(
     ModuleSpec[] specs,
     in GuestModules.Tests tests,
 ) {
+    import snakebite.frontend.dmd.functions: prettyNameOf;
     import std.string: fromStringz;
 
     auto records = new ModuleInfo*[specs.length];
@@ -726,7 +727,7 @@ private ModuleInfo*[] recordsOf(
     if (nativeRecords.length)
         foreach (i, spec; specs)
             foreach (module_; spec.module_.aimports) {
-                const name = module_.toPrettyChars.fromStringz;
+                const name = prettyNameOf(module_).fromStringz;
                 if (auto record = name in nativeByName)
                     nativeImports[i] ~= *record;
             }
@@ -736,7 +737,7 @@ private ModuleInfo*[] recordsOf(
     foreach (i, spec; specs) {
         auto functions = spec.functions;
         Fields fields;
-        fields.name = spec.module_.toPrettyChars.fromStringz.idup;
+        fields.name = prettyNameOf(spec.module_).fromStringz.idup;
         // druntime orders no module that has nothing to construct or
         // destruct, and no import of one: dmd marks it the same way.
         fields.standalone = !spec.module_.needmoduleinfo;

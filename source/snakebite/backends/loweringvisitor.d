@@ -610,8 +610,9 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
                 break;
             case ArrayLiteralPlan.Storage.lowering:
                 import snakebite.frontend.compiler: arrayLiteralLowering;
+                import snakebite.frontend.dmd.functions: moduleOf;
 
-                arrayLiteralLowering(expression, currentFunction.getModule)
+                arrayLiteralLowering(expression, moduleOf(currentFunction))
                     .accept(this);
                 break;
             }

@@ -78,6 +78,25 @@ public imported!"dmd.dmodule".Module moduleOf(
     return result;
 }
 
+// The pretty name `toPrettyChars` gives, walking the parent chain under the
+// query lock once. The result outlives the lock; a thread keeps it for the
+// declaration's lifetime.
+public const(char)* prettyNameOf(
+    imported!"dmd.dsymbol".Dsymbol declaration,
+) {
+    import snakebite.frontend.compiler: withCompilerQuery;
+
+    if (auto found = declaration in metadata.prettyNames)
+        return *found;
+
+    const(char)* result;
+    withCompilerQuery({
+        result = declaration.toPrettyChars;
+        metadata.prettyNames[declaration] = result;
+    });
+    return result;
+}
+
 public struct FunctionContext {
     public imported!"dmd.dmodule".Module module_;
     public imported!"dmd.func".FuncDeclaration outerFunction;
@@ -119,6 +138,7 @@ private struct ThreadMetadata {
     size_t generation;
     imported!"dmd.dmodule".Module[imported!"dmd.dsymbol".Dsymbol] modules;
     FunctionContext[imported!"dmd.func".FuncDeclaration] contexts;
+    const(char)*[imported!"dmd.dsymbol".Dsymbol] prettyNames;
 }
 
 // Ordinary module storage is TLS in D; the maps need no shared lock.

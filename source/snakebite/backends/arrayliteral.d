@@ -30,6 +30,7 @@ public ArrayLiteralPlan planArrayLiteral(
     import dmd.astenums: FileType, Tarray, Tpointer, Tsarray, Tvoid;
     import dmd.mtype: Type;
     import dmd.typesem: nextOf, toBasetype;
+    import snakebite.frontend.dmd.functions: moduleOf;
 
     auto type = expression.type.toBasetype; // DMD element types remain mutable.
     const kind = type.ty;
@@ -50,7 +51,7 @@ public ArrayLiteralPlan planArrayLiteral(
     // Scope-local and equality transforms can set onstack after lowering.
     plan.storage = plan.count == 0 ? ArrayLiteralPlan.Storage.empty
         : expression.onstack || kind == Tsarray
-            || (function_.getModule.filetype == FileType.c && kind == Tpointer)
+            || (moduleOf(function_).filetype == FileType.c && kind == Tpointer)
         ? ArrayLiteralPlan.Storage.temporary
         : ArrayLiteralPlan.Storage.lowering;
     return plan;

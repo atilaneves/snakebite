@@ -112,6 +112,7 @@ public TypeInfo_Class classRuntimeInfo(
 ) {
     import dmd.root.string: toDString;
     import dmd.common.blake3: blake3;
+    import snakebite.frontend.dmd.functions: prettyNameOf;
 
     if (auto cached = declaration in cache)
         return *cached;
@@ -141,7 +142,7 @@ public TypeInfo_Class classRuntimeInfo(
                 info.m_flags |= isAbstract;
         }
     }
-    info.name = cast(string) declaration.toPrettyChars.toDString;
+    info.name = cast(string) prettyNameOf(declaration).toDString;
     info.nameSig = *cast(uint[4]*) blake3(
         cast(const(ubyte)[]) info.name,
     )[0 .. 16].ptr;

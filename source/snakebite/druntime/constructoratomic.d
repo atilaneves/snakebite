@@ -38,9 +38,33 @@ public NativeTarget nativeTarget(
 ) {
     import snakebite.frontend.compiler: withCompilerQuery;
 
+    if (auto found = function_ in targets.byFunction)
+        return *found;
+
     NativeTarget result;
-    withCompilerQuery({ result = nativeTargetLocked(function_); });
+    withCompilerQuery({
+        result = nativeTargetLocked(function_);
+        targets.byFunction[function_] = result;
+    });
     return result;
+}
+
+// The answer depends on the declaration alone, so each thread keeps it and
+// a repeated query takes no lock.
+private struct Targets {
+    size_t generation;
+    NativeTarget[imported!"dmd.func".FuncDeclaration] byFunction;
+}
+
+private Targets _targets;
+
+private ref Targets targets() {
+    import snakebite.frontend.compiler: metadataGeneration;
+
+    const generation = metadataGeneration;
+    if (_targets.generation != generation)
+        _targets = Targets(generation);
+    return _targets;
 }
 
 
