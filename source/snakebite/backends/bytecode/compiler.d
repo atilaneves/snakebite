@@ -8121,13 +8121,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import std.conv: to;
         import snakebite.backends.druntimehooks: DruntimeHook, planOf;
 
+        if (callee.ident is null || callee.parent is null)
+            return false;
+        const name = callee.ident.toString;
+        if (name != "_d_newarrayT" && name != "_d_newarrayU")
+            return false;
         auto instance = callee.parent.isTemplateInstance;
         if (instance is null || instance.tdtypes.length != 1
                 || expression.arguments is null
                 || expression.arguments.length == 0)
-            return false;
-        const name = callee.ident.toString;
-        if (name != "_d_newarrayT" && name != "_d_newarrayU")
             return false;
         if (callee.getModule.toPrettyChars.to!string
                 != "core.internal.array.construction")
