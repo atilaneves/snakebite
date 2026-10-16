@@ -146,6 +146,12 @@ public struct CallSite {
         package size_t end;
         package uint alignment;
 
+        // The callee frame alignment is only final when the callee is
+        // compiled, because its temporaries can raise it. A window is never
+        // less aligned than the temporaries that are usual, so such a callee
+        // still fits.
+        private enum uint minimumAlignment = 16;
+
         // The window of a call whose callee has parameters up to
         // `parametersEnd` and frame alignment `calleeAlignment`, laid out from
         // `depth`: the end of the windows that are still open around it.
@@ -157,8 +163,8 @@ public struct CallSite {
         ) {
             Window window;
             window.baseSlot = baseSlot;
-            window.alignment = calleeAlignment > uint(Activation.alignof)
-                ? calleeAlignment : uint(Activation.alignof);
+            window.alignment = calleeAlignment > minimumAlignment
+                ? calleeAlignment : minimumAlignment;
             const mask = size_t(window.alignment) - 1;
             window.scratch = (depth + scratchAlignment - 1)
                 & ~(size_t(scratchAlignment) - 1);
@@ -1859,7 +1865,7 @@ private const(Instruction)* callWindow(Destination destination)(
 ) {
     version (BytecodeCount) {
         static __gshared CountSlot slot;
-        countExecution(&slot, "opCall");
+        countExecution(&slot, "opCallWindow." ~ destination.stringof);
     }
     import core.atomic: atomicLoad, MemoryOrder;
 

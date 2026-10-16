@@ -9100,10 +9100,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
-    // Whether the arguments of a call to `callee` can be written into a
-    // call window: the activation of the callee is then a plain one. A
-    // callee with a closure, or with a frame that asks for a page of
-    // alignment, is called the generic way.
     // The window of a call to a callee with `layout`, from the windows that are
     // open now. It takes the frame slot that holds where the windows start.
     private CallSite.Window windowOf(
@@ -9165,6 +9161,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return inWindow(window, layout.hiddenThis.parameter.offset);
     }
 
+    // Whether the arguments of a call to `callee` can be written into a
+    // call window: the activation of the callee is then a plain one. A
+    // callee with a closure, or with a frame that asks for a page of
+    // alignment, is called the generic way.
     private bool windowFits(FuncDeclaration callee, in FrameLayout layout) {
         import core.memory: pageSize;
 
