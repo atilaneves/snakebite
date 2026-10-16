@@ -768,7 +768,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opModuloSigned3, opModuloUnsigned3,
         CompareKind, Comparison, constantForm, fusedBranchHandler, fusesConstant,
         threeAddressConstantHandlers, threeAddressHandlers,
-        isFusedBranch, specialiseHandlers, RegisterFamily, registerFamily,
+        decodesIndirect, isFusedBranch, specialiseHandlers, RegisterFamily, registerFamily,
         fusedRegisterFamily, registerForm, fusedRegisterForm,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall,
@@ -864,6 +864,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private uint _tempAlignment;
     // Temporaries made for an operand and read by its one parent.
     private bool[size_t] _operandTemps;
+    // The size of every temporary `reserveTemp` made, by offset.
+    private size_t[size_t] _tempRanges;
     private struct Temporary {
         size_t base;
         size_t site;
@@ -1092,6 +1094,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (_pendingDefaultJumps.length != 0)
             internalFailure("every `default` a jump targets was compiled");
 
+        forwardCopies;
         removeEmptyLifetimes;
         // Dispatch tests no end of stream: the last instruction ends the
         // activation.
@@ -1123,6 +1126,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         optimizeStaticLoads;
+        debugDump("pre");
         fuseReturns;
         fuseLoadCopies;
         assignRegisters;
@@ -1181,6 +1185,42 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         result.inlineBody = inlineBody;
         result.relocs = _relocs;
         return result;
+    }
+
+    private void debugDump(string tag) {
+        import core.stdc.stdio: fprintf, stderr;
+        import core.stdc.stdlib: getenv;
+        import std.string: toStringz;
+        if (getenv("SB_DUMP") is null)
+            return;
+        fprintf(stderr, "FUNC %s base %p\n", _function.toString.toStringz, cast(void*) &opReturn);
+        foreach (i, ref ins; _instructions)
+            fprintf(stderr, "I %zu %s d=%zx s=%zx w=%zu sw=%zx\n", i,
+                dumpName(ins.handler), ins.destination, ins.source, ins.width, ins.sourceWidth);
+    }
+
+    private const(char)* dumpName(Instruction.Handler h) {
+        import std.meta: AliasSeq;
+        static foreach (n; ["opAdd", "opAssert", "opBitAnd", "opBitOr", "opBitXor", "opBranchFalse", "opBranchTrue", "opCall", "opCastToBool", "opCastWidenSigned", "opCastWidenUnsigned", "opComplement", "opConstant", "opCopy", "opEqual", "opFrameAddress", "opJump", "opLoadIndirect", "opLogicalNot", "opMultiply", "opNegate", "opNotEqual", "opReturn", "opReturnVoid", "opStoreIndirect", "opSubtract", "opThrow", "opZero", "opStaticLoad", "opStaticStore", "opStaticAddress", "opLessThanSigned", "opGreaterThanSigned", "opLessOrEqualSigned", "opGreaterOrEqualSigned", "opTemporaryBegin", "opTemporaryEnd", "opTemporaryRegister", "opRangeEnd", "opIndexSlice", "opIndexStatic", "opIndexPointer", "opShiftLeft", "opShiftRightArithmetic", "opShiftRightLogical", "opLessThanUnsigned", "opGreaterThanUnsigned", "opDivideSigned", "opModuloSigned", "opFloatAdd", "opFloatSubtract", "opFloatMultiply"])
+            if (h is mixin("&" ~ n)) return (n ~ "\0").ptr;
+        static foreach (w; [1, 2, 4, 8, 16]) {
+            if (h is &opCopyFixed!w) return ("CopyFixed" ~ w.stringof ~ "\0").ptr;
+            if (h is &opCopyFixed!(w, true)) return ("CopyFixedStatic" ~ w.stringof ~ "\0").ptr;
+        }
+        static foreach (w; indirectCopyWidths) {
+            if (h is &opLoadIndirectFixed!w) return ("LoadIndirectFixed" ~ w.stringof ~ "\0").ptr;
+            if (h is &opStoreIndirectFixed!w) return ("StoreIndirectFixed" ~ w.stringof ~ "\0").ptr;
+        }
+        static foreach (kind; [CastKind.narrow, CastKind.widenSigned, CastKind.widenUnsigned])
+            static foreach (d; [1UL, 2, 4, 8])
+                static foreach (sz; [1UL, 2, 4, 8])
+                    if (h is &opCastFixedAs!(kind, d, sz)) return ("Cast" ~ kind.stringof ~ d.stringof ~ "from" ~ sz.stringof ~ "\0").ptr;
+        static foreach (i, op; threeAddressHandlers) {
+            if (h is &op) return ("Three" ~ i.stringof ~ "\0").ptr;
+            if (h is &threeAddressConstantHandlers[i]) return ("ThreeConst" ~ i.stringof ~ "\0").ptr;
+        }
+        if (isFusedBranch(h)) return "FusedBranch";
+        return "?";
     }
 
     // dmd normally rejects a non-void function whose end is reachable, but
@@ -1641,6 +1681,456 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
+
+    // Copy forwarding. A temporary that one instruction fills and one copy
+    // empties makes the producer write the copy's destination instead; a
+    // copy into a temporary that one instruction reads makes that
+    // instruction read the copy's source instead. A temporary counts only
+    // when `reserveTemp` made it and every mention of it is known: an
+    // instruction field, a call argument or a catch offset.
+    private enum indirectBit = 1UL << 63;
+
+    private static bool isDirect(in size_t field) {
+        return (field & indirectBit) == 0;
+    }
+
+    private static size_t slotOfField(in size_t field) {
+        return (field >> 32) & 0x7fff_ffffUL;
+    }
+
+    private static size_t copyWidthOf(in Instruction.Handler handler) {
+        static foreach (width; [1, 2, 4, 8, 16])
+            if (handler is &opCopyFixed!width)
+                return width;
+        return 0;
+    }
+
+    // A handler that reads its operands, then writes `destination` alone and
+    // reads nothing from it.
+    private static bool isPureWriter(in Instruction.Handler handler) {
+        import std.meta: AliasSeq;
+
+        static foreach (operation; AliasSeq!(
+            opConstant, opZero, opStaticLoad, opFrameAddress, opIndexSlice,
+            opIndexStatic, opIndexPointer,
+        ))
+            if (handler is &operation)
+                return true;
+        static foreach (width; [1, 2, 4, 8]) {
+            if (handler is &opLoadIndirectFixed!width
+                    || handler is &opCopyFixed!width)
+                return true;
+        }
+        static foreach (kind; [
+            CastKind.narrow, CastKind.widenSigned, CastKind.widenUnsigned,
+        ])
+            static foreach (destSize; [1UL, 2, 4, 8])
+                static foreach (sourceSize; [1UL, 2, 4, 8])
+                    if (handler is &opCastFixedAs!(kind, destSize, sourceSize))
+                        return true;
+        static foreach (index, operation; threeAddressHandlers) {
+            if (handler is &operation
+                    || handler is &threeAddressConstantHandlers[index])
+                return true;
+        }
+        return false;
+    }
+
+    // A handler that reads `destination` and writes it with a result of the
+    // same width, and reads no other storage than `source`.
+    private static bool isInPlace(in Instruction.Handler handler) {
+        import std.meta: AliasSeq;
+
+        static foreach (operation; AliasSeq!(
+            opAdd, opSubtract, opMultiply, opBitAnd, opBitOr, opBitXor,
+            opShiftLeft, opShiftRightLogical, opShiftRightArithmetic,
+            opNegate, opComplement, opLogicalNot, opCastToBool,
+            opFloatAdd, opFloatSubtract, opFloatMultiply, opFloatDivide,
+            opFloatNegate,
+        ))
+            if (handler is &operation)
+                return true;
+        return false;
+    }
+
+    private enum Field : ubyte { destination, source, right }
+
+    // The fields from which a handler only reads a direct operand, as a bit
+    // mask of `1 << Field`.
+    private static uint readOnlyFields(in Instruction.Handler handler) {
+        import std.meta: AliasSeq;
+
+        enum d = 1 << Field.destination;
+        enum s = 1 << Field.source;
+        enum r = 1 << Field.right;
+        if (handler is &opReturn)
+            return s;
+        static foreach (width; [1, 2, 4, 8])
+            if (handler is &opCopyFixed!width
+                    || handler is &opStoreIndirectFixed!width)
+                return handler is &opCopyFixed!width ? s : d | s;
+        static foreach (width; indirectCopyWidths)
+            if (handler is &opLoadIndirectFixed!width)
+                return s;
+        static foreach (kind; [
+            CastKind.narrow, CastKind.widenSigned, CastKind.widenUnsigned,
+        ])
+            static foreach (destSize; [1UL, 2, 4, 8])
+                static foreach (sourceSize; [1UL, 2, 4, 8])
+                    if (handler is &opCastFixedAs!(kind, destSize, sourceSize))
+                        return s;
+        static foreach (index, operation; threeAddressHandlers) {
+            if (handler is &operation)
+                return s | r;
+            if (handler is &threeAddressConstantHandlers[index])
+                return s;
+        }
+        static foreach (operation; AliasSeq!(opBranchFalse, opBranchTrue))
+            if (handler is &operation)
+                return d;
+        if (isFusedBranch(handler))
+            return fusesConstant(handler) ? d : d | s;
+        static foreach (operation; AliasSeq!(
+            opAdd, opSubtract, opMultiply, opBitAnd, opBitOr, opBitXor,
+            opShiftLeft, opShiftRightLogical, opShiftRightArithmetic,
+        ))
+            if (handler is &operation)
+                return s;
+        return 0;
+    }
+
+    // The bytes that a handler reads from the operand in `field`.
+    private static size_t readWidthOf(
+        in Instruction instruction, in Field field,
+    ) {
+        const handler = instruction.handler;
+        static foreach (width; indirectCopyWidths) {
+            if (handler is &opLoadIndirectFixed!width
+                    || handler is &opStoreIndirectFixed!width) {
+                if (field == Field.destination
+                        || handler is &opLoadIndirectFixed!width)
+                    return size_t.sizeof;
+            }
+        }
+        static foreach (kind; [
+            CastKind.narrow, CastKind.widenSigned, CastKind.widenUnsigned,
+        ])
+            static foreach (destSize; [1UL, 2, 4, 8])
+                static foreach (sourceSize; [1UL, 2, 4, 8])
+                    if (handler is &opCastFixedAs!(kind, destSize, sourceSize))
+                        return sourceSize;
+        return instruction.width;
+    }
+
+    private void forwardCopies() {
+        const count = _instructions.length;
+        if (count < 2)
+            return;
+
+        size_t[size_t] mentions;
+        void mention(in size_t field, in long delta) {
+            const key = isDirect(field) ? field : slotOfField(field);
+            mentions[key] = cast(size_t) (
+                cast(long) mentions.get(key, 0) + delta);
+        }
+        auto isTarget = new bool[count + 1];
+        void markTarget(in size_t index) {
+            if (index <= count)
+                isTarget[index] = true;
+        }
+        foreach (ref instruction; _instructions) {
+            if (instruction.handler is null)
+                continue;
+            mention(instruction.destination, 1);
+            mention(instruction.source, 1);
+            mention(instruction.sourceWidth, 1);
+            if (auto field = branchTargetField(instruction))
+                markTarget(*field);
+        }
+        foreach (ref site; _callSites) {
+            foreach (arg; site.args)
+                mention(arg.callerOffset, 1);
+            foreach (arg; site.nativeArgs)
+                mention(arg.callerOffset, 1);
+            foreach (arg; site.value.surplus)
+                mention(arg.callerOffset, 1);
+            mention(site.calleeSlotOffset, 1);
+            if (site.cleanupStartIndex != size_t.max) {
+                markTarget(site.cleanupStartIndex);
+                markTarget(site.cleanupEndIndex);
+            }
+        }
+        foreach (handler; _exceptionHandlers) {
+            mention(handler._catchOffset, 1);
+            markTarget(handler._bodyStart);
+            markTarget(handler._bodyEnd);
+            markTarget(handler._handler);
+            markTarget(handler._cleanupEnd);
+        }
+
+        // The size of a temporary that nothing else overlaps, or 0.
+        size_t exclusiveSize(in size_t temp) {
+            if (!isDirect(temp))
+                return 0;
+            const size = temp in _tempRanges;
+            if (size is null || *size == 0)
+                return 0;
+            foreach (inner; temp + 1 .. temp + *size)
+                if (mentions.get(inner, 0) != 0)
+                    return 0;
+            return *size;
+        }
+        size_t fieldsMentioning(in Instruction instruction, in size_t temp) {
+            size_t found;
+            foreach (field; [
+                instruction.destination, instruction.source,
+                instruction.sourceWidth,
+            ])
+                if ((isDirect(field) ? field : slotOfField(field)) == temp)
+                    ++found;
+            return found;
+        }
+        bool overlaps(in size_t a, in size_t aWidth, in size_t b,
+                in size_t bWidth) {
+            return a < b + bWidth && b < a + aWidth;
+        }
+
+        foreach (index; 1 .. count) {
+            if (_instructions[index].handler is null || isTarget[index])
+                continue;
+            if (redirectProducer(index, mentions, isTarget, &mention,
+                    &exclusiveSize, &fieldsMentioning, &overlaps))
+                continue;
+            forwardSource(index, mentions, &mention, &exclusiveSize,
+                &fieldsMentioning);
+        }
+    }
+
+    // `copy` empties a temporary that a run of earlier instructions fills.
+    // The run is one pure writer, then in-place operations on the same
+    // temporary, with constants loaded in between. They write the
+    // destination of the copy, and the copy goes.
+    private bool redirectProducer(
+        in size_t copyIndex,
+        ref size_t[size_t] mentions,
+        in bool[] isTarget,
+        scope void delegate(in size_t, in long) mention,
+        scope size_t delegate(in size_t) exclusiveSize,
+        scope size_t delegate(in Instruction, in size_t) fieldsMentioning,
+        scope bool delegate(in size_t, in size_t, in size_t, in size_t) overlaps,
+    ) {
+        auto copy = &_instructions[copyIndex];
+        const width = copyWidthOf(copy.handler);
+        if (width == 0 || width > size_t.sizeof)
+            return false;
+        const temp = copy.source;
+        const destination = copy.destination;
+        if (!isDirect(temp) || exclusiveSize(temp) != width
+                || destination == temp
+                || overlaps(destination, width, temp, width))
+            return false;
+
+        // One mention of the temporary is the copy.
+        size_t need = mentions.get(temp, 0);
+        if (need < 2)
+            return false;
+        --need;
+        size_t[] run;
+        size_t writer = size_t.max;
+        enum maxScan = 16;
+        for (size_t at = copyIndex; at > 0 && copyIndex - at < maxScan;) {
+            --at;
+            auto candidate = &_instructions[at];
+            if (candidate.handler is null || isTarget[at + 1])
+                return false;
+            const found = fieldsMentioning(*candidate, temp);
+            if (found == 0) {
+                // Only a load of a constant elsewhere may sit in between.
+                if (candidate.handler !is &opConstant
+                        && candidate.handler !is &opZero)
+                    return false;
+                if (!isDirect(candidate.destination)
+                        || overlaps(candidate.destination, candidate.width,
+                            destination, width))
+                    return false;
+                continue;
+            }
+            if (found != 1 || need == 0)
+                return false;
+            --need;
+            if (candidate.destination == temp
+                    && isPureWriter(candidate.handler)) {
+                if (need != 0)
+                    return false;
+                writer = at;
+                break;
+            }
+            if (!(candidate.destination == temp
+                    && isInPlace(candidate.handler)
+                    && candidate.width == width
+                    && isDirect(candidate.source)
+                    && isDirect(candidate.sourceWidth)
+                    && !overlaps(candidate.source, width, destination, width)
+                    && candidate.source != temp
+                    && !overlaps(candidate.sourceWidth, width, destination,
+                        width)))
+                return false;
+            run ~= at;
+        }
+        if (writer == size_t.max)
+            return false;
+
+        auto first = &_instructions[writer];
+        if (!isDirect(destination)) {
+            if (run.length != 0 || !decodesIndirect(first.handler, 0))
+                return false;
+        }
+        // A copy that reads a source overlapping the destination without
+        // being equal to it stays as a copy.
+        if (isDirect(first.source) && first.source != destination
+                && overlaps(first.source, width, destination, width)
+                && copyWidthOf(first.handler) != 0)
+            return false;
+
+        first.destination = destination;
+        mention(destination, 1);
+        foreach (at; run) {
+            _instructions[at].destination = destination;
+            mention(destination, 1);
+        }
+        mention(temp, -cast(long) (run.length + 2));
+        mention(destination, -1);
+        copy.handler = null;
+        return true;
+    }
+
+
+    // A cast in place over a temporary that a copy has just filled writes
+    // all of it, so the copy is dead once the cast reads the copy's source.
+    // Other readers of the temporary come after the cast.
+    private bool forwardIntoCast(
+        Instruction* producer,
+        Instruction* consumer,
+        in size_t temp,
+        in size_t value,
+        in size_t width,
+        in size_t size,
+        scope void delegate(in size_t, in long) mention,
+    ) {
+        static foreach (kind; [
+            CastKind.narrow, CastKind.widenSigned, CastKind.widenUnsigned,
+        ])
+            static foreach (destSize; [1UL, 2, 4, 8])
+                static foreach (sourceSize; [1UL, 2, 4, 8])
+                    if (consumer.handler
+                            is &opCastFixedAs!(kind, destSize, sourceSize)) {
+                        if (consumer.destination != temp
+                                || consumer.source != temp
+                                || width != sourceSize
+                                || destSize != size
+                                || (!isDirect(value)
+                                    && !decodesIndirect(consumer.handler, 1)))
+                            return false;
+                        consumer.source = value;
+                        mention(temp, -2);
+                        mention(value, 0);
+                        producer.handler = null;
+                        return true;
+                    }
+        return false;
+    }
+
+    // `producer` copies a temporary that the next instruction reads. That
+    // instruction reads the copy's source instead, and the copy goes.
+    private bool forwardSource(
+        in size_t consumerIndex,
+        ref size_t[size_t] mentions,
+        scope void delegate(in size_t, in long) mention,
+        scope size_t delegate(in size_t) exclusiveSize,
+        scope size_t delegate(in Instruction, in size_t) fieldsMentioning,
+    ) {
+        auto producer = &_instructions[consumerIndex - 1];
+        auto consumer = &_instructions[consumerIndex];
+        const width = copyWidthOf(producer.handler);
+        if (width == 0 || consumer.handler is null)
+            return false;
+        const temp = producer.destination;
+        const value = producer.source;
+        const size = exclusiveSize(temp);
+        if (!isDirect(temp) || size < width)
+            return false;
+        // The copy of a wide value feeds a return alone.
+        if (width > size_t.sizeof && consumer.handler !is &opReturn)
+            return false;
+
+        if (forwardIntoCast(producer, consumer, temp, value, width, size,
+                mention))
+            return true;
+
+        const readOnly = readOnlyFields(consumer.handler);
+        const writes = isPureWriter(consumer.handler);
+        size_t[3] fields = [
+            consumer.destination, consumer.source, consumer.sourceWidth,
+        ];
+        size_t patched;
+        foreach (field, current; fields) {
+            const isSlot = !isDirect(current);
+            if ((isSlot ? slotOfField(current) : current) != temp)
+                continue;
+            if (isSlot) {
+                // An address slot read by a handler that decodes operands.
+                if ((readOnly == 0 && !writes) || !isDirect(value))
+                    return false;
+                if (size_t.sizeof > width)
+                    return false;
+            } else if (field == Field.destination && writes) {
+                continue;
+            } else {
+                if (!(readOnly & (1 << field))
+                        || readWidthOf(*consumer, cast(Field) field) > width)
+                    return false;
+                if (!isDirect(value)
+                        && !decodesIndirect(consumer.handler, field))
+                    return false;
+            }
+            ++patched;
+        }
+        size_t named;
+        foreach (current; fields)
+            if ((isDirect(current) ? current : slotOfField(current)) == temp)
+                ++named;
+        if (patched == 0 || mentions.get(temp, 0) != 1 + named)
+            return false;
+
+        foreach (field, current; fields) {
+            const isSlot = !isDirect(current);
+            if ((isSlot ? slotOfField(current) : current) != temp)
+                continue;
+            if (!isSlot && field == Field.destination && writes)
+                continue;
+            const replacement = isSlot
+                ? (current & ~(0x7fff_ffffUL << 32)) | (value << 32)
+                : value;
+            final switch (cast(Field) field) {
+                case Field.destination:
+                    consumer.destination = replacement;
+                    break;
+                case Field.source:
+                    consumer.source = replacement;
+                    break;
+                case Field.right:
+                    consumer.sourceWidth = replacement;
+                    break;
+            }
+            mention(temp, -1);
+            mention(value, 1);
+        }
+        mention(temp, -1);
+        mention(value, -1);
+        producer.handler = null;
+        return true;
+    }
+
     private void fuseLoadCopies() {
         foreach (index, ref instruction; _instructions) {
             if (index + 1 == _instructions.length)
@@ -1738,6 +2228,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // parameter or local.
     private size_t reserveTemp(in TypeFacts facts) {
         const offset = alignUp(_tempSize, facts.alignment);
+        _tempRanges[offset] = facts.size;
         _tempSize = offset + facts.size;
         if (facts.alignment > _tempAlignment)
             _tempAlignment = facts.alignment;

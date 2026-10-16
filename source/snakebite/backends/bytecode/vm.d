@@ -4164,6 +4164,17 @@ package void specialiseHandlers(Instruction[] instructions) {
     }
 }
 
+// Whether the handler reads an indirect operand in a field: 0 for
+// `destination`, 1 for `source`, 2 for the right operand in `sourceWidth`.
+// A handler without a specialisation entry is not known to.
+package bool decodesIndirect(in Instruction.Handler handler, in size_t field) {
+    const entry = lookupSpecialisation(handler);
+    if (entry is null)
+        return false;
+    return field == 0 ? entry.destination
+        : field == 1 ? entry.source : entry.right;
+}
+
 private const(Specialisation)* lookupSpecialisation(
     in Instruction.Handler handler,
 ) {
