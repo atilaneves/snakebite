@@ -634,6 +634,7 @@ private const(Instruction)* executeRegister(
     OperandKind destinationKind,
     OperandKind sourceKind,
     size_t fixedWidth,
+    OperandKind rightKind,
     Parameters...,
 )(
     const(Instruction)* pc,
@@ -646,11 +647,12 @@ private const(Instruction)* executeRegister(
     version (BytecodeCount) {
         static __gshared CountSlot slot;
         countExecution(&slot, countName!(__traits(identifier, operation),
-            destinationKind, sourceKind, fixedWidth, OperandKind.storage, Parameters));
+            destinationKind, sourceKind, fixedWidth, rightKind, Parameters));
     }
     static if (storesPosition!operation)
         activation.pc = pc;
-    auto execution = Execution!(destinationKind, sourceKind, fixedWidth)(
+    auto execution = Execution!(destinationKind, sourceKind, fixedWidth,
+        rightKind)(
         pc, activation, state, frame,
     );
     execution.inR0 = r0;
@@ -3230,7 +3232,7 @@ private enum registerKind(bool inRegister) = inRegister
 private alias opInt3R(string operation, bool constant, bool fromRegister,
         bool toRegister) =
     executeRegister!(runInt3R, registerKind!toRegister,
-        registerKind!fromRegister, 0, operation, constant, fromRegister,
+        registerKind!fromRegister, 0, OperandKind.storage, operation, constant, fromRegister,
         toRegister);
 
 private const(Instruction)* runInt3R(string operation, bool constant,
@@ -3254,7 +3256,7 @@ private const(Instruction)* runInt3R(string operation, bool constant,
 private alias opFloat3R(string operation, bool constant, bool fromRegister,
         bool toRegister) =
     executeRegister!(runFloat3R, registerKind!toRegister,
-        registerKind!fromRegister, 0, operation, constant, fromRegister,
+        registerKind!fromRegister, 0, OperandKind.storage, operation, constant, fromRegister,
         toRegister);
 
 private const(Instruction)* runFloat3R(string operation, bool constant,
@@ -3279,7 +3281,7 @@ private alias opFusedBranchR(Comparison comparison, CompareKind kind,
     bool jumpWhen, bool constant) =
     executeRegister!(runFusedBranchR, OperandKind.unused,
         constant ? OperandKind.immediate : OperandKind.storage, 0,
-        comparisonSymbols[comparison], kind, jumpWhen);
+        OperandKind.storage, comparisonSymbols[comparison], kind, jumpWhen);
 
 private const(Instruction)* runFusedBranchR(string operation, CompareKind kind,
     bool jumpWhen, Decoded)(
@@ -4131,7 +4133,8 @@ private enum indirectBit = 1UL << 63;
 // storage operands, so that none of them tests the indirect bit.
 private alias kindOperations = AliasSeq!(
     runCopyFixed, runIndex, runInt3, runFloat3, runFusedBranch,
-    runLoadIndirect, runStoreIndirect,
+    runLoadIndirect, runStoreIndirect, runCompare3, runShift3, runDivide3,
+    runFloatCompare3, runInt3R, runFloat3R, runFusedBranchR,
 );
 
 private alias MaskedHandlers = Instruction.Handler[widthSlots][7];
@@ -4209,12 +4212,13 @@ private template instance(alias executor, alias operation,
             width, rightKind, Parameters);
     else
         alias instance = executor!(operation, destinationKind, sourceKind,
-            width, Parameters);
+            width, rightKind, Parameters);
 }
 
 // Fills `entry` with the instances for the operands named by `mask`, if the
 // operation has all of them.
-private void maskedInstances(alias operation, OperandKind destinationKind,
+private void maskedInstances(alias executor, alias operation,
+    OperandKind destinationKind,
     OperandKind sourceKind, immutable(ulong)[] widths, bool right, int mask,
     Parameters...)(ref Specialisation entry)
 {
@@ -4232,10 +4236,10 @@ private void maskedInstances(alias operation, OperandKind destinationKind,
         enum r = rightIndirect ? OperandKind.indirect : OperandKind.frame;
         if (entry.masked is null)
             entry.masked = &(new MaskedHandlers[1])[0];
-        (*entry.masked)[mask - 1][0] = &executeWith!(operation, d, s, 0, r,
-            Parameters);
+        (*entry.masked)[mask - 1][0] = &instance!(executor, operation, d, s, 0,
+            r, Parameters);
         static foreach (width; widths)
-            (*entry.masked)[mask - 1][widthSlot(width)] = &executeWith!(
+            (*entry.masked)[mask - 1][widthSlot(width)] = &instance!(executor,
                 operation, d, s, width, r, Parameters);
     }
 }
@@ -4271,10 +4275,9 @@ private void specialiseWith(alias executor, alias operation,
             frameKind!destinationKind, frameKind!sourceKind, width,
             OperandKind.storage, Parameters);
     }
-    static if (__traits(isSame, executor, executeWith)
-            && staticIndexOf!(operation, kindOperations) >= 0)
+    static if (staticIndexOf!(operation, kindOperations) >= 0)
         static foreach (mask; 1 .. 8)
-            maskedInstances!(operation, destinationKind, sourceKind, widths,
+            maskedInstances!(executor, operation, destinationKind, sourceKind, widths,
                 right, mask, Parameters)(entry);
     addSpecialisation(entry, rolesOfOperation!(operation, sourceKind, Parameters));
 }
