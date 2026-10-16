@@ -283,7 +283,7 @@ public struct CallSite {
         slot.argCount = args.length;
         slot.plainArgs = true;
         foreach (arg; args)
-            if ((arg.callerOffset & (1UL << 63)) != 0
+            if (!isFrameOperand(arg.callerOffset)
                     || (arg.width != 1 && arg.width != 2 && arg.width != 4
                         && arg.width != 8))
                 slot.plainArgs = false;
@@ -349,8 +349,32 @@ public enum discardResult = size_t.max;
 // targets, constants, and call sites) are decoded separately from storage.
 package size_t indirectStorage(in size_t addressSlot) @safe pure nothrow @nogc {
     assert(addressSlot < (1UL << 31));
-    return (1UL << 63) | (addressSlot << 32);
+    return indirectBit | (addressSlot << 32);
 }
+
+package enum indirectBit = 1UL << 63;
+
+// Whether a storage operand is a plain frame offset.
+package bool isFrameOperand(in size_t operand) @safe pure nothrow @nogc {
+    return (operand & indirectBit) == 0;
+}
+
+// The frame slot that holds the address of an indirect operand.
+package size_t addressSlotOf(in size_t operand) @safe pure nothrow @nogc {
+    return (operand >> 32) & addressSlotMask;
+}
+
+// The indirect operand `operand` with its address held in `addressSlot`.
+package size_t withAddressSlot(in size_t operand, in size_t addressSlot)
+        @safe pure nothrow @nogc {
+    assert(addressSlot <= addressSlotMask);
+    return (operand & ~(addressSlotMask << 32)) | (addressSlot << 32);
+}
+
+private enum addressSlotMask = 0x7fff_ffffUL;
+
+// The fields of an instruction that name storage, in instruction order.
+package enum Field : ubyte { destination, source, right }
 
 // The handler adapter owns operand decoding. An operation receives native
 // addresses for storage and integer words for immediates, so it cannot
@@ -486,8 +510,8 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind,
 pragma(inline, true)
 private ubyte* indirectStorageAt(ubyte* frame, in size_t operand)
         pure nothrow @nogc {
-    const addressSlot = (operand >> 32) & 0x7fff_ffffUL;
-    return *cast(ubyte**) (frame + addressSlot) + cast(uint) operand;
+    return *cast(ubyte**) (frame + addressSlotOf(operand))
+        + cast(uint) operand;
 }
 
 // A frame offset, or an address held in a frame slot plus an offset when the
@@ -495,10 +519,9 @@ private ubyte* indirectStorageAt(ubyte* frame, in size_t operand)
 pragma(inline, true)
 package ubyte* operandStorage(ubyte* frame, in size_t operand)
         pure nothrow @nogc {
-    if ((operand & (1UL << 63)) == 0)
+    if (isFrameOperand(operand))
         return frame + operand;
-    const addressSlot = (operand >> 32) & 0x7fff_ffffUL;
-    return *cast(ubyte**) (frame + addressSlot) + cast(uint) operand;
+    return indirectStorageAt(frame, operand);
 }
 
 // An optimising build chains handlers: each one ends with a tail call to the
@@ -4105,6 +4128,8 @@ package struct Roles {
     package Role destination;
     package Role source;
     package Role sourceWidth;
+    // The low 32 bits of `width` hold the frame offset of an index.
+    package bool widthHoldsIndexSlot;
 }
 
 // Operations whose instructions hold neither a process address nor an
@@ -4306,9 +4331,6 @@ private size_t widthSlot(in size_t width) @safe pure nothrow @nogc {
     }
 }
 
-private enum indirectBit = 1UL << 63;
-
-
 // The operations whose instances exist for each mix of frame and indirect
 // storage operands, so that none of them tests the indirect bit.
 private alias kindOperations = AliasSeq!(
@@ -4487,9 +4509,10 @@ shared static this() {
                         addRoles(&opCheckedIndex!(kind, fixed, shape[0],
                             shape[1] == 1, size),
                             kind == CheckedAccess.storeUnchecked
-                                ? Roles(Role.other, Role.other, Role.other)
+                                ? Roles(Role.other, Role.other, Role.other,
+                                    true)
                                 : Roles(Role.other, Role.other,
-                                    Role.instruction));
+                                    Role.instruction, true));
     // The fused return keeps the roles of the producer it replaces.
     static foreach (width; 1 .. 17)
         addRoles(&opThenReturn!(opCopyFixed!(width, true)),
@@ -4642,6 +4665,26 @@ package void specialiseHandlers(Instruction[] instructions) {
             chosen = row[0];
         instruction.handler = chosen;
     }
+}
+
+// Whether the handler reads an indirect operand in `field`. A handler
+// without a specialisation entry is not known to.
+package bool decodesIndirect(in Instruction.Handler handler, in Field field) {
+    const entry = lookupSpecialisation(handler);
+    if (entry is null)
+        return false;
+    final switch (field) {
+        case Field.destination: return entry.destination;
+        case Field.source: return entry.source;
+        case Field.right: return entry.right;
+    }
+}
+
+// Whether the handler reads the frame offset of an index from the low 32
+// bits of `width`. Every `opCheckedIndex` instance says so in its roles.
+package bool widthHoldsIndexSlot(in Instruction.Handler handler) {
+    Roles roles;
+    return rolesOf(handler, roles) && roles.widthHoldsIndexSlot;
 }
 
 private const(Specialisation)* lookupSpecialisation(

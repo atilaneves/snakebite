@@ -791,10 +791,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import dmd.tokens: EXP;
     import snakebite.backends.bytecode.vm:
         Arg, AssertSite, CallSite, ClosureSlot, castSizeWithSignedness,
-        discardResult, indirectStorage,
+        discardResult, Field, indirectStorage,
         ExceptionHandler, Function, InlineBody,
-        Instruction, Role, Roles, branchTargetField, recordAssertSiteRelocs,
+        Instruction, Role, Roles, addressSlotOf, branchTargetField, recordAssertSiteRelocs,
         recordCallSiteRelocs, recordExceptionHandlerRelocs, rolesOf,
+        isFrameOperand, widthHoldsIndexSlot, withAddressSlot,
         opAdd3, opSubtract3, opMultiply3, opFloatAdd3, opFloatSubtract3,
         opFloatMultiply3, opFloatDivide3, opLessThanSigned3,
         opLessThanUnsigned3, opLessOrEqualSigned3, opLessOrEqualUnsigned3,
@@ -810,7 +811,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         CompareKind, Comparison, constantForm, fusedBranchHandler, fusesConstant,
         firstComparisonHandler, threeAddressConstantHandlers,
         threeAddressHandlers,
-        isFusedBranch, specialiseHandlers, RegisterFamily, registerFamily,
+        decodesIndirect, isFusedBranch, specialiseHandlers, RegisterFamily, registerFamily,
         fusedRegisterFamily, registerForm, fusedRegisterForm,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall,
@@ -906,6 +907,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private uint _tempAlignment;
     // Temporaries made for an operand and read by its one parent.
     private bool[size_t] _operandTemps;
+    // The offset and size of every temporary `reserveTemp` made, in
+    // increasing order of offset.
+    private size_t[] _tempStarts;
+    private size_t[] _tempSizes;
     private struct Temporary {
         size_t base;
         size_t site;
@@ -1107,7 +1112,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto closurePlan = closurePlanOf(function_);
         if (closurePlan.needsClosure) {
             _closureLayout = closurePlan.layout;
-            _closureOffset = reserveTemp(pointerFacts);
+            _closureOffset = reserveStorage(pointerFacts);
         }
     }
 
@@ -1134,6 +1139,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (_pendingDefaultJumps.length != 0)
             internalFailure("every `default` a jump targets was compiled");
 
+        forwardCopies;
         removeEmptyLifetimes;
         // Dispatch tests no end of stream: the last instruction ends the
         // activation.
@@ -1261,7 +1267,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // The operand roles of every handler a copied function may use, and
     // `false` for any other. A handler outside this list never gets copied,
     // so a new opcode starts as not copyable.
-    private bool inlineOperandsOf(
+    private static bool inlineOperandsOf(
         Instruction.Handler handler, out Operands roles,
     ) {
         import std.meta: AliasSeq;
@@ -1760,21 +1766,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 isTarget[target - _instructions.ptr] = true;
             }
         }
-        void markTarget(in size_t index) {
-            if (index <= count)
-                isTarget[index] = true;
-        }
-        foreach (handler; _exceptionHandlers) {
-            markTarget(handler._bodyStart);
-            markTarget(handler._bodyEnd);
-            markTarget(handler._handler);
-            markTarget(handler._cleanupEnd);
-        }
-        foreach (ref site; _callSites)
-            if (site.cleanupStartIndex != size_t.max) {
-                isTarget[site.cleanupStartIndex] = true;
-                isTarget[site.cleanupEndIndex] = true;
-            }
+        markScopeTargets(isTarget);
 
         auto readsRegister = new bool[count];
         auto writesRegister = new bool[count];
@@ -1813,6 +1805,635 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 instruction.handler = registerForm(instruction.handler,
                     readsRegister[index], writesRegister[index]);
             }
+        }
+    }
+
+
+    // Copy forwarding. A temporary that one instruction fills and one copy
+    // empties makes the producer write the copy's destination instead; a
+    // copy into a temporary that one instruction reads makes that
+    // instruction read the copy's source instead. A temporary counts only
+    // when `reserveTemp` made it, and a pass counts every access that
+    // overlaps it: an instruction field, a call argument or a catch
+    // offset. The VM can write storage with no instruction naming it (the
+    // closure pointer), so `reserveStorage` makes that and the pass never
+    // sees it.
+    private void forwardCopies() {
+        const count = _instructions.length;
+        if (count < 2 || _tempStarts.length == 0)
+            return;
+
+        auto isTarget = new bool[count + 1];
+        foreach (ref instruction; _instructions) {
+            if (instruction.handler is null)
+                continue;
+            if (auto field = branchTargetField(instruction))
+                if (*field <= count)
+                    isTarget[*field] = true;
+        }
+        markScopeTargets(isTarget);
+
+        auto state = CopyForwarding(
+            _instructions, _tempStarts, _tempSizes, isTarget);
+        foreach (ref site; _callSites) {
+            foreach (arg; site.args)
+                state.count(arg.callerOffset, arg.width, 1);
+            foreach (arg; site.nativeArgs)
+                state.count(arg.callerOffset, arg.width, 1);
+            foreach (arg; site.value.surplus)
+                state.count(arg.callerOffset, arg.width, 1);
+            if (site.kind == CallSite.Kind.indirect
+                    || site.kind == CallSite.Kind.value)
+                state.count(site.calleeSlotOffset, size_t.sizeof, 1);
+        }
+        foreach (handler; _exceptionHandlers)
+            if (handler._catchOffset != size_t.max)
+                state.count(handler._catchOffset, size_t.sizeof, 1);
+        state.run;
+    }
+
+    // Marks the instructions that an exception handler or a cleanup range
+    // starts or ends at. `isTarget` has one more element than there are
+    // instructions.
+    private void markScopeTargets(bool[] isTarget) {
+        void mark(in size_t index) {
+            if (index < isTarget.length)
+                isTarget[index] = true;
+        }
+        foreach (handler; _exceptionHandlers) {
+            mark(handler._bodyStart);
+            mark(handler._bodyEnd);
+            mark(handler._handler);
+            mark(handler._cleanupEnd);
+        }
+        foreach (ref site; _callSites)
+            if (site.cleanupStartIndex != size_t.max) {
+                mark(site.cleanupStartIndex);
+                mark(site.cleanupEndIndex);
+            }
+    }
+
+    // How the pass treats the operands of a handler.
+    private static struct Access {
+        enum Kind {
+            // Not known well enough to change a field.
+            opaque,
+            // Reads its operands, then writes `destination` alone and reads
+            // nothing from it.
+            pureWriter,
+            // Reads `destination` and writes it with a result of the same
+            // width.
+            inPlace,
+            // Writes none of its storage operands.
+            reader,
+        }
+
+        Kind kind;
+        // Which fields name storage. A handler outside the role table may
+        // name storage in every field.
+        Operands roles;
+        // The handler uses the address of its source, not its value.
+        bool takesAddress;
+        // `width` holds the frame offset of an index in its low 32 bits.
+        bool widthIsSlot;
+        // The role table knows the handler, so each operand names one object
+        // of `width` bytes at most.
+        bool known;
+        // The width of a copy, or 0.
+        size_t copyWidth;
+        // The bytes that the handler touches through `destination` or
+        // `source` whatever the width of the instruction, or 0.
+        size_t destinationExtent;
+        size_t sourceExtent;
+
+        bool isWriter() const {
+            return kind == Kind.pureWriter || kind == Kind.inPlace;
+        }
+
+        bool namesStorage(in Field field) const {
+            final switch (field) {
+                case Field.destination:
+                    return roles.destination == Operand.storage;
+                case Field.source:
+                    return roles.source == Operand.storage;
+                case Field.right:
+                    return roles.right == Operand.storage;
+            }
+        }
+
+        // The fields from which the handler only reads a value, as a bit
+        // mask of `1 << Field`.
+        uint readOnlyFields() const {
+            if (kind == Kind.opaque || takesAddress)
+                return 0;
+            uint mask;
+            foreach (field; allFields) {
+                if (namesStorage(field)
+                        && !(field == Field.destination && isWriter))
+                    mask |= 1 << cast(int) field;
+            }
+            return mask;
+        }
+    }
+
+    private static Access accessOf(in Instruction.Handler handler) {
+        // A direct-mapped cache of `classify`, thread-local: a handler never
+        // changes what it is.
+        static struct Entry {
+            Instruction.Handler handler;
+            Access access;
+        }
+        enum entries = 256;
+        static Entry[entries] cache;
+
+        auto entry = &cache[(cast(size_t) handler >> 4) % entries];
+        if (entry.handler !is handler) {
+            entry.access = classify(handler);
+            entry.handler = cast(Instruction.Handler) handler;
+        }
+        return entry.access;
+    }
+
+    private static Access classify(Instruction.Handler handler) {
+        import std.meta: AliasSeq;
+
+        Access access;
+        access.known = inlineOperandsOf(handler, access.roles);
+        if (!access.known) {
+            enum S = Operand.storage;
+            access.roles = Operands(S, S, S);
+        }
+        access.widthIsSlot = widthHoldsIndexSlot(handler);
+
+        with (Access.Kind) {
+            static foreach (operation; AliasSeq!(
+                opConstant, opZero, opStaticLoad,
+            ))
+                if (handler is &operation)
+                    access.kind = pureWriter;
+            // These write an address.
+            static foreach (operation; AliasSeq!(
+                opFrameAddress, opIndexSlice, opIndexStatic, opIndexPointer,
+            ))
+                if (handler is &operation) {
+                    access.kind = pureWriter;
+                    access.destinationExtent = size_t.sizeof;
+                }
+            static foreach (width; copyWidths)
+                if (handler is &opCopyFixed!width) {
+                    access.kind = pureWriter;
+                    access.copyWidth = width;
+                }
+            static foreach (width; indirectCopyWidths) {
+                if (handler is &opLoadIndirectFixed!width) {
+                    access.kind = pureWriter;
+                    access.sourceExtent = size_t.sizeof;
+                }
+                if (handler is &opStoreIndirectFixed!width) {
+                    access.kind = reader;
+                    access.destinationExtent = size_t.sizeof;
+                }
+            }
+            static foreach (kind; [
+                CastKind.narrow, CastKind.widenSigned, CastKind.widenUnsigned,
+            ])
+                static foreach (destSize; [1UL, 2, 4, 8])
+                    static foreach (sourceSize; [1UL, 2, 4, 8])
+                        if (handler
+                                is &opCastFixedAs!(kind, destSize, sourceSize)) {
+                            access.kind = pureWriter;
+                            access.destinationExtent = destSize;
+                            access.sourceExtent = sourceSize;
+                        }
+            static foreach (index, operation; threeAddressHandlers) {
+                if (handler is &operation
+                        || handler is &threeAddressConstantHandlers[index]) {
+                    access.kind = pureWriter;
+                    // A comparison writes one byte whatever its operand
+                    // width.
+                    static if (index >= firstComparisonHandler)
+                        access.destinationExtent = 1;
+                }
+            }
+            static foreach (operation; AliasSeq!(
+                opAdd, opSubtract, opMultiply, opBitAnd, opBitOr, opBitXor,
+                opShiftLeft, opShiftRightLogical, opShiftRightArithmetic,
+                opNegate, opComplement, opLogicalNot, opCastToBool,
+                opFloatAdd, opFloatSubtract, opFloatMultiply, opFloatDivide,
+                opFloatNegate,
+            ))
+                if (handler is &operation)
+                    access.kind = inPlace;
+            static foreach (operation; AliasSeq!(
+                opReturn, opBranchFalse, opBranchTrue,
+            ))
+                if (handler is &operation)
+                    access.kind = reader;
+            if (isFusedBranch(handler))
+                access.kind = reader;
+        }
+        // The address of the operand matters, not only its value.
+        static foreach (operation; AliasSeq!(
+            opFrameAddress, opIndexSlice, opIndexStatic, opIndexPointer,
+        ))
+            if (handler is &operation)
+                access.takesAddress = true;
+        return access;
+    }
+
+    private enum copyWidths = [1, 2, 4, 8, 16];
+
+    private static immutable Field[3] allFields = [
+        Field.destination, Field.source, Field.right,
+    ];
+
+    // The bytes that a writer writes to `destination`.
+    private static size_t writtenSize(
+        in Instruction instruction, in Access access,
+    ) {
+        return access.destinationExtent != 0
+            ? access.destinationExtent : instruction.width;
+    }
+
+    // The bytes that an instruction reads or writes through `field`. A
+    // handler outside the role table is assumed to touch one object at the
+    // field's base.
+    private static size_t extentOf(
+        in Instruction instruction, in Access access, in Field field,
+    ) {
+        if (field == Field.destination && access.destinationExtent != 0)
+            return access.destinationExtent;
+        if (field == Field.source && access.sourceExtent != 0)
+            return access.sourceExtent;
+        if (!access.known || access.takesAddress)
+            return 1;
+        return instruction.width == 0 ? 1 : instruction.width;
+    }
+
+    private static ref size_t operandOf(ref Instruction instruction, in Field field) {
+        final switch (field) {
+            case Field.destination: return instruction.destination;
+            case Field.source: return instruction.source;
+            case Field.right: return instruction.sourceWidth;
+        }
+    }
+
+    private static bool overlaps(
+        in size_t a, in size_t aWidth, in size_t b, in size_t bWidth,
+    ) {
+        return a < b + bWidth && b < a + aWidth;
+    }
+
+    // The analysis state of copy forwarding: for each temporary, how many
+    // accesses overlap it.
+    private static struct CopyForwarding {
+        Instruction[] instructions;
+        // The temporaries, in increasing order of offset, and their sizes.
+        const(size_t)[] starts;
+        const(size_t)[] sizes;
+        long[] counts;
+        // The end of the last temporary.
+        size_t tempsEnd;
+        // An instruction that control may enter from outside the previous one.
+        const(bool)[] isTarget;
+
+        this(
+            Instruction[] instructions, const(size_t)[] starts,
+            const(size_t)[] sizes, const(bool)[] isTarget,
+        ) {
+            this.instructions = instructions;
+            this.starts = starts;
+            this.sizes = sizes;
+            this.isTarget = isTarget;
+            tempsEnd = starts[$ - 1] + sizes[$ - 1];
+            counts = new long[starts.length];
+            foreach (ref instruction; instructions)
+                if (instruction.handler !is null)
+                    adjust(instruction, 1);
+        }
+
+        void run() {
+            foreach (index; 1 .. instructions.length) {
+                if (instructions[index].handler is null || isTarget[index])
+                    continue;
+                if (redirectProducer(index))
+                    continue;
+                forwardSource(index);
+            }
+        }
+
+        // Adds `delta` to every temporary that the `extent` bytes from `base`
+        // overlap, or to the temporary at the address slot of an indirect
+        // `base`.
+        void count(in size_t base, in size_t extent, in long delta) {
+            if (!isFrameOperand(base)) {
+                countFrame(addressSlotOf(base), size_t.sizeof, delta);
+                return;
+            }
+            countFrame(base, extent, delta);
+        }
+
+        private void countFrame(
+            in size_t base, in size_t extent, in long delta,
+        ) {
+            if (base >= tempsEnd || base + extent <= starts[0])
+                return;
+            // The first temporary that ends after `base`.
+            size_t low;
+            size_t high = starts.length;
+            while (low < high) {
+                const middle = (low + high) / 2;
+                if (starts[middle] + sizes[middle] <= base)
+                    low = middle + 1;
+                else
+                    high = middle;
+            }
+            const end = base + extent;
+            for (size_t at = low; at < starts.length && starts[at] < end; ++at)
+                counts[at] += delta;
+        }
+
+        // Counts or uncounts every access of `instruction`.
+        private void adjust(ref Instruction instruction, in long delta) {
+            const access = accessOf(instruction.handler);
+            foreach (field; allFields) {
+                if (access.namesStorage(field))
+                    count(operandOf(instruction, field),
+                        extentOf(instruction, access, field), delta);
+            }
+            if (access.widthIsSlot)
+                countFrame(cast(uint) instruction.width, size_t.sizeof, delta);
+        }
+
+        private void set(
+            ref Instruction instruction, in Field field, in size_t value,
+        ) {
+            adjust(instruction, -1);
+            operandOf(instruction, field) = value;
+            adjust(instruction, 1);
+        }
+
+        private void drop(ref Instruction instruction) {
+            adjust(instruction, -1);
+            instruction.handler = null;
+        }
+
+        // The index into `starts` of the temporary at `offset`, or the
+        // length of `starts`.
+        private size_t tempAt(in size_t offset) const {
+            size_t low;
+            size_t high = starts.length;
+            while (low < high) {
+                const middle = (low + high) / 2;
+                if (starts[middle] < offset)
+                    low = middle + 1;
+                else
+                    high = middle;
+            }
+            return low < starts.length && starts[low] == offset
+                ? low : starts.length;
+        }
+
+        // The size of the temporary at `offset`, or 0.
+        private size_t sizeOf(in size_t offset) const {
+            const at = tempAt(offset);
+            return at == starts.length ? 0 : sizes[at];
+        }
+
+        // How many accesses overlap the temporary at `offset`.
+        private long mentions(in size_t offset) const {
+            const at = tempAt(offset);
+            return at == starts.length ? 0 : counts[at];
+        }
+
+        // The number of fields of `instruction` that have `temp` as base or
+        // as address slot.
+        private size_t fieldsNaming(ref Instruction instruction, in size_t temp) {
+            const access = accessOf(instruction.handler);
+            size_t found;
+            foreach (field; allFields) {
+                if (!access.namesStorage(field))
+                    continue;
+                const operand = operandOf(instruction, field);
+                if ((isFrameOperand(operand) ? operand : addressSlotOf(operand))
+                        == temp)
+                    ++found;
+            }
+            return found;
+        }
+
+        // `copy` empties a temporary that a run of earlier instructions
+        // fills. The run is one pure writer, then in-place operations on the
+        // same temporary, with constants loaded in between. They write the
+        // destination of the copy, and the copy goes.
+        private bool redirectProducer(in size_t copyIndex) {
+            auto copy = &instructions[copyIndex];
+            const width = accessOf(copy.handler).copyWidth;
+            if (width == 0 || width > size_t.sizeof)
+                return false;
+            const temp = copy.source;
+            const destination = copy.destination;
+            const direct = isFrameOperand(destination);
+            if (!isFrameOperand(temp) || sizeOf(temp) != width
+                    || destination == temp
+                    || (direct && overlaps(destination, width, temp, width)))
+                return false;
+
+            // One mention of the temporary is the copy.
+            long need = mentions(temp);
+            if (need < 2)
+                return false;
+            --need;
+            size_t[] run;
+            size_t writer = size_t.max;
+            enum maxScan = 16;
+            for (size_t at = copyIndex; at > 0 && copyIndex - at < maxScan;) {
+                --at;
+                auto candidate = &instructions[at];
+                if (candidate.handler is null || isTarget[at + 1])
+                    return false;
+                const found = fieldsNaming(*candidate, temp);
+                if (found == 0) {
+                    // Only a load of a constant to a frame slot elsewhere may
+                    // sit in between. It is not between an indirect
+                    // destination and its writer: it could write the address
+                    // slot or the pointee.
+                    if (!direct
+                            || (candidate.handler !is &opConstant
+                                && candidate.handler !is &opZero)
+                            || !isFrameOperand(candidate.destination)
+                            || overlaps(candidate.destination, candidate.width,
+                                destination, width))
+                        return false;
+                    continue;
+                }
+                if (found != 1 || need == 0)
+                    return false;
+                --need;
+                const access = accessOf(candidate.handler);
+                if (candidate.destination == temp
+                        && access.kind == Access.Kind.pureWriter
+                        && writtenSize(*candidate, access) == width) {
+                    if (need != 0)
+                        return false;
+                    writer = at;
+                    break;
+                }
+                if (candidate.destination != temp
+                        || access.kind != Access.Kind.inPlace
+                        || candidate.width != width
+                        || !readsAwayFrom(*candidate, access, temp,
+                            destination, width))
+                    return false;
+                run ~= at;
+            }
+            if (writer == size_t.max)
+                return false;
+
+            auto first = &instructions[writer];
+            if (!direct && (run.length != 0
+                    || !decodesIndirect(first.handler, Field.destination)))
+                return false;
+            // A copy now writes over a source that it reads, which a copy
+            // through the temporary did not.
+            if (accessOf(first.handler).copyWidth != 0
+                    && partlyOverlaps(first.source, destination, width))
+                return false;
+
+            set(*first, Field.destination, destination);
+            foreach (at; run)
+                set(instructions[at], Field.destination, destination);
+            drop(*copy);
+            return true;
+        }
+
+        // Whether every frame operand that `instruction` reads besides
+        // `destination` is a plain frame offset away from both `temp` and
+        // the `width` bytes at `destination`.
+        private bool readsAwayFrom(
+            ref Instruction instruction, in Access access, in size_t temp,
+            in size_t destination, in size_t width,
+        ) {
+            foreach (field; [Field.source, Field.right]) {
+                if (!access.namesStorage(field))
+                    continue;
+                const operand = operandOf(instruction, field);
+                if (!isFrameOperand(operand) || operand == temp
+                        || overlaps(operand, width, destination, width))
+                    return false;
+            }
+            return true;
+        }
+
+        // Whether `source` partly overlaps the `width` bytes at
+        // `destination`, which a copy cannot do and a copy through a
+        // temporary could.
+        private static bool partlyOverlaps(
+            in size_t source, in size_t destination, in size_t width,
+        ) {
+            return isFrameOperand(source) && isFrameOperand(destination)
+                && source != destination
+                && overlaps(source, width, destination, width);
+        }
+
+        // A cast in place over a temporary that a copy has just filled
+        // writes all of it, so the copy is dead once the cast reads the
+        // copy's source.
+        private bool forwardIntoCast(
+            ref Instruction producer, ref Instruction consumer,
+            in size_t temp, in size_t value, in size_t width, in size_t size,
+        ) {
+            static foreach (kind; [
+                CastKind.narrow, CastKind.widenSigned, CastKind.widenUnsigned,
+            ])
+                static foreach (destSize; [1UL, 2, 4, 8])
+                    static foreach (sourceSize; [1UL, 2, 4, 8])
+                        if (consumer.handler
+                                is &opCastFixedAs!(kind, destSize, sourceSize)) {
+                            if (consumer.destination != temp
+                                    || consumer.source != temp
+                                    || width != sourceSize
+                                    || destSize != size
+                                    || (!isFrameOperand(value)
+                                        && !decodesIndirect(consumer.handler,
+                                            Field.source)))
+                                return false;
+                            set(consumer, Field.source, value);
+                            drop(producer);
+                            return true;
+                        }
+            return false;
+        }
+
+        // `producer` copies a temporary that the next instruction reads. That
+        // instruction reads the copy's source instead, and the copy goes.
+        private bool forwardSource(in size_t consumerIndex) {
+            auto producer = &instructions[consumerIndex - 1];
+            auto consumer = &instructions[consumerIndex];
+            const width = accessOf(producer.handler).copyWidth;
+            if (width == 0)
+                return false;
+            const temp = producer.destination;
+            const value = producer.source;
+            const size = sizeOf(temp);
+            if (!isFrameOperand(temp) || size < width)
+                return false;
+            // The copy of a wide value feeds a return alone.
+            if (width > size_t.sizeof && consumer.handler !is &opReturn)
+                return false;
+
+            if (forwardIntoCast(*producer, *consumer, temp, value, width, size))
+                return true;
+
+            const access = accessOf(consumer.handler);
+            const readOnly = access.readOnlyFields;
+            long named;
+            Field[3] patched;
+            size_t patchedCount;
+            foreach (field; allFields) {
+                if (!access.namesStorage(field))
+                    continue;
+                const current = operandOf(*consumer, field);
+                const isSlot = !isFrameOperand(current);
+                if ((isSlot ? addressSlotOf(current) : current) != temp)
+                    continue;
+                ++named;
+                if (isSlot) {
+                    // An address slot read by a handler that decodes operands.
+                    if (access.kind == Access.Kind.opaque
+                            || !isFrameOperand(value)
+                            || size_t.sizeof > width)
+                        return false;
+                } else if (field == Field.destination
+                        && access.kind == Access.Kind.pureWriter) {
+                    // The consumer overwrites the temporary.
+                    continue;
+                } else {
+                    if (!(readOnly & (1 << cast(int) field))
+                            || extentOf(*consumer, access, field) > width)
+                        return false;
+                    if (!isFrameOperand(value)
+                            && !decodesIndirect(consumer.handler, field))
+                        return false;
+                }
+                patched[patchedCount++] = field;
+            }
+            if (patchedCount == 0 || mentions(temp) != 1 + named)
+                return false;
+            // The consumer writes where it now reads, which a copy through
+            // the temporary did not allow.
+            if (access.copyWidth != 0
+                    && partlyOverlaps(value, consumer.destination,
+                        consumer.width))
+                return false;
+
+            foreach (field; patched[0 .. patchedCount]) {
+                const current = operandOf(*consumer, field);
+                set(*consumer, field, isFrameOperand(current)
+                    ? value : withAddressSlot(current, value));
+            }
+            drop(*producer);
+            return true;
         }
     }
 
@@ -1912,6 +2533,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // through `_layout.offsetOf`, which only ever answers for a declared
     // parameter or local.
     private size_t reserveTemp(in TypeFacts facts) {
+        const offset = reserveStorage(facts);
+        if (facts.size != 0) {
+            _tempStarts ~= offset;
+            _tempSizes ~= facts.size;
+        }
+        return offset;
+    }
+
+    // Storage like `reserveTemp`, for a value that the VM writes with no
+    // instruction naming it. Copy forwarding does not see it.
+    private size_t reserveStorage(in TypeFacts facts) {
         const offset = alignUp(_tempSize, facts.alignment);
         _tempSize = offset + facts.size;
         if (facts.alignment > _tempAlignment)
