@@ -814,7 +814,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         decodesIndirect, isFusedBranch, specialiseHandlers, RegisterFamily, registerFamily,
         fusedRegisterFamily, registerForm, fusedRegisterForm,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
-        opBranchTrue, opCall,
+        opBranchTrue, opCall, opCallWindowDiscard, opCallWindowFrame,
+        opCallWindowIndirect,
         opCastAs, opCastFixedAs,
         opCastToBool, opCastWidenSigned, opCastWidenUnsigned, opComplement,
         opAlloca, opArrayEqual, opComplex, opComplexNegate, opConstant, opCopy,
@@ -905,6 +906,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private PendingExceptionHandler[] _exceptionHandlers;
     private size_t _tempSize;
     private uint _tempAlignment;
+    // The frame slot that holds where the call windows start, past the end of
+    // this frame, so that nothing the callee of a call can write is a
+    // temporary of this function. `size_t.max` until a call needs it.
+    private size_t _windowSlot = size_t.max;
+    // How many bytes of the windows around the code being compiled are in
+    // use, and the farthest any window reaches.
+    private size_t _windowDepth;
+    private size_t _windowReach;
+    // Where the receiver of the call being compiled is to be written, in the
+    // window of the call, or `size_t.max`. The first code that computes the
+    // receiver takes it.
+    private size_t _receiverDest = size_t.max;
     // Temporaries made for an operand and read by its one parent.
     private bool[size_t] _operandTemps;
     // The offset and size of every temporary `reserveTemp` made, in
@@ -1149,6 +1162,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     && _instructions[$ - 1].handler !is &opJump))
             emit(&opReturnVoid, 0, 0, 0);
         auto inlineBody = inlineBodyOfBuilt;
+        const resultPlace = redirectReturns;
         resolveBranches();
 
         ExceptionHandler[] exceptionHandlers;
@@ -1224,10 +1238,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 ? _layout.variadicCursor : size_t.max,
             _layout.parameters.length,
             _layout.signature,
-            _layout.returnPlace,
+            resultPlace,
         );
         result.inlineBody = inlineBody;
         result.relocs = _relocs;
+        result.windowSlot = _windowSlot;
+        result.windowBytes = _windowReach;
         return result;
     }
 
@@ -1443,6 +1459,93 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     && instruction.destination + written > offset)
                 return true;
         }
+        return false;
+    }
+
+    // Makes a return leave without a copy, where its value is already written
+    // where the caller wants it. A `return` whose value the instruction
+    // before it computes in one write has that instruction write the place
+    // directly: the place holds the destination of the call, and the write
+    // comes after every read of the callee, so the callee still sees the
+    // old destination until then. A function whose returns are all of that
+    // kind keeps a pointer to the place in a frame slot; the callers store it
+    // there. Returns the place of the function.
+    private imported!"snakebite.backends.returnplace".ReturnPlace
+    redirectReturns() {
+        import snakebite.backends.returnplace: ReturnPlace;
+
+        auto place = _layout.returnPlace;
+        if (_isVoidReturn || _isRefReturn)
+            return place;
+        if (place.offset != size_t.max) {
+            // The value was written through the place already.
+            const written = indirectStorage(place.offset);
+            foreach (ref instruction; _instructions)
+                if (instruction.handler is &opReturn
+                        && instruction.source == written)
+                    instruction.handler = &opReturnVoid;
+            return place;
+        }
+
+        auto targets = new bool[_instructions.length + 1];
+        foreach (ref instruction; _instructions)
+            if (auto target = branchTargetField(instruction))
+                targets[*target] = true;
+        foreach (handler; _exceptionHandlers) {
+            targets[handler._bodyStart] = true;
+            targets[handler._bodyEnd] = true;
+            targets[handler._handler] = true;
+            if (handler._cleanupEnd != size_t.max)
+                targets[handler._cleanupEnd] = true;
+        }
+        foreach (site; _callSites)
+            if (site.cleanupStartIndex != size_t.max) {
+                targets[site.cleanupStartIndex] = true;
+                targets[site.cleanupEndIndex] = true;
+            }
+
+        size_t slot = size_t.max;
+        foreach (index; 1 .. _instructions.length) {
+            auto instruction = &_instructions[index];
+            auto previous = &_instructions[index - 1];
+            if (instruction.handler !is &opReturn || targets[index]
+                    || instruction.source != previous.destination
+                    || (instruction.source & (1UL << 63)) != 0)
+                continue;
+            // A call that hands its own place on writes the result of this
+            // function when it returns.
+            const forwardsCall = (previous.handler is &opCallWindowFrame
+                    || previous.handler is &opCall)
+                && _callSites[previous.source].returnWidth == instruction.width;
+            if (!forwardsCall && !writesWholeWord(*previous, instruction.width)
+                    && !copiesValue(*previous, instruction.width))
+                continue;
+            if (slot == size_t.max)
+                slot = reserveTemp(pointerFacts);
+            previous.destination = indirectStorage(slot);
+            if (previous.handler is &opCallWindowFrame)
+                previous.handler = &opCallWindowIndirect;
+            instruction.handler = &opReturnVoid;
+        }
+        if (slot == size_t.max)
+            return place;
+        return ReturnPlace(slot, _returnFacts.size, _returnFacts.alignment);
+    }
+
+    // Whether `instruction` copies a value of `width` bytes from a frame
+    // slot to `destination` in one write. A copy from the frame of the
+    // function never overlaps the place of its result.
+    private bool copiesValue(in Instruction instruction, in size_t width) {
+        import std.meta: AliasSeq;
+
+        if (instruction.width != width
+                || (instruction.source & (1UL << 63)) != 0)
+            return false;
+        if (instruction.handler is &opCopy)
+            return true;
+        static foreach (copyWidth; AliasSeq!(1, 2, 4, 8, 16))
+            if (instruction.handler is &opCopyFixed!copyWidth)
+                return copyWidth == width;
         return false;
     }
 
@@ -9391,15 +9494,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         // DMD expressions must stay mutable for backend evaluation.
         auto receiver = receiverOf(expression, callee);
+        const dest = _receiverDest;
+        _receiverDest = size_t.max;
         final switch (receiver.kind) with (CallReceiver.Kind) {
         case enclosing:
             return contextOffsetOf(calleeContextSourceOf(_function, callee));
         case classValue:
-            const object = reserveTemp(pointerFacts);
+            const object = dest != size_t.max
+                ? dest : reserveTemp(pointerFacts);
             evalInto(receiver.expression, object, size_t.sizeof);
             return object;
         case aggregateAddress:
-            return receiverAddress(receiver.expression, expression);
+            return receiverAddress(receiver.expression, expression, dest);
         case implicitThis:
             return hiddenThisOffset;
         }
@@ -9408,7 +9514,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // The address of the receiver `aggregate` of `expression`. A pointer
     // held in a plain local is read in place when no argument can change
     // it before the callee runs.
-    private size_t receiverAddress(Expression aggregate, CallExp expression) {
+    private size_t receiverAddress(
+        Expression aggregate, CallExp expression, in size_t dest = size_t.max,
+    ) {
         import dmd.sideeffect: hasSideEffect;
 
         bool argumentsPure = true;
@@ -9420,7 +9528,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             case variable, dotVariable, star, index: {
                 const place = placeOf(aggregate, argumentsPure);
                 if (place != size_t.max)
-                    return addressOfPlace(place);
+                    return addressOfPlace(place, dest);
                 break;
             }
             default:
@@ -9455,8 +9563,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.backends.calls: arityMismatches;
 
         size_t receiverOffset = size_t.max;
-        if (hasThis)
+        if (hasThis) {
+            const saved = _receiverDest;
+            scope(exit) _receiverDest = saved;
+            size_t windowEnd;
+            _receiverDest = receiverSlotOf(callee, site, windowEnd);
+            // The receiver is written into the window of this call, so
+            // the calls that evaluate it open their windows above it.
+            const outer = _windowDepth;
+            scope(exit) _windowDepth = outer;
+            if (windowEnd != size_t.max)
+                _windowDepth = windowEnd;
             receiverOffset = thisOffsetOf();
+        }
         constructTemporary(callee,
             { emit(&opTemporarySuspend, 0, receiverOffset, 0); },
             { compileResolvedCallBody(callee, arguments, loc,
@@ -9542,12 +9661,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             );
         }
 
-        auto preparation = CallAdapter.Arguments.of(calleeType, arguments);
-        args ~= compileGuestArguments(preparation, calleeLayout);
-
-        if (calleeType.parameterList.varargs == VarArg.variadic)
-            args ~= compileVariadicArguments(arguments, calleeLayout).guest;
-
         // A `ref` return hands the caller the callee's own returned
         // storage's address - `compileAddress`'s `CallExp` case is the one
         // place that address is read back out, and `compileIndirectAssign`
@@ -9563,12 +9676,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 && destOffset != discardResult)
             internalFailure("a `void` call is only ever evaluated for effect");
 
-        if (calleeType.parameterList.varargs == VarArg.none) {
-            if (auto inlinable = _bytecode.inlineBodyOf(callee)) {
-                emitInlined(*inlinable, args, destOffset);
-                emitReceiverResult(returnShape, destOffset, receiverOffset);
-                return;
-            }
+        const inlinable = calleeType.parameterList.varargs == VarArg.none
+            ? _bytecode.inlineBodyOf(callee) : null;
+        if (inlinable is null && calleeType.parameterList.varargs == VarArg.none
+                && windowFits(callee, calleeLayout))
+            return compileWindowCall(
+                callee, calleeLayout, calleeType, arguments, args,
+                returnShape, destOffset, receiverOffset);
+
+        auto preparation = CallAdapter.Arguments.of(calleeType, arguments);
+        args ~= compileGuestArguments(preparation, calleeLayout);
+
+        if (calleeType.parameterList.varargs == VarArg.variadic)
+            args ~= compileVariadicArguments(arguments, calleeLayout).guest;
+
+        if (inlinable !is null) {
+            emitInlined(*inlinable, args, destOffset);
+            emitReceiverResult(returnShape, destOffset, receiverOffset);
+            return;
         }
 
         const siteIndex = _callSites.length;
@@ -9624,6 +9749,170 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             atomicStore!(MemoryOrder.rel)(_cached, _compute());
             return atomicLoad!(MemoryOrder.acq)(_cached);
         }
+    }
+
+    // The window of a call to a callee with `layout`, from the windows that are
+    // open now. It takes the frame slot that holds where the windows start.
+    private CallSite.Window windowOf(
+        in FrameLayout layout, in CallAdapter returnShape,
+    ) {
+        if (_windowSlot == size_t.max)
+            // The VM writes it when the function starts, with no
+            // instruction naming it, so copy forwarding must not see it.
+            _windowSlot = reserveStorage(pointerFacts);
+
+        const scratchBytes = returnShape.isVoid ? 0 :
+            (returnShape.returnFacts.size > layout.returnPlace.size
+                ? returnShape.returnFacts.size : layout.returnPlace.size);
+        const scratchAlignment = returnShape.isVoid ? 1 :
+            (returnShape.returnFacts.alignment > layout.returnPlace.alignment
+                ? returnShape.returnFacts.alignment
+                : layout.returnPlace.alignment);
+        const window = CallSite.Window.of(
+            _windowSlot, _windowDepth, layout.alignment,
+            parametersEnd(layout), scratchBytes, scratchAlignment);
+        if (window.alignment > _tempAlignment)
+            _tempAlignment = window.alignment;
+        if (scratchAlignment > _tempAlignment)
+            _tempAlignment = scratchAlignment;
+        if (window.end > _windowReach)
+            _windowReach = window.end;
+        return window;
+    }
+
+    // The slot of the `this` parameter of `callee` in the window of a call
+    // that `compileWindowCall` will make, or `size_t.max` when the call will
+    // go another way. A constructor reads its receiver again after the call,
+    // so its receiver stays where it is.
+    // `windowEnd` is where that window ends, or `size_t.max` for no window.
+    private size_t receiverSlotOf(
+        FuncDeclaration callee, Expression site, out size_t windowEnd,
+    ) {
+        import dmd.astenums: VarArg;
+        import snakebite.frontend.dmd.functions: typeFunctionOf;
+        import snakebite.ffi.call: CallAdapter;
+
+        windowEnd = size_t.max;
+        if (callee.isCtorDeclaration !is null)
+            return size_t.max;
+        const decision = CallSelection.atCallSite(_bytecode._callSelection.decisionOf(
+            callee, &_bytecode.isGuestFunction,
+            _bytecode.hasNativeSymbol(callee),
+            _bytecode.hasIndependentNativeSymbol(callee),
+        ), site);
+        if (decision.route != CallSelection.Route.guest)
+            return size_t.max;
+        auto type = typeFunctionOf(callee);
+        const layout = *_bytecode.layoutOf(callee);
+        if (type.parameterList.varargs != VarArg.none
+                || layout.hiddenThis.variable is null
+                || !windowFits(callee, layout)
+                || _bytecode.inlineBodyOf(callee) !is null)
+            return size_t.max;
+        const window = windowOf(layout, CallAdapter.ofType(type));
+        windowEnd = window.end;
+        return inWindow(window, layout.hiddenThis.parameter.offset);
+    }
+
+    // Whether the arguments of a call to `callee` can be written into a
+    // call window: the activation of the callee is then a plain one. A
+    // callee with a closure, or with a frame that asks for a page of
+    // alignment, is called the generic way.
+    private bool windowFits(FuncDeclaration callee, in FrameLayout layout) {
+        import core.memory: pageSize;
+
+        return layout.variadicTypes == size_t.max
+            && layout.variadicCursor == size_t.max
+            && layout.alignment < pageSize
+            && !closurePlanOf(callee).needsClosure;
+    }
+
+    // The first byte after the last parameter slot of `layout`.
+    private static size_t parametersEnd(in FrameLayout layout) {
+        size_t end;
+        void include(in size_t offset, in size_t size) {
+            if (offset + size > end)
+                end = offset + size;
+        }
+        if (layout.hiddenThis.variable !is null)
+            include(layout.hiddenThis.parameter.offset,
+                layout.hiddenThis.parameter.facts.size);
+        foreach (parameter; layout.parameters)
+            include(parameter.offset, parameter.facts.size);
+        if (layout.returnPlace.offset != size_t.max)
+            include(layout.returnPlace.offset, size_t.sizeof);
+        return end;
+    }
+
+    // The operand of the slot at `offset` from the start of `window`.
+    private static size_t inWindow(in CallSite.Window window, in size_t offset) {
+        return indirectStorage(window.baseSlot) + window.frame + offset;
+    }
+
+    private static Instruction.Handler windowCallHandler(in size_t destOffset) {
+        if (destOffset == discardResult)
+            return &opCallWindowDiscard;
+        return (destOffset & (1UL << 63)) != 0
+            ? &opCallWindowIndirect : &opCallWindowFrame;
+    }
+
+    // A call whose arguments are evaluated straight into the parameter
+    // slots of the callee, in a window above the end of this frame. Nothing
+    // is copied when the call runs, and no temporary of this function can
+    // lie under the window, because the window starts after the last of
+    // them. A window opened while the arguments evaluate starts after this
+    // one, so a call among the arguments never overwrites an argument that
+    // is already in place.
+    private void compileWindowCall(
+        FuncDeclaration callee,
+        in FrameLayout calleeLayout,
+        TypeFunction calleeType,
+        Expressions* arguments,
+        Arg[] args,
+        in CallAdapter returnShape,
+        in size_t destOffset,
+        in size_t receiverOffset,
+    ) {
+        const window = windowOf(calleeLayout, returnShape);
+
+        // The receiver is ready. Its slot comes first, then the arguments,
+        // each in order.
+        if (calleeLayout.hiddenThis.variable !is null) {
+            const slot = inWindow(window, calleeLayout.hiddenThis.parameter.offset);
+            if (receiverOffset != slot)
+                emit(&opCopy, slot, receiverOffset, size_t.sizeof);
+            args = [Arg(slot, calleeLayout.hiddenThis.parameter.offset,
+                size_t.sizeof)];
+        }
+
+        const outer = _windowDepth;
+        _windowDepth = window.end;
+        auto preparation = CallAdapter.Arguments.of(calleeType, arguments);
+        preparation.eachDeclared((i, value) {
+            const parameter = calleeLayout.parameters[i];
+            const slot = inWindow(window, parameter.offset);
+            if (value.isReference) {
+                const address = compileAddress(value.expression);
+                emit(&opCopy, slot, address, size_t.sizeof);
+                args ~= Arg(slot, parameter.offset, size_t.sizeof);
+                return;
+            }
+
+            evalInto(value.expression, slot, parameter.facts.size);
+            args ~= Arg(slot, parameter.offset, parameter.facts.size);
+        });
+        _windowDepth = outer;
+
+        const siteIndex = _callSites.length;
+        // The delegate outlives this compiler, so it captures the backend
+        // and not `this`.
+        auto bytecode = _bytecode;
+        _callSites ~= CallSite.guest(
+            deferred(() => bytecode.compileFunction(callee)), args,
+            returnShape.returnFacts.size, window,
+        );
+        emit(windowCallHandler(destOffset), destOffset, siteIndex, 0);
+        emitReceiverResult(returnShape, destOffset, receiverOffset);
     }
 
     private Arg[] compileGuestArguments(
@@ -10593,9 +10882,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             .resolve(expression);
     }
 
-    private size_t addressOfPlace(in size_t place) {
+    private size_t addressOfPlace(in size_t place, in size_t dest = size_t.max) {
         if (!isIndirect(place)) {
-            const address = reserveTemp(pointerFacts);
+            const address = dest != size_t.max
+                ? dest : reserveTemp(pointerFacts);
             emit(&opFrameAddress, address, place, size_t.sizeof);
             return address;
         }

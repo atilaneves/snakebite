@@ -114,6 +114,69 @@ public struct CallSite {
         return site;
     }
 
+    // A `guest` site whose caller laid the callee's activation and parameter
+    // slots out in a window of its own frame: `args` name the window slots,
+    // and `opCall` writes nothing into them. See `Window`.
+    public static CallSite guest(
+        const(Function)* delegate() prepare, Arg[] args, size_t returnWidth,
+        in Window window,
+    ) {
+        auto site = guest(prepare, args, returnWidth);
+        site.windowSlot = window.baseSlot;
+        site.windowDisp = window.activation;
+        site.windowScratch = window.scratch;
+        site.windowEnd = window.end;
+        site.windowAlignment = window.alignment;
+        return site;
+    }
+
+    // Where a caller lays out one call. The frame of the caller holds a
+    // pointer slot, `baseSlot`, that points past the end of its frame; all
+    // offsets here are from that address. The callee activation starts at
+    // `activation`, its parameter slots follow the activation header, and a
+    // result that nothing reads goes to `scratch`. `end` is the first byte
+    // after the parameter slots.
+    public struct Window {
+        package size_t baseSlot;
+        package size_t activation;
+        // The first parameter slot of the callee, which is the start of
+        // its frame.
+        package size_t frame;
+        package size_t scratch;
+        package size_t end;
+        package uint alignment;
+
+        // The callee frame alignment is only final when the callee is
+        // compiled, because its temporaries can raise it. A window is never
+        // less aligned than the temporaries that are usual, so such a callee
+        // still fits.
+        private enum uint minimumAlignment = 16;
+
+        // The window of a call whose callee has parameters up to
+        // `parametersEnd` and frame alignment `calleeAlignment`, laid out from
+        // `depth`: the end of the windows that are still open around it.
+        // `scratchBytes` is the size of a result that nothing reads.
+        public static Window of(
+            in size_t baseSlot, in size_t depth, in uint calleeAlignment,
+            in size_t parametersEnd, in size_t scratchBytes,
+            in uint scratchAlignment,
+        ) {
+            Window window;
+            window.baseSlot = baseSlot;
+            window.alignment = calleeAlignment > minimumAlignment
+                ? calleeAlignment : minimumAlignment;
+            const mask = size_t(window.alignment) - 1;
+            window.scratch = (depth + scratchAlignment - 1)
+                & ~(size_t(scratchAlignment) - 1);
+            window.activation =
+                (window.scratch + scratchBytes + mask) & ~mask;
+            window.frame = window.activation
+                + ((Activation.sizeof + mask) & ~mask);
+            window.end = window.frame + parametersEnd;
+            return window;
+        }
+    }
+
     // A prepared FFI plan for a native symbol, called through
     // `executeCallPlan`.
     public static CallSite native(
@@ -186,10 +249,16 @@ public struct CallSite {
     package size_t returnWidth;
     package const(Function)* callee;
     package const(Function)* delegate() prepareGuest;
+    // `size_t.max` unless the caller laid this call out in a `Window`.
+    package size_t windowSlot = size_t.max;
+    package size_t windowDisp;
+    package size_t windowScratch;
+    package size_t windowEnd;
+    package uint windowAlignment;
 
     // What `opCall` needs of a `guest` site whose callee is compiled, in
     // one place. The fields other than `state` are valid once `state` is
-    // `ready`.
+    // `ready`, and only a site with a call window becomes `ready`.
     package struct FastCall {
         package enum State : uint {
             unprepared,
@@ -203,12 +272,17 @@ public struct CallSite {
         package size_t frameBytes;
         package size_t frameOffset;
         package uint alignment;
-        package size_t returnPlaceOffset = size_t.max;
-        package size_t returnWidth;
-        package const(Arg)* args;
-        package size_t argCount;
-        // Every argument is a plain frame offset of width 1, 2, 4 or 8.
-        package bool plainArgs;
+        // Where the call stores the address of the result, and where it
+        // stores the base of the call windows of the callee, both from the
+        // frame of the callee. A callee that keeps neither gets them in a
+        // field of its activation that nothing has read yet.
+        package size_t placeStore;
+        package size_t windowStore;
+        // Where that base lies from the activation of the callee.
+        package size_t windowBase;
+        // How far past the activation the committed bytes must reach: the
+        // frame and the call windows of the callee.
+        package size_t reachBytes;
     }
 
     package FastCall fast;
@@ -256,37 +330,35 @@ public struct CallSite {
         return eligible;
     }
 
-    // Fills `slot` for a callee whose activation `opCall` builds without
-    // the generic decoding: no closure and no context conversion. A
-    // callee with a return place also needs a result place at the site;
-    // `opCall` checks that per call.
+    // Fills `slot` for a callee that a call window can hold: no closure and
+    // no frame that needs a stricter alignment than the window gives. A
+    // site that is not eligible takes the generic path, which copies the
+    // arguments out of the window.
     private bool fill(ref FastCall slot) const {
+        if (windowSlot == size_t.max)
+            return false;
         const function_ = cacheCallee();
-        if (function_.closureOffset != size_t.max
-                || (hasContext && function_.contextOffset == size_t.max))
+        if (function_.closureOffset != size_t.max)
             return false;
         assert(function_.frameAlignment > 0
             && (function_.frameAlignment & (function_.frameAlignment - 1)) == 0);
         const alignment = function_.frameAlignment > uint(Activation.alignof)
             ? function_.frameAlignment : uint(Activation.alignof);
-        import core.memory: pageSize;
-        // `opCall` reserves with `reserveFast`.
-        if (alignment >= pageSize)
+        if (alignment > windowAlignment)
             return false;
         slot.frameOffset =
             (Activation.sizeof + alignment - 1) & ~(size_t(alignment) - 1);
         slot.alignment = alignment;
         slot.frameBytes = slot.frameOffset + function_.frameSize;
-        slot.returnPlaceOffset = function_.returnPlace.offset;
-        slot.returnWidth = returnWidth;
-        slot.args = args.ptr;
-        slot.argCount = args.length;
-        slot.plainArgs = true;
-        foreach (arg; args)
-            if (!isFrameOperand(arg.callerOffset)
-                    || (arg.width != 1 && arg.width != 2 && arg.width != 4
-                        && arg.width != 8))
-                slot.plainArgs = false;
+        const unusedStore = Activation.resume.offsetof - slot.frameOffset;
+        slot.placeStore = function_.returnPlace.offset == size_t.max
+            ? unusedStore : function_.returnPlace.offset;
+        slot.windowStore = function_.windowSlot == size_t.max
+            ? unusedStore : function_.windowSlot;
+        slot.windowBase = (slot.frameBytes + alignment - 1)
+            & ~(size_t(alignment) - 1);
+        slot.reachBytes = function_.windowSlot == size_t.max
+            ? slot.frameBytes : slot.windowBase + function_.windowBytes;
         slot.callee = function_;
         return true;
     }
@@ -431,6 +503,7 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind,
     private const(Instruction)* _pc;
     private ubyte* _frame;
     private size_t _cleanupMark;
+    private Activation* _activation;
 
     // The register arguments: what the previous handler left, and what this
     // one leaves for the next. An operation that leaves nothing leaves
@@ -446,6 +519,7 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind,
     ) pure nothrow @nogc {
         _pc = pc;
         _frame = frame;
+        _activation = activation;
         _cleanupMark = activation.cleanupMark;
         this.returnPlace = activation.returnPlace;
         this.constants = activation.constants;
@@ -459,6 +533,10 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind,
 
     public const(Instruction)* next() const pure nothrow @nogc {
         return _pc + 1;
+    }
+
+    public Activation* activation() pure nothrow @nogc {
+        return _activation;
     }
 
     public size_t width() const @safe pure nothrow @nogc {
@@ -898,6 +976,11 @@ public struct Function {
     // Every word of this function that holds a process address, except the
     // handler of each instruction.
     package Reloc[] relocs;
+    // `size_t.max` unless this function lays out call windows. Otherwise
+    // this frame slot holds the address where they start, and `windowBytes`
+    // is how far they reach from it.
+    package size_t windowSlot = size_t.max;
+    package size_t windowBytes;
 }
 
 
@@ -929,7 +1012,8 @@ package void recordCallSiteRelocs(
     enum plainFields = AliasSeq!(
         "kind", "value", "args", "nativeArgs", "returnWidth", "fast",
         "calleeSlotOffset", "hasContext", "cleanupStartIndex",
-        "cleanupEndIndex", "cleanupStart", "cleanupEnd",
+        "cleanupEndIndex", "cleanupStart", "cleanupEnd", "windowSlot",
+        "windowDisp", "windowScratch", "windowEnd", "windowAlignment",
         "directState", "directTarget", "directSwapped",
     );
     enum addressFields = AliasSeq!(
@@ -1041,6 +1125,19 @@ public struct Vm {
         assert(function_.instructions.length > 0);
         assert(function_.frameAlignment > 0);
 
+        // A guest function that called out to the host may be mid-way through
+        // laying out a call; its window lies above the reserved bytes.
+        const outer = _frames.mark;
+        scope(exit) _frames.release(outer);
+        if (auto entry = cast(DispatchState*) _frames.backendEntry)
+            if (entry.current !is null
+                    && entry.current.function_.windowSlot != size_t.max) {
+                auto running = entry.current;
+                _frames.raiseTo(
+                    *cast(ubyte**) (running.frame
+                        + running.function_.windowSlot)
+                    + running.function_.windowBytes);
+            }
         auto frame = _frames.push(
             function_.frameSize,
             function_.frameAlignment,
@@ -1053,11 +1150,31 @@ public struct Vm {
         returnPlace = function_.returnPlace.bind(
             &_frames, frame.base, returnPlace);
         initializeClosure(&function_, frame.base, &_frames);
+        initializeWindow(&function_, frame.base, &_frames);
         auto pc = function_.instructions.ptr;
         dispatch(pc, frame.base, returnPlace, &function_, &_frames, &this);
     }
 }
 
+
+// Points the window slot of `function_`, if it has one, past every byte that
+// is reserved now: the calls of this function lay their activations out from
+// there. Whatever reserves bytes later does so above the windows (see
+// `Vm.call`) or moves them (`opAlloca`).
+private void initializeWindow(
+    const(Function)* function_,
+    ubyte* frame,
+    FrameStack* frames,
+) {
+    if (function_.windowSlot == size_t.max)
+        return;
+    const alignment = function_.frameAlignment > uint(Activation.alignof)
+        ? function_.frameAlignment : uint(Activation.alignof);
+    auto base = cast(ubyte*) ((cast(size_t) frames.top + alignment - 1)
+        & ~(size_t(alignment) - 1));
+    frames.commitTo(base + function_.windowBytes);
+    *cast(ubyte**) (frame + function_.windowSlot) = base;
+}
 
 private void initializeClosure(
     const(Function)* function_,
@@ -1728,14 +1845,7 @@ package const(Instruction)* opThrow(
 private alias opCallGeneral =
     executeCall!(runCall, OperandKind.result, OperandKind.immediate);
 
-// A call of a compiled guest function whose activation needs no closure,
-// no discarded memory-class result slot and no context conversion, with
-// plain arguments and room on the committed frame stack: the activation is
-// built here without the generic `Execution` decoding, from the facts
-// `CallSite.prepare` keeps. Everything else takes `opCallSlow`, which has the
-// same effect. In a chained build it ends with a tail call to the callee's
-// first handler, so it keeps no value in a callee-saved register over that
-// call.
+// Every call that is not a window call: `opCallSlow` takes it.
 public const(Instruction)* opCall(
     const(Instruction)* pc,
     Activation* active,
@@ -1748,22 +1858,54 @@ public const(Instruction)* opCall(
         static __gshared CountSlot slot;
         countExecution(&slot, "opCall");
     }
+    return opCallSlow(pc, active, state, frame, r0, fp0);
+}
+
+// Where a call writes its result, which the compiler knows when it chooses
+// the handler.
+private enum Destination {
+    frame,
+    indirect,
+    discard,
+}
+
+public alias opCallWindowFrame = callWindow!(Destination.frame);
+public alias opCallWindowIndirect = callWindow!(Destination.indirect);
+public alias opCallWindowDiscard = callWindow!(Destination.discard);
+
+// A call of a compiled guest function through a call window: the caller
+// wrote the arguments into the parameter slots of the callee, so the
+// activation only has to be linked and the frame stack to grow. Nothing is
+// copied. A site that is not ready, and a window call that does not fit the
+// committed frame stack, take `opCallSlow`. In a chained build it ends with a
+// tail call to the callee's first handler, so it keeps no value in a
+// callee-saved register over that call.
+private const(Instruction)* callWindow(Destination destination)(
+    const(Instruction)* pc,
+    Activation* active,
+    DispatchState* state,
+    ubyte* frame,
+    ulong r0,
+    double fp0,
+) {
+    version (BytecodeCount) {
+        static __gshared CountSlot slot;
+        countExecution(&slot, "opCallWindow." ~ destination.stringof);
+    }
     import core.atomic: atomicLoad, MemoryOrder;
 
     const site = &active.callSites[pc.source];
     const fast = &site.fast;
-    const ready = atomicLoad!(MemoryOrder.acq)(
-        *cast(shared(uint)*) &fast.state) == CallSite.FastCall.State.ready;
-    const hasPlace = fast.returnWidth != 0 && pc.destination != discardResult;
-    if (!ready || !fast.plainArgs
-            || (!hasPlace && fast.returnPlaceOffset != size_t.max))
+    if (atomicLoad!(MemoryOrder.acq)(
+            *cast(shared(uint)*) &fast.state) != CallSite.FastCall.State.ready)
         return opCallSlow(pc, active, state, frame, r0, fp0);
 
+    ubyte* base = *cast(ubyte**) (frame + site.windowSlot);
+    auto activation = cast(Activation*) (base + site.windowDisp);
     auto frames = state.frames;
     const mark = frames.mark;
-    auto activation = cast(Activation*) frames.reserveFast(
-        fast.frameBytes, fast.alignment);
-    if (activation is null)
+    if (!frames.claimFast(cast(ubyte*) activation + fast.frameBytes,
+            cast(ubyte*) activation + fast.reachBytes))
         return opCallSlow(pc, active, state, frame, r0, fp0);
 
     // The position of a throw selects its handler, and the new activation
@@ -1775,13 +1917,20 @@ public const(Instruction)* opCall(
     ubyte* calleeFrame = cast(ubyte*) activation + fast.frameOffset;
     activation.frame = calleeFrame;
 
-    const callee = fast.callee;
-    void* place = null;
-    if (hasPlace)
-        place = operandStorage(frame, pc.destination);
-    if (fast.returnPlaceOffset != size_t.max)
-        *cast(void**) (calleeFrame + fast.returnPlaceOffset) = place;
+    // A result nobody reads still has a place to go.
+    static if (destination == Destination.frame)
+        void* place = frame + pc.destination;
+    else static if (destination == Destination.indirect)
+        void* place = indirectStorageAt(frame, pc.destination);
+    else
+        void* place = base + site.windowScratch;
     activation.returnPlace = place;
+    // A callee without a slot gets its address stored in a field that nothing
+    // reads yet, so that no branch tests for it.
+    *cast(void**) (calleeFrame + fast.placeStore) = place;
+    *cast(ubyte**) (calleeFrame + fast.windowStore) =
+        cast(ubyte*) activation + fast.windowBase;
+    const callee = fast.callee;
     activation.pc = callee.instructions.ptr;
     activation.function_ = callee;
     activation.cleanupMark = frames.cleanupMark;
@@ -1790,20 +1939,6 @@ public const(Instruction)* opCall(
     static if (!chainedDispatch)
         state.pending = activation;
 
-    // Last, so that few values stay live through the loop.
-    foreach (arg; fast.args[0 .. fast.argCount]) {
-        auto destination = calleeFrame + arg.calleeOffset;
-        const source = frame + arg.callerOffset;
-        // Compares, not a jump table: a site always takes the same one.
-        if (arg.width == 8)
-            *cast(ulong*) destination = *cast(const(ulong)*) source;
-        else if (arg.width == 4)
-            *cast(uint*) destination = *cast(const(uint)*) source;
-        else if (arg.width == 1)
-            *destination = *source;
-        else
-            *cast(ushort*) destination = *cast(const(ushort)*) source;
-    }
     static if (chainedDispatch) {
         // The callee's first handler runs from here, so the native stack
         // stays flat however deep the guest calls go.
@@ -1815,7 +1950,6 @@ public const(Instruction)* opCall(
     } else
         return callee.instructions.ptr;
 }
-
 
 // A `native` site: decided once whether the plan is a direct word call.
 // Only the thread that wins the `preparing` state decides and writes the
@@ -1887,8 +2021,8 @@ private const(Instruction)* opCallNative(
     return pc + 1;
 }
 
-// Every call `opCall` does not take, and the same call with a general
-// frame reserve and argument copy.
+// Every call `opCall` does not take. A native site is a direct word call
+// when it can be; any other call goes to `opCallPlain`.
 pragma(inline, false)
 private const(Instruction)* opCallSlow(
     const(Instruction)* pc,
@@ -1936,8 +2070,6 @@ private const(Instruction)* opCallPlain(
     ulong r0,
     double fp0,
 ) {
-    import core.stdc.string: memcpy;
-
     import core.atomic: atomicLoad, MemoryOrder;
 
     // The position of a throw selects its handler, and the new activation
@@ -1949,51 +2081,31 @@ private const(Instruction)* opCallPlain(
         *cast(shared(uint)*) &site.fast.state) == CallSite.FastCall.State.ready;
     if (!ready && !site.prepareFast)
         return opCallGeneral(pc, active, state, frame, r0, fp0);
-    const fast = &site.fast;
-    const callee = fast.callee;
-    const hasPlace = fast.returnWidth != 0 && pc.destination != discardResult;
-    if (!hasPlace && fast.returnPlaceOffset != size_t.max)
-        return opCallGeneral(pc, active, state, frame, r0, fp0);
 
-    ubyte* storage(in size_t operand) {
-        return operandStorage(frame, operand);
-    }
-
+    ubyte* base = *cast(ubyte**) (frame + site.windowSlot);
+    auto activation = cast(Activation*) (base + site.windowDisp);
     auto frames = state.frames;
+    const fast = &site.fast;
     const mark = frames.mark;
-    auto activation = cast(Activation*) frames.reserveCommitted(
-        fast.frameBytes, fast.alignment);
+    frames.claim(cast(ubyte*) activation + fast.frameBytes,
+        cast(ubyte*) activation + fast.reachBytes);
+
     activation.frameMark = mark;
     ubyte* calleeFrame = cast(ubyte*) activation + fast.frameOffset;
     activation.frame = calleeFrame;
-
-    foreach (arg; fast.args[0 .. fast.argCount]) {
-        auto destination = calleeFrame + arg.calleeOffset;
-        const source = storage(arg.callerOffset);
-        // Constant widths let the compiler copy without a call.
-        switch (arg.width) {
-        case 1: memcpy(destination, source, 1); break;
-        case 2: memcpy(destination, source, 2); break;
-        case 4: memcpy(destination, source, 4); break;
-        case 8: memcpy(destination, source, 8); break;
-        case 16: memcpy(destination, source, 16); break;
-        default: memcpy(destination, source, arg.width); break;
-        }
-    }
-
-    void* place = null;
-    if (hasPlace)
-        place = storage(pc.destination);
-    if (fast.returnPlaceOffset != size_t.max)
-        *cast(void**) (calleeFrame + fast.returnPlaceOffset) = place;
+    void* place = pc.destination == discardResult
+        ? base + site.windowScratch : operandStorage(frame, pc.destination);
     activation.returnPlace = place;
-    activation.pc = callee.instructions.ptr;
-    activation.function_ = callee;
+    *cast(void**) (calleeFrame + fast.placeStore) = place;
+    *cast(ubyte**) (calleeFrame + fast.windowStore) =
+        cast(ubyte*) activation + fast.windowBase;
+    activation.pc = fast.callee.instructions.ptr;
+    activation.function_ = fast.callee;
     activation.cleanupMark = frames.cleanupMark;
-    activation.parent = state.current;
-    activation.parent.resume = pc + 1;
+    activation.parent = active;
+    active.resume = pc + 1;
     state.pending = activation;
-    return callee.instructions.ptr;
+    return fast.callee.instructions.ptr;
 }
 
 private const(Instruction)* runCall(Decoded)(
@@ -2151,6 +2263,13 @@ private const(Instruction)* callFunction(bool redirected = false, Decoded)(
 
     const mark = execution.frames.mark;
     scope(failure) execution.frames.release(mark);
+    // The caller may have arguments waiting in a window of its frame, above
+    // the reserved bytes. This callee gets its frame above every window.
+    const running = execution.activation.function_;
+    if (running.windowSlot != size_t.max)
+        execution.frames.raiseTo(
+            *cast(ubyte**) execution.storage(running.windowSlot)
+            + running.windowBytes);
     assert(callee.frameAlignment > 0
         && (callee.frameAlignment & (callee.frameAlignment - 1)) == 0);
     const alignment = max(callee.frameAlignment, uint(Activation.alignof));
@@ -2194,6 +2313,7 @@ private const(Instruction)* callFunction(bool redirected = false, Decoded)(
     activation.returnPlace = callee.returnPlace.bind(
         execution.frames, activation.frame,
         site.returnWidth == 0 ? null : execution.destination);
+    initializeWindow(callee, activation.frame, execution.frames);
     activation.pc = callee.instructions.ptr;
     activation.function_ = callee;
     activation.cleanupMark = execution.frames.cleanupMark;
@@ -3993,9 +4113,24 @@ package alias opAlloca =
 private const(Instruction)* runAlloca(Decoded)(
     ref Decoded execution,
 ) {
+    import core.stdc.string: memmove;
+
     const size = *cast(const(size_t)*) (execution.source);
     *cast(void**) (execution.destination) =
         execution.frames.reserve(size, 16);
+    // The call windows of this function lay out above the reserved bytes.
+    // Move them above the new memory, with what they hold so far.
+    const function_ = execution.activation.function_;
+    if (function_.windowSlot != size_t.max) {
+        auto slot = cast(ubyte**) execution.storage(function_.windowSlot);
+        const alignment = function_.frameAlignment > uint(Activation.alignof)
+            ? function_.frameAlignment : uint(Activation.alignof);
+        auto moved = cast(ubyte*) ((cast(size_t) execution.frames.top
+            + alignment - 1) & ~(size_t(alignment) - 1));
+        execution.frames.commitTo(moved + function_.windowBytes);
+        memmove(moved, *slot, function_.windowBytes);
+        *slot = moved;
+    }
     return execution.next;
 }
 

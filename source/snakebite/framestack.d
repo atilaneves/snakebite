@@ -268,6 +268,60 @@ public struct FrameStack {
         return _base + alignedUsed;
     }
 
+    // The first byte above everything reserved.
+    public ubyte* top() @system {
+        return _base + _used;
+    }
+
+    // Makes every byte below `end` reserved, for a callee frame that the
+    // caller laid out above the reservation already. The bytes up to
+    // `reach` must also be committed, because the callee writes its own call
+    // windows there. `false` when they are not; `claim` then does the work
+    // with the checks.
+    pragma(inline, true)
+    public bool claimFast(ubyte* end, ubyte* reach) @system {
+        if (reach - _base > _fastEnd)
+            return false;
+        _used = end - _base;
+        return true;
+    }
+
+    // As `claimFast`, committing the bytes or failing as `reserve` does.
+    public void claim(ubyte* end, ubyte* reach) @system {
+        import std.conv: text;
+
+        const used = end - _base;
+        const needed = reach > end ? reach - _base : used;
+        if (needed > _limit)
+            throw new Exception(
+                text("frame stack overflow: need offset ", needed, " of ",
+                    _limit));
+        if (needed > _committed)
+            commit(needed);
+        _used = used;
+    }
+
+    // Commits the bytes below `end` without reserving them.
+    public void commitTo(ubyte* end) @system {
+        import std.conv: text;
+
+        const needed = end - _base;
+        if (needed > _limit)
+            throw new Exception(
+                text("frame stack overflow: need offset ", needed, " of ",
+                    _limit));
+        if (needed > _committed)
+            commit(needed);
+    }
+
+    // Reserves nothing below `address` any more. A frame that lives above
+    // the reservation (a call window) stays out of the way of whatever
+    // reserves next.
+    public void raiseTo(ubyte* address) @system {
+        if (address > top)
+            claim(address, address);
+    }
+
     // Gives back everything reserved since `mark`. Only for `reserve`d
     // bytes: a `push`ed `Frame` gives its own back.
     public void release(in Mark mark) {
