@@ -8491,6 +8491,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         callee = _bytecode.definitionOf(callee);
         if (compileFloatIntrinsic(expression, callee, destOffset))
             return;
+        if (compileNativeArrayNew(expression, callee, destOffset))
+            return;
         if (expression.readsVtable(callee))
             return compileVirtualCall(expression, callee, destOffset);
 
@@ -8504,6 +8506,59 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             hasThis,
             () => receiverOffsetOf(expression, callee),
             destOffset, expression);
+    }
+
+    // `new T[n]` lowers to `_d_newarrayT!T(n, false)`, whose chain of
+    // templates the guest would interpret. druntime also exports the
+    // non-template `_d_newarrayT`/`_d_newarrayiT`/`_d_newarrayU(ti, n)`,
+    // which do the same work as compiled code: one native call instead.
+    private bool compileNativeArrayNew(
+        CallExp expression, FuncDeclaration callee, in size_t destOffset,
+    ) {
+        import dmd.dtemplate: isType;
+        import dmd.location: Loc;
+        import dmd.typesem: isZeroInit;
+        import snakebite.frontend.compiler: newInFrontend;
+        import snakebite.backends.druntimehooks: DruntimeHook, planOf;
+
+        if (callee.ident is null || callee.parent is null)
+            return false;
+        const name = callee.ident.toString;
+        if (name != "_d_newarrayT" && name != "_d_newarrayU")
+            return false;
+        auto instance = callee.parent.isTemplateInstance;
+        if (instance is null || instance.tdtypes.length != 1
+                || expression.arguments is null
+                || expression.arguments.length == 0)
+            return false;
+        const declaration = callee.getModule.md;
+        if (declaration is null || declaration.id.toString != "construction"
+                || declaration.packages.length != 3
+                || declaration.packages[0].toString != "core"
+                || declaration.packages[1].toString != "internal"
+                || declaration.packages[2].toString != "array")
+            return false;
+        auto elementType = isType(instance.tdtypes[0]);
+        if (elementType is null)
+            return false;
+
+        const hook = name == "_d_newarrayU"
+            ? DruntimeHook.newArrayUninitialized
+            : newInFrontend!isZeroInit(elementType, Loc.initial)
+            ? DruntimeHook.newArrayZeroed : DruntimeHook.newArrayInitialized;
+        auto plan = planOf(_bytecode._plans, hook);
+
+        const length = reserveTemp(pointerFacts);
+        evalInto((*expression.arguments)[0], length, size_t.sizeof);
+        const info = reserveTemp(pointerFacts);
+        emitRuntimeTypeInfoConstant(
+            expression.type, info, size_t.sizeof);
+        _callSites ~= CallSite.native(
+            cast(const(void)*) plan,
+            [Arg(info, 0, size_t.sizeof), Arg(length, 0, size_t.sizeof)],
+            2 * size_t.sizeof);
+        emit(&opCall, destOffset, _callSites.length - 1, 0);
+        return true;
     }
 
     // `core.math.sqrt` and `core.math.fabs` on a float type: the operand is

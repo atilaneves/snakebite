@@ -1342,6 +1342,34 @@ static foreach (backend; Matrix!(
 }
 
 
+// The collector skips the elements of an array whose element type has no
+// pointers (`NO_SCAN`). `new S[n]` takes that from the element's TypeInfo.
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+        "GC.getAttr calls gc_getAttr, which has no source for CTFE"))) {
+    @("pointerFreeStructArrayIsNoScan." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.memory: GC;
+
+            struct F { float f; int i = 7; }
+            struct NP { int a; long b; }
+            struct D { int a; ~this() {} }
+
+            bool noScan(T)(T[] array) {
+                return (GC.getAttr(cast(const(void)*) array.ptr) & GC.BlkAttr.NO_SCAN) != 0;
+            }
+
+            void main() {
+                assert(noScan(new F[3]));
+                assert(noScan(new NP[3]));
+                assert(noScan(new shared(F)[3]));
+                assert(noScan(new D[3]));
+            }
+        });
+    }
+}
+
 // An element of a slice read or written with a 32-bit or 64-bit index and a
 // constant offset, for each element size.
 static foreach (backend; Matrix!()) {
@@ -1371,6 +1399,26 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+        "GC.getAttr calls gc_getAttr, which has no source for CTFE"))) {
+    @("pointerStructArrayIsScanned." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.memory: GC;
+
+            struct P { int a; int* p; }
+
+            void main() {
+                auto array = new P[3];
+                assert((GC.getAttr(array.ptr) & GC.BlkAttr.NO_SCAN) == 0);
+            }
+        });
+    }
+}
+
 
 // An index below zero or past the end, after the offset, is a `RangeError`
 // that names the line of the access, and a read leaves its destination alone.
