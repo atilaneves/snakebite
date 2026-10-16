@@ -6,7 +6,7 @@ import dmd.func: FuncDeclaration;
 import snakebite.backends.backend: Program;
 import snakebite.backends.bytecode.inspection:
     handlerRoleMismatches, misplacedRelocs, relocsOf, unrecordedWords;
-import snakebite.backends.bytecode.relocation: Place, Target;
+import snakebite.backends.bytecode.relocation: Place, Target, recordRelocs;
 import snakebite.backends.bytecode.vm:
     Function, Instruction, opConstant, specialisedHandlersWithoutRoles;
 import snakebite.frontend.compiler: parseSnippet;
@@ -232,6 +232,9 @@ private void withCompiledProgram(
     string source, in Checksum[] checksums,
     scope void delegate(string, const(Function)*) visit,
 ) {
+    const before = recordRelocs;
+    recordRelocs = true;
+    scope(exit) recordRelocs = before;
     auto guestModule = parseSnippet(source);
     auto program = Program([guestModule]);
     auto backend = Owned!Bytecode(program);

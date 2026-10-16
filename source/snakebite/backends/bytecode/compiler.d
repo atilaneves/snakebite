@@ -813,7 +813,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         ContextSource, PairPlan, calleeContextSourceOf, contextSourceOf,
         pairPlanOf;
     import snakebite.backends.bytecode.relocation:
-        Address, Place, Reloc, Target;
+        Address, Place, Reloc, Target, recordRelocs;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.backends.temporary: TemporaryPlan, constructTemporary;
     import snakebite.exception: SnakebiteException;
@@ -1136,12 +1136,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     site.cleanupEndIndex);
             }
 
-        foreach (index, ref site; _callSites)
-            recordCallSiteRelocs(_relocs, index, site);
-        foreach (index, ref site; _assertSites)
-            recordAssertSiteRelocs(_relocs, index, site);
-        foreach (index, ref handler; exceptionHandlers)
-            recordExceptionHandlerRelocs(_relocs, index, handler);
+        if (recordRelocs) {
+            foreach (index, ref site; _callSites)
+                recordCallSiteRelocs(_relocs, index, site);
+            foreach (index, ref site; _assertSites)
+                recordAssertSiteRelocs(_relocs, index, site);
+            foreach (index, ref handler; exceptionHandlers)
+                recordExceptionHandlerRelocs(_relocs, index, handler);
+        }
 
         ClosureSlot[] closureSlots;
         if (_closureOffset != size_t.max)
@@ -1514,6 +1516,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import std.conv: text;
 
+        if (!recordRelocs)
+            return;
         Roles roles;
         const known = rolesOf(handler, roles);
         const role = field == Place.Field.destination ? roles.destination
@@ -1534,7 +1538,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private size_t addConstant(in Address address) {
-        if (!address.isNull)
+        if (recordRelocs && !address.isNull)
             _relocs ~= Reloc(
             Place(Place.Section.constant, Place.Field.word,
                 _constants.length),

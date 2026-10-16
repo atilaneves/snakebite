@@ -116,6 +116,12 @@ public struct Place {
 }
 
 
+// Whether the bytecode compiler records relocs. It is off: nothing reads the
+// relocs yet, and recording them costs compile time and memory. It is
+// thread-local, so a test that turns it on does not affect other tests.
+public bool recordRelocs;
+
+
 public struct Reloc {
     public Place place;
     public Target target;
