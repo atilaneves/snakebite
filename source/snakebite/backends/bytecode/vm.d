@@ -1007,12 +1007,7 @@ public struct Vm {
             &_frames, frame.base, returnPlace);
         initializeClosure(&function_, frame.base, &_frames);
         auto pc = function_.instructions.ptr;
-        dispatch(
-            pc, frame.base, returnPlace, function_.constants,
-            function_.callSites, function_.assertSites,
-            function_.exceptionHandlers, &_frames,
-            &this,
-        );
+        dispatch(pc, frame.base, returnPlace, &function_, &_frames, &this);
     }
 }
 
@@ -1052,18 +1047,50 @@ private void initializeClosure(
 // therefore depends on barrier crossings, not guest call depth.
 private struct Activation {
     const(Instruction)* pc;
-    const(Instruction)* start;
-    const(Instruction)* end;
     const(Instruction)* resume;
     ubyte* frame;
     void* returnPlace;
-    const(long)[] constants;
-    const(CallSite)[] callSites;
-    const(AssertSite)[] assertSites;
-    const(ExceptionHandler)[] exceptionHandlers;
+    // The tables of the running function: constants, call sites, assert
+    // sites and exception handlers.
+    const(Function)* function_;
     size_t cleanupMark;
     FrameStack.Mark frameMark;
     Activation* parent;
+
+    ref const(long[]) constants() const pure nothrow @nogc return {
+        return function_.constants;
+    }
+
+    ref const(CallSite[]) callSites() const pure nothrow @nogc return {
+        return function_.callSites;
+    }
+
+    ref const(AssertSite[]) assertSites() const pure nothrow @nogc return {
+        return function_.assertSites;
+    }
+
+    // Every activation whose parent is null is the `base` of a
+    // `RootActivation`, made only by `dispatch`. The three accessors below
+    // rely on that to read the root's extra fields.
+    static assert(RootActivation.base.offsetof == 0);
+
+    // The root has no parent. A cleanup root has no handlers at all.
+    const(ExceptionHandler)[] exceptionHandlers() const pure nothrow @nogc return {
+        if (parent is null && (cast(const(RootActivation)*) &this).noHandlers)
+            return null;
+        return function_.exceptionHandlers;
+    }
+
+    // Only a root activation limits the instructions it runs.
+    const(Instruction)* end() const pure nothrow @nogc {
+        return parent is null
+            ? (cast(const(RootActivation)*) &this).end : null;
+    }
+
+    const(Instruction)* start() const pure nothrow @nogc {
+        return parent is null
+            ? (cast(const(RootActivation)*) &this).start : null;
+    }
 
     void cleanup(FrameStack* frames) {
         // Most activations leave no temporary to destroy.
@@ -1075,6 +1102,15 @@ private struct Activation {
     void discardCleanups(FrameStack* frames) {
         frames.finishCleanups(cleanupMark, (in size_t) {});
     }
+}
+
+// An activation that `dispatch` builds on the native stack: the entry of a
+// function from the host, a `finally` body or a temporary's cleanup.
+private struct RootActivation {
+    Activation base;
+    const(Instruction)* start;
+    const(Instruction)* end;
+    bool noHandlers;
 }
 
 private struct DispatchState {
@@ -1109,29 +1145,24 @@ private void dispatch(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    scope const ExceptionHandler[] exceptionHandlers,
+    const(Function)* function_,
     FrameStack* frames,
     Vm* vm,
     const(Instruction)* end = null,
+    bool noHandlers = false,
 ) {
-    // Fill each field once. Default initialization otherwise clears the
-    // arrays before these assignments on every callback entry.
-    Activation root = void;
-    root.pc = root.start = pc;
+    RootActivation root = void;
+    root.start = pc;
     root.end = end;
-    root.resume = null;
-    root.frame = frame;
-    root.returnPlace = returnPlace;
-    root.constants = constants;
-    root.callSites = callSites;
-    root.assertSites = assertSites;
-    root.exceptionHandlers = exceptionHandlers;
-    root.cleanupMark = frames.cleanupMark;
-    root.frameMark = FrameStack.Mark.init;
-    root.parent = null;
+    root.noHandlers = noHandlers;
+    root.base.pc = pc;
+    root.base.resume = null;
+    root.base.frame = frame;
+    root.base.returnPlace = returnPlace;
+    root.base.function_ = function_;
+    root.base.cleanupMark = frames.cleanupMark;
+    root.base.frameMark = FrameStack.Mark.init;
+    root.base.parent = null;
     auto state = DispatchState(frames, null, null, 0, vm,
         cast(DispatchState*) frames.backendEntry);
     // A halt must also discard a partially reserved activation.
@@ -1141,7 +1172,7 @@ private void dispatch(
     bool returned;
     bool thrown;
     scope(exit) if (!returned) {
-        frames.finishCleanups(root.cleanupMark, (in size_t) {});
+        frames.finishCleanups(root.base.cleanupMark, (in size_t) {});
         frames.release(frameMark);
     }
     try {
@@ -1158,7 +1189,7 @@ private void dispatch(
             }
         }
         scope(failure) thrown = true;
-        dispatchLoop(root.pc, &root, &state);
+        dispatchLoop(pc, &root.base, &state);
         returned = true;
     } catch (ForeignUnwindEnd) {
         returned = true;
@@ -1195,13 +1226,13 @@ private void dispatchLoop(
                 continue;
             }
 
+            // A call returns the first instruction of its callee.
             pc = pc.handler(pc, active, state, active.frame, state.r0, state.fp0);
             if (state.pending !is null) {
                 active = state.pending;
                 state.pending = null;
                 static if (chainedDispatch)
                     state.current = active;
-                pc = active.pc;
             }
         } catch (Throwable throwable) {
             static if (chainedDispatch)
@@ -1270,9 +1301,7 @@ private Activation* handleException(
                 unwindFinally(throwable, () {
                     state.current = active;
                     dispatch(handler.handler, active.frame,
-                        active.returnPlace, active.constants,
-                        active.callSites, active.assertSites,
-                        active.exceptionHandlers, frames, vm,
+                        active.returnPlace, active.function_, frames, vm,
                         handler.cleanupEnd);
                 });
             } catch (Throwable chained) {
@@ -1318,9 +1347,8 @@ private void cleanupSince(
         auto state = cast(DispatchState*) frames.backendEntry;
         state.current = active;
         dispatch(cast(const(Instruction)*) site.cleanupStart,
-            active.frame, null, active.constants, active.callSites,
-            active.assertSites, null, frames, state.vm,
-            cast(const(Instruction)*) site.cleanupEnd);
+            active.frame, null, active.function_, frames, state.vm,
+            cast(const(Instruction)*) site.cleanupEnd, true);
     });
 }
 
@@ -1701,19 +1729,14 @@ public const(Instruction)* opCall(
     activation.frame = calleeFrame;
 
     const callee = fast.callee;
-    activation.pc = activation.start = callee.instructions.ptr;
-    activation.end = null;
-    activation.resume = null;
     void* place = null;
     if (hasPlace)
         place = operandStorage(frame, pc.destination);
     if (fast.returnPlaceOffset != size_t.max)
         *cast(void**) (calleeFrame + fast.returnPlaceOffset) = place;
     activation.returnPlace = place;
-    activation.constants = callee.constants;
-    activation.callSites = callee.callSites;
-    activation.assertSites = callee.assertSites;
-    activation.exceptionHandlers = callee.exceptionHandlers;
+    activation.pc = callee.instructions.ptr;
+    activation.function_ = callee;
     activation.cleanupMark = frames.cleanupMark;
     activation.parent = active;
     active.resume = pc + 1;
@@ -1743,7 +1766,7 @@ public const(Instruction)* opCall(
         double none1 = void;
         return first.handler(first, activation, state, calleeFrame, none0, none1);
     } else
-        return pc + 1;
+        return callee.instructions.ptr;
 }
 
 
@@ -1803,24 +1826,19 @@ private const(Instruction)* opCallSlow(
         }
     }
 
-    activation.pc = activation.start = callee.instructions.ptr;
-    activation.end = null;
-    activation.resume = null;
     void* place = null;
     if (hasPlace)
         place = storage(pc.destination);
     if (fast.returnPlaceOffset != size_t.max)
         *cast(void**) (calleeFrame + fast.returnPlaceOffset) = place;
     activation.returnPlace = place;
-    activation.constants = callee.constants;
-    activation.callSites = callee.callSites;
-    activation.assertSites = callee.assertSites;
-    activation.exceptionHandlers = callee.exceptionHandlers;
+    activation.pc = callee.instructions.ptr;
+    activation.function_ = callee;
     activation.cleanupMark = frames.cleanupMark;
     activation.parent = state.current;
     activation.parent.resume = pc + 1;
     state.pending = activation;
-    return pc + 1;
+    return callee.instructions.ptr;
 }
 
 private const(Instruction)* runCall(Decoded)(
@@ -2018,21 +2036,16 @@ private const(Instruction)* callFunction(bool redirected = false, Decoded)(
     }
     initializeClosure(callee, activation.frame, execution.frames);
 
-    activation.pc = activation.start = callee.instructions.ptr;
-    activation.end = null;
-    activation.resume = null;
     activation.returnPlace = callee.returnPlace.bind(
         execution.frames, activation.frame,
         site.returnWidth == 0 ? null : execution.destination);
-    activation.constants = callee.constants;
-    activation.callSites = callee.callSites;
-    activation.assertSites = callee.assertSites;
-    activation.exceptionHandlers = callee.exceptionHandlers;
+    activation.pc = callee.instructions.ptr;
+    activation.function_ = callee;
     activation.cleanupMark = execution.frames.cleanupMark;
     activation.parent = execution._dispatch.current;
     activation.parent.resume = execution.next;
     execution._dispatch.pending = activation;
-    return execution.next;
+    return callee.instructions.ptr;
 }
 
 
