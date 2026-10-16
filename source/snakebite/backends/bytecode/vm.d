@@ -3026,6 +3026,15 @@ static foreach (triple; threeAddressNames) {
 package alias threeAddressHandlers = mixin(handlerList(""));
 package alias threeAddressConstantHandlers = mixin(handlerList("K"));
 
+// The index in `threeAddressHandlers` of the first comparison, which writes
+// one byte whatever its operand width. Every later handler is a comparison.
+package enum firstComparisonHandler = () {
+    foreach (index, triple; threeAddressNames)
+        if (triple[1] == "opCompare3")
+            return index;
+    assert(false, "no comparison handler");
+}();
+
 private string handlerList(in string suffix) {
     string list = "AliasSeq!(";
     foreach (triple; threeAddressNames)
