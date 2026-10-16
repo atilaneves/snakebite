@@ -357,8 +357,8 @@ private enum frameKind(OperandKind kind) = kind == OperandKind.storage
 
 // `fixedWidth` is the width of the instruction's operands when the compiler
 // chose a handler for exactly that width, or 0 to read it from the instruction.
-// `rightKind` is the kind of the right operand that `storage` decodes, when the
-// handler is specialised for it; `storage` then does not follow the other two.
+// `rightKind` is the kind of the right operand, which only `rightStorage`
+// decodes; `storage` decodes any other operand and ignores it.
 private struct Execution(OperandKind destinationKind, OperandKind sourceKind,
     size_t fixedWidth = 0, OperandKind rightKind = OperandKind.storage)
 {
@@ -444,14 +444,19 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind,
     }
 
     public ubyte* storage(in size_t operand) pure nothrow @nogc {
+        static if (frameOnly)
+            return _frame + operand;
+        else
+            return operandStorage(_frame, operand);
+    }
+
+    public ubyte* rightStorage(in size_t operand) pure nothrow @nogc {
         static if (rightKind == OperandKind.frame)
             return _frame + operand;
         else static if (rightKind == OperandKind.indirect)
             return indirectStorageAt(_frame, operand);
-        else static if (frameOnly)
-            return _frame + operand;
         else
-            return operandStorage(_frame, operand);
+            return storage(operand);
     }
 }
 
@@ -505,7 +510,7 @@ version (BytecodeCount) {
     private enum countName(string op, OperandKind d, OperandKind s,
         size_t width, OperandKind r, P...) =
         op ~ "/" ~ d.stringof ~ "/" ~ s.stringof ~ "/w" ~ width.stringof
-            ~ (r == OperandKind.storage ? "" : "/r" ~ r.stringof)
+            ~ (r == OperandKind.storage ? "" : "/r/" ~ r.stringof)
             ~ P.stringof;
 
     private extern(C) void dumpCounts() {
@@ -2674,7 +2679,8 @@ private const(Instruction)* runIndex(IndexBase base, Decoded)(
         auto first = execution.source;
     else
         auto first = *cast(ubyte**) execution.source;
-    const index = *cast(const(size_t)*) execution.storage(execution.sourceWidth);
+    const index = *cast(const(size_t)*) execution.rightStorage(
+        execution.sourceWidth);
     *cast(ubyte**) execution.destination = first + index * execution.width;
     return execution.next;
 }
@@ -2693,7 +2699,7 @@ private ubyte* rightOperand(bool constant, Decoded)(ref Decoded execution) {
     static if (constant)
         return cast(ubyte*) execution.sourceWidth;
     else
-        return execution.storage(execution.sourceWidth);
+        return execution.rightStorage(execution.sourceWidth);
 }
 
 private alias opInt3(string operation, bool constant = false) =
@@ -3763,7 +3769,7 @@ private alias plainOperations = AliasSeq!(
     runGreaterOrEqualSigned, runGreaterOrEqualUnsigned, runEqual, runNotEqual,
     runShiftLeft, runShiftRightLogical, runShiftRightArithmetic, runCopy,
     runFrameAddress, runLoadIndirect, runStoreIndirect, runStaticArrayEqual,
-    runConstant, runZero, runNegate, runCastToBool, runLogicalNot,
+    runConstant, runZero, runNegate, runCastToBool, runLogicalNot, runIndex,
 );
 
 // The operations with a constant right operand in `sourceWidth` or not.
@@ -3953,7 +3959,6 @@ private size_t widthSlot(in size_t width) @safe pure nothrow @nogc {
 
 private enum indirectBit = 1UL << 63;
 
-private enum maskedHandlers = 2 + 8;
 
 // The operations whose instances exist for each mix of frame and indirect
 // storage operands, so that none of them tests the indirect bit.
@@ -3962,13 +3967,17 @@ private alias kindOperations = AliasSeq!(
     runLoadIndirect, runStoreIndirect,
 );
 
+private alias MaskedHandlers = Instruction.Handler[widthSlots][7];
+
 private struct Specialisation {
     Instruction.Handler general;
-    // [0] keeps indirect operands possible, [1] is frame-only. [2 + mask] is
-    // for the operands that the mask names as indirect (bit 0 the
-    // destination, bit 1 the source, bit 2 the right operand) and the others
-    // frame; only an operation in `kindOperations` has them. By width slot.
-    Instruction.Handler[widthSlots][maskedHandlers] handlers;
+    // [0] keeps indirect operands possible, [1] is frame-only. By width slot.
+    Instruction.Handler[widthSlots][2] handlers;
+    // Only an operation in `kindOperations` has these, so most entries do not
+    // pay for them: `masked[mask - 1]` is for the operands that `mask` names
+    // as indirect (bit 0 the destination, bit 1 the source, bit 2 the right
+    // operand) and the others frame.
+    MaskedHandlers* masked;
     bool destination;
     bool source;
     bool right;
@@ -3992,10 +4001,17 @@ private void addSpecialisation(Specialisation entry, in Roles roles) {
     // instruction address. It is searched for every instruction of a
     // function, so it stays small.
     if (roles != Roles.init)
+    {
         foreach (frame; entry.handlers)
             foreach (handler; frame)
                 if (handler !is null)
                     addRoles(handler, roles);
+        if (entry.masked !is null)
+            foreach (frame; *entry.masked)
+                foreach (handler; frame)
+                    if (handler !is null)
+                        addRoles(handler, roles);
+    }
     insertSpecialisation(entry);
 }
 
@@ -4047,10 +4063,12 @@ private void maskedInstances(alias operation, OperandKind destinationKind,
         enum s = sourceKind != OperandKind.storage ? sourceKind
             : sourceIndirect ? OperandKind.indirect : OperandKind.frame;
         enum r = rightIndirect ? OperandKind.indirect : OperandKind.frame;
-        entry.handlers[2 + mask][0] = &executeWith!(operation, d, s, 0, r,
+        if (entry.masked is null)
+            entry.masked = &(new MaskedHandlers[1])[0];
+        (*entry.masked)[mask - 1][0] = &executeWith!(operation, d, s, 0, r,
             Parameters);
         static foreach (width; widths)
-            entry.handlers[2 + mask][widthSlot(width)] = &executeWith!(
+            (*entry.masked)[mask - 1][widthSlot(width)] = &executeWith!(
                 operation, d, s, width, r, Parameters);
     }
 }
@@ -4092,6 +4110,14 @@ private void specialiseWith(alias executor, alias operation,
             maskedInstances!(operation, destinationKind, sourceKind, widths,
                 right, mask, Parameters)(entry);
     addSpecialisation(entry, rolesOfOperation!(operation, sourceKind, Parameters));
+}
+
+// `opCopyFixed` takes a `size_t` width, and a handler registered with another
+// type of width would never be found.
+private void specialiseCopyFixed(size_t width, bool staticSource)() {
+    specialise!(runCopyFixed, OperandKind.storage,
+        staticSource ? OperandKind.immediate : OperandKind.storage, noWidths,
+        false, width, staticSource)();
 }
 
 shared static this() {
@@ -4183,9 +4209,11 @@ shared static this() {
         }}
     }
     static foreach (width; [1, 2, 4, 8, 16])
-        specialise!(runCopyFixed, S, S, noWidths, false, size_t(width), false)();
+        specialiseCopyFixed!(width, false);
     static foreach (width; 1 .. 17)
-        specialise!(runCopyFixed, S, I, noWidths, false, size_t(width), true)();
+        specialiseCopyFixed!(width, true);
+    static foreach (base; EnumMembers!IndexBase)
+        specialise!(runIndex, S, S, noWidths, true, base)();
     {
         Specialisation entry;
         entry.general = &opReturn;
@@ -4201,6 +4229,12 @@ shared static this() {
     foreach (handler; branchHandlers)
         if (!holdsInstruction(handler))
             internalFailure("a branch handler has no instruction role");
+    static foreach (width; [1, 2, 4, 8, 16])
+        if (lookupSpecialisation(&opCopyFixed!width) is null)
+            internalFailure("opCopyFixed has no specialisation");
+    static foreach (width; 1 .. 17)
+        if (lookupSpecialisation(&opCopyFixed!(width, true)) is null)
+            internalFailure("opCopyFixed has no specialisation");
 }
 
 // The handlers that the compiler emits with a branch target. A target that
@@ -4238,11 +4272,14 @@ package void specialiseHandlers(Instruction[] instructions) {
                 && !((next.destination | next.source) & indirectBit);
         }
         const slot = widthSlot(instruction.width);
-        const row = frame ? 1 : entry.handlers[2 + mask][0] !is null
-            ? 2 + mask : 0;
-        Instruction.Handler chosen = entry.handlers[row][slot];
+        const(Instruction.Handler)[] row = entry.handlers[0][];
+        if (frame)
+            row = entry.handlers[1][];
+        else if (entry.masked !is null && (*entry.masked)[mask - 1][0] !is null)
+            row = (*entry.masked)[mask - 1][];
+        Instruction.Handler chosen = row[slot];
         if (chosen is null)
-            chosen = entry.handlers[row][0];
+            chosen = row[0];
         instruction.handler = chosen;
     }
 }
