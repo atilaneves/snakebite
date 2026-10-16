@@ -564,3 +564,83 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.nested.callerOfCalleeThatCallsAnotherCallee." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Task { bool holding; int held; Task* link; }
+
+            void setTaskHolding(Task* task) {
+                task.holding = true;
+                task.held += 1;
+            }
+
+            Task* holdSelf(Task* task) {
+                setTaskHolding(task);
+                return task.link;
+            }
+
+            void main() {
+                auto first = new Task;
+                auto second = new Task;
+                first.link = second;
+                assert(holdSelf(first) is second);
+                assert(holdSelf(first) is second);
+                assert(first.holding && first.held == 2);
+                assert(!second.holding && second.held == 0);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.nested.chainDeeperThanTheSpeculationLimit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int leaf(int x) { return x * 2; }
+            int c(int x) { return leaf(x) + 1; }
+            int b(int x) { return c(x) + 10; }
+            int a(int x) { return b(x) + 100; }
+
+            void main() {
+                assert(a(1) == 113);
+                assert(a(5) == 121);
+                assert(c(3) == 7);
+                assert(leaf(4) == 8);
+                int total;
+                foreach (index; 0 .. 4)
+                    total += a(index);
+                assert(total == 4 * 111 + 2 * 6);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.nested.innerCalleeThatTakesAnAddressStaysACall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int other(int x) { return x + 1; }
+
+            int takesAddress(int x) {
+                auto function_ = &other;
+                return function_(x) * 2;
+            }
+
+            int outer(int x) { return takesAddress(x) + 5; }
+
+            void main() {
+                assert(outer(1) == 9);
+                assert(outer(2) == 11);
+                assert(takesAddress(3) == 8);
+            }
+        });
+    }
+}

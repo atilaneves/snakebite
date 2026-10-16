@@ -99,9 +99,9 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // reuses the one already built.
     private snakebite.backends.classinfo.ClassRuntimeCache _classRuntime;
     private size_t _compilationDepth;
-    // Greater than zero while a callee compiles only so that its caller
-    // can copy it: that compile may copy callees that are already complete
-    // but compiles no further function.
+    // The number of callees that compile only so that their callers can
+    // copy them, nested inside each other. Greater than zero while such a
+    // compile runs; it never exceeds `maxSpeculationDepth`.
     private size_t _speculating;
     private bool[FuncDeclaration] _rejectedForInlining;
     private size_t _cacheMisses;
@@ -524,10 +524,12 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     }
 
     // The body of `function_` for a caller to copy in place of a call, or
-    // null. It compiles a tiny `function_` unless a function is already
-    // compiling only for a caller. A callee that this compiler rejects, or
+    // null. It compiles a tiny `function_` that is not yet compiled, and
+    // that compile may in turn compile its own tiny callees, up to
+    // `maxSpeculationDepth` deep. A callee that this compiler rejects, or
     // whose compile would reach another function's address, is recorded
-    // once and stays a normal call.
+    // once and stays a normal call. A chain that is too deep leaves every
+    // function on it uncompiled and null is returned for the outermost.
     package const(InlineBody)* inlineBodyOf(FuncDeclaration function_) {
         import snakebite.frontend.compiler: withCompilerLock;
 
@@ -535,13 +537,27 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         withCompilerLock({
             if (auto complete = function_ in _complete)
                 found = *complete;
-            else if (_speculating < speculationDepth && function_ !in _compiled
+            else if (function_ !in _compiled
                     && function_ !in _rejectedForInlining
                     && hasTinyBody(function_)) {
+                if (_speculating >= maxSpeculationDepth)
+                    throw new SpeculationTooDeep;
+                const nested = _speculating != 0;
                 ++_speculating;
                 scope(exit) --_speculating;
                 try
                     found = compileFunction(function_);
+                catch (SpeculationTooDeep tooDeep) {
+                    // No function on the chain keeps a compiled form: one
+                    // that compiled without this callee would stay a call
+                    // for every later caller. The outermost speculation
+                    // leaves its callee a normal call; that callee gets a
+                    // normal compile, with its own speculation depth,
+                    // when it runs.
+                    if (nested)
+                        throw tooDeep;
+                    found = null;
+                }
                 catch (Exception) {
                     found = null;
                     _rejectedForInlining[function_] = true;
@@ -551,56 +567,48 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return found is null ? null : found.inlineBody;
     }
 
-    // Compiling a callee only so that a caller can copy it must not reach
-    // code that a plain call would never reach: `internalFailure` ends the
-    // process and cannot be recovered. A callee of at most this many
-    // statements, all of them `return` or expression statements, is the
-    // only one compiled that way.
-    private enum maxSpeculativeStatements = 12;
+    // Limits of a callee that a caller copies in place of a call. A longer
+    // callee stays a call. Measured on the tardy test suite and on six
+    // AWFY benchmarks: 24 statements and 100 instructions compile as fast
+    // as 12 and 40 (within noise) and run in the same number of bytecodes.
+    //
+    // A compile that only a caller needs must not reach code that a plain
+    // call would never reach, because `internalFailure` ends the process.
+    // `hasTinyBody` therefore admits only `return`, expression, `if`,
+    // compound and scope statements. None of these reaches
+    // `compileCtfeBlockWithLabels` (its body needs a label, which no
+    // admitted statement holds, so `comeFrom` is false), and the other
+    // `internalFailure` calls check states that dmd's semantic analysis has
+    // already excluded for any function body. A callee that takes an
+    // address throws `SpeculationRejected` instead (`operandAddress`).
+    private enum maxSpeculativeStatements = 24;
+    private enum maxInlineInstructions = 100;
 
-    // Prototype tunables: SB_INLINE_STMTS and SB_INLINE_INSNS.
-    package static int envLimit(string name, int fallback) {
-        import core.stdc.stdlib: atoi, getenv;
+    // The deepest chain of callees that compile only for a caller. A
+    // deeper chain stays a call: the callee at the limit compiles normally,
+    // with its own chain, when it runs.
+    private enum maxSpeculationDepth = 3;
 
-        const value = getenv(name.ptr);
-        return value is null ? fallback : atoi(value);
-    }
-
-    private static int statementLimit() {
-        static int limit = -1;
-        if (limit < 0)
-            limit = envLimit("SB_INLINE_STMTS\0", maxSpeculativeStatements);
-        return limit;
-    }
-
-    package static int speculationDepth() {
-        static int limit = -1;
-        if (limit < 0)
-            limit = envLimit("SB_INLINE_DEPTH\0", 3);
-        return limit;
-    }
-
-    package static int instructionLimit() {
-        static int limit = -1;
-        if (limit < 0)
-            limit = envLimit("SB_INLINE_INSNS\0", 40);
-        return limit;
+    private static class SpeculationTooDeep: Exception {
+        this() @safe pure nothrow {
+            super("a speculative compile reached the depth limit");
+        }
     }
 
     private static class SpeculationRejected: Exception {
         this() @safe pure nothrow {
-            super("a speculative compile must not compile another function");
+            super("a speculative compile must not take the address of a function");
         }
     }
 
     private static bool hasTinyBody(FuncDeclaration function_) {
         import dmd.statement: Statement;
 
-        int budget = statementLimit;
+        int budget = maxSpeculativeStatements;
         bool tiny(Statement statement) {
             if (statement is null)
                 return true;
-            if (--budget < 0)
+            if (--budget < 0 || statement.comeFrom)
                 return false;
             if (auto compound = statement.isCompoundStatement) {
                 foreach (child; *compound.statements)
@@ -1237,10 +1245,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
 
-    // A caller copies a function in place of a call only when it is a
-    // leaf of at most this many instructions.
-    private enum maxInlineInstructions = 8;
-
     // How a copied instruction names frame storage. `ignored` marks a field
     // that holds no storage operand.
     private enum Operand { ignored, storage, constant }
@@ -1351,31 +1355,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // null. Called once the instructions are final except for fusing and
     // the resolution of branch targets to addresses.
     private InlineBody* inlineBodyOfBuilt() {
-        import core.stdc.stdio: fprintf, stderr;
-
-        string why;
-        if (_callSites.length != 0) why = "callSites";
-        else if (_assertSites.length != 0) why = "assertSites";
-        else if (_exceptionHandlers.length != 0) why = "handlers";
-        else if (_closureOffset != size_t.max) why = "closure";
-        else if (_layout.returnPlace.offset != size_t.max) why = "returnPlace";
-        else if (_layout.variadicTypes != size_t.max
-                || _layout.variadicCursor != size_t.max) why = "variadic";
-        else if (_instructions.length > Bytecode.instructionLimit) why = "size";
-        if (why.length == 0)
-            foreach (instruction; _instructions) {
-                Operands roles;
-                if (!inlineOperandsOf(instruction.handler, roles)) {
-                    why = "handler";
-                    break;
-                }
-            }
-        if (why.length != 0) {
-            if (Bytecode.envLimit("SB_INLINE_DEBUG\0", 0))
-                fprintf(stderr, "INLREJ %s %.*s %d\n", why.ptr,
-                    cast(int) _function.ident.toString.length, _function.ident.toString.ptr,
-                    cast(int) _instructions.length);
+        if (_callSites.length != 0 || _assertSites.length != 0
+                || _exceptionHandlers.length != 0
+                || _closureOffset != size_t.max
+                || _layout.returnPlace.offset != size_t.max
+                || _layout.variadicTypes != size_t.max
+                || _layout.variadicCursor != size_t.max
+                || _instructions.length > Bytecode.maxInlineInstructions)
             return null;
+        foreach (instruction; _instructions) {
+            Operands roles;
+            if (!inlineOperandsOf(instruction.handler, roles))
+                return null;
         }
         return new InlineBody(
             _instructions.dup, _constants.dup, _tempSize, _tempAlignment,
