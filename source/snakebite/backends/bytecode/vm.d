@@ -3249,6 +3249,38 @@ private const(Instruction)* runFloatUnary(string operation, Decoded)(
 
 package alias opFloatNegate = opFloatUnary!"-";
 
+private T sqrtOf(T)(T value) @nogc nothrow pure {
+    import core.math: sqrt;
+    return sqrt(value);
+}
+
+private T absOf(T)(T value) @nogc nothrow pure {
+    import core.math: fabs;
+    return fabs(value);
+}
+
+// `core.math.sqrt` and `core.math.fabs` run in place, like `opFloatNegate`.
+package alias opFloatSqrt = opFloatUnaryCall!sqrtOf;
+package alias opFloatAbs = opFloatUnaryCall!absOf;
+
+private alias opFloatUnaryCall(alias function_) =
+    execute!(runFloatUnaryCall, OperandKind.storage, OperandKind.immediate, function_);
+
+private const(Instruction)* runFloatUnaryCall(alias function_, Decoded)(
+    ref Decoded execution,
+) {
+    auto place = execution.destination;
+    if (execution.width == float.sizeof)
+        *cast(float*) place = function_(*cast(float*) place);
+    else if (execution.width == double.sizeof)
+        *cast(double*) place = function_(*cast(double*) place);
+    else {
+        assert(execution.width == real.sizeof);
+        *cast(real*) place = function_(*cast(real*) place);
+    }
+    return execution.next;
+}
+
 package alias opComplement =
     execute!(runComplement, OperandKind.storage, OperandKind.immediate);
 

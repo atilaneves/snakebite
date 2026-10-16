@@ -781,6 +781,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opFloatAdd, opFloatDivide, opFloatEqual, opFloatGreaterOrEqual,
         opFloatGreaterThan, opFloatLessOrEqual, opFloatLessThan,
         opFloatModulo, opFloatMultiply, opFloatNegate, opFloatNotEqual,
+        opFloatSqrt, opFloatAbs,
         opFloatSubtract, opFloatToBool,
         opFloatWidthCast, opFrameAddress, opGreaterOrEqualSigned,
         opGreaterOrEqualUnsigned, opGreaterThanSigned, opGreaterThanUnsigned,
@@ -8091,6 +8092,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return compileIndirectCall(expression, destOffset);
 
         callee = _bytecode.definitionOf(callee);
+        if (compileFloatIntrinsic(expression, callee, destOffset))
+            return;
         if (expression.readsVtable(callee))
             return compileVirtualCall(expression, callee, destOffset);
 
@@ -8104,6 +8107,42 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             hasThis,
             () => receiverOffsetOf(expression, callee),
             destOffset, expression);
+    }
+
+    // `core.math.sqrt` and `core.math.fabs` on a float type: the operand is
+    // evaluated into the destination and a handler applies the operation in
+    // place. Returns false when `expression` is not such a call.
+    private bool compileFloatIntrinsic(
+        CallExp expression, FuncDeclaration callee, in size_t destOffset,
+    ) {
+        import std.string: fromStringz;
+        import dmd.astenums: Tfloat32, Tfloat64, Tfloat80;
+        import dmd.tokens: EXP;
+
+        if (destOffset == discardResult || callee.ident is null
+                || expression.arguments is null
+                || expression.arguments.length != 1
+                || expression.e1.op != EXP.variable)
+            return false;
+        const name = callee.ident.toString;
+        Instruction.Handler handler;
+        if (name == "sqrt")
+            handler = &opFloatSqrt;
+        else if (name == "fabs")
+            handler = &opFloatAbs;
+        else
+            return false;
+        auto module_ = callee.getModule;
+        if (module_ is null
+                || module_.toPrettyChars.fromStringz != "core.math")
+            return false;
+        const ty = expression.type.ty;
+        if (ty != Tfloat32 && ty != Tfloat64 && ty != Tfloat80)
+            return false;
+        const width = typeFacts(expression.type).size;
+        evalInto((*expression.arguments)[0], destOffset, width);
+        emit(handler, destOffset, 0, width);
+        return true;
     }
 
     // The address of `callee`'s own hidden `this` argument for `expression`
