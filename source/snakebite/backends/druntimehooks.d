@@ -30,6 +30,7 @@ public enum DruntimeHook {
     arrayAppendWchar,
     assertMessage,
     cAssertFail,
+    isBaseOf,
     newArrayUninitialized,
     newArrayZeroed,
     newArrayInitialized,
@@ -112,6 +113,16 @@ private immutable Register[4] _cAssertFailRegisters = [
     Register(Register.Kind.pointer, 8),
 ];
 
+// `_d_isbaseof(scope ClassInfo oc, scope const ClassInfo c)`, an
+// `extern(C)` function of `object.d` returning an `int`: whether `c` is
+// `oc` or one of its bases.
+private immutable Register[2] _isBaseOfRegisters = [
+    Register(Register.Kind.pointer, 8),
+    Register(Register.Kind.pointer, 8),
+];
+private immutable Register _isBaseOfReturnRegister =
+    Register(Register.Kind.signed, 4);
+
 // `void[] _d_newarrayU/_d_newarrayT/_d_newarrayiT(const TypeInfo ti,
 // size_t length)`: `ti` is the array type's `TypeInfo`.
 private immutable Register[2] _newArrayRegisters = [
@@ -190,6 +201,9 @@ public DruntimeHookSpec specOf(in DruntimeHook hook) @safe @nogc nothrow pure {
                 "_d_assert_msg", _assertMessageRegisters);
         case cAssertFail:
             return DruntimeHookSpec("__assert_fail", _cAssertFailRegisters);
+        case isBaseOf:
+            return DruntimeHookSpec(
+                "_d_isbaseof", _isBaseOfRegisters, _isBaseOfReturnRegister);
         case newArrayUninitialized:
             return newArraySpec("_d_newarrayU");
         case newArrayZeroed:
