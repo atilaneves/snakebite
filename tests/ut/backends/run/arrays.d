@@ -1524,28 +1524,52 @@ static foreach (backend; Matrix!(
                     index = length = 0;
                 }
                 try { auto x = a[k - 1]; }
-                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                catch (ArrayIndexError e) {
+                    index = e.index;
+                    length = e.length;
+                }
                 check(size_t.max);
                 try { auto x = a[low]; }
-                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                catch (ArrayIndexError e) {
+                    index = e.index;
+                    length = e.length;
+                }
                 check(cast(size_t) int.min);
                 try { auto x = a[low + 0]; }
-                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                catch (ArrayIndexError e) {
+                    index = e.index;
+                    length = e.length;
+                }
                 check(cast(size_t) int.min);
                 try { auto x = a[u - 1]; }
-                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                catch (ArrayIndexError e) {
+                    index = e.index;
+                    length = e.length;
+                }
                 check(uint.max);
                 try { a[k - 1] = 1; }
-                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                catch (ArrayIndexError e) {
+                    index = e.index;
+                    length = e.length;
+                }
                 check(size_t.max);
                 try { a[u - 1] = 1; }
-                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                catch (ArrayIndexError e) {
+                    index = e.index;
+                    length = e.length;
+                }
                 check(uint.max);
                 try { auto x = a[one + int.max]; }
-                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                catch (ArrayIndexError e) {
+                    index = e.index;
+                    length = e.length;
+                }
                 check(cast(size_t) (1 + int.max) | 0xFFFFFFFF00000000);
                 try { auto x = a[l - 1]; }
-                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                catch (ArrayIndexError e) {
+                    index = e.index;
+                    length = e.length;
+                }
                 check(size_t.max);
             }
         });
@@ -1584,6 +1608,148 @@ static foreach (backend; Matrix!(
                 try { a[i] = none[0]; }
                 catch (ArrayIndexError e) { index = e.index; }
                 check(5);
+            }
+        });
+    }
+}
+
+// An element of a static array reached through a field of `this`, through a
+// pointer, as a local and through a `ref` parameter, read and written.
+static foreach (backend; Matrix!()) {
+    @("checkedIndex.staticArrayReadsAndWrites." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Holder {
+                int[4] ints;
+                long[3] longs;
+                void set(int i, int v) { ints[i] = v; }
+                int get(int i) { return ints[i]; }
+            }
+            struct Plain { ubyte[5] bytes; }
+            void fill(ref short[3] shorts, uint u) { shorts[u] = 7; }
+            void main() {
+                auto holder = new Holder;
+                int k = 2;
+                uint u = 1;
+                long l = 2;
+                holder.set(k, 11);
+                holder.set(k + 1, 13);
+                assert(holder.get(2) == 11 && holder.get(3) == 13);
+                assert(holder.ints[0] == 0 && holder.ints[k - 1] == 0);
+                holder.longs[l] = 17;
+                holder.longs[u] = holder.longs[l] + 1;
+                assert(holder.longs[0] == 0 && holder.longs[1] == 18
+                    && holder.longs[2] == 17);
+                Plain plain;
+                auto pointer = &plain;
+                pointer.bytes[u] = 3;
+                pointer.bytes[l + 1] = 4;
+                assert(plain.bytes[1] == 3 && plain.bytes[3] == 4
+                    && pointer.bytes[u] == 3);
+                int[3] local;
+                local[k] = 5;
+                local[u] = local[k] + 1;
+                assert(local[0] == 0 && local[1] == 6 && local[2] == 5);
+                short[3] shorts;
+                fill(shorts, u);
+                assert(shorts[0] == 0 && shorts[1] == 7 && shorts[u] == 7);
+            }
+        });
+    }
+}
+
+// An index outside a static array is an `ArrayIndexError` that names the
+// index in 64 bits and the dimension, for a read and a write, and a write
+// leaves the array alone.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "an out-of-bounds index is a compile-time error in CTFE"),
+)) {
+    @("checkedIndex.staticArrayErrorNamesIndex." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: ArrayIndexError;
+            class Holder { int[3] ints; }
+            struct Plain { int[3] ints; }
+            void main() {
+                auto holder = new Holder;
+                Plain plain;
+                auto pointer = &plain;
+                int k = 0;
+                uint u = 0;
+                long l = 3;
+                size_t index;
+                size_t length;
+                void check(size_t wantedIndex) {
+                    assert(index == wantedIndex);
+                    assert(length == 3);
+                    index = length = 0;
+                }
+                try { auto x = holder.ints[k - 1]; }
+                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                check(size_t.max);
+                try { auto x = pointer.ints[u - 1]; }
+                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                check(uint.max);
+                try { holder.ints[l] = 1; }
+                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                check(3);
+                try { pointer.ints[k - 1] = 1; }
+                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                check(size_t.max);
+                assert(holder.ints == [0, 0, 0] && plain.ints == [0, 0, 0]);
+                holder.ints[k + 2] = 1;
+                assert(holder.ints[2] == 1);
+            }
+        });
+    }
+}
+
+// A store whose value can fail still checks its left side first, for a slice
+// field and a static array, and the value does not run when the left side
+// fails.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "an out-of-bounds index is a compile-time error in CTFE"),
+)) {
+    @("checkedIndex.fieldStoreChecksLeftFirst." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: ArrayIndexError;
+            class Holder {
+                int[] slice = [1, 2, 3];
+                int[3] fixed = [4, 5, 6];
+                void swapSlice(int i, int j) { slice[i] = slice[j]; }
+                void swapFixed(uint i, uint j) { fixed[i] = fixed[j]; }
+            }
+            void main() {
+                auto holder = new Holder;
+                size_t index;
+                size_t length;
+                void check(size_t wantedIndex) {
+                    assert(index == wantedIndex);
+                    assert(length == 3);
+                    index = length = 0;
+                }
+                holder.swapSlice(0, 2);
+                holder.swapFixed(1, 2);
+                assert(holder.slice == [3, 2, 3] && holder.fixed == [4, 6, 6]);
+                try { holder.swapSlice(5, 7); }
+                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                check(5);
+                try { holder.swapSlice(1, 7); }
+                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                check(7);
+                try { holder.swapFixed(5, 7); }
+                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                check(5);
+                try { holder.swapFixed(1, 7); }
+                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                check(7);
+                assert(holder.slice == [3, 2, 3] && holder.fixed == [4, 6, 6]);
             }
         });
     }
