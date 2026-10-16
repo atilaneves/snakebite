@@ -4103,9 +4103,9 @@ shared static this() {
         }}
     }
     static foreach (width; [1, 2, 4, 8, 16])
-        specialise!(runCopyFixed, S, S, noWidths, false, width, false)();
+        specialise!(runCopyFixed, S, S, noWidths, false, size_t(width), false)();
     static foreach (width; 1 .. 17)
-        specialise!(runCopyFixed, S, I, noWidths, false, width, true)();
+        specialise!(runCopyFixed, S, I, noWidths, false, size_t(width), true)();
     {
         Specialisation entry;
         entry.general = &opReturn;
