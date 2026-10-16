@@ -2760,26 +2760,42 @@ private const(Instruction)* runIndex(IndexBase base, Decoded)(
     return execution.next;
 }
 
-// A bounds-checked element access in one instruction. `destination` is the
-// value operand (read by a store, written by a load), `source` the slice
-// operand, `width` the frame offset of the index in its low 32 bits and a
-// signed 32-bit offset that is added to the index, in the index's own width,
-// in the high 32 bits. `sourceWidth` is the instruction that runs when the
-// access succeeded. When the index is out of bounds, the next instruction
-// runs: the failure code the compiler emitted after this one.
-private alias opCheckedIndex(bool store, size_t indexWidth, bool signed,
-        size_t elementSize) =
-    execute!(runCheckedIndex, OperandKind.storage, OperandKind.storage,
-        store, indexWidth, signed, elementSize);
+// The accesses of `opCheckedIndex`. A store whose value can fail is split in
+// two: `check` tests the bounds and does nothing else, and `storeUnchecked`
+// stores, without a test, after the value ran. The error order stays native:
+// the left side fails first.
+package enum CheckedAccess {
+    load,
+    store,
+    check,
+    storeUnchecked,
+}
 
-private const(Instruction)* runCheckedIndex(bool store, size_t indexWidth,
-    bool signed, size_t elementSize, Decoded)(
+// A bounds-checked element access in one instruction. `destination` is the
+// value operand (read by a store, written by a load), `source` the operand
+// that holds the elements, `width` the frame offset of the index in its low
+// 32 bits and, in the high 32 bits, either a signed 32-bit offset that is
+// added to the index, in the index's own width, or (with `fixedLength`) the
+// length of a static array. `sourceWidth` is the instruction that runs when
+// the access succeeded. When the index is out of bounds, the next
+// instruction runs: the failure code the compiler emitted after this one.
+private alias opCheckedIndex(CheckedAccess access, bool fixedLength,
+        size_t indexWidth, bool signed, size_t elementSize) =
+    execute!(runCheckedIndex, OperandKind.storage, OperandKind.storage,
+        access, fixedLength, indexWidth, signed, elementSize);
+
+private const(Instruction)* runCheckedIndex(CheckedAccess access,
+    bool fixedLength, size_t indexWidth, bool signed, size_t elementSize,
+    Decoded)(
     ref Decoded execution,
 ) {
     import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset;
 
     const packed = execution.width;
-    const offset = cast(int) (packed >> 32);
+    static if (fixedLength)
+        enum offset = 0;
+    else
+        const offset = cast(int) (packed >> 32);
     const indexPlace = execution.storage(cast(uint) packed);
     static if (indexWidth == 4 && signed) {
         const sum = *cast(const(int)*) indexPlace + offset;
@@ -2790,44 +2806,67 @@ private const(Instruction)* runCheckedIndex(bool store, size_t indexWidth,
     } else
         const index = *cast(const(size_t)*) indexPlace
             + cast(size_t) cast(long) offset;
-    const length = *cast(const(size_t)*) (execution.source + arrayLengthOffset);
-    if (index >= length)
-        return execution.next;
-    static if (elementSize == 1)
-        alias Element = ubyte;
-    else static if (elementSize == 2)
-        alias Element = ushort;
-    else static if (elementSize == 4)
-        alias Element = uint;
-    else
-        alias Element = ulong;
-    auto element = cast(Element*) (*cast(ubyte**) (execution.source
-        + arrayPointerOffset) + index * elementSize);
-    static if (store)
-        *element = *cast(const(Element)*) execution.destination;
-    else
-        *cast(Element*) execution.destination = *element;
-    return cast(const(Instruction)*) execution.sourceWidth;
+    static if (access != CheckedAccess.storeUnchecked) {
+        static if (fixedLength)
+            const length = packed >> 32;
+        else
+            const length = *cast(const(size_t)*) (execution.source
+                + arrayLengthOffset);
+        if (index >= length)
+            return execution.next;
+    }
+    static if (access == CheckedAccess.check)
+        return cast(const(Instruction)*) execution.sourceWidth;
+    else {
+        static if (elementSize == 1)
+            alias Element = ubyte;
+        else static if (elementSize == 2)
+            alias Element = ushort;
+        else static if (elementSize == 4)
+            alias Element = uint;
+        else
+            alias Element = ulong;
+        static if (fixedLength)
+            auto element = cast(Element*) (execution.source
+                + index * elementSize);
+        else
+            auto element = cast(Element*) (*cast(ubyte**) (execution.source
+                + arrayPointerOffset) + index * elementSize);
+        static if (access == CheckedAccess.load)
+            *cast(Element*) execution.destination = *element;
+        else
+            *element = *cast(const(Element)*) execution.destination;
+        static if (access == CheckedAccess.storeUnchecked)
+            return execution.next;
+        else
+            return cast(const(Instruction)*) execution.sourceWidth;
+    }
 }
 
 private enum checkedIndexShapes = [[4UL, 1UL], [4UL, 0UL], [8UL, 0UL]];
 private enum checkedIndexElementSizes = [1UL, 2UL, 4UL, 8UL];
 
+// A `check` does not read an element, so one size stands for all.
 package Instruction.Handler checkedIndexHandler(
-    in bool store, in size_t indexWidth, in bool signed,
-    in size_t elementSize,
+    in CheckedAccess access, in bool fixedLength, in size_t indexWidth,
+    in bool signed, in size_t elementSize,
 ) {
     import std.conv: text;
 
-    static foreach (isStore; [false, true])
-        static foreach (shape; checkedIndexShapes)
-            static foreach (size; checkedIndexElementSizes)
-                if (store == isStore && indexWidth == shape[0]
-                        && signed == (shape[1] == 1) && elementSize == size)
-                    return &opCheckedIndex!(isStore, shape[0],
-                        shape[1] == 1, size);
+    const handlerSize = access == CheckedAccess.check ? 1 : elementSize;
+    static foreach (kind; [EnumMembers!CheckedAccess])
+        static foreach (fixed; [false, true])
+            static foreach (shape; checkedIndexShapes)
+                static foreach (size; checkedIndexElementSizes)
+                    static if (kind != CheckedAccess.check || size == 1)
+                        if (access == kind && fixedLength == fixed
+                                && indexWidth == shape[0]
+                                && signed == (shape[1] == 1)
+                                && handlerSize == size)
+                            return &opCheckedIndex!(kind, fixed, shape[0],
+                                shape[1] == 1, size);
     internalFailure(text("no checked-index handler for a ", indexWidth,
-        "-byte ", signed ? "signed" : "unsigned", " index and ", elementSize,
+        "-byte ", signed ? "signed" : "unsigned", " index and ", handlerSize,
         "-byte elements"));
 }
 
@@ -4297,11 +4336,17 @@ shared static this() {
     addRoles(&opTlsLoad, rolesOfOperation!(runTlsLoad, I));
     addRoles(&opTlsStore, rolesOfOperation!(runTlsStore, S));
     addRoles(&opTlsAddress, rolesOfOperation!(runTlsAddress, I));
-    static foreach (isStore; [false, true])
-        static foreach (shape; checkedIndexShapes)
-            static foreach (size; checkedIndexElementSizes)
-                addRoles(&opCheckedIndex!(isStore, shape[0], shape[1] == 1,
-                    size), Roles(Role.other, Role.other, Role.instruction));
+    static foreach (kind; [EnumMembers!CheckedAccess])
+        static foreach (fixed; [false, true])
+            static foreach (shape; checkedIndexShapes)
+                static foreach (size; checkedIndexElementSizes)
+                    static if (kind != CheckedAccess.check || size == 1)
+                        addRoles(&opCheckedIndex!(kind, fixed, shape[0],
+                            shape[1] == 1, size),
+                            kind == CheckedAccess.storeUnchecked
+                                ? Roles(Role.other, Role.other, Role.other)
+                                : Roles(Role.other, Role.other,
+                                    Role.instruction));
     // The fused return keeps the roles of the producer it replaces.
     static foreach (width; 1 .. 17)
         addRoles(&opThenReturn!(opCopyFixed!(width, true)),
