@@ -7,6 +7,6 @@ if [[ ! -f build.ninja || "${BASH_SOURCE[0]}" -nt build.ninja ]]; then
     if [[ -n "${REGGAE_BIN:-}" ]]; then
         "$REGGAE_BIN" -b ninja
     else
-        dub run "reggae@~>0.17.0" --compiler=ldc -- -b ninja
+        dub run "reggae@~>0.18.0" --build=release --compiler=ldc -- -b ninja
     fi
 fi
