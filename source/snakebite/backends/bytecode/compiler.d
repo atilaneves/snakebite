@@ -778,11 +778,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opCopyFixed, opLoadThenCopy, opThenReturn, opLoadIndirectFixed, opStoreIndirectFixed,
         opDivideSigned, opDivideSigned32, opDivideUnsigned,
         opEqual,
-        opFloatAdd, opFloatDivide, opFloatEqual, opFloatGreaterOrEqual,
+        opFloatAbs, opFloatAdd, opFloatDivide, opFloatEqual, opFloatGreaterOrEqual,
         opFloatGreaterThan, opFloatLessOrEqual, opFloatLessThan,
         opFloatModulo, opFloatMultiply, opFloatNegate, opFloatNotEqual,
-        opFloatSqrt, opFloatAbs,
-        opFloatSubtract, opFloatToBool,
+        opFloatSqrt, opFloatSubtract, opFloatToBool,
         opFloatWidthCast, opFrameAddress, opGreaterOrEqualSigned,
         opGreaterOrEqualUnsigned, opGreaterThanSigned, opGreaterThanUnsigned,
         opJump, opLessOrEqualSigned, opLessOrEqualUnsigned, opLessThanSigned,
@@ -8115,29 +8114,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private bool compileFloatIntrinsic(
         CallExp expression, FuncDeclaration callee, in size_t destOffset,
     ) {
-        import std.string: fromStringz;
         import dmd.astenums: Tfloat32, Tfloat64, Tfloat80;
-        import dmd.tokens: EXP;
 
-        if (destOffset == discardResult || callee.ident is null
-                || expression.arguments is null
-                || expression.arguments.length != 1
-                || expression.e1.op != EXP.variable)
+        if (destOffset == discardResult)
             return false;
-        const name = callee.ident.toString;
         Instruction.Handler handler;
-        if (name == "sqrt")
-            handler = &opFloatSqrt;
-        else if (name == "fabs")
-            handler = &opFloatAbs;
-        else
-            return false;
-        auto module_ = callee.getModule;
-        if (module_ is null
-                || module_.toPrettyChars.fromStringz != "core.math")
-            return false;
+        final switch (_bytecode._callSelection.floatIntrinsicOf(expression, callee))
+            with (CallSelection.FloatIntrinsic) {
+            case none: return false;
+            case sqrt: handler = &opFloatSqrt; break;
+            case fabs: handler = &opFloatAbs; break;
+        }
         const ty = expression.type.ty;
-        if (ty != Tfloat32 && ty != Tfloat64 && ty != Tfloat80)
+        // A declaration whose operand differs from its result (`double
+        // fabs(real)`) is not the host's operation: it stays a call.
+        if (ty != Tfloat32 && ty != Tfloat64 && ty != Tfloat80
+                || (*expression.arguments)[0].type.ty != ty)
             return false;
         const width = typeFacts(expression.type).size;
         evalInto((*expression.arguments)[0], destOffset, width);

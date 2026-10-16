@@ -3224,30 +3224,9 @@ private const(Instruction)* runNegate(Decoded)(
     return execution.next;
 }
 
-private T applyFloatUnary(string operation, T)(T value) @nogc nothrow pure {
-    return mixin(operation ~ "value");
+private T negateOf(T)(T value) @nogc nothrow pure {
+    return -value;
 }
-
-private alias opFloatUnary(string operation) =
-    execute!(runFloatUnary, OperandKind.storage, OperandKind.immediate, operation);
-
-private const(Instruction)* runFloatUnary(string operation, Decoded)(
-    ref Decoded execution,
-) {
-    auto place = execution.destination;
-    if (execution.width == float.sizeof)
-        *cast(float*) place = applyFloatUnary!operation(*cast(float*) place);
-    else if (execution.width == double.sizeof)
-        *cast(double*) place =
-            applyFloatUnary!operation(*cast(double*) place);
-    else {
-        assert(execution.width == real.sizeof);
-        *cast(real*) place = applyFloatUnary!operation(*cast(real*) place);
-    }
-    return execution.next;
-}
-
-package alias opFloatNegate = opFloatUnary!"-";
 
 private T sqrtOf(T)(T value) @nogc nothrow pure {
     import core.math: sqrt;
@@ -3260,13 +3239,14 @@ private T absOf(T)(T value) @nogc nothrow pure {
 }
 
 // `core.math.sqrt` and `core.math.fabs` run in place, like `opFloatNegate`.
-package alias opFloatSqrt = opFloatUnaryCall!sqrtOf;
-package alias opFloatAbs = opFloatUnaryCall!absOf;
+package alias opFloatNegate = opFloatUnary!negateOf;
+package alias opFloatSqrt = opFloatUnary!sqrtOf;
+package alias opFloatAbs = opFloatUnary!absOf;
 
-private alias opFloatUnaryCall(alias function_) =
-    execute!(runFloatUnaryCall, OperandKind.storage, OperandKind.immediate, function_);
+private alias opFloatUnary(alias function_) =
+    execute!(runFloatUnary, OperandKind.storage, OperandKind.immediate, function_);
 
-private const(Instruction)* runFloatUnaryCall(alias function_, Decoded)(
+private const(Instruction)* runFloatUnary(alias function_, Decoded)(
     ref Decoded execution,
 ) {
     auto place = execution.destination;
