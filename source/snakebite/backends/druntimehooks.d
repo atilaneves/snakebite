@@ -31,6 +31,9 @@ public enum DruntimeHook {
     assertMessage,
     cAssertFail,
     isBaseOf,
+    newArrayUninitialized,
+    newArrayZeroed,
+    newArrayInitialized,
 }
 
 
@@ -120,6 +123,23 @@ private immutable Register[2] _isBaseOfRegisters = [
 private immutable Register _isBaseOfReturnRegister =
     Register(Register.Kind.signed, 4);
 
+// `void[] _d_newarrayU/_d_newarrayT/_d_newarrayiT(const TypeInfo ti,
+// size_t length)`: `ti` is the array type's `TypeInfo`.
+private immutable Register[2] _newArrayRegisters = [
+    Register(Register.Kind.pointer, 8),
+    Register(Register.Kind.unsigned, 8),
+];
+
+// The `void[]` that those functions return comes back in two registers,
+// length first.
+private DruntimeHookSpec newArraySpec(string symbol)
+    @safe @nogc nothrow pure
+{
+    return DruntimeHookSpec(symbol, _newArrayRegisters,
+        Register(Register.Kind.unsigned, 8),
+        Register(Register.Kind.pointer, 8));
+}
+
 // druntime's `_d_invariant` (`rt.invariant_`) has plain `extern(D)`
 // linkage, so its linker symbol is its mangled name, not the bare
 // identifier - the same mangled string dmd's own backend hardcodes for
@@ -138,6 +158,7 @@ public struct DruntimeHookSpec {
     public string name;
     public const(Register)[] parameterRegisters;
     public Register returnRegister = Register(Register.Kind.none, 0);
+    public Register secondReturnRegister = Register(Register.Kind.none, 0);
 }
 
 
@@ -183,6 +204,12 @@ public DruntimeHookSpec specOf(in DruntimeHook hook) @safe @nogc nothrow pure {
         case isBaseOf:
             return DruntimeHookSpec(
                 "_d_isbaseof", _isBaseOfRegisters, _isBaseOfReturnRegister);
+        case newArrayUninitialized:
+            return newArraySpec("_d_newarrayU");
+        case newArrayZeroed:
+            return newArraySpec("_d_newarrayT");
+        case newArrayInitialized:
+            return newArraySpec("_d_newarrayiT");
     }
 }
 
@@ -197,5 +224,6 @@ public const(imported!"snakebite.ffi.plan".CallPlan)* planOf(
 ) {
     const spec = specOf(hook);
     return plans.requiredRawPlanOf(
-        spec.name, spec.parameterRegisters, spec.returnRegister);
+        spec.name, spec.parameterRegisters, spec.returnRegister,
+        spec.secondReturnRegister);
 }

@@ -751,6 +751,7 @@ public struct CallPlan {
         const(void)* address,
         scope const(Register)[] parameterRegisters,
         Register returnRegister = Register(Register.Kind.none, 0),
+        Register secondReturnRegister = Register(Register.Kind.none, 0),
     ) {
         CallPlan plan;
         plan._address = cast(void*) address;
@@ -760,10 +761,17 @@ public struct CallPlan {
             plan._arguments[i] =
                 ArgumentPlan([register, Register.init], 1, false);
         if (returnRegister.kind != Register.Kind.none)
-            plan._return =
-                ArgumentPlan([returnRegister, Register.init], 1, false);
+            plan._return = returnPlanOf(returnRegister, secondReturnRegister);
         plan.buildMoves;
         return plan;
+    }
+
+    private static ArgumentPlan returnPlanOf(
+        in Register first, in Register second,
+    ) {
+        return second.kind == Register.Kind.none
+            ? ArgumentPlan([first, Register.init], 1, false)
+            : ArgumentPlan([first, second], 2, false);
     }
 
     // Whether this plan, built by `ofRawAddress`, was built from exactly
@@ -772,6 +780,7 @@ public struct CallPlan {
     private bool hasShape(
         scope const(Register)[] parameterRegisters,
         in Register returnRegister,
+        in Register secondReturnRegister = Register(Register.Kind.none, 0),
     ) const {
         if (_parameterCount != parameterRegisters.length)
             return false;
@@ -782,7 +791,7 @@ public struct CallPlan {
 
         const expectedReturn = returnRegister.kind == Register.Kind.none
             ? ArgumentPlan.init
-            : ArgumentPlan([returnRegister, Register.init], 1, false);
+            : returnPlanOf(returnRegister, secondReturnRegister);
         return _return == expectedReturn;
     }
 
@@ -1668,11 +1677,13 @@ public struct PlanCache {
             parameterRegisters,
         Register returnRegister =
             Register(Register.Kind.none, 0),
+        Register secondReturnRegister = Register(Register.Kind.none, 0),
     ) {
         if (auto cached = name in _rawPlans) {
             import std.conv: text;
 
-            assert((*cached).hasShape(parameterRegisters, returnRegister),
+            assert((*cached).hasShape(
+                    parameterRegisters, returnRegister, secondReturnRegister),
                 text("ffi: `", name, "` was already planned with a ",
                     "different register shape"));
             return *cached;
@@ -1685,7 +1696,7 @@ public struct PlanCache {
         countPreparation;
         auto plan = new CallPlan;
         *plan = CallPlan.ofRawAddress(
-            address, parameterRegisters, returnRegister);
+            address, parameterRegisters, returnRegister, secondReturnRegister);
         return *_rawPlans.insert(name, plan);
     }
 
@@ -1695,10 +1706,12 @@ public struct PlanCache {
         string name,
         scope const(Register)[] parameterRegisters,
         Register returnRegister = Register(Register.Kind.none, 0),
+        Register secondReturnRegister = Register(Register.Kind.none, 0),
     ) {
         import std.conv: text;
 
-        if (auto plan = rawPlanOf(name, parameterRegisters, returnRegister))
+        if (auto plan = rawPlanOf(name, parameterRegisters, returnRegister,
+                secondReturnRegister))
             return plan;
 
         throw new Exception(text(

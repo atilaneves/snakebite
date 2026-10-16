@@ -1029,12 +1029,7 @@ public struct Vm {
             &_frames, frame.base, returnPlace);
         initializeClosure(&function_, frame.base, &_frames);
         auto pc = function_.instructions.ptr;
-        dispatch(
-            pc, frame.base, returnPlace, function_.constants,
-            function_.callSites, function_.assertSites,
-            function_.exceptionHandlers, &_frames,
-            &this,
-        );
+        dispatch(pc, frame.base, returnPlace, &function_, &_frames, &this);
     }
 }
 
@@ -1074,18 +1069,50 @@ private void initializeClosure(
 // therefore depends on barrier crossings, not guest call depth.
 private struct Activation {
     const(Instruction)* pc;
-    const(Instruction)* start;
-    const(Instruction)* end;
     const(Instruction)* resume;
     ubyte* frame;
     void* returnPlace;
-    const(long)[] constants;
-    const(CallSite)[] callSites;
-    const(AssertSite)[] assertSites;
-    const(ExceptionHandler)[] exceptionHandlers;
+    // The tables of the running function: constants, call sites, assert
+    // sites and exception handlers.
+    const(Function)* function_;
     size_t cleanupMark;
     FrameStack.Mark frameMark;
     Activation* parent;
+
+    ref const(long[]) constants() const pure nothrow @nogc return {
+        return function_.constants;
+    }
+
+    ref const(CallSite[]) callSites() const pure nothrow @nogc return {
+        return function_.callSites;
+    }
+
+    ref const(AssertSite[]) assertSites() const pure nothrow @nogc return {
+        return function_.assertSites;
+    }
+
+    // Every activation whose parent is null is the `base` of a
+    // `RootActivation`, made only by `dispatch`. The three accessors below
+    // rely on that to read the root's extra fields.
+    static assert(RootActivation.base.offsetof == 0);
+
+    // The root has no parent. A cleanup root has no handlers at all.
+    const(ExceptionHandler)[] exceptionHandlers() const pure nothrow @nogc return {
+        if (parent is null && (cast(const(RootActivation)*) &this).noHandlers)
+            return null;
+        return function_.exceptionHandlers;
+    }
+
+    // Only a root activation limits the instructions it runs.
+    const(Instruction)* end() const pure nothrow @nogc {
+        return parent is null
+            ? (cast(const(RootActivation)*) &this).end : null;
+    }
+
+    const(Instruction)* start() const pure nothrow @nogc {
+        return parent is null
+            ? (cast(const(RootActivation)*) &this).start : null;
+    }
 
     void cleanup(FrameStack* frames) {
         // Most activations leave no temporary to destroy.
@@ -1097,6 +1124,15 @@ private struct Activation {
     void discardCleanups(FrameStack* frames) {
         frames.finishCleanups(cleanupMark, (in size_t) {});
     }
+}
+
+// An activation that `dispatch` builds on the native stack: the entry of a
+// function from the host, a `finally` body or a temporary's cleanup.
+private struct RootActivation {
+    Activation base;
+    const(Instruction)* start;
+    const(Instruction)* end;
+    bool noHandlers;
 }
 
 private struct DispatchState {
@@ -1131,29 +1167,24 @@ private void dispatch(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    scope const ExceptionHandler[] exceptionHandlers,
+    const(Function)* function_,
     FrameStack* frames,
     Vm* vm,
     const(Instruction)* end = null,
+    bool noHandlers = false,
 ) {
-    // Fill each field once. Default initialization otherwise clears the
-    // arrays before these assignments on every callback entry.
-    Activation root = void;
-    root.pc = root.start = pc;
+    RootActivation root = void;
+    root.start = pc;
     root.end = end;
-    root.resume = null;
-    root.frame = frame;
-    root.returnPlace = returnPlace;
-    root.constants = constants;
-    root.callSites = callSites;
-    root.assertSites = assertSites;
-    root.exceptionHandlers = exceptionHandlers;
-    root.cleanupMark = frames.cleanupMark;
-    root.frameMark = FrameStack.Mark.init;
-    root.parent = null;
+    root.noHandlers = noHandlers;
+    root.base.pc = pc;
+    root.base.resume = null;
+    root.base.frame = frame;
+    root.base.returnPlace = returnPlace;
+    root.base.function_ = function_;
+    root.base.cleanupMark = frames.cleanupMark;
+    root.base.frameMark = FrameStack.Mark.init;
+    root.base.parent = null;
     auto state = DispatchState(frames, null, null, 0, vm,
         cast(DispatchState*) frames.backendEntry);
     // A halt must also discard a partially reserved activation.
@@ -1163,7 +1194,7 @@ private void dispatch(
     bool returned;
     bool thrown;
     scope(exit) if (!returned) {
-        frames.finishCleanups(root.cleanupMark, (in size_t) {});
+        frames.finishCleanups(root.base.cleanupMark, (in size_t) {});
         frames.release(frameMark);
     }
     try {
@@ -1180,7 +1211,7 @@ private void dispatch(
             }
         }
         scope(failure) thrown = true;
-        dispatchLoop(root.pc, &root, &state);
+        dispatchLoop(pc, &root.base, &state);
         returned = true;
     } catch (ForeignUnwindEnd) {
         returned = true;
@@ -1217,13 +1248,13 @@ private void dispatchLoop(
                 continue;
             }
 
+            // A call returns the first instruction of its callee.
             pc = pc.handler(pc, active, state, active.frame, state.r0, state.fp0);
             if (state.pending !is null) {
                 active = state.pending;
                 state.pending = null;
                 static if (chainedDispatch)
                     state.current = active;
-                pc = active.pc;
             }
         } catch (Throwable throwable) {
             static if (chainedDispatch)
@@ -1292,9 +1323,7 @@ private Activation* handleException(
                 unwindFinally(throwable, () {
                     state.current = active;
                     dispatch(handler.handler, active.frame,
-                        active.returnPlace, active.constants,
-                        active.callSites, active.assertSites,
-                        active.exceptionHandlers, frames, vm,
+                        active.returnPlace, active.function_, frames, vm,
                         handler.cleanupEnd);
                 });
             } catch (Throwable chained) {
@@ -1340,9 +1369,8 @@ private void cleanupSince(
         auto state = cast(DispatchState*) frames.backendEntry;
         state.current = active;
         dispatch(cast(const(Instruction)*) site.cleanupStart,
-            active.frame, null, active.constants, active.callSites,
-            active.assertSites, null, frames, state.vm,
-            cast(const(Instruction)*) site.cleanupEnd);
+            active.frame, null, active.function_, frames, state.vm,
+            cast(const(Instruction)*) site.cleanupEnd, true);
     });
 }
 
@@ -1723,19 +1751,14 @@ public const(Instruction)* opCall(
     activation.frame = calleeFrame;
 
     const callee = fast.callee;
-    activation.pc = activation.start = callee.instructions.ptr;
-    activation.end = null;
-    activation.resume = null;
     void* place = null;
     if (hasPlace)
         place = operandStorage(frame, pc.destination);
     if (fast.returnPlaceOffset != size_t.max)
         *cast(void**) (calleeFrame + fast.returnPlaceOffset) = place;
     activation.returnPlace = place;
-    activation.constants = callee.constants;
-    activation.callSites = callee.callSites;
-    activation.assertSites = callee.assertSites;
-    activation.exceptionHandlers = callee.exceptionHandlers;
+    activation.pc = callee.instructions.ptr;
+    activation.function_ = callee;
     activation.cleanupMark = frames.cleanupMark;
     activation.parent = active;
     active.resume = pc + 1;
@@ -1765,7 +1788,7 @@ public const(Instruction)* opCall(
         double none1 = void;
         return first.handler(first, activation, state, calleeFrame, none0, none1);
     } else
-        return pc + 1;
+        return callee.instructions.ptr;
 }
 
 
@@ -1933,24 +1956,19 @@ private const(Instruction)* opCallPlain(
         }
     }
 
-    activation.pc = activation.start = callee.instructions.ptr;
-    activation.end = null;
-    activation.resume = null;
     void* place = null;
     if (hasPlace)
         place = storage(pc.destination);
     if (fast.returnPlaceOffset != size_t.max)
         *cast(void**) (calleeFrame + fast.returnPlaceOffset) = place;
     activation.returnPlace = place;
-    activation.constants = callee.constants;
-    activation.callSites = callee.callSites;
-    activation.assertSites = callee.assertSites;
-    activation.exceptionHandlers = callee.exceptionHandlers;
+    activation.pc = callee.instructions.ptr;
+    activation.function_ = callee;
     activation.cleanupMark = frames.cleanupMark;
     activation.parent = state.current;
     activation.parent.resume = pc + 1;
     state.pending = activation;
-    return pc + 1;
+    return callee.instructions.ptr;
 }
 
 private const(Instruction)* runCall(Decoded)(
@@ -2148,21 +2166,16 @@ private const(Instruction)* callFunction(bool redirected = false, Decoded)(
     }
     initializeClosure(callee, activation.frame, execution.frames);
 
-    activation.pc = activation.start = callee.instructions.ptr;
-    activation.end = null;
-    activation.resume = null;
     activation.returnPlace = callee.returnPlace.bind(
         execution.frames, activation.frame,
         site.returnWidth == 0 ? null : execution.destination);
-    activation.constants = callee.constants;
-    activation.callSites = callee.callSites;
-    activation.assertSites = callee.assertSites;
-    activation.exceptionHandlers = callee.exceptionHandlers;
+    activation.pc = callee.instructions.ptr;
+    activation.function_ = callee;
     activation.cleanupMark = execution.frames.cleanupMark;
     activation.parent = execution._dispatch.current;
     activation.parent.resume = execution.next;
     execution._dispatch.pending = activation;
-    return execution.next;
+    return callee.instructions.ptr;
 }
 
 
@@ -2890,26 +2903,42 @@ private const(Instruction)* runIndex(IndexBase base, Decoded)(
     return execution.next;
 }
 
-// A bounds-checked element access in one instruction. `destination` is the
-// value operand (read by a store, written by a load), `source` the slice
-// operand, `width` the frame offset of the index in its low 32 bits and a
-// signed 32-bit offset that is added to the index, in the index's own width,
-// in the high 32 bits. `sourceWidth` is the instruction that runs when the
-// access succeeded. When the index is out of bounds, the next instruction
-// runs: the failure code the compiler emitted after this one.
-private alias opCheckedIndex(bool store, size_t indexWidth, bool signed,
-        size_t elementSize) =
-    execute!(runCheckedIndex, OperandKind.storage, OperandKind.storage,
-        store, indexWidth, signed, elementSize);
+// The accesses of `opCheckedIndex`. A store whose value can fail is split in
+// two: `check` tests the bounds and does nothing else, and `storeUnchecked`
+// stores, without a test, after the value ran. The error order stays native:
+// the left side fails first.
+package enum CheckedAccess {
+    load,
+    store,
+    check,
+    storeUnchecked,
+}
 
-private const(Instruction)* runCheckedIndex(bool store, size_t indexWidth,
-    bool signed, size_t elementSize, Decoded)(
+// A bounds-checked element access in one instruction. `destination` is the
+// value operand (read by a store, written by a load), `source` the operand
+// that holds the elements, `width` the frame offset of the index in its low
+// 32 bits and, in the high 32 bits, either a signed 32-bit offset that is
+// added to the index, in the index's own width, or (with `fixedLength`) the
+// length of a static array. `sourceWidth` is the instruction that runs when
+// the access succeeded. When the index is out of bounds, the next
+// instruction runs: the failure code the compiler emitted after this one.
+private alias opCheckedIndex(CheckedAccess access, bool fixedLength,
+        size_t indexWidth, bool signed, size_t elementSize) =
+    execute!(runCheckedIndex, OperandKind.storage, OperandKind.storage,
+        access, fixedLength, indexWidth, signed, elementSize);
+
+private const(Instruction)* runCheckedIndex(CheckedAccess access,
+    bool fixedLength, size_t indexWidth, bool signed, size_t elementSize,
+    Decoded)(
     ref Decoded execution,
 ) {
     import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset;
 
     const packed = execution.width;
-    const offset = cast(int) (packed >> 32);
+    static if (fixedLength)
+        enum offset = 0;
+    else
+        const offset = cast(int) (packed >> 32);
     const indexPlace = execution.storage(cast(uint) packed);
     static if (indexWidth == 4 && signed) {
         const sum = *cast(const(int)*) indexPlace + offset;
@@ -2920,44 +2949,67 @@ private const(Instruction)* runCheckedIndex(bool store, size_t indexWidth,
     } else
         const index = *cast(const(size_t)*) indexPlace
             + cast(size_t) cast(long) offset;
-    const length = *cast(const(size_t)*) (execution.source + arrayLengthOffset);
-    if (index >= length)
-        return execution.next;
-    static if (elementSize == 1)
-        alias Element = ubyte;
-    else static if (elementSize == 2)
-        alias Element = ushort;
-    else static if (elementSize == 4)
-        alias Element = uint;
-    else
-        alias Element = ulong;
-    auto element = cast(Element*) (*cast(ubyte**) (execution.source
-        + arrayPointerOffset) + index * elementSize);
-    static if (store)
-        *element = *cast(const(Element)*) execution.destination;
-    else
-        *cast(Element*) execution.destination = *element;
-    return cast(const(Instruction)*) execution.sourceWidth;
+    static if (access != CheckedAccess.storeUnchecked) {
+        static if (fixedLength)
+            const length = packed >> 32;
+        else
+            const length = *cast(const(size_t)*) (execution.source
+                + arrayLengthOffset);
+        if (index >= length)
+            return execution.next;
+    }
+    static if (access == CheckedAccess.check)
+        return cast(const(Instruction)*) execution.sourceWidth;
+    else {
+        static if (elementSize == 1)
+            alias Element = ubyte;
+        else static if (elementSize == 2)
+            alias Element = ushort;
+        else static if (elementSize == 4)
+            alias Element = uint;
+        else
+            alias Element = ulong;
+        static if (fixedLength)
+            auto element = cast(Element*) (execution.source
+                + index * elementSize);
+        else
+            auto element = cast(Element*) (*cast(ubyte**) (execution.source
+                + arrayPointerOffset) + index * elementSize);
+        static if (access == CheckedAccess.load)
+            *cast(Element*) execution.destination = *element;
+        else
+            *element = *cast(const(Element)*) execution.destination;
+        static if (access == CheckedAccess.storeUnchecked)
+            return execution.next;
+        else
+            return cast(const(Instruction)*) execution.sourceWidth;
+    }
 }
 
 private enum checkedIndexShapes = [[4UL, 1UL], [4UL, 0UL], [8UL, 0UL]];
 private enum checkedIndexElementSizes = [1UL, 2UL, 4UL, 8UL];
 
+// A `check` does not read an element, so one size stands for all.
 package Instruction.Handler checkedIndexHandler(
-    in bool store, in size_t indexWidth, in bool signed,
-    in size_t elementSize,
+    in CheckedAccess access, in bool fixedLength, in size_t indexWidth,
+    in bool signed, in size_t elementSize,
 ) {
     import std.conv: text;
 
-    static foreach (isStore; [false, true])
-        static foreach (shape; checkedIndexShapes)
-            static foreach (size; checkedIndexElementSizes)
-                if (store == isStore && indexWidth == shape[0]
-                        && signed == (shape[1] == 1) && elementSize == size)
-                    return &opCheckedIndex!(isStore, shape[0],
-                        shape[1] == 1, size);
+    const handlerSize = access == CheckedAccess.check ? 1 : elementSize;
+    static foreach (kind; [EnumMembers!CheckedAccess])
+        static foreach (fixed; [false, true])
+            static foreach (shape; checkedIndexShapes)
+                static foreach (size; checkedIndexElementSizes)
+                    static if (kind != CheckedAccess.check || size == 1)
+                        if (access == kind && fixedLength == fixed
+                                && indexWidth == shape[0]
+                                && signed == (shape[1] == 1)
+                                && handlerSize == size)
+                            return &opCheckedIndex!(kind, fixed, shape[0],
+                                shape[1] == 1, size);
     internalFailure(text("no checked-index handler for a ", indexWidth,
-        "-byte ", signed ? "signed" : "unsigned", " index and ", elementSize,
+        "-byte ", signed ? "signed" : "unsigned", " index and ", handlerSize,
         "-byte elements"));
 }
 
@@ -4427,11 +4479,17 @@ shared static this() {
     addRoles(&opTlsLoad, rolesOfOperation!(runTlsLoad, I));
     addRoles(&opTlsStore, rolesOfOperation!(runTlsStore, S));
     addRoles(&opTlsAddress, rolesOfOperation!(runTlsAddress, I));
-    static foreach (isStore; [false, true])
-        static foreach (shape; checkedIndexShapes)
-            static foreach (size; checkedIndexElementSizes)
-                addRoles(&opCheckedIndex!(isStore, shape[0], shape[1] == 1,
-                    size), Roles(Role.other, Role.other, Role.instruction));
+    static foreach (kind; [EnumMembers!CheckedAccess])
+        static foreach (fixed; [false, true])
+            static foreach (shape; checkedIndexShapes)
+                static foreach (size; checkedIndexElementSizes)
+                    static if (kind != CheckedAccess.check || size == 1)
+                        addRoles(&opCheckedIndex!(kind, fixed, shape[0],
+                            shape[1] == 1, size),
+                            kind == CheckedAccess.storeUnchecked
+                                ? Roles(Role.other, Role.other, Role.other)
+                                : Roles(Role.other, Role.other,
+                                    Role.instruction));
     // The fused return keeps the roles of the producer it replaces.
     static foreach (width; 1 .. 17)
         addRoles(&opThenReturn!(opCopyFixed!(width, true)),
