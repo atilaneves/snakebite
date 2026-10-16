@@ -1403,8 +1403,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     // Whether `instruction` writes the whole of `destination` with a result
-    // of `width` bytes in one machine word or less, and reads each of its
-    // operands before it writes.
+    // of `width` bytes in one machine word or less, from operands that do
+    // not include `destination` itself (a two-address instruction reads it).
     private bool writesWholeWord(in Instruction instruction, in size_t width) {
         import std.meta: AliasSeq;
 
@@ -1412,7 +1412,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return false;
         static foreach (operation; AliasSeq!(
             opCopy, opLoadIndirect,
-            opAdd, opSubtract, opMultiply, opBitAnd, opBitOr, opBitXor,
             opCopyFixed!1, opCopyFixed!2, opCopyFixed!4, opCopyFixed!8,
         ))
             if (instruction.handler is &operation)
