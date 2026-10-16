@@ -1862,6 +1862,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // The role table knows the handler, so each operand names one object
         // of `width` bytes at most.
         bool known;
+        // The width of a copy, or 0.
+        size_t copyWidth;
+        // The bytes that the handler touches through `destination` or
+        // `source` whatever the width of the instruction, or 0.
+        size_t destinationExtent;
+        size_t sourceExtent;
 
         bool isWriter() const {
             return kind == Kind.pureWriter || kind == Kind.inPlace;
@@ -1894,13 +1900,21 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private static Access accessOf(in Instruction.Handler handler) {
-        // Thread-local: a handler never changes what it is.
-        static Access[Instruction.Handler] cache;
-        if (auto found = handler in cache)
-            return *found;
-        const access = classify(handler);
-        cache[handler] = access;
-        return access;
+        // A direct-mapped cache of `classify`, thread-local: a handler never
+        // changes what it is.
+        static struct Entry {
+            Instruction.Handler handler;
+            Access access;
+        }
+        enum entries = 256;
+        static Entry[entries] cache;
+
+        auto entry = &cache[(cast(size_t) handler >> 4) % entries];
+        if (entry.handler !is handler) {
+            entry.access = classify(handler);
+            entry.handler = cast(Instruction.Handler) handler;
+        }
+        return entry.access;
     }
 
     private static Access classify(Instruction.Handler handler) {
@@ -1916,19 +1930,32 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         with (Access.Kind) {
             static foreach (operation; AliasSeq!(
-                opConstant, opZero, opStaticLoad, opFrameAddress,
-                opIndexSlice, opIndexStatic, opIndexPointer,
+                opConstant, opZero, opStaticLoad,
             ))
                 if (handler is &operation)
                     access.kind = pureWriter;
+            // These write an address.
+            static foreach (operation; AliasSeq!(
+                opFrameAddress, opIndexSlice, opIndexStatic, opIndexPointer,
+            ))
+                if (handler is &operation) {
+                    access.kind = pureWriter;
+                    access.destinationExtent = size_t.sizeof;
+                }
             static foreach (width; copyWidths)
-                if (handler is &opCopyFixed!width)
+                if (handler is &opCopyFixed!width) {
                     access.kind = pureWriter;
+                    access.copyWidth = width;
+                }
             static foreach (width; indirectCopyWidths) {
-                if (handler is &opLoadIndirectFixed!width)
+                if (handler is &opLoadIndirectFixed!width) {
                     access.kind = pureWriter;
-                if (handler is &opStoreIndirectFixed!width)
+                    access.sourceExtent = size_t.sizeof;
+                }
+                if (handler is &opStoreIndirectFixed!width) {
                     access.kind = reader;
+                    access.destinationExtent = size_t.sizeof;
+                }
             }
             static foreach (kind; [
                 CastKind.narrow, CastKind.widenSigned, CastKind.widenUnsigned,
@@ -1936,12 +1963,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 static foreach (destSize; [1UL, 2, 4, 8])
                     static foreach (sourceSize; [1UL, 2, 4, 8])
                         if (handler
-                                is &opCastFixedAs!(kind, destSize, sourceSize))
+                                is &opCastFixedAs!(kind, destSize, sourceSize)) {
                             access.kind = pureWriter;
+                            access.destinationExtent = destSize;
+                            access.sourceExtent = sourceSize;
+                        }
             static foreach (index, operation; threeAddressHandlers) {
                 if (handler is &operation
-                        || handler is &threeAddressConstantHandlers[index])
+                        || handler is &threeAddressConstantHandlers[index]) {
                     access.kind = pureWriter;
+                    // A comparison writes one byte whatever its operand
+                    // width.
+                    static if (index >= firstComparisonHandler)
+                        access.destinationExtent = 1;
+                }
             }
             static foreach (operation; AliasSeq!(
                 opAdd, opSubtract, opMultiply, opBitAnd, opBitOr, opBitXor,
@@ -1975,37 +2010,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Field.destination, Field.source, Field.right,
     ];
 
-    private static size_t copyWidthOf(in Instruction.Handler handler) {
-        static foreach (width; copyWidths)
-            if (handler is &opCopyFixed!width)
-                return width;
-        return 0;
-    }
-
     // The bytes that a writer writes to `destination`.
-    private static size_t writtenSize(in Instruction instruction) {
-        import std.meta: AliasSeq;
-
-        const handler = instruction.handler;
-        static foreach (operation; AliasSeq!(
-            opFrameAddress, opIndexSlice, opIndexStatic, opIndexPointer,
-        ))
-            if (handler is &operation)
-                return size_t.sizeof;
-        static foreach (kind; [
-            CastKind.narrow, CastKind.widenSigned, CastKind.widenUnsigned,
-        ])
-            static foreach (destSize; [1UL, 2, 4, 8])
-                static foreach (sourceSize; [1UL, 2, 4, 8])
-                    if (handler is &opCastFixedAs!(kind, destSize, sourceSize))
-                        return destSize;
-        // A comparison writes one byte whatever its operand width.
-        static foreach (index, operation; threeAddressHandlers)
-            static if (index >= firstComparisonHandler)
-                if (handler is &operation
-                        || handler is &threeAddressConstantHandlers[index])
-                    return 1;
-        return instruction.width;
+    private static size_t writtenSize(
+        in Instruction instruction, in Access access,
+    ) {
+        return access.destinationExtent != 0
+            ? access.destinationExtent : instruction.width;
     }
 
     // The bytes that an instruction reads or writes through `field`. A
@@ -2014,24 +2024,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private static size_t extentOf(
         in Instruction instruction, in Access access, in Field field,
     ) {
-        const handler = instruction.handler;
-        if (field == Field.destination && access.kind == Access.Kind.pureWriter)
-            return writtenSize(instruction);
-        static foreach (width; indirectCopyWidths) {
-            // The address slot of an indirect load or store.
-            if ((field == Field.source && handler is &opLoadIndirectFixed!width)
-                    || (field == Field.destination
-                        && handler is &opStoreIndirectFixed!width))
-                return size_t.sizeof;
-        }
-        static foreach (kind; [
-            CastKind.narrow, CastKind.widenSigned, CastKind.widenUnsigned,
-        ])
-            static foreach (destSize; [1UL, 2, 4, 8])
-                static foreach (sourceSize; [1UL, 2, 4, 8])
-                    if (field == Field.source && handler
-                            is &opCastFixedAs!(kind, destSize, sourceSize))
-                        return sourceSize;
+        if (field == Field.destination && access.destinationExtent != 0)
+            return access.destinationExtent;
+        if (field == Field.source && access.sourceExtent != 0)
+            return access.sourceExtent;
         if (!access.known || access.takesAddress)
             return 1;
         return instruction.width == 0 ? 1 : instruction.width;
@@ -2059,6 +2055,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const(size_t)[] starts;
         const(size_t)[] sizes;
         long[] counts;
+        // The end of the last temporary.
+        size_t tempsEnd;
         // An instruction that control may enter from outside the previous one.
         const(bool)[] isTarget;
 
@@ -2070,6 +2068,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             this.starts = starts;
             this.sizes = sizes;
             this.isTarget = isTarget;
+            tempsEnd = starts[$ - 1] + sizes[$ - 1];
             counts = new long[starts.length];
             foreach (ref instruction; instructions)
                 if (instruction.handler !is null)
@@ -2100,6 +2099,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         private void countFrame(
             in size_t base, in size_t extent, in long delta,
         ) {
+            if (base >= tempsEnd || base + extent <= starts[0])
+                return;
             // The first temporary that ends after `base`.
             size_t low;
             size_t high = starts.length;
@@ -2190,7 +2191,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // destination of the copy, and the copy goes.
         private bool redirectProducer(in size_t copyIndex) {
             auto copy = &instructions[copyIndex];
-            const width = copyWidthOf(copy.handler);
+            const width = accessOf(copy.handler).copyWidth;
             if (width == 0 || width > size_t.sizeof)
                 return false;
             const temp = copy.source;
@@ -2235,7 +2236,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 const access = accessOf(candidate.handler);
                 if (candidate.destination == temp
                         && access.kind == Access.Kind.pureWriter
-                        && writtenSize(*candidate) == width) {
+                        && writtenSize(*candidate, access) == width) {
                     if (need != 0)
                         return false;
                     writer = at;
@@ -2258,8 +2259,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return false;
             // A copy now writes over a source that it reads, which a copy
             // through the temporary did not.
-            if (overlapsWithoutEqual(
-                    first.handler, first.source, destination, width))
+            if (accessOf(first.handler).copyWidth != 0
+                    && partlyOverlaps(first.source, destination, width))
                 return false;
 
             set(*first, Field.destination, destination);
@@ -2287,14 +2288,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return true;
         }
 
-        // Whether `handler` copies with `memcpy` and `source` partly overlaps
-        // the `width` bytes at `destination`, which a copy cannot do.
-        private static bool overlapsWithoutEqual(
-            in Instruction.Handler handler, in size_t source,
-            in size_t destination, in size_t width,
+        // Whether `source` partly overlaps the `width` bytes at
+        // `destination`, which a copy cannot do and a copy through a
+        // temporary could.
+        private static bool partlyOverlaps(
+            in size_t source, in size_t destination, in size_t width,
         ) {
-            return copyWidthOf(handler) != 0
-                && isFrameOperand(source) && isFrameOperand(destination)
+            return isFrameOperand(source) && isFrameOperand(destination)
                 && source != destination
                 && overlaps(source, width, destination, width);
         }
@@ -2333,7 +2333,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         private bool forwardSource(in size_t consumerIndex) {
             auto producer = &instructions[consumerIndex - 1];
             auto consumer = &instructions[consumerIndex];
-            const width = copyWidthOf(producer.handler);
+            const width = accessOf(producer.handler).copyWidth;
             if (width == 0)
                 return false;
             const temp = producer.destination;
@@ -2385,9 +2385,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return false;
             // The consumer writes where it now reads, which a copy through
             // the temporary did not allow.
-            if (access.isWriter
-                    && overlapsWithoutEqual(consumer.handler, value,
-                        consumer.destination, writtenSize(*consumer)))
+            if (access.copyWidth != 0
+                    && partlyOverlaps(value, consumer.destination,
+                        consumer.width))
                 return false;
 
             foreach (field; patched[0 .. patchedCount]) {
