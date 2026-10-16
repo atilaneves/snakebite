@@ -28,7 +28,23 @@ public struct NativeTarget {
 // The declaration is checked by resolved module and template identity, then
 // by template arguments and D ABI. A matching declaration therefore cannot
 // be an application function with the same unqualified name.
+//
+// The checks walk parent chains up to the root package. DMD changes the
+// parent of a root package while another thread sets up a module's global
+// scope (`scopeCreateGlobal`), so the walk runs under the frontend query
+// lock, which excludes every such writer.
 public NativeTarget nativeTarget(
+    imported!"dmd.func".FuncDeclaration function_,
+) {
+    import snakebite.frontend.compiler: withCompilerQuery;
+
+    NativeTarget result;
+    withCompilerQuery({ result = nativeTargetLocked(function_); });
+    return result;
+}
+
+
+private NativeTarget nativeTargetLocked(
     imported!"dmd.func".FuncDeclaration function_,
 ) {
     import dmd.astenums: LINK, STC, Tint32, VarArg;

@@ -3078,3 +3078,44 @@ unittest {
 
     (cast(int[]) destBuffer[]).should == [3, 4];
 }
+
+
+// `dmd.dsymbolsem.scopeCreateGlobal` makes the root package of its module
+// a child of a temporary scope symbol and clears the parent again. A
+// guest thread that asks for a native target walks that parent chain, so
+// the walk must exclude such writers: reading `parent` twice, once for
+// the null check and once for the use, can see the clear in between.
+@("nativeTarget.excludesConcurrentGlobalScopeSetup")
+unittest {
+    import core.atomic: atomicLoad, atomicStore;
+    import core.thread: Thread;
+    import dmd.dsymbolsem: scopeCreateGlobal;
+    import dmd.globals: global;
+    import snakebite.druntime.constructoratomic: nativeTarget;
+    import snakebite.frontend.compiler: newInFrontend, withCompilerLock;
+
+    auto guestModule = parseSnippet(q{
+        module snakebite_ut_nativetarget.guest;
+        int target() { return 1; }
+    });
+    auto function_ = findFunction(guestModule, "target");
+    assert(function_ !is null, "No function `target` in the guest program");
+
+    enum reads = 20_000;
+    shared bool done = false;
+
+    auto writer = new Thread({
+        while (!atomicLoad(done))
+            withCompilerLock({
+                newInFrontend!scopeCreateGlobal(guestModule, global.errorSink);
+            });
+    });
+    writer.start;
+    scope(exit) {
+        atomicStore(done, true);
+        writer.join;
+    }
+
+    foreach (_; 0 .. reads)
+        nativeTarget(function_).address.should == null;
+}
