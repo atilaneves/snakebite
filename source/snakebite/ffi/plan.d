@@ -152,6 +152,9 @@ public struct CallPlan {
     // register, for a variadic callee's `%al`.
     private size_t _sseCount;
     private size_t _integerArgumentCount;
+    // Set for a C-style or `extern(D)` untyped variadic callee: the call
+    // needs its `%al` and extra arguments, so it is never a direct call.
+    private bool _variadicCall;
     private bool _callbackVariadic;
     private bool _callbackDVariadic;
     private size_t _callbackVariadicOffset = size_t.max;
@@ -1184,15 +1187,19 @@ public extern(C) void executeCallPlan(
 // The address to call as `ulong function(ulong, ulong)` when this plan is
 // one or two word arguments in the first two integer registers and one
 // integer result of 1, 2, 4 or 8 bytes (`resultWidth`), with nothing else
-// for `callAt` to do. `swapped` says the second parameter goes in the
-// first register. Null otherwise.
+// for `callAt` to do, and the callee is not variadic. `parameterCount` is
+// the number of parameters of the plan; a call site passes the same number
+// of arguments. `swapped` says the second parameter goes in the first
+// register. Null otherwise.
 public extern(C) const(void)* directWordCallTarget(
     const(void)* opaquePlan, out bool swapped, out size_t resultWidth,
+    out size_t parameterCount,
 ) {
     import snakebite.ffi.sysv: CallFrame;
 
     const plan = cast(const(CallPlan)*) opaquePlan;
-    if (!plan._integerOnly || plan._hiddenReturnPointer || plan._hiddenContext
+    if (!plan._integerOnly || plan._variadicCall
+            || plan._hiddenReturnPointer || plan._hiddenContext
             || plan._callbackArguments.length != 0
             || plan._parameterCount < 1 || plan._parameterCount > 2
             || plan._moveCount != plan._parameterCount
@@ -1213,6 +1220,7 @@ public extern(C) const(void)* directWordCallTarget(
     if (plan._moveCount == 1 && seen[0] != 0)
         return null;
     swapped = plan._moveCount == 2 && seen[0] == 1;
+    parameterCount = plan._parameterCount;
     final switch (plan._resultMoves[0].store) with (CallPlan.Store) {
         case byte1: resultWidth = 1; break;
         case byte2: resultWidth = 2; break;
@@ -2000,6 +2008,8 @@ private CallPlan _shapeOf(
         // this exact dmd shows `%rdi`=`_arguments`, `%rsi`=`a`, `%rdx`=
         // `b`, `%rcx`=`c`, `%r8`/`%r9`=the two extra arguments - plain
         // declaration order, not reversed).
+        plan._variadicCall = isVariadicCall
+            || type.parameterList.varargs == VarArg.variadic;
         plan._reversedArguments = reversedDParameters
             && (linkage == LINK.d || linkage == LINK.default_)
             && !isDVariadic;
