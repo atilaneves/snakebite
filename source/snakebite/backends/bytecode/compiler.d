@@ -8915,7 +8915,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (hasThis) {
             const saved = _receiverDest;
             scope(exit) _receiverDest = saved;
-            _receiverDest = receiverSlotOf(callee, site);
+            size_t windowEnd;
+            _receiverDest = receiverSlotOf(callee, site, windowEnd);
+            // The receiver is written into the window of this call, so
+            // the calls that evaluate it open their windows above it.
+            const outer = _windowDepth;
+            scope(exit) _windowDepth = outer;
+            if (windowEnd != size_t.max)
+                _windowDepth = windowEnd;
             receiverOffset = thisOffsetOf();
         }
         constructTemporary(callee,
@@ -9128,11 +9135,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // that `compileWindowCall` will make, or `size_t.max` when the call will
     // go another way. A constructor reads its receiver again after the call,
     // so its receiver stays where it is.
-    private size_t receiverSlotOf(FuncDeclaration callee, Expression site) {
+    // `windowEnd` is where that window ends, or `size_t.max` for no window.
+    private size_t receiverSlotOf(
+        FuncDeclaration callee, Expression site, out size_t windowEnd,
+    ) {
         import dmd.astenums: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
         import snakebite.ffi.call: CallAdapter;
 
+        windowEnd = size_t.max;
         if (callee.isCtorDeclaration !is null)
             return size_t.max;
         const decision = CallSelection.atCallSite(_bytecode._callSelection.decisionOf(
@@ -9150,6 +9161,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 || _bytecode.inlineBodyOf(callee) !is null)
             return size_t.max;
         const window = windowOf(layout, CallAdapter.ofType(type));
+        windowEnd = window.end;
         return inWindow(window, layout.hiddenThis.parameter.offset);
     }
 

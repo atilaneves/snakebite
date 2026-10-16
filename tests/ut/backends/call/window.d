@@ -292,3 +292,54 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// The receiver of a call can itself be a call. The receiver is written into
+// the window of the outer call, so the callee that produces it must not
+// run in that window.
+static foreach (backend; Matrix!()) {
+    @("window.receiver.callThatProducesReceiverKeepsItsFrame." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeStatusOf!(backend, q{
+            class K {
+                long v;
+                this(long v) { this.v = v; }
+                final void say(long expected) {
+                    assert(v == expected);
+                }
+                final long twice() {
+                    long a = v * 3; long b = a + v; long c = b * 2;
+                    long d = c - a; long e = d + b; long f = e - c;
+                    return v * 2 + (f - f);
+                }
+                final long plus(long x, long y) {
+                    long a = v * 3; long b = a + v; long c = b * 2;
+                    long d = c - a; long e = d + b; long f = e - c;
+                    return v + x + y + (f - f);
+                }
+            }
+            K mk(long v) {
+                long a = v * 3; long b = a + v; long c = b * 2;
+                long d = c - a; long e = d + b; long f = e - c;
+                auto k = new K(v + (f - f));
+                return k;
+            }
+            long id(long v) {
+                long a = v * 3; long b = a + v; long c = b * 2;
+                long d = c - a; long e = d + b; long f = e - c;
+                return v + (f - f);
+            }
+
+            int main() {
+                mk(3).say(3);
+                if (mk(4).twice() != 8)
+                    return 1;
+                if (mk(5).plus(id(6), id(7)) != 18)
+                    return 2;
+                mk(1).say(1);
+                return 42;
+            }
+        });
+    }
+}
