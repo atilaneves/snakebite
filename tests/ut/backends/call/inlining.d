@@ -251,3 +251,135 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.parameters.arithmeticResultIntoAnArgumentDestination." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int add(int x, int y) { return x + y; }
+            int mul(int x, int y) { return x * y; }
+
+            void main() {
+                int a = 3;
+                int b = 4;
+                a = add(a, b);
+                assert(a == 7);
+                b = add(a, b);
+                assert(b == 11);
+                a = mul(a, b);
+                assert(a == 77);
+                a = add(b, a);
+                assert(a == 88);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.parameters.getterResultIntoItsOwnPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Node { int value; Node* next; }
+            Node* following(Node* node) { return node.next; }
+
+            void main() {
+                Node c = Node(3, null);
+                Node b = Node(2, &c);
+                Node a = Node(1, &b);
+                Node* p = &a;
+                p = following(p);
+                assert(p.value == 2);
+                p = following(p);
+                assert(p.value == 3);
+                p = following(p);
+                assert(p is null);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.parameters.sameArgumentTwice." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int add(int x, int y) { return x + y; }
+            int minus(int x, int y) { return x - y; }
+
+            void main() {
+                int a = 21;
+                assert(add(a, a) == 42);
+                assert(minus(a, a) == 0);
+                a = add(a, a);
+                assert(a == 42);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.parameters.calleeWritingItsParameterLeavesTheCaller." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int clobber(int x) { x = x + 100; return x; }
+            int clobberTwo(int x, int y) { x = y; y = 0; return x; }
+
+            void main() {
+                int a = 5;
+                int b = 6;
+                assert(clobber(a) == 105);
+                assert(a == 5);
+                assert(clobberTwo(a, b) == 6);
+                assert(a == 5);
+                assert(b == 6);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.parameters.refArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void increment(ref int x) { x += 1; }
+            int read(ref int x) { return x; }
+            int addInto(ref int x, int y) { x = x + y; return x; }
+
+            void main() {
+                int a = 1;
+                increment(a);
+                increment(a);
+                assert(a == 3);
+                assert(read(a) == 3);
+                assert(addInto(a, a) == 6);
+                assert(a == 6);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.parameters.argumentWrittenByALaterArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int add3(int x, int y, int z) { return x + y + z; }
+
+            void main() {
+                int a = 5;
+                assert(add3(a, a = 1, 10) == 16);
+                assert(a == 1);
+            }
+        });
+    }
+}
