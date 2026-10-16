@@ -453,7 +453,6 @@ static foreach (backend; Matrix!()) {
 }
 
 
-
 static foreach (backend; Matrix!()) {
     @("inlining.parameters.receiverIsFixedBeforeArgumentsRun." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -480,6 +479,30 @@ static foreach (backend; Matrix!()) {
 
                 assert(first.plus(first.bump()) == 4);
                 assert(first.value == 2);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.result.refToFieldAtNonZeroOffsetIsWrittenReadAndUpdated." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S {
+                int x;
+                int y;
+                ref int getY() return { return y; }
+            }
+
+            void main() {
+                S s;
+                s.getY() = 9;
+                assert(s.y == 9 && s.x == 0);
+                assert(s.getY() == 9);
+                s.getY() += 4;
+                assert(s.y == 13 && s.x == 0);
             }
         });
     }

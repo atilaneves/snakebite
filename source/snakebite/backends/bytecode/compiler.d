@@ -767,7 +767,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opShiftRightArithmetic3, opDivideSigned3, opDivideUnsigned3,
         opModuloSigned3, opModuloUnsigned3,
         CompareKind, Comparison, constantForm, fusedBranchHandler, fusesConstant,
-        threeAddressConstantHandlers, threeAddressHandlers,
+        firstComparisonHandler, threeAddressConstantHandlers,
+        threeAddressHandlers,
         isFusedBranch, specialiseHandlers, RegisterFamily, registerFamily,
         fusedRegisterFamily, registerForm, fusedRegisterForm,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
@@ -1383,9 +1384,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import std.meta: AliasSeq;
 
-        // The widest result of an instruction whose width field does not
-        // say how much it writes.
-        enum sliceWidth = 16;
+        // An indexing instruction's width field is the element size; it
+        // writes one pointer.
+        enum indexWidth = size_t.sizeof;
         foreach (instruction; body_.instructions) {
             if (leavesDestination(instruction.handler))
                 continue;
@@ -1394,7 +1395,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 opIndexSlice, opIndexStatic, opIndexPointer,
             ))
                 if (instruction.handler is &operation)
-                    written = sliceWidth;
+                    written = indexWidth;
             if (instruction.destination < offset + width
                     && instruction.destination + written > offset)
                 return true;
@@ -1405,6 +1406,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // Whether `instruction` writes the whole of `destination` with a result
     // of `width` bytes in one machine word or less, from operands that do
     // not include `destination` itself (a two-address instruction reads it).
+    // A comparison writes one byte whatever its operand width, so it is not
+    // one of them.
     private bool writesWholeWord(in Instruction instruction, in size_t width) {
         import std.meta: AliasSeq;
 
@@ -1420,12 +1423,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             static if (copyWidth <= size_t.sizeof)
                 if (instruction.handler is &opLoadIndirectFixed!copyWidth)
                     return true;
-        static foreach (index, operation; threeAddressHandlers) {
-            if (instruction.handler is &operation)
-                return true;
-            if (instruction.handler is &threeAddressConstantHandlers[index])
-                return true;
-        }
+        static foreach (index, operation; threeAddressHandlers)
+            static if (index < firstComparisonHandler) {
+                if (instruction.handler is &operation)
+                    return true;
+                if (instruction.handler
+                        is &threeAddressConstantHandlers[index])
+                    return true;
+            }
         return false;
     }
 
@@ -1434,7 +1439,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // each return copies the result to `destOffset` and jumps past the copy.
     //
     // A parameter that nothing in the body writes shares the storage of
-    // the caller's operand instead of a copy of it. A value that the last
+    // the caller's operand instead of a copy of it. `args` is reordered:
+    // the shared arguments move to its front. A value that the last
     // instruction before a return computes goes straight to `destOffset`.
     private void emitInlined(
         in InlineBody body_, Arg[] args, in size_t destOffset,
@@ -1444,17 +1450,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (body_.frameAlignment > _tempAlignment)
             _tempAlignment = body_.frameAlignment;
 
-        Arg[] bound;
+        size_t boundCount;
         const mayBind = bodyWritesOnlyItsFrame(body_);
         foreach (arg; args) {
             if (mayBind && arg.width != 0
                     && (arg.callerOffset & (1UL << 63)) == 0
                     && !bodyWrites(body_, arg.calleeOffset, arg.width))
-                bound ~= arg;
+                args[boundCount++] = arg;
             else
                 emit(&opCopy, base + arg.calleeOffset, arg.callerOffset,
                     arg.width);
         }
+        const bound = args[0 .. boundCount];
         size_t rebase(in size_t offset) {
             foreach (arg; bound)
                 if (offset >= arg.calleeOffset
@@ -1470,18 +1477,21 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         const instructions = body_.instructions;
-        auto isTarget = new bool[instructions.length + 1];
+        // `positions` first marks the branch targets, then holds the new
+        // index of each instruction.
+        auto positions = new size_t[instructions.length + 1];
+        enum targetMark = 1;
         foreach (instruction; instructions) {
             Instruction probe = instruction;
             if (auto target = branchTargetField(probe))
-                isTarget[*target] = true;
+                positions[*target] = targetMark;
         }
         // A return whose copy to `destOffset` the instruction before it
         // does instead.
         auto direct = new bool[instructions.length];
         foreach (i, instruction; instructions) {
             if (instruction.handler !is &opReturn || destOffset == discardResult
-                    || i == 0 || isTarget[i]
+                    || i == 0 || positions[i] == targetMark
                     || (instruction.source & (1UL << 63)) != 0)
                 continue;
             const previous = instructions[i - 1];
@@ -1492,7 +1502,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const constantBase = _constants.length;
         _constants ~= body_.constants;
         const start = _instructions.length;
-        auto positions = new size_t[instructions.length + 1];
         size_t next = start;
         foreach (i, instruction; instructions) {
             positions[i] = next;
