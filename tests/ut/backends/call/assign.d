@@ -443,3 +443,381 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+
+static foreach (backend; Matrix!()) {
+    @("assign.destination.local.isAlsoRightOperand." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        13.shouldBeRetOf!(
+            backend,
+            q{
+                int result() {
+                    int x = 3;
+                    int y = 5;
+                    x = y * 2 + x;
+                    return x;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("assign.destination.local.isAlsoLeftOperandOfChain." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(
+            backend,
+            q{
+                int result() {
+                    int x = 3;
+                    int y = 5;
+                    x = x - y + y * 2 - 1;
+                    return x;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("assign.destination.local.swapsThroughExpression." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        53.shouldBeRetOf!(
+            backend,
+            q{
+                int result() {
+                    int a = 3;
+                    int b = 5;
+                    a = a + b;
+                    b = a - b;
+                    a = a - b;
+                    return a * 10 + b;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("assign.destination.bool.conversionOfZeroByteIntoItself." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeRetOf!(
+            backend,
+            q{
+                int result() {
+                    ubyte[2] raw = [0, 5];
+                    bool flag = true;
+                    flag = cast(bool) raw[0];
+                    return flag ? 1 : 0;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("assign.destination.bool.conversionOfNonZeroByteIntoItself." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeRetOf!(
+            backend,
+            q{
+                int result() {
+                    ubyte[2] raw = [0, 5];
+                    bool flag = false;
+                    flag = cast(bool) raw[1];
+                    return flag ? 1 : 0;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("assign.destination.bool.conversionOfExpressionReadingItself." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeRetOf!(
+            backend,
+            q{
+                int result() {
+                    ubyte[2] raw = [0, 5];
+                    bool flag = true;
+                    flag = cast(bool) (flag + raw[0]);
+                    return flag ? 1 : 0;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("assign.destination.bool.comparisonThatReadsTheFlag." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        3.shouldBeRetOf!(
+            backend,
+            q{
+                int result() {
+                    int limit = 4;
+                    bool seen = true;
+                    seen = limit > 3 && !seen;
+                    const first = seen;
+                    seen = limit < 9 && !first;
+                    return (seen ? 1 : 0) + (first ? 4 : 2);
+                }
+            },
+            "result",
+        );
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("assign.destination.field.isAlsoOperandThroughPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1_309.shouldBeRetOf!(
+            backend,
+            q{
+                struct Pair {
+                    int first;
+                    int second;
+                }
+
+                int result() {
+                    auto pair = Pair(3, 5);
+                    auto pointer = &pair;
+                    pointer.first = pointer.second * 2 + pointer.first;
+                    pointer.second = pointer.first - pointer.second + 1;
+                    return pair.first * 100 + pair.second;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("assign.destination.field.ofSameStructReadByTheValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        207.shouldBeRetOf!(
+            backend,
+            q{
+                struct Pair {
+                    int first;
+                    int second;
+
+                    void rotate() {
+                        first = second - first;
+                        second = first + second;
+                    }
+                }
+
+                int result() {
+                    auto pair = Pair(3, 5);
+                    pair.rotate;
+                    return pair.first * 100 + pair.second;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("assign.destination.reference.isAlsoOperand." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1_921.shouldBeRetOf!(
+            backend,
+            q{
+                void update(ref int target, ref int other) {
+                    target = other * 2 + target;
+                }
+
+                int result() {
+                    int x = 5;
+                    int y = 7;
+                    update(x, y);
+                    update(y, y);
+                    return x * 100 + y;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("assign.destination.array.elementIsAlsoOperand." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        17_026.shouldBeRetOf!(
+            backend,
+            q{
+                int result() {
+                    int[3] values = [2, 5, 9];
+                    values[1] = values[1] * 2 + values[2] - values[0];
+                    int last = values[2];
+                    last = values[1] + last;
+                    return values[1] * 1000 + last;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE stops at an array bounds error; a catch cannot see it"),
+)) {
+    @("assign.destination.throwBeforeValueLeavesVariableOperand." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                int result() {
+                    int[2] values = [10, 20];
+                    int x = 42;
+                    size_t position = 5;
+                    try {
+                        x = values[position] + x;
+                    } catch (Throwable) {
+                    }
+                    return x;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE stops at an array bounds error; a catch cannot see it"),
+)) {
+    @("assign.destination.throwBeforeValueLeavesWideVariable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(
+            backend,
+            q{
+                int result() {
+                    int[2] values = [10, 20];
+                    long wide = 7;
+                    size_t position = 5;
+                    try {
+                        wide = values[position];
+                    } catch (Throwable) {
+                    }
+                    return cast(int) wide;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE stops at an array bounds error; a catch cannot see it"),
+)) {
+    @("assign.destination.throwBeforeValueLeavesBoolVariable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeRetOf!(
+            backend,
+            q{
+                int result() {
+                    int[2] values = [10, 20];
+                    bool flag = true;
+                    size_t position = 5;
+                    try {
+                        flag = cast(bool) values[position];
+                    } catch (Throwable) {
+                    }
+                    return flag ? 0 : 1;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("assign.destination.result.leavesCopyOfVariable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        107.shouldBeRetOf!(
+            backend,
+            q{
+                long widened(int value) {
+                    long copy = value;
+                    value = 0;
+                    return copy + value;
+                }
+
+                int result() {
+                    return cast(int) widened(100) + 7;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("assign.destination.throwAfterPartialValueLeavesDestination." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(
+            backend,
+            q{
+                int thrower(int value) {
+                    if (value > 0)
+                        throw new Exception("thrown");
+                    return value;
+                }
+
+                int result() {
+                    int x = 7;
+                    const y = 3;
+                    try {
+                        x = y * 2 + thrower(y);
+                    } catch (Exception) {
+                    }
+                    return x;
+                }
+            },
+            "result",
+        );
+    }
+}
