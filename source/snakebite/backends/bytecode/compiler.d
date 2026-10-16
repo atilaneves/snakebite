@@ -802,7 +802,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opGreaterOrEqualUnsigned3, opEqual3, opNotEqual3, opFloatEqual3,
         opFloatNotEqual3, opFloatLessThan3, opFloatLessOrEqual3,
         opFloatGreaterThan3, opFloatGreaterOrEqual3,
-        opIndexPointer, opIndexSlice, opIndexStatic, checkedIndexHandler,
+        CheckedAccess, opIndexPointer, opIndexSlice, opIndexStatic,
+        checkedIndexHandler,
         opBitAnd3, opBitOr3, opBitXor3, opShiftLeft3, opShiftRightLogical3,
         opShiftRightArithmetic3, opDivideSigned3, opDivideUnsigned3,
         opModuloSigned3, opModuloUnsigned3,
@@ -6511,19 +6512,30 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // The frame slot that holds the index, or `size_t.max`.
         size_t slot = size_t.max;
         Expression expression;
+        // A static array: the bounds are the constant `dimension`, and the
+        // base is the storage of the elements.
+        bool fixedLength;
+        size_t dimension;
     }
 
-    // Whether `expression` is an element of a slice that one instruction
-    // reads or writes after its bounds check. Emits no code.
+    // Whether `expression` is an element of a slice or of a static array that
+    // one instruction reads or writes after its bounds check. Emits no code.
     private bool checkedIndexShape(
         IndexExp expression, in size_t elementSize, out CheckedIndex shape,
     ) {
-        import dmd.astenums: Tarray;
+        import dmd.astenums: Tarray, Tsarray;
         import dmd.sideeffect: hasSideEffect;
         import snakebite.backends.checkplan: boundsPlanOf, FailurePlan;
 
         auto arrayType = expression.e1.type.toBasetype;
-        if (arrayType.ty != Tarray || expression.lengthVar !is null
+        shape.fixedLength = arrayType.ty == Tsarray;
+        if (shape.fixedLength) {
+            shape.dimension = cast(size_t) arrayType.isTypeSArray.dim.toInteger;
+            if (shape.dimension > uint.max)
+                return false;
+        }
+        if ((arrayType.ty != Tarray && !shape.fixedLength)
+                || expression.lengthVar !is null
                 || hasSideEffect(expression.e2)
                 || !isPlainPlace(expression.e1))
             return false;
@@ -6548,6 +6560,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         shape.width = index.size;
         shape.signed = !index.isUnsigned;
         shape.expression = indexExpression;
+        if (shape.fixedLength) {
+            // A literal index is checked when the program is compiled; a
+            // static array has no room for an offset beside its length.
+            if (indexExpression.isIntegerExp)
+                return false;
+            shape.slot = operandOf(indexExpression, index.size, false);
+            return true;
+        }
         if (auto sum = indexExpression.isBinExp) {
             auto literal = sum.e2.isIntegerExp;
             if ((sum.op == EXP.add || sum.op == EXP.min) && literal !is null
@@ -6578,14 +6598,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const array = placeOf(expression.e1, true);
         if (array == size_t.max)
             return false;
-        emitCheckedIndex(expression, shape, false, _destination, array);
+        emitCheckedIndex(expression, shape, CheckedAccess.load, _destination,
+            array);
         return true;
     }
 
+    // `value` must have no side effect: the split store below reads the
+    // array and the index again after `value` ran.
     private bool compileCheckedStore(
         IndexExp expression, Expression value, in size_t width,
         in bool floating,
     ) {
+        import dmd.sideeffect: hasSideEffect;
+
         CheckedIndex shape;
         if (!checkedIndexShape(expression, width, shape))
             return false;
@@ -6593,15 +6618,27 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (array == size_t.max)
             return false;
         size_t operand = operandOf(value, width, floating);
+        if (operand == size_t.max && !cannotFail(value)) {
+            // Native order checks the left side first, so the bounds check
+            // runs before the value, and the store after it needs none.
+            if (hasSideEffect(value))
+                internalFailure("a split checked store needs a value "
+                    ~ "without side effects");
+            resolveIndexSlot(shape);
+            emitCheckedIndex(expression, shape, CheckedAccess.check,
+                noValue, array);
+            operand = reserveTemp(typeFacts(expression.type));
+            evalInto(value, operand, width, expression.type);
+            emitCheckedIndex(expression, shape, CheckedAccess.storeUnchecked,
+                operand, array);
+            return true;
+        }
         if (operand == size_t.max) {
-            // Native order checks the left side first; the instruction checks
-            // it after the value, so the value must not be able to fail.
-            if (!cannotFail(value))
-                return false;
             operand = reserveTemp(typeFacts(expression.type));
             evalInto(value, operand, width, expression.type);
         }
-        emitCheckedIndex(expression, shape, true, operand, array);
+        emitCheckedIndex(expression, shape, CheckedAccess.store, operand,
+            array);
         return true;
     }
 
@@ -6625,25 +6662,40 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
+    // Evaluates an index that is not a plain local into a temporary.
+    private void resolveIndexSlot(ref CheckedIndex shape) {
+        if (shape.slot != size_t.max)
+            return;
+        shape.slot = reserveTemp(typeFacts(shape.expression.type));
+        evalInto(shape.expression, shape.slot, shape.width);
+    }
+
+    // The value operand of an access that has no value.
+    private enum noValue = 0;
+
     // The access, then the failure code of the bounds check. The access
-    // continues after the failure code when the index is in bounds.
+    // continues after the failure code when the index is in bounds. An
+    // unchecked store has no failure code.
     private void emitCheckedIndex(
-        IndexExp expression, CheckedIndex shape, in bool store,
+        IndexExp expression, CheckedIndex shape, in CheckedAccess access,
         in size_t value, in size_t array,
     ) {
         import snakebite.nativelayout: arrayLengthOffset;
 
-        auto indexType = shape.expression.type;
-        if (shape.slot == size_t.max) {
-            shape.slot = reserveTemp(typeFacts(indexType));
-            evalInto(shape.expression, shape.slot, shape.width);
-        }
+        resolveIndexSlot(shape);
         const element = typeFacts(expression.type).size;
-        const handler = checkedIndexHandler(store, shape.width, shape.signed,
-            element);
-        const packed = shape.slot
-            | (cast(size_t) cast(uint) cast(int) shape.offset << 32);
-        const length = placeAt(array, arrayLengthOffset);
+        const handler = checkedIndexHandler(access, shape.fixedLength,
+            shape.width, shape.signed, element);
+        const second = shape.fixedLength
+            ? shape.dimension : cast(size_t) cast(uint) cast(int) shape.offset;
+        const packed = shape.slot | (second << 32);
+        if (access == CheckedAccess.storeUnchecked) {
+            emit(handler, value, array, packed, 0);
+            return;
+        }
+        const length = shape.fixedLength ? size_t.max
+            : placeAt(array, arrayLengthOffset);
+        auto indexType = shape.expression.type;
         compileIndexCheckWith({
             emit(handler, value, array, packed, 0);
         }, () {
@@ -6661,7 +6713,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 emit(shape.signed ? &opCastWidenSigned : &opCastWidenUnsigned,
                     wide, shape.width, size_t.sizeof);
             return Arg(wide, 0, size_t.sizeof);
-        }, () => Arg(length, 0, size_t.sizeof), expression.loc);
+        }, () => shape.fixedLength
+            ? constantArgument(shape.dimension, size_t.sizeof)
+            : Arg(length, 0, size_t.sizeof), expression.loc);
     }
 
     // The value of a literal index that `$` does not depend on, or
