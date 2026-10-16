@@ -278,7 +278,7 @@ public struct CallSite {
         slot.argCount = args.length;
         slot.plainArgs = true;
         foreach (arg; args)
-            if ((arg.callerOffset & (1UL << 63)) != 0
+            if (!isFrameOperand(arg.callerOffset)
                     || (arg.width != 1 && arg.width != 2 && arg.width != 4
                         && arg.width != 8))
                 slot.plainArgs = false;
@@ -328,8 +328,32 @@ public enum discardResult = size_t.max;
 // targets, constants, and call sites) are decoded separately from storage.
 package size_t indirectStorage(in size_t addressSlot) @safe pure nothrow @nogc {
     assert(addressSlot < (1UL << 31));
-    return (1UL << 63) | (addressSlot << 32);
+    return indirectBit | (addressSlot << 32);
 }
+
+package enum indirectBit = 1UL << 63;
+
+// Whether a storage operand is a plain frame offset.
+package bool isFrameOperand(in size_t operand) @safe pure nothrow @nogc {
+    return (operand & indirectBit) == 0;
+}
+
+// The frame slot that holds the address of an indirect operand.
+package size_t addressSlotOf(in size_t operand) @safe pure nothrow @nogc {
+    return (operand >> 32) & addressSlotMask;
+}
+
+// The indirect operand `operand` with its address held in `addressSlot`.
+package size_t withAddressSlot(in size_t operand, in size_t addressSlot)
+        @safe pure nothrow @nogc {
+    assert(addressSlot <= addressSlotMask);
+    return (operand & ~(addressSlotMask << 32)) | (addressSlot << 32);
+}
+
+private enum addressSlotMask = 0x7fff_ffffUL;
+
+// The fields of an instruction that name storage, in instruction order.
+package enum Field : ubyte { destination, source, right }
 
 // The handler adapter owns operand decoding. An operation receives native
 // addresses for storage and integer words for immediates, so it cannot
@@ -465,8 +489,8 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind,
 pragma(inline, true)
 private ubyte* indirectStorageAt(ubyte* frame, in size_t operand)
         pure nothrow @nogc {
-    const addressSlot = (operand >> 32) & 0x7fff_ffffUL;
-    return *cast(ubyte**) (frame + addressSlot) + cast(uint) operand;
+    return *cast(ubyte**) (frame + addressSlotOf(operand))
+        + cast(uint) operand;
 }
 
 // A frame offset, or an address held in a frame slot plus an offset when the
@@ -474,10 +498,9 @@ private ubyte* indirectStorageAt(ubyte* frame, in size_t operand)
 pragma(inline, true)
 package ubyte* operandStorage(ubyte* frame, in size_t operand)
         pure nothrow @nogc {
-    if ((operand & (1UL << 63)) == 0)
+    if (isFrameOperand(operand))
         return frame + operand;
-    const addressSlot = (operand >> 32) & 0x7fff_ffffUL;
-    return *cast(ubyte**) (frame + addressSlot) + cast(uint) operand;
+    return indirectStorageAt(frame, operand);
 }
 
 // An optimising build chains handlers: each one ends with a tail call to the
@@ -4124,9 +4147,6 @@ private size_t widthSlot(in size_t width) @safe pure nothrow @nogc {
     }
 }
 
-private enum indirectBit = 1UL << 63;
-
-
 // The operations whose instances exist for each mix of frame and indirect
 // storage operands, so that none of them tests the indirect bit.
 private alias kindOperations = AliasSeq!(
@@ -4456,15 +4476,29 @@ package void specialiseHandlers(Instruction[] instructions) {
     }
 }
 
-// Whether the handler reads an indirect operand in a field: 0 for
-// `destination`, 1 for `source`, 2 for the right operand in `sourceWidth`.
-// A handler without a specialisation entry is not known to.
-package bool decodesIndirect(in Instruction.Handler handler, in size_t field) {
+// Whether the handler reads an indirect operand in `field`. A handler
+// without a specialisation entry is not known to.
+package bool decodesIndirect(in Instruction.Handler handler, in Field field) {
     const entry = lookupSpecialisation(handler);
     if (entry is null)
         return false;
-    return field == 0 ? entry.destination
-        : field == 1 ? entry.source : entry.right;
+    final switch (field) {
+        case Field.destination: return entry.destination;
+        case Field.source: return entry.source;
+        case Field.right: return entry.right;
+    }
+}
+
+// Whether the handler reads the frame offset of an index from the low 32
+// bits of `width`.
+package bool widthHoldsIndexSlot(in Instruction.Handler handler) {
+    static foreach (isStore; [false, true])
+        static foreach (shape; checkedIndexShapes)
+            static foreach (size; checkedIndexElementSizes)
+                if (handler is &opCheckedIndex!(isStore, shape[0],
+                        shape[1] == 1, size))
+                    return true;
+    return false;
 }
 
 private const(Specialisation)* lookupSpecialisation(
