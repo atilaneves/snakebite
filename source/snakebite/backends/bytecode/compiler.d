@@ -99,9 +99,9 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // reuses the one already built.
     private snakebite.backends.classinfo.ClassRuntimeCache _classRuntime;
     private size_t _compilationDepth;
-    // Greater than zero while a callee compiles only so that its caller
-    // can copy it: that compile may copy callees that are already complete
-    // but compiles no further function.
+    // The number of callees that compile only so that their callers can
+    // copy them, nested inside each other. Greater than zero while such a
+    // compile runs; it never exceeds `maxSpeculationDepth`.
     private size_t _speculating;
     private bool[FuncDeclaration] _rejectedForInlining;
     private size_t _cacheMisses;
@@ -524,10 +524,12 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     }
 
     // The body of `function_` for a caller to copy in place of a call, or
-    // null. It compiles a tiny `function_` unless a function is already
-    // compiling only for a caller. A callee that this compiler rejects, or
+    // null. It compiles a tiny `function_` that is not yet compiled, and
+    // that compile may in turn compile its own tiny callees, up to
+    // `maxSpeculationDepth` deep. A callee that this compiler rejects, or
     // whose compile would reach another function's address, is recorded
-    // once and stays a normal call.
+    // once and stays a normal call. A chain that is too deep leaves every
+    // function on it uncompiled and null is returned for the outermost.
     package const(InlineBody)* inlineBodyOf(FuncDeclaration function_) {
         import snakebite.frontend.compiler: withCompilerLock;
 
@@ -535,13 +537,27 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         withCompilerLock({
             if (auto complete = function_ in _complete)
                 found = *complete;
-            else if (_speculating == 0 && function_ !in _compiled
+            else if (function_ !in _compiled
                     && function_ !in _rejectedForInlining
                     && hasTinyBody(function_)) {
+                if (_speculating >= maxSpeculationDepth)
+                    throw new SpeculationTooDeep;
+                const nested = _speculating != 0;
                 ++_speculating;
                 scope(exit) --_speculating;
                 try
                     found = compileFunction(function_);
+                catch (SpeculationTooDeep tooDeep) {
+                    // No function on the chain keeps a compiled form: one
+                    // that compiled without this callee would stay a call
+                    // for every later caller. The outermost speculation
+                    // leaves its callee a normal call; that callee gets a
+                    // normal compile, with its own speculation depth,
+                    // when it runs.
+                    if (nested)
+                        throw tooDeep;
+                    found = null;
+                }
                 catch (Exception) {
                     found = null;
                     _rejectedForInlining[function_] = true;
@@ -551,16 +567,37 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return found is null ? null : found.inlineBody;
     }
 
-    // Compiling a callee only so that a caller can copy it must not reach
-    // code that a plain call would never reach: `internalFailure` ends the
-    // process and cannot be recovered. A callee of at most this many
-    // statements, all of them `return` or expression statements, is the
-    // only one compiled that way.
-    private enum maxSpeculativeStatements = 3;
+    // Limits of a callee that a caller copies in place of a call. A longer
+    // callee stays a call. Measured on the tardy test suite and on six
+    // AWFY benchmarks: 24 statements and 100 instructions compile as fast
+    // as 12 and 40 (within noise) and run in the same number of bytecodes.
+    //
+    // A compile that only a caller needs must not reach code that a plain
+    // call would never reach, because `internalFailure` ends the process.
+    // `hasTinyBody` therefore admits only `return`, expression, `if`,
+    // compound and scope statements. None of these reaches
+    // `compileCtfeBlockWithLabels` (its body needs a label, which no
+    // admitted statement holds, so `comeFrom` is false), and the other
+    // `internalFailure` calls check states that dmd's semantic analysis has
+    // already excluded for any function body. A callee that takes an
+    // address throws `SpeculationRejected` instead (`operandAddress`).
+    private enum maxSpeculativeStatements = 24;
+    private enum maxInlineInstructions = 100;
+
+    // The deepest chain of callees that compile only for a caller. A
+    // deeper chain stays a call: the callee at the limit compiles normally,
+    // with its own chain, when it runs.
+    private enum maxSpeculationDepth = 3;
+
+    private static class SpeculationTooDeep: Exception {
+        this() @safe pure nothrow {
+            super("a speculative compile reached the depth limit");
+        }
+    }
 
     private static class SpeculationRejected: Exception {
         this() @safe pure nothrow {
-            super("a speculative compile must not compile another function");
+            super("a speculative compile must not take the address of a function");
         }
     }
 
@@ -571,7 +608,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         bool tiny(Statement statement) {
             if (statement is null)
                 return true;
-            if (--budget < 0)
+            if (--budget < 0 || statement.comeFrom)
                 return false;
             if (auto compound = statement.isCompoundStatement) {
                 foreach (child; *compound.statements)
@@ -581,6 +618,9 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             }
             if (auto scoped = statement.isScopeStatement)
                 return tiny(scoped.statement);
+            if (auto conditional = statement.isIfStatement)
+                return tiny(conditional.ifbody)
+                    && tiny(conditional.elsebody);
             return statement.isReturnStatement !is null
                 || statement.isExpStatement !is null;
         }
@@ -762,7 +802,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opGreaterOrEqualUnsigned3, opEqual3, opNotEqual3, opFloatEqual3,
         opFloatNotEqual3, opFloatLessThan3, opFloatLessOrEqual3,
         opFloatGreaterThan3, opFloatGreaterOrEqual3,
-        opIndexPointer, opIndexSlice, opIndexStatic, checkedIndexHandler,
+        CheckedAccess, opIndexPointer, opIndexSlice, opIndexStatic,
+        checkedIndexHandler,
         opBitAnd3, opBitOr3, opBitXor3, opShiftLeft3, opShiftRightLogical3,
         opShiftRightArithmetic3, opDivideSigned3, opDivideUnsigned3,
         opModuloSigned3, opModuloUnsigned3,
@@ -1205,10 +1246,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
 
-    // A caller copies a function in place of a call only when it is a
-    // leaf of at most this many instructions.
-    private enum maxInlineInstructions = 8;
-
     // How a copied instruction names frame storage. `ignored` marks a field
     // that holds no storage operand.
     private enum Operand { ignored, storage, constant }
@@ -1325,7 +1362,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 || _layout.returnPlace.offset != size_t.max
                 || _layout.variadicTypes != size_t.max
                 || _layout.variadicCursor != size_t.max
-                || _instructions.length > maxInlineInstructions)
+                || _instructions.length > Bytecode.maxInlineInstructions)
             return null;
         foreach (instruction; _instructions) {
             Operands roles;
@@ -6483,19 +6520,30 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // The frame slot that holds the index, or `size_t.max`.
         size_t slot = size_t.max;
         Expression expression;
+        // A static array: the bounds are the constant `dimension`, and the
+        // base is the storage of the elements.
+        bool fixedLength;
+        size_t dimension;
     }
 
-    // Whether `expression` is an element of a slice that one instruction
-    // reads or writes after its bounds check. Emits no code.
+    // Whether `expression` is an element of a slice or of a static array that
+    // one instruction reads or writes after its bounds check. Emits no code.
     private bool checkedIndexShape(
         IndexExp expression, in size_t elementSize, out CheckedIndex shape,
     ) {
-        import dmd.astenums: Tarray;
+        import dmd.astenums: Tarray, Tsarray;
         import dmd.sideeffect: hasSideEffect;
         import snakebite.backends.checkplan: boundsPlanOf, FailurePlan;
 
         auto arrayType = expression.e1.type.toBasetype;
-        if (arrayType.ty != Tarray || expression.lengthVar !is null
+        shape.fixedLength = arrayType.ty == Tsarray;
+        if (shape.fixedLength) {
+            shape.dimension = cast(size_t) arrayType.isTypeSArray.dim.toInteger;
+            if (shape.dimension > uint.max)
+                return false;
+        }
+        if ((arrayType.ty != Tarray && !shape.fixedLength)
+                || expression.lengthVar !is null
                 || hasSideEffect(expression.e2)
                 || !isPlainPlace(expression.e1))
             return false;
@@ -6520,6 +6568,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         shape.width = index.size;
         shape.signed = !index.isUnsigned;
         shape.expression = indexExpression;
+        if (shape.fixedLength) {
+            // A literal index is checked when the program is compiled; a
+            // static array has no room for an offset beside its length.
+            if (indexExpression.isIntegerExp)
+                return false;
+            shape.slot = operandOf(indexExpression, index.size, false);
+            return true;
+        }
         if (auto sum = indexExpression.isBinExp) {
             auto literal = sum.e2.isIntegerExp;
             if ((sum.op == EXP.add || sum.op == EXP.min) && literal !is null
@@ -6550,14 +6606,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const array = placeOf(expression.e1, true);
         if (array == size_t.max)
             return false;
-        emitCheckedIndex(expression, shape, false, _destination, array);
+        emitCheckedIndex(expression, shape, CheckedAccess.load, _destination,
+            array);
         return true;
     }
 
+    // `value` must have no side effect: the split store below reads the
+    // array and the index again after `value` ran.
     private bool compileCheckedStore(
         IndexExp expression, Expression value, in size_t width,
         in bool floating,
     ) {
+        import dmd.sideeffect: hasSideEffect;
+
         CheckedIndex shape;
         if (!checkedIndexShape(expression, width, shape))
             return false;
@@ -6565,20 +6626,33 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (array == size_t.max)
             return false;
         size_t operand = operandOf(value, width, floating);
+        if (operand == size_t.max && !cannotFail(value)) {
+            // Native order checks the left side first, so the bounds check
+            // runs before the value, and the store after it needs none.
+            if (hasSideEffect(value))
+                internalFailure("a split checked store needs a value "
+                    ~ "without side effects");
+            resolveIndexSlot(shape);
+            emitCheckedIndex(expression, shape, CheckedAccess.check,
+                noValue, array);
+            operand = reserveTemp(typeFacts(expression.type));
+            evalInto(value, operand, width, expression.type);
+            emitCheckedIndex(expression, shape, CheckedAccess.storeUnchecked,
+                operand, array);
+            return true;
+        }
         if (operand == size_t.max) {
             const constant = constantOf(value, width, floating);
             if (!constant.isNull && typeFacts(value.type).size == width) {
-                emitCheckedIndex(expression, shape, true, 0, array, constant);
+                emitCheckedIndex(expression, shape, CheckedAccess.store, 0,
+                    array, constant);
                 return true;
             }
-            // Native order checks the left side first; the instruction checks
-            // it after the value, so the value must not be able to fail.
-            if (!cannotFail(value))
-                return false;
             operand = reserveTemp(typeFacts(expression.type));
             evalInto(value, operand, width, expression.type);
         }
-        emitCheckedIndex(expression, shape, true, operand, array);
+        emitCheckedIndex(expression, shape, CheckedAccess.store, operand,
+            array);
         return true;
     }
 
@@ -6602,26 +6676,41 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
+    // Evaluates an index that is not a plain local into a temporary.
+    private void resolveIndexSlot(ref CheckedIndex shape) {
+        if (shape.slot != size_t.max)
+            return;
+        shape.slot = reserveTemp(typeFacts(shape.expression.type));
+        evalInto(shape.expression, shape.slot, shape.width);
+    }
+
+    // The value operand of an access that has no value.
+    private enum noValue = 0;
+
     // The access, then the failure code of the bounds check. The access
-    // continues after the failure code when the index is in bounds.
+    // continues after the failure code when the index is in bounds. An
+    // unchecked store has no failure code.
     private void emitCheckedIndex(
-        IndexExp expression, CheckedIndex shape, in bool store,
+        IndexExp expression, CheckedIndex shape, in CheckedAccess access,
         in size_t value, in size_t array,
         in Address constantValue = Address.init,
     ) {
         import snakebite.nativelayout: arrayLengthOffset;
 
-        auto indexType = shape.expression.type;
-        if (shape.slot == size_t.max) {
-            shape.slot = reserveTemp(typeFacts(indexType));
-            evalInto(shape.expression, shape.slot, shape.width);
-        }
+        resolveIndexSlot(shape);
         const element = typeFacts(expression.type).size;
-        const handler = checkedIndexHandler(store, shape.width, shape.signed,
-            element, !constantValue.isNull);
-        const packed = shape.slot
-            | (cast(size_t) cast(uint) cast(int) shape.offset << 32);
-        const length = placeAt(array, arrayLengthOffset);
+        const handler = checkedIndexHandler(access, shape.fixedLength,
+            shape.width, shape.signed, element, !constantValue.isNull);
+        const second = shape.fixedLength
+            ? shape.dimension : cast(size_t) cast(uint) cast(int) shape.offset;
+        const packed = shape.slot | (second << 32);
+        if (access == CheckedAccess.storeUnchecked) {
+            emit(handler, value, array, packed, 0);
+            return;
+        }
+        const length = shape.fixedLength ? size_t.max
+            : placeAt(array, arrayLengthOffset);
+        auto indexType = shape.expression.type;
         compileIndexCheckWith({
             if (constantValue.isNull)
                 emit(handler, value, array, packed, 0);
@@ -6642,7 +6731,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 emit(shape.signed ? &opCastWidenSigned : &opCastWidenUnsigned,
                     wide, shape.width, size_t.sizeof);
             return Arg(wide, 0, size_t.sizeof);
-        }, () => Arg(length, 0, size_t.sizeof), expression.loc);
+        }, () => shape.fixedLength
+            ? constantArgument(shape.dimension, size_t.sizeof)
+            : Arg(length, 0, size_t.sizeof), expression.loc);
     }
 
     // The value of a literal index that `$` does not depend on, or
@@ -8418,6 +8509,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         callee = _bytecode.definitionOf(callee);
         if (compileFloatIntrinsic(expression, callee, destOffset))
             return;
+        if (compileNativeArrayNew(expression, callee, destOffset))
+            return;
         if (expression.readsVtable(callee))
             return compileVirtualCall(expression, callee, destOffset);
 
@@ -8431,6 +8524,59 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             hasThis,
             () => receiverOffsetOf(expression, callee),
             destOffset, expression);
+    }
+
+    // `new T[n]` lowers to `_d_newarrayT!T(n, false)`, whose chain of
+    // templates the guest would interpret. druntime also exports the
+    // non-template `_d_newarrayT`/`_d_newarrayiT`/`_d_newarrayU(ti, n)`,
+    // which do the same work as compiled code: one native call instead.
+    private bool compileNativeArrayNew(
+        CallExp expression, FuncDeclaration callee, in size_t destOffset,
+    ) {
+        import dmd.dtemplate: isType;
+        import dmd.location: Loc;
+        import dmd.typesem: isZeroInit;
+        import snakebite.frontend.compiler: newInFrontend;
+        import snakebite.backends.druntimehooks: DruntimeHook, planOf;
+
+        if (callee.ident is null || callee.parent is null)
+            return false;
+        const name = callee.ident.toString;
+        if (name != "_d_newarrayT" && name != "_d_newarrayU")
+            return false;
+        auto instance = callee.parent.isTemplateInstance;
+        if (instance is null || instance.tdtypes.length != 1
+                || expression.arguments is null
+                || expression.arguments.length == 0)
+            return false;
+        const declaration = callee.getModule.md;
+        if (declaration is null || declaration.id.toString != "construction"
+                || declaration.packages.length != 3
+                || declaration.packages[0].toString != "core"
+                || declaration.packages[1].toString != "internal"
+                || declaration.packages[2].toString != "array")
+            return false;
+        auto elementType = isType(instance.tdtypes[0]);
+        if (elementType is null)
+            return false;
+
+        const hook = name == "_d_newarrayU"
+            ? DruntimeHook.newArrayUninitialized
+            : newInFrontend!isZeroInit(elementType, Loc.initial)
+            ? DruntimeHook.newArrayZeroed : DruntimeHook.newArrayInitialized;
+        auto plan = planOf(_bytecode._plans, hook);
+
+        const length = reserveTemp(pointerFacts);
+        evalInto((*expression.arguments)[0], length, size_t.sizeof);
+        const info = reserveTemp(pointerFacts);
+        emitRuntimeTypeInfoConstant(
+            expression.type, info, size_t.sizeof);
+        _callSites ~= CallSite.native(
+            cast(const(void)*) plan,
+            [Arg(info, 0, size_t.sizeof), Arg(length, 0, size_t.sizeof)],
+            2 * size_t.sizeof);
+        emit(&opCall, destOffset, _callSites.length - 1, 0);
+        return true;
     }
 
     // `core.math.sqrt` and `core.math.fabs` on a float type: the operand is

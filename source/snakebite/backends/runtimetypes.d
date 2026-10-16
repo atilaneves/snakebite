@@ -433,9 +433,12 @@ public struct RuntimeTypes {
                 && !(declaration.postblit.storage_class & STC.disable))
             info.xpostblit = cast(typeof(info.xpostblit))
                 _methodAddress(declaration.postblit, 0);
+        // The enum's default value is `hasPointers`, its first member, so a
+        // pointer-free struct must have the flags cleared explicitly.
         const hasPointerData = declaration.type.hasPointers;
-        if (hasPointerData)
-            info.m_flags = TypeInfo_Struct.StructFlags.hasPointers;
+        info.m_flags = hasPointerData
+            ? TypeInfo_Struct.StructFlags.hasPointers
+            : cast(TypeInfo_Struct.StructFlags) 0;
         info.m_RTInfo = rtInfo(declaration);
         import snakebite.ffi.abi: supported;
         static if (supported) {
