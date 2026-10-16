@@ -267,6 +267,9 @@ public struct CallSite {
         // `size_t.max`, and where that base lies from the callee's activation.
         package size_t windowSlotOffset = size_t.max;
         package size_t windowBase;
+        // How far past the activation the committed bytes must reach: the
+        // frame and the call windows of the callee.
+        package size_t reachBytes;
     }
 
     package FastCall fast;
@@ -338,6 +341,8 @@ public struct CallSite {
         slot.windowSlotOffset = function_.windowSlot;
         slot.windowBase = (slot.frameBytes + alignment - 1)
             & ~(size_t(alignment) - 1);
+        slot.reachBytes = function_.windowSlot == size_t.max
+            ? slot.frameBytes : slot.windowBase + function_.windowBytes;
         slot.callee = function_;
         return true;
     }
@@ -1107,8 +1112,10 @@ private void initializeWindow(
         return;
     const alignment = function_.frameAlignment > uint(Activation.alignof)
         ? function_.frameAlignment : uint(Activation.alignof);
-    *cast(size_t*) (frame + function_.windowSlot) =
-        (cast(size_t) frames.top + alignment - 1) & ~(size_t(alignment) - 1);
+    auto base = cast(ubyte*) ((cast(size_t) frames.top + alignment - 1)
+        & ~(size_t(alignment) - 1));
+    frames.commitTo(base + function_.windowBytes);
+    *cast(ubyte**) (frame + function_.windowSlot) = base;
 }
 
 private void initializeClosure(
@@ -1806,7 +1813,8 @@ public const(Instruction)* opCall(
     auto activation = cast(Activation*) (base + site.windowDisp);
     auto frames = state.frames;
     const mark = frames.mark;
-    if (!frames.claimFast(cast(ubyte*) activation + fast.frameBytes))
+    if (!frames.claimFast(cast(ubyte*) activation + fast.frameBytes,
+            cast(ubyte*) activation + fast.reachBytes))
         return opCallSlow(pc, active, state, frame, r0, fp0);
     return enterWindow(pc, active, state, frame, site, base, activation, mark);
 }
@@ -1889,7 +1897,8 @@ private const(Instruction)* opCallSlow(
     auto activation = cast(Activation*) (base + site.windowDisp);
     auto frames = state.frames;
     const mark = frames.mark;
-    frames.claim(cast(ubyte*) activation + site.fast.frameBytes);
+    frames.claim(cast(ubyte*) activation + site.fast.frameBytes,
+        cast(ubyte*) activation + site.fast.reachBytes);
     return enterWindow(pc, active, state, frame, site, base, activation, mark);
 }
 
@@ -2048,11 +2057,13 @@ private const(Instruction)* callFunction(bool redirected = false, Decoded)(
 
     const mark = execution.frames.mark;
     scope(failure) execution.frames.release(mark);
-    // The arguments wait in a window of the caller's frame, above the
-    // reserved bytes. This callee gets its frame above the window.
-    if (site.windowSlot != size_t.max)
+    // The caller may have arguments waiting in a window of its frame, above
+    // the reserved bytes. This callee gets its frame above every window.
+    const running = execution.activation.function_;
+    if (running.windowSlot != size_t.max)
         execution.frames.raiseTo(
-            *cast(ubyte**) execution.storage(site.windowSlot) + site.windowEnd);
+            *cast(ubyte**) execution.storage(running.windowSlot)
+            + running.windowBytes);
     assert(callee.frameAlignment > 0
         && (callee.frameAlignment & (callee.frameAlignment - 1)) == 0);
     const alignment = max(callee.frameAlignment, uint(Activation.alignof));
@@ -3856,6 +3867,7 @@ private const(Instruction)* runAlloca(Decoded)(
             ? function_.frameAlignment : uint(Activation.alignof);
         auto moved = cast(ubyte*) ((cast(size_t) execution.frames.top
             + alignment - 1) & ~(size_t(alignment) - 1));
+        execution.frames.commitTo(moved + function_.windowBytes);
         memmove(moved, *slot, function_.windowBytes);
         *slot = moved;
     }
