@@ -872,6 +872,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // use, and the farthest any window reaches.
     private size_t _windowDepth;
     private size_t _windowReach;
+    // Where the receiver of the call being compiled is to be written, in the
+    // window of the call, or `size_t.max`. The first code that computes the
+    // receiver takes it.
+    private size_t _receiverDest = size_t.max;
     // Temporaries made for an operand and read by its one parent.
     private bool[size_t] _operandTemps;
     private struct Temporary {
@@ -8603,15 +8607,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         // DMD expressions must stay mutable for backend evaluation.
         auto receiver = receiverOf(expression, callee);
+        const dest = _receiverDest;
+        _receiverDest = size_t.max;
         final switch (receiver.kind) with (CallReceiver.Kind) {
         case enclosing:
             return contextOffsetOf(calleeContextSourceOf(_function, callee));
         case classValue:
-            const object = reserveTemp(pointerFacts);
+            const object = dest != size_t.max
+                ? dest : reserveTemp(pointerFacts);
             evalInto(receiver.expression, object, size_t.sizeof);
             return object;
         case aggregateAddress:
-            return receiverAddress(receiver.expression, expression);
+            return receiverAddress(receiver.expression, expression, dest);
         case implicitThis:
             return hiddenThisOffset;
         }
@@ -8620,7 +8627,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // The address of the receiver `aggregate` of `expression`. A pointer
     // held in a plain local is read in place when no argument can change
     // it before the callee runs.
-    private size_t receiverAddress(Expression aggregate, CallExp expression) {
+    private size_t receiverAddress(
+        Expression aggregate, CallExp expression, in size_t dest = size_t.max,
+    ) {
         import dmd.sideeffect: hasSideEffect;
 
         bool argumentsPure = true;
@@ -8632,7 +8641,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             case variable, dotVariable, star, index: {
                 const place = placeOf(aggregate, argumentsPure);
                 if (place != size_t.max)
-                    return addressOfPlace(place);
+                    return addressOfPlace(place, dest);
                 break;
             }
             default:
@@ -8667,8 +8676,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.backends.calls: arityMismatches;
 
         size_t receiverOffset = size_t.max;
-        if (hasThis)
+        if (hasThis) {
+            const saved = _receiverDest;
+            scope(exit) _receiverDest = saved;
+            _receiverDest = receiverSlotOf(callee, site);
             receiverOffset = thisOffsetOf();
+        }
         constructTemporary(callee,
             { emit(&opTemporarySuspend, 0, receiverOffset, 0); },
             { compileResolvedCallBody(callee, arguments, loc,
@@ -8848,6 +8861,62 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // call window: the activation of the callee is then a plain one. A
     // callee with a closure, or with a frame that asks for a page of
     // alignment, is called the generic way.
+    // The window of a call to a callee with `layout`, from the windows that are
+    // open now. It takes the frame slot that holds where the windows start.
+    private CallSite.Window windowOf(
+        in FrameLayout layout, in CallAdapter returnShape,
+    ) {
+        if (_windowSlot == size_t.max)
+            _windowSlot = reserveTemp(pointerFacts);
+
+        const scratchBytes = returnShape.isVoid ? 0 :
+            (returnShape.returnFacts.size > layout.returnPlace.size
+                ? returnShape.returnFacts.size : layout.returnPlace.size);
+        const scratchAlignment = returnShape.isVoid ? 1 :
+            (returnShape.returnFacts.alignment > layout.returnPlace.alignment
+                ? returnShape.returnFacts.alignment
+                : layout.returnPlace.alignment);
+        const window = CallSite.Window.of(
+            _windowSlot, _windowDepth, layout.alignment,
+            parametersEnd(layout), scratchBytes, scratchAlignment);
+        if (window.alignment > _tempAlignment)
+            _tempAlignment = window.alignment;
+        if (scratchAlignment > _tempAlignment)
+            _tempAlignment = scratchAlignment;
+        if (window.end > _windowReach)
+            _windowReach = window.end;
+        return window;
+    }
+
+    // The slot of the `this` parameter of `callee` in the window of a call
+    // that `compileWindowCall` will make, or `size_t.max` when the call will
+    // go another way. A constructor reads its receiver again after the call,
+    // so its receiver stays where it is.
+    private size_t receiverSlotOf(FuncDeclaration callee, Expression site) {
+        import dmd.astenums: VarArg;
+        import snakebite.frontend.dmd.functions: typeFunctionOf;
+        import snakebite.ffi.call: CallAdapter;
+
+        if (callee.isCtorDeclaration !is null)
+            return size_t.max;
+        const decision = CallSelection.atCallSite(_bytecode._callSelection.decisionOf(
+            callee, &_bytecode.isGuestFunction,
+            _bytecode.hasNativeSymbol(callee),
+            _bytecode.hasIndependentNativeSymbol(callee),
+        ), site);
+        if (decision.route != CallSelection.Route.guest)
+            return size_t.max;
+        auto type = typeFunctionOf(callee);
+        const layout = *_bytecode.layoutOf(callee);
+        if (type.parameterList.varargs != VarArg.none
+                || layout.hiddenThis.variable is null
+                || !windowFits(callee, layout)
+                || _bytecode.inlineBodyOf(callee) !is null)
+            return size_t.max;
+        const window = windowOf(layout, CallAdapter.ofType(type));
+        return inWindow(window, layout.hiddenThis.parameter.offset);
+    }
+
     private bool windowFits(FuncDeclaration callee, in FrameLayout layout) {
         import core.memory: pageSize;
 
@@ -8903,31 +8972,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t destOffset,
         in size_t receiverOffset,
     ) {
-        if (_windowSlot == size_t.max)
-            _windowSlot = reserveTemp(pointerFacts);
-
-        const scratchBytes = returnShape.isVoid ? 0 :
-            (returnShape.returnFacts.size > calleeLayout.returnPlace.size
-                ? returnShape.returnFacts.size : calleeLayout.returnPlace.size);
-        const scratchAlignment = returnShape.isVoid ? 1 :
-            (returnShape.returnFacts.alignment > calleeLayout.returnPlace.alignment
-                ? returnShape.returnFacts.alignment
-                : calleeLayout.returnPlace.alignment);
-        const window = CallSite.Window.of(
-            _windowSlot, _windowDepth, calleeLayout.alignment,
-            parametersEnd(calleeLayout), scratchBytes, scratchAlignment);
-        if (window.alignment > _tempAlignment)
-            _tempAlignment = window.alignment;
-        if (scratchAlignment > _tempAlignment)
-            _tempAlignment = scratchAlignment;
-        if (window.end > _windowReach)
-            _windowReach = window.end;
+        const window = windowOf(calleeLayout, returnShape);
 
         // The receiver is ready. Its slot comes first, then the arguments,
         // each in order.
         if (calleeLayout.hiddenThis.variable !is null) {
             const slot = inWindow(window, calleeLayout.hiddenThis.parameter.offset);
-            emit(&opCopy, slot, receiverOffset, size_t.sizeof);
+            if (receiverOffset != slot)
+                emit(&opCopy, slot, receiverOffset, size_t.sizeof);
             args = [Arg(slot, calleeLayout.hiddenThis.parameter.offset,
                 size_t.sizeof)];
         }
@@ -9940,9 +9992,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             .resolve(expression);
     }
 
-    private size_t addressOfPlace(in size_t place) {
+    private size_t addressOfPlace(in size_t place, in size_t dest = size_t.max) {
         if (!isIndirect(place)) {
-            const address = reserveTemp(pointerFacts);
+            const address = dest != size_t.max
+                ? dest : reserveTemp(pointerFacts);
             emit(&opFrameAddress, address, place, size_t.sizeof);
             return address;
         }
