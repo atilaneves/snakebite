@@ -4128,6 +4128,8 @@ package struct Roles {
     package Role destination;
     package Role source;
     package Role sourceWidth;
+    // The low 32 bits of `width` hold the frame offset of an index.
+    package bool widthHoldsIndexSlot;
 }
 
 // Operations whose instructions hold neither a process address nor an
@@ -4507,9 +4509,10 @@ shared static this() {
                         addRoles(&opCheckedIndex!(kind, fixed, shape[0],
                             shape[1] == 1, size),
                             kind == CheckedAccess.storeUnchecked
-                                ? Roles(Role.other, Role.other, Role.other)
+                                ? Roles(Role.other, Role.other, Role.other,
+                                    true)
                                 : Roles(Role.other, Role.other,
-                                    Role.instruction));
+                                    Role.instruction, true));
     // The fused return keeps the roles of the producer it replaces.
     static foreach (width; 1 .. 17)
         addRoles(&opThenReturn!(opCopyFixed!(width, true)),
@@ -4678,15 +4681,10 @@ package bool decodesIndirect(in Instruction.Handler handler, in Field field) {
 }
 
 // Whether the handler reads the frame offset of an index from the low 32
-// bits of `width`.
+// bits of `width`. Every `opCheckedIndex` instance says so in its roles.
 package bool widthHoldsIndexSlot(in Instruction.Handler handler) {
-    static foreach (isStore; [false, true])
-        static foreach (shape; checkedIndexShapes)
-            static foreach (size; checkedIndexElementSizes)
-                if (handler is &opCheckedIndex!(isStore, shape[0],
-                        shape[1] == 1, size))
-                    return true;
-    return false;
+    Roles roles;
+    return rolesOf(handler, roles) && roles.widthHoldsIndexSlot;
 }
 
 private const(Specialisation)* lookupSpecialisation(
