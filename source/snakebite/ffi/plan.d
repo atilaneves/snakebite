@@ -763,9 +763,6 @@ public struct CallPlan {
         return plan;
     }
 
-    // Whether this plan, built by `ofRawAddress`, was built from exactly
-    // these register shapes - the cache keys such a plan by symbol name
-    // alone, so a second caller naming the same symbol has to agree.
     private static ArgumentPlan returnPlanOf(
         in Register first, in Register second,
     ) {
@@ -774,6 +771,9 @@ public struct CallPlan {
             : ArgumentPlan([first, second], 2, false);
     }
 
+    // Whether this plan, built by `ofRawAddress`, was built from exactly
+    // these register shapes - the cache keys such a plan by symbol name
+    // alone, so a second caller naming the same symbol has to agree.
     private bool hasShape(
         scope const(Register)[] parameterRegisters,
         in Register returnRegister,

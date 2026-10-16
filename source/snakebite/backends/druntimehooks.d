@@ -113,12 +113,21 @@ private immutable Register[4] _cAssertFailRegisters = [
 ];
 
 // `void[] _d_newarrayU/_d_newarrayT/_d_newarrayiT(const TypeInfo ti,
-// size_t length)`: `ti` is the array type's `TypeInfo`. The `void[]`
-// comes back in two registers, length first.
+// size_t length)`: `ti` is the array type's `TypeInfo`.
 private immutable Register[2] _newArrayRegisters = [
     Register(Register.Kind.pointer, 8),
     Register(Register.Kind.unsigned, 8),
 ];
+
+// The `void[]` that those functions return comes back in two registers,
+// length first.
+private DruntimeHookSpec newArraySpec(string symbol)
+    @safe @nogc nothrow pure
+{
+    return DruntimeHookSpec(symbol, _newArrayRegisters,
+        Register(Register.Kind.unsigned, 8),
+        Register(Register.Kind.pointer, 8));
+}
 
 // druntime's `_d_invariant` (`rt.invariant_`) has plain `extern(D)`
 // linkage, so its linker symbol is its mangled name, not the bare
@@ -182,17 +191,11 @@ public DruntimeHookSpec specOf(in DruntimeHook hook) @safe @nogc nothrow pure {
         case cAssertFail:
             return DruntimeHookSpec("__assert_fail", _cAssertFailRegisters);
         case newArrayUninitialized:
-            return DruntimeHookSpec("_d_newarrayU", _newArrayRegisters,
-                Register(Register.Kind.unsigned, 8),
-                Register(Register.Kind.pointer, 8));
+            return newArraySpec("_d_newarrayU");
         case newArrayZeroed:
-            return DruntimeHookSpec("_d_newarrayT", _newArrayRegisters,
-                Register(Register.Kind.unsigned, 8),
-                Register(Register.Kind.pointer, 8));
+            return newArraySpec("_d_newarrayT");
         case newArrayInitialized:
-            return DruntimeHookSpec("_d_newarrayiT", _newArrayRegisters,
-                Register(Register.Kind.unsigned, 8),
-                Register(Register.Kind.pointer, 8));
+            return newArraySpec("_d_newarrayiT");
     }
 }
 

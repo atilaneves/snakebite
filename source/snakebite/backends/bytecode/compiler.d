@@ -8117,8 +8117,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import dmd.dtemplate: isType;
         import dmd.location: Loc;
-        import dmd.typesem: arrayOf, isZeroInit;
-        import std.conv: to;
+        import dmd.typesem: isZeroInit;
+        import snakebite.frontend.compiler: newInFrontend;
         import snakebite.backends.druntimehooks: DruntimeHook, planOf;
 
         if (callee.ident is null || callee.parent is null)
@@ -8131,8 +8131,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 || expression.arguments is null
                 || expression.arguments.length == 0)
             return false;
-        if (callee.getModule.toPrettyChars.to!string
-                != "core.internal.array.construction")
+        const declaration = callee.getModule.md;
+        if (declaration is null || declaration.id.toString != "construction"
+                || declaration.packages.length != 3
+                || declaration.packages[0].toString != "core"
+                || declaration.packages[1].toString != "internal"
+                || declaration.packages[2].toString != "array")
             return false;
         auto elementType = isType(instance.tdtypes[0]);
         if (elementType is null)
@@ -8140,7 +8144,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const hook = name == "_d_newarrayU"
             ? DruntimeHook.newArrayUninitialized
-            : elementType.isZeroInit(Loc.initial)
+            : newInFrontend!isZeroInit(elementType, Loc.initial)
             ? DruntimeHook.newArrayZeroed : DruntimeHook.newArrayInitialized;
         auto plan = planOf(_bytecode._plans, hook);
 
@@ -8148,7 +8152,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         evalInto((*expression.arguments)[0], length, size_t.sizeof);
         const info = reserveTemp(pointerFacts);
         emitRuntimeTypeInfoConstant(
-            elementType.arrayOf, info, size_t.sizeof);
+            expression.type, info, size_t.sizeof);
         _callSites ~= CallSite.native(
             cast(const(void)*) plan,
             [Arg(info, 0, size_t.sizeof), Arg(length, 0, size_t.sizeof)],
