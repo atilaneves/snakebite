@@ -268,6 +268,45 @@ public struct FrameStack {
         return _base + alignedUsed;
     }
 
+    // The first byte above everything reserved.
+    public ubyte* top() @system {
+        return _base + _used;
+    }
+
+    // Makes every byte below `end` reserved, for a callee frame that the
+    // caller laid out above the reservation already. `false` when the
+    // bytes are not committed; `claim` then does the work with the checks.
+    pragma(inline, true)
+    public bool claimFast(ubyte* end) @system {
+        const used = end - _base;
+        if (used > _fastEnd)
+            return false;
+        _used = used;
+        return true;
+    }
+
+    // As `claimFast`, committing the bytes or failing as `reserve` does.
+    public void claim(ubyte* end) @system {
+        import std.conv: text;
+
+        const used = end - _base;
+        if (used > _limit)
+            throw new Exception(
+                text("frame stack overflow: need offset ", used, " of ",
+                    _limit));
+        if (used > _committed)
+            commit(used);
+        _used = used;
+    }
+
+    // Reserves nothing below `address` any more. A frame that lives above
+    // the reservation (a call window) stays out of the way of whatever
+    // reserves next.
+    public void raiseTo(ubyte* address) @system {
+        if (address > top)
+            claim(address);
+    }
+
     // Gives back everything reserved since `mark`. Only for `reserve`d
     // bytes: a `push`ed `Frame` gives its own back.
     public void release(in Mark mark) {

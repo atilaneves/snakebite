@@ -863,6 +863,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private PendingExceptionHandler[] _exceptionHandlers;
     private size_t _tempSize;
     private uint _tempAlignment;
+    // The frame slot that holds where the call windows start, past the end of
+    // this frame, so that nothing the callee of a call can write is a
+    // temporary of this function. `size_t.max` until a call needs it.
+    private size_t _windowSlot = size_t.max;
+    // How many bytes of the windows around the code being compiled are in
+    // use, and the farthest any window reaches.
+    private size_t _windowDepth;
+    private size_t _windowReach;
     // Temporaries made for an operand and read by its one parent.
     private bool[size_t] _operandTemps;
     private struct Temporary {
@@ -1181,6 +1189,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         );
         result.inlineBody = inlineBody;
         result.relocs = _relocs;
+        result.windowSlot = _windowSlot;
+        result.windowBytes = _windowReach;
         return result;
     }
 
@@ -8673,12 +8683,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             );
         }
 
-        auto preparation = CallAdapter.Arguments.of(calleeType, arguments);
-        args ~= compileGuestArguments(preparation, calleeLayout);
-
-        if (calleeType.parameterList.varargs == VarArg.variadic)
-            args ~= compileVariadicArguments(arguments, calleeLayout).guest;
-
         // A `ref` return hands the caller the callee's own returned
         // storage's address - `compileAddress`'s `CallExp` case is the one
         // place that address is read back out, and `compileIndirectAssign`
@@ -8694,12 +8698,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 && destOffset != discardResult)
             internalFailure("a `void` call is only ever evaluated for effect");
 
-        if (calleeType.parameterList.varargs == VarArg.none) {
-            if (auto inlinable = _bytecode.inlineBodyOf(callee)) {
-                emitInlined(*inlinable, args, destOffset);
-                emitReceiverResult(returnShape, destOffset, receiverOffset);
-                return;
-            }
+        const inlinable = calleeType.parameterList.varargs == VarArg.none
+            ? _bytecode.inlineBodyOf(callee) : null;
+        if (inlinable is null && calleeType.parameterList.varargs == VarArg.none
+                && windowFits(callee, calleeLayout))
+            return compileWindowCall(
+                callee, calleeLayout, calleeType, arguments, args,
+                returnShape, destOffset, receiverOffset);
+
+        auto preparation = CallAdapter.Arguments.of(calleeType, arguments);
+        args ~= compileGuestArguments(preparation, calleeLayout);
+
+        if (calleeType.parameterList.varargs == VarArg.variadic)
+            args ~= compileVariadicArguments(arguments, calleeLayout).guest;
+
+        if (inlinable !is null) {
+            emitInlined(*inlinable, args, destOffset);
+            emitReceiverResult(returnShape, destOffset, receiverOffset);
+            return;
         }
 
         const siteIndex = _callSites.length;
@@ -8755,6 +8771,117 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             atomicStore!(MemoryOrder.rel)(_cached, _compute());
             return atomicLoad!(MemoryOrder.acq)(_cached);
         }
+    }
+
+    // Whether the arguments of a call to `callee` can be written into a
+    // call window: the activation of the callee is then a plain one. A
+    // callee with a closure, or with a frame that asks for a page of
+    // alignment, is called the generic way.
+    private bool windowFits(FuncDeclaration callee, in FrameLayout layout) {
+        import core.memory: pageSize;
+
+        return layout.variadicTypes == size_t.max
+            && layout.variadicCursor == size_t.max
+            && layout.alignment < pageSize
+            && !closurePlanOf(callee).needsClosure;
+    }
+
+    // The first byte after the last parameter slot of `layout`.
+    private static size_t parametersEnd(in FrameLayout layout) {
+        size_t end;
+        void include(in size_t offset, in size_t size) {
+            if (offset + size > end)
+                end = offset + size;
+        }
+        if (layout.hiddenThis.variable !is null)
+            include(layout.hiddenThis.parameter.offset,
+                layout.hiddenThis.parameter.facts.size);
+        foreach (parameter; layout.parameters)
+            include(parameter.offset, parameter.facts.size);
+        if (layout.returnPlace.offset != size_t.max)
+            include(layout.returnPlace.offset, size_t.sizeof);
+        return end;
+    }
+
+    // The operand of the slot at `offset` from the start of `window`.
+    private static size_t inWindow(in CallSite.Window window, in size_t offset) {
+        return indirectStorage(window.baseSlot) + window.frame + offset;
+    }
+
+    // A call whose arguments are evaluated straight into the parameter
+    // slots of the callee, in a window above the end of this frame. Nothing
+    // is copied when the call runs, and no temporary of this function can
+    // lie under the window, because the window starts after the last of
+    // them. A window opened while the arguments evaluate starts after this
+    // one, so a call among the arguments never overwrites an argument that
+    // is already in place.
+    private void compileWindowCall(
+        FuncDeclaration callee,
+        in FrameLayout calleeLayout,
+        TypeFunction calleeType,
+        Expressions* arguments,
+        Arg[] args,
+        in CallAdapter returnShape,
+        in size_t destOffset,
+        in size_t receiverOffset,
+    ) {
+        if (_windowSlot == size_t.max)
+            _windowSlot = reserveTemp(pointerFacts);
+
+        const scratchBytes = returnShape.isVoid ? 0 :
+            (returnShape.returnFacts.size > calleeLayout.returnPlace.size
+                ? returnShape.returnFacts.size : calleeLayout.returnPlace.size);
+        const scratchAlignment = returnShape.isVoid ? 1 :
+            (returnShape.returnFacts.alignment > calleeLayout.returnPlace.alignment
+                ? returnShape.returnFacts.alignment
+                : calleeLayout.returnPlace.alignment);
+        const window = CallSite.Window.of(
+            _windowSlot, _windowDepth, calleeLayout.alignment,
+            parametersEnd(calleeLayout), scratchBytes, scratchAlignment);
+        if (window.alignment > _tempAlignment)
+            _tempAlignment = window.alignment;
+        if (scratchAlignment > _tempAlignment)
+            _tempAlignment = scratchAlignment;
+        if (window.end > _windowReach)
+            _windowReach = window.end;
+
+        // The receiver is ready. Its slot comes first, then the arguments,
+        // each in order.
+        if (calleeLayout.hiddenThis.variable !is null) {
+            const slot = inWindow(window, calleeLayout.hiddenThis.parameter.offset);
+            emit(&opCopy, slot, receiverOffset, size_t.sizeof);
+            args = [Arg(slot, calleeLayout.hiddenThis.parameter.offset,
+                size_t.sizeof)];
+        }
+
+        const outer = _windowDepth;
+        _windowDepth = window.end;
+        auto preparation = CallAdapter.Arguments.of(calleeType, arguments);
+        preparation.eachDeclared((i, value) {
+            const parameter = calleeLayout.parameters[i];
+            const slot = inWindow(window, parameter.offset);
+            if (value.isReference) {
+                const address = compileAddress(value.expression);
+                emit(&opCopy, slot, address, size_t.sizeof);
+                args ~= Arg(slot, parameter.offset, size_t.sizeof);
+                return;
+            }
+
+            evalInto(value.expression, slot, parameter.facts.size);
+            args ~= Arg(slot, parameter.offset, parameter.facts.size);
+        });
+        _windowDepth = outer;
+
+        const siteIndex = _callSites.length;
+        // The delegate outlives this compiler, so it captures the backend
+        // and not `this`.
+        auto bytecode = _bytecode;
+        _callSites ~= CallSite.guest(
+            deferred(() => bytecode.compileFunction(callee)), args,
+            returnShape.returnFacts.size, window,
+        );
+        emit(&opCall, destOffset, siteIndex, 0);
+        emitReceiverResult(returnShape, destOffset, receiverOffset);
     }
 
     private Arg[] compileGuestArguments(
