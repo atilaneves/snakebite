@@ -251,3 +251,58 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.locals.calleeWithSeveralStatementsKeepsItsOwnLocals." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int mix(int left, int right) {
+                int sum = left + right;
+                int product = left * right;
+                sum += 1;
+                product -= sum;
+                return product * 2 + sum;
+            }
+
+            void main() {
+                int first = 3;
+                assert(mix(first, 4) == 2 * (12 - 8) + 8);
+                assert(first == 3);
+                assert(mix(2, 3) + mix(mix(2, 3), 1) == 6 + 4);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.branch.ifElseAndEarlyReturnInsideLargerCallee." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int classify(int number) {
+                if (number < 0)
+                    return -1;
+                int result;
+                if (number == 0)
+                    result = 100;
+                else
+                    result = number > 10 ? number * 2 + 1000 : number * 2;
+                return result + 1;
+            }
+
+            void main() {
+                assert(classify(-5) == -1);
+                assert(classify(0) == 101);
+                assert(classify(4) == 9);
+                assert(classify(11) == 1023);
+                int total;
+                foreach (index; -1 .. 12)
+                    total += classify(index);
+                assert(total == -1 + 101 + 3 + 5 + 7 + 9 + 11 + 13 + 15 + 17 + 19 + 21 + 1023);
+            }
+        });
+    }
+}

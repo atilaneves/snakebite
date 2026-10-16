@@ -535,7 +535,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         withCompilerLock({
             if (auto complete = function_ in _complete)
                 found = *complete;
-            else if (_speculating == 0 && function_ !in _compiled
+            else if (_speculating < speculationDepth && function_ !in _compiled
                     && function_ !in _rejectedForInlining
                     && hasTinyBody(function_)) {
                 ++_speculating;
@@ -556,7 +556,36 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // process and cannot be recovered. A callee of at most this many
     // statements, all of them `return` or expression statements, is the
     // only one compiled that way.
-    private enum maxSpeculativeStatements = 3;
+    private enum maxSpeculativeStatements = 12;
+
+    // Prototype tunables: SB_INLINE_STMTS and SB_INLINE_INSNS.
+    package static int envLimit(string name, int fallback) {
+        import core.stdc.stdlib: atoi, getenv;
+
+        const value = getenv(name.ptr);
+        return value is null ? fallback : atoi(value);
+    }
+
+    private static int statementLimit() {
+        static int limit = -1;
+        if (limit < 0)
+            limit = envLimit("SB_INLINE_STMTS\0", maxSpeculativeStatements);
+        return limit;
+    }
+
+    package static int speculationDepth() {
+        static int limit = -1;
+        if (limit < 0)
+            limit = envLimit("SB_INLINE_DEPTH\0", 3);
+        return limit;
+    }
+
+    package static int instructionLimit() {
+        static int limit = -1;
+        if (limit < 0)
+            limit = envLimit("SB_INLINE_INSNS\0", 40);
+        return limit;
+    }
 
     private static class SpeculationRejected: Exception {
         this() @safe pure nothrow {
@@ -567,7 +596,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     private static bool hasTinyBody(FuncDeclaration function_) {
         import dmd.statement: Statement;
 
-        int budget = maxSpeculativeStatements;
+        int budget = statementLimit;
         bool tiny(Statement statement) {
             if (statement is null)
                 return true;
@@ -581,6 +610,9 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             }
             if (auto scoped = statement.isScopeStatement)
                 return tiny(scoped.statement);
+            if (auto conditional = statement.isIfStatement)
+                return tiny(conditional.ifbody)
+                    && tiny(conditional.elsebody);
             return statement.isReturnStatement !is null
                 || statement.isExpStatement !is null;
         }
@@ -1318,18 +1350,31 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // null. Called once the instructions are final except for fusing and
     // the resolution of branch targets to addresses.
     private InlineBody* inlineBodyOfBuilt() {
-        if (_callSites.length != 0 || _assertSites.length != 0
-                || _exceptionHandlers.length != 0
-                || _closureOffset != size_t.max
-                || _layout.returnPlace.offset != size_t.max
-                || _layout.variadicTypes != size_t.max
-                || _layout.variadicCursor != size_t.max
-                || _instructions.length > maxInlineInstructions)
+        import core.stdc.stdio: fprintf, stderr;
+
+        string why;
+        if (_callSites.length != 0) why = "callSites";
+        else if (_assertSites.length != 0) why = "assertSites";
+        else if (_exceptionHandlers.length != 0) why = "handlers";
+        else if (_closureOffset != size_t.max) why = "closure";
+        else if (_layout.returnPlace.offset != size_t.max) why = "returnPlace";
+        else if (_layout.variadicTypes != size_t.max
+                || _layout.variadicCursor != size_t.max) why = "variadic";
+        else if (_instructions.length > Bytecode.instructionLimit) why = "size";
+        if (why.length == 0)
+            foreach (instruction; _instructions) {
+                Operands roles;
+                if (!inlineOperandsOf(instruction.handler, roles)) {
+                    why = "handler";
+                    break;
+                }
+            }
+        if (why.length != 0) {
+            if (Bytecode.envLimit("SB_INLINE_DEBUG\0", 0))
+                fprintf(stderr, "INLREJ %s %.*s %d\n", why.ptr,
+                    cast(int) _function.ident.toString.length, _function.ident.toString.ptr,
+                    cast(int) _instructions.length);
             return null;
-        foreach (instruction; _instructions) {
-            Operands roles;
-            if (!inlineOperandsOf(instruction.handler, roles))
-                return null;
         }
         return new InlineBody(
             _instructions.dup, _constants.dup, _tempSize, _tempAlignment,
