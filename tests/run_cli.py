@@ -1569,6 +1569,9 @@ def test_long_guest_loops_run_in_a_small_native_stack(
 
 # Guest recursion that is not a tail call finishes within a small native
 # stack: the depth of the guest calls does not set the native stack use.
+# This guards the optimised build only: `bin/sb` is the LDC -O build, where a
+# lost tail call between handlers would overflow the 1 MiB stack. `bin/ut` is a
+# debug build and does not chain handlers.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
 def test_deep_guest_recursion_runs_in_a_small_native_stack(
     tmp_path: Path, backend: str,
@@ -1585,8 +1588,20 @@ def test_deep_guest_recursion_runs_in_a_small_native_stack(
             return 1 + depth(n - 1);
         }
 
+        long total;
+
+        void countDown(long n) {
+            if (n == 0)
+                return;
+            total += 1;
+            countDown(n - 1);
+            total += 0;
+        }
+
         void main() {
             writeln(depth(100_000));
+            countDown(100_000);
+            writeln(total);
         }
         """,
     )
@@ -1598,7 +1613,7 @@ def test_deep_guest_recursion_runs_in_a_small_native_stack(
     )
 
     assert result.returncode == 0, output(result)
-    assert guest_lines(result) == ["100000"]
+    assert guest_lines(result) == ["100000", "100000"]
 
 
 # A `pragma(crt_constructor)` function runs before every module constructor,

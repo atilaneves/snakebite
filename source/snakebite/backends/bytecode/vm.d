@@ -542,7 +542,7 @@ private alias positionFree = AliasSeq!(
     runIndex, runInt3, runJump, runLessOrEqualSigned, runLessOrEqualUnsigned,
     runLessThanSigned, runLessThanUnsigned, runLoadBitfield, runLoadIndirect,
     runLogicalNot, runMultiply, runNegate, runNotEqual, runRangeEndPass,
-    runReturnVoid, runShift3, runShiftLeft, runShiftRightArithmetic,
+    runShift3, runShiftLeft, runShiftRightArithmetic,
     runShiftRightLogical, runSliceCopy, runSliceFill, runSlicesConform,
     runStaticAddress, runStaticArrayEqual, runStaticLoad, runStaticStore,
     runStoreBitfield, runStoreIndirect, runSubtract, runZero,
@@ -670,8 +670,9 @@ private const(Instruction)* executeOnce(
     return operation!Parameters(execution);
 }
 
-// As `execute`, for the instruction that can switch the activation. It
-// returns to `dispatchLoop`, which owns that switch.
+// As `execute`, for the instruction that can switch the activation. Outside a
+// chained build it returns to `dispatchLoop`, which owns that switch; a chained
+// build switches in the handler itself.
 private const(Instruction)* executeCall(
     alias operation,
     OperandKind destinationKind,
@@ -1049,6 +1050,8 @@ private struct Activation {
 
 private struct DispatchState {
     FrameStack* frames;
+    // The activation that runs. A chained build keeps it up to date at every
+    // call and return; other builds set it only where a handler can throw.
     Activation* current;
     Activation* pending;
     // The first handler of `current` that an exception that is no
@@ -1626,8 +1629,9 @@ private alias opCallGeneral =
 // plain arguments and room on the committed frame stack: the activation is
 // built here without the generic `Execution` decoding, from the facts
 // `CallSite.prepare` keeps. Everything else takes `opCallSlow`, which has the
-// same effect. This function calls nothing, so it keeps no value in a
-// callee-saved register.
+// same effect. In a chained build it ends with a tail call to the callee's
+// first handler, so it keeps no value in a callee-saved register over that
+// call.
 public const(Instruction)* opCall(
     const(Instruction)* pc,
     Activation* active,
@@ -1705,7 +1709,7 @@ public const(Instruction)* opCall(
         // The callee's first handler runs from here, so the native stack
         // stays flat however deep the guest calls go.
         state.current = activation;
-        const first = activation.pc;
+        const first = callee.instructions.ptr;
         ulong none0 = void;
         double none1 = void;
         return first.handler(first, activation, state, calleeFrame, none0, none1);
@@ -2008,7 +2012,9 @@ private const(Instruction)* callFunction(bool redirected = false, Decoded)(
 // backend uses for a call whose value nothing reads. `Instruction.destination`
 // is unused: there is no frame slot on the receiving end, only `returnPlace`.
 // `width` is 0 to read the width from the instruction, and `frameOnly` says the
-// source is a plain frame offset. It returns `null`, which ends the activation.
+// source is a plain frame offset. In a chained build an activation with no
+// cleanup resumes its caller by tail call; in every other case it returns
+// `null`, which ends the activation.
 package const(Instruction)* returnHandler(size_t width, bool frameOnly)(
     const(Instruction)* pc,
     Activation* activation,
@@ -2035,20 +2041,32 @@ package const(Instruction)* returnHandler(size_t width, bool frameOnly)(
             memcpy(place, source, width);
     }
     static if (chainedDispatch) {
-        // An activation with no temporary to destroy resumes its caller
-        // from here. `dispatchLoop` ends the others.
-        auto parent = activation.parent;
-        auto frames = state.frames;
-        if (parent !is null && frames.cleanupMark == activation.cleanupMark) {
-            frames.release(activation.frameMark);
-            state.current = parent;
-            const resume = parent.resume;
+        const resume = leaveToCaller(activation, state);
+        if (resume !is null) {
             ulong none0 = void;
             double none1 = void;
-            return resume.handler(resume, parent, state, parent.frame, none0, none1);
+            return resume.handler(resume, state.current, state, state.current.frame,
+                none0, none1);
         }
     }
     return null;
+}
+
+// An activation with no temporary to destroy leaves for its caller from the
+// returning handler: it releases its frame, makes the caller current and
+// gives the caller's resume point. `null` means `dispatchLoop` must end the
+// activation, because it has a cleanup to run or no caller.
+private const(Instruction)* leaveToCaller(
+    Activation* activation,
+    DispatchState* state,
+) {
+    auto parent = activation.parent;
+    auto frames = state.frames;
+    if (parent is null || frames.cleanupMark != activation.cleanupMark)
+        return null;
+    frames.release(activation.frameMark);
+    state.current = parent;
+    return parent.resume;
 }
 
 public alias opReturn = returnHandler!(0, false);
@@ -2070,8 +2088,30 @@ package const(Instruction)* opThenReturn(alias operation)(
     }
 }
 
-public alias opReturnVoid =
-    executeOnce!(runReturnVoid, OperandKind.immediate, OperandKind.immediate);
+public const(Instruction)* opReturnVoid(
+    const(Instruction)* pc,
+    Activation* activation,
+    DispatchState* state,
+    ubyte* frame,
+    ulong r0,
+    double fp0,
+) {
+    version (BytecodeCount) {
+        static __gshared CountSlot slot;
+        countExecution(&slot, "opReturnVoid");
+    }
+    activation.pc = pc;
+    static if (chainedDispatch) {
+        const resume = leaveToCaller(activation, state);
+        if (resume !is null) {
+            ulong none0 = void;
+            double none1 = void;
+            return resume.handler(resume, state.current, state, state.current.frame,
+                none0, none1);
+        }
+    }
+    return null;
+}
 
 // Ends a cleanup range, which `dispatch` runs up to the instruction at
 // `Activation.end`. Anywhere else it does nothing.
@@ -2095,12 +2135,6 @@ private const(Instruction)* runRangeEndPass(Decoded)(
     ref Decoded execution,
 ) {
     return execution.next;
-}
-
-private const(Instruction)* runReturnVoid(Decoded)(
-    ref Decoded execution,
-) {
-    return null;
 }
 
 
