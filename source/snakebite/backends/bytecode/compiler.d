@@ -1336,19 +1336,107 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _relocs.dup);
     }
 
-    // A frame operand of the copied function, moved into the region of the
-    // caller's frame that starts at `base`. The top bit names an address
-    // slot, which moves, and a displacement, which does not.
-    private static size_t inlineStorage(in size_t operand, in size_t base) {
-        if ((operand & (1UL << 63)) == 0)
-            return operand + base;
-        const slot = (operand >> 32) & 0x7fff_ffffUL;
-        return indirectStorage(slot + base) | (operand & 0xffff_ffffUL);
+    // Whether an instruction of a copied body leaves its `destination`
+    // field unwritten: it only reads it, or it is a store through it.
+    private bool leavesDestination(Instruction.Handler handler) {
+        import std.meta: AliasSeq;
+
+        static foreach (operation; AliasSeq!(
+            opThrow, opBranchTrue, opBranchFalse, opReturn, opJump,
+            opReturnVoid, opStoreIndirect,
+        ))
+            if (handler is &operation)
+                return true;
+        static foreach (width; indirectCopyWidths)
+            if (handler is &opStoreIndirectFixed!width)
+                return true;
+        return isFusedBranch(handler);
+    }
+
+    // Whether the caller's operands can stand for the callee's parameters
+    // of `body_`: nothing in it writes through a pointer, and nothing in it
+    // takes the address of a frame slot. Then only its direct writes can
+    // change a parameter or a caller operand.
+    private bool bodyWritesOnlyItsFrame(in InlineBody body_) {
+        import std.meta: AliasSeq;
+
+        foreach (instruction; body_.instructions) {
+            static foreach (operation; AliasSeq!(
+                opStoreIndirect, opFrameAddress,
+            ))
+                if (instruction.handler is &operation)
+                    return false;
+            static foreach (width; indirectCopyWidths)
+                if (instruction.handler is &opStoreIndirectFixed!width)
+                    return false;
+            if (!leavesDestination(instruction.handler)
+                    && (instruction.destination & (1UL << 63)) != 0)
+                return false;
+        }
+        return true;
+    }
+
+    // Whether any instruction of `body_` writes the bytes
+    // `[offset, offset + width)` of its frame.
+    private bool bodyWrites(
+        in InlineBody body_, in size_t offset, in size_t width,
+    ) {
+        import std.meta: AliasSeq;
+
+        // The widest result of an instruction whose width field does not
+        // say how much it writes.
+        enum sliceWidth = 16;
+        foreach (instruction; body_.instructions) {
+            if (leavesDestination(instruction.handler))
+                continue;
+            size_t written = instruction.width == 0 ? 1 : instruction.width;
+            static foreach (operation; AliasSeq!(
+                opIndexSlice, opIndexStatic, opIndexPointer,
+            ))
+                if (instruction.handler is &operation)
+                    written = sliceWidth;
+            if (instruction.destination < offset + width
+                    && instruction.destination + written > offset)
+                return true;
+        }
+        return false;
+    }
+
+    // Whether `instruction` writes the whole of `destination` with a result
+    // of `width` bytes in one machine word or less, and reads each of its
+    // operands before it writes.
+    private bool writesWholeWord(in Instruction instruction, in size_t width) {
+        import std.meta: AliasSeq;
+
+        if (width > size_t.sizeof || instruction.width != width)
+            return false;
+        static foreach (operation; AliasSeq!(
+            opCopy, opLoadIndirect,
+            opAdd, opSubtract, opMultiply, opBitAnd, opBitOr, opBitXor,
+            opCopyFixed!1, opCopyFixed!2, opCopyFixed!4, opCopyFixed!8,
+        ))
+            if (instruction.handler is &operation)
+                return true;
+        static foreach (copyWidth; indirectCopyWidths)
+            static if (copyWidth <= size_t.sizeof)
+                if (instruction.handler is &opLoadIndirectFixed!copyWidth)
+                    return true;
+        static foreach (index, operation; threeAddressHandlers) {
+            if (instruction.handler is &operation)
+                return true;
+            if (instruction.handler is &threeAddressConstantHandlers[index])
+                return true;
+        }
+        return false;
     }
 
     // Copies `body` into this function in place of a call whose arguments
     // are already in `args`. Its frame becomes a region of this frame, and
     // each return copies the result to `destOffset` and jumps past the copy.
+    //
+    // A parameter that nothing in the body writes shares the storage of
+    // the caller's operand instead of a copy of it. A value that the last
+    // instruction before a return computes goes straight to `destOffset`.
     private void emitInlined(
         in InlineBody body_, Arg[] args, in size_t destOffset,
     ) {
@@ -1356,11 +1444,52 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _tempSize = base + body_.frameSize;
         if (body_.frameAlignment > _tempAlignment)
             _tempAlignment = body_.frameAlignment;
-        foreach (arg; args)
-            emit(&opCopy, base + arg.calleeOffset, arg.callerOffset,
-                arg.width);
+
+        Arg[] bound;
+        const mayBind = bodyWritesOnlyItsFrame(body_);
+        foreach (arg; args) {
+            if (mayBind && arg.width != 0
+                    && (arg.callerOffset & (1UL << 63)) == 0
+                    && !bodyWrites(body_, arg.calleeOffset, arg.width))
+                bound ~= arg;
+            else
+                emit(&opCopy, base + arg.calleeOffset, arg.callerOffset,
+                    arg.width);
+        }
+        size_t rebase(in size_t offset) {
+            foreach (arg; bound)
+                if (offset >= arg.calleeOffset
+                        && offset < arg.calleeOffset + arg.width)
+                    return arg.callerOffset + (offset - arg.calleeOffset);
+            return offset + base;
+        }
+        size_t place(in size_t operand) {
+            if ((operand & (1UL << 63)) == 0)
+                return rebase(operand);
+            const slot = (operand >> 32) & 0x7fff_ffffUL;
+            return indirectStorage(rebase(slot)) | (operand & 0xffff_ffffUL);
+        }
 
         const instructions = body_.instructions;
+        auto isTarget = new bool[instructions.length + 1];
+        foreach (instruction; instructions) {
+            Instruction probe = instruction;
+            if (auto target = branchTargetField(probe))
+                isTarget[*target] = true;
+        }
+        // A return whose copy to `destOffset` the instruction before it
+        // does instead.
+        auto direct = new bool[instructions.length];
+        foreach (i, instruction; instructions) {
+            if (instruction.handler !is &opReturn || destOffset == discardResult
+                    || i == 0 || isTarget[i]
+                    || (instruction.source & (1UL << 63)) != 0)
+                continue;
+            const previous = instructions[i - 1];
+            direct[i] = previous.destination == instruction.source
+                && writesWholeWord(previous, instruction.width);
+        }
+
         const constantBase = _constants.length;
         _constants ~= body_.constants;
         const start = _instructions.length;
@@ -1369,7 +1498,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         foreach (i, instruction; instructions) {
             positions[i] = next;
             if (instruction.handler is &opReturn)
-                next += (destOffset != discardResult ? 1 : 0)
+                next += (destOffset != discardResult && !direct[i] ? 1 : 0)
                     + (i + 1 == instructions.length ? 0 : 1);
             else if (instruction.handler is &opReturnVoid)
                 next += i + 1 == instructions.length ? 0 : 1;
@@ -1384,9 +1513,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             inlineOperandsOf(instruction.handler, roles);
             const isReturn = instruction.handler is &opReturn;
             if (isReturn || instruction.handler is &opReturnVoid) {
-                if (isReturn && destOffset != discardResult)
-                    emit(&opCopy, destOffset,
-                        inlineStorage(instruction.source, base),
+                if (isReturn && destOffset != discardResult && !direct[i])
+                    emit(&opCopy, destOffset, place(instruction.source),
                         instruction.width);
                 if (i + 1 != instructions.length)
                     emit(&opJump, end, 0, 0);
@@ -1394,13 +1522,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             }
             Instruction copied = instruction;
             if (roles.destination == Operand.storage)
-                copied.destination = inlineStorage(copied.destination, base);
+                copied.destination = i + 1 < instructions.length
+                        && direct[i + 1]
+                    ? destOffset : place(copied.destination);
             if (roles.source == Operand.storage)
-                copied.source = inlineStorage(copied.source, base);
+                copied.source = place(copied.source);
             else if (roles.source == Operand.constant)
                 copied.source += constantBase;
             if (roles.right == Operand.storage)
-                copied.sourceWidth = inlineStorage(copied.sourceWidth, base);
+                copied.sourceWidth = place(copied.sourceWidth);
             if (auto target = branchTargetField(copied))
                 *target = positions[*target];
             _instructions ~= copied;
@@ -8191,10 +8321,34 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             evalInto(receiver.expression, object, size_t.sizeof);
             return object;
         case aggregateAddress:
-            return compileAddress(receiver.expression);
+            return receiverAddress(receiver.expression, expression);
         case implicitThis:
             return hiddenThisOffset;
         }
+    }
+
+    // The address of the receiver `aggregate` of `expression`. A pointer
+    // held in a plain local is read in place when no argument can change
+    // it before the callee runs.
+    private size_t receiverAddress(Expression aggregate, CallExp expression) {
+        import dmd.sideeffect: hasSideEffect;
+
+        bool argumentsPure = true;
+        if (expression.arguments !is null)
+            foreach (argument; *expression.arguments)
+                if (argument !is null && hasSideEffect(argument))
+                    argumentsPure = false;
+        with (EXP) switch (aggregate.op) {
+            case variable, dotVariable, star, index: {
+                const place = placeOf(aggregate, argumentsPure);
+                if (place != size_t.max)
+                    return addressOfPlace(place);
+                break;
+            }
+            default:
+                break;
+        }
+        return compileAddress(aggregate);
     }
 
     // Compiles a call to `callee` with `arguments` already resolved -
