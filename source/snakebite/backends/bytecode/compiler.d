@@ -762,7 +762,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opGreaterOrEqualUnsigned3, opEqual3, opNotEqual3, opFloatEqual3,
         opFloatNotEqual3, opFloatLessThan3, opFloatLessOrEqual3,
         opFloatGreaterThan3, opFloatGreaterOrEqual3,
-        opIndexPointer, opIndexSlice, opIndexStatic,
+        opIndexPointer, opIndexSlice, opIndexStatic, checkedIndexHandler,
         opBitAnd3, opBitOr3, opBitXor3, opShiftLeft3, opShiftRightLogical3,
         opShiftRightArithmetic3, opDivideSigned3, opDivideUnsigned3,
         opModuloSigned3, opModuloUnsigned3,
@@ -5272,6 +5272,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         requireDestination(expression);
+        if (compileCheckedLoad(expression))
+            return;
         const place = placeOf(expression, true);
         emit(&opCopy, _destination, place, _width);
     }
@@ -6326,6 +6328,168 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
+    // The index of a checked access: where it is, and what is added to it in
+    // its own width.
+    private struct CheckedIndex {
+        size_t width;
+        bool signed;
+        long offset;
+        // The frame slot that holds the index, or `size_t.max`.
+        size_t slot = size_t.max;
+        Expression expression;
+    }
+
+    // Whether `expression` is an element of a slice that one instruction
+    // reads or writes after its bounds check. Emits no code.
+    private bool checkedIndexShape(
+        IndexExp expression, in size_t elementSize, out CheckedIndex shape,
+    ) {
+        import dmd.astenums: Tarray;
+        import dmd.sideeffect: hasSideEffect;
+        import snakebite.backends.checkplan: boundsPlanOf, FailurePlan;
+
+        auto arrayType = expression.e1.type.toBasetype;
+        if (arrayType.ty != Tarray || expression.lengthVar !is null
+                || hasSideEffect(expression.e2)
+                || !isPlainPlace(expression.e1))
+            return false;
+        if (typeFacts(arrayType.nextOf).size != elementSize
+                || (elementSize != 1 && elementSize != 2 && elementSize != 4
+                    && elementSize != 8))
+            return false;
+        if (boundsPlanOf(_bytecode.checks, _function).kind
+                == FailurePlan.Kind.ignore)
+            return false;
+        // Semantic widens a 32-bit index to `size_t` with a cast.
+        auto indexExpression = expression.e2;
+        if (auto widening = indexExpression.isCastExp) {
+            const narrow = typeFacts(widening.e1.type);
+            if (narrow.isIntegral && narrow.size == 4
+                    && typeFacts(widening.type).size == size_t.sizeof)
+                indexExpression = widening.e1;
+        }
+        const index = typeFacts(indexExpression.type);
+        if (!index.isIntegral || (index.size != 4 && index.size != 8))
+            return false;
+        shape.width = index.size;
+        shape.signed = !index.isUnsigned;
+        shape.expression = indexExpression;
+        if (auto sum = indexExpression.isBinExp) {
+            auto literal = sum.e2.isIntegerExp;
+            if ((sum.op == EXP.add || sum.op == EXP.min) && literal !is null
+                    && typeFacts(sum.e1.type).size == index.size
+                    && typeFacts(sum.e1.type).isUnsigned == index.isUnsigned) {
+                const local = operandOf(sum.e1, index.size, false);
+                const value = sum.op == EXP.add
+                    ? cast(long) literal.toInteger
+                    : -cast(long) literal.toInteger;
+                if (local != size_t.max && value >= int.min
+                        && value <= int.max) {
+                    shape.slot = local;
+                    shape.offset = value;
+                    return true;
+                }
+            }
+        }
+        shape.slot = operandOf(indexExpression, index.size, false);
+        return true;
+    }
+
+    private bool compileCheckedLoad(IndexExp expression) {
+        CheckedIndex shape;
+        if (!checkedIndexShape(expression, _width, shape)
+                || !isScalarOperand(expression.type, _width,
+                    isRealFloatType(expression.type)))
+            return false;
+        const array = placeOf(expression.e1, true);
+        if (array == size_t.max)
+            return false;
+        emitCheckedIndex(expression, shape, false, _destination, array);
+        return true;
+    }
+
+    private bool compileCheckedStore(
+        IndexExp expression, Expression value, in size_t width,
+        in bool floating,
+    ) {
+        CheckedIndex shape;
+        if (!checkedIndexShape(expression, width, shape))
+            return false;
+        const array = placeOf(expression.e1, true);
+        if (array == size_t.max)
+            return false;
+        size_t operand = operandOf(value, width, floating);
+        if (operand == size_t.max) {
+            // Native order checks the left side first; the instruction checks
+            // it after the value, so the value must not be able to fail.
+            if (!cannotFail(value))
+                return false;
+            operand = reserveTemp(typeFacts(expression.type));
+            evalInto(value, operand, width, expression.type);
+        }
+        emitCheckedIndex(expression, shape, true, operand, array);
+        return true;
+    }
+
+    // Whether evaluating `expression` cannot raise an `Error` or an
+    // exception: literals, plain locals and arithmetic over them.
+    private bool cannotFail(Expression expression) {
+        switch (expression.op) {
+            case EXP.int64, EXP.float64:
+                return true;
+            case EXP.variable:
+                return localSlot(expression) != size_t.max;
+            case EXP.cast_:
+                return cannotFail(expression.isCastExp.e1);
+            case EXP.negate, EXP.tilde:
+                return cannotFail(expression.isUnaExp.e1);
+            case EXP.add, EXP.min, EXP.mul, EXP.and, EXP.or, EXP.xor:
+                auto binary = expression.isBinExp;
+                return cannotFail(binary.e1) && cannotFail(binary.e2);
+            default:
+                return false;
+        }
+    }
+
+    // The access, then the failure code of the bounds check. The access
+    // continues after the failure code when the index is in bounds.
+    private void emitCheckedIndex(
+        IndexExp expression, CheckedIndex shape, in bool store,
+        in size_t value, in size_t array,
+    ) {
+        import snakebite.nativelayout: arrayLengthOffset;
+
+        auto indexType = shape.expression.type;
+        if (shape.slot == size_t.max) {
+            shape.slot = reserveTemp(typeFacts(indexType));
+            evalInto(shape.expression, shape.slot, shape.width);
+        }
+        const element = typeFacts(expression.type).size;
+        const handler = checkedIndexHandler(store, shape.width, shape.signed,
+            element);
+        const packed = shape.slot
+            | (cast(size_t) cast(uint) cast(int) shape.offset << 32);
+        const length = placeAt(array, arrayLengthOffset);
+        compileIndexCheckWith({
+            emit(handler, value, array, packed, 0);
+        }, () {
+            // The index the hook reports: the index plus the offset, in
+            // the width of the index, then widened in place.
+            const wide = reserveTemp(pointerFacts);
+            emit(&opCopy, wide, shape.slot, shape.width);
+            if (shape.offset != 0) {
+                const offset = reserveTemp(typeFacts(indexType));
+                emit(&opConstant, offset, addConstant(shape.offset),
+                    shape.width);
+                emit(&opAdd, wide, offset, shape.width);
+            }
+            if (shape.width != size_t.sizeof)
+                emit(shape.signed ? &opCastWidenSigned : &opCastWidenUnsigned,
+                    wide, shape.width, size_t.sizeof);
+            return Arg(wide, 0, size_t.sizeof);
+        }, () => Arg(length, 0, size_t.sizeof), expression.loc);
+    }
+
     // The value of a literal index that `$` does not depend on, or
     // `size_t.max`.
     private size_t literalIndex(IndexExp expression) {
@@ -6940,6 +7104,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 emit(&opCopy, destOffset, local, facts.size);
             return true;
         }
+
+        if (destOffset == discardResult && !hasSideEffect(value))
+            if (auto indexed = expression.e1.isIndexExp)
+                if (compileCheckedStore(indexed, value, facts.size,
+                        floating))
+                    return true;
 
         const target = placeOf(expression.e1, !hasSideEffect(value));
         if (target == size_t.max)
