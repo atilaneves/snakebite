@@ -2731,6 +2731,17 @@ private const(Instruction)* runIndex(IndexBase base, Decoded)(
     return execution.next;
 }
 
+// The accesses of `opCheckedIndex`. A store whose value can fail is split in
+// two: `check` tests the bounds and does nothing else, and `storeUnchecked`
+// stores, without a test, after the value ran. The error order stays native:
+// the left side fails first.
+package enum CheckedAccess {
+    load,
+    store,
+    check,
+    storeUnchecked,
+}
+
 // A bounds-checked element access in one instruction. `destination` is the
 // value operand (read by a store, written by a load), `source` the operand
 // that holds the elements, `width` the frame offset of the index in its low
@@ -2739,17 +2750,6 @@ private const(Instruction)* runIndex(IndexBase base, Decoded)(
 // length of a static array. `sourceWidth` is the instruction that runs when
 // the access succeeded. When the index is out of bounds, the next
 // instruction runs: the failure code the compiler emitted after this one.
-//
-// A store whose value can fail is split in two: `check` tests the bounds and
-// does nothing else, and `storeUnchecked` stores, without a test, after the
-// value ran. The error order stays native: the left side fails first.
-package enum CheckedAccess {
-    load,
-    store,
-    check,
-    storeUnchecked,
-}
-
 private alias opCheckedIndex(CheckedAccess access, bool fixedLength,
         size_t indexWidth, bool signed, size_t elementSize) =
     execute!(runCheckedIndex, OperandKind.storage, OperandKind.storage,
@@ -2820,11 +2820,11 @@ private enum checkedIndexElementSizes = [1UL, 2UL, 4UL, 8UL];
 // A `check` does not read an element, so one size stands for all.
 package Instruction.Handler checkedIndexHandler(
     in CheckedAccess access, in bool fixedLength, in size_t indexWidth,
-    in bool signed, in size_t width,
+    in bool signed, in size_t elementSize,
 ) {
     import std.conv: text;
 
-    const elementSize = access == CheckedAccess.check ? 1 : width;
+    const handlerSize = access == CheckedAccess.check ? 1 : elementSize;
     static foreach (kind; [EnumMembers!CheckedAccess])
         static foreach (fixed; [false, true])
             static foreach (shape; checkedIndexShapes)
@@ -2833,11 +2833,11 @@ package Instruction.Handler checkedIndexHandler(
                         if (access == kind && fixedLength == fixed
                                 && indexWidth == shape[0]
                                 && signed == (shape[1] == 1)
-                                && elementSize == size)
+                                && handlerSize == size)
                             return &opCheckedIndex!(kind, fixed, shape[0],
                                 shape[1] == 1, size);
     internalFailure(text("no checked-index handler for a ", indexWidth,
-        "-byte ", signed ? "signed" : "unsigned", " index and ", elementSize,
+        "-byte ", signed ? "signed" : "unsigned", " index and ", handlerSize,
         "-byte elements"));
 }
 

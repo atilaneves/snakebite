@@ -6567,10 +6567,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return true;
     }
 
+    // `value` must have no side effect: the split store below reads the
+    // array and the index again after `value` ran.
     private bool compileCheckedStore(
         IndexExp expression, Expression value, in size_t width,
         in bool floating,
     ) {
+        import dmd.sideeffect: hasSideEffect;
+
         CheckedIndex shape;
         if (!checkedIndexShape(expression, width, shape))
             return false;
@@ -6581,9 +6585,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (operand == size_t.max && !cannotFail(value)) {
             // Native order checks the left side first, so the bounds check
             // runs before the value, and the store after it needs none.
+            if (hasSideEffect(value))
+                internalFailure("a split checked store needs a value "
+                    ~ "without side effects");
             resolveIndexSlot(shape);
-            emitCheckedIndex(expression, shape, CheckedAccess.check, 0,
-                array);
+            emitCheckedIndex(expression, shape, CheckedAccess.check,
+                noValue, array);
             operand = reserveTemp(typeFacts(expression.type));
             evalInto(value, operand, width, expression.type);
             emitCheckedIndex(expression, shape, CheckedAccess.storeUnchecked,
@@ -6626,6 +6633,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         shape.slot = reserveTemp(typeFacts(shape.expression.type));
         evalInto(shape.expression, shape.slot, shape.width);
     }
+
+    // The value operand of an access that has no value.
+    private enum noValue = 0;
 
     // The access, then the failure code of the bounds check. The access
     // continues after the failure code when the index is in bounds. An

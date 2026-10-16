@@ -1476,28 +1476,52 @@ static foreach (backend; Matrix!(
                     index = length = 0;
                 }
                 try { auto x = a[k - 1]; }
-                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                catch (ArrayIndexError e) {
+                    index = e.index;
+                    length = e.length;
+                }
                 check(size_t.max);
                 try { auto x = a[low]; }
-                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                catch (ArrayIndexError e) {
+                    index = e.index;
+                    length = e.length;
+                }
                 check(cast(size_t) int.min);
                 try { auto x = a[low + 0]; }
-                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                catch (ArrayIndexError e) {
+                    index = e.index;
+                    length = e.length;
+                }
                 check(cast(size_t) int.min);
                 try { auto x = a[u - 1]; }
-                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                catch (ArrayIndexError e) {
+                    index = e.index;
+                    length = e.length;
+                }
                 check(uint.max);
                 try { a[k - 1] = 1; }
-                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                catch (ArrayIndexError e) {
+                    index = e.index;
+                    length = e.length;
+                }
                 check(size_t.max);
                 try { a[u - 1] = 1; }
-                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                catch (ArrayIndexError e) {
+                    index = e.index;
+                    length = e.length;
+                }
                 check(uint.max);
                 try { auto x = a[one + int.max]; }
-                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                catch (ArrayIndexError e) {
+                    index = e.index;
+                    length = e.length;
+                }
                 check(cast(size_t) (1 + int.max) | 0xFFFFFFFF00000000);
                 try { auto x = a[l - 1]; }
-                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                catch (ArrayIndexError e) {
+                    index = e.index;
+                    length = e.length;
+                }
                 check(size_t.max);
             }
         });
