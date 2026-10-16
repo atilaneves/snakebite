@@ -565,10 +565,11 @@ private alias positionFree = AliasSeq!(
     runFloatCompare3, runFloatComparison, runFloatToBool, runFloatUnary,
     runFloatWidthCast, runFrameAddress, runFusedBranch, runGreaterOrEqualSigned,
     runGreaterOrEqualUnsigned, runGreaterThanSigned, runGreaterThanUnsigned,
-    runIndex, runInt3, runJump, runLessOrEqualSigned, runLessOrEqualUnsigned,
+    runIndex, runCheckedIndex,
+    runInt3, runJump, runLessOrEqualSigned, runLessOrEqualUnsigned,
     runLessThanSigned, runLessThanUnsigned, runLoadBitfield, runLoadIndirect,
     runLogicalNot, runMultiply, runNegate, runNotEqual, runRangeEndPass,
-    runReturnVoid, runShift3, runShiftLeft, runShiftRightArithmetic,
+    runShift3, runShiftLeft, runShiftRightArithmetic,
     runShiftRightLogical, runSliceCopy, runSliceFill, runSlicesConform,
     runStaticAddress, runStaticArrayEqual, runStaticLoad, runStaticStore,
     runStoreBitfield, runStoreIndirect, runSubtract, runZero,
@@ -698,8 +699,9 @@ private const(Instruction)* executeOnce(
     return operation!Parameters(execution);
 }
 
-// As `execute`, for the instruction that can switch the activation. It
-// returns to `dispatchLoop`, which owns that switch.
+// As `execute`, for the instruction that can switch the activation. Outside a
+// chained build it returns to `dispatchLoop`, which owns that switch; a chained
+// build switches in the handler itself.
 private const(Instruction)* executeCall(
     alias operation,
     OperandKind destinationKind,
@@ -1077,6 +1079,8 @@ private struct Activation {
 
 private struct DispatchState {
     FrameStack* frames;
+    // The activation that runs. A chained build keeps it up to date at every
+    // call and return; other builds set it only where a handler can throw.
     Activation* current;
     Activation* pending;
     // The first handler of `current` that an exception that is no
@@ -1170,14 +1174,23 @@ private void dispatchLoop(
     // Cleanup writes the frame stack.
     auto frames = state.frames;
 
+    // A chain of handlers calls and returns by itself, so the activation
+    // that runs when the chain ends or throws is `state.current`.
+    static if (chainedDispatch)
+        state.current = active;
+
     while (true) {
         try {
+            static if (chainedDispatch)
+                active = state.current;
             if (pc is null) {
                 active.pc = pc;
                 active.cleanup(frames);
                 if (active.parent is null)
                     return;
                 active = popActivation(active, frames);
+                static if (chainedDispatch)
+                    state.current = active;
                 pc = active.resume;
                 continue;
             }
@@ -1186,10 +1199,16 @@ private void dispatchLoop(
             if (state.pending !is null) {
                 active = state.pending;
                 state.pending = null;
+                static if (chainedDispatch)
+                    state.current = active;
                 pc = active.pc;
             }
         } catch (Throwable throwable) {
+            static if (chainedDispatch)
+                active = state.current;
             active = handleException(active, frames, throwable, state.vm);
+            static if (chainedDispatch)
+                state.current = active;
             pc = active.pc;
         }
     }
@@ -1639,8 +1658,9 @@ private alias opCallGeneral =
 // plain arguments and room on the committed frame stack: the activation is
 // built here without the generic `Execution` decoding, from the facts
 // `CallSite.prepare` keeps. Everything else takes `opCallSlow`, which has the
-// same effect. This function calls nothing, so it keeps no value in a
-// callee-saved register.
+// same effect. In a chained build it ends with a tail call to the callee's
+// first handler, so it keeps no value in a callee-saved register over that
+// call.
 public const(Instruction)* opCall(
     const(Instruction)* pc,
     Activation* active,
@@ -1674,7 +1694,8 @@ public const(Instruction)* opCall(
     // The position of a throw selects its handler, and the new activation
     // resumes this one.
     active.pc = pc;
-    state.current = active;
+    static if (!chainedDispatch)
+        state.current = active;
     activation.frameMark = mark;
     ubyte* calleeFrame = cast(ubyte*) activation + fast.frameOffset;
     activation.frame = calleeFrame;
@@ -1696,7 +1717,8 @@ public const(Instruction)* opCall(
     activation.cleanupMark = frames.cleanupMark;
     activation.parent = active;
     active.resume = pc + 1;
-    state.pending = activation;
+    static if (!chainedDispatch)
+        state.pending = activation;
 
     // Last, so that few values stay live through the loop.
     foreach (arg; fast.args[0 .. fast.argCount]) {
@@ -1712,7 +1734,16 @@ public const(Instruction)* opCall(
         else
             *cast(ushort*) destination = *cast(const(ushort)*) source;
     }
-    return pc + 1;
+    static if (chainedDispatch) {
+        // The callee's first handler runs from here, so the native stack
+        // stays flat however deep the guest calls go.
+        state.current = activation;
+        const first = callee.instructions.ptr;
+        ulong none0 = void;
+        double none1 = void;
+        return first.handler(first, activation, state, calleeFrame, none0, none1);
+    } else
+        return pc + 1;
 }
 
 
@@ -2010,7 +2041,9 @@ private const(Instruction)* callFunction(bool redirected = false, Decoded)(
 // backend uses for a call whose value nothing reads. `Instruction.destination`
 // is unused: there is no frame slot on the receiving end, only `returnPlace`.
 // `width` is 0 to read the width from the instruction, and `frameOnly` says the
-// source is a plain frame offset. It returns `null`, which ends the activation.
+// source is a plain frame offset. In a chained build an activation with no
+// cleanup resumes its caller by tail call; in every other case it returns
+// `null`, which ends the activation.
 package const(Instruction)* returnHandler(size_t width, bool frameOnly)(
     const(Instruction)* pc,
     Activation* activation,
@@ -2036,7 +2069,33 @@ package const(Instruction)* returnHandler(size_t width, bool frameOnly)(
         else
             memcpy(place, source, width);
     }
+    static if (chainedDispatch) {
+        const resume = leaveToCaller(activation, state);
+        if (resume !is null) {
+            ulong none0 = void;
+            double none1 = void;
+            return resume.handler(resume, state.current, state, state.current.frame,
+                none0, none1);
+        }
+    }
     return null;
+}
+
+// An activation with no temporary to destroy leaves for its caller from the
+// returning handler: it releases its frame, makes the caller current and
+// gives the caller's resume point. `null` means `dispatchLoop` must end the
+// activation, because it has a cleanup to run or no caller.
+private const(Instruction)* leaveToCaller(
+    Activation* activation,
+    DispatchState* state,
+) {
+    auto parent = activation.parent;
+    auto frames = state.frames;
+    if (parent is null || frames.cleanupMark != activation.cleanupMark)
+        return null;
+    frames.release(activation.frameMark);
+    state.current = parent;
+    return parent.resume;
 }
 
 public alias opReturn = returnHandler!(0, false);
@@ -2058,8 +2117,30 @@ package const(Instruction)* opThenReturn(alias operation)(
     }
 }
 
-public alias opReturnVoid =
-    executeOnce!(runReturnVoid, OperandKind.immediate, OperandKind.immediate);
+public const(Instruction)* opReturnVoid(
+    const(Instruction)* pc,
+    Activation* activation,
+    DispatchState* state,
+    ubyte* frame,
+    ulong r0,
+    double fp0,
+) {
+    version (BytecodeCount) {
+        static __gshared CountSlot slot;
+        countExecution(&slot, "opReturnVoid");
+    }
+    activation.pc = pc;
+    static if (chainedDispatch) {
+        const resume = leaveToCaller(activation, state);
+        if (resume !is null) {
+            ulong none0 = void;
+            double none1 = void;
+            return resume.handler(resume, state.current, state, state.current.frame,
+                none0, none1);
+        }
+    }
+    return null;
+}
 
 // Ends a cleanup range, which `dispatch` runs up to the instruction at
 // `Activation.end`. Anywhere else it does nothing.
@@ -2083,12 +2164,6 @@ private const(Instruction)* runRangeEndPass(Decoded)(
     ref Decoded execution,
 ) {
     return execution.next;
-}
-
-private const(Instruction)* runReturnVoid(Decoded)(
-    ref Decoded execution,
-) {
-    return null;
 }
 
 
@@ -2685,6 +2760,77 @@ private const(Instruction)* runIndex(IndexBase base, Decoded)(
     return execution.next;
 }
 
+// A bounds-checked element access in one instruction. `destination` is the
+// value operand (read by a store, written by a load), `source` the slice
+// operand, `width` the frame offset of the index in its low 32 bits and a
+// signed 32-bit offset that is added to the index, in the index's own width,
+// in the high 32 bits. `sourceWidth` is the instruction that runs when the
+// access succeeded. When the index is out of bounds, the next instruction
+// runs: the failure code the compiler emitted after this one.
+private alias opCheckedIndex(bool store, size_t indexWidth, bool signed,
+        size_t elementSize) =
+    execute!(runCheckedIndex, OperandKind.storage, OperandKind.storage,
+        store, indexWidth, signed, elementSize);
+
+private const(Instruction)* runCheckedIndex(bool store, size_t indexWidth,
+    bool signed, size_t elementSize, Decoded)(
+    ref Decoded execution,
+) {
+    import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset;
+
+    const packed = execution.width;
+    const offset = cast(int) (packed >> 32);
+    const indexPlace = execution.storage(cast(uint) packed);
+    static if (indexWidth == 4 && signed) {
+        const sum = *cast(const(int)*) indexPlace + offset;
+        const index = cast(size_t) cast(long) sum;
+    } else static if (indexWidth == 4) {
+        const sum = *cast(const(uint)*) indexPlace + cast(uint) offset;
+        const index = cast(size_t) sum;
+    } else
+        const index = *cast(const(size_t)*) indexPlace
+            + cast(size_t) cast(long) offset;
+    const length = *cast(const(size_t)*) (execution.source + arrayLengthOffset);
+    if (index >= length)
+        return execution.next;
+    static if (elementSize == 1)
+        alias Element = ubyte;
+    else static if (elementSize == 2)
+        alias Element = ushort;
+    else static if (elementSize == 4)
+        alias Element = uint;
+    else
+        alias Element = ulong;
+    auto element = cast(Element*) (*cast(ubyte**) (execution.source
+        + arrayPointerOffset) + index * elementSize);
+    static if (store)
+        *element = *cast(const(Element)*) execution.destination;
+    else
+        *cast(Element*) execution.destination = *element;
+    return cast(const(Instruction)*) execution.sourceWidth;
+}
+
+private enum checkedIndexShapes = [[4UL, 1UL], [4UL, 0UL], [8UL, 0UL]];
+private enum checkedIndexElementSizes = [1UL, 2UL, 4UL, 8UL];
+
+package Instruction.Handler checkedIndexHandler(
+    in bool store, in size_t indexWidth, in bool signed,
+    in size_t elementSize,
+) {
+    import std.conv: text;
+
+    static foreach (isStore; [false, true])
+        static foreach (shape; checkedIndexShapes)
+            static foreach (size; checkedIndexElementSizes)
+                if (store == isStore && indexWidth == shape[0]
+                        && signed == (shape[1] == 1) && elementSize == size)
+                    return &opCheckedIndex!(isStore, shape[0],
+                        shape[1] == 1, size);
+    internalFailure(text("no checked-index handler for a ", indexWidth,
+        "-byte ", signed ? "signed" : "unsigned", " index and ", elementSize,
+        "-byte elements"));
+}
+
 package alias opIndexSlice = opIndex!(IndexBase.slice);
 package alias opIndexStatic = opIndex!(IndexBase.staticArray);
 package alias opIndexPointer = opIndex!(IndexBase.pointer);
@@ -3253,30 +3399,42 @@ private const(Instruction)* runNegate(Decoded)(
     return execution.next;
 }
 
-private T applyFloatUnary(string operation, T)(T value) @nogc nothrow pure {
-    return mixin(operation ~ "value");
+private T negateOf(T)(T value) @nogc nothrow pure {
+    return -value;
 }
 
-private alias opFloatUnary(string operation) =
-    execute!(runFloatUnary, OperandKind.storage, OperandKind.immediate, operation);
+private T sqrtOf(T)(T value) @nogc nothrow pure {
+    import core.math: sqrt;
+    return sqrt(value);
+}
 
-private const(Instruction)* runFloatUnary(string operation, Decoded)(
+private T absOf(T)(T value) @nogc nothrow pure {
+    import core.math: fabs;
+    return fabs(value);
+}
+
+// `core.math.sqrt` and `core.math.fabs` run in place, like `opFloatNegate`.
+package alias opFloatNegate = opFloatUnary!negateOf;
+package alias opFloatSqrt = opFloatUnary!sqrtOf;
+package alias opFloatAbs = opFloatUnary!absOf;
+
+private alias opFloatUnary(alias function_) =
+    execute!(runFloatUnary, OperandKind.storage, OperandKind.immediate, function_);
+
+private const(Instruction)* runFloatUnary(alias function_, Decoded)(
     ref Decoded execution,
 ) {
     auto place = execution.destination;
     if (execution.width == float.sizeof)
-        *cast(float*) place = applyFloatUnary!operation(*cast(float*) place);
+        *cast(float*) place = function_(*cast(float*) place);
     else if (execution.width == double.sizeof)
-        *cast(double*) place =
-            applyFloatUnary!operation(*cast(double*) place);
+        *cast(double*) place = function_(*cast(double*) place);
     else {
         assert(execution.width == real.sizeof);
-        *cast(real*) place = applyFloatUnary!operation(*cast(real*) place);
+        *cast(real*) place = function_(*cast(real*) place);
     }
     return execution.next;
 }
-
-package alias opFloatNegate = opFloatUnary!"-";
 
 package alias opComplement =
     execute!(runComplement, OperandKind.storage, OperandKind.immediate);
@@ -4130,6 +4288,11 @@ shared static this() {
     addRoles(&opTlsLoad, rolesOfOperation!(runTlsLoad, I));
     addRoles(&opTlsStore, rolesOfOperation!(runTlsStore, S));
     addRoles(&opTlsAddress, rolesOfOperation!(runTlsAddress, I));
+    static foreach (isStore; [false, true])
+        static foreach (shape; checkedIndexShapes)
+            static foreach (size; checkedIndexElementSizes)
+                addRoles(&opCheckedIndex!(isStore, shape[0], shape[1] == 1,
+                    size), Roles(Role.other, Role.other, Role.instruction));
     // The fused return keeps the roles of the producer it replaces.
     static foreach (width; 1 .. 17)
         addRoles(&opThenReturn!(opCopyFixed!(width, true)),

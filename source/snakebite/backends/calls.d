@@ -69,6 +69,52 @@ public struct CallSelection {
         return false;
     }
 
+    // The floating point operations that the bytecode backend runs in place.
+    public enum FloatIntrinsic { none, sqrt, fabs }
+
+    // Whether `expression`, a call of `function_`, is `core.math.sqrt` or
+    // `core.math.fabs` of the host. The host decides what they are: dmd
+    // declares both without a body and inlines them; LDC aliases `fabs` to
+    // `llvm_fabs` and gives `sqrt` a body that calls `llvm_sqrt`.
+    public FloatIntrinsic floatIntrinsicOf(
+        imported!"dmd.expression".CallExp expression, FuncDeclaration function_,
+    ) {
+        import snakebite.frontend.dmd.functions: moduleOf;
+
+        if (!hasIntrinsicCallee(expression) || expression.arguments is null
+                || expression.arguments.length != 1)
+            return FloatIntrinsic.none;
+        version (LDC) {
+            import gen.dpragma: LDCPragma;
+            import std.algorithm.searching: startsWith;
+
+            if (function_.fbody !is null) {
+                // Only `core.math.sqrt` has a body that is such an operation.
+                const module_ = moduleOf(function_);
+                if (function_.ident.toString != "sqrt" || module_ is null
+                        || module_.md is null
+                        || module_.md.packages.length != 1
+                        || module_.md.packages[0].toString != "core"
+                        || module_.md.id.toString != "math")
+                    return FloatIntrinsic.none;
+                return FloatIntrinsic.sqrt;
+            }
+            if (function_.llvmInternal != LDCPragma.LLVMintrinsic
+                    || intrinsicPlanOf(function_).call.route != Route.builtin)
+                return FloatIntrinsic.none;
+            const llvmName = function_.mangleOverride;
+            return llvmName.startsWith("llvm.fabs.")
+                ? FloatIntrinsic.fabs : FloatIntrinsic.none;
+        } else {
+            if (function_.fbody !is null
+                    || intrinsicPlanOf(function_).call.route != Route.builtin)
+                return FloatIntrinsic.none;
+            const name = function_.ident.toString;
+            return name == "sqrt" ? FloatIntrinsic.sqrt
+                : name == "fabs" ? FloatIntrinsic.fabs : FloatIntrinsic.none;
+        }
+    }
+
     public static Decision atCallSite(
         in Decision decision, imported!"dmd.expression".Expression site,
     ) {
