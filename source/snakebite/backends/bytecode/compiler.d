@@ -762,12 +762,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opGreaterOrEqualUnsigned3, opEqual3, opNotEqual3, opFloatEqual3,
         opFloatNotEqual3, opFloatLessThan3, opFloatLessOrEqual3,
         opFloatGreaterThan3, opFloatGreaterOrEqual3,
-        opIndexPointer, opIndexSlice, opIndexStatic,
+        opIndexPointer, opIndexSlice, opIndexStatic, checkedIndexHandler,
         opBitAnd3, opBitOr3, opBitXor3, opShiftLeft3, opShiftRightLogical3,
         opShiftRightArithmetic3, opDivideSigned3, opDivideUnsigned3,
         opModuloSigned3, opModuloUnsigned3,
         CompareKind, Comparison, constantForm, fusedBranchHandler, fusesConstant,
-        threeAddressConstantHandlers, threeAddressHandlers,
+        firstComparisonHandler, threeAddressConstantHandlers,
+        threeAddressHandlers,
         isFusedBranch, specialiseHandlers, RegisterFamily, registerFamily,
         fusedRegisterFamily, registerForm, fusedRegisterForm,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
@@ -778,10 +779,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opCopyFixed, opLoadThenCopy, opThenReturn, opLoadIndirectFixed, opStoreIndirectFixed,
         opDivideSigned, opDivideSigned32, opDivideUnsigned,
         opEqual,
-        opFloatAdd, opFloatDivide, opFloatEqual, opFloatGreaterOrEqual,
+        opFloatAbs, opFloatAdd, opFloatDivide, opFloatEqual, opFloatGreaterOrEqual,
         opFloatGreaterThan, opFloatLessOrEqual, opFloatLessThan,
         opFloatModulo, opFloatMultiply, opFloatNegate, opFloatNotEqual,
-        opFloatSubtract, opFloatToBool,
+        opFloatSqrt, opFloatSubtract, opFloatToBool,
         opFloatWidthCast, opFrameAddress, opGreaterOrEqualSigned,
         opGreaterOrEqualUnsigned, opGreaterThanSigned, opGreaterThanUnsigned,
         opJump, opLessOrEqualSigned, opLessOrEqualUnsigned, opLessThanSigned,
@@ -1336,19 +1337,111 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _relocs.dup);
     }
 
-    // A frame operand of the copied function, moved into the region of the
-    // caller's frame that starts at `base`. The top bit names an address
-    // slot, which moves, and a displacement, which does not.
-    private static size_t inlineStorage(in size_t operand, in size_t base) {
-        if ((operand & (1UL << 63)) == 0)
-            return operand + base;
-        const slot = (operand >> 32) & 0x7fff_ffffUL;
-        return indirectStorage(slot + base) | (operand & 0xffff_ffffUL);
+    // Whether an instruction of a copied body leaves its `destination`
+    // field unwritten: it only reads it, or it is a store through it.
+    private bool leavesDestination(Instruction.Handler handler) {
+        import std.meta: AliasSeq;
+
+        static foreach (operation; AliasSeq!(
+            opThrow, opBranchTrue, opBranchFalse, opReturn, opJump,
+            opReturnVoid, opStoreIndirect,
+        ))
+            if (handler is &operation)
+                return true;
+        static foreach (width; indirectCopyWidths)
+            if (handler is &opStoreIndirectFixed!width)
+                return true;
+        return isFusedBranch(handler);
+    }
+
+    // Whether the caller's operands can stand for the callee's parameters
+    // of `body_`: nothing in it writes through a pointer, and nothing in it
+    // takes the address of a frame slot. Then only its direct writes can
+    // change a parameter or a caller operand.
+    private bool bodyWritesOnlyItsFrame(in InlineBody body_) {
+        import std.meta: AliasSeq;
+
+        foreach (instruction; body_.instructions) {
+            static foreach (operation; AliasSeq!(
+                opStoreIndirect, opFrameAddress,
+            ))
+                if (instruction.handler is &operation)
+                    return false;
+            static foreach (width; indirectCopyWidths)
+                if (instruction.handler is &opStoreIndirectFixed!width)
+                    return false;
+            if (!leavesDestination(instruction.handler)
+                    && (instruction.destination & (1UL << 63)) != 0)
+                return false;
+        }
+        return true;
+    }
+
+    // Whether any instruction of `body_` writes the bytes
+    // `[offset, offset + width)` of its frame.
+    private bool bodyWrites(
+        in InlineBody body_, in size_t offset, in size_t width,
+    ) {
+        import std.meta: AliasSeq;
+
+        // An indexing instruction's width field is the element size; it
+        // writes one pointer.
+        enum indexWidth = size_t.sizeof;
+        foreach (instruction; body_.instructions) {
+            if (leavesDestination(instruction.handler))
+                continue;
+            size_t written = instruction.width == 0 ? 1 : instruction.width;
+            static foreach (operation; AliasSeq!(
+                opIndexSlice, opIndexStatic, opIndexPointer,
+            ))
+                if (instruction.handler is &operation)
+                    written = indexWidth;
+            if (instruction.destination < offset + width
+                    && instruction.destination + written > offset)
+                return true;
+        }
+        return false;
+    }
+
+    // Whether `instruction` writes the whole of `destination` with a result
+    // of `width` bytes in one machine word or less, from operands that do
+    // not include `destination` itself (a two-address instruction reads it).
+    // A comparison writes one byte whatever its operand width, so it is not
+    // one of them.
+    private bool writesWholeWord(in Instruction instruction, in size_t width) {
+        import std.meta: AliasSeq;
+
+        if (width > size_t.sizeof || instruction.width != width)
+            return false;
+        static foreach (operation; AliasSeq!(
+            opCopy, opLoadIndirect,
+            opCopyFixed!1, opCopyFixed!2, opCopyFixed!4, opCopyFixed!8,
+        ))
+            if (instruction.handler is &operation)
+                return true;
+        static foreach (copyWidth; indirectCopyWidths)
+            static if (copyWidth <= size_t.sizeof)
+                if (instruction.handler is &opLoadIndirectFixed!copyWidth)
+                    return true;
+        static foreach (index, operation; threeAddressHandlers)
+            static if (index < firstComparisonHandler) {
+                if (instruction.handler is &operation)
+                    return true;
+                if (instruction.handler
+                        is &threeAddressConstantHandlers[index])
+                    return true;
+            }
+        return false;
     }
 
     // Copies `body` into this function in place of a call whose arguments
     // are already in `args`. Its frame becomes a region of this frame, and
     // each return copies the result to `destOffset` and jumps past the copy.
+    //
+    // A parameter that nothing in the body writes shares the storage of
+    // the caller's operand instead of a copy of it. `args` is reordered:
+    // the shared arguments move to its front. A value that the last
+    // instruction before a return computes goes straight to `destOffset`.
     private void emitInlined(
         in InlineBody body_, Arg[] args, in size_t destOffset,
     ) {
@@ -1356,20 +1449,64 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _tempSize = base + body_.frameSize;
         if (body_.frameAlignment > _tempAlignment)
             _tempAlignment = body_.frameAlignment;
-        foreach (arg; args)
-            emit(&opCopy, base + arg.calleeOffset, arg.callerOffset,
-                arg.width);
+
+        size_t boundCount;
+        const mayBind = bodyWritesOnlyItsFrame(body_);
+        foreach (arg; args) {
+            if (mayBind && arg.width != 0
+                    && (arg.callerOffset & (1UL << 63)) == 0
+                    && !bodyWrites(body_, arg.calleeOffset, arg.width))
+                args[boundCount++] = arg;
+            else
+                emit(&opCopy, base + arg.calleeOffset, arg.callerOffset,
+                    arg.width);
+        }
+        const bound = args[0 .. boundCount];
+        size_t rebase(in size_t offset) {
+            foreach (arg; bound)
+                if (offset >= arg.calleeOffset
+                        && offset < arg.calleeOffset + arg.width)
+                    return arg.callerOffset + (offset - arg.calleeOffset);
+            return offset + base;
+        }
+        size_t place(in size_t operand) {
+            if ((operand & (1UL << 63)) == 0)
+                return rebase(operand);
+            const slot = (operand >> 32) & 0x7fff_ffffUL;
+            return indirectStorage(rebase(slot)) | (operand & 0xffff_ffffUL);
+        }
 
         const instructions = body_.instructions;
+        // `positions` first marks the branch targets, then holds the new
+        // index of each instruction.
+        auto positions = new size_t[instructions.length + 1];
+        enum targetMark = 1;
+        foreach (instruction; instructions) {
+            Instruction probe = instruction;
+            if (auto target = branchTargetField(probe))
+                positions[*target] = targetMark;
+        }
+        // A return whose copy to `destOffset` the instruction before it
+        // does instead.
+        auto direct = new bool[instructions.length];
+        foreach (i, instruction; instructions) {
+            if (instruction.handler !is &opReturn || destOffset == discardResult
+                    || i == 0 || positions[i] == targetMark
+                    || (instruction.source & (1UL << 63)) != 0)
+                continue;
+            const previous = instructions[i - 1];
+            direct[i] = previous.destination == instruction.source
+                && writesWholeWord(previous, instruction.width);
+        }
+
         const constantBase = _constants.length;
         _constants ~= body_.constants;
         const start = _instructions.length;
-        auto positions = new size_t[instructions.length + 1];
         size_t next = start;
         foreach (i, instruction; instructions) {
             positions[i] = next;
             if (instruction.handler is &opReturn)
-                next += (destOffset != discardResult ? 1 : 0)
+                next += (destOffset != discardResult && !direct[i] ? 1 : 0)
                     + (i + 1 == instructions.length ? 0 : 1);
             else if (instruction.handler is &opReturnVoid)
                 next += i + 1 == instructions.length ? 0 : 1;
@@ -1384,9 +1521,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             inlineOperandsOf(instruction.handler, roles);
             const isReturn = instruction.handler is &opReturn;
             if (isReturn || instruction.handler is &opReturnVoid) {
-                if (isReturn && destOffset != discardResult)
-                    emit(&opCopy, destOffset,
-                        inlineStorage(instruction.source, base),
+                if (isReturn && destOffset != discardResult && !direct[i])
+                    emit(&opCopy, destOffset, place(instruction.source),
                         instruction.width);
                 if (i + 1 != instructions.length)
                     emit(&opJump, end, 0, 0);
@@ -1394,13 +1530,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             }
             Instruction copied = instruction;
             if (roles.destination == Operand.storage)
-                copied.destination = inlineStorage(copied.destination, base);
+                copied.destination = i + 1 < instructions.length
+                        && direct[i + 1]
+                    ? destOffset : place(copied.destination);
             if (roles.source == Operand.storage)
-                copied.source = inlineStorage(copied.source, base);
+                copied.source = place(copied.source);
             else if (roles.source == Operand.constant)
                 copied.source += constantBase;
             if (roles.right == Operand.storage)
-                copied.sourceWidth = inlineStorage(copied.sourceWidth, base);
+                copied.sourceWidth = place(copied.sourceWidth);
             if (auto target = branchTargetField(copied))
                 *target = positions[*target];
             _instructions ~= copied;
@@ -5272,6 +5410,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         requireDestination(expression);
+        if (compileCheckedLoad(expression))
+            return;
         const place = placeOf(expression, true);
         emit(&opCopy, _destination, place, _width);
     }
@@ -6326,6 +6466,168 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
+    // The index of a checked access: where it is, and what is added to it in
+    // its own width.
+    private struct CheckedIndex {
+        size_t width;
+        bool signed;
+        long offset;
+        // The frame slot that holds the index, or `size_t.max`.
+        size_t slot = size_t.max;
+        Expression expression;
+    }
+
+    // Whether `expression` is an element of a slice that one instruction
+    // reads or writes after its bounds check. Emits no code.
+    private bool checkedIndexShape(
+        IndexExp expression, in size_t elementSize, out CheckedIndex shape,
+    ) {
+        import dmd.astenums: Tarray;
+        import dmd.sideeffect: hasSideEffect;
+        import snakebite.backends.checkplan: boundsPlanOf, FailurePlan;
+
+        auto arrayType = expression.e1.type.toBasetype;
+        if (arrayType.ty != Tarray || expression.lengthVar !is null
+                || hasSideEffect(expression.e2)
+                || !isPlainPlace(expression.e1))
+            return false;
+        if (typeFacts(arrayType.nextOf).size != elementSize
+                || (elementSize != 1 && elementSize != 2 && elementSize != 4
+                    && elementSize != 8))
+            return false;
+        if (boundsPlanOf(_bytecode.checks, _function).kind
+                == FailurePlan.Kind.ignore)
+            return false;
+        // Semantic widens a 32-bit index to `size_t` with a cast.
+        auto indexExpression = expression.e2;
+        if (auto widening = indexExpression.isCastExp) {
+            const narrow = typeFacts(widening.e1.type);
+            if (narrow.isIntegral && narrow.size == 4
+                    && typeFacts(widening.type).size == size_t.sizeof)
+                indexExpression = widening.e1;
+        }
+        const index = typeFacts(indexExpression.type);
+        if (!index.isIntegral || (index.size != 4 && index.size != 8))
+            return false;
+        shape.width = index.size;
+        shape.signed = !index.isUnsigned;
+        shape.expression = indexExpression;
+        if (auto sum = indexExpression.isBinExp) {
+            auto literal = sum.e2.isIntegerExp;
+            if ((sum.op == EXP.add || sum.op == EXP.min) && literal !is null
+                    && typeFacts(sum.e1.type).size == index.size
+                    && typeFacts(sum.e1.type).isUnsigned == index.isUnsigned) {
+                const local = operandOf(sum.e1, index.size, false);
+                const value = sum.op == EXP.add
+                    ? cast(long) literal.toInteger
+                    : -cast(long) literal.toInteger;
+                if (local != size_t.max && value >= int.min
+                        && value <= int.max) {
+                    shape.slot = local;
+                    shape.offset = value;
+                    return true;
+                }
+            }
+        }
+        shape.slot = operandOf(indexExpression, index.size, false);
+        return true;
+    }
+
+    private bool compileCheckedLoad(IndexExp expression) {
+        CheckedIndex shape;
+        if (!checkedIndexShape(expression, _width, shape)
+                || !isScalarOperand(expression.type, _width,
+                    isRealFloatType(expression.type)))
+            return false;
+        const array = placeOf(expression.e1, true);
+        if (array == size_t.max)
+            return false;
+        emitCheckedIndex(expression, shape, false, _destination, array);
+        return true;
+    }
+
+    private bool compileCheckedStore(
+        IndexExp expression, Expression value, in size_t width,
+        in bool floating,
+    ) {
+        CheckedIndex shape;
+        if (!checkedIndexShape(expression, width, shape))
+            return false;
+        const array = placeOf(expression.e1, true);
+        if (array == size_t.max)
+            return false;
+        size_t operand = operandOf(value, width, floating);
+        if (operand == size_t.max) {
+            // Native order checks the left side first; the instruction checks
+            // it after the value, so the value must not be able to fail.
+            if (!cannotFail(value))
+                return false;
+            operand = reserveTemp(typeFacts(expression.type));
+            evalInto(value, operand, width, expression.type);
+        }
+        emitCheckedIndex(expression, shape, true, operand, array);
+        return true;
+    }
+
+    // Whether evaluating `expression` cannot raise an `Error` or an
+    // exception: literals, plain locals and arithmetic over them.
+    private bool cannotFail(Expression expression) {
+        switch (expression.op) {
+            case EXP.int64, EXP.float64:
+                return true;
+            case EXP.variable:
+                return localSlot(expression) != size_t.max;
+            case EXP.cast_:
+                return cannotFail(expression.isCastExp.e1);
+            case EXP.negate, EXP.tilde:
+                return cannotFail(expression.isUnaExp.e1);
+            case EXP.add, EXP.min, EXP.mul, EXP.and, EXP.or, EXP.xor:
+                auto binary = expression.isBinExp;
+                return cannotFail(binary.e1) && cannotFail(binary.e2);
+            default:
+                return false;
+        }
+    }
+
+    // The access, then the failure code of the bounds check. The access
+    // continues after the failure code when the index is in bounds.
+    private void emitCheckedIndex(
+        IndexExp expression, CheckedIndex shape, in bool store,
+        in size_t value, in size_t array,
+    ) {
+        import snakebite.nativelayout: arrayLengthOffset;
+
+        auto indexType = shape.expression.type;
+        if (shape.slot == size_t.max) {
+            shape.slot = reserveTemp(typeFacts(indexType));
+            evalInto(shape.expression, shape.slot, shape.width);
+        }
+        const element = typeFacts(expression.type).size;
+        const handler = checkedIndexHandler(store, shape.width, shape.signed,
+            element);
+        const packed = shape.slot
+            | (cast(size_t) cast(uint) cast(int) shape.offset << 32);
+        const length = placeAt(array, arrayLengthOffset);
+        compileIndexCheckWith({
+            emit(handler, value, array, packed, 0);
+        }, () {
+            // The index the hook reports: the index plus the offset, in
+            // the width of the index, then widened in place.
+            const wide = reserveTemp(pointerFacts);
+            emit(&opCopy, wide, shape.slot, shape.width);
+            if (shape.offset != 0) {
+                const offset = reserveTemp(typeFacts(indexType));
+                emit(&opConstant, offset, addConstant(shape.offset),
+                    shape.width);
+                emit(&opAdd, wide, offset, shape.width);
+            }
+            if (shape.width != size_t.sizeof)
+                emit(shape.signed ? &opCastWidenSigned : &opCastWidenUnsigned,
+                    wide, shape.width, size_t.sizeof);
+            return Arg(wide, 0, size_t.sizeof);
+        }, () => Arg(length, 0, size_t.sizeof), expression.loc);
+    }
+
     // The value of a literal index that `$` does not depend on, or
     // `size_t.max`.
     private size_t literalIndex(IndexExp expression) {
@@ -6940,6 +7242,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 emit(&opCopy, destOffset, local, facts.size);
             return true;
         }
+
+        if (destOffset == discardResult && !hasSideEffect(value))
+            if (auto indexed = expression.e1.isIndexExp)
+                if (compileCheckedStore(indexed, value, facts.size,
+                        floating))
+                    return true;
 
         const target = placeOf(expression.e1, !hasSideEffect(value));
         if (target == size_t.max)
@@ -8091,6 +8399,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return compileIndirectCall(expression, destOffset);
 
         callee = _bytecode.definitionOf(callee);
+        if (compileFloatIntrinsic(expression, callee, destOffset))
+            return;
         if (compileNativeArrayNew(expression, callee, destOffset))
             return;
         if (expression.readsVtable(callee))
@@ -8158,6 +8468,35 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             [Arg(info, 0, size_t.sizeof), Arg(length, 0, size_t.sizeof)],
             2 * size_t.sizeof);
         emit(&opCall, destOffset, _callSites.length - 1, 0);
+        return true;
+    }
+
+    // `core.math.sqrt` and `core.math.fabs` on a float type: the operand is
+    // evaluated into the destination and a handler applies the operation in
+    // place. Returns false when `expression` is not such a call.
+    private bool compileFloatIntrinsic(
+        CallExp expression, FuncDeclaration callee, in size_t destOffset,
+    ) {
+        import dmd.astenums: Tfloat32, Tfloat64, Tfloat80;
+
+        if (destOffset == discardResult)
+            return false;
+        Instruction.Handler handler;
+        final switch (_bytecode._callSelection.floatIntrinsicOf(expression, callee))
+            with (CallSelection.FloatIntrinsic) {
+            case none: return false;
+            case sqrt: handler = &opFloatSqrt; break;
+            case fabs: handler = &opFloatAbs; break;
+        }
+        const ty = expression.type.ty;
+        // A declaration whose operand differs from its result (`double
+        // fabs(real)`) is not the host's operation: it stays a call.
+        if (ty != Tfloat32 && ty != Tfloat64 && ty != Tfloat80
+                || (*expression.arguments)[0].type.ty != ty)
+            return false;
+        const width = typeFacts(expression.type).size;
+        evalInto((*expression.arguments)[0], destOffset, width);
+        emit(handler, destOffset, 0, width);
         return true;
     }
 
@@ -8246,10 +8585,34 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             evalInto(receiver.expression, object, size_t.sizeof);
             return object;
         case aggregateAddress:
-            return compileAddress(receiver.expression);
+            return receiverAddress(receiver.expression, expression);
         case implicitThis:
             return hiddenThisOffset;
         }
+    }
+
+    // The address of the receiver `aggregate` of `expression`. A pointer
+    // held in a plain local is read in place when no argument can change
+    // it before the callee runs.
+    private size_t receiverAddress(Expression aggregate, CallExp expression) {
+        import dmd.sideeffect: hasSideEffect;
+
+        bool argumentsPure = true;
+        if (expression.arguments !is null)
+            foreach (argument; *expression.arguments)
+                if (argument !is null && hasSideEffect(argument))
+                    argumentsPure = false;
+        with (EXP) switch (aggregate.op) {
+            case variable, dotVariable, star, index: {
+                const place = placeOf(aggregate, argumentsPure);
+                if (place != size_t.max)
+                    return addressOfPlace(place);
+                break;
+            }
+            default:
+                break;
+        }
+        return compileAddress(aggregate);
     }
 
     // Compiles a call to `callee` with `arguments` already resolved -
