@@ -772,7 +772,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         isFusedBranch, specialiseHandlers, RegisterFamily, registerFamily,
         fusedRegisterFamily, registerForm, fusedRegisterForm,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
-        opBranchTrue, opCall,
+        opBranchTrue, opCall, opCallWindowDiscard, opCallWindowFrame,
+        opCallWindowIndirect,
         opCastAs, opCastFixedAs,
         opCastToBool, opCastWidenSigned, opCastWidenUnsigned, opComplement,
         opAlloca, opArrayEqual, opComplex, opComplexNegate, opConstant, opCopy,
@@ -8870,6 +8871,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return indirectStorage(window.baseSlot) + window.frame + offset;
     }
 
+    private static Instruction.Handler windowCallHandler(in size_t destOffset) {
+        if (destOffset == discardResult)
+            return &opCallWindowDiscard;
+        return (destOffset & (1UL << 63)) != 0
+            ? &opCallWindowIndirect : &opCallWindowFrame;
+    }
+
     // A call whose arguments are evaluated straight into the parameter
     // slots of the callee, in a window above the end of this frame. Nothing
     // is copied when the call runs, and no temporary of this function can
@@ -8942,7 +8950,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             deferred(() => bytecode.compileFunction(callee)), args,
             returnShape.returnFacts.size, window,
         );
-        emit(&opCall, destOffset, siteIndex, 0);
+        emit(windowCallHandler(destOffset), destOffset, siteIndex, 0);
         emitReceiverResult(returnShape, destOffset, receiverOffset);
     }
 
