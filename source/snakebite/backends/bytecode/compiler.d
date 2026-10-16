@@ -1474,7 +1474,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const forwardsCall = (previous.handler is &opCallWindowFrame
                     || previous.handler is &opCall)
                 && _callSites[previous.source].returnWidth == instruction.width;
-            if (!forwardsCall && !writesWholeWord(*previous, instruction.width))
+            if (!forwardsCall && !writesWholeWord(*previous, instruction.width)
+                    && !copiesValue(*previous, instruction.width))
                 continue;
             if (slot == size_t.max)
                 slot = reserveTemp(pointerFacts);
@@ -1486,6 +1487,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (slot == size_t.max)
             return place;
         return ReturnPlace(slot, _returnFacts.size, _returnFacts.alignment);
+    }
+
+    // Whether `instruction` copies a value of `width` bytes from a frame
+    // slot to `destination` in one write. A copy from the frame of the
+    // function never overlaps the place of its result.
+    private bool copiesValue(in Instruction instruction, in size_t width) {
+        import std.meta: AliasSeq;
+
+        if (instruction.width != width
+                || (instruction.source & (1UL << 63)) != 0)
+            return false;
+        if (instruction.handler is &opCopy)
+            return true;
+        static foreach (copyWidth; AliasSeq!(1, 2, 4, 8, 16))
+            if (instruction.handler is &opCopyFixed!copyWidth)
+                return copyWidth == width;
+        return false;
     }
 
     // Whether `instruction` writes the whole of `destination` with a result
