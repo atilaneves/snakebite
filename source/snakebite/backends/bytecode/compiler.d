@@ -9243,6 +9243,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.typesem: isZeroInit;
         import snakebite.frontend.compiler: newInFrontend;
         import snakebite.backends.druntimehooks: DruntimeHook, planOf;
+        import snakebite.frontend.dmd.functions: moduleOf;
 
         if (callee.ident is null || callee.parent is null)
             return false;
@@ -9254,7 +9255,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 || expression.arguments is null
                 || expression.arguments.length == 0)
             return false;
-        const declaration = callee.getModule.md;
+        const declaration = moduleOf(callee).md;
         if (declaration is null || declaration.id.toString != "construction"
                 || declaration.packages.length != 3
                 || declaration.packages[0].toString != "core"

@@ -88,11 +88,13 @@ public CAssertCall cAssertCallOf(
     in imported!"dmd.location".Loc loc,
     imported!"dmd.func".FuncDeclaration function_,
 ) {
+    import snakebite.frontend.dmd.functions: prettyNameOf;
+
     return CAssertCall(
         assertion,
         loc.filename,
         cast(uint) loc.linnum,
-        function_ is null ? "" : function_.toPrettyChars,
+        function_ is null ? "" : prettyNameOf(function_),
     );
 }
 

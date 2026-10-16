@@ -362,6 +362,7 @@ public struct RuntimeTypes {
     // through that same fabrication path.
     public TypeInfo_Class linkedClassInfo(ClassDeclaration declaration) {
         import dmd.root.string: toDString;
+        import snakebite.frontend.dmd.functions: prettyNameOf;
 
         if (isRootOwned(declaration))
             return null;
@@ -373,13 +374,14 @@ public struct RuntimeTypes {
             return info;
 
         return cast(TypeInfo_Class) TypeInfo_Class.find(
-            declaration.toPrettyChars.toDString);
+            prettyNameOf(declaration).toDString);
     }
 
     private TypeInfo_Enum enumInfo(EnumDeclaration declaration) {
         import dmd.root.string: toDString;
+        import snakebite.frontend.dmd.functions: prettyNameOf;
         auto info = new TypeInfo_Enum;
-        info.name = cast(string) declaration.toPrettyChars.toDString;
+        info.name = cast(string) prettyNameOf(declaration).toDString;
         info.base = get(declaration.memtype);
         info.m_init = cast(byte[]) _initialValue(
             declaration.type, declaration.loc,

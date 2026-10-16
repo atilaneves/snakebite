@@ -352,7 +352,9 @@ private extern(C++) class InlineAsmVersionGate
             return;
         }
 
-        const owner = target.getModule;
+        import snakebite.frontend.dmd.functions: moduleOf;
+
+        const owner = moduleOf(target);
         if ((owner !is null && owner !is _module) || target in _aliasTargets)
             return;
         _aliasTargets[target] = true;

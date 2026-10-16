@@ -49,7 +49,9 @@ public FailurePlan boundsPlanOf(
 ) {
     import dmd.astenums: CHECKENABLE, FileType, TRUST;
 
-    const module_ = function_ is null ? null : function_.getModule;
+    import snakebite.frontend.dmd.functions: moduleOf;
+
+    const module_ = function_ is null ? null : moduleOf(function_);
     if (module_ !is null && module_.filetype == FileType.c)
         return planFor(CHECKENABLE.off, checks);
 

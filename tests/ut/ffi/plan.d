@@ -3078,3 +3078,139 @@ unittest {
 
     (cast(int[]) destBuffer[]).should == [3, 4];
 }
+
+
+// `dmd.dsymbolsem.scopeCreateGlobal` makes the root package of its module
+// a child of a temporary scope symbol and clears the parent again. A
+// guest thread that walks a parent chain (`getModule`, `isInstantiated`,
+// `toPrettyChars`) must exclude such writers: reading `parent` twice, once
+// for the null check and once for the use, can see the clear in between.
+// Every thread caches its answers per declaration, so the reader asks
+// about many declarations, each one for the first time.
+private enum raceFunctions = 3000;
+private enum raceReaders = 8;
+
+private void readWhileGlobalScopeIsSetUp(
+    scope void delegate(FuncDeclaration) read,
+) {
+    import core.atomic: atomicLoad, atomicStore;
+    import core.thread: Thread;
+    import dmd.dsymbolsem: scopeCreateGlobal;
+    import dmd.globals: global;
+    import snakebite.frontend.compiler: newInFrontend, withCompilerLock;
+    import std.array: appender;
+    import std.conv: text;
+
+    auto source = appender!string;
+    source.put("module snakebite_ut_race.guest;\n");
+    foreach (i; 0 .. raceFunctions)
+        source.put(text("int target", i, "() { return 1; }\n"));
+    auto guestModule = parseSnippet(source[]);
+
+    FuncDeclaration[] functions;
+    foreach (i; 0 .. raceFunctions) {
+        auto function_ = findFunction(guestModule, text("target", i));
+        assert(function_ !is null, "Missing guest function");
+        functions ~= function_;
+    }
+
+    shared bool done = false;
+    auto writer = new Thread({
+        while (!atomicLoad(done))
+            withCompilerLock({
+                newInFrontend!scopeCreateGlobal(guestModule, global.errorSink);
+            });
+    });
+    writer.start;
+    scope(exit) {
+        atomicStore(done, true);
+        writer.join;
+    }
+
+    // Each reader thread has its own caches, so each one asks cold.
+    Thread[] readers;
+    foreach (_; 0 .. raceReaders)
+        readers ~= new Thread({
+            foreach (function_; functions)
+                read(function_);
+        });
+    foreach (reader; readers)
+        reader.start;
+    foreach (reader; readers)
+        reader.join; // Rethrows what the reader threw.
+}
+
+
+@("nativeTarget.excludesConcurrentGlobalScopeSetup")
+unittest {
+    import snakebite.druntime.constructoratomic: nativeTarget;
+
+    readWhileGlobalScopeIsSetUp((function_) {
+        nativeTarget(function_).address.should == null;
+    });
+}
+
+
+@("boundsPlanOf.excludesConcurrentGlobalScopeSetup")
+unittest {
+    import snakebite.backends.checkplan: boundsPlanOf;
+    import snakebite.frontend.checks: Checks;
+
+    readWhileGlobalScopeIsSetUp((function_) {
+        boundsPlanOf(Checks.init, function_);
+    });
+}
+
+
+@("cAssertCallOf.excludesConcurrentGlobalScopeSetup")
+unittest {
+    import dmd.location: Loc;
+    import snakebite.backends.exceptions: cAssertCallOf;
+
+    readWhileGlobalScopeIsSetUp((function_) {
+        (cAssertCallOf("x", Loc.initial, function_).function_ !is null).should == true;
+    });
+}
+
+
+// A repeated `nativeTarget` call must not take the frontend lock: the
+// answer is cached, and a finalizer scope that cannot lock asks it.
+@("nativeTarget.repeatedQueryTakesNoLock")
+unittest {
+    import core.atomic: atomicLoad, atomicStore;
+    import core.thread: Thread;
+    import core.time: MonoTime, msecs;
+    import snakebite.druntime.constructoratomic: nativeTarget;
+    import snakebite.frontend.compiler: withCompilerLock;
+
+    auto guestModule = parseSnippet(q{
+        module snakebite_ut_nativetarget.cached;
+        int target() { return 1; }
+    });
+    auto function_ = findFunction(guestModule, "target");
+    nativeTarget(function_);
+
+    shared bool held = false;
+    shared bool answered = false;
+    auto holder = new Thread({
+        withCompilerLock({
+            atomicStore(held, true);
+            foreach (_; 0 .. 200) {
+                if (atomicLoad(answered))
+                    break;
+                Thread.sleep(10.msecs);
+            }
+        });
+    });
+    holder.start;
+    scope(exit) holder.join;
+    while (!atomicLoad(held))
+        Thread.yield;
+
+    const start = MonoTime.currTime;
+    nativeTarget(function_);
+    const waited = MonoTime.currTime - start;
+    atomicStore(answered, true);
+    // The holder keeps the lock for up to 2 s; a call that locks waits.
+    (waited < 500.msecs).should == true;
+}
