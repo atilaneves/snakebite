@@ -8,7 +8,8 @@ import snakebite.backends.bytecode.inspection:
     handlerRoleMismatches, misplacedRelocs, relocsOf, unrecordedWords;
 import snakebite.backends.bytecode.relocation: Place, Target, recordRelocs;
 import snakebite.backends.bytecode.vm:
-    Function, Instruction, opConstant, specialisedHandlersWithoutRoles;
+    Function, Instruction, opConstant, registerFormsWithChangedRoles,
+    specialisedHandlersWithoutRoles;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import std.conv: to;
@@ -89,6 +90,22 @@ package enum addressPrograms = q{
             total -= 11;
         double scale = seed * 2.5;
         return total + cast(long) scale;
+    }
+
+    // Chains whose intermediate results travel in a register, ending in a
+    // compare-and-branch on the result.
+    long runRegisters() {
+        long x = 6;
+        long y = 4;
+        long integer = x * y + 5 - y;
+        double d = 1.5;
+        double e = d * 2.0 + d - 0.5;
+        if (x * y + 1 > 20)
+            integer += 1;
+        long total = integer + cast(long) e;
+        if (d * 2.0 < 4.0)
+            total += 100;
+        return total;
     }
 
     // Every statement starts a full expression, whose lifetime marker is
@@ -193,7 +210,7 @@ private enum addressChecksums = [
     Checksum("runStatics", 31), Checksum("runPointers", 25),
     Checksum("runStackClass", 7), Checksum("runChecks", 10),
     Checksum("runThrow", 6), Checksum("runLiterals", 43),
-    Checksum("runRemap", 15),
+    Checksum("runRemap", 15), Checksum("runRegisters", 130),
 ];
 
 // What each entry point of `callPrograms` returns.
@@ -328,6 +345,14 @@ unittest {
 @("relocation.everySpecialisedHandlerHasRoles")
 unittest {
     specialisedHandlersWithoutRoles.should == 0;
+}
+
+// The compiler records the addresses of a function before it swaps an
+// operation for its register form, and the loader of an image reads the roles
+// of the form.
+@("relocation.registerFormsKeepTheRolesOfTheOriginal")
+unittest {
+    registerFormsWithChangedRoles.should == 0;
 }
 
 // The handlers that no specialisation covers are registered by hand.

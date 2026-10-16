@@ -3763,7 +3763,8 @@ private template rolesOfOperation(alias operation, OperandKind sourceKind,
         // The second parameter is `staticSource`: the source is an address.
         enum rolesOfOperation = Roles(Role.other,
             Parameters[1] ? Role.address : Role.other, Role.other);
-    else static if (__traits(isSame, operation, runFusedBranch))
+    else static if (__traits(isSame, operation, runFusedBranch)
+            || __traits(isSame, operation, runFusedBranchR))
         // With a constant, `source` is the address of a pool constant.
         enum rolesOfOperation = Roles(Role.other,
             sourceKind == OperandKind.immediate ? Role.address : Role.other,
@@ -3778,6 +3779,12 @@ private template rolesOfOperation(alias operation, OperandKind sourceKind,
         // of a pool constant.
         enum rolesOfOperation = Roles(Role.other, Role.other,
             Parameters[$ - 1] ? Role.address : Role.other);
+    else static if (__traits(isSame, operation, runInt3R)
+            || __traits(isSame, operation, runFloat3R))
+        // The second parameter is `constant`. An operand that travels in a
+        // register holds nothing.
+        enum rolesOfOperation = Roles(Role.other, Role.other,
+            Parameters[1] ? Role.address : Role.other);
     else static if (staticIndexOf!(operation, plainOperations) >= 0)
         enum rolesOfOperation = Roles.init;
     else
@@ -3868,6 +3875,35 @@ public size_t specialisedHandlersWithoutRoles() {
             }
     }
     return missing;
+}
+
+
+// The register form of a handler is a different handler that replaces the
+// original after the compiler recorded the original's addresses, so it has to
+// hold the same roles. Counts the register forms whose roles differ.
+version (unittest)
+public size_t registerFormsWithChangedRoles() {
+    size_t changed;
+    void compare(Instruction.Handler original, Instruction.Handler form) {
+        // A handler that is not in the table has `Roles.init`.
+        Roles before;
+        Roles after;
+        rolesOf(original, before);
+        rolesOf(form, after);
+        if (before != after)
+            ++changed;
+    }
+    static foreach (triple; registerNames)
+        static foreach (constant; [false, true])
+            static foreach (from; [false, true])
+                static foreach (to; [false, true])
+                    static if (from || to)
+                        compare(mixin("&" ~ triple[0] ~ (constant ? "K" : "")),
+                            registerForm(mixin("&" ~ triple[0]
+                                ~ (constant ? "K" : "")), from, to));
+    foreach (index, original; fusedHandlers)
+        compare(original, fusedRegisterForm(original));
+    return changed;
 }
 
 
