@@ -279,3 +279,32 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+
+static foreach (backend; Matrix!()) {
+    @("destination.throwAfterPartialValueLeavesDestination." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(
+            backend,
+            q{
+                int thrower(int value) {
+                    if (value > 0)
+                        throw new Exception("thrown");
+                    return value;
+                }
+
+                int result() {
+                    int x = 7;
+                    const y = 3;
+                    try {
+                        x = y * 2 + thrower(y);
+                    } catch (Exception) {
+                    }
+                    return x;
+                }
+            },
+            "result",
+        );
+    }
+}

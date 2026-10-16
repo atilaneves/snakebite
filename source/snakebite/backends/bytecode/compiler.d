@@ -1126,7 +1126,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         optimizeStaticLoads;
-        debugDump("pre");
         fuseReturns;
         fuseLoadCopies;
         assignRegisters;
@@ -1185,42 +1184,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         result.inlineBody = inlineBody;
         result.relocs = _relocs;
         return result;
-    }
-
-    private void debugDump(string tag) {
-        import core.stdc.stdio: fprintf, stderr;
-        import core.stdc.stdlib: getenv;
-        import std.string: toStringz;
-        if (getenv("SB_DUMP") is null)
-            return;
-        fprintf(stderr, "FUNC %s base %p\n", _function.toString.toStringz, cast(void*) &opReturn);
-        foreach (i, ref ins; _instructions)
-            fprintf(stderr, "I %zu %s d=%zx s=%zx w=%zu sw=%zx\n", i,
-                dumpName(ins.handler), ins.destination, ins.source, ins.width, ins.sourceWidth);
-    }
-
-    private const(char)* dumpName(Instruction.Handler h) {
-        import std.meta: AliasSeq;
-        static foreach (n; ["opAdd", "opAssert", "opBitAnd", "opBitOr", "opBitXor", "opBranchFalse", "opBranchTrue", "opCall", "opCastToBool", "opCastWidenSigned", "opCastWidenUnsigned", "opComplement", "opConstant", "opCopy", "opEqual", "opFrameAddress", "opJump", "opLoadIndirect", "opLogicalNot", "opMultiply", "opNegate", "opNotEqual", "opReturn", "opReturnVoid", "opStoreIndirect", "opSubtract", "opThrow", "opZero", "opStaticLoad", "opStaticStore", "opStaticAddress", "opLessThanSigned", "opGreaterThanSigned", "opLessOrEqualSigned", "opGreaterOrEqualSigned", "opTemporaryBegin", "opTemporaryEnd", "opTemporaryRegister", "opRangeEnd", "opIndexSlice", "opIndexStatic", "opIndexPointer", "opShiftLeft", "opShiftRightArithmetic", "opShiftRightLogical", "opLessThanUnsigned", "opGreaterThanUnsigned", "opDivideSigned", "opModuloSigned", "opFloatAdd", "opFloatSubtract", "opFloatMultiply"])
-            if (h is mixin("&" ~ n)) return (n ~ "\0").ptr;
-        static foreach (w; [1, 2, 4, 8, 16]) {
-            if (h is &opCopyFixed!w) return ("CopyFixed" ~ w.stringof ~ "\0").ptr;
-            if (h is &opCopyFixed!(w, true)) return ("CopyFixedStatic" ~ w.stringof ~ "\0").ptr;
-        }
-        static foreach (w; indirectCopyWidths) {
-            if (h is &opLoadIndirectFixed!w) return ("LoadIndirectFixed" ~ w.stringof ~ "\0").ptr;
-            if (h is &opStoreIndirectFixed!w) return ("StoreIndirectFixed" ~ w.stringof ~ "\0").ptr;
-        }
-        static foreach (kind; [CastKind.narrow, CastKind.widenSigned, CastKind.widenUnsigned])
-            static foreach (d; [1UL, 2, 4, 8])
-                static foreach (sz; [1UL, 2, 4, 8])
-                    if (h is &opCastFixedAs!(kind, d, sz)) return ("Cast" ~ kind.stringof ~ d.stringof ~ "from" ~ sz.stringof ~ "\0").ptr;
-        static foreach (i, op; threeAddressHandlers) {
-            if (h is &op) return ("Three" ~ i.stringof ~ "\0").ptr;
-            if (h is &threeAddressConstantHandlers[i]) return ("ThreeConst" ~ i.stringof ~ "\0").ptr;
-        }
-        if (isFusedBranch(h)) return "FusedBranch";
-        return "?";
     }
 
     // dmd normally rejects a non-void function whose end is reachable, but
