@@ -4287,6 +4287,15 @@ private void specialiseCopyFixed(size_t width, bool staticSource)() {
         false, width, staticSource)();
 }
 
+// `opLoadIndirectFixed` and `opStoreIndirectFixed` take a `size_t` width, and
+// a handler registered with another type of width would never be found.
+private void specialiseIndirect(size_t width)() {
+    specialise!(runLoadIndirect, OperandKind.storage, OperandKind.storage,
+        noWidths, false, width)();
+    specialise!(runStoreIndirect, OperandKind.storage, OperandKind.storage,
+        noWidths, false, width)();
+}
+
 shared static this() {
     enum S = OperandKind.storage;
     enum I = OperandKind.immediate;
@@ -4367,8 +4376,7 @@ shared static this() {
                             ? noWidths : integralWidths,
                         false, comparisonSymbols[comparison], kind, jumpWhen)();
     static foreach (width; [1, 2, 4, 8, 16, 32]) {
-        specialise!(runLoadIndirect, S, S, noWidths, false, width)();
-        specialise!(runStoreIndirect, S, S, noWidths, false, width)();
+        specialiseIndirect!width;
         static foreach (copyWidth; [1, 2, 4, 8, 16]) {{
             Specialisation entry;
             entry.general = &opLoadThenCopy!(width, copyWidth);
@@ -4401,12 +4409,49 @@ shared static this() {
     foreach (handler; branchHandlers)
         if (!holdsInstruction(handler))
             internalFailure("a branch handler has no instruction role");
-    static foreach (width; [1, 2, 4, 8, 16])
-        if (lookupSpecialisation(&opCopyFixed!width) is null)
-            internalFailure("opCopyFixed has no specialisation");
+    checkSpecialised;
+}
+
+// The table finds a handler by its address, so a specialisation registered
+// under a different template instance than the one the compiler emits (an
+// `int` where `size_t` is declared) would never match. This checks, at start
+// up, every handler family that the compiler emits.
+private void checkSpecialised() {
+    void check(in Instruction.Handler handler, in string family) {
+        if (lookupSpecialisation(handler) is null)
+            internalFailure(family ~ " has no specialisation");
+    }
+    static foreach (handler; threeAddressHandlers)
+        check(&handler, "a three-address handler");
+    static foreach (handler; threeAddressConstantHandlers)
+        check(&handler, "a three-address handler with a constant");
+    foreach (handler; fusedHandlers)
+        check(handler, "a fused branch");
+    foreach (base; EnumMembers!IndexBase)
+        check(&opIndex!base, "opIndex");
+    static foreach (width; [1, 2, 4, 8, 16]) {
+        check(&opCopyFixed!width, "opCopyFixed");
+        static foreach (loadWidth; [1, 2, 4, 8, 16, 32])
+            check(&opLoadThenCopy!(loadWidth, width), "opLoadThenCopy");
+    }
     static foreach (width; 1 .. 17)
-        if (lookupSpecialisation(&opCopyFixed!(width, true)) is null)
-            internalFailure("opCopyFixed has no specialisation");
+        check(&opCopyFixed!(width, true), "opCopyFixed");
+    static foreach (width; [1, 2, 4, 8, 16, 32]) {
+        check(&opLoadIndirectFixed!width, "opLoadIndirectFixed");
+        check(&opStoreIndirectFixed!width, "opStoreIndirectFixed");
+    }
+    static foreach (handler; AliasSeq!(opLoadIndirect, opStoreIndirect))
+        check(&handler, "an indirect memory operation");
+    foreach (handler; fusedHandlers)
+        check(fusedRegisterForm(handler), "a fused register branch");
+    static foreach (triple; registerNames)
+        static foreach (constant; [false, true])
+            static foreach (from; [false, true])
+                static foreach (to; [false, true])
+                    static if (from || to)
+                        check(registerForm(mixin("&" ~ triple[0]
+                            ~ (constant ? "K" : "")), from, to),
+                            "a register form");
 }
 
 // The handlers that the compiler emits with a branch target. A target that
