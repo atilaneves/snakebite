@@ -1110,6 +1110,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     && _instructions[$ - 1].handler !is &opJump))
             emit(&opReturnVoid, 0, 0, 0);
         auto inlineBody = inlineBodyOfBuilt;
+        const resultPlace = redirectReturns;
         resolveBranches();
 
         ExceptionHandler[] exceptionHandlers;
@@ -1185,7 +1186,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 ? _layout.variadicCursor : size_t.max,
             _layout.parameters.length,
             _layout.signature,
-            _layout.returnPlace,
+            resultPlace,
         );
         result.inlineBody = inlineBody;
         result.relocs = _relocs;
@@ -1411,6 +1412,67 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return true;
         }
         return false;
+    }
+
+    // Makes a return leave without a copy, where its value is already written
+    // where the caller wants it. A `return` whose value the instruction
+    // before it computes in one write has that instruction write the place
+    // directly: the place holds the destination of the call, and the write
+    // comes after every read of the callee, so the callee still sees the
+    // old destination until then. A function whose returns are all of that
+    // kind keeps a pointer to the place in a frame slot; the callers store it
+    // there. Returns the place of the function.
+    private imported!"snakebite.backends.returnplace".ReturnPlace
+    redirectReturns() {
+        import snakebite.backends.returnplace: ReturnPlace;
+
+        auto place = _layout.returnPlace;
+        if (_isVoidReturn || _isRefReturn)
+            return place;
+        if (place.offset != size_t.max) {
+            // The value was written through the place already.
+            const written = indirectStorage(place.offset);
+            foreach (ref instruction; _instructions)
+                if (instruction.handler is &opReturn
+                        && instruction.source == written)
+                    instruction.handler = &opReturnVoid;
+            return place;
+        }
+
+        auto targets = new bool[_instructions.length + 1];
+        foreach (ref instruction; _instructions)
+            if (auto target = branchTargetField(instruction))
+                targets[*target] = true;
+        foreach (handler; _exceptionHandlers) {
+            targets[handler._bodyStart] = true;
+            targets[handler._bodyEnd] = true;
+            targets[handler._handler] = true;
+            if (handler._cleanupEnd != size_t.max)
+                targets[handler._cleanupEnd] = true;
+        }
+        foreach (site; _callSites)
+            if (site.cleanupStartIndex != size_t.max) {
+                targets[site.cleanupStartIndex] = true;
+                targets[site.cleanupEndIndex] = true;
+            }
+
+        size_t slot = size_t.max;
+        foreach (index; 1 .. _instructions.length) {
+            auto instruction = &_instructions[index];
+            auto previous = &_instructions[index - 1];
+            if (instruction.handler !is &opReturn || targets[index]
+                    || instruction.source != previous.destination
+                    || (instruction.source & (1UL << 63)) != 0
+                    || !writesWholeWord(*previous, instruction.width))
+                continue;
+            if (slot == size_t.max)
+                slot = reserveTemp(pointerFacts);
+            previous.destination = indirectStorage(slot);
+            instruction.handler = &opReturnVoid;
+        }
+        if (slot == size_t.max)
+            return place;
+        return ReturnPlace(slot, _returnFacts.size, _returnFacts.alignment);
     }
 
     // Whether `instruction` writes the whole of `destination` with a result
