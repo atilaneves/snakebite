@@ -6440,11 +6440,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (array == size_t.max)
             return false;
         size_t operand = operandOf(value, width, floating);
+        if (operand == size_t.max && !cannotFail(value)) {
+            // Native order checks the left side first, so the bounds check
+            // runs before the value, and the store after it needs none.
+            resolveIndexSlot(shape);
+            emitCheckedIndex(expression, shape, CheckedAccess.check, 0,
+                array);
+            operand = reserveTemp(typeFacts(expression.type));
+            evalInto(value, operand, width, expression.type);
+            emitCheckedIndex(expression, shape, CheckedAccess.storeUnchecked,
+                operand, array);
+            return true;
+        }
         if (operand == size_t.max) {
-            // Native order checks the left side first; the instruction checks
-            // it after the value, so the value must not be able to fail.
-            if (!cannotFail(value))
-                return false;
             operand = reserveTemp(typeFacts(expression.type));
             evalInto(value, operand, width, expression.type);
         }

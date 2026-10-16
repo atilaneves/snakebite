@@ -1634,3 +1634,51 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A store whose value can fail still checks its left side first, for a slice
+// field and a static array, and the value does not run when the left side
+// fails.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "an out-of-bounds index is a compile-time error in CTFE"),
+)) {
+    @("checkedIndex.fieldStoreChecksLeftFirst." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: ArrayIndexError;
+            class Holder {
+                int[] slice = [1, 2, 3];
+                int[3] fixed = [4, 5, 6];
+                void swapSlice(int i, int j) { slice[i] = slice[j]; }
+                void swapFixed(uint i, uint j) { fixed[i] = fixed[j]; }
+            }
+            void main() {
+                auto holder = new Holder;
+                size_t index;
+                size_t length;
+                void check(size_t wantedIndex) {
+                    assert(index == wantedIndex);
+                    assert(length == 3);
+                    index = length = 0;
+                }
+                holder.swapSlice(0, 2);
+                holder.swapFixed(1, 2);
+                assert(holder.slice == [3, 2, 3] && holder.fixed == [4, 6, 6]);
+                try { holder.swapSlice(5, 7); }
+                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                check(5);
+                try { holder.swapSlice(1, 7); }
+                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                check(7);
+                try { holder.swapFixed(5, 7); }
+                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                check(5);
+                try { holder.swapFixed(1, 7); }
+                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                check(7);
+                assert(holder.slice == [3, 2, 3] && holder.fixed == [4, 6, 6]);
+            }
+        });
+    }
+}
