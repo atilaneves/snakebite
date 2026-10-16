@@ -3325,6 +3325,34 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A downcast keeps the reference when the object is an instance of the
+// target class or of a class derived from it, and gives null for a sibling
+// class and for a base class.
+static foreach (backend; Matrix!()) {
+    @("classDowncastAlongChain." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base { }
+            class Middle : Base { }
+            class Leaf : Middle { }
+            class Sibling : Base { }
+
+            int main() {
+                Base leaf = new Leaf;
+                Base base = new Base;
+                Base none;
+                if (cast(Leaf) leaf is null) return 1;
+                if (cast(Object) cast(Middle) leaf !is cast(Object) leaf) return 2;
+                if (cast(Sibling) leaf !is null) return 3;
+                if (cast(Middle) base !is null) return 4;
+                if (cast(Middle) none !is null) return 5;
+                return 0;
+            }
+        });
+    }
+}
+
 // A cast of a null class reference reads no vtable: the result is null.
 static foreach (backend; Matrix!()) {
     @("castNullClassReferenceIsNotAFault." ~ backend.stringof)
