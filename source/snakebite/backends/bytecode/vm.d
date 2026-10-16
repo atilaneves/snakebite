@@ -21,6 +21,7 @@ extern(C) bool executeIndirectCallPlan(
 );
 
 import snakebite.backends.argumentflow: ArgumentFlow, Shape, Signature;
+import snakebite.backends.bytecode.relocation: Address, Place, Reloc, Target;
 import snakebite.backends.builtins: BuiltinCall;
 import snakebite.backends.haltprocess: HaltAction, isHalt;
 import snakebite.backends.unwindplan:
@@ -788,6 +789,8 @@ package struct InlineBody {
     package long[] constants;
     package size_t frameSize;
     package uint frameAlignment;
+    // The addresses in `instructions` and `constants`.
+    package Reloc[] relocs;
 }
 
 
@@ -816,6 +819,106 @@ public struct Function {
     package imported!"snakebite.backends.returnplace".ReturnPlace returnPlace;
     // Not null when a caller can copy this function in place of a call.
     package const(InlineBody)* inlineBody;
+    // Every word of this function that holds a process address, except the
+    // handler of each instruction.
+    package Reloc[] relocs;
+}
+
+
+// The process addresses that the tables of a function hold. Each recorder
+// names every field of its type that holds an address, and a `static assert`
+// makes a new field say which kind it is, so that no address stays unrecorded
+// by accident.
+
+private void recordAddress(
+    ref Reloc[] relocs, in Place.Section section, in size_t index,
+    in Place.Field field, in Target.Kind kind, in size_t address,
+) {
+    if (address != 0)
+        relocs ~= Reloc(Place(section, field, index), Target(kind, address));
+}
+
+package void recordCallSiteRelocs(
+    ref Reloc[] relocs, in size_t index, in CallSite site,
+) {
+    import std.traits: FieldNameTuple;
+
+    // Address fields: `callee`, `prepareGuest`, `nativePlan`,
+    // `prepareNativePlan`, `builtinEntry` and `value.signature`. A
+    // delegate is kept by its function; its context is state of the
+    // compiler. The instruction addresses `cleanupStart` and `cleanupEnd`
+    // follow from the two indexes. `fast` is not listed as an address field:
+    // it is filled only at run time, when a call first runs, so a compiled
+    // function never holds an address in it.
+    enum plainFields = AliasSeq!(
+        "kind", "value", "args", "nativeArgs", "returnWidth", "fast",
+        "calleeSlotOffset", "hasContext", "cleanupStartIndex",
+        "cleanupEndIndex", "cleanupStart", "cleanupEnd",
+    );
+    enum addressFields = AliasSeq!(
+        "callee", "prepareGuest", "nativePlan", "prepareNativePlan",
+        "builtinEntry",
+    );
+    static foreach (name; FieldNameTuple!CallSite)
+        static assert(staticIndexOf!(name, plainFields) >= 0
+            || staticIndexOf!(name, addressFields) >= 0,
+            "CallSite." ~ name ~ " has to say whether it holds an address");
+    static foreach (name; FieldNameTuple!(CallSite.ValueArguments))
+        static assert(name == "signature" || name == "surplus"
+            || name == "surplusShapes",
+            "CallSite.ValueArguments." ~ name
+            ~ " has to say whether it holds an address");
+
+    enum section = Place.Section.callSite;
+    recordAddress(relocs, section, index, Place.Field.callee,
+        Target.Kind.functionWord, cast(size_t) site.callee);
+    recordAddress(relocs, section, index, Place.Field.prepareGuest,
+        Target.Kind.callback, cast(size_t) site.prepareGuest.funcptr);
+    recordAddress(relocs, section, index, Place.Field.nativePlan,
+        Target.Kind.nativePlan, cast(size_t) site.nativePlan);
+    recordAddress(relocs, section, index, Place.Field.prepareNativePlan,
+        Target.Kind.callback, cast(size_t) site.prepareNativePlan.funcptr);
+    recordAddress(relocs, section, index, Place.Field.builtinEntry,
+        Target.Kind.hostSymbol, cast(size_t) site.builtinEntry);
+    recordAddress(relocs, section, index, Place.Field.valueSignature,
+        Target.Kind.signature, cast(size_t) site.value.signature);
+}
+
+package void recordAssertSiteRelocs(
+    ref Reloc[] relocs, in size_t index, in AssertSite site,
+) {
+    import std.traits: FieldNameTuple;
+
+    static foreach (name; FieldNameTuple!AssertSite)
+        static assert(name == "message" || name == "file" || name == "line"
+            || name == "halt",
+            "AssertSite." ~ name ~ " has to say whether it holds an address");
+
+    enum section = Place.Section.assertSite;
+    recordAddress(relocs, section, index, Place.Field.message,
+        Target.Kind.frontendString, cast(size_t) site.message.ptr);
+    recordAddress(relocs, section, index, Place.Field.file,
+        Target.Kind.frontendString, cast(size_t) site.file.ptr);
+    recordAddress(relocs, section, index, Place.Field.halt,
+        Target.Kind.hostSymbol, cast(size_t) site.halt);
+}
+
+package void recordExceptionHandlerRelocs(
+    ref Reloc[] relocs, in size_t index, in ExceptionHandler handler,
+) {
+    import std.traits: FieldNameTuple;
+
+    // `bodyStart`, `bodyEnd`, `handler` and `cleanupEnd` are instruction
+    // addresses of the same function.
+    static foreach (name; FieldNameTuple!ExceptionHandler)
+        static assert(name == "type" || name == "bodyStart"
+            || name == "bodyEnd" || name == "handler"
+            || name == "catchOffset" || name == "cleanupEnd",
+            "ExceptionHandler." ~ name
+            ~ " has to say whether it holds an address");
+
+    recordAddress(relocs, Place.Section.exceptionHandler, index,
+        Place.Field.type, Target.Kind.typeInfo, cast(size_t) cast(void*) handler.type);
 }
 
 
@@ -3607,6 +3710,203 @@ private const(Instruction)* runSliceFill(Decoded)(
 }
 
 
+// What the operand fields of an instruction hold, decided by its handler. A
+// field that is neither names a frame offset, a width, an index into a table
+// of the function, or a plain number.
+package enum Role : ubyte {
+    other,
+    // A process address: the compiler records it, and the loader of a stored
+    // image fixes it.
+    address,
+    // The address of an instruction of the same function. The compiler
+    // handles it as an index until the function is complete.
+    instruction,
+}
+
+package struct Roles {
+    package Role destination;
+    package Role source;
+    package Role sourceWidth;
+}
+
+// Operations whose instructions hold neither a process address nor an
+// instruction address. An operation that `specialise` meets and that is in
+// no list of `rolesOf` stops the build, so a new operation has to say what
+// its fields hold.
+private alias plainOperations = AliasSeq!(
+    runAdd, runSubtract, runMultiply, runBitAnd, runBitOr, runBitXor,
+    runLessThanSigned, runLessThanUnsigned, runLessOrEqualSigned,
+    runLessOrEqualUnsigned, runGreaterThanSigned, runGreaterThanUnsigned,
+    runGreaterOrEqualSigned, runGreaterOrEqualUnsigned, runEqual, runNotEqual,
+    runShiftLeft, runShiftRightLogical, runShiftRightArithmetic, runCopy,
+    runFrameAddress, runLoadIndirect, runStoreIndirect, runStaticArrayEqual,
+    runConstant, runZero, runNegate, runCastToBool, runLogicalNot,
+);
+
+// The operations with a constant right operand in `sourceWidth` or not.
+private alias threeAddressOperations = AliasSeq!(
+    runInt3, runShift3, runDivide3, runFloat3, runCompare3, runFloatCompare3,
+);
+
+private template rolesOfOperation(alias operation, OperandKind sourceKind,
+    Parameters...)
+{
+    static if (__traits(isSame, operation, runStaticLoad)
+            || __traits(isSame, operation, runStaticAddress)
+            || __traits(isSame, operation, runTlsLoad)
+            || __traits(isSame, operation, runTlsAddress))
+        enum rolesOfOperation = Roles(Role.other, Role.address, Role.other);
+    else static if (__traits(isSame, operation, runStaticStore)
+            || __traits(isSame, operation, runTlsStore))
+        enum rolesOfOperation = Roles(Role.address, Role.other, Role.other);
+    else static if (__traits(isSame, operation, runCopyFixed))
+        // The second parameter is `staticSource`: the source is an address.
+        enum rolesOfOperation = Roles(Role.other,
+            Parameters[1] ? Role.address : Role.other, Role.other);
+    else static if (__traits(isSame, operation, runFusedBranch)
+            || __traits(isSame, operation, runFusedBranchR))
+        // With a constant, `source` is the address of a pool constant.
+        enum rolesOfOperation = Roles(Role.other,
+            sourceKind == OperandKind.immediate ? Role.address : Role.other,
+            Role.instruction);
+    else static if (__traits(isSame, operation, runBranchFalse)
+            || __traits(isSame, operation, runBranchTrue))
+        enum rolesOfOperation = Roles(Role.other, Role.instruction, Role.other);
+    else static if (__traits(isSame, operation, runJump))
+        enum rolesOfOperation = Roles(Role.instruction, Role.other, Role.other);
+    else static if (staticIndexOf!(operation, threeAddressOperations) >= 0)
+        // The last parameter is `constant`: the right operand is the address
+        // of a pool constant.
+        enum rolesOfOperation = Roles(Role.other, Role.other,
+            Parameters[$ - 1] ? Role.address : Role.other);
+    else static if (__traits(isSame, operation, runInt3R)
+            || __traits(isSame, operation, runFloat3R))
+        // The second parameter is `constant`. An operand that travels in a
+        // register holds nothing.
+        enum rolesOfOperation = Roles(Role.other, Role.other,
+            Parameters[1] ? Role.address : Role.other);
+    else static if (staticIndexOf!(operation, plainOperations) >= 0)
+        enum rolesOfOperation = Roles.init;
+    else
+        static assert(false, "no operand roles for " ~ __traits(identifier, operation));
+}
+
+private struct RoleEntry {
+    Instruction.Handler handler;
+    Roles roles;
+}
+
+private __gshared RoleEntry[] roleEntries;
+private __gshared size_t roleCount;
+private __gshared size_t roleShift;
+
+private size_t roleSlot(in Instruction.Handler handler) {
+    return (cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL) >> roleShift;
+}
+
+private void addRoles(Instruction.Handler handler, in Roles roles) {
+    if ((roleCount + 1) * 2 > roleEntries.length) {
+        auto old = roleEntries;
+        const capacity = old.length == 0 ? 2048 : old.length * 2;
+        roleEntries = new RoleEntry[capacity];
+        roleShift = size_t.sizeof * 8 - bsf(capacity);
+        roleCount = 0;
+        foreach (previous; old)
+            if (previous.handler !is null)
+                addRoles(previous.handler, previous.roles);
+    }
+    auto slot = roleSlot(handler);
+    while (roleEntries[slot].handler !is null) {
+        if (roleEntries[slot].handler is handler)
+            return;
+        slot = (slot + 1) & (roleEntries.length - 1);
+    }
+    roleEntries[slot] = RoleEntry(handler, roles);
+    ++roleCount;
+}
+
+// Whether the table holds the handler's roles, and what they are. A handler
+// that is not in the table holds no address and no instruction address.
+package bool rolesOf(in Instruction.Handler handler, out Roles roles) {
+    if (roleEntries.length == 0)
+        return false;
+    auto slot = roleSlot(handler);
+    while (roleEntries[slot].handler !is null) {
+        if (roleEntries[slot].handler is handler) {
+            roles = roleEntries[slot].roles;
+            return true;
+        }
+        slot = (slot + 1) & (roleEntries.length - 1);
+    }
+    return false;
+}
+
+// The field of `instruction` that holds the instruction of the same function
+// where control continues, or null.
+package size_t* branchTargetField(ref Instruction instruction) {
+    Roles roles;
+    if (!rolesOf(instruction.handler, roles))
+        return null;
+    if (roles.destination == Role.instruction)
+        return &instruction.destination;
+    if (roles.source == Role.instruction)
+        return &instruction.source;
+    if (roles.sourceWidth == Role.instruction)
+        return &instruction.sourceWidth;
+    return null;
+}
+
+// The specialised handlers whose roles the table does not hold. A handler
+// that holds an address or an instruction address has an entry for each
+// instance that a specialisation makes of it, so that the roles stay known
+// after `specialiseHandlers` swaps the handler.
+version (unittest)
+public size_t specialisedHandlersWithoutRoles() {
+    size_t missing;
+    foreach (entry; specialisations) {
+        if (entry.general is null || entry.roles == Roles.init)
+            continue;
+        foreach (frame; entry.handlers)
+            foreach (handler; frame) {
+                Roles roles;
+                if (handler !is null
+                        && (!rolesOf(handler, roles) || roles != entry.roles))
+                    ++missing;
+            }
+    }
+    return missing;
+}
+
+
+// The register form of a handler is a different handler that replaces the
+// original after the compiler recorded the original's addresses, so it has to
+// hold the same roles. Counts the register forms whose roles differ.
+version (unittest)
+public size_t registerFormsWithChangedRoles() {
+    size_t changed;
+    void compare(Instruction.Handler original, Instruction.Handler form) {
+        // A handler that is not in the table has `Roles.init`.
+        Roles before;
+        Roles after;
+        rolesOf(original, before);
+        rolesOf(form, after);
+        if (before != after)
+            ++changed;
+    }
+    static foreach (triple; registerNames)
+        static foreach (constant; [false, true])
+            static foreach (from; [false, true])
+                static foreach (to; [false, true])
+                    static if (from || to)
+                        compare(mixin("&" ~ triple[0] ~ (constant ? "K" : "")),
+                            registerForm(mixin("&" ~ triple[0]
+                                ~ (constant ? "K" : "")), from, to));
+    foreach (index, original; fusedHandlers)
+        compare(original, fusedRegisterForm(original));
+    return changed;
+}
+
+
 // Handler specialisation. The compiler emits general handlers; once a
 // function is complete, `specialiseHandlers` swaps each for the instance that
 // decodes frame operands without testing the indirect bit and/or has its
@@ -3639,6 +3939,7 @@ private struct Specialisation {
     bool right;
     // The fused load-then-copy also runs the next instruction.
     bool pairWithNext;
+    Roles roles;
 }
 
 private __gshared Specialisation[] specialisations;
@@ -3650,7 +3951,20 @@ private size_t specialisationSlot(in Instruction.Handler handler) {
         >> specialisationShift;
 }
 
-private void addSpecialisation(Specialisation entry) {
+private void addSpecialisation(Specialisation entry, in Roles roles) {
+    entry.roles = roles;
+    // The table keeps only the handlers that hold an address or an
+    // instruction address. It is searched for every instruction of a
+    // function, so it stays small.
+    if (roles != Roles.init)
+        foreach (frame; entry.handlers)
+            foreach (handler; frame)
+                if (handler !is null)
+                    addRoles(handler, roles);
+    insertSpecialisation(entry);
+}
+
+private void insertSpecialisation(Specialisation entry) {
     if ((specialisationCount + 1) * 2 > specialisations.length) {
         auto old = specialisations;
         const capacity = old.length == 0 ? 1024 : old.length * 2;
@@ -3659,7 +3973,7 @@ private void addSpecialisation(Specialisation entry) {
         specialisationCount = 0;
         foreach (ref previous; old)
             if (previous.general !is null)
-                addSpecialisation(previous);
+                insertSpecialisation(previous);
     }
     auto slot = specialisationSlot(entry.general);
     while (specialisations[slot].general !is null)
@@ -3697,12 +4011,23 @@ private void specialiseWith(alias executor, alias operation,
             frameKind!destinationKind, frameKind!sourceKind, width,
             Parameters);
     }
-    addSpecialisation(entry);
+    addSpecialisation(entry, rolesOfOperation!(operation, sourceKind, Parameters));
 }
 
 shared static this() {
     enum S = OperandKind.storage;
     enum I = OperandKind.immediate;
+    // Handlers that no specialisation covers.
+    addRoles(&opJump, rolesOfOperation!(runJump, I));
+    addRoles(&opStaticStore, rolesOfOperation!(runStaticStore, S));
+    addRoles(&opStaticAddress, rolesOfOperation!(runStaticAddress, I));
+    addRoles(&opTlsLoad, rolesOfOperation!(runTlsLoad, I));
+    addRoles(&opTlsStore, rolesOfOperation!(runTlsStore, S));
+    addRoles(&opTlsAddress, rolesOfOperation!(runTlsAddress, I));
+    // The fused return keeps the roles of the producer it replaces.
+    static foreach (width; 1 .. 17)
+        addRoles(&opThenReturn!(opCopyFixed!(width, true)),
+            rolesOfOperation!(runCopyFixed, I, width, true));
     static foreach (triple; threeAddressNames) {{
         static if (triple[1] == "opInt3" || triple[1] == "opCompare3")
             enum widths = integralWidths;
@@ -3774,7 +4099,7 @@ shared static this() {
             entry.destination = true;
             entry.source = true;
             entry.pairWithNext = true;
-            addSpecialisation(entry);
+            addSpecialisation(entry, Roles.init);
         }}
     }
     static foreach (width; [1, 2, 4, 8, 16])
@@ -3791,8 +4116,26 @@ shared static this() {
             entry.handlers[0][widthSlot(width)] = &returnHandler!(width, false);
             entry.handlers[1][widthSlot(width)] = &returnHandler!(width, true);
         }
-        addSpecialisation(entry);
+        addSpecialisation(entry, Roles.init);
     }
+    foreach (handler; branchHandlers)
+        if (!holdsInstruction(handler))
+            internalFailure("a branch handler has no instruction role");
+}
+
+// The handlers that the compiler emits with a branch target. A target that
+// the table does not know would be skipped when the compiler remaps
+// instruction indexes, so the table is checked when the program starts.
+private Instruction.Handler[] branchHandlers() {
+    return [&opJump, &opBranchFalse, &opBranchTrue];
+}
+
+private bool holdsInstruction(in Instruction.Handler handler) {
+    Roles roles;
+    return rolesOf(handler, roles)
+        && (roles.destination == Role.instruction
+            || roles.source == Role.instruction
+            || roles.sourceWidth == Role.instruction);
 }
 
 // The specialised instance of `instruction`'s handler: frame-only when every
