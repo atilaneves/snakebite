@@ -109,6 +109,25 @@ public extern(C) int snakebite_ut_add(int left, int right) {
 }
 
 
+public extern(C) long snakebite_ut_word_double(long value) {
+    return value * 2;
+}
+
+
+public extern(C) long snakebite_ut_word_combine(long first, long second) {
+    return first * 10 + second;
+}
+
+
+// The host compiler may pass the parameters of an `extern(D)` function in
+// reversed order, so the result tells whether each one reached the right
+// parameter.
+pragma(mangle, "snakebite_ut_extern_d_word_combine")
+private extern(D) long snakebite_ut_dWordCombine(long first, long second) {
+    return first * 10 + second;
+}
+
+
 public extern(C) short snakebite_ut_narrow(byte left, ushort right) {
     return cast(short) (left + right);
 }
@@ -4480,5 +4499,46 @@ static foreach (backend; Matrix!(
                 assert(sin(2.7) == 2.0);
             }
         });
+    }
+}
+
+
+// One and two word arguments with an integer result, called through
+// the same site more than once, and an `extern(D)` callee whose
+// parameters may be passed in reversed order.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("directWordCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_word_double")
+                extern(C) long one(long value);
+                pragma(mangle, "snakebite_ut_word_combine")
+                extern(C) long two(long first, long second);
+                // A `static` struct member keeps dmd's reversed-parameter
+                // convention under the nesting of the native oracle, as in
+                // `signatures.externD.nineWordsTwoStringsSpill`.
+                struct Ffi {
+                    static:
+                    pragma(mangle, "snakebite_ut_extern_d_word_combine")
+                    extern(D) long swapped(long first, long second);
+                }
+
+                int answer() {
+                    foreach (round; 0 .. 3) {
+                        if (one(21) != 42) return 1;
+                        if (two(4, 2) != 42) return 2;
+                        if (Ffi.swapped(4, 2) != 42) return 3;
+                        if (Ffi.swapped(2, 4) != 24) return 4;
+                    }
+                    return 0;
+                }
+            },
+            "answer",
+        );
     }
 }

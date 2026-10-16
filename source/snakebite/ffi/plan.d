@@ -152,6 +152,9 @@ public struct CallPlan {
     // register, for a variadic callee's `%al`.
     private size_t _sseCount;
     private size_t _integerArgumentCount;
+    // Set for a C-style or `extern(D)` untyped variadic callee: the call
+    // needs its `%al` and extra arguments, so it is never a direct call.
+    private bool _variadicCall;
     private bool _callbackVariadic;
     private bool _callbackDVariadic;
     private size_t _callbackVariadicOffset = size_t.max;
@@ -748,6 +751,7 @@ public struct CallPlan {
         const(void)* address,
         scope const(Register)[] parameterRegisters,
         Register returnRegister = Register(Register.Kind.none, 0),
+        Register secondReturnRegister = Register(Register.Kind.none, 0),
     ) {
         CallPlan plan;
         plan._address = cast(void*) address;
@@ -757,10 +761,17 @@ public struct CallPlan {
             plan._arguments[i] =
                 ArgumentPlan([register, Register.init], 1, false);
         if (returnRegister.kind != Register.Kind.none)
-            plan._return =
-                ArgumentPlan([returnRegister, Register.init], 1, false);
+            plan._return = returnPlanOf(returnRegister, secondReturnRegister);
         plan.buildMoves;
         return plan;
+    }
+
+    private static ArgumentPlan returnPlanOf(
+        in Register first, in Register second,
+    ) {
+        return second.kind == Register.Kind.none
+            ? ArgumentPlan([first, Register.init], 1, false)
+            : ArgumentPlan([first, second], 2, false);
     }
 
     // Whether this plan, built by `ofRawAddress`, was built from exactly
@@ -769,6 +780,7 @@ public struct CallPlan {
     private bool hasShape(
         scope const(Register)[] parameterRegisters,
         in Register returnRegister,
+        in Register secondReturnRegister = Register(Register.Kind.none, 0),
     ) const {
         if (_parameterCount != parameterRegisters.length)
             return false;
@@ -779,7 +791,7 @@ public struct CallPlan {
 
         const expectedReturn = returnRegister.kind == Register.Kind.none
             ? ArgumentPlan.init
-            : ArgumentPlan([returnRegister, Register.init], 1, false);
+            : returnPlanOf(returnRegister, secondReturnRegister);
         return _return == expectedReturn;
     }
 
@@ -1179,6 +1191,55 @@ public extern(C) void executeCallPlan(
 ) {
     const plan = cast(const(CallPlan)*) opaquePlan;
     plan.call(returnPlace, arguments[0 .. argumentCount]);
+}
+
+// The address to call as `ulong function(ulong, ulong)` when this plan is
+// one or two word arguments in the first two integer registers and one
+// integer result of 1, 2, 4 or 8 bytes (`resultWidth`), with nothing else
+// for `callAt` to do, and the callee is not variadic. `parameterCount` is
+// the number of parameters of the plan; a call site passes the same number
+// of arguments. `swapped` says the second parameter goes in the first
+// register. Null otherwise.
+public extern(C) const(void)* directWordCallTarget(
+    const(void)* opaquePlan, out bool swapped, out size_t resultWidth,
+    out size_t parameterCount,
+) {
+    import snakebite.ffi.sysv: CallFrame;
+
+    const plan = cast(const(CallPlan)*) opaquePlan;
+    if (!plan._integerOnly || plan._variadicCall
+            || plan._hiddenReturnPointer || plan._hiddenContext
+            || plan._callbackArguments.length != 0
+            || plan._parameterCount < 1 || plan._parameterCount > 2
+            || plan._moveCount != plan._parameterCount
+            || plan._realResultCount != 0 || plan._resultCount != 1
+            || plan._resultMoves[0].sourceOffset
+                != CallFrame.integerResult.offsetof)
+        return null;
+    size_t[2] seen = [0, 1];
+    foreach (move; plan._moves[0 .. plan._moveCount]) {
+        if (move.load != CallPlan.Load.word64 || move.byteOffset != 0
+                || move.destinationOffset >= 2 * size_t.sizeof
+                || move.parameterIndex > 1)
+            return null;
+        seen[move.parameterIndex] = move.destinationOffset / size_t.sizeof;
+    }
+    if (plan._moveCount == 2 && seen[0] == seen[1])
+        return null;
+    if (plan._moveCount == 1 && seen[0] != 0)
+        return null;
+    swapped = plan._moveCount == 2 && seen[0] == 1;
+    parameterCount = plan._parameterCount;
+    final switch (plan._resultMoves[0].store) with (CallPlan.Store) {
+        case byte1: resultWidth = 1; break;
+        case byte2: resultWidth = 2; break;
+        case byte4: resultWidth = 4; break;
+        case byte8: resultWidth = 8; break;
+        case copy16:
+        case partial:
+            return null;
+    }
+    return plan._address;
 }
 
 public extern(C) bool executeIndirectCallPlan(
@@ -1616,11 +1677,13 @@ public struct PlanCache {
             parameterRegisters,
         Register returnRegister =
             Register(Register.Kind.none, 0),
+        Register secondReturnRegister = Register(Register.Kind.none, 0),
     ) {
         if (auto cached = name in _rawPlans) {
             import std.conv: text;
 
-            assert((*cached).hasShape(parameterRegisters, returnRegister),
+            assert((*cached).hasShape(
+                    parameterRegisters, returnRegister, secondReturnRegister),
                 text("ffi: `", name, "` was already planned with a ",
                     "different register shape"));
             return *cached;
@@ -1633,7 +1696,7 @@ public struct PlanCache {
         countPreparation;
         auto plan = new CallPlan;
         *plan = CallPlan.ofRawAddress(
-            address, parameterRegisters, returnRegister);
+            address, parameterRegisters, returnRegister, secondReturnRegister);
         return *_rawPlans.insert(name, plan);
     }
 
@@ -1643,10 +1706,12 @@ public struct PlanCache {
         string name,
         scope const(Register)[] parameterRegisters,
         Register returnRegister = Register(Register.Kind.none, 0),
+        Register secondReturnRegister = Register(Register.Kind.none, 0),
     ) {
         import std.conv: text;
 
-        if (auto plan = rawPlanOf(name, parameterRegisters, returnRegister))
+        if (auto plan = rawPlanOf(name, parameterRegisters, returnRegister,
+                secondReturnRegister))
             return plan;
 
         throw new Exception(text(
@@ -1956,6 +2021,8 @@ private CallPlan _shapeOf(
         // this exact dmd shows `%rdi`=`_arguments`, `%rsi`=`a`, `%rdx`=
         // `b`, `%rcx`=`c`, `%r8`/`%r9`=the two extra arguments - plain
         // declaration order, not reversed).
+        plan._variadicCall = isVariadicCall
+            || type.parameterList.varargs == VarArg.variadic;
         plan._reversedArguments = reversedDParameters
             && (linkage == LINK.d || linkage == LINK.default_)
             && !isDVariadic;

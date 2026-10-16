@@ -3325,6 +3325,77 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A downcast keeps the reference when the object is an instance of the
+// target class or of a class derived from it, and gives null for a sibling
+// class and for a base class.
+static foreach (backend; Matrix!()) {
+    @("classDowncastAlongChain." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base { }
+            class Middle : Base { }
+            class Leaf : Middle { }
+            class Sibling : Base { }
+
+            int main() {
+                Base leaf = new Leaf;
+                Base base = new Base;
+                Base none;
+                if (cast(Leaf) leaf is null) return 1;
+                if (cast(Object) cast(Middle) leaf !is cast(Object) leaf) return 2;
+                if (cast(Sibling) leaf !is null) return 3;
+                if (cast(Middle) base !is null) return 4;
+                if (cast(Middle) none !is null) return 5;
+                return 0;
+            }
+        });
+    }
+}
+
+// A downcast to a `final` class keeps the reference for an instance of the
+// class and gives null for a base class instance.
+static foreach (backend; Matrix!()) {
+    @("classDowncastToFinalClass." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base { }
+            final class Leaf : Base { }
+
+            int main() {
+                Base leaf = new Leaf;
+                Base base = new Base;
+                Base none;
+                if (cast(Leaf) leaf is null) return 1;
+                if (cast(Object) cast(Leaf) leaf !is cast(Object) leaf) return 2;
+                if (cast(Leaf) base !is null) return 3;
+                if (cast(Leaf) none !is null) return 4;
+                return 0;
+            }
+        });
+    }
+}
+
+// A downcast whose result is dropped still runs, and a later use of the
+// object is unaffected.
+static foreach (backend; Matrix!()) {
+    @("classDowncastResultDiscarded." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base { int value = 7; }
+            class Derived : Base { }
+
+            int main() {
+                Base base = new Derived;
+                cast(void) cast(Derived) base;
+                return base.value == 7 ? 0 : 1;
+            }
+        });
+    }
+}
+
 // A cast of a null class reference reads no vtable: the result is null.
 static foreach (backend; Matrix!()) {
     @("castNullClassReferenceIsNotAFault." ~ backend.stringof)

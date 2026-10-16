@@ -118,6 +118,9 @@ mixin Export!(ffi, "snakebite_ut_nineWords", "signatures.externD.nineWordsTwoStr
 mixin Export!(ffi, "snakebite_ut_remember", "signatures.arityAndDiscard");
 mixin Export!(ffi, "snakebite_ut_recall", "signatures.arityAndDiscard");
 mixin Export!(ffi, "snakebite_ut_add", "signatures.arityAndDiscard");
+mixin Export!(ffi, "snakebite_ut_word_double", "directWordCall");
+mixin Export!(ffi, "snakebite_ut_word_combine", "directWordCall");
+mixin Export!(ffi, "snakebite_ut_dWordCombine", "directWordCall");
 mixin Export!(ffi, "snakebite_ut_narrow", "signatures.narrowValues");
 mixin Export!(ffi, "snakebite_ut_double_of_long", "signatures.doubleOfLong");
 mixin Export!(ffi, "snakebite_ut_memory_triple", "memoryClassParameter.threeWords");

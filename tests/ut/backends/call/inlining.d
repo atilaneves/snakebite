@@ -254,6 +254,31 @@ static foreach (backend; Matrix!()) {
 
 
 static foreach (backend; Matrix!()) {
+    @("inlining.locals.calleeWithSeveralStatementsKeepsItsOwnLocals." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int mix(int left, int right) {
+                int sum = left + right;
+                int product = left * right;
+                sum += 1;
+                product -= sum;
+                return product * 2 + sum;
+            }
+
+            void main() {
+                int first = 3;
+                assert(mix(first, 4) == 2 * (12 - 8) + 8);
+                assert(first == 3);
+                assert(mix(2, 3) + mix(mix(2, 3), 1) == 6 + 4);
+
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
     @("inlining.parameters.arithmeticResultIntoAnArgumentDestination." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -272,6 +297,38 @@ static foreach (backend; Matrix!()) {
                 assert(a == 77);
                 a = add(b, a);
                 assert(a == 88);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.branch.ifElseAndEarlyReturnInsideLargerCallee." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int classify(int number) {
+                if (number < 0)
+                    return -1;
+                int result;
+                if (number == 0)
+                    result = 100;
+                else
+                    result = number > 10 ? number * 2 + 1000 : number * 2;
+                return result + 1;
+            }
+
+            void main() {
+                assert(classify(-5) == -1);
+                assert(classify(0) == 101);
+                assert(classify(4) == 9);
+                assert(classify(11) == 1023);
+                int total;
+                foreach (index; -1 .. 12)
+                    total += classify(index);
+                assert(total == -1 + 101 + 3 + 5 + 7 + 9 + 11 + 13 + 15 + 17 + 19 + 21 + 1023);
+
             }
         });
     }
@@ -503,6 +560,86 @@ static foreach (backend; Matrix!()) {
                 assert(s.getY() == 9);
                 s.getY() += 4;
                 assert(s.y == 13 && s.x == 0);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.nested.callerOfCalleeThatCallsAnotherCallee." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Task { bool holding; int held; Task* link; }
+
+            void setTaskHolding(Task* task) {
+                task.holding = true;
+                task.held += 1;
+            }
+
+            Task* holdSelf(Task* task) {
+                setTaskHolding(task);
+                return task.link;
+            }
+
+            void main() {
+                auto first = new Task;
+                auto second = new Task;
+                first.link = second;
+                assert(holdSelf(first) is second);
+                assert(holdSelf(first) is second);
+                assert(first.holding && first.held == 2);
+                assert(!second.holding && second.held == 0);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.nested.chainDeeperThanTheSpeculationLimit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int leaf(int x) { return x * 2; }
+            int c(int x) { return leaf(x) + 1; }
+            int b(int x) { return c(x) + 10; }
+            int a(int x) { return b(x) + 100; }
+
+            void main() {
+                assert(a(1) == 113);
+                assert(a(5) == 121);
+                assert(c(3) == 7);
+                assert(leaf(4) == 8);
+                int total;
+                foreach (index; 0 .. 4)
+                    total += a(index);
+                assert(total == 4 * 111 + 2 * 6);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("inlining.nested.innerCalleeThatTakesAnAddressStaysACall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int other(int x) { return x + 1; }
+
+            int takesAddress(int x) {
+                auto function_ = &other;
+                return function_(x) * 2;
+            }
+
+            int outer(int x) { return takesAddress(x) + 5; }
+
+            void main() {
+                assert(outer(1) == 9);
+                assert(outer(2) == 11);
+                assert(takesAddress(3) == 8);
             }
         });
     }

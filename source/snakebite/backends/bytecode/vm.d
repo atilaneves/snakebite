@@ -7,6 +7,11 @@ private:
 import snakebite.internalfailure: internalFailure;
 
 
+extern(C) const(void)* directWordCallTarget(
+    const(void)* opaquePlan, out bool swapped, out size_t resultWidth,
+    out size_t parameterCount,
+);
+
 extern(C) void executeCallPlan(
     const(void)* opaquePlan,
     void* returnPlace,
@@ -354,6 +359,22 @@ public struct CallSite {
 
     package const(void)* nativePlan;
     package const(void)* delegate() prepareNativePlan;
+
+    // A `native` site whose plan is one or two word arguments and one
+    // integer result called directly. Filled only at run time, with the
+    // protocol of `fast`: the thread that wins the `preparing` state writes
+    // `directTarget` and `directSwapped`, then publishes `directState`
+    // last. The two fields are valid once `directState` is `direct`.
+    package enum DirectState : uint {
+        unprepared,
+        preparing,
+        direct,
+        general,
+    }
+
+    package uint directState;
+    package const(void)* directTarget;
+    package bool directSwapped;
     package BuiltinCall builtinEntry;
     package size_t calleeSlotOffset;
     package bool hasContext;
@@ -954,14 +975,15 @@ package void recordCallSiteRelocs(
     // `prepareNativePlan`, `builtinEntry` and `value.signature`. A
     // delegate is kept by its function; its context is state of the
     // compiler. The instruction addresses `cleanupStart` and `cleanupEnd`
-    // follow from the two indexes. `fast` is not listed as an address field:
-    // it is filled only at run time, when a call first runs, so a compiled
-    // function never holds an address in it.
+    // follow from the two indexes. `fast` and `directTarget` are not listed
+    // as address fields: they are filled only at run time, when a call first
+    // runs, so a compiled function never holds an address in them.
     enum plainFields = AliasSeq!(
         "kind", "value", "args", "nativeArgs", "returnWidth", "fast",
         "calleeSlotOffset", "hasContext", "cleanupStartIndex",
         "cleanupEndIndex", "cleanupStart", "cleanupEnd", "windowSlot",
         "windowDisp", "windowScratch", "windowEnd", "windowAlignment",
+        "directState", "directTarget", "directSwapped",
     );
     enum addressFields = AliasSeq!(
         "callee", "prepareGuest", "nativePlan", "prepareNativePlan",
@@ -1179,6 +1201,11 @@ private struct Activation {
     ref const(AssertSite[]) assertSites() const pure nothrow @nogc return {
         return function_.assertSites;
     }
+
+    // Every activation whose parent is null is the `base` of a
+    // `RootActivation`, made only by `dispatch`. The three accessors below
+    // rely on that to read the root's extra fields.
+    static assert(RootActivation.base.offsetof == 0);
 
     // The root has no parent. A cleanup root has no handlers at all.
     const(ExceptionHandler)[] exceptionHandlers() const pure nothrow @nogc return {
@@ -1873,6 +1900,7 @@ private const(Instruction)* callWindow(Destination destination)(
     *cast(ubyte**) (calleeFrame + fast.windowStore) =
         cast(ubyte*) activation + fast.windowBase;
     const callee = fast.callee;
+    activation.pc = callee.instructions.ptr;
     activation.function_ = callee;
     activation.cleanupMark = frames.cleanupMark;
     activation.parent = active;
@@ -1892,10 +1920,118 @@ private const(Instruction)* callWindow(Destination destination)(
         return callee.instructions.ptr;
 }
 
-// Every call `opCall` does not take. A window call whose bytes the frame
-// stack has not committed yet commits them; any other call is generic.
+// A `native` site: decided once whether the plan is a direct word call.
+// Only the thread that wins the `preparing` state decides and writes the
+// fields; it publishes `directState` last. A thread that loses takes the
+// general path for that call.
+pragma(inline, false)
+private const(Instruction)* opCallNative(
+    CallSite* site,
+    const(Instruction)* pc,
+    Activation* active,
+    DispatchState* state,
+    ubyte* frame,
+    ulong r0,
+    double fp0,
+) {
+    import core.atomic: atomicLoad, atomicStore, cas, MemoryOrder;
+
+    alias State = CallSite.DirectState;
+    auto stateSlot = cast(shared(uint)*) &site.directState;
+    auto current = atomicLoad!(MemoryOrder.acq)(*stateSlot);
+    if (current == State.unprepared) {
+        if (!cas(stateSlot, uint(State.unprepared), uint(State.preparing)))
+            return opCallNotDirect(pc, active, state, frame, r0, fp0);
+        const plan = site.nativePlan !is null
+            ? site.nativePlan : site.prepareNativePlan();
+        bool swapped;
+        size_t resultWidth;
+        size_t parameterCount;
+        const target = directWordCallTarget(
+            plan, swapped, resultWidth, parameterCount);
+        const eligible = target !is null
+            && site.args.length == parameterCount
+            && site.args.length >= 1 && site.args.length <= 2
+            && site.args[0].width == 8
+            && (site.args.length == 1 || site.args[1].width == 8)
+            && site.returnWidth == resultWidth;
+        site.directTarget = target;
+        site.directSwapped = swapped;
+        atomicStore!(MemoryOrder.rel)(
+            *stateSlot,
+            uint(eligible ? State.direct : State.general));
+        current = eligible ? State.direct : State.general;
+    }
+    if (current != State.direct)
+        return opCallNotDirect(pc, active, state, frame, r0, fp0);
+
+    alias Word2 = extern(C) ulong function(ulong, ulong);
+    // The position of a throw selects its handler.
+    active.pc = pc;
+    state.current = active;
+    ulong first = *cast(ulong*) operandStorage(frame, site.args[0].callerOffset);
+    ulong second = site.args.length == 2
+        ? *cast(ulong*) operandStorage(frame, site.args[1].callerOffset) : 0;
+    if (site.directSwapped) {
+        const swap = first;
+        first = second;
+        second = swap;
+    }
+    const result = (cast(Word2) site.directTarget)(first, second);
+    if (pc.destination != discardResult) {
+        auto place = operandStorage(frame, pc.destination);
+        switch (site.returnWidth) {
+        case 1: *place = cast(ubyte) result; break;
+        case 2: *cast(ushort*) place = cast(ushort) result; break;
+        case 4: *cast(uint*) place = cast(uint) result; break;
+        default: *cast(ulong*) place = result; break;
+        }
+    }
+    return pc + 1;
+}
+
+// Every call `opCall` does not take. A native site is a direct word call
+// when it can be; any other call goes to `opCallPlain`.
 pragma(inline, false)
 private const(Instruction)* opCallSlow(
+    const(Instruction)* pc,
+    Activation* active,
+    DispatchState* state,
+    ubyte* frame,
+    ulong r0,
+    double fp0,
+) {
+    import core.atomic: atomicLoad, MemoryOrder;
+
+    auto nativeSite = cast(CallSite*) &active.callSites[pc.source];
+    // A native site that is decided to be general pays for no extra call.
+    if (nativeSite.kind == CallSite.Kind.native
+            && atomicLoad!(MemoryOrder.acq)(
+                *cast(shared(uint)*) &nativeSite.directState)
+                != CallSite.DirectState.general)
+        return opCallNative(nativeSite, pc, active, state, frame, r0, fp0);
+    return opCallPlain(pc, active, state, frame, r0, fp0);
+}
+
+// `opCallPlain` for `opCallNative`, as a call and not a second copy of the
+// body.
+pragma(inline, false)
+private const(Instruction)* opCallNotDirect(
+    const(Instruction)* pc,
+    Activation* active,
+    DispatchState* state,
+    ubyte* frame,
+    ulong r0,
+    double fp0,
+) {
+    return opCallPlain(pc, active, state, frame, r0, fp0);
+}
+
+// Every call that `opCall` and `opCallNative` do not take. `opCallSlow`
+// holds it inline, so that a call that is not native pays for no extra
+// call.
+pragma(inline, true)
+private const(Instruction)* opCallPlain(
     const(Instruction)* pc,
     Activation* active,
     DispatchState* state,
@@ -1932,6 +2068,7 @@ private const(Instruction)* opCallSlow(
     *cast(void**) (calleeFrame + fast.placeStore) = place;
     *cast(ubyte**) (calleeFrame + fast.windowStore) =
         cast(ubyte*) activation + fast.windowBase;
+    activation.pc = fast.callee.instructions.ptr;
     activation.function_ = fast.callee;
     activation.cleanupMark = frames.cleanupMark;
     activation.parent = active;
@@ -2146,6 +2283,7 @@ private const(Instruction)* callFunction(bool redirected = false, Decoded)(
         execution.frames, activation.frame,
         site.returnWidth == 0 ? null : execution.destination);
     initializeWindow(callee, activation.frame, execution.frames);
+    activation.pc = callee.instructions.ptr;
     activation.function_ = callee;
     activation.cleanupMark = execution.frames.cleanupMark;
     activation.parent = execution._dispatch.current;
@@ -2879,26 +3017,42 @@ private const(Instruction)* runIndex(IndexBase base, Decoded)(
     return execution.next;
 }
 
-// A bounds-checked element access in one instruction. `destination` is the
-// value operand (read by a store, written by a load), `source` the slice
-// operand, `width` the frame offset of the index in its low 32 bits and a
-// signed 32-bit offset that is added to the index, in the index's own width,
-// in the high 32 bits. `sourceWidth` is the instruction that runs when the
-// access succeeded. When the index is out of bounds, the next instruction
-// runs: the failure code the compiler emitted after this one.
-private alias opCheckedIndex(bool store, size_t indexWidth, bool signed,
-        size_t elementSize) =
-    execute!(runCheckedIndex, OperandKind.storage, OperandKind.storage,
-        store, indexWidth, signed, elementSize);
+// The accesses of `opCheckedIndex`. A store whose value can fail is split in
+// two: `check` tests the bounds and does nothing else, and `storeUnchecked`
+// stores, without a test, after the value ran. The error order stays native:
+// the left side fails first.
+package enum CheckedAccess {
+    load,
+    store,
+    check,
+    storeUnchecked,
+}
 
-private const(Instruction)* runCheckedIndex(bool store, size_t indexWidth,
-    bool signed, size_t elementSize, Decoded)(
+// A bounds-checked element access in one instruction. `destination` is the
+// value operand (read by a store, written by a load), `source` the operand
+// that holds the elements, `width` the frame offset of the index in its low
+// 32 bits and, in the high 32 bits, either a signed 32-bit offset that is
+// added to the index, in the index's own width, or (with `fixedLength`) the
+// length of a static array. `sourceWidth` is the instruction that runs when
+// the access succeeded. When the index is out of bounds, the next
+// instruction runs: the failure code the compiler emitted after this one.
+private alias opCheckedIndex(CheckedAccess access, bool fixedLength,
+        size_t indexWidth, bool signed, size_t elementSize) =
+    execute!(runCheckedIndex, OperandKind.storage, OperandKind.storage,
+        access, fixedLength, indexWidth, signed, elementSize);
+
+private const(Instruction)* runCheckedIndex(CheckedAccess access,
+    bool fixedLength, size_t indexWidth, bool signed, size_t elementSize,
+    Decoded)(
     ref Decoded execution,
 ) {
     import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset;
 
     const packed = execution.width;
-    const offset = cast(int) (packed >> 32);
+    static if (fixedLength)
+        enum offset = 0;
+    else
+        const offset = cast(int) (packed >> 32);
     const indexPlace = execution.storage(cast(uint) packed);
     static if (indexWidth == 4 && signed) {
         const sum = *cast(const(int)*) indexPlace + offset;
@@ -2909,44 +3063,67 @@ private const(Instruction)* runCheckedIndex(bool store, size_t indexWidth,
     } else
         const index = *cast(const(size_t)*) indexPlace
             + cast(size_t) cast(long) offset;
-    const length = *cast(const(size_t)*) (execution.source + arrayLengthOffset);
-    if (index >= length)
-        return execution.next;
-    static if (elementSize == 1)
-        alias Element = ubyte;
-    else static if (elementSize == 2)
-        alias Element = ushort;
-    else static if (elementSize == 4)
-        alias Element = uint;
-    else
-        alias Element = ulong;
-    auto element = cast(Element*) (*cast(ubyte**) (execution.source
-        + arrayPointerOffset) + index * elementSize);
-    static if (store)
-        *element = *cast(const(Element)*) execution.destination;
-    else
-        *cast(Element*) execution.destination = *element;
-    return cast(const(Instruction)*) execution.sourceWidth;
+    static if (access != CheckedAccess.storeUnchecked) {
+        static if (fixedLength)
+            const length = packed >> 32;
+        else
+            const length = *cast(const(size_t)*) (execution.source
+                + arrayLengthOffset);
+        if (index >= length)
+            return execution.next;
+    }
+    static if (access == CheckedAccess.check)
+        return cast(const(Instruction)*) execution.sourceWidth;
+    else {
+        static if (elementSize == 1)
+            alias Element = ubyte;
+        else static if (elementSize == 2)
+            alias Element = ushort;
+        else static if (elementSize == 4)
+            alias Element = uint;
+        else
+            alias Element = ulong;
+        static if (fixedLength)
+            auto element = cast(Element*) (execution.source
+                + index * elementSize);
+        else
+            auto element = cast(Element*) (*cast(ubyte**) (execution.source
+                + arrayPointerOffset) + index * elementSize);
+        static if (access == CheckedAccess.load)
+            *cast(Element*) execution.destination = *element;
+        else
+            *element = *cast(const(Element)*) execution.destination;
+        static if (access == CheckedAccess.storeUnchecked)
+            return execution.next;
+        else
+            return cast(const(Instruction)*) execution.sourceWidth;
+    }
 }
 
 private enum checkedIndexShapes = [[4UL, 1UL], [4UL, 0UL], [8UL, 0UL]];
 private enum checkedIndexElementSizes = [1UL, 2UL, 4UL, 8UL];
 
+// A `check` does not read an element, so one size stands for all.
 package Instruction.Handler checkedIndexHandler(
-    in bool store, in size_t indexWidth, in bool signed,
-    in size_t elementSize,
+    in CheckedAccess access, in bool fixedLength, in size_t indexWidth,
+    in bool signed, in size_t elementSize,
 ) {
     import std.conv: text;
 
-    static foreach (isStore; [false, true])
-        static foreach (shape; checkedIndexShapes)
-            static foreach (size; checkedIndexElementSizes)
-                if (store == isStore && indexWidth == shape[0]
-                        && signed == (shape[1] == 1) && elementSize == size)
-                    return &opCheckedIndex!(isStore, shape[0],
-                        shape[1] == 1, size);
+    const handlerSize = access == CheckedAccess.check ? 1 : elementSize;
+    static foreach (kind; [EnumMembers!CheckedAccess])
+        static foreach (fixed; [false, true])
+            static foreach (shape; checkedIndexShapes)
+                static foreach (size; checkedIndexElementSizes)
+                    static if (kind != CheckedAccess.check || size == 1)
+                        if (access == kind && fixedLength == fixed
+                                && indexWidth == shape[0]
+                                && signed == (shape[1] == 1)
+                                && handlerSize == size)
+                            return &opCheckedIndex!(kind, fixed, shape[0],
+                                shape[1] == 1, size);
     internalFailure(text("no checked-index handler for a ", indexWidth,
-        "-byte ", signed ? "signed" : "unsigned", " index and ", elementSize,
+        "-byte ", signed ? "signed" : "unsigned", " index and ", handlerSize,
         "-byte elements"));
 }
 
@@ -4431,11 +4608,17 @@ shared static this() {
     addRoles(&opTlsLoad, rolesOfOperation!(runTlsLoad, I));
     addRoles(&opTlsStore, rolesOfOperation!(runTlsStore, S));
     addRoles(&opTlsAddress, rolesOfOperation!(runTlsAddress, I));
-    static foreach (isStore; [false, true])
-        static foreach (shape; checkedIndexShapes)
-            static foreach (size; checkedIndexElementSizes)
-                addRoles(&opCheckedIndex!(isStore, shape[0], shape[1] == 1,
-                    size), Roles(Role.other, Role.other, Role.instruction));
+    static foreach (kind; [EnumMembers!CheckedAccess])
+        static foreach (fixed; [false, true])
+            static foreach (shape; checkedIndexShapes)
+                static foreach (size; checkedIndexElementSizes)
+                    static if (kind != CheckedAccess.check || size == 1)
+                        addRoles(&opCheckedIndex!(kind, fixed, shape[0],
+                            shape[1] == 1, size),
+                            kind == CheckedAccess.storeUnchecked
+                                ? Roles(Role.other, Role.other, Role.other)
+                                : Roles(Role.other, Role.other,
+                                    Role.instruction));
     // The fused return keeps the roles of the producer it replaces.
     static foreach (width; 1 .. 17)
         addRoles(&opThenReturn!(opCopyFixed!(width, true)),

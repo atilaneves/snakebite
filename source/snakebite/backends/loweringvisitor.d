@@ -401,6 +401,8 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     // for instance), and that call is what must run.
     final override void visit(CastExp expression) {
         if (expression.lowering !is null) {
+            if (visitLoweredClassCast(expression))
+                return;
             expression.lowering.accept(this);
             return;
         }
@@ -431,6 +433,12 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     }
 
     protected abstract void visitUnloweredCast(CastExp expression);
+
+    // A backend that compiles a class downcast itself instead of its
+    // `lowering` returns `true`.
+    protected bool visitLoweredClassCast(CastExp expression) {
+        return false;
+    }
 
     final override void visit(AssignExp expression) {
         if (expression.e1.isArrayLengthExp !is null
