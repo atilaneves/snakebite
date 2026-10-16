@@ -1449,3 +1449,94 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// The error of an index below zero names the index in 64 bits, whatever the
+// width of the index variable.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "an out-of-bounds index is a compile-time error in CTFE"),
+)) {
+    @("checkedIndex.errorNamesIndex." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: ArrayIndexError;
+            void main() {
+                auto a = new int[3];
+                int k = 0;
+                int low = int.min;
+                uint u = 0;
+                int one = 1;
+                long l = 0;
+                size_t index;
+                size_t length;
+                void check(size_t wantedIndex) {
+                    assert(index == wantedIndex);
+                    assert(length == 3);
+                    index = length = 0;
+                }
+                try { auto x = a[k - 1]; }
+                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                check(size_t.max);
+                try { auto x = a[low]; }
+                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                check(cast(size_t) int.min);
+                try { auto x = a[low + 0]; }
+                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                check(cast(size_t) int.min);
+                try { auto x = a[u - 1]; }
+                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                check(uint.max);
+                try { a[k - 1] = 1; }
+                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                check(size_t.max);
+                try { a[u - 1] = 1; }
+                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                check(uint.max);
+                try { auto x = a[one + int.max]; }
+                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                check(cast(size_t) (1 + int.max) | 0xFFFFFFFF00000000);
+                try { auto x = a[l - 1]; }
+                catch (ArrayIndexError e) { index = e.index; length = e.length; }
+                check(size_t.max);
+            }
+        });
+    }
+}
+
+// The left side of a store is checked before the value is read.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "an out-of-bounds index is a compile-time error in CTFE"),
+)) {
+    @("checkedIndex.storeChecksLeftFirst." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: ArrayIndexError;
+            void main() {
+                auto a = new int[3];
+                auto b = new int[3];
+                int[] none;
+                size_t i = 5;
+                size_t j = 7;
+                int m = 5;
+                int n = 9;
+                size_t index;
+                void check(size_t wantedIndex) {
+                    assert(index == wantedIndex);
+                    index = 0;
+                }
+                try { a[i] = b[j]; }
+                catch (ArrayIndexError e) { index = e.index; }
+                check(5);
+                try { a[m + 1] = b[n - 1]; }
+                catch (ArrayIndexError e) { index = e.index; }
+                check(6);
+                try { a[i] = none[0]; }
+                catch (ArrayIndexError e) { index = e.index; }
+                check(5);
+            }
+        });
+    }
+}

@@ -539,7 +539,8 @@ private alias positionFree = AliasSeq!(
     runFloatCompare3, runFloatComparison, runFloatToBool, runFloatUnary,
     runFloatWidthCast, runFrameAddress, runFusedBranch, runGreaterOrEqualSigned,
     runGreaterOrEqualUnsigned, runGreaterThanSigned, runGreaterThanUnsigned,
-    runIndex, runCheckedIndex, runInt3, runJump, runLessOrEqualSigned, runLessOrEqualUnsigned,
+    runIndex, runCheckedIndex,
+    runInt3, runJump, runLessOrEqualSigned, runLessOrEqualUnsigned,
     runLessThanSigned, runLessThanUnsigned, runLoadBitfield, runLoadIndirect,
     runLogicalNot, runMultiply, runNegate, runNotEqual, runRangeEndPass,
     runReturnVoid, runShift3, runShiftLeft, runShiftRightArithmetic,
@@ -2684,7 +2685,8 @@ private const(Instruction)* runCheckedIndex(bool store, size_t indexWidth,
         const sum = *cast(const(uint)*) indexPlace + cast(uint) offset;
         const index = cast(size_t) sum;
     } else
-        const index = *cast(const(size_t)*) indexPlace + cast(size_t) cast(long) offset;
+        const index = *cast(const(size_t)*) indexPlace
+            + cast(size_t) cast(long) offset;
     const length = *cast(const(size_t)*) (execution.source + arrayLengthOffset);
     if (index >= length)
         return execution.next;
@@ -2712,6 +2714,8 @@ package Instruction.Handler checkedIndexHandler(
     in bool store, in size_t indexWidth, in bool signed,
     in size_t elementSize,
 ) {
+    import std.conv: text;
+
     static foreach (isStore; [false, true])
         static foreach (shape; checkedIndexShapes)
             static foreach (size; checkedIndexElementSizes)
@@ -2719,7 +2723,9 @@ package Instruction.Handler checkedIndexHandler(
                         && signed == (shape[1] == 1) && elementSize == size)
                     return &opCheckedIndex!(isStore, shape[0],
                         shape[1] == 1, size);
-    return null;
+    internalFailure(text("no checked-index handler for a ", indexWidth,
+        "-byte ", signed ? "signed" : "unsigned", " index and ", elementSize,
+        "-byte elements"));
 }
 
 package alias opIndexSlice = opIndex!(IndexBase.slice);

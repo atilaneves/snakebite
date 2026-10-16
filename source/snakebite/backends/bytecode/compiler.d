@@ -6420,11 +6420,35 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return false;
         size_t operand = operandOf(value, width, floating);
         if (operand == size_t.max) {
+            // Native order checks the left side first; the instruction checks
+            // it after the value, so the value must not be able to fail.
+            if (!cannotFail(value))
+                return false;
             operand = reserveTemp(typeFacts(expression.type));
             evalInto(value, operand, width, expression.type);
         }
         emitCheckedIndex(expression, shape, true, operand, array);
         return true;
+    }
+
+    // Whether evaluating `expression` cannot raise an `Error` or an
+    // exception: literals, plain locals and arithmetic over them.
+    private bool cannotFail(Expression expression) {
+        switch (expression.op) {
+            case EXP.int64, EXP.float64:
+                return true;
+            case EXP.variable:
+                return localSlot(expression) != size_t.max;
+            case EXP.cast_:
+                return cannotFail(expression.isCastExp.e1);
+            case EXP.negate, EXP.tilde:
+                return cannotFail(expression.isUnaExp.e1);
+            case EXP.add, EXP.min, EXP.mul, EXP.and, EXP.or, EXP.xor:
+                auto binary = expression.isBinExp;
+                return cannotFail(binary.e1) && cannotFail(binary.e2);
+            default:
+                return false;
+        }
     }
 
     // The access, then the failure code of the bounds check. The access
@@ -6450,18 +6474,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(handler, value, array, packed, 0);
         }, () {
             // The index the hook reports: the index plus the offset, in
-            // the width of the index, then widened.
+            // the width of the index, then widened in place.
             const wide = reserveTemp(pointerFacts);
-            const narrow = shape.width == size_t.sizeof
-                ? wide : reserveTemp(typeFacts(indexType));
-            emit(&opCopy, narrow, shape.slot, shape.width);
+            emit(&opCopy, wide, shape.slot, shape.width);
             if (shape.offset != 0) {
                 const offset = reserveTemp(typeFacts(indexType));
                 emit(&opConstant, offset, addConstant(shape.offset),
                     shape.width);
-                emit(&opAdd, narrow, offset, shape.width);
+                emit(&opAdd, wide, offset, shape.width);
             }
-            if (narrow != wide)
+            if (shape.width != size_t.sizeof)
                 emit(shape.signed ? &opCastWidenSigned : &opCastWidenUnsigned,
                     wide, shape.width, size_t.sizeof);
             return Arg(wide, 0, size_t.sizeof);
