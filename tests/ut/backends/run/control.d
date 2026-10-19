@@ -3209,3 +3209,41 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// A conditional expression runs only the arm that its condition selects,
+// whether it yields a scalar, a slice, an lvalue or nothing.
+static foreach (backend; Matrix!()) {
+    @("conditionalExpressionForms." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Pair { int a; int b; }
+            void bump(ref int x) { ++x; }
+            int pick(int n, bool even) { return even ? n * 2 : -n; }
+            int[] shorter(int[] a, int[] b) { return a.length < b.length ? a : b; }
+            double mix(bool even) { return even ? 0.5 : 2.5; }
+            int main() {
+                int x, y;
+                Pair p1 = Pair(1, 2);
+                Pair p2 = Pair(3, 4);
+                int[] s1 = [1, 2];
+                int[] s2 = [3];
+                int total;
+                foreach (i; 0 .. 4) {
+                    const even = i % 2 == 0;
+                    total += even ? 10 : 1;
+                    total += cast(int) (mix(even) * 2);
+                    const bool flag = even ? i > 0 : true;
+                    total += flag ? 100 : 0;
+                    total += (even ? s1 : s2).length;
+                    total += (even ? p1 : p2).b;
+                    total += pick(i, even) + shorter(s1, s2).length;
+                    bump(even ? x : y);
+                    even ? x++ : y++;
+                    even ? bump(x) : bump(y);
+                }
+                return total == 356 && x == 6 && y == 6 ? 0 : 1;
+            }
+        });
+    }
+}

@@ -1184,6 +1184,34 @@ private final class ConditionalDouble : DoubleNode {
     }
 }
 
+private final class ConditionalAddress : Node {
+    private Node _test;
+    private Node _first;
+    private Node _second;
+    public this(Node test, Node first, Node second) {
+        _test = test; _first = first; _second = second;
+    }
+    public override ubyte* executeAddr(ubyte* frame) {
+        return _test.executeBool(frame)
+            ? _first.executeAddr(frame) : _second.executeAddr(frame);
+    }
+}
+
+private final class ConditionalVoid : Node {
+    private Node _test;
+    private Node _first;
+    private Node _second;
+    public this(Node test, Node first, Node second) {
+        _test = test; _first = first; _second = second;
+    }
+    public override void executeVoid(ubyte* frame) {
+        if (_test.executeBool(frame))
+            _first.executeVoid(frame);
+        else
+            _second.executeVoid(frame);
+    }
+}
+
 private final class ConditionalSlice : SliceNode {
     private Node _test;
     private Node _first;
@@ -2266,6 +2294,9 @@ private Node buildAddress(E)(E ev, Expression expression) {
         }
         case index:
             return buildIndexAddress(ev, expression.isIndexExp);
+        case question:
+            return buildConditional!(buildAddress!E, ConditionalAddress)(
+                ev, expression.isCondExp);
         default:
             return null;
     }
@@ -2815,9 +2846,13 @@ private Node buildEffect(E)(E ev, Expression expression) {
         return buildDeclaration(ev, declaration);
     if (isSlice(expression.type))
         return buildSlice(ev, expression);
-    if (expression.type !is null && expression.type.toBasetype.ty == TY.Tvoid)
+    if (expression.type !is null && expression.type.toBasetype.ty == TY.Tvoid) {
+        if (expression.op == EXP.question)
+            return buildConditional!(buildEffect!E, ConditionalVoid)(
+                ev, expression.isCondExp);
         return expression.op == EXP.call
             ? buildCall(ev, expression.isCallExp) : null;
+    }
     return buildValue(ev, expression);
 }
 
@@ -3041,12 +3076,6 @@ private Node buildValue(E)(E ev, Expression expression) {
             auto location = buildAddress(ev, operand);
             return location is null ? null : new AddressValue(location);
         }
-        case question:
-            return scalar.kind == Scalar.Kind.floating
-                ? buildConditional!(buildValue!E, ConditionalDouble)(
-                    ev, expression.isCondExp)
-                : buildConditional!(buildValue!E, ConditionalLong)(
-                    ev, expression.isCondExp);
         case typeid_: {
             import dmd.dtemplate: isExpression, isType;
 
@@ -3060,6 +3089,20 @@ private Node buildValue(E)(E ev, Expression expression) {
         }
         case comma:
             return buildComma(ev, expression.isCommaExp, &buildValue!E);
+        case question: {
+            auto conditional = expression.isCondExp;
+            bool differs(Expression arm) {
+                return scalarOf(ev, arm.type).kind != scalar.kind
+                    || ev.factsOf(arm.type).size != scalar.facts.size;
+            }
+            if (differs(conditional.e1) || differs(conditional.e2))
+                return null;
+            return scalar.kind == Scalar.Kind.floating
+                ? buildConditional!(buildValue!E, ConditionalDouble)(
+                    ev, conditional)
+                : buildConditional!(buildValue!E, ConditionalLong)(
+                    ev, conditional);
+        }
         case identity: return buildIdentity!false(ev, expression.isIdentityExp);
         case notIdentity: return buildIdentity!true(ev, expression.isIdentityExp);
         default:
