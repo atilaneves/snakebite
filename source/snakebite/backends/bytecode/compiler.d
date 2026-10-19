@@ -9339,7 +9339,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         CallExp expression, FuncDeclaration callee, in size_t destOffset,
     ) {
         import dmd.astenums: STC, Tvoid, VarArg;
-        import snakebite.backends.calls: arityMismatches;
+        import snakebite.backends.calls: arityMismatches, ValueCall;
         import snakebite.frontend.dmd.dispatch: classReceiverOf;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
@@ -9362,7 +9362,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         evalInto(receiver, objectOffset, size_t.sizeof);
 
         const calleeSlotOffset = reserveTemp(pointerFacts);
-        auto calleeLayout = FrameLayout.ofParameters(calleeType, true);
+        auto valueCall = ValueCall.of(calleeType, true);
+        const calleeLayout = valueCall.layout;
         Arg[] args;
         args ~= Arg(
             objectOffset, calleeLayout.hiddenThis.parameter.offset,
@@ -9372,13 +9373,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto site = compileIndirectArguments(
             calleeType, expression.arguments, calleeLayout, args,
             calleeSlotOffset, isVoidCallee ? 0 : returnFacts.size,
-            /* hasContext */ true, /* mayUseWindow */ false);
+            /* hasContext */ true, /* mayUseWindow */ true);
         compileNullCheck(objectOffset, expression.loc);
         compileClassVtableSlot(
             expression, objectOffset, callee, calleeSlotOffset);
+        site.value.signature = valueCall.signature;
         const siteIndex = _callSites.length;
+        const windowed = site.windowSlot != size_t.max;
         _callSites ~= site;
-        emit(&opCall, destOffset, siteIndex, 0);
+        const place = nativeResultPlace(destOffset, isVoidCallee, returnFacts);
+        emit(windowed ? indirectWindowCallHandler(place) : &opCall,
+            place, siteIndex, 0);
     }
 
     // `callee`'s own compiled override, read out of the object's instance
@@ -10417,8 +10422,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // The arguments and call site of a call whose callee address is read
     // from a frame slot at run time: a function pointer, a delegate, or a
     // class's vtable entry. `args` already holds the context or receiver.
-    // Only a call of a function pointer or delegate value may use a call
-    // window (`mayUseWindow`); a virtual call keeps the plain call site.
+    // `mayUseWindow` puts the context and arguments in a call window.
     // Every callee such a site can reach shares `functionType`'s own
     // parameters, so one argument plan covers declared parameters, the
     // `TypeInfo` and cursor of a D variadic, and the extra values of a C
