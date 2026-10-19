@@ -1393,7 +1393,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
         // The left array is read from `destination`, which then takes the
         // result; `width` is an element size.
-        if (handler is &opArrayEqual) {
+        if (handler is &opArrayEqual || handler is &opStaticArrayEqual) {
             roles = Operands(S, S);
             return true;
         }
