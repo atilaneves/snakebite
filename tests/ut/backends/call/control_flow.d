@@ -1902,7 +1902,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// A constant-index read in a comparison happens before the destructor of a temporary in the same full expression.
+// An indexed read in a comparison happens before the destructor of a temporary in the same full expression.
 static foreach (backend; Matrix!()) {
     @("fullExpression.indexedReadBeforeDestructor.if." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -1934,14 +1934,15 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!()) {
-    @("fullExpression.indexedReadBeforeDestructor.ternary." ~ backend.stringof)
+    @("fullExpression.localReadBeforeDestructor.if." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            struct Clear { int[]* values; int value; ~this() { (*values)[1] = 0; } }
+            struct Clear { int* target; int value; ~this() { *target = 0; } }
             int main() {
-                int[] values = [1, 9, 3];
-                return Clear(&values, 5).value < values[1] ? 0 : 1;
+                int x = 9;
+                if (Clear(&x, 5).value < x) return 0;
+                return 1;
             }
         });
     }

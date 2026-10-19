@@ -7909,7 +7909,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // Where an operand of a three-address instruction is. A plain local is
     // used in place, unless `later` (the operand evaluated after this one)
     // has a side effect: it could write the local. A nothrow, strongly pure
-    // call has none, and cannot write a caller's local.
+    // call has none, and cannot write a caller's local. With
+    // `destructorsFollow`, the consumer reads the operands after destructors
+    // of temporaries ran, and such a destructor could write the place: the
+    // operand is then copied to a temporary whatever `later` is.
     private size_t operandInto(
         Expression operand, Expression later,
         in imported!"snakebite.nativelayout".TypeFacts facts,
