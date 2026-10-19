@@ -63,7 +63,8 @@ Measure with the existing tools. Do not write a new benchmark harness.
   never to natively compiled guest code.
 - Profile `bin/sb-prof` (`ninja bin/sb-prof`; the release `bin/sb` plus
   `--frame-pointer=all -gline-tables-only`; not in the default targets),
-  and record with `perf record --call-graph fp`.
+  and record with `perf record -e cycles:u --call-graph fp --user-callchains`
+  (with `perf_event_paranoid=2`, plain `--call-graph fp` is refused).
   Use the plain release build only for timings.
 - See the "Native baseline" section of issue #718 before any native
   comparison.
