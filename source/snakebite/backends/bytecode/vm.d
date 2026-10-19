@@ -4417,7 +4417,17 @@ private const(Instruction)* runZero(Decoded)(
 ) {
     import core.stdc.string: memset;
 
-    memset(execution.destination, 0, execution.width);
+    auto destination = execution.destination;
+    switch (execution.width) {
+        case 1: *destination = 0; break;
+        case 4: *cast(uint*) destination = 0; break;
+        case 8: *cast(ulong*) destination = 0; break;
+        case 16:
+            (cast(ulong*) destination)[0] = 0;
+            (cast(ulong*) destination)[1] = 0;
+            break;
+        default: memset(destination, 0, execution.width);
+    }
     return execution.next;
 }
 
