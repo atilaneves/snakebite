@@ -1205,6 +1205,35 @@ private final class Comma : Node {
     }
 }
 
+// A leaf the evaluator evaluates, for a value whose making is not the tree's
+// to decide: a function address, a delegate literal.
+private final class EvaluatedWord(E) : LongNode {
+    private E _ev;
+    private Expression _expression;
+    private TreeRoot* _root;
+    public this(E ev, Expression expression) {
+        _ev = ev; _expression = expression; _root = ev._treeRoot;
+    }
+    public override long executeLong(ubyte* frame) {
+        size_t value;
+        _ev.evaluateTreeValue(_root, frame, _expression, &value);
+        return value;
+    }
+    mixin BoolFromLong;
+}
+
+private final class EvaluatedPair(E) : SliceNode {
+    private E _ev;
+    private Expression _expression;
+    private TreeRoot* _root;
+    public this(E ev, Expression expression) {
+        _ev = ev; _expression = expression; _root = ev._treeRoot;
+    }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        _ev.evaluateTreeValue(_root, frame, _expression, dest);
+    }
+}
+
 // --- statements -------------------------------------------------------
 
 private final class ExpressionStatement : Node {
@@ -1474,7 +1503,8 @@ private final class Uninitialised(E) : Node {
 
 // --- calls ------------------------------------------------------------
 
-private enum Argument : ubyte { i8, i16, i32, i64, f32, f64, address, slice }
+// `pair` is a value of two words: a dynamic array or a delegate.
+private enum Argument : ubyte { i8, i16, i32, i64, f32, f64, address, pair }
 
 private size_t sizeOf(Argument mode) {
     final switch (mode) with (Argument) {
@@ -1482,7 +1512,7 @@ private size_t sizeOf(Argument mode) {
         case i16: return 2;
         case f32, i32: return 4;
         case f64, i64, address: return 8;
-        case slice: return SliceValue.sizeof;
+        case pair: return SliceValue.sizeof;
     }
 }
 
@@ -1563,30 +1593,116 @@ private struct DirectWordCall {
     }
 }
 
+// What every call node does once it has chosen its callee: the fields that
+// say how the site passes its arguments and takes its result, the callee's
+// frame, the arguments evaluated into the parameter slots, and the run.
+private mixin template CalleeEntry(E) {
+    private E _ev;
+    private CallExp _site;
+    private Node[] _args;
+    private Argument[] _modes;
+    private size_t _resultSize;
+    private bool _resultUnsigned;
+    private imported!"snakebite.backends.calls".CallSelection.Route _route;
+    private const(imported!"snakebite.ffi.plan".CallPlan)* _plan;
+    private TreeRoot* _root;
+    private DirectWordCall _direct;
+
+    // Whether `callee` takes the arguments of this site and gives its result.
+    private bool takesArguments(in TreeCallee* callee) const {
+        auto layout = callee.layout;
+        if (layout.parameters.length != _modes.length)
+            return false;
+        foreach (i, parameter; layout.parameters)
+            if (parameter.isRef != (_modes[i] == Argument.address)
+                    || parameter.facts.size != sizeOf(_modes[i]))
+                return false;
+        return _resultSize == 0 || callee.returnFacts.size == _resultSize;
+    }
+
+    private void routeTo(TreeCallee* callee) {
+        import snakebite.backends.calls: CallSelection;
+
+        const decision = CallSelection.atCallSite(callee.decision, _site);
+        _route = decision.route;
+        _plan = _route == CallSelection.Route.native
+            ? _ev._plans.of(callee.function_) : null;
+    }
+
+    // Runs `callee` with `hidden` as its context word, the arguments taken
+    // from the caller's `frame`.
+    private void enter(
+        TreeCallee* callee, size_t hidden, ubyte* frame, void* result,
+    ) {
+        auto ev = _ev;
+        const layout = callee.layout;
+        auto calleeFrame = FrameGuard(&ev._frames);
+        // A frame of small alignment has the same lead whatever it is.
+        size_t lead = fastFrameLead;
+        auto base = callee.reservesFast
+            ? ev._frames.reserveFast(layout.size + lead, fastFrameLead) : null;
+        if (base is null) {
+            lead = callee.lead;
+            base = ev._frames.reserve(layout.size + lead, cast(uint) lead);
+        }
+        base += lead;
+        *faultSlotOf(base) = null;
+        if (layout.hiddenThis.variable !is null)
+            *cast(size_t*) (base + layout.hiddenThis.parameter.offset)
+                = hidden;
+        foreach (i, node; _args)
+            storeArgument(node, _modes[i], frame, base + layout.parameters[i].offset);
+        if (layout.retainsTemporaries)
+            ev._temporaries.withNestedCall(layout.retainsTemporaries, {
+                run(callee, base, result);
+            });
+        else
+            run(callee, base, result);
+    }
+
+    private void run(TreeCallee* callee, ubyte* base, void* result) {
+        import snakebite.backends.calls: CallSelection;
+
+        final switch (_route) with (CallSelection.Route) {
+            case guest:
+                _ev.runTreeCallee(callee, base, result);
+                break;
+            case native:
+                if (_direct.decided)
+                    _direct.run(_ev, callee, base, result);
+                else
+                    _ev.runHostCallee(callee, _plan, base, result);
+                break;
+            case builtin:
+                _ev.runHostCallee(callee, _plan, base, result);
+                break;
+            case vaStart, vaCopy, alloca:
+                assert(0, "makeTreeCallee yields no callee for this route");
+        }
+    }
+
+    private double floatingResult(in ulong[2] buffer) const {
+        return _resultSize == 4
+            ? *cast(const(float)*) buffer.ptr : *cast(const(double)*) buffer.ptr;
+    }
+}
+
 // A direct or virtual call with scalar, `ref` or dynamic array parameters,
 // and a scalar, dynamic array or no result. The callee is a guest function,
 // a native function or a builtin. It pushes the callee frame, evaluates each
 // argument into its parameter slot, and runs the callee: a guest callee's
 // node tree, or the native call through its plan.
 private final class Call(E) : Node {
-    private E _ev;
-    private CallExp _site;
+    mixin CalleeEntry!E;
+
     private FuncDeclaration _method;
     private Node _receiver;
-    private Node[] _args;
-    private Argument[] _modes;
-    private size_t _resultSize;
-    private bool _resultUnsigned;
     private bool _virtual;
     private bool _receiverIsAddress;
     // A constructor call yields the object it constructed.
     private bool _yieldsReceiver;
-    private imported!"snakebite.backends.calls".CallSelection.Route _route;
-    private const(imported!"snakebite.ffi.plan".CallPlan)* _plan;
     private TreeCallee* _callee;
     private const(void)* _vtable;
-    private TreeRoot* _root;
-    private DirectWordCall _direct;
 
     public this(E ev, CallExp site, FuncDeclaration method, Node receiver,
             bool receiverIsAddress, bool virtual, Node[] args,
@@ -1600,26 +1716,17 @@ private final class Call(E) : Node {
     }
 
     public final bool matches(TreeCallee* callee) {
-        auto layout = callee.layout;
         if (_virtual && callee.decision.route != _route)
             return false;
-        if (layout.parameters.length != _modes.length)
+        // The receiver is the context word, and only a callee with one takes it.
+        if ((_receiver !is null) != (callee.layout.hiddenThis.variable !is null))
             return false;
-        foreach (i, parameter; layout.parameters)
-            if (parameter.isRef != (_modes[i] == Argument.address)
-                    || parameter.facts.size != sizeOf(_modes[i]))
-                return false;
-        return _resultSize == 0 || callee.returnFacts.size == _resultSize;
+        return takesArguments(callee);
     }
 
     public final void bind(TreeCallee* callee) {
-        import snakebite.backends.calls: CallSelection;
-
         _callee = callee;
-        const decision = CallSelection.atCallSite(callee.decision, _site);
-        _route = decision.route;
-        _plan = _route == CallSelection.Route.native
-            ? _ev._plans.of(callee.function_) : null;
+        routeTo(callee);
         if (!_virtual && _route == CallSelection.Route.native)
             _direct.decide(_plan, callee);
     }
@@ -1654,67 +1761,117 @@ private final class Call(E) : Node {
                 }
             }
         }
-
-        const layout = callee.layout;
-        auto calleeFrame = FrameGuard(&ev._frames);
-        // A frame of small alignment has the same lead whatever it is.
-        size_t lead = fastFrameLead;
-        auto base = callee.reservesFast
-            ? ev._frames.reserveFast(layout.size + lead, fastFrameLead) : null;
-        if (base is null) {
-            lead = callee.lead;
-            base = ev._frames.reserve(layout.size + lead, cast(uint) lead);
-        }
-        base += lead;
-        *faultSlotOf(base) = null;
-        if (layout.hiddenThis.variable !is null)
-            *cast(size_t*) (base + layout.hiddenThis.parameter.offset)
-                = receiver;
-        foreach (i, node; _args)
-            storeArgument(node, _modes[i], frame, base + layout.parameters[i].offset);
-        if (layout.retainsTemporaries)
-            ev._temporaries.withNestedCall(layout.retainsTemporaries, {
-                run(callee, base, result);
-            });
-        else
-            run(callee, base, result);
+        enter(callee, receiver, frame, result);
         return receiver;
-    }
-
-    private void run(TreeCallee* callee, ubyte* base, void* result) {
-        import snakebite.backends.calls: CallSelection;
-
-        final switch (_route) with (CallSelection.Route) {
-            case guest:
-                _ev.runTreeCallee(callee, base, result);
-                break;
-            case native:
-                if (_direct.decided)
-                    _direct.run(_ev, callee, base, result);
-                else
-                    _ev.runHostCallee(callee, _plan, base, result);
-                break;
-            case builtin:
-                _ev.runHostCallee(callee, _plan, base, result);
-                break;
-            case vaStart, vaCopy, alloca:
-                assert(0, "makeTreeCallee yields no callee for this route");
-        }
     }
 
     public override long executeLong(ubyte* frame) {
         ulong[2] buffer;
         const receiver = invoke(frame, _yieldsReceiver ? null : buffer.ptr);
-        if (_yieldsReceiver)
-            return receiver;
+        return _yieldsReceiver
+            ? receiver
+            : extendResult(buffer[0], _resultSize, _resultUnsigned);
+    }
+
+    public override double executeDouble(ubyte* frame) {
+        ulong[2] buffer;
+        invoke(frame, buffer.ptr);
+        return floatingResult(buffer);
+    }
+
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        SliceValue buffer = void;
+        invoke(frame, &buffer);
+        *cast(SliceValue*) dest = buffer;
+    }
+
+    public override void executeVoid(ubyte* frame) {
+        ulong[2] buffer;
+        invoke(frame, buffer.ptr);
+    }
+}
+
+// The two words of a delegate, in the native layout.
+private struct DelegateValue {
+    public size_t context;
+    public size_t function_;
+}
+
+static assert(DelegateValue.context.offsetof
+        == imported!"snakebite.nativelayout".delegateContextOffset
+    && DelegateValue.function_.offsetof
+        == imported!"snakebite.nativelayout".delegateFunctionOffset
+    && DelegateValue.sizeof == imported!"snakebite.nativelayout".delegateValueSize);
+
+// A call through a function pointer or a delegate, with the same parameter
+// and result kinds as `Call`. The target is a callback address, which the
+// shared decode (`guestFunctionOf`) turns into the guest function and the
+// adjustment of its context. A host target, a null one, and a guest callee
+// that `Call` could not run stay with the evaluator, which has the fault for
+// the null one and the foreign-function barrier for the others.
+private final class IndirectCall(E) : Node {
+    mixin CalleeEntry!E;
+
+    private Node _target;
+    private bool _viaDelegate;
+    // The function that this site last called, and its callee when the tree
+    // runs it.
+    private FuncDeclaration _function;
+    private TreeCallee* _callee;
+
+    public this(E ev, CallExp site, Node target, bool viaDelegate,
+            Node[] args, Argument[] modes, size_t resultSize,
+            bool resultUnsigned) {
+        _ev = ev; _site = site; _target = target; _viaDelegate = viaDelegate;
+        _args = args; _modes = modes; _resultSize = resultSize;
+        _resultUnsigned = resultUnsigned;
+        _root = ev._treeRoot;
+    }
+
+    private void invoke(ubyte* frame, void* result) {
+        auto ev = _ev;
+        DelegateValue target = void;
+        if (_viaDelegate) {
+            _target.executeInto(frame, cast(ubyte*) &target);
+        } else {
+            target.context = 0;
+            target.function_ = _target.executeLong(frame);
+        }
+        ptrdiff_t adjustment;
+        auto function_ = ev.guestFunctionOf(
+            cast(const(void)*) target.function_, adjustment);
+        if (function_ !is _function) {
+            _callee = function_ is null ? null : calleeOf(function_);
+            _function = function_;
+        }
+        if (_callee is null) {
+            ev.syncTree(_root, frame);
+            ev._executeCallExpression(_site, result);
+            return;
+        }
+        enter(_callee, target.context + adjustment, frame, result);
+    }
+
+    private TreeCallee* calleeOf(FuncDeclaration function_) {
+        auto definition = _ev._callSelection.definitionOf(
+            function_, (declaration) => _ev._program.linkedFunctionOf(declaration));
+        auto callee = _ev.treeCalleeOf(definition);
+        if (callee is null || !takesArguments(callee))
+            return null;
+        routeTo(callee);
+        return callee;
+    }
+
+    public override long executeLong(ubyte* frame) {
+        ulong[2] buffer;
+        invoke(frame, buffer.ptr);
         return extendResult(buffer[0], _resultSize, _resultUnsigned);
     }
 
     public override double executeDouble(ubyte* frame) {
         ulong[2] buffer;
         invoke(frame, buffer.ptr);
-        return _resultSize == 4
-            ? *cast(float*) buffer.ptr : *cast(double*) buffer.ptr;
+        return floatingResult(buffer);
     }
 
     public override void executeInto(ubyte* frame, ubyte* dest) {
@@ -1739,7 +1896,7 @@ private void storeArgument(Node node, Argument mode, ubyte* frame, ubyte* place)
         case f32: *cast(float*) place = node.executeDouble(frame); break;
         case f64: *cast(double*) place = node.executeDouble(frame); break;
         case address: *cast(ubyte**) place = node.executeAddr(frame); break;
-        case slice: node.executeInto(frame, place); break;
+        case pair: node.executeInto(frame, place); break;
     }
 }
 
@@ -1870,7 +2027,7 @@ private Node buildIntrinsicCall(E)(E ev, CallExp call, FuncDeclaration function_
     if (!buildArguments(ev, typeFunctionOf(function_), call.arguments, args, modes))
         return null;
     foreach (mode; modes)
-        if (mode == Argument.address || mode == Argument.slice)
+        if (mode == Argument.address || mode == Argument.pair)
             return null;
     return new BuiltinOp(decision.builtinEntry, args, modes,
         isVoid ? 0 : result.facts.size, result.facts.isUnsigned);
@@ -2152,11 +2309,14 @@ private Node buildCall(E)(E ev, CallExp call) {
     import snakebite.backends.calls: CallSelection;
     import snakebite.frontend.dmd.dispatch: CallReceiver, readsVtable,
         receiverOf;
-    import snakebite.frontend.dmd.functions: typeFunctionOf;
+    import snakebite.frontend.dmd.functions: typeFunctionOf, unresolvedCalleeOf;
 
-    if (call.f is null || call.vthis2 !is null || call.e1.isCommaExp !is null
+    if (call.vthis2 !is null || call.e1.isCommaExp !is null
             || call.arguments is null)
         return null;
+    if (call.f is null)
+        return unresolvedCalleeOf(call) is null
+            ? buildIndirectCall(ev, call) : null;
     CallSelection.ScalarConstant constant;
     if (ev._callSelection.foldedScalarIntrinsic(call, constant))
         return null;
@@ -2215,6 +2375,47 @@ private Node buildCall(E)(E ev, CallExp call) {
     return node;
 }
 
+// A call through a function pointer or a delegate: null when the value of
+// the callee is outside what the tree reads, or the call is variadic.
+private Node buildIndirectCall(E)(E ev, CallExp call) {
+    import dmd.astenums: TY, VarArg;
+    import dmd.typesem: nextOf, toBasetype;
+    import snakebite.backends.calls: isIndirectDelegateCall;
+
+    auto callee = call.e1;
+    const viaDelegate = isIndirectDelegateCall(callee.type);
+    Node target;
+    imported!"dmd.mtype".TypeFunction type;
+    if (viaDelegate) {
+        type = callee.type.toBasetype.nextOf.isTypeFunction;
+        target = buildDelegate(ev, callee);
+    } else {
+        // dmd calls a function pointer as `(*pointer)(arguments)`.
+        auto dereference = callee.isPtrExp;
+        if (dereference is null)
+            return null;
+        type = dereference.type.isTypeFunction;
+        target = buildValue(ev, dereference.e1);
+    }
+    if (target is null || type is null
+            || type.parameterList.varargs != VarArg.none)
+        return null;
+
+    const isVoid = call.type.toBasetype.ty == TY.Tvoid;
+    const resultIsSlice = isSlice(call.type);
+    const result = isVoid || resultIsSlice ? Scalar() : scalarOf(ev, call.type);
+    if (!isVoid && !resultIsSlice && result.kind == Scalar.Kind.none)
+        return null;
+
+    Node[] args;
+    Argument[] modes;
+    if (!buildArguments(ev, type, call.arguments, args, modes))
+        return null;
+    return new IndirectCall!E(ev, call, target, viaDelegate, args, modes,
+        isVoid ? 0 : resultIsSlice ? SliceValue.sizeof : result.facts.size,
+        result.facts.isUnsigned);
+}
+
 // The nodes of the arguments of a call of `type`, one for each parameter,
 // and how each one is passed. False when one is outside the supported kinds.
 private bool buildArguments(E)(
@@ -2240,8 +2441,13 @@ private bool buildArguments(E)(
         } else if (isSlice(parameter.type)) {
             if (!isSlice(argument.type))
                 return false;
-            modes[i] = Argument.slice;
+            modes[i] = Argument.pair;
             args[i] = buildSlice(ev, argument);
+        } else if (isDelegate(parameter.type)) {
+            if (!isDelegate(argument.type))
+                return false;
+            modes[i] = Argument.pair;
+            args[i] = buildDelegate(ev, argument);
         } else {
             const declared = scalarOf(ev, parameter.type);
             const given = scalarOf(ev, argument.type);
@@ -2264,6 +2470,50 @@ private bool buildArguments(E)(
             return false;
     }
     return true;
+}
+
+package bool isDelegate(Type type) {
+    import dmd.astenums: TY;
+    import dmd.typesem: toBasetype;
+
+    return type !is null && type.toBasetype.ty == TY.Tdelegate;
+}
+
+// The node that yields the delegate `expression` as two words, or null when
+// the tree does not cover the expression. A delegate literal, `&nested` and
+// `&object.method` are made by the evaluator: it decides the context and the
+// callback address of the function.
+private Node buildDelegate(E)(E ev, Expression expression) {
+    import dmd.tokens: EXP;
+
+    if (!isDelegate(expression.type))
+        return null;
+    switch (expression.op) with (EXP) {
+        case variable: {
+            auto declaration = expression.isVarExp.var.isVarDeclaration;
+            const slot = slotOf(ev, declaration);
+            if (!slot.ok) {
+                auto outer = buildOuterAddress(ev, declaration);
+                return outer is null ? null : new LoadSlice(outer);
+            }
+            return slot.indirect
+                ? new LoadSlice(new IndirectLocalAddress(slot.offset))
+                : new LocalSlice(slot.offset);
+        }
+        case dotVariable, star, index: {
+            auto address = buildAddress(ev, expression);
+            return address is null ? null : new LoadSlice(address);
+        }
+        case null_:
+            return new NullSlice;
+        case function_, delegate_:
+            return new EvaluatedPair!E(ev, expression);
+        case question:
+            return buildConditional!(buildDelegate!E, ConditionalSlice)(
+                ev, expression.isCondExp);
+        default:
+            return null;
+    }
 }
 
 // The node that yields the dynamic array `expression`, or null when the
@@ -2683,6 +2933,9 @@ private Node buildValue(E)(E ev, Expression expression) {
             return buildStore(ev, cast(AssignExp) expression, scalar);
         case new_:
             return buildNew(ev, expression.isNewExp);
+        case function_, symbolOffset:
+            return scalar.kind == Scalar.Kind.integral
+                ? new EvaluatedWord!E(ev, expression) : null;
         case address: {
             import snakebite.nativelayout: isStaticStructAddress;
 

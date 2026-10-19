@@ -1462,9 +1462,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             case vaStart, vaCopy, alloca:
                 return null;
         }
-        if (layout.returnPlace.offset != size_t.max
-                || (function_.isThis !is null)
-                    != (layout.hiddenThis.variable !is null))
+        if (layout.returnPlace.offset != size_t.max)
             return null;
         auto returnType = function_.type.nextOf;
         // A constructor's result is its receiver.
@@ -1482,6 +1480,15 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             && (layout.alignment & (layout.alignment - 1)) == 0
             && layout.alignment <= fastFrameLead;
         return callee;
+    }
+
+    // Evaluates `expression` into `place` for a tree node whose value the
+    // evaluator makes.
+    package void evaluateTreeValue(
+        TreeRoot* root, ubyte* frame, Expression expression, void* place,
+    ) {
+        syncTree(root, frame);
+        evaluate(expression, expression.type, place);
     }
 
     // Calls a native function or a builtin whose frame the caller has filled:
@@ -6642,14 +6649,14 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             : Callee(resolved, null, false);
         // A function pointer or delegate that is null has neither: the call
         // goes to address zero, as in compiled D.
-        if (callee.address !is null || callee.function_ is null) {
-            const target = _plans.guestTarget(callee.address);
-            if (target.word is null)
+        if (resolved is null) {
+            ptrdiff_t adjustment;
+            callee.function_ = guestFunctionOf(callee.address, adjustment);
+            if (callee.function_ is null)
                 return _callIndirect(expression, callee.type,
                     callee.address, callee.context, callee.fromDelegate,
                     returnPlace);
-            callee.function_ = cast(FuncDeclaration) cast(void*) target.word;
-            callee.context = cast(ubyte*) callee.context + target.adjustment;
+            callee.context = cast(ubyte*) callee.context + adjustment;
         }
         auto function_ = _callSelection.definitionOf(
             callee.function_,
@@ -6965,12 +6972,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 return Callee(null, null, false, null, type);
             }
 
-            if (auto declaration =
-                    cast(void*) function_ in _shared.callableDeclarations)
-                return Callee(*declaration, null, false, null, type);
-            if (!_plans.isGuestWord(cast(void*) function_))
-                return Callee(null, null, false, cast(void*) function_, type);
-            return Callee(function_, null, false, null, type);
+            return Callee(null, null, false, cast(void*) function_, type);
         }
 
         const facts = factsOf(callee.type);
@@ -6992,13 +6994,24 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 failNullDeref(expression.loc);
             return Callee(null, cast(void*) context, true, null, type);
         }
-        if (auto declaration =
-                cast(void*) function_ in _shared.callableDeclarations)
-            return Callee(*declaration, cast(void*) context, true, null, type);
-        if (!_plans.isGuestWord(cast(void*) function_))
-            return Callee(null, cast(void*) context, true,
-                cast(void*) function_, type);
-        return Callee(function_, cast(void*) context, true, null, type);
+        return Callee(null, cast(void*) context, true,
+            cast(void*) function_, type);
+    }
+
+    // The guest function that the word of a function pointer or delegate
+    // names, and the adjustment of its context. A word is a guest function
+    // itself, or the address of a callback entry; null for a word that is
+    // neither, which host code runs.
+    package FuncDeclaration guestFunctionOf(
+        const(void)* word, out ptrdiff_t adjustment,
+    ) {
+        if (auto declaration = word in _shared.callableDeclarations)
+            return *declaration;
+        if (_plans.isGuestWord(word))
+            return cast(FuncDeclaration) cast(void*) word;
+        const target = _plans.guestTarget(word);
+        adjustment = target.adjustment;
+        return cast(FuncDeclaration) cast(void*) target.word;
     }
 
     private void* classReferenceOf(Expression expression) {
