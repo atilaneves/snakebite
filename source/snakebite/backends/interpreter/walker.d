@@ -7214,6 +7214,7 @@ private abstract class NtNode {
     ubyte* executeAddr(ubyte* frame) { assert(0); }
     void executeVoid(ubyte* frame) { assert(0); }
     NtFlow executeStmt(ubyte* frame) { assert(0); }
+    bool runsAsStatement() { return false; }
 }
 
 private abstract class NtLong : NtNode {
@@ -7549,6 +7550,7 @@ private final class NtStoreLocalLong(T) : NtLong {
         *cast(T*) (frame + _offset) = value;
         return value;
     }
+    mixin NtStatementForm!"executeLong";
 }
 
 private final class NtStoreLocalDouble(T) : NtDouble {
@@ -7560,6 +7562,7 @@ private final class NtStoreLocalDouble(T) : NtDouble {
         *cast(T*) (frame + _offset) = value;
         return value;
     }
+    mixin NtStatementForm!"executeDouble";
 }
 
 private final class NtStoreAddrLong(T) : NtLong {
@@ -7572,6 +7575,7 @@ private final class NtStoreAddrLong(T) : NtLong {
         *cast(T*) address = value;
         return value;
     }
+    mixin NtStatementForm!"executeLong";
 }
 
 private final class NtStoreAddrDouble(T) : NtDouble {
@@ -7584,6 +7588,7 @@ private final class NtStoreAddrDouble(T) : NtDouble {
         *cast(T*) address = value;
         return value;
     }
+    mixin NtStatementForm!"executeDouble";
 }
 
 // `target op= step` on an integral target of 32 or 64 bits. `_address` is
@@ -7628,6 +7633,7 @@ private final class NtOpAssignLong(string op, T) : NtLong {
         *target = result;
         return result;
     }
+    mixin NtStatementForm!"executeLong";
 }
 
 private final class NtOpAssignDouble(string op, T) : NtDouble {
@@ -7645,6 +7651,7 @@ private final class NtOpAssignDouble(string op, T) : NtDouble {
         *target = result;
         return result;
     }
+    mixin NtStatementForm!"executeDouble";
 }
 
 // `target++` and `target--`: the value is the old one.
@@ -7659,6 +7666,7 @@ private final class NtPostStep(T, long delta) : NtLong {
         *target = cast(T) (old + delta);
         return old;
     }
+    mixin NtStatementForm!"executeLong";
 }
 
 // --- statements -------------------------------------------------------
@@ -7784,6 +7792,389 @@ private final class NtGenericCondition(E) : NtBool {
     private Expression _condition;
     this(E ev, Expression condition) { _ev = ev; _condition = condition; }
     override bool executeBool(ubyte*) { return _ev.conditionHolds(_condition); }
+}
+
+// --- fused nodes ------------------------------------------------------
+// A parent that knows its children's kinds reads a leaf child inline
+// instead of calling it. Operand structs carry the leaf's data.
+
+private struct NtNodeOp {
+    NtNode node;
+    long value(ubyte* frame) { return node.executeLong(frame); }
+}
+
+private struct NtLocalOp(T) {
+    size_t offset;
+    long value(ubyte* frame) { return *cast(T*) (frame + offset); }
+}
+
+private struct NtConstOp {
+    long constant;
+    long value(ubyte*) { return constant; }
+}
+
+private struct NtNodeDop {
+    NtNode node;
+    double value(ubyte* frame) { return node.executeDouble(frame); }
+}
+
+private struct NtLocalDop {
+    size_t offset;
+    double value(ubyte* frame) { return *cast(double*) (frame + offset); }
+}
+
+private struct NtConstDop {
+    double constant;
+    double value(ubyte*) { return constant; }
+}
+
+private struct NtNodeAop {
+    NtNode node;
+    ubyte* address(ubyte* frame) { return node.executeAddr(frame); }
+}
+
+private struct NtFrameAop {
+    size_t offset;
+    ubyte* address(ubyte* frame) { return frame + offset; }
+}
+
+private enum NtOpKind : ubyte { node, localInt, localLong, constant }
+
+private struct NtOperand {
+    NtOpKind kind;
+    NtNode node;
+    size_t offset;
+    long constant;
+}
+
+private NtOperand ntOperandOf(NtNode node) {
+    if (auto leaf = cast(NtConstLong) node)
+        return NtOperand(NtOpKind.constant, node, 0, leaf._value);
+    if (auto leaf = cast(NtLocalLong!int) node)
+        return NtOperand(NtOpKind.localInt, node, leaf._offset);
+    if (auto leaf = cast(NtLocalLong!long) node)
+        return NtOperand(NtOpKind.localLong, node, leaf._offset);
+    if (auto leaf = cast(NtLocalLong!ulong) node)
+        return NtOperand(NtOpKind.localLong, node, leaf._offset);
+    return NtOperand(NtOpKind.node, node);
+}
+
+private template NtOpType(NtOpKind kind) {
+    static if (kind == NtOpKind.node)
+        alias NtOpType = NtNodeOp;
+    else static if (kind == NtOpKind.localInt)
+        alias NtOpType = NtLocalOp!int;
+    else static if (kind == NtOpKind.localLong)
+        alias NtOpType = NtLocalOp!long;
+    else
+        alias NtOpType = NtConstOp;
+}
+
+private Op ntMakeOp(Op)(in NtOperand operand) {
+    static if (is(Op == NtNodeOp))
+        return NtNodeOp(cast() operand.node);
+    else static if (is(Op == NtConstOp))
+        return NtConstOp(operand.constant);
+    else
+        return Op(operand.offset);
+}
+
+private NtNode ntFuseBinary(alias make, Args...)(
+    NtOperand left, NtOperand right, Args args,
+) {
+    import std.meta: AliasSeq;
+
+    if (left.kind == NtOpKind.constant)
+        left.kind = NtOpKind.node;
+    static foreach (lk; AliasSeq!(NtOpKind.node, NtOpKind.localInt,
+            NtOpKind.localLong))
+        static foreach (rk; AliasSeq!(NtOpKind.node, NtOpKind.localInt,
+                NtOpKind.localLong, NtOpKind.constant))
+            static if (lk != NtOpKind.node || rk != NtOpKind.node)
+                if (left.kind == lk && right.kind == rk)
+                    return make!(NtOpType!lk, NtOpType!rk)(
+                        ntMakeOp!(NtOpType!lk)(left),
+                        ntMakeOp!(NtOpType!rk)(right), args);
+    return null;
+}
+
+private NtNode ntFuseStep(alias make, Args...)(NtOperand step, Args args) {
+    import std.meta: AliasSeq;
+
+    static foreach (sk; AliasSeq!(NtOpKind.node, NtOpKind.localInt,
+            NtOpKind.localLong, NtOpKind.constant))
+        if (step.kind == sk)
+            return make!(NtOpType!sk)(ntMakeOp!(NtOpType!sk)(step), args);
+    return null;
+}
+
+private enum NtDKind : ubyte { node, local, constant }
+
+private struct NtDOperand {
+    NtDKind kind;
+    NtNode node;
+    size_t offset;
+    double constant;
+}
+
+private NtDOperand ntDoubleOperandOf(NtNode node) {
+    if (auto leaf = cast(NtConstDouble) node)
+        return NtDOperand(NtDKind.constant, node, 0, leaf._value);
+    if (auto leaf = cast(NtLocalDouble!double) node)
+        return NtDOperand(NtDKind.local, node, leaf._offset);
+    return NtDOperand(NtDKind.node, node);
+}
+
+private template NtDopType(NtDKind kind) {
+    static if (kind == NtDKind.node)
+        alias NtDopType = NtNodeDop;
+    else static if (kind == NtDKind.local)
+        alias NtDopType = NtLocalDop;
+    else
+        alias NtDopType = NtConstDop;
+}
+
+private Op ntMakeDop(Op)(in NtDOperand operand) {
+    static if (is(Op == NtNodeDop))
+        return NtNodeDop(cast() operand.node);
+    else static if (is(Op == NtConstDop))
+        return NtConstDop(operand.constant);
+    else
+        return NtLocalDop(operand.offset);
+}
+
+private NtNode ntFuseDouble(alias make)(NtDOperand left, NtDOperand right) {
+    import std.meta: AliasSeq;
+
+    static foreach (lk; AliasSeq!(NtDKind.node, NtDKind.local, NtDKind.constant))
+        static foreach (rk; AliasSeq!(NtDKind.node, NtDKind.local,
+                NtDKind.constant))
+            static if (lk != NtDKind.node || rk != NtDKind.node)
+                static if (lk != NtDKind.constant || rk != NtDKind.constant)
+                    if (left.kind == lk && right.kind == rk)
+                        return make!(NtDopType!lk, NtDopType!rk)(
+                            ntMakeDop!(NtDopType!lk)(left),
+                            ntMakeDop!(NtDopType!rk)(right));
+    return null;
+}
+
+// The statement form of an expression node: the statement runs the
+// expression directly, with no wrapper statement node.
+private mixin template NtStatementForm(string method) {
+    override bool runsAsStatement() { return true; }
+    override NtFlow executeStmt(ubyte* frame) {
+        mixin(method ~ "(frame);");
+        return NtFlow.normal;
+    }
+}
+
+private final class NtIntBinF(string op, T, L, R) : NtLong {
+    private L _left;
+    private R _right;
+    this(L left, R right) { _left = left; _right = right; }
+    override long executeLong(ubyte* frame) {
+        const a = _left.value(frame);
+        const b = _right.value(frame);
+        return cast(T) mixin("a " ~ op ~ " b");
+    }
+}
+
+private final class NtFloatBinF(string op, L, R) : NtDouble {
+    private L _left;
+    private R _right;
+    this(L left, R right) { _left = left; _right = right; }
+    override double executeDouble(ubyte* frame) {
+        const a = _left.value(frame);
+        const b = _right.value(frame);
+        return mixin("a " ~ op ~ " b");
+    }
+}
+
+private final class NtIntCompareF(string op, bool unsigned, L, R) : NtBool {
+    private L _left;
+    private R _right;
+    this(L left, R right) { _left = left; _right = right; }
+    override bool executeBool(ubyte* frame) {
+        const a = _left.value(frame);
+        const b = _right.value(frame);
+        static if (unsigned)
+            return mixin("cast(ulong) a " ~ op ~ " cast(ulong) b");
+        else
+            return mixin("a " ~ op ~ " b");
+    }
+}
+
+private final class NtFloatCompareF(string op, L, R) : NtBool {
+    private L _left;
+    private R _right;
+    this(L left, R right) { _left = left; _right = right; }
+    override bool executeBool(ubyte* frame) {
+        const a = _left.value(frame);
+        const b = _right.value(frame);
+        return mixin("a " ~ op ~ " b");
+    }
+}
+
+private final class NtIndexDynamicF(E, A, I) : NtNode {
+    private E _ev;
+    private IndexExp _expression;
+    private A _array;
+    private I _index;
+    private size_t _stride;
+    this(E ev, IndexExp expression, A array, I index, size_t stride) {
+        _ev = ev; _expression = expression; _array = array; _index = index;
+        _stride = stride;
+    }
+    override ubyte* executeAddr(ubyte* frame) {
+        const index = cast(size_t) _index.value(frame);
+        auto array = _array.address(frame);
+        const length = *cast(size_t*) array;
+        if (index >= length)
+            fail(index, length);
+        return *cast(ubyte**) (array + size_t.sizeof) + index * _stride;
+    }
+    private void fail(size_t index, size_t length) {
+        _ev.failArrayBounds(NtBoundsCheck.index, _expression.loc,
+            [cast(const(void)*) &index, cast(const(void)*) &length]);
+    }
+}
+
+private final class NtStoreAddrConst(T) : NtLong {
+    private NtNode _address;
+    private T _value;
+    this(NtNode address, T value) { _address = address; _value = value; }
+    override long executeLong(ubyte* frame) {
+        *cast(T*) _address.executeAddr(frame) = _value;
+        return _value;
+    }
+    mixin NtStatementForm!"executeLong";
+}
+
+private final class NtStoreLocalConst(T) : NtLong {
+    private size_t _offset;
+    private T _value;
+    this(size_t offset, T value) { _offset = offset; _value = value; }
+    override long executeLong(ubyte* frame) {
+        *cast(T*) (frame + _offset) = _value;
+        return _value;
+    }
+    mixin NtStatementForm!"executeLong";
+}
+
+private final class NtStoreLocalDoubleConst(T) : NtDouble {
+    private size_t _offset;
+    private T _value;
+    this(size_t offset, T value) { _offset = offset; _value = value; }
+    override double executeDouble(ubyte* frame) {
+        *cast(T*) (frame + _offset) = _value;
+        return _value;
+    }
+    mixin NtStatementForm!"executeDouble";
+}
+
+private final class NtOpAssignLocalF(string op, T, S) : NtLong {
+    private size_t _offset;
+    private S _step;
+    this(S step, size_t offset) { _step = step; _offset = offset; }
+    override long executeLong(ubyte* frame) {
+        const b = _step.value(frame);
+        auto target = cast(T*) (frame + _offset);
+        const long a = *target;
+        const T result = cast(T) mixin("a " ~ op ~ " b");
+        *target = result;
+        return result;
+    }
+    mixin NtStatementForm!"executeLong";
+}
+
+private final class NtSeq2 : NtNode {
+    private NtNode _first;
+    private NtNode _second;
+    override NtFlow executeStmt(ubyte* frame) {
+        const flow = _first.executeStmt(frame);
+        if (flow != NtFlow.normal)
+            return flow;
+        return _second.executeStmt(frame);
+    }
+}
+
+private final class NtSeq3 : NtNode {
+    private NtNode _first;
+    private NtNode _second;
+    private NtNode _third;
+    override NtFlow executeStmt(ubyte* frame) {
+        auto flow = _first.executeStmt(frame);
+        if (flow != NtFlow.normal)
+            return flow;
+        flow = _second.executeStmt(frame);
+        if (flow != NtFlow.normal)
+            return flow;
+        return _third.executeStmt(frame);
+    }
+}
+
+private NtNode ntStatement(NtNode expression) {
+    return expression.runsAsStatement ? expression : new NtExprStmt(expression);
+}
+
+
+private NtNode ntFuseIndex(E)(E ev, IndexExp indexed, NtNode array,
+        NtNode position, size_t stride) {
+    import std.meta: AliasSeq;
+
+    auto index = ntOperandOf(position);
+    if (index.kind == NtOpKind.constant)
+        index.kind = NtOpKind.node;
+    auto frameArray = cast(NtLocalAddr) array;
+    static foreach (ik; AliasSeq!(NtOpKind.node, NtOpKind.localInt,
+            NtOpKind.localLong))
+        if (index.kind == ik) {
+            alias I = NtOpType!ik;
+            auto i = ntMakeOp!I(index);
+            if (frameArray !is null)
+                return new NtIndexDynamicF!(E, NtFrameAop, I)(
+                    ev, indexed, NtFrameAop(frameArray._offset), i, stride);
+            static if (ik != NtOpKind.node)
+                return new NtIndexDynamicF!(E, NtNodeAop, I)(
+                    ev, indexed, NtNodeAop(array), i, stride);
+        }
+    return new NtIndexDynamic!E(ev, indexed, array, position, stride);
+}
+
+private NtNode ntMakeStoreLocalConst(T)(size_t offset, long value) {
+    return new NtStoreLocalConst!T(offset, cast(T) value);
+}
+private NtNode ntMakeStoreAddrConst(T)(NtNode address, long value) {
+    return new NtStoreAddrConst!T(address, cast(T) value);
+}
+private NtNode ntMakeStoreLocalDoubleConst(T)(size_t offset, double value) {
+    return new NtStoreLocalDoubleConst!T(offset, cast(T) value);
+}
+
+private NtNode ntBuildStoreLocal(in NtScalar target, size_t offset,
+        NtNode value) {
+    if (target.kind == NtKind.floating) {
+        if (auto leaf = cast(NtConstDouble) value)
+            return ntByFloating!ntMakeStoreLocalDoubleConst(
+                target.facts, offset, leaf._value);
+        return ntByFloating!ntMakeStoreLocalDouble(
+            target.facts, offset, value);
+    }
+    if (auto leaf = cast(NtConstLong) value)
+        return ntByIntegral!ntMakeStoreLocalConst(
+            target.facts, offset, leaf._value);
+    return ntByIntegral!ntMakeStoreLocalLong(target.facts, offset, value);
+}
+
+private NtNode ntBuildStoreAddr(in NtScalar target, NtNode address,
+        NtNode value) {
+    if (target.kind == NtKind.floating)
+        return ntByFloating!ntMakeStoreAddrDouble(
+            target.facts, address, value);
+    if (auto leaf = cast(NtConstLong) value)
+        return ntByIntegral!ntMakeStoreAddrConst(
+            target.facts, address, leaf._value);
+    return ntByIntegral!ntMakeStoreAddrLong(target.facts, address, value);
 }
 
 // Builds its statement's node on first execution and replaces itself in the
@@ -7998,8 +8389,10 @@ private NtNode ntBuildAddress(E)(E ev, Expression expression) {
             switch (indexed.e1.type.toBasetype.ty) with (TY) {
                 case Tarray: {
                     auto array = ntBuildAddress(ev, indexed.e1);
-                    return array is null ? null : new NtIndexDynamic!E(
-                        ev, indexed, array, position, element.size);
+                    if (array is null)
+                        return null;
+                    return ntFuseIndex(ev, indexed, array, position,
+                        element.size);
                 }
                 case Tsarray: {
                     auto array = ntBuildAddress(ev, indexed.e1);
@@ -8073,6 +8466,24 @@ private NtNode ntBuildValue(E)(E ev, Expression expression) {
                 else
                     return new NtIntBin!(op, T)(l, r, lf, rf);
             }
+            static if (op == "+" || op == "-" || op == "*") {
+                static NtNode makeInt(L, R)(L l, R r) {
+                    return new NtIntBinF!(op, int, L, R)(l, r);
+                }
+                static NtNode makeLong(L, R)(L l, R r) {
+                    return new NtIntBinF!(op, long, L, R)(l, r);
+                }
+                if (!scalar.facts.isUnsigned && scalar.facts.size == 4) {
+                    if (auto fused = ntFuseBinary!makeInt(
+                            ntOperandOf(left), ntOperandOf(right)))
+                        return fused;
+                } else if (!scalar.facts.isUnsigned
+                        && scalar.facts.size == 8) {
+                    if (auto fused = ntFuseBinary!makeLong(
+                            ntOperandOf(left), ntOperandOf(right)))
+                        return fused;
+                }
+            }
             static if (ntShiftOp!op)
                 const sp = shiftPlan(e);
             else
@@ -8087,6 +8498,13 @@ private NtNode ntBuildValue(E)(E ev, Expression expression) {
                 auto right = ntBuildValue(ev, e.e2);
                 if (left is null || right is null)
                     return null;
+                static NtNode makeFused(L, R)(L l, R r) {
+                    return new NtFloatBinF!(op, L, R)(l, r);
+                }
+                if (scalar.facts.size == 8)
+                    if (auto fused = ntFuseDouble!makeFused(
+                            ntDoubleOperandOf(left), ntDoubleOperandOf(right)))
+                        return fused;
                 static NtNode makeFloat(T)(NtNode l, NtNode r) {
                     return new NtFloatBin!(op, T)(l, r);
                 }
@@ -8105,13 +8523,34 @@ private NtNode ntBuildValue(E)(E ev, Expression expression) {
         if (plan.kind == ComparisonPlan.Kind.integral) {
             if (ntScalarOf(ev, e.e1.type).kind != NtKind.integral)
                 return null;
+            static NtNode makeSigned(L, R)(L l, R r) {
+                return new NtIntCompareF!(op, false, L, R)(l, r);
+            }
+            static NtNode makeUnsigned(L, R)(L l, R r) {
+                return new NtIntCompareF!(op, true, L, R)(l, r);
+            }
+            auto fused = plan.facts.isUnsigned
+                ? ntFuseBinary!makeUnsigned(
+                    ntOperandOf(left), ntOperandOf(right))
+                : ntFuseBinary!makeSigned(
+                    ntOperandOf(left), ntOperandOf(right));
+            if (fused !is null)
+                return fused;
             return plan.facts.isUnsigned
                 ? new NtIntCompare!(op, true)(left, right)
                 : new NtIntCompare!(op, false)(left, right);
         }
         if (plan.kind == ComparisonPlan.Kind.floating
-                && ntScalarOf(ev, e.e1.type).kind == NtKind.floating)
+                && ntScalarOf(ev, e.e1.type).kind == NtKind.floating) {
+            static NtNode makeFused(L, R)(L l, R r) {
+                return new NtFloatCompareF!(op, L, R)(l, r);
+            }
+            if (ev.factsOf(e.e1.type).size == 8)
+                if (auto fused = ntFuseDouble!makeFused(
+                        ntDoubleOperandOf(left), ntDoubleOperandOf(right)))
+                    return fused;
             return new NtFloatCompare!op(left, right);
+        }
         return null;
     }
 
@@ -8147,6 +8586,20 @@ private NtNode ntBuildValue(E)(E ev, Expression expression) {
             if (operationFacts.size != scalar.facts.size
                     || operationFacts.isUnsigned != scalar.facts.isUnsigned)
                 return null;
+            static if (op == "+" || op == "-" || op == "*") {
+                static NtNode makeInt(S)(S s, size_t o) {
+                    return new NtOpAssignLocalF!(op, int, S)(s, o);
+                }
+                static NtNode makeLong(S)(S s, size_t o) {
+                    return new NtOpAssignLocalF!(op, long, S)(s, o);
+                }
+                if (address is null && !scalar.facts.isUnsigned) {
+                    if (scalar.facts.size == 4)
+                        return ntFuseStep!makeInt(ntOperandOf(step), offset);
+                    if (scalar.facts.size == 8)
+                        return ntFuseStep!makeLong(ntOperandOf(step), offset);
+                }
+            }
             static NtNode make(T)(
                 NtNode a, size_t o, NtNode s, typeof(operationFacts) of,
                 typeof(stepFacts) sf, NtShiftPlan sp)
@@ -8224,18 +8677,12 @@ private NtNode ntBuildValue(E)(E ev, Expression expression) {
             if (!slot.ok)
                 return null;
             if (!slot.indirect)
-                return target.kind == NtKind.floating
-                    ? ntByFloating!ntMakeStoreLocalDouble(
-                        target.facts, slot.offset, value)
-                    : ntByIntegral!ntMakeStoreLocalLong(
-                        target.facts, slot.offset, value);
+                return ntBuildStoreLocal(target, slot.offset, value);
         }
         auto address = ntBuildAddress(ev, e.e1);
         if (address is null)
             return null;
-        return target.kind == NtKind.floating
-            ? ntByFloating!ntMakeStoreAddrDouble(target.facts, address, value)
-            : ntByIntegral!ntMakeStoreAddrLong(target.facts, address, value);
+        return ntBuildStoreAddr(target, address, value);
     }
 
     switch (expression.op) with (EXP) {
@@ -8417,7 +8864,7 @@ private NtNode ntBuildDeclaration(E)(E ev, Statement statement,
         return null;
     if (initializerRunsForEffect(initializer, variable)) {
         auto effect = ntBuildValue(ev, initializer.exp);
-        return effect is null ? null : new NtExprStmt(effect);
+        return effect is null ? null : ntStatement(effect);
     }
     auto value = initializerValueOf(initializer);
     const slot = ntSlotOf(ev, variable);
@@ -8428,9 +8875,7 @@ private NtNode ntBuildDeclaration(E)(E ev, Statement statement,
     auto node = ntBuildValue(ev, value);
     if (node is null)
         return null;
-    return new NtExprStmt(scalar.kind == NtKind.floating
-        ? ntByFloating!ntMakeStoreLocalDouble(scalar.facts, slot.offset, node)
-        : ntByIntegral!ntMakeStoreLocalLong(scalar.facts, slot.offset, node));
+    return ntStatement(ntBuildStoreLocal(scalar, slot.offset, node));
 }
 
 private NtNode ntBuildStatement(E)(E ev, Statement statement, NtNode* slot) {
@@ -8468,6 +8913,19 @@ private NtNode ntBuildStatement(E)(E ev, Statement statement, NtNode* slot) {
             foreach (candidate; *compound.statements)
                 if (candidate !is null)
                     inner ~= candidate;
+            if (inner.length == 2) {
+                auto seq = new NtSeq2;
+                seq._first = child(inner[0], &seq._first);
+                seq._second = child(inner[1], &seq._second);
+                return seq;
+            }
+            if (inner.length == 3) {
+                auto seq = new NtSeq3;
+                seq._first = child(inner[0], &seq._first);
+                seq._second = child(inner[1], &seq._second);
+                seq._third = child(inner[2], &seq._third);
+                return seq;
+            }
             auto nodes = new NtNode[inner.length];
             foreach (i, one; inner)
                 nodes[i] = child(one, &nodes[i]);
@@ -8491,7 +8949,7 @@ private NtNode ntBuildStatement(E)(E ev, Statement statement, NtNode* slot) {
                     || ntScalarOf(ev, expression.type).kind == NtKind.none)
                 return generic();
             auto node = ntBuildValue(ev, expression);
-            return node is null ? generic() : new NtExprStmt(node);
+            return node is null ? generic() : ntStatement(node);
         }
         case If: {
             auto conditional = statement.isIfStatement;
