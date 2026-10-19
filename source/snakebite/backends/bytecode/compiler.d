@@ -8056,7 +8056,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // order: scalar operations on scalar variables and literals, and direct
     // calls of them. Aggregates and everything else keep the value path.
     private bool isPlainCondition(Expression expression) {
-        import dmd.astenums: STC, Tpointer;
+        import dmd.astenums: STC, Tpointer, VarArg;
         import dmd.typesem: toBasetype;
 
         const facts = typeFacts(expression.type);
@@ -8088,13 +8088,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             case cast_, negate, not:
                 return isPlainCondition(expression.isUnaExp.e1);
             case call:
-                // A direct call with a scalar result and plain arguments
-                // creates no temporary with a lifetime.
                 auto call = expression.isCallExp;
                 if (call.f is null)
                     return false;
                 auto tf = call.f.type.isTypeFunction;
-                if (tf is null || tf.parameterList.varargs != imported!"dmd.astenums".VarArg.none
+                if (tf is null || tf.parameterList.varargs != VarArg.none
                         || tf.isRef)
                     return false;
                 if (call.arguments !is null)
