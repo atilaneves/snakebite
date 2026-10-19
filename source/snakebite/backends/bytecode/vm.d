@@ -945,6 +945,9 @@ package struct InlineBody {
     package uint frameAlignment;
     // The addresses in `instructions` and `constants`.
     package Reloc[] relocs;
+    // The sites of the `opCall` instructions of the body: only calls of
+    // druntime hooks, which a failed check makes.
+    package CallSite[] callSites;
 }
 
 
@@ -3134,6 +3137,34 @@ private const(Instruction)* runCheckedIndex(CheckedAccess access,
         else
             return cast(const(Instruction)*) execution.sourceWidth;
     }
+}
+
+// Whether `handler` is an `opCheckedIndex` instance, and which access and
+// kind of value operand it has.
+package bool checkedIndexKind(
+    in Instruction.Handler handler, out CheckedAccess access,
+    out bool constantValue,
+) {
+    static foreach (kind; [EnumMembers!CheckedAccess])
+        static foreach (fixed; [false, true])
+            static foreach (shape; checkedIndexShapes)
+                static foreach (size; checkedIndexElementSizes)
+                    static if (kind != CheckedAccess.check || size == 1) {
+                        if (handler is &opCheckedIndex!(kind, fixed, shape[0],
+                                shape[1] == 1, size)) {
+                            access = kind;
+                            constantValue = false;
+                            return true;
+                        }
+                        static if (kind == CheckedAccess.store)
+                            if (handler is &opCheckedIndex!(kind, fixed,
+                                    shape[0], shape[1] == 1, size, true)) {
+                                access = kind;
+                                constantValue = true;
+                                return true;
+                            }
+                    }
+    return false;
 }
 
 private enum checkedIndexShapes = [[4UL, 1UL], [4UL, 0UL], [8UL, 0UL]];
