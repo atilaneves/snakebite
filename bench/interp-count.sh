@@ -21,13 +21,21 @@ run() {
     (cd "$awfy" && taskset -c "$core" setarch -R "$@" "$sb" --DRT-gcopt=disable:1 -b interpreter \
         -I src src -- --DRT-testmode=run-main "${args[@]}")
 }
-count() {
-    local out
-    args=("$1" "$2" "$3")
-    out=$(run perf stat -x, -e "$events" 2>&1 >/dev/null)
-    if ! grep -q instructions <<<"$out"; then echo "FAILED $1 $2: $out" >&2; exit 1; fi
-    grep instructions <<<"$out" | cut -d, -f1 | awk '/^[0-9]+$/ { s += $1 } END { print s }'
+# A failing run stops the script: perf stat exits with the guest status, but
+# set -e does not reach into $(...), so every status is checked here.
+fail() {
+    echo "FAILED $1 outer=$2 (status $3); guest output:" >&2
+    cat "$tmp/guest" >&2
+    exit 1
 }
+count() {
+    args=("$1" "$2" "$3")
+    local rc=0
+    run perf stat -x, -o "$tmp/perf" -e "$events" >"$tmp/guest" 2>&1 || rc=$?
+    [ $rc -eq 0 ] || fail "$1" "$2" $rc
+    grep instructions "$tmp/perf" | cut -d, -f1 | awk '/^[0-9]+$/ { s += $1 } END { print s }'
+}
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # A hybrid CPU has one PMU per core type, and each counts only on its own
 # cores; the sum is right on any core.
 if [ -d /sys/bus/event_source/devices/cpu_core ]; then
@@ -35,7 +43,9 @@ if [ -d /sys/bus/event_source/devices/cpu_core ]; then
 else
     events=instructions:u
 fi
-args=(Sieve 1 1); run >/dev/null 2>&1
+args=(Sieve 1 1); rc=0
+run >"$tmp/guest" 2>&1 || rc=$?
+[ $rc -eq 0 ] || fail warm-up 1 $rc
 printf '%-11s %16s %16s\n' benchmark instr/iteration first-run
 for b in "${benches[@]}"; do
     a=$(count "$b" 1 "${inner[$b]}")

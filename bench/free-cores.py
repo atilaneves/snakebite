@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""List cores by how free they are: pinned processes (from /proc/*/status
+"""List cores by how free they are: pinned threads (from /proc/*/task/*/status
 Cpus_allowed_list), busy percentage over a 1 s sample (/proc/stat), and the
 SMT sibling (/sys topology). A core is free when neither it nor its sibling
 has a pinned process and both were under 20% busy."""
@@ -19,18 +19,18 @@ def sibling(c):
     return parse(open(path).read().strip()) - {c}
 
 pinned = {c: [] for c in range(ncpu)}
-for status in glob.glob('/proc/[0-9]*/status'):
+for status in glob.glob('/proc/[0-9]*/task/[0-9]*/status'):
     try:
         fields = dict(l.split(':\t', 1) for l in open(status) if ':\t' in l)
         allowed = parse(fields['Cpus_allowed_list'].strip())
     except (OSError, KeyError, ValueError):
         continue
-    if fields.get('Kthread', '0').strip() == '1' or 'PPid:\t2\n' in open(status).read():
+    if fields.get('Kthread', '0').strip() == '1' or fields.get('PPid', '').strip() == '2':
         continue
     if len(allowed) < ncpu:
         name = fields['Name'].strip()
         for c in allowed:
-            pinned[c].append(f"{status.split('/')[2]}:{name}")
+            pinned[c].append(f"{status.split('/')[2]}/{status.split('/')[4]}:{name}")
 
 def sample():
     out = {}
