@@ -817,6 +817,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall, opCallWindowDiscard, opCallWindowFrame,
         opCallWindowIndirect,
+        opCallIndirectWindowFrame, opCallIndirectWindowIndirect,
+        opCallIndirectWindowDiscard,
         opCastAs, opCastFixedAs,
         opCastToBool, opCastWidenSigned, opCastWidenUnsigned, opComplement,
         opAlloca, opArrayEqual, opComplex, opComplexNegate, opConstant, opCopy,
@@ -1246,7 +1248,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         result.windowSlot = _windowSlot;
         result.windowBytes = _windowReach;
         result.windowCallable = windowFits(_function, _layout);
-        result.fixActivationAlignment();
+        result.fixWindowFacts();
         return result;
     }
 
@@ -1572,6 +1574,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             // A call that hands its own place on writes the result of this
             // function when it returns.
             const forwardsCall = (previous.handler is &opCallWindowFrame
+                    || previous.handler is &opCallIndirectWindowFrame
                     || previous.handler is &opCall)
                 && _callSites[previous.source].returnWidth == instruction.width;
             if (!forwardsCall && !writesWholeWord(*previous, instruction.width)
@@ -1582,6 +1585,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             previous.destination = indirectStorage(slot);
             if (previous.handler is &opCallWindowFrame)
                 previous.handler = &opCallWindowIndirect;
+            else if (previous.handler is &opCallIndirectWindowFrame)
+                previous.handler = &opCallIndirectWindowIndirect;
             instruction.handler = &opReturnVoid;
         }
         if (slot == size_t.max)
@@ -9966,6 +9971,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ? &opCallWindowIndirect : &opCallWindowFrame;
     }
 
+    private static Instruction.Handler indirectWindowCallHandler(
+        in size_t destOffset,
+    ) {
+        if (destOffset == discardResult)
+            return &opCallIndirectWindowDiscard;
+        return (destOffset & (1UL << 63)) != 0
+            ? &opCallIndirectWindowIndirect : &opCallIndirectWindowFrame;
+    }
+
     // A call whose arguments are evaluated straight into the parameter
     // slots of the callee, in a window above the end of this frame. Nothing
     // is copied when the call runs, and no temporary of this function can
@@ -10386,10 +10400,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         site.kind = CallSite.Kind.value;
         site.value.signature = valueCall.signature;
         const siteIndex = _callSites.length;
+        const windowed = site.windowSlot != size_t.max;
         _callSites ~= site;
-        emit(&opCall,
-            nativeResultPlace(destOffset, isVoidCallee, returnShape.returnFacts),
-            siteIndex, 0);
+        const place = nativeResultPlace(
+            destOffset, isVoidCallee, returnShape.returnFacts);
+        emit(windowed ? indirectWindowCallHandler(place) : &opCall,
+            place, siteIndex, 0);
     }
 
     // The arguments and call site of a call whose callee address is read
@@ -10411,6 +10427,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: VarArg;
 
         auto preparation = CallAdapter.Arguments.of(functionType, arguments);
+        if (functionType.parameterList.varargs == VarArg.none
+                && calleeLayout.variadicTypes == size_t.max
+                && calleeLayout.variadicCursor == size_t.max
+                && (!hasContext
+                    || calleeLayout.hiddenThis.parameter.facts.size != 0))
+            return compileIndirectWindowArguments(
+                functionType, preparation, calleeLayout, args, calleeOffset,
+                returnWidth, hasContext);
         const initialCount = args.length;
         args ~= compileGuestArguments(preparation, calleeLayout);
 
@@ -10440,6 +10464,53 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             hasContext);
         site.value.surplus = variadic.values;
         site.value.surplusShapes = variadic.shapes;
+        return site;
+    }
+
+    // `compileIndirectArguments` for a call that is not variadic: the context
+    // and each argument go straight into their slot of a window laid out
+    // from the signature of the value, as a call to a known callee does.
+    // `args` is empty or holds the context.
+    private CallSite compileIndirectWindowArguments(
+        TypeFunction functionType,
+        CallAdapter.Arguments preparation,
+        in FrameLayout calleeLayout,
+        Arg[] args,
+        in size_t calleeOffset,
+        in size_t returnWidth,
+        in bool hasContext,
+    ) {
+        import snakebite.ffi.call: CallAdapter;
+
+        const window = windowOf(calleeLayout, CallAdapter.ofType(functionType));
+        if (hasContext) {
+            const offset = calleeLayout.hiddenThis.parameter.offset;
+            const slot = inWindow(window, offset);
+            emit(&opCopy, slot, args[0].callerOffset, size_t.sizeof);
+            args = [Arg(slot, offset, size_t.sizeof)];
+        }
+
+        const outer = _windowDepth;
+        _windowDepth = window.end;
+        preparation.eachDeclared((i, value) {
+            const parameter = calleeLayout.parameters[i];
+            const slot = inWindow(window, parameter.offset);
+            if (value.isReference) {
+                emit(&opCopy, slot, compileAddress(value.expression),
+                    size_t.sizeof);
+                args ~= Arg(slot, parameter.offset, size_t.sizeof);
+                return;
+            }
+            evalInto(value.expression, slot, parameter.facts.size);
+            args ~= Arg(slot, parameter.offset, parameter.facts.size);
+        });
+        _windowDepth = outer;
+
+        auto site = CallSite.indirect(
+            calleeOffset, args, args, returnWidth,
+            _bytecode._plans.signatureOf(functionType, hasContext),
+            hasContext);
+        site.useWindow(window);
         return site;
     }
 
