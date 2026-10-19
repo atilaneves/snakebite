@@ -962,3 +962,108 @@ static foreach (backend; Matrix!(
         }, "staysOnStack");
     }
 }
+
+
+// A statement that the original evaluator runs after a call that other
+// statements of the callee ran must see its own function's state.
+static foreach (backend; Matrix!()) {
+    @("generic.statementAfterTreeCallRunsAgain." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        31.shouldBeRetOf!(
+            backend,
+            q{
+                int fill(int base) {
+                    int[2] pair = [base, base + 1];
+                    return pair[1];
+                }
+
+                int outer() {
+                    int[2] seen = [0, 0];
+                    int total = 0;
+                    for (int i = 0; i < 2; ++i) {
+                        total += fill(i);
+                        seen = [total, i];
+                    }
+                    return seen[0] * 10 + seen[1];
+                }
+            },
+            "outer",
+        );
+    }
+}
+
+
+// A function with no parameters and no locals has an empty frame, which
+// starts where its first callee's frame starts. The callee must still run
+// its statements with its own return type, not its caller's.
+static foreach (backend; Matrix!()) {
+    @("generic.calleeOfEmptyFrameUsesItsOwnReturnType." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        2239.0.shouldBeRetOf!(
+            backend,
+            q{
+                int b(int x) {
+                    switch (x) {
+                        case 3: return 1003;
+                        case 4: return 1004;
+                        default: return 1000;
+                    }
+                }
+
+                double a() { return b(3); }
+
+                ubyte c() { return cast(ubyte) b(4); }
+
+                double driver() {
+                    int first = b(2);
+                    double second = a();
+                    int third = c();
+                    return first + second + third;
+                }
+            },
+            "driver",
+        );
+    }
+}
+
+
+// The same empty frame, the other way round: a caller with an empty frame
+// must not run its statements with the type of the callee that ran before.
+// The caller has no parameter or local to carry what changes between its two
+// calls, so it reads a module variable.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a mutable module variable"),
+)) {
+    @("generic.callerOfEmptyFrameUsesItsOwnReturnType." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        56.shouldBeRetOf!(
+            backend,
+            q{
+                __gshared int g = 1;
+
+                double b(int x) { return x + 0.5; }
+
+                int a() {
+                    if (g == 2)
+                        b(3);
+                    switch (g) {
+                        case 1: return 5;
+                        default: return 6;
+                    }
+                }
+
+                int driver() {
+                    const first = a();
+                    g = 2;
+                    const second = a();
+                    return first * 10 + second;
+                }
+            },
+            "driver",
+        );
+    }
+}
