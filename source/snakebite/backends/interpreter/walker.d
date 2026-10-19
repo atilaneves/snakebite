@@ -596,6 +596,26 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     alias visit = LoweringVisitor.visit;
 
+    enum checksNull = nullChecks;
+    private Closures!(Evaluator!nullChecks).Roots _closureRoots;
+
+    extern(D) final void closureStatement(Statement statement) {
+        statement.accept(this);
+    }
+
+    extern(D) final bool closureCondition(Expression condition) {
+        return conditionHolds(condition);
+    }
+
+    extern(D) final void closureIncrement(Expression increment) {
+        fullExpression(FullExpressionScope.Position.loopIncrement,
+            increment, { runForEffect(increment); });
+    }
+
+    extern(D) final void closureEvaluate(Expression expression, void* place) {
+        evaluate(expression, expression.type, place);
+    }
+
     private Shared* _shared;
     // Every guest frame this thread runs lives in this one frame stack,
     // bump-allocated on call and popped on return. Frames never move;
@@ -1337,6 +1357,15 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _controlFlow = ControlFlowState.init;
         _returned = ReturnedLvalue.init;
         ctfeBlockDepth = 0;
+        if (!closurePlan.needsClosure) {
+            auto root = Closures!(Evaluator!nullChecks).rootOf(
+                this, layout, body_, _closureRoots);
+            const status = root.sfn(root, frameBase, this);
+            if (status != Closures!(Evaluator!nullChecks).Status.external
+                    || !_controlFlow.hasGoto)
+                return;
+            _controlFlow.resume;
+        }
         while (true) {
             body_.accept(this);
             if (!_controlFlow.hasGoto)
@@ -7152,4 +7181,1254 @@ private struct Cache(Key, Value) {
 private void assertEveryNodeHandled() {
     static assert(
         imported!"snakebite.backends.nodecoverage".AssertEveryNodeHandled!(Evaluator!false));
+}
+
+// Closure compilation (Feeley and Lapalme 1987): a function body maps to a
+// tree of `Node`s. Each node holds a plain function pointer, its resolved
+// operands and the dmd node it came from. A node starts as a stub; its
+// first execution resolves the frame offsets, sizes and operation once,
+// patches its own function pointer and runs it. A function pointer, not a
+// delegate: the frame base arrives as an argument, so no context pointer
+// is needed and a call costs one indirect jump. Values are RETURNED by
+// type (`long` for integers, bools and addresses, `double` for floats),
+// control flow is a returned `Status`. Whatever is not supported runs on
+// the walker through a fallback node.
+private struct Closures(Ev) {
+    import core.stdc.stdlib: calloc;
+    import dmd.astenums: TY;
+    import dmd.declaration: VarDeclaration;
+    import dmd.expression;
+    import dmd.expressionsem: toInteger;
+    import dmd.mtype: Type;
+    import dmd.statement;
+    import dmd.tokens: EXP;
+    import dmd.typesem: toBasetype;
+
+    enum Status : ubyte { normal, break_, continue_, return_, external }
+
+    enum Kind : ubyte {
+        none, bool_, i8, u8, i16, u16, i32, u32, i64, u64, f32, f64,
+    }
+
+    alias IFn = long function(Node*, ubyte*, Ev);
+    alias FFn = double function(Node*, ubyte*, Ev);
+    alias SFn = Status function(Node*, ubyte*, Ev);
+
+    struct Node {
+        union {
+            IFn ifn;
+            FFn ffn;
+            SFn sfn;
+        }
+
+        Node* a, b, c;
+        Node** list;
+        size_t count;
+        size_t off, off2;
+        long imm;
+        double fimm;
+        Kind kind;
+        bool cIsFloat;
+        Expression exp;
+        Statement stmt;
+    }
+
+    // A hash table on the C heap: the evaluator lives outside the GC's
+    // view, so a GC-allocated table would be collected under it.
+    struct Roots {
+        struct Entry {
+            void* key;
+            Node* root;
+        }
+
+        Entry* table;
+        size_t capacity, count;
+
+        Node* find(void* key) {
+            if (capacity == 0)
+                return null;
+            for (size_t i = hash(key) & (capacity - 1);;
+                    i = (i + 1) & (capacity - 1)) {
+                if (table[i].key is key)
+                    return table[i].root;
+                if (table[i].key is null)
+                    return null;
+            }
+        }
+
+        void put(void* key, Node* root) {
+            if (2 * (count + 1) > capacity)
+                grow;
+            auto i = hash(key) & (capacity - 1);
+            while (table[i].key !is null && table[i].key !is key)
+                i = (i + 1) & (capacity - 1);
+            if (table[i].key is null)
+                ++count;
+            table[i] = Entry(key, root);
+        }
+
+        private static size_t hash(void* key) {
+            return (cast(size_t) key >> 4) * 0x9E3779B97F4A7C15UL >> 20;
+        }
+
+        private void grow() {
+            auto old = table[0 .. capacity];
+            capacity = capacity == 0 ? 256 : capacity * 2;
+            table = cast(Entry*) calloc(capacity, Entry.sizeof);
+            count = 0;
+            foreach (entry; old)
+                if (entry.key !is null)
+                    put(entry.key, entry.root);
+        }
+    }
+
+    template D(Kind k) {
+        static if (k == Kind.bool_) alias D = bool;
+        else static if (k == Kind.i8) alias D = byte;
+        else static if (k == Kind.u8) alias D = ubyte;
+        else static if (k == Kind.i16) alias D = short;
+        else static if (k == Kind.u16) alias D = ushort;
+        else static if (k == Kind.i32) alias D = int;
+        else static if (k == Kind.u32) alias D = uint;
+        else static if (k == Kind.i64) alias D = long;
+        else static if (k == Kind.u64) alias D = ulong;
+        else static if (k == Kind.f32) alias D = float;
+        else static if (k == Kind.f64) alias D = double;
+    }
+
+    import std.meta: AliasSeq;
+
+    alias allInt = AliasSeq!(Kind.bool_, Kind.i8, Kind.u8, Kind.i16,
+        Kind.u16, Kind.i32, Kind.u32, Kind.i64, Kind.u64);
+    alias arith = AliasSeq!(Kind.i32, Kind.u32, Kind.i64, Kind.u64);
+    alias floats = AliasSeq!(Kind.f32, Kind.f64);
+
+    static bool isFloat(in Kind k) { return k == Kind.f32 || k == Kind.f64; }
+    static bool isInt(in Kind k) { return k != Kind.none && !isFloat(k); }
+    static bool isArith(in Kind k) {
+        return k == Kind.i32 || k == Kind.u32 || k == Kind.i64
+            || k == Kind.u64;
+    }
+
+    static Kind kindOf(Type type) {
+        if (type is null)
+            return Kind.none;
+        switch (type.toBasetype.ty) with (TY) {
+            case Tbool: return Kind.bool_;
+            case Tint8: return Kind.i8;
+            case Tuns8, Tchar: return Kind.u8;
+            case Tint16: return Kind.i16;
+            case Tuns16, Twchar: return Kind.u16;
+            case Tint32: return Kind.i32;
+            case Tuns32, Tdchar: return Kind.u32;
+            case Tint64: return Kind.i64;
+            case Tuns64: return Kind.u64;
+            case Tfloat32: return Kind.f32;
+            case Tfloat64: return Kind.f64;
+            default: return Kind.none;
+        }
+    }
+
+    // The function pointer for `F!(D!k)`, for the kinds in `kinds` only.
+    static auto pick(alias F, kinds...)(in Kind k) {
+        alias R = typeof(&F!(D!(kinds[0])));
+        switch (k) {
+            static foreach (kind; kinds)
+                case kind: return cast(R) &F!(D!kind);
+            default: return cast(R) null;
+        }
+    }
+
+    // ---- entry ----
+
+    static Node* rootOf(Ev ev, const(void)* layout, Statement body_,
+        ref Roots roots)
+    {
+        if (auto found = roots.find(cast(void*) ev._function)) {
+            if (found.off2 == cast(size_t) layout)
+                return found;
+        }
+        auto root = alloc;
+        root.a = stmtNode(body_);
+        root.off2 = cast(size_t) layout;
+        root.sfn = &runRoot;
+        roots.put(cast(void*) ev._function, root);
+        return root;
+    }
+
+    static Status runRoot(Node* n, ubyte* fp, Ev ev) {
+        return n.a.sfn(n.a, fp, ev);
+    }
+
+    static Node* alloc() {
+        return cast(Node*) calloc(1, Node.sizeof);
+    }
+
+    // ---- what a frame slot is ----
+
+    static auto localSlot(Ev ev, VarDeclaration variable) {
+        import snakebite.frontend.dmd.delegates: isCtfeVariable;
+        import dmd.astenums: STC;
+
+        if (variable.isDataseg || isCtfeVariable(variable)
+                || (variable.storage_class & (STC.lazy_ | STC.ref_
+                    | STC.out_)) != 0)
+            return null;
+        auto slot = ev._layout.slotOf(variable);
+        if (slot is null || slot.isRef || slot.isReturnPlace
+                || slot.retainsTemporaries)
+            return null;
+        return slot;
+    }
+
+    // ---- predicates: what this layer runs natively ----
+
+    static bool okAddr(Ev ev, Expression e) {
+        if (auto v = e.isVarExp)
+            return v.var.isVarDeclaration !is null
+                && localSlot(ev, v.var.isVarDeclaration) !is null;
+        if (auto d = e.isDotVarExp) {
+            auto field = d.var.isVarDeclaration;
+            if (field is null || field.isBitFieldDeclaration !is null
+                    || field.isDataseg)
+                return false;
+            const ty = d.e1.type.toBasetype.ty;
+            if (ty == TY.Tstruct)
+                return okAddr(ev, d.e1);
+            if (ty == TY.Tclass || ty == TY.Tpointer)
+                return d.e1.isVarExp !is null && okAddr(ev, d.e1);
+            return false;
+        }
+        if (auto i = e.isIndexExp) {
+            if (i.lengthVar !is null)
+                return false;
+            const ty = i.e1.type.toBasetype.ty;
+            return (ty == TY.Tarray || ty == TY.Tsarray)
+                && okAddr(ev, i.e1) && isInt(kindOf(i.e2.type))
+                && ok(ev, i.e2);
+        }
+        return false;
+    }
+
+    static bool okLvalue(Ev ev, Expression e) {
+        return kindOf(e.type) != Kind.none && okAddr(ev, e);
+    }
+
+    static bool ok(Ev ev, Expression e) {
+        const kind = kindOf(e.type);
+        if (kind == Kind.none)
+            return false;
+        switch (e.op) with (EXP) {
+            case int64:
+                return isInt(kind);
+            case float64:
+                return isFloat(kind);
+            case variable, dotVariable, index:
+                return okAddr(ev, e);
+            case arrayLength:
+                return okAddr(ev, e.isArrayLengthExp.e1)
+                    && e.isArrayLengthExp.e1.type.toBasetype.ty == TY.Tarray;
+            case add, min, mul, div:
+                return (isArith(kind) || isFloat(kind))
+                    && same(e, e.isBinExp.e1) && same(e, e.isBinExp.e2)
+                    && ok(ev, e.isBinExp.e1) && ok(ev, e.isBinExp.e2);
+            case mod, and, or, xor:
+                return isArith(kind) && same(e, e.isBinExp.e1)
+                    && same(e, e.isBinExp.e2)
+                    && ok(ev, e.isBinExp.e1) && ok(ev, e.isBinExp.e2);
+            case leftShift, rightShift, unsignedRightShift:
+                return isArith(kind) && same(e, e.isBinExp.e1)
+                    && isInt(kindOf(e.isBinExp.e2.type))
+                    && ok(ev, e.isBinExp.e1) && ok(ev, e.isBinExp.e2);
+            case lessThan, lessOrEqual, greaterThan, greaterOrEqual,
+                    equal, notEqual:
+                auto b = e.isBinExp;
+                const ok1 = kindOf(b.e1.type);
+                return kind == Kind.bool_ && ok1 != Kind.none
+                    && ok1 == kindOf(b.e2.type)
+                    && ok(ev, b.e1) && ok(ev, b.e2);
+            case andAnd, orOr:
+                auto b = e.isBinExp;
+                return isInt(kindOf(b.e1.type)) && isInt(kindOf(b.e2.type))
+                    && ok(ev, b.e1) && ok(ev, b.e2);
+            case not:
+                return isInt(kindOf(e.isUnaExp.e1.type))
+                    && ok(ev, e.isUnaExp.e1);
+            case negate:
+                return (isArith(kind) || isFloat(kind))
+                    && same(e, e.isUnaExp.e1) && ok(ev, e.isUnaExp.e1);
+            case tilde:
+                return isArith(kind) && same(e, e.isUnaExp.e1)
+                    && ok(ev, e.isUnaExp.e1);
+            case cast_:
+                auto c = e.isCastExp;
+                return c.lowering is null
+                    && kindOf(c.e1.type) != Kind.none && ok(ev, c.e1);
+            case assign, construct, blit:
+                auto b = e.isBinExp;
+                return same(e, b.e1) && same(e, b.e2)
+                    && okLvalue(ev, b.e1) && ok(ev, b.e2)
+                    && (e.isConstructExp is null
+                        || e.isConstructExp.lowering is null);
+            case addAssign, minAssign, mulAssign, divAssign:
+                auto b = e.isBinExp;
+                return (isArith(kind) || isFloat(kind))
+                    && same(e, b.e1) && same(e, b.e2)
+                    && okLvalue(ev, b.e1) && ok(ev, b.e2);
+            case modAssign, andAssign, orAssign, xorAssign:
+                auto b = e.isBinExp;
+                return isArith(kind) && same(e, b.e1) && same(e, b.e2)
+                    && okLvalue(ev, b.e1) && ok(ev, b.e2);
+            case leftShiftAssign, rightShiftAssign,
+                    unsignedRightShiftAssign:
+                auto b = e.isBinExp;
+                return isArith(kind) && same(e, b.e1)
+                    && isInt(kindOf(b.e2.type))
+                    && okLvalue(ev, b.e1) && ok(ev, b.e2);
+            case plusPlus, minusMinus:
+                auto b = e.isBinExp;
+                return isArith(kind) && same(e, b.e1)
+                    && okLvalue(ev, b.e1);
+            default:
+                return false;
+        }
+    }
+
+    static bool same(Expression a, Expression b) {
+        return kindOf(a.type) == kindOf(b.type);
+    }
+
+    // ---- statement nodes ----
+
+    static Node* stmtNode(Statement s) {
+        auto n = alloc;
+        n.stmt = s;
+        n.sfn = &resolveS;
+        return n;
+    }
+
+    static Status resolveS(Node* n, ubyte* fp, Ev ev) {
+        resolveStatement(n, ev);
+        return n.sfn(n, fp, ev);
+    }
+
+    static Statement unwrap(Statement s) {
+        while (s !is null) {
+            auto scope_ = s.isScopeStatement;
+            if (scope_ is null)
+                break;
+            s = scope_.statement;
+        }
+        return s;
+    }
+
+    static Node* childStmt(Statement s) {
+        s = unwrap(s);
+        if (s is null) {
+            auto n = alloc;
+            n.sfn = &noopS;
+            return n;
+        }
+        return stmtNode(s);
+    }
+
+    static Node* condNode(Ev ev, Expression c) {
+        if (ok(ev, c) && isInt(kindOf(c.type)))
+            return expNode(c);
+        auto n = alloc;
+        n.exp = c;
+        n.ifn = &conditionFallback;
+        return n;
+    }
+
+    static long conditionFallback(Node* n, ubyte*, Ev ev) {
+        return ev.closureCondition(n.exp);
+    }
+
+    static Status noopS(Node*, ubyte*, Ev) { return Status.normal; }
+
+    static Status fallbackS(Node* n, ubyte*, Ev ev) {
+        ev.closureStatement(n.stmt);
+        return ev._controlFlow.hasTransfer ? Status.external : Status.normal;
+    }
+
+    static void resolveStatement(Node* n, Ev ev) {
+        import snakebite.backends.ifplan: ifPlan, IfPlan;
+        import snakebite.nativelayout: initializerRunsForEffect,
+            initializerValueOf;
+
+        auto s = n.stmt;
+        n.sfn = &fallbackS;
+        scope(exit) trace(n, ev);
+
+        if (auto c = s.isCompoundStatement) {
+            if (c.statements is null) {
+                n.sfn = &noopS;
+                return;
+            }
+            auto list = cast(Node**) calloc(
+                (*c.statements).length, (Node*).sizeof);
+            size_t count;
+            foreach (child; *c.statements)
+                if (child !is null)
+                    list[count++] = childStmt(child);
+            n.list = list;
+            n.count = count;
+            n.sfn = &compound;
+        } else if (auto e = s.isExpStatement) {
+            if (e.exp is null) {
+                n.sfn = &noopS;
+                return;
+            }
+            auto exp = e.exp;
+            if (auto declaration = exp.isDeclarationExp) {
+                resolveDeclaration(n, ev, declaration);
+                return;
+            }
+            const kind = kindOf(exp.type);
+            if (kind == Kind.none || !ok(ev, exp))
+                return;
+            n.a = expNode(exp);
+            n.sfn = isFloat(kind) ? &effectF : &effectI;
+        } else if (auto i = s.isIfStatement) {
+            if (i.param !is null || i.match !is null || ifPlan(i).kind != IfPlan.Kind.condition)
+                return;
+            n.a = condNode(ev, i.condition);
+            n.b = childStmt(i.ifbody);
+            n.c = i.elsebody is null ? null : childStmt(i.elsebody);
+            n.sfn = n.c is null ? &ifNoElse : &ifElse;
+        } else if (auto f = s.isForStatement) {
+            n.a = f.condition is null ? null : condNode(ev, f.condition);
+            n.b = f._body is null ? null : childStmt(f._body);
+            if (f.increment !is null) {
+                if (kindOf(f.increment.type) != Kind.none
+                        && ok(ev, f.increment)) {
+                    n.c = expNode(f.increment);
+                    n.cIsFloat = isFloat(n.c.kind);
+                } else {
+                    n.c = alloc;
+                    n.c.exp = f.increment;
+                    n.c.ifn = &incrementFallback;
+                }
+            }
+            n.sfn = &forS;
+        } else if (auto b = s.isBreakStatement) {
+            if (b.ident is null)
+                n.sfn = &breakS;
+        } else if (auto c = s.isContinueStatement) {
+            if (c.ident is null)
+                n.sfn = &continueS;
+        } else if (auto r = s.isReturnStatement) {
+            resolveReturn(n, ev, r);
+        }
+    }
+
+    static void trace(Node* n, Ev ev) {
+        import core.stdc.stdio: fprintf, stderr;
+        import core.stdc.stdlib: getenv;
+
+        if (getenv("SB_CLTRACE") is null || n.sfn != &fallbackS)
+            return;
+        fprintf(stderr, "closure fallback line %d: %s\n",
+            n.stmt.loc.linnum, n.stmt.toChars());
+    }
+
+    static long incrementFallback(Node* n, ubyte*, Ev ev) {
+        ev.closureIncrement(n.exp);
+        return 0;
+    }
+
+    static void resolveReturn(Node* n, Ev ev, ReturnStatement r) {
+        import snakebite.frontend.dmd.functions: typeFunctionOf;
+
+        if (r.exp is null) {
+            n.sfn = &returnS;
+            return;
+        }
+        if (ev._type.ty == TY.Tvoid || typeFunctionOf(ev._function).isRef)
+            return;
+        const kind = kindOf(ev._type);
+        if (kind == Kind.none || kind != kindOf(r.exp.type)
+                || !ok(ev, r.exp))
+            return;
+        n.a = expNode(r.exp);
+        n.kind = kind;
+        n.sfn = isFloat(kind)
+            ? pick!(retF, floats)(kind) : pick!(retI, allInt)(kind);
+    }
+
+    static void resolveDeclaration(Node* n, Ev ev, DeclarationExp d) {
+        import snakebite.nativelayout: initializerRunsForEffect,
+            initializerValueOf;
+
+        auto variable = d.declaration.isVarDeclaration;
+        if (variable is null)
+            return;
+        if (variable.isDataseg || variable._init is null
+                || variable._init.isVoidInitializer !is null) {
+            if (variable.isDataseg || variable._init is null
+                    || variable._init.isVoidInitializer !is null)
+                n.sfn = &noopS;
+            return;
+        }
+        auto init = variable._init.isExpInitializer;
+        auto slot = localSlot(ev, variable);
+        const kind = kindOf(variable.type);
+        if (init is null || slot is null || kind == Kind.none
+                || initializerRunsForEffect(init, variable))
+            return;
+        auto value = initializerValueOf(init);
+        if (kindOf(value.type) != kind || !ok(ev, value))
+            return;
+        n.a = expNode(value);
+        n.off = slot.offset;
+        n.kind = kind;
+        n.sfn = isFloat(kind)
+            ? pick!(declF, floats)(kind) : pick!(declI, allInt)(kind);
+    }
+
+    static Status compound(Node* n, ubyte* fp, Ev ev) {
+        foreach (i; 0 .. n.count) {
+            auto child = n.list[i];
+            const status = child.sfn(child, fp, ev);
+            if (status != Status.normal)
+                return status;
+        }
+        return Status.normal;
+    }
+
+    static Status effectI(Node* n, ubyte* fp, Ev ev) {
+        n.a.ifn(n.a, fp, ev);
+        return Status.normal;
+    }
+
+    static Status effectF(Node* n, ubyte* fp, Ev ev) {
+        n.a.ffn(n.a, fp, ev);
+        return Status.normal;
+    }
+
+    static Status ifNoElse(Node* n, ubyte* fp, Ev ev) {
+        if (n.a.ifn(n.a, fp, ev) != 0)
+            return n.b.sfn(n.b, fp, ev);
+        return Status.normal;
+    }
+
+    static Status ifElse(Node* n, ubyte* fp, Ev ev) {
+        if (n.a.ifn(n.a, fp, ev) != 0)
+            return n.b.sfn(n.b, fp, ev);
+        return n.c.sfn(n.c, fp, ev);
+    }
+
+    static Status breakS(Node*, ubyte*, Ev) { return Status.break_; }
+    static Status continueS(Node*, ubyte*, Ev) { return Status.continue_; }
+    static Status returnS(Node*, ubyte*, Ev) { return Status.return_; }
+
+    static Status retI(T)(Node* n, ubyte* fp, Ev ev) {
+        const value = cast(T) n.a.ifn(n.a, fp, ev);
+        if (ev._place !is null)
+            *cast(T*) ev._place = value;
+        return Status.return_;
+    }
+
+    static Status retF(T)(Node* n, ubyte* fp, Ev ev) {
+        const value = cast(T) n.a.ffn(n.a, fp, ev);
+        if (ev._place !is null)
+            *cast(T*) ev._place = value;
+        return Status.return_;
+    }
+
+    static Status declI(T)(Node* n, ubyte* fp, Ev ev) {
+        *cast(T*) (fp + n.off) = cast(T) n.a.ifn(n.a, fp, ev);
+        return Status.normal;
+    }
+
+    static Status declF(T)(Node* n, ubyte* fp, Ev ev) {
+        *cast(T*) (fp + n.off) = cast(T) n.a.ffn(n.a, fp, ev);
+        return Status.normal;
+    }
+
+    static Status forS(Node* n, ubyte* fp, Ev ev) {
+        for (;;) {
+            if (n.a !is null && n.a.ifn(n.a, fp, ev) == 0)
+                return Status.normal;
+            if (n.b !is null) {
+                const status = n.b.sfn(n.b, fp, ev);
+                if (status != Status.normal) {
+                    if (status == Status.break_)
+                        return Status.normal;
+                    if (status == Status.return_)
+                        return status;
+                    if (status == Status.external
+                            && ev._controlFlow.leavesLoop(null))
+                        return ev._controlFlow.hasTransfer
+                            ? Status.external : Status.normal;
+                }
+            }
+            if (n.c !is null) {
+                if (n.cIsFloat)
+                    n.c.ffn(n.c, fp, ev);
+                else
+                    n.c.ifn(n.c, fp, ev);
+            }
+        }
+    }
+
+    // ---- expression nodes ----
+
+    static Node* expNode(Expression e) {
+        // A cast that keeps the kind changes no bits.
+        while (auto c = e.isCastExp) {
+            if (c.lowering !is null || kindOf(c.type) != kindOf(c.e1.type))
+                break;
+            e = c.e1;
+        }
+        auto n = alloc;
+        n.exp = e;
+        n.kind = kindOf(e.type);
+        if (isFloat(n.kind))
+            n.ffn = &resolveF;
+        else
+            n.ifn = &resolveI;
+        return n;
+    }
+
+    static Node* addrNode(Expression e) {
+        auto n = alloc;
+        n.exp = e;
+        n.ifn = &resolveAddr;
+        return n;
+    }
+
+    static long resolveI(Node* n, ubyte* fp, Ev ev) {
+        resolveExpression(n, ev);
+        return n.ifn(n, fp, ev);
+    }
+
+    static double resolveF(Node* n, ubyte* fp, Ev ev) {
+        resolveExpression(n, ev);
+        return n.ffn(n, fp, ev);
+    }
+
+    static long normalize(in Kind k, in ulong v) {
+        switch (k) {
+            case Kind.bool_: return v != 0;
+            case Kind.i8: return cast(byte) v;
+            case Kind.u8: return cast(ubyte) v;
+            case Kind.i16: return cast(short) v;
+            case Kind.u16: return cast(ushort) v;
+            case Kind.i32: return cast(int) v;
+            case Kind.u32: return cast(uint) v;
+            default: return cast(long) v;
+        }
+    }
+
+    static long loadNorm(in Kind k, in void* p) {
+        switch (k) {
+            static foreach (kind; allInt)
+                case kind: return cast(long) *cast(const(D!kind)*) p;
+            default: assert(false);
+        }
+    }
+
+    // The operation reached an edge case (division by zero, say): the
+    // walker's own evaluation of the node raises the error.
+    static long slowI(Node* n, Ev ev) {
+        ulong buffer;
+        ev.closureEvaluate(n.exp, &buffer);
+        return loadNorm(n.kind, &buffer);
+    }
+
+    static void resolveExpression(Node* n, Ev ev) {
+        auto e = n.exp;
+        const k = n.kind;
+        switch (e.op) with (EXP) {
+            case int64:
+                n.imm = normalize(k, e.isIntegerExp.value);
+                n.ifn = &constI;
+                return;
+            case float64:
+                n.fimm = k == Kind.f32
+                    ? cast(float) e.isRealExp.value
+                    : cast(double) e.isRealExp.value;
+                n.ffn = &constF;
+                return;
+            case variable, dotVariable, index:
+                resolveLoad(n, ev);
+                return;
+            case arrayLength:
+                resolveLength(n, ev);
+                return;
+            case add:
+                return binary!"+"(n, ev);
+            case min:
+                return binary!"-"(n, ev);
+            case mul:
+                return binary!"*"(n, ev);
+            case div:
+                return binary!"/"(n, ev);
+            case mod:
+                return binary!"%"(n, ev);
+            case and:
+                return binary!"&"(n, ev);
+            case or:
+                return binary!"|"(n, ev);
+            case xor:
+                return binary!"^"(n, ev);
+            case leftShift:
+                return binary!"<<"(n, ev);
+            case rightShift:
+                return binary!">>"(n, ev);
+            case unsignedRightShift:
+                return binary!">>>"(n, ev);
+            case lessThan:
+                return compare!"<"(n, ev);
+            case lessOrEqual:
+                return compare!"<="(n, ev);
+            case greaterThan:
+                return compare!">"(n, ev);
+            case greaterOrEqual:
+                return compare!">="(n, ev);
+            case equal:
+                return compare!"=="(n, ev);
+            case notEqual:
+                return compare!"!="(n, ev);
+            case andAnd:
+                n.a = expNode(e.isBinExp.e1);
+                n.b = expNode(e.isBinExp.e2);
+                n.ifn = &andAndI;
+                return;
+            case orOr:
+                n.a = expNode(e.isBinExp.e1);
+                n.b = expNode(e.isBinExp.e2);
+                n.ifn = &orOrI;
+                return;
+            case not:
+                n.a = expNode(e.isUnaExp.e1);
+                n.ifn = &notI;
+                return;
+            case negate:
+                n.a = expNode(e.isUnaExp.e1);
+                if (isFloat(k))
+                    n.ffn = pick!(negF, floats)(k);
+                else
+                    n.ifn = pick!(negI, arith)(k);
+                return;
+            case tilde:
+                n.a = expNode(e.isUnaExp.e1);
+                n.ifn = pick!(comI, arith)(k);
+                return;
+            case cast_:
+                return resolveCast(n, ev);
+            case assign, construct, blit:
+                return resolveAssign(n, ev);
+            case addAssign:
+                return opAssign!"+"(n, ev);
+            case minAssign:
+                return opAssign!"-"(n, ev);
+            case mulAssign:
+                return opAssign!"*"(n, ev);
+            case divAssign:
+                return opAssign!"/"(n, ev);
+            case modAssign:
+                return opAssign!"%"(n, ev);
+            case andAssign:
+                return opAssign!"&"(n, ev);
+            case orAssign:
+                return opAssign!"|"(n, ev);
+            case xorAssign:
+                return opAssign!"^"(n, ev);
+            case leftShiftAssign:
+                return opAssign!"<<"(n, ev);
+            case rightShiftAssign:
+                return opAssign!">>"(n, ev);
+            case unsignedRightShiftAssign:
+                return opAssign!">>>"(n, ev);
+            case plusPlus:
+                return postfix!1(n, ev);
+            case minusMinus:
+                return postfix!(-1)(n, ev);
+            default:
+                assert(false, "an unsupported node reached the closures");
+        }
+    }
+
+    static long constI(Node* n, ubyte*, Ev) { return n.imm; }
+    static double constF(Node* n, ubyte*, Ev) { return n.fimm; }
+
+    // Frame offset of an lvalue that lives in this function's frame.
+    static bool frameOffset(Ev ev, Expression e, out size_t off) {
+        if (auto v = e.isVarExp) {
+            auto slot = localSlot(ev, v.var.isVarDeclaration);
+            if (slot is null)
+                return false;
+            off = slot.offset;
+            return true;
+        }
+        if (auto d = e.isDotVarExp) {
+            if (d.e1.type.toBasetype.ty == TY.Tstruct
+                    && frameOffset(ev, d.e1, off)) {
+                off += d.var.isVarDeclaration.offset;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static void resolveLoad(Node* n, Ev ev) {
+        const k = n.kind;
+        size_t off;
+        if (frameOffset(ev, n.exp, off)) {
+            n.off = off;
+            if (isFloat(k))
+                n.ffn = pick!(loadFrameF, floats)(k);
+            else
+                n.ifn = pick!(loadFrameI, allInt)(k);
+            return;
+        }
+        n.a = addrNode(n.exp);
+        if (isFloat(k))
+            n.ffn = pick!(loadAddrF, floats)(k);
+        else
+            n.ifn = pick!(loadAddrI, allInt)(k);
+    }
+
+    static long loadFrameI(T)(Node* n, ubyte* fp, Ev) {
+        return cast(long) *cast(T*) (fp + n.off);
+    }
+
+    static double loadFrameF(T)(Node* n, ubyte* fp, Ev) {
+        return cast(double) *cast(T*) (fp + n.off);
+    }
+
+    static long loadAddrI(T)(Node* n, ubyte* fp, Ev ev) {
+        return cast(long) *cast(T*) n.a.ifn(n.a, fp, ev);
+    }
+
+    static double loadAddrF(T)(Node* n, ubyte* fp, Ev ev) {
+        return cast(double) *cast(T*) n.a.ifn(n.a, fp, ev);
+    }
+
+    static void resolveLength(Node* n, Ev ev) {
+        auto array = n.exp.isArrayLengthExp.e1;
+        size_t off;
+        if (frameOffset(ev, array, off)) {
+            n.off = off;
+            n.ifn = &lengthFrame;
+            return;
+        }
+        n.a = addrNode(array);
+        n.ifn = &lengthAddr;
+    }
+
+    static long lengthFrame(Node* n, ubyte* fp, Ev) {
+        return *cast(size_t*) (fp + n.off);
+    }
+
+    static long lengthAddr(Node* n, ubyte* fp, Ev ev) {
+        return *cast(size_t*) n.a.ifn(n.a, fp, ev);
+    }
+
+    // The address of an lvalue, as an integer.
+    static long resolveAddr(Node* n, ubyte* fp, Ev ev) {
+        auto e = n.exp;
+        size_t off;
+        if (frameOffset(ev, e, off)) {
+            n.off = off;
+            n.ifn = &addrFrame;
+        } else if (auto d = e.isDotVarExp) {
+            size_t pointerSlot;
+            if (d.e1.type.toBasetype.ty == TY.Tstruct) {
+                n.a = addrNode(d.e1);
+                n.off = d.var.isVarDeclaration.offset;
+                n.ifn = &addrField;
+            } else {
+                frameOffset(ev, d.e1, pointerSlot);
+                n.off2 = pointerSlot;
+                n.off = d.var.isVarDeclaration.offset;
+                n.ifn = &addrViaPointer;
+            }
+        } else if (auto i = e.isIndexExp) {
+            resolveIndex(n, ev, i);
+        } else
+            assert(false, "an unsupported lvalue reached the closures");
+        return n.ifn(n, fp, ev);
+    }
+
+    static long addrFrame(Node* n, ubyte* fp, Ev) {
+        return cast(long) (fp + n.off);
+    }
+
+    static long addrField(Node* n, ubyte* fp, Ev ev) {
+        return n.a.ifn(n.a, fp, ev) + n.off;
+    }
+
+    static long addrViaPointer(Node* n, ubyte* fp, Ev ev) {
+        auto object = *cast(ubyte**) (fp + n.off2);
+        static if (Ev.checksNull)
+            ev.checkNotNull(object, n.exp.loc);
+        return cast(long) (object + n.off);
+    }
+
+    static void resolveIndex(Node* n, Ev ev, IndexExp i) {
+        auto arrayType = i.e1.type.toBasetype;
+        n.b = expNode(i.e2);
+        n.c = null;
+        n.imm = ev.factsOf(nextOfType(arrayType)).size;
+        size_t off;
+        const inFrame = frameOffset(ev, i.e1, off);
+        if (arrayType.ty == TY.Tarray) {
+            if (inFrame) {
+                n.off = off;
+                n.ifn = &indexDynamicFrame;
+            } else {
+                n.a = addrNode(i.e1);
+                n.ifn = &indexDynamic;
+            }
+        } else {
+            n.off2 = cast(size_t) arrayType.isTypeSArray.dim.toInteger;
+            if (inFrame) {
+                n.off = off;
+                n.ifn = &indexStaticFrame;
+            } else {
+                n.a = addrNode(i.e1);
+                n.ifn = &indexStatic;
+            }
+        }
+    }
+
+    static Type nextOfType(Type type) {
+        import dmd.typesem: nextOf;
+        return type.nextOf;
+    }
+
+    static long boundsFailed(Node* n, Ev ev, size_t index, size_t length) {
+        ev.failArrayBounds(BoundsCheck.index, n.exp.loc,
+            [cast(const(void)*) &index, cast(const(void)*) &length]);
+        return 0;
+    }
+
+    static long indexDynamicFrame(Node* n, ubyte* fp, Ev ev) {
+        const index = cast(size_t) n.b.ifn(n.b, fp, ev);
+        auto array = cast(size_t*) (fp + n.off);
+        if (index >= array[0])
+            boundsFailed(n, ev, index, array[0]);
+        return cast(long) (cast(ubyte*) array[1] + index * n.imm);
+    }
+
+    static long indexDynamic(Node* n, ubyte* fp, Ev ev) {
+        auto array = cast(size_t*) n.a.ifn(n.a, fp, ev);
+        const index = cast(size_t) n.b.ifn(n.b, fp, ev);
+        if (index >= array[0])
+            boundsFailed(n, ev, index, array[0]);
+        return cast(long) (cast(ubyte*) array[1] + index * n.imm);
+    }
+
+    static long indexStaticFrame(Node* n, ubyte* fp, Ev ev) {
+        const index = cast(size_t) n.b.ifn(n.b, fp, ev);
+        if (index >= n.off2)
+            boundsFailed(n, ev, index, n.off2);
+        return cast(long) (fp + n.off + index * n.imm);
+    }
+
+    static long indexStatic(Node* n, ubyte* fp, Ev ev) {
+        auto base = n.a.ifn(n.a, fp, ev);
+        const index = cast(size_t) n.b.ifn(n.b, fp, ev);
+        if (index >= n.off2)
+            boundsFailed(n, ev, index, n.off2);
+        return base + index * n.imm;
+    }
+
+    // ---- arithmetic ----
+
+    static void binary(string op)(Node* n, Ev ev) {
+        auto b = n.exp.isBinExp;
+        n.a = expNode(b.e1);
+        n.b = expNode(b.e2);
+        if (isFloat(n.kind)) {
+            static if (op == "+" || op == "-" || op == "*" || op == "/")
+                n.ffn = pick!(binF!op, floats)(n.kind);
+        } else
+            n.ifn = pick!(binI!op, arith)(n.kind);
+    }
+
+    template binI(string op) {
+        static long binI(T)(Node* n, ubyte* fp, Ev ev) {
+            const x = cast(T) n.a.ifn(n.a, fp, ev);
+            const y = cast(T) n.b.ifn(n.b, fp, ev);
+            static if (op == "/" || op == "%") {
+                static if (is(T == int) || is(T == long))
+                    if (y == 0 || (y == -1 && x == T.min))
+                        return slowI(n, ev);
+                static if (is(T == uint) || is(T == ulong))
+                    if (y == 0)
+                        return slowI(n, ev);
+                return cast(long) cast(T) mixin("x " ~ op ~ " y");
+            } else static if (op == "<<" || op == ">>" || op == ">>>") {
+                enum mask = T.sizeof * 8 - 1;
+                return cast(long) cast(T) mixin("x " ~ op ~ " (y & mask)");
+            } else
+                return cast(long) cast(T) mixin("x " ~ op ~ " y");
+        }
+    }
+
+    template binF(string op) {
+        static double binF(T)(Node* n, ubyte* fp, Ev ev) {
+            const T x = cast(T) n.a.ffn(n.a, fp, ev);
+            const T y = cast(T) n.b.ffn(n.b, fp, ev);
+            const T r = mixin("x " ~ op ~ " y");
+            return r;
+        }
+    }
+
+    static long negI(T)(Node* n, ubyte* fp, Ev ev) {
+        return cast(long) cast(T) -(cast(T) n.a.ifn(n.a, fp, ev));
+    }
+
+    static double negF(T)(Node* n, ubyte* fp, Ev ev) {
+        const T r = -(cast(T) n.a.ffn(n.a, fp, ev));
+        return r;
+    }
+
+    static long comI(T)(Node* n, ubyte* fp, Ev ev) {
+        return cast(long) cast(T) ~(cast(T) n.a.ifn(n.a, fp, ev));
+    }
+
+    static long notI(Node* n, ubyte* fp, Ev ev) {
+        return n.a.ifn(n.a, fp, ev) == 0;
+    }
+
+    static long andAndI(Node* n, ubyte* fp, Ev ev) {
+        return n.a.ifn(n.a, fp, ev) != 0 && n.b.ifn(n.b, fp, ev) != 0;
+    }
+
+    static long orOrI(Node* n, ubyte* fp, Ev ev) {
+        return n.a.ifn(n.a, fp, ev) != 0 || n.b.ifn(n.b, fp, ev) != 0;
+    }
+
+    static void compare(string op)(Node* n, Ev ev) {
+        auto b = n.exp.isBinExp;
+        n.a = expNode(b.e1);
+        n.b = expNode(b.e2);
+        const k = kindOf(b.e1.type);
+        if (isFloat(k))
+            n.ifn = &cmpF!op;
+        else if (k == Kind.u64)
+            n.ifn = &cmpU!op;
+        else
+            n.ifn = &cmpS!op;
+    }
+
+    static long cmpS(string op)(Node* n, ubyte* fp, Ev ev) {
+        const x = n.a.ifn(n.a, fp, ev);
+        const y = n.b.ifn(n.b, fp, ev);
+        return mixin("x " ~ op ~ " y");
+    }
+
+    static long cmpU(string op)(Node* n, ubyte* fp, Ev ev) {
+        const x = cast(ulong) n.a.ifn(n.a, fp, ev);
+        const y = cast(ulong) n.b.ifn(n.b, fp, ev);
+        return mixin("x " ~ op ~ " y");
+    }
+
+    static long cmpF(string op)(Node* n, ubyte* fp, Ev ev) {
+        const x = n.a.ffn(n.a, fp, ev);
+        const y = n.b.ffn(n.b, fp, ev);
+        return mixin("x " ~ op ~ " y");
+    }
+
+    // ---- casts ----
+
+    static void resolveCast(Node* n, Ev ev) {
+        auto c = n.exp.isCastExp;
+        n.a = expNode(c.e1);
+        const from = n.a.kind;
+        const to = n.kind;
+        if (isFloat(to)) {
+            if (isFloat(from))
+                n.ffn = pick!(castFF, floats)(to);
+            else if (from == Kind.u64)
+                n.ffn = pick!(castUF, floats)(to);
+            else
+                n.ffn = pick!(castIF, floats)(to);
+        } else if (isFloat(from))
+            n.ifn = pick!(castFI, allInt)(to);
+        else
+            n.ifn = pick!(castII, allInt)(to);
+    }
+
+    static double castFF(T)(Node* n, ubyte* fp, Ev ev) {
+        const T r = cast(T) n.a.ffn(n.a, fp, ev);
+        return r;
+    }
+
+    static double castIF(T)(Node* n, ubyte* fp, Ev ev) {
+        const T r = cast(T) n.a.ifn(n.a, fp, ev);
+        return r;
+    }
+
+    static double castUF(T)(Node* n, ubyte* fp, Ev ev) {
+        const T r = cast(T) cast(ulong) n.a.ifn(n.a, fp, ev);
+        return r;
+    }
+
+    static long castFI(T)(Node* n, ubyte* fp, Ev ev) {
+        static if (is(T == bool))
+            return n.a.ffn(n.a, fp, ev) != 0;
+        else
+            return cast(long) cast(T) n.a.ffn(n.a, fp, ev);
+    }
+
+    static long castII(T)(Node* n, ubyte* fp, Ev ev) {
+        static if (is(T == bool))
+            return n.a.ifn(n.a, fp, ev) != 0;
+        else
+            return cast(long) cast(T) n.a.ifn(n.a, fp, ev);
+    }
+
+    // ---- assignment ----
+
+    static void resolveAssign(Node* n, Ev ev) {
+        auto b = n.exp.isBinExp;
+        n.b = expNode(b.e2);
+        size_t off;
+        const local = frameOffset(ev, b.e1, off);
+        if (local)
+            n.off = off;
+        else
+            n.a = addrNode(b.e1);
+        if (isFloat(n.kind)) {
+            n.ffn = local ? pick!(assignFrameF, floats)(n.kind)
+                : pick!(assignAddrF, floats)(n.kind);
+        } else {
+            n.ifn = local ? pick!(assignFrameI, allInt)(n.kind)
+                : pick!(assignAddrI, allInt)(n.kind);
+        }
+    }
+
+    static long assignFrameI(T)(Node* n, ubyte* fp, Ev ev) {
+        const T v = cast(T) n.b.ifn(n.b, fp, ev);
+        *cast(T*) (fp + n.off) = v;
+        return cast(long) v;
+    }
+
+    static long assignAddrI(T)(Node* n, ubyte* fp, Ev ev) {
+        const T v = cast(T) n.b.ifn(n.b, fp, ev);
+        *cast(T*) n.a.ifn(n.a, fp, ev) = v;
+        return cast(long) v;
+    }
+
+    static double assignFrameF(T)(Node* n, ubyte* fp, Ev ev) {
+        const T v = cast(T) n.b.ffn(n.b, fp, ev);
+        *cast(T*) (fp + n.off) = v;
+        return v;
+    }
+
+    static double assignAddrF(T)(Node* n, ubyte* fp, Ev ev) {
+        const T v = cast(T) n.b.ffn(n.b, fp, ev);
+        *cast(T*) n.a.ifn(n.a, fp, ev) = v;
+        return v;
+    }
+
+    static void opAssign(string op)(Node* n, Ev ev) {
+        auto b = n.exp.isBinExp;
+        n.b = expNode(b.e2);
+
+        size_t off;
+        const local = frameOffset(ev, b.e1, off);
+        if (local)
+            n.off = off;
+        else
+            n.a = addrNode(b.e1);
+        if (isFloat(n.kind)) {
+            static if (op == "+" || op == "-" || op == "*" || op == "/")
+                n.ffn = local ? pick!(opFrameF!op, floats)(n.kind)
+                    : pick!(opAddrF!op, floats)(n.kind);
+        } else {
+            n.ifn = local ? pick!(opFrameI!op, arith)(n.kind)
+                : pick!(opAddrI!op, arith)(n.kind);
+        }
+    }
+
+    template opFrameI(string op) {
+        static long opFrameI(T)(Node* n, ubyte* fp, Ev ev) {
+            auto p = cast(T*) (fp + n.off);
+            return combineI!(op, T)(n, ev, p, cast(T) n.b.ifn(n.b, fp, ev));
+        }
+    }
+
+    template opAddrI(string op) {
+        static long opAddrI(T)(Node* n, ubyte* fp, Ev ev) {
+            auto p = cast(T*) n.a.ifn(n.a, fp, ev);
+            return combineI!(op, T)(n, ev, p, cast(T) n.b.ifn(n.b, fp, ev));
+        }
+    }
+
+    static long combineI(string op, T)(Node* n, Ev ev, T* p, in T y) {
+        const x = *p;
+        static if (op == "/" || op == "%") {
+            static if (is(T == int) || is(T == long))
+                if (y == 0 || (y == -1 && x == T.min))
+                    return slowI(n, ev);
+            static if (is(T == uint) || is(T == ulong))
+                if (y == 0)
+                    return slowI(n, ev);
+            const T r = cast(T) mixin("x " ~ op ~ " y");
+        } else static if (op == "<<" || op == ">>" || op == ">>>") {
+            enum mask = T.sizeof * 8 - 1;
+            const T r = cast(T) mixin("x " ~ op ~ " (y & mask)");
+        } else
+            const T r = cast(T) mixin("x " ~ op ~ " y");
+        *p = r;
+        return cast(long) r;
+    }
+
+    template opFrameF(string op) {
+        static double opFrameF(T)(Node* n, ubyte* fp, Ev ev) {
+            auto p = cast(T*) (fp + n.off);
+            const T y = cast(T) n.b.ffn(n.b, fp, ev);
+            const T r = mixin("*p " ~ op ~ " y");
+            *p = r;
+            return r;
+        }
+    }
+
+    template opAddrF(string op) {
+        static double opAddrF(T)(Node* n, ubyte* fp, Ev ev) {
+            auto p = cast(T*) n.a.ifn(n.a, fp, ev);
+            const T y = cast(T) n.b.ffn(n.b, fp, ev);
+            const T r = mixin("*p " ~ op ~ " y");
+            *p = r;
+            return r;
+        }
+    }
+
+    static void postfix(int delta)(Node* n, Ev ev) {
+        auto b = n.exp.isBinExp;
+        size_t off;
+        const local = frameOffset(ev, b.e1, off);
+        if (local)
+            n.off = off;
+        else
+            n.a = addrNode(b.e1);
+        n.ifn = local ? pick!(postFrame!delta, arith)(n.kind)
+            : pick!(postAddr!delta, arith)(n.kind);
+    }
+
+    template postFrame(int delta) {
+        static long postFrame(T)(Node* n, ubyte* fp, Ev) {
+            auto p = cast(T*) (fp + n.off);
+            const old = *p;
+            *p = cast(T) (old + delta);
+            return cast(long) old;
+        }
+    }
+
+    template postAddr(int delta) {
+        static long postAddr(T)(Node* n, ubyte* fp, Ev ev) {
+            auto p = cast(T*) n.a.ifn(n.a, fp, ev);
+            const old = *p;
+            *p = cast(T) (old + delta);
+            return cast(long) old;
+        }
+    }
 }
