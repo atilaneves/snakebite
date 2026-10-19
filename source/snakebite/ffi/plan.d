@@ -2,6 +2,7 @@ module snakebite.ffi.plan;
 
 
 import snakebite.ffi.callback: CallbackBridge;
+import snakebite.ffi.load: LoadKind = Load, loadWidth;
 import snakebite.ffi.symbol: Resolver;
 
 
@@ -58,17 +59,8 @@ public struct CallPlan {
     private enum size_t sseBase = CallFrame.sse.offsetof;
     private enum size_t stackBase = Frame.stackArea.offsetof;
 
-    // How to read one eightbyte's source bytes at call time, precomputed
-    // once from the argument's `Register` at `buildMoves` time - a single
-    // flat tag instead of `abi.word`'s two-level switch on `Register.Kind`
-    // then size. A pointer, an 8-byte signed/unsigned integral and a full
-    // eightbyte of an INTEGER/SSE-class aggregate all read the same way,
-    // so they share `word64`; `copy` is the rare aggregate eightbyte
-    // narrower than 8 bytes, the only case that still needs a byte count.
-    private enum Load : ubyte {
-        word64, zero8, zero16, zero32, sign8, sign16, sign32, copy, copy16,
-        address,
-    }
+    public alias Load = LoadKind;
+    public alias loadWidth = .loadWidth;
 
     // One eightbyte's source and destination, fixed at prepare time. The
     // source is `byteOffset` bytes into argument `parameterIndex`'s own
@@ -1193,16 +1185,20 @@ public extern(C) void executeCallPlan(
     plan.call(returnPlace, arguments[0 .. argumentCount]);
 }
 
-// The address to call as `ulong function(ulong, ulong)` when this plan is
-// one or two word arguments in the first two integer registers and one
-// integer result of 1, 2, 4 or 8 bytes (`resultWidth`), with nothing else
-// for `callAt` to do, and the callee is not variadic. `parameterCount` is
-// the number of parameters of the plan; a call site passes the same number
-// of arguments. `swapped` says the second parameter goes in the first
-// register. Null otherwise.
+// The address to call as `Pair function(ulong, ulong, ulong)` (`Pair` is two
+// `ulong`s) when this plan is one to three word arguments in the first
+// integer registers and an integer result of 1, 2, 4 or 8 bytes, or of two
+// full eightbytes (`resultWidth` 16), with nothing else for `callAt` to do,
+// and the callee is not variadic. `parameterCount` is the number of
+// parameters of the plan; a call site passes the same number of arguments.
+// `order[r]` is the parameter that goes in integer register `r`; a register
+// past the last parameter has `order[r] == r` and is passed zero.
+// `loads[p]` says how parameter `p` is read; only the loads of a whole
+// word, or of 1, 2 or 4 bytes zero- or sign-extended, take part. Null
+// otherwise.
 public extern(C) const(void)* directWordCallTarget(
-    const(void)* opaquePlan, out bool swapped, out size_t resultWidth,
-    out size_t parameterCount,
+    const(void)* opaquePlan, out ubyte[3] order, out CallPlan.Load[3] loads,
+    out size_t resultWidth, out size_t parameterCount,
 ) {
     import snakebite.ffi.sysv: CallFrame;
 
@@ -1210,26 +1206,48 @@ public extern(C) const(void)* directWordCallTarget(
     if (!plan._integerOnly || plan._variadicCall
             || plan._hiddenReturnPointer || plan._hiddenContext
             || plan._callbackArguments.length != 0
-            || plan._parameterCount < 1 || plan._parameterCount > 2
+            || plan._parameterCount < 1 || plan._parameterCount > 3
             || plan._moveCount != plan._parameterCount
-            || plan._realResultCount != 0 || plan._resultCount != 1
+            || plan._realResultCount != 0
+            || plan._resultCount < 1 || plan._resultCount > 2
             || plan._resultMoves[0].sourceOffset
                 != CallFrame.integerResult.offsetof)
         return null;
-    size_t[2] seen = [0, 1];
+    if (plan._resultCount == 2
+            && (plan._resultMoves[1].sourceOffset
+                    != CallFrame.integerResult.offsetof + size_t.sizeof
+                || plan._resultMoves[0].store != CallPlan.Store.byte8
+                || plan._resultMoves[1].store != CallPlan.Store.byte8))
+        return null;
+    bool[3] registerTaken;
+    bool[3] parameterSeen;
+    foreach (r; 0 .. 3)
+        order[r] = cast(ubyte) r;
     foreach (move; plan._moves[0 .. plan._moveCount]) {
-        if (move.load != CallPlan.Load.word64 || move.byteOffset != 0
-                || move.destinationOffset >= 2 * size_t.sizeof
-                || move.parameterIndex > 1)
+        with (CallPlan.Load)
+            if (move.load != word64 && move.load != zero8
+                    && move.load != zero16 && move.load != zero32
+                    && move.load != sign8 && move.load != sign16
+                    && move.load != sign32)
+                return null;
+        const register = move.destinationOffset / size_t.sizeof;
+        if (move.byteOffset != 0
+                || move.destinationOffset % size_t.sizeof != 0
+                || register >= plan._parameterCount
+                || move.parameterIndex >= plan._parameterCount
+                || registerTaken[register]
+                || parameterSeen[move.parameterIndex])
             return null;
-        seen[move.parameterIndex] = move.destinationOffset / size_t.sizeof;
+        registerTaken[register] = true;
+        parameterSeen[move.parameterIndex] = true;
+        order[register] = cast(ubyte) move.parameterIndex;
+        loads[move.parameterIndex] = move.load;
     }
-    if (plan._moveCount == 2 && seen[0] == seen[1])
-        return null;
-    if (plan._moveCount == 1 && seen[0] != 0)
-        return null;
-    swapped = plan._moveCount == 2 && seen[0] == 1;
     parameterCount = plan._parameterCount;
+    if (plan._resultCount == 2) {
+        resultWidth = 16;
+        return plan._address;
+    }
     final switch (plan._resultMoves[0].store) with (CallPlan.Store) {
         case byte1: resultWidth = 1; break;
         case byte2: resultWidth = 2; break;

@@ -128,6 +128,30 @@ private extern(D) long snakebite_ut_dWordCombine(long first, long second) {
 }
 
 
+public extern(C) long snakebite_ut_word_three(
+    const(long)* values, int index, long scale,
+) {
+    return values[index] * scale;
+}
+
+
+// Returned in the two result registers, length first.
+public extern(C) long[] snakebite_ut_word_slice(long* values, long length) {
+    return values[0 .. length];
+}
+
+
+// The host compiler may pass the parameters of an `extern(D)` function in
+// reversed order, so the result tells whether each one reached the right
+// parameter.
+pragma(mangle, "snakebite_ut_extern_d_word_three")
+private extern(D) long snakebite_ut_dWordThree(
+    long first, long second, long third,
+) {
+    return (first * 10 + second) * 10 + third;
+}
+
+
 public extern(C) short snakebite_ut_narrow(byte left, ushort right) {
     return cast(short) (left + right);
 }
@@ -4542,3 +4566,105 @@ static foreach (backend; Matrix!(
         );
     }
 }
+
+
+// Three word arguments: a pointer, a negative `int` and a `long`, called
+// through the same site more than once.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("directWordCall.threeArguments." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_word_three")
+                extern(C) long three(const(long)* values, int index, long scale);
+
+                int answer() {
+                    long[3] values = [7, 8, 9];
+                    foreach (round; 0 .. 3) {
+                        if (three(&values[2], -1, 10) != 80) return 1;
+                        if (three(&values[0], 2, -1) != -9) return 2;
+                        if (three(&values[1], 0, 3) != 24) return 3;
+                    }
+                    return 0;
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// An `extern(D)` callee with three parameters, which the host compiler may
+// take in reversed order.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("directWordCall.externDThreeArguments." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeRetOf!(
+            backend,
+            q{
+                struct Ffi {
+                    static:
+                    pragma(mangle, "snakebite_ut_extern_d_word_three")
+                    extern(D) long three(long first, long second, long third);
+                }
+
+                int answer() {
+                    foreach (round; 0 .. 3) {
+                        if (Ffi.three(1, 2, 3) != 123) return 1;
+                        if (Ffi.three(3, 2, 1) != 321) return 2;
+                        if (Ffi.three(2, 3, 1) != 231) return 3;
+                    }
+                    return 0;
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// A result of two words in the result registers, from a call with two
+// word arguments.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("directWordCall.twoWordResult." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_word_slice")
+                extern(C) long[] slice(long* values, long length);
+
+                int answer() {
+                    long[4] values = [3, 5, 7, 11];
+                    foreach (round; 0 .. 3) {
+                        auto whole = slice(values.ptr, 4);
+                        if (whole.length != 4 || whole.ptr !is values.ptr)
+                            return 1;
+                        if (whole[3] != 11) return 2;
+                        auto none = slice(&values[1], 0);
+                        if (none.length != 0 || none.ptr !is &values[1])
+                            return 3;
+                        // The result is dropped.
+                        cast(void) slice(values.ptr, 2);
+                        auto tail = slice(&values[2], 2);
+                        if (tail.length != 2 || tail[0] != 7) return 4;
+                    }
+                    return 0;
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
