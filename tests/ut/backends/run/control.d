@@ -3150,33 +3150,32 @@ static foreach (backend; Matrix!(
     }
 }
 
-// A condition with no temporary splits at `&&`, `||` and `!`. `limit` lives in
-// the closure of a delegate that escapes, so a test of it is not a read of a
-// frame slot.
+// A condition with no temporary splits at `&&`, `||` and `!`. A comparison of
+// a `real` is not a register scalar of the interpreter's tree, so the
+// operands that hold one run as conditions of their own.
 static foreach (backend; Matrix!()) {
-    @("logicalConditionsWithAClosureOperand." ~ backend.stringof)
+    @("logicalConditionsWithAWideOperand." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
             int main() {
-                int limit = 3;
+                real wide = 2.5L;
                 int calls;
-                int delegate() read = () => limit;
                 bool bump() { ++calls; return true; }
                 int taken;
                 foreach (i; 0 .. 6) {
-                    if (i > 0 && limit > i && !(i == 2))
+                    if (i > 0 && wide > i && !(i == 2))
                         taken += 10;
-                    if (!(i > 1) || limit == i)
+                    if (!(wide < i) || i == 5)
                         taken += 1;
-                    if (i > 0 && bump())
+                    if (i > 3 || wide > 1.5L && bump())
                         taken += 100;
-                    while (i < 0 || limit < i) {
+                    while (i < 0 || wide < i - 0.5L) {
                         taken += 1000;
                         break;
                     }
                 }
-                return taken == 2513 + read() - 3 && calls == 5 ? 0 : 1;
+                return taken == 2614 && calls == 4 ? 0 : 1;
             }
         });
     }
