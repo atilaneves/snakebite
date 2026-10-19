@@ -25,6 +25,13 @@ extern(C) const(void)* guestWordOf(
     const(void)* opaquePlan, const(void)* address, out ptrdiff_t adjustment,
 );
 
+// Calls the host function at `address` with the plan, for an `address` that
+// `guestWordOf` found not to be a guest entry.
+extern(C) void executeHostCallPlan(
+    const(void)* opaquePlan, const(void)* address, void* returnPlace,
+    scope const(void*)* arguments, size_t argumentCount,
+);
+
 extern(C) bool executeIndirectCallPlan(
     const(void)* opaquePlan, ref const(void)* address, void* returnPlace,
     scope const(void*)* arguments, size_t argumentCount,
@@ -91,7 +98,9 @@ public struct CallSite {
         indirect,
         // An `indirect` call through a function pointer or a delegate value:
         // `value.signature` is the signature of the value's type, and a callee
-        // with another signature reads its parameters by register.
+        // with another signature reads its parameters by register. A virtual
+        // call is an `indirect` site that also sets `value.signature`, for
+        // the check of its call window.
         value,
         // `builtinEntry` is a `snakebite.backends.builtins.BuiltinCall`,
         // resolved once by `CallSelection` (`snakebite.backends.calls`)
@@ -245,8 +254,9 @@ public struct CallSite {
     // What a call through a value of a function type adds: the signature of
     // the type, and the variadic arguments of the call with their shapes. A
     // callee with another signature reads its parameters from the arguments
-    // that are in the same registers (`ArgumentFlow`). `signature` is null
-    // for every other call.
+    // that are in the same registers (`ArgumentFlow`). `signature` is the
+    // signature the call site expects of its callee: null for every call
+    // that is neither through a value nor virtual.
     public struct ValueArguments {
         package const(Signature)* signature;
         package Arg[] surplus;
@@ -294,6 +304,17 @@ public struct CallSite {
         // How far past the activation the committed bytes must reach: the
         // frame and the call windows of the callee.
         package size_t reachBytes;
+
+        // Copies every field but `state` and `callee` from `facts`.
+        package void adopt(in FastCall facts) {
+            frameBytes = facts.frameBytes;
+            frameOffset = facts.frameOffset;
+            alignment = facts.alignment;
+            placeStore = facts.placeStore;
+            windowStore = facts.windowStore;
+            windowBase = facts.windowBase;
+            reachBytes = facts.reachBytes;
+        }
 
         // Sets every field but `state` and `callee` to what a call needs of
         // `function_`, a callee that a call window can hold.
@@ -377,14 +398,7 @@ public struct CallSite {
         assert(function_.windowCallable);
         if (function_.activationAlignment > windowAlignment)
             return false;
-        const facts = &function_.windowFacts;
-        slot.frameBytes = facts.frameBytes;
-        slot.frameOffset = facts.frameOffset;
-        slot.alignment = facts.alignment;
-        slot.placeStore = facts.placeStore;
-        slot.windowStore = facts.windowStore;
-        slot.windowBase = facts.windowBase;
-        slot.reachBytes = facts.reachBytes;
+        slot.adopt(function_.windowFacts);
         slot.callee = function_;
         return true;
     }
@@ -1350,6 +1364,12 @@ private struct DispatchState {
     // each of them.
     ulong r0;
     double fp0;
+    // What `guestWordOf` found for `decodedAddress`, kept for the slow path of
+    // the same call so that it does not look the address up again. Null when
+    // nothing is kept.
+    const(void)* decodedAddress;
+    const(void)* decodedWord;
+    ptrdiff_t decodedAdjustment;
 }
 
 // Thrown after guest code has resumed from a handler that took an exception
@@ -1995,8 +2015,12 @@ private const(Instruction)* callIndirectWindow(Destination destination)(
             || !callee.windowCallable
             || callee.signature !is site.value.signature
             || callee.activationAlignment > site.windowAlignment
-            || (callee.contextOffset != size_t.max) != site.hasContext)
+            || (callee.contextOffset != size_t.max) != site.hasContext) {
+        state.decodedAddress = address;
+        state.decodedWord = callee;
+        state.decodedAdjustment = adjustment;
         return opCallSlow(pc, active, state, frame, r0, fp0);
+    }
 
     return enterWindow!(destination, true)(
         pc, active, state, frame, r0, fp0, site, &callee.windowFacts, callee,
@@ -2351,7 +2375,17 @@ private const(Instruction)* runIndirect(bool isValue, Decoded)(
     if (site.nativePlan !is null) {
         auto arguments = gatherArguments(execution, site.nativeArgs);
         auto values = arguments.values;
-        if (executeIndirectCallPlan(site.nativePlan, callee,
+        auto dispatch = execution._dispatch;
+        if (callee !is null && dispatch.decodedAddress is callee) {
+            // `callIndirectWindow` already decoded this address.
+            if (dispatch.decodedWord is null) {
+                executeHostCallPlan(site.nativePlan, callee,
+                    execution.destination, values.ptr, values.length);
+                return execution.next;
+            }
+            callee = dispatch.decodedWord;
+            contextAdjustment = dispatch.decodedAdjustment;
+        } else if (executeIndirectCallPlan(site.nativePlan, callee,
                 execution.destination, values.ptr, values.length,
                 contextAdjustment))
             return execution.next;

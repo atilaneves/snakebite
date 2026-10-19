@@ -10437,15 +10437,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in bool hasContext,
         in bool mayUseWindow,
     ) {
+        import core.memory: pageSize;
         import dmd.astenums: VarArg;
 
         auto preparation = CallAdapter.Arguments.of(functionType, arguments);
+        // A frame that asks for a page of alignment is called the generic
+        // way, as `windowFits` decides for a known callee.
         if (mayUseWindow
                 && functionType.parameterList.varargs == VarArg.none
-                && calleeLayout.variadicTypes == size_t.max
-                && calleeLayout.variadicCursor == size_t.max
-                && (!hasContext
-                    || calleeLayout.hiddenThis.parameter.facts.size != 0))
+                && calleeLayout.alignment < pageSize)
             return compileIndirectWindowArguments(
                 functionType, preparation, calleeLayout, args, calleeOffset,
                 returnWidth, hasContext);
