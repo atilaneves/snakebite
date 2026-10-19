@@ -3139,36 +3139,84 @@ private const(Instruction)* runCheckedIndex(CheckedAccess access,
     }
 }
 
+// One instantiation of `opCheckedIndex`.
+private struct CheckedInstance {
+    Instruction.Handler handler;
+    CheckedAccess access;
+    bool fixedLength;
+    size_t indexWidth;
+    bool signed;
+    size_t elementSize;
+    bool constantValue;
+}
+
+private enum checkedIndexShapes = [[4UL, 1UL], [4UL, 0UL], [8UL, 0UL]];
+private enum checkedIndexElementSizes = [1UL, 2UL, 4UL, 8UL];
+
+// Every instantiation of `opCheckedIndex`: the one list that the lookups and
+// the roles below are built from.
+private immutable CheckedInstance[] checkedInstances;
+private immutable CheckedInstance[Instruction.Handler] checkedInstanceOf;
+
+private CheckedInstance[] allCheckedInstances() {
+    CheckedInstance[] all;
+    static foreach (kind; [EnumMembers!CheckedAccess])
+        static foreach (fixed; [false, true])
+            static foreach (shape; checkedIndexShapes)
+                static foreach (size; checkedIndexElementSizes)
+                    static if (kind != CheckedAccess.check || size == 1) {
+                        all ~= CheckedInstance(
+                            &opCheckedIndex!(kind, fixed, shape[0],
+                                shape[1] == 1, size),
+                            kind, fixed, shape[0], shape[1] == 1, size, false);
+                        static if (kind == CheckedAccess.store)
+                            all ~= CheckedInstance(
+                                &opCheckedIndex!(kind, fixed, shape[0],
+                                    shape[1] == 1, size, true),
+                                kind, fixed, shape[0], shape[1] == 1, size,
+                                true);
+                    }
+    return all;
+}
+
+shared static this() {
+    auto all = allCheckedInstances();
+    CheckedInstance[Instruction.Handler] byHandler;
+    foreach (instance; all)
+        byHandler[instance.handler] = instance;
+    checkedInstances = cast(immutable) all;
+    checkedInstanceOf = cast(immutable) byHandler;
+}
+
 // Whether `handler` is an `opCheckedIndex` instance, and which access and
 // kind of value operand it has.
 package bool checkedIndexKind(
     in Instruction.Handler handler, out CheckedAccess access,
     out bool constantValue,
 ) {
-    static foreach (kind; [EnumMembers!CheckedAccess])
-        static foreach (fixed; [false, true])
-            static foreach (shape; checkedIndexShapes)
-                static foreach (size; checkedIndexElementSizes)
-                    static if (kind != CheckedAccess.check || size == 1) {
-                        if (handler is &opCheckedIndex!(kind, fixed, shape[0],
-                                shape[1] == 1, size)) {
-                            access = kind;
-                            constantValue = false;
-                            return true;
-                        }
-                        static if (kind == CheckedAccess.store)
-                            if (handler is &opCheckedIndex!(kind, fixed,
-                                    shape[0], shape[1] == 1, size, true)) {
-                                access = kind;
-                                constantValue = true;
-                                return true;
-                            }
-                    }
-    return false;
+    const found = handler in checkedInstanceOf;
+    if (found is null)
+        return false;
+    access = found.access;
+    constantValue = found.constantValue;
+    return true;
 }
 
-private enum checkedIndexShapes = [[4UL, 1UL], [4UL, 0UL], [8UL, 0UL]];
-private enum checkedIndexElementSizes = [1UL, 2UL, 4UL, 8UL];
+// Whether `handler` is an `opCheckedIndex` instance, and which access it has.
+package bool checkedIndexAccess(
+    in Instruction.Handler handler, out CheckedAccess access,
+) {
+    bool constantValue;
+    return checkedIndexKind(handler, access, constantValue);
+}
+
+// The bytes that `handler` writes to its destination when it is a checked
+// load, otherwise 0.
+package size_t checkedLoadWidth(in Instruction.Handler handler) {
+    const found = handler in checkedInstanceOf;
+    return found !is null && found.access == CheckedAccess.load
+        ? found.elementSize : 0;
+}
 
 // A `check` does not read an element, so one size stands for all.
 package Instruction.Handler checkedIndexHandler(
@@ -3178,26 +3226,16 @@ package Instruction.Handler checkedIndexHandler(
     import std.conv: text;
 
     const handlerSize = access == CheckedAccess.check ? 1 : elementSize;
-    static foreach (kind; [EnumMembers!CheckedAccess])
-        static foreach (fixed; [false, true])
-            static foreach (shape; checkedIndexShapes)
-                static foreach (size; checkedIndexElementSizes)
-                    static if (kind != CheckedAccess.check || size == 1)
-                        if (access == kind && fixedLength == fixed
-                                && indexWidth == shape[0]
-                                && signed == (shape[1] == 1)
-                                && handlerSize == size) {
-                            if (constantValue) {
-                                static if (kind == CheckedAccess.store)
-                                    return &opCheckedIndex!(kind, fixed,
-                                        shape[0], shape[1] == 1, size, true);
-                                else
-                                    internalFailure("only a checked store "
-                                        ~ "has a constant");
-                            } else
-                                return &opCheckedIndex!(kind, fixed, shape[0],
-                                    shape[1] == 1, size);
-                        }
+    foreach (instance; checkedInstances)
+        if (instance.access == access && instance.fixedLength == fixedLength
+                && instance.indexWidth == indexWidth
+                && instance.signed == signed
+                && instance.elementSize == handlerSize) {
+            if (instance.constantValue == constantValue)
+                return instance.handler;
+            if (constantValue && access != CheckedAccess.store)
+                internalFailure("only a checked store has a constant");
+        }
     internalFailure(text("no checked-index handler for a ", indexWidth,
         "-byte ", signed ? "signed" : "unsigned", " index and ", handlerSize,
         "-byte elements"));
@@ -4698,24 +4736,13 @@ shared static this() {
     addRoles(&opTlsLoad, rolesOfOperation!(runTlsLoad, I));
     addRoles(&opTlsStore, rolesOfOperation!(runTlsStore, S));
     addRoles(&opTlsAddress, rolesOfOperation!(runTlsAddress, I));
-    static foreach (kind; [EnumMembers!CheckedAccess])
-        static foreach (fixed; [false, true])
-            static foreach (shape; checkedIndexShapes)
-                static foreach (size; checkedIndexElementSizes)
-                    static if (kind != CheckedAccess.check || size == 1) {
-                        addRoles(&opCheckedIndex!(kind, fixed, shape[0],
-                            shape[1] == 1, size),
-                            kind == CheckedAccess.storeUnchecked
-                                ? Roles(Role.other, Role.other, Role.other,
-                                    true)
-                                : Roles(Role.other, Role.other,
-                                    Role.instruction, true));
-                        static if (kind == CheckedAccess.store)
-                            addRoles(&opCheckedIndex!(kind, fixed, shape[0],
-                                shape[1] == 1, size, true),
-                                Roles(Role.address, Role.other,
-                                    Role.instruction, true));
-                    }
+    foreach (instance; checkedInstances)
+        addRoles(instance.handler,
+            instance.constantValue
+                ? Roles(Role.address, Role.other, Role.instruction, true)
+                : instance.access == CheckedAccess.storeUnchecked
+                    ? Roles(Role.other, Role.other, Role.other, true)
+                    : Roles(Role.other, Role.other, Role.instruction, true));
     // The fused return keeps the roles of the producer it replaces.
     static foreach (width; 1 .. 17)
         addRoles(&opThenReturn!(opCopyFixed!(width, true)),
