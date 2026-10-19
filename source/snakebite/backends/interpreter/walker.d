@@ -235,6 +235,7 @@ import snakebite.backends.unwindplan:
 import snakebite.backends.switchplan: SwitchPlan, switchPlan, selectCase,
     gotoCaseTarget, gotoDefaultTarget;
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
+import snakebite.backends.interpreter.nodecache: NodeCache;
 import snakebite.cstack: CStack;
 import snakebite.backends.fullexpression:
     FullExpressionScope;
@@ -689,8 +690,15 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // basic types, so a loop revisiting the same `int` node hits this
     // every time - a pointer compare instead of an AA hash lookup - and
     // only asks the fact owner on an actual change of type.
-    private Type _cachedType;
-    private TypeFacts _cachedFacts;
+    private NodeCache!(TypeFacts, 8) _factsCache;
+    // A frame slot of a variable, by the variable's address: valid for the
+    // layout it was found in.
+    private static struct FrameSlot {
+        const(FrameLayout)* layout;
+        size_t offset;
+        bool indirect;
+    }
+    private NodeCache!(FrameSlot, 10) _frameSlots;
     // The hash lookups this evaluator makes through another type's
     // interface rather than through a `Cache` of its own: a frame
     // layout's `offsetOf`, and an FFI plan's `of`. Counted at the call
@@ -1166,14 +1174,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // `type`'s facts, from the cache; computed on the first visit of any
     // node with this type.
     extern(D) private TypeFacts factsOf(Type type) {
-        if (type is _cachedType)
-            return _cachedFacts;
+        if (auto cached = _factsCache.find(cast(void*) type))
+            return *cached;
 
         version(unittest) ++_typeLookups;
-        const facts = _shared.facts.typeOf(type);
-        _cachedType = type;
-        _cachedFacts = facts;
-        return facts;
+        return *_factsCache.insert(
+            cast(void*) type, _shared.facts.typeOf(type));
     }
 
     // Runs one call through the FFI seam. The callee receives its frame
@@ -3214,6 +3220,15 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             internalFailure("function and TypeInfo addresses are `SymOffExp`s and "
                 ~ "the storage resolver sends only variables here");
 
+        if (auto cached = _frameSlots.find(cast(void*) variable)) {
+            if (cached.layout is _layout) {
+                auto address = _frameBase + cached.offset;
+                return cached.indirect
+                    ? cast(ubyte*) loadIntegral(address, size_t.sizeof, false)
+                    : address;
+            }
+        }
+
         if (variable.isDataseg)
             return staticSlotOf(variable);
 
@@ -3254,6 +3269,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return base + layout.offsetOf(variable);
 
         auto address = base + slot.offset;
+
+        if (layout is _layout)
+            _frameSlots.insert(cast(void*) variable, FrameSlot(
+                layout, slot.offset, slot.isRef || slot.isReturnPlace));
 
         // A `ref` variable's own slot holds the address of the referenced
         // storage, not the storage itself. Reading through it once more here,
