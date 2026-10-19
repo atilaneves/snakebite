@@ -82,12 +82,13 @@ declared parameter values or references, and any variadic extra values.
 **Call window**:
 The memory that a direct call from guest code to a compiled guest function
 uses for the callee: `[scratch][activation][parameter slots]`, aligned to at
-least 16 bytes. It starts above the whole frame of the caller; a nested window
-starts above the open one. The caller evaluates each call argument and the call
-receiver straight into its slot, and the callee writes its result straight to
-the place the caller passed, so nothing is copied. A **window call** is a call
-that uses one. Other calls (virtual calls, function pointers, delegates, and
-callees whose temporaries need alignment above 16) take the general call path.
+least 16 bytes. It starts above the frame of the caller; a window opened while
+the call arguments evaluate starts above the open one. The caller evaluates
+each call argument and the call receiver straight into its slot, so the call
+copies no arguments and the return copies no result. By-value struct arguments
+and a local passed as an argument still copy. A **window call** is a call that
+uses one. Virtual calls, function pointers, delegates, and callees with a
+closure, variadics or page alignment take the general call path.
 
 **Prepared facts**:
 Information computed before a guest callback runs, so its execution can use
