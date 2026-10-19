@@ -1423,21 +1423,20 @@ private struct FrameGuard {
 }
 
 // A native call that the plan shows to be one to three word arguments in
-// the first integer registers and an integer result: the node calls the
-// target with the words itself, and skips the plan's own work
-// (`directWordCallTarget`).
+// the first integer registers and an integer result of 1, 2, 4 or 8 bytes
+// or of two words (16 bytes): the node calls the target with the words
+// itself, and skips the plan's own work (`directWordCallTarget`).
 private struct DirectWordCall {
     private alias Load = imported!"snakebite.ffi.load".Load;
-    private struct Pair { ulong low, high; }
-    private alias Target = extern(C) Pair function(ulong, ulong, ulong);
 
     private const(void)* _target;
     private ubyte[3] _order;
     private Load[3] _loads;
-    private size_t _count, _resultWidth;
+    private size_t _resultWidth;
 
-    // Whether the call of `callee` through `plan` is one. A receiver or a
-    // result that is not a whole number of words is not.
+    // Whether the call of `callee` through `plan` is one. A receiver, a `ref`
+    // parameter, a parameter whose size is not the load width of its word, or
+    // a result whose size is not the `resultWidth` of the plan is not.
     public bool decide(
         const(imported!"snakebite.ffi.plan".CallPlan)* plan,
         in TreeCallee* callee,
@@ -1459,7 +1458,6 @@ private struct DirectWordCall {
             if (parameter.isRef || parameter.facts.size != loadWidth(_loads[i]))
                 return false;
         _target = target;
-        _count = count;
         _resultWidth = resultWidth;
         return true;
     }
@@ -1469,40 +1467,15 @@ private struct DirectWordCall {
     public void run(E)(
         E ev, in TreeCallee* callee, const(ubyte)* base, void* place,
     ) {
+        import snakebite.ffi.load: callDirectWords, loadWord;
+
         ulong[3] words;
         foreach (i, parameter; callee.layout.parameters)
-            words[i] = wordAt(base + parameter.offset, _loads[i]);
-        const target = cast(Target) _target;
-        const first = words[_order[0]], second = words[_order[1]],
-            third = words[_order[2]];
-        const width = _resultWidth;
+            words[i] = loadWord(base + parameter.offset, _loads[i]);
+        const target = _target, order = _order, width = _resultWidth;
         ev.crossNative({
-            const result = target(first, second, third);
-            switch (width) {
-                case 1: *cast(ubyte*) place = cast(ubyte) result.low; break;
-                case 2: *cast(ushort*) place = cast(ushort) result.low; break;
-                case 4: *cast(uint*) place = cast(uint) result.low; break;
-                case 16:
-                    (cast(ulong*) place)[0] = result.low;
-                    (cast(ulong*) place)[1] = result.high;
-                    break;
-                default: *cast(ulong*) place = result.low; break;
-            }
+            callDirectWords(target, words, order, width, place);
         });
-    }
-
-    private static ulong wordAt(const(ubyte)* place, Load load) {
-        final switch (load) with (Load) {
-            case word64: return *cast(const(ulong)*) place;
-            case zero32: return *cast(const(uint)*) place;
-            case sign32: return cast(ulong) cast(long) *cast(const(int)*) place;
-            case zero8: return *place;
-            case zero16: return *cast(const(ushort)*) place;
-            case sign8: return cast(ulong) cast(long) *cast(const(byte)*) place;
-            case sign16: return cast(ulong) cast(long) *cast(const(short)*) place;
-            case copy, copy16, address:
-                assert(0, "directWordCallTarget yields only word loads");
-        }
     }
 }
 
@@ -1613,35 +1586,8 @@ private final class Call(E) : Node {
         if (layout.hiddenThis.variable !is null)
             *cast(size_t*) (base + layout.hiddenThis.parameter.offset)
                 = receiver;
-        foreach (i, node; _args) {
-            auto place = base + layout.parameters[i].offset;
-            final switch (_modes[i]) with (Argument) {
-                case i8:
-                    *cast(ubyte*) place = cast(ubyte) node.executeLong(frame);
-                    break;
-                case i16:
-                    *cast(ushort*) place = cast(ushort) node.executeLong(frame);
-                    break;
-                case i32:
-                    *cast(uint*) place = cast(uint) node.executeLong(frame);
-                    break;
-                case i64:
-                    *cast(ulong*) place = node.executeLong(frame);
-                    break;
-                case f32:
-                    *cast(float*) place = node.executeDouble(frame);
-                    break;
-                case f64:
-                    *cast(double*) place = node.executeDouble(frame);
-                    break;
-                case address:
-                    *cast(ubyte**) place = node.executeAddr(frame);
-                    break;
-                case slice:
-                    node.executeInto(frame, place);
-                    break;
-            }
-        }
+        foreach (i, node; _args)
+            storeArgument(node, _modes[i], frame, base + layout.parameters[i].offset);
         if (layout.retainsTemporaries)
             ev._temporaries.withNestedCall(layout.retainsTemporaries, {
                 run(callee, base, result);
@@ -1677,20 +1623,7 @@ private final class Call(E) : Node {
         const receiver = invoke(frame, _yieldsReceiver ? null : buffer.ptr);
         if (_yieldsReceiver)
             return receiver;
-        switch (_resultSize) {
-            case 1:
-                return _resultUnsigned
-                    ? cast(long) cast(ubyte) buffer[0] : cast(long) cast(byte) buffer[0];
-            case 2:
-                return _resultUnsigned
-                    ? cast(long) cast(ushort) buffer[0]
-                    : cast(long) cast(short) buffer[0];
-            case 4:
-                return _resultUnsigned
-                    ? cast(long) cast(uint) buffer[0] : cast(long) cast(int) buffer[0];
-            default:
-                return buffer[0];
-        }
+        return extendResult(buffer[0], _resultSize, _resultUnsigned);
     }
 
     public override double executeDouble(ubyte* frame) {
@@ -1709,6 +1642,30 @@ private final class Call(E) : Node {
     public override void executeVoid(ubyte* frame) {
         ulong[2] buffer;
         invoke(frame, buffer.ptr);
+    }
+}
+
+// Evaluates `node` into the parameter slot `place` as `mode` says.
+private void storeArgument(Node node, Argument mode, ubyte* frame, ubyte* place) {
+    final switch (mode) with (Argument) {
+        case i8: *cast(ubyte*) place = cast(ubyte) node.executeLong(frame); break;
+        case i16: *cast(ushort*) place = cast(ushort) node.executeLong(frame); break;
+        case i32: *cast(uint*) place = cast(uint) node.executeLong(frame); break;
+        case i64: *cast(ulong*) place = node.executeLong(frame); break;
+        case f32: *cast(float*) place = node.executeDouble(frame); break;
+        case f64: *cast(double*) place = node.executeDouble(frame); break;
+        case address: *cast(ubyte**) place = node.executeAddr(frame); break;
+        case slice: node.executeInto(frame, place); break;
+    }
+}
+
+// The integer result of `size` bytes in `word`, extended to a `long`.
+private long extendResult(ulong word, size_t size, bool isUnsigned) {
+    switch (size) {
+        case 1: return isUnsigned ? cast(long) cast(ubyte) word : cast(long) cast(byte) word;
+        case 2: return isUnsigned ? cast(long) cast(ushort) word : cast(long) cast(short) word;
+        case 4: return isUnsigned ? cast(long) cast(uint) word : cast(long) cast(int) word;
+        default: return word;
     }
 }
 
@@ -1750,17 +1707,9 @@ private final class BuiltinOp : Node {
         ulong[maxArguments] values;
         const(void)*[maxArguments] pointers;
         foreach (i, node; _args) {
+            // `buildIntrinsicCall` takes only value arguments.
             auto place = cast(ubyte*) &values[i];
-            final switch (_modes[i]) with (Argument) {
-                case i8: *cast(ubyte*) place = cast(ubyte) node.executeLong(frame); break;
-                case i16: *cast(ushort*) place = cast(ushort) node.executeLong(frame); break;
-                case i32: *cast(uint*) place = cast(uint) node.executeLong(frame); break;
-                case i64: *cast(ulong*) place = node.executeLong(frame); break;
-                case f32: *cast(float*) place = node.executeDouble(frame); break;
-                case f64: *cast(double*) place = node.executeDouble(frame); break;
-                case address, slice:
-                    assert(0, "buildIntrinsicCall takes only value arguments");
-            }
+            storeArgument(node, _modes[i], frame, place);
             pointers[i] = place;
         }
         _entry(result, pointers.ptr, _args.length);
@@ -1769,20 +1718,7 @@ private final class BuiltinOp : Node {
     public override long executeLong(ubyte* frame) {
         ulong[2] buffer;
         invoke(frame, buffer.ptr);
-        switch (_resultSize) {
-            case 1:
-                return _resultUnsigned
-                    ? cast(long) cast(ubyte) buffer[0] : cast(long) cast(byte) buffer[0];
-            case 2:
-                return _resultUnsigned
-                    ? cast(long) cast(ushort) buffer[0]
-                    : cast(long) cast(short) buffer[0];
-            case 4:
-                return _resultUnsigned
-                    ? cast(long) cast(uint) buffer[0] : cast(long) cast(int) buffer[0];
-            default:
-                return buffer[0];
-        }
+        return extendResult(buffer[0], _resultSize, _resultUnsigned);
     }
 
     public override double executeDouble(ubyte* frame) {
