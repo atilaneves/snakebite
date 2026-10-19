@@ -2087,8 +2087,6 @@ private struct Selection {
     public const(imported!"snakebite.ffi.plan".CallPlan)* plan;
     // Set when the call is a direct word call.
     public DirectWordCall* direct;
-    // How a call node runs the callee without a general call, if it can.
-    public FastCallee* fast;
 }
 
 // One argument of a call, placed in its parameter slot of the callee frame.
@@ -2106,7 +2104,7 @@ private struct FastCallee {
     public enum Kind : ubyte { getter, setter, soleReturn }
 
     public Kind kind;
-    public FuncDeclaration function_;
+    public TreeCallee* callee;
     // The access of a getter or a setter.
     public size_t offset;
     public size_t size;
@@ -2138,7 +2136,7 @@ private struct AccessScope(E) {
         _slotBefore = *_slot;
         _functionBefore = ev._function;
         *_slot = fast.position;
-        ev._function = fast.function_;
+        ev._function = fast.callee.function_;
     }
 
     ~this() {
@@ -2182,6 +2180,7 @@ private mixin template CalleeEntry(E) {
 
     // Runs `callee` with `hidden` as its context word, the arguments taken
     // from the caller's `frame`.
+    pragma(inline, true)
     private void enter(
         in Selection selection, size_t hidden, ubyte* frame, void* result,
     ) {
@@ -2270,6 +2269,10 @@ private final class Call(E) : Node {
     private const(void)* _vtable;
     // The fast form of each callee this site has met, null for none.
     private FastCallee*[TreeCallee*] _fasts;
+    private bool _hasFast;
+    // The fast form of the callee in `_selected`. The two change together,
+    // with no code between that could run this site again.
+    private FastCallee* _fast;
 
     public this(E ev, CallExp site, FuncDeclaration method, Node receiver,
             bool receiverIsAddress, bool virtual, Node[] args,
@@ -2298,21 +2301,26 @@ private final class Call(E) : Node {
     public final void bind(TreeCallee* callee) {
         import snakebite.backends.calls: CallSelection;
 
-        _selected = selection(callee);
+        _selected = selectionOf(callee);
         if (!_virtual && _selected.route == CallSelection.Route.native
                 && _direct.decide(_selected.plan, callee))
             _selected.direct = &_direct;
+        _fast = fastFormOf(callee, _selected);
     }
 
-    private Selection selection(TreeCallee* callee) {
-        auto selected = selectionOf(callee);
+    // The fast form of `callee` at this site, which the site makes once.
+    private FastCallee* fastFormOf(TreeCallee* callee, in Selection selected) {
+        FastCallee* fast;
         if (auto found = callee in _fasts) {
-            selected.fast = *found;
+            fast = *found;
         } else {
-            selected.fast = fastOf(callee, selected);
-            _fasts[callee] = selected.fast;
+            fast = fastOf(callee, selected);
+            _fasts[callee] = fast;
         }
-        return selected;
+        // A site that has met a callee with a fast form takes the checks of
+        // the fast forms on every run; the others keep the general call.
+        _hasFast |= fast !is null;
+        return fast;
     }
 
     // How this site runs `callee` in place of a general call, or null.
@@ -2325,9 +2333,8 @@ private final class Call(E) : Node {
         if (callee.shape.kind == CalleeShape.Kind.unexamined)
             examine(ev, callee);
         const shape = callee.shape;
-        auto function_ = callee.function_;
         auto fast = new FastCallee;
-        fast.function_ = function_;
+        fast.callee = callee;
         final switch (shape.kind) with (CalleeShape.Kind) {
             case unexamined, other:
                 return null;
@@ -2372,22 +2379,43 @@ private final class Call(E) : Node {
             : cast(size_t) _receiver.readLong(frame);
     }
 
-    // Chooses the callee for this run, after the receiver ran. False when
-    // the original path must run the call: a null receiver at a virtual
-    // site, or a callee that the tree cannot place.
-    private bool resolve(size_t receiver, ref Selection selected) {
-        if (!_virtual)
-            return true;
-        if (receiver == 0)
-            return false;
-        const vtable = *cast(const(void)**) receiver;
-        if (vtable is _vtable)
-            return true;
+    // Returns the receiver of the call, 0 when there is none.
+    private size_t invoke(ubyte* frame, void* result) {
+        const receiver = runReceiver(frame);
+        invokeOn(receiver, frame, result);
+        return receiver;
+    }
+
+    // The general call, once the receiver has run.
+    private void invokeOn(size_t receiver, ubyte* frame, void* result) {
+        // Read after the receiver runs: it can run this site again.
+        auto selected = _selected;
+        if (_virtual) {
+            if (receiver == 0) {
+                originalPath(frame, result, receiver);
+                return;
+            }
+            const vtable = *cast(const(void)**) receiver;
+            if (vtable !is _vtable && !meet(vtable, receiver, selected)) {
+                originalPath(frame, result, receiver);
+                return;
+            }
+        }
+        enter(selected, receiver, frame, result);
+    }
+
+    // A virtual site met a vtable that it has no callee for: false when
+    // the original path must run the call.
+    pragma(inline, false)
+    private bool meet(
+        const(void)* vtable, size_t receiver, ref Selection selected,
+    ) {
         auto callee = _ev.virtualTreeCalleeOf(_method, cast(void*) receiver);
         if (callee is null || !matches(callee))
             return false;
-        selected = selection(callee);
+        selected = selectionOf(callee);
         _selected = selected;
+        _fast = fastFormOf(callee, selected);
         _vtable = vtable;
         return true;
     }
@@ -2399,56 +2427,34 @@ private final class Call(E) : Node {
         ev._executeMethodCall(_site, result, _method, cast(void*) receiver);
     }
 
-    // Returns the receiver of the call, 0 when there is none.
-    private size_t invoke(ubyte* frame, void* result) {
-        const receiver = runReceiver(frame);
-        // Read after the receiver runs: it can run this site again.
+    // The callee of this run once the receiver ran, in `_selected`. False
+    // when the original path must run the call.
+    private bool resolve(size_t receiver) {
+        if (!_virtual)
+            return true;
+        if (receiver == 0)
+            return false;
+        const vtable = *cast(const(void)**) receiver;
+        if (vtable is _vtable)
+            return true;
         auto selected = _selected;
-        if (resolve(receiver, selected))
-            enter(selected, receiver, frame, result);
-        else
-            originalPath(frame, result, receiver);
-        return receiver;
+        return meet(vtable, receiver, selected);
     }
 
     public override long executeLong(ubyte* frame) {
-        const receiver = runReceiver(frame);
-        auto selected = _selected;
-        const resolved = resolve(receiver, selected);
-        if (resolved && selected.fast !is null) {
-            auto fast = selected.fast;
-            if (fast.kind == FastCallee.Kind.getter)
-                return loadLong(fast, receiver, frame);
-            if (fast.kind == FastCallee.Kind.soleReturn
-                    && returnsInRegister(fast, selected.callee))
-                return enterLong(fast, selected.callee, receiver, frame);
-        }
+        if (_hasFast)
+            return executeLongOfFastSite(frame);
         ulong[2] buffer;
-        if (resolved)
-            enter(selected, receiver, frame, _yieldsReceiver ? null : buffer.ptr);
-        else
-            originalPath(frame, _yieldsReceiver ? null : buffer.ptr, receiver);
+        const receiver = invoke(frame, _yieldsReceiver ? null : buffer.ptr);
         return _yieldsReceiver
             ? receiver : extendResult(buffer[0], _resultSize, _resultUnsigned);
     }
 
     public override double executeDouble(ubyte* frame) {
-        const receiver = runReceiver(frame);
-        auto selected = _selected;
-        const resolved = resolve(receiver, selected);
-        if (resolved && selected.fast !is null) {
-            auto fast = selected.fast;
-            if (fast.kind == FastCallee.Kind.getter)
-                return loadDouble(fast, receiver, frame);
-            if (fast.kind == FastCallee.Kind.soleReturn
-                    && returnsInRegister(fast, selected.callee))
-                return enterDouble(fast, selected.callee, receiver, frame);
-        }
+        if (_hasFast)
+            return executeDoubleOfFastSite(frame);
         ulong[2] buffer;
-        if (resolved)
-            enter(selected, receiver, frame, buffer.ptr);
-        else
-            originalPath(frame, buffer.ptr, receiver);
+        invoke(frame, buffer.ptr);
         return floatingResult(buffer);
     }
 
@@ -2459,19 +2465,81 @@ private final class Call(E) : Node {
     }
 
     public override void executeVoid(ubyte* frame) {
-        const receiver = runReceiver(frame);
-        auto selected = _selected;
-        const resolved = resolve(receiver, selected);
-        if (resolved && selected.fast !is null
-                && selected.fast.kind == FastCallee.Kind.setter) {
-            store(selected.fast, receiver, frame);
+        if (_hasFast) {
+            executeVoidOfFastSite(frame);
             return;
         }
         ulong[2] buffer;
-        if (resolved)
-            enter(selected, receiver, frame, buffer.ptr);
-        else
-            originalPath(frame, buffer.ptr, receiver);
+        invoke(frame, buffer.ptr);
+    }
+
+    // The three forms of a call at a site where a callee has a fast form.
+    // Nothing between the choice of the callee and its run evaluates user
+    // code except the arguments, which only read `fast` and `callee`.
+    pragma(inline, false)
+    private long executeLongOfFastSite(ubyte* frame) {
+        const receiver = runReceiver(frame);
+        if (resolve(receiver)) {
+            auto fast = _fast;
+            if (fast !is null) {
+                if (fast.kind == FastCallee.Kind.getter)
+                    return loadLong(fast, receiver, frame);
+                if (fast.kind == FastCallee.Kind.soleReturn
+                        && returnsInRegister(fast))
+                    return enterLong(fast, receiver, frame);
+            }
+        }
+        return generalLong(receiver, frame);
+    }
+
+    pragma(inline, false)
+    private double executeDoubleOfFastSite(ubyte* frame) {
+        const receiver = runReceiver(frame);
+        if (resolve(receiver)) {
+            auto fast = _fast;
+            if (fast !is null) {
+                if (fast.kind == FastCallee.Kind.getter)
+                    return loadDouble(fast, receiver, frame);
+                if (fast.kind == FastCallee.Kind.soleReturn
+                        && returnsInRegister(fast))
+                    return enterDouble(fast, receiver, frame);
+            }
+        }
+        return generalDouble(receiver, frame);
+    }
+
+    pragma(inline, false)
+    private void executeVoidOfFastSite(ubyte* frame) {
+        const receiver = runReceiver(frame);
+        if (resolve(receiver)) {
+            auto fast = _fast;
+            if (fast !is null && fast.kind == FastCallee.Kind.setter) {
+                store(fast, receiver, frame);
+                return;
+            }
+        }
+        generalVoid(receiver, frame);
+    }
+
+    pragma(inline, false)
+    private double generalDouble(size_t receiver, ubyte* frame) {
+        ulong[2] buffer;
+        invokeOn(receiver, frame, buffer.ptr);
+        return floatingResult(buffer);
+    }
+
+    pragma(inline, false)
+    private void generalVoid(size_t receiver, ubyte* frame) {
+        ulong[2] buffer;
+        invokeOn(receiver, frame, buffer.ptr);
+    }
+
+    pragma(inline, false)
+    private long generalLong(size_t receiver, ubyte* frame) {
+        ulong[2] buffer;
+        invokeOn(receiver, frame, _yieldsReceiver ? null : buffer.ptr);
+        return _yieldsReceiver
+            ? receiver : extendResult(buffer[0], _resultSize, _resultUnsigned);
     }
 
     // The access of a getter: one load at the receiver plus the offset of
@@ -2545,9 +2613,9 @@ private final class Call(E) : Node {
 
     // Whether the tree of the callee has its return statement: the callee
     // has run once.
-    private bool returnsInRegister(FastCallee* fast, TreeCallee* callee) {
+    private bool returnsInRegister(FastCallee* fast) {
         if (fast.root is null) {
-            auto root = callee.root;
+            auto root = fast.callee.root;
             if (root is null || !root.hasSoleReturn)
                 return false;
             fast.root = root;
@@ -2555,30 +2623,27 @@ private final class Call(E) : Node {
         return true;
     }
 
-    private long enterLong(
-        FastCallee* fast, TreeCallee* callee, size_t receiver, ubyte* frame,
-    ) {
+    private long enterLong(FastCallee* fast, size_t receiver, ubyte* frame) {
         auto ev = _ev;
         auto calleeFrame = FrameGuard(&ev._frames);
-        auto base = placeArguments(fast, callee, receiver, frame);
-        return ev.runTreeValue!long(fast.root, fast.function_, base);
+        auto base = placeArguments(fast, receiver, frame);
+        return ev.runTreeValue!long(fast.root, fast.callee.function_, base);
     }
 
-    private double enterDouble(
-        FastCallee* fast, TreeCallee* callee, size_t receiver, ubyte* frame,
-    ) {
+    private double enterDouble(FastCallee* fast, size_t receiver, ubyte* frame) {
         auto ev = _ev;
         auto calleeFrame = FrameGuard(&ev._frames);
-        auto base = placeArguments(fast, callee, receiver, frame);
-        return ev.runTreeValue!double(fast.root, fast.function_, base);
+        auto base = placeArguments(fast, receiver, frame);
+        return ev.runTreeValue!double(fast.root, fast.callee.function_, base);
     }
 
     // Reserves the frame of the callee, which the caller's guard gives
     // back, and evaluates the arguments into it.
     private ubyte* placeArguments(
-        FastCallee* fast, TreeCallee* callee, size_t receiver, ubyte* frame,
+        FastCallee* fast, size_t receiver, ubyte* frame,
     ) {
         auto ev = _ev;
+        auto callee = fast.callee;
         size_t lead = fastFrameLead;
         auto base = ev._frames.reserveFast(
             callee.layout.size + lead, fastFrameLead);
