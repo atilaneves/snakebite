@@ -7344,6 +7344,7 @@ private final class NtIndexDynamic(E) : NtNode {
             fail(index, length);
         return *cast(ubyte**) (array + size_t.sizeof) + index * _stride;
     }
+    pragma(inline, false)
     private void fail(size_t index, size_t length) {
         _ev.failArrayBounds(NtBoundsCheck.index, _expression.loc,
             [cast(const(void)*) &index, cast(const(void)*) &length]);
@@ -7368,6 +7369,7 @@ private final class NtIndexStatic(E) : NtNode {
             fail(index);
         return _array.executeAddr(frame) + index * _stride;
     }
+    pragma(inline, false)
     private void fail(size_t index) {
         auto length = _length;
         _ev.failArrayBounds(NtBoundsCheck.index, _expression.loc,
@@ -8082,6 +8084,7 @@ private final class NtIndexDynamicF(E, A, I) : NtNode {
             fail(index, length);
         return *cast(ubyte**) (array + size_t.sizeof) + index * _stride;
     }
+    pragma(inline, false)
     private void fail(size_t index, size_t length) {
         _ev.failArrayBounds(NtBoundsCheck.index, _expression.loc,
             [cast(const(void)*) &index, cast(const(void)*) &length]);
