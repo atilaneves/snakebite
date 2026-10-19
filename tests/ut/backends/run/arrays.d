@@ -1754,3 +1754,108 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// Compiled D evaluates the base of an index expression, calls included,
+// before the index operand, so the index reads a variable the base's call
+// changed.
+
+static foreach (backend; Matrix!()) {
+    @("indexAfterBaseCallLoadDynamic." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[][] arrs = [[10, 20, 30], [1, 2, 3]];
+                int i;
+                int* pi = &i;
+                int moveI() { *pi = 2; return 1; }
+                assert(arrs[moveI()][i] == 3);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("indexAfterBaseCallStoreDynamic." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[][] arrs = [[10, 20, 30], [1, 2, 3]];
+                int i;
+                int* pi = &i;
+                int moveI() { *pi = 2; return 1; }
+                arrs[moveI()][i] = 55;
+                assert(arrs[1] == [1, 2, 55]);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("indexAfterBaseCallCompoundDynamic." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[][] arrs = [[10, 20, 30], [1, 2, 3]];
+                int i;
+                int* pi = &i;
+                int moveI() { *pi = 2; return 1; }
+                arrs[moveI()][i] += 100;
+                assert(arrs[1] == [1, 2, 103]);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("indexAfterBaseCallLoadStatic." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[3][2] arrs = [[10, 20, 30], [1, 2, 3]];
+                int i;
+                int* pi = &i;
+                int moveI() { *pi = 2; return 1; }
+                assert(arrs[moveI()][i] == 3);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("indexAfterBaseCallStoreStatic." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[3][2] arrs = [[10, 20, 30], [1, 2, 3]];
+                int i;
+                int* pi = &i;
+                int moveI() { *pi = 2; return 1; }
+                arrs[moveI()][i] = 55;
+                assert(arrs[1] == [1, 2, 55]);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("indexAfterBaseCallCompoundStatic." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[3][2] arrs = [[10, 20, 30], [1, 2, 3]];
+                int i;
+                int* pi = &i;
+                int moveI() { *pi = 2; return 1; }
+                arrs[moveI()][i] += 100;
+                assert(arrs[1] == [1, 2, 103]);
+            }
+        });
+    }
+}
