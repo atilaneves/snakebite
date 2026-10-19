@@ -327,6 +327,12 @@ package struct FrameLayout {
         package TypeFacts facts;
     }
 
+    private Slot[] _allocatedSlots;
+
+    package const(Slot)[] allocatedSlots() const {
+        return _allocatedSlots;
+    }
+
     // Reserves one slot for a value of `type` and returns its offset and
     // facts. A parameter and a local differ in what they key the offset
     // by, not in how the frame grows to fit them, so both come here.
@@ -347,7 +353,9 @@ package struct FrameLayout {
         if (facts.alignment > this.alignment)
             this.alignment = facts.alignment;
 
-        return Slot(offset, facts);
+        const slot = Slot(offset, facts);
+        _allocatedSlots ~= slot;
+        return slot;
     }
 
     // Reserves and returns one parameter's own slot, from its declared
