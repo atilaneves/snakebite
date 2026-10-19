@@ -7677,6 +7677,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t placeOfStaticIndex(
         IndexExp expression, Type arrayType, in bool inPlace,
     ) {
+        import snakebite.frontend.storage: readsIndexAfterBase;
         import snakebite.nativelayout: arrayLengthOffset;
 
         const stride = typeFacts(arrayType.nextOf).size;
@@ -7692,13 +7693,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opConstant, dimensionSlot, addConstant(cast(long) dimension),
                 size_t.sizeof);
         }
-        const index = indexOperand(expression, dimensionSlot, expression.e1);
+        const baseFirst = readsIndexAfterBase(expression);
+        const earlyArray = baseFirst
+            ? staticArrayPlace(expression.e1, true) : size_t.max;
+        const index = indexOperand(
+            expression, dimensionSlot, baseFirst ? null : expression.e1);
         compileIndexCheck(Comparison.lessThan, index,
             constantWord(dimension),
             () => Arg(index, 0, size_t.sizeof),
             () => constantArgument(dimension, size_t.sizeof),
             expression.loc);
-        const array = staticArrayPlace(expression.e1, true);
+        const array = baseFirst
+            ? earlyArray : staticArrayPlace(expression.e1, true);
         const address = reserveTemp(pointerFacts);
         emit(&opIndexStatic, address, array, stride, index);
         return indirectStorage(address);
@@ -7715,6 +7721,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         IndexExp expression, Type arrayType, in bool inPlace,
     ) {
         import dmd.sideeffect: hasSideEffect;
+        import snakebite.frontend.storage: readsIndexAfterBase;
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
 
         const stride = typeFacts(arrayType.nextOf).size;
@@ -7745,8 +7752,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     return placeOfSliceAt(expression, array, stride,
                         literalOperand(literal));
             }
-            index = indexOperand(expression, size_t.max, expression.e1);
-            array = sliceOperand(expression.e1, true);
+            if (readsIndexAfterBase(expression)) {
+                array = sliceOperand(expression.e1, true);
+                index = indexOperand(expression, size_t.max, null);
+            } else {
+                index = indexOperand(expression, size_t.max, expression.e1);
+                array = sliceOperand(expression.e1, true);
+            }
         }
         return placeOfSliceAt(expression, array, stride, index);
     }
