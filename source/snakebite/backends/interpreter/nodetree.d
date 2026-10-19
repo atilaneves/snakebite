@@ -90,6 +90,16 @@ package struct TreeCallee {
     package bool reservesFast;
 }
 
+// Where a variable of an enclosing function lives: the words to load from
+// the running frame outward, then the offset in the context they reach.
+// `indirect` is set when the slot holds the address of the storage.
+package struct OuterVariable {
+    package bool ok;
+    package const(imported!"snakebite.backends.closureplan".Hop)[] hops;
+    package size_t offset;
+    package bool indirect;
+}
+
 package bool isScalar(E)(E ev, Type type) {
     return scalarOf(ev, type).kind != Scalar.Kind.none;
 }
@@ -271,6 +281,35 @@ private final class IndirectLocalAddress : Node {
     public override ubyte* executeAddr(ubyte* frame) {
         return *cast(ubyte**) (frame + _offset);
     }
+}
+
+// A variable of an enclosing function: the static chain's words from the
+// running frame, then the variable's offset.
+private final class OuterAddress : Node {
+    private const(imported!"snakebite.backends.closureplan".Hop)[] _hops;
+    private size_t _offset;
+    private bool _indirect;
+    public this(OuterVariable variable) {
+        _hops = variable.hops; _offset = variable.offset;
+        _indirect = variable.indirect;
+    }
+    public override ubyte* executeAddr(ubyte* frame) {
+        auto context = frame;
+        foreach (hop; _hops)
+            context = *cast(ubyte**) (context + hop.offset);
+        auto address = context + _offset;
+        return _indirect ? *cast(ubyte**) address : address;
+    }
+}
+
+// `&lvalue`: the address as a pointer value.
+private final class AddressValue : LongNode {
+    private Node _address;
+    public this(Node address) { _address = address; }
+    public override long executeLong(ubyte* frame) {
+        return cast(long) _address.executeAddr(frame);
+    }
+    mixin BoolFromLong;
 }
 
 private final class FieldOfAddress : Node {
@@ -1095,6 +1134,49 @@ private final class StoreSlice(A) : SliceNode {
     mixin StatementForm!"executeVoid";
 }
 
+// `test ? first : second`, which runs the one branch the test selects.
+private final class ConditionalLong : LongNode {
+    private Node _test;
+    private Node _first;
+    private Node _second;
+    public this(Node test, Node first, Node second) {
+        _test = test; _first = first; _second = second;
+    }
+    public override long executeLong(ubyte* frame) {
+        return _test.executeBool(frame)
+            ? _first.executeLong(frame) : _second.executeLong(frame);
+    }
+    mixin BoolFromLong;
+}
+
+private final class ConditionalDouble : DoubleNode {
+    private Node _test;
+    private Node _first;
+    private Node _second;
+    public this(Node test, Node first, Node second) {
+        _test = test; _first = first; _second = second;
+    }
+    public override double executeDouble(ubyte* frame) {
+        return _test.executeBool(frame)
+            ? _first.executeDouble(frame) : _second.executeDouble(frame);
+    }
+}
+
+private final class ConditionalSlice : SliceNode {
+    private Node _test;
+    private Node _first;
+    private Node _second;
+    public this(Node test, Node first, Node second) {
+        _test = test; _first = first; _second = second;
+    }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        if (_test.executeBool(frame))
+            _first.executeInto(frame, dest);
+        else
+            _second.executeInto(frame, dest);
+    }
+}
+
 // `first, second`: `first` runs for its effect, and the node yields
 // `second` in whichever form the parent asks for.
 private final class Comma : Node {
@@ -1898,6 +1980,19 @@ private Slot slotOf(E)(E ev, VarDeclaration variable) {
     return Slot(true, slot.offset, slot.isRef || slot.isReturnPlace);
 }
 
+// The address of a variable of an enclosing function, or null.
+private Node buildOuterAddress(E)(E ev, VarDeclaration variable) {
+    import dmd.astenums: STC;
+    import snakebite.frontend.dmd.delegates: isCtfeVariable;
+
+    if (variable is null || isCtfeVariable(variable)
+            || variable.isSymbolDeclaration !is null
+            || (variable.storage_class & STC.lazy_) != 0)
+        return null;
+    const outer = ev.outerVariableOf(variable);
+    return outer.ok ? new OuterAddress(outer) : null;
+}
+
 private VarDeclaration thisVariable(E)(E ev, ThisExp expression) {
     import snakebite.backends.closureplan: ClosurePlan;
     import snakebite.frontend.dmd.delegates: outerFunctionOf;
@@ -1919,9 +2014,10 @@ private Node buildAddress(E)(E ev, Expression expression) {
 
     switch (expression.op) with (EXP) {
         case variable: {
-            const slot = slotOf(ev, expression.isVarExp.var.isVarDeclaration);
+            auto declaration = expression.isVarExp.var.isVarDeclaration;
+            const slot = slotOf(ev, declaration);
             if (!slot.ok)
-                return null;
+                return buildOuterAddress(ev, declaration);
             return slot.indirect
                 ? new IndirectLocalAddress(slot.offset)
                 : new LocalAddress(slot.offset);
@@ -2179,13 +2275,19 @@ private Node buildSlice(E)(E ev, Expression expression) {
         return null;
     switch (expression.op) with (EXP) {
         case variable: {
-            const slot = slotOf(ev, expression.isVarExp.var.isVarDeclaration);
-            if (!slot.ok)
-                return null;
+            auto declaration = expression.isVarExp.var.isVarDeclaration;
+            const slot = slotOf(ev, declaration);
+            if (!slot.ok) {
+                auto outer = buildOuterAddress(ev, declaration);
+                return outer is null ? null : new LoadSlice(outer);
+            }
             return slot.indirect
                 ? new LoadSlice(new IndirectLocalAddress(slot.offset))
                 : new LocalSlice(slot.offset);
         }
+        case question:
+            return buildConditional!(buildSlice!E, ConditionalSlice)(
+                ev, expression.isCondExp);
         case dotVariable, star, index: {
             auto address = buildAddress(ev, expression);
             return address is null ? null : new LoadSlice(address);
@@ -2311,7 +2413,7 @@ private Node buildSliceCast(E)(E ev, CastExp castExp) {
     import snakebite.nativevalue: CastKind;
 
     if (castExp.lowering !is null)
-        return null;
+        return buildSlice(ev, castExp.lowering);
     const plan = *ev._shared.facts.castOf(castExp);
     with (CastKind) switch (plan.kind) {
         case copy:
@@ -2478,9 +2580,11 @@ private Node buildValue(E)(E ev, Expression expression) {
             return value is null ? null : new SliceWord(value, lengthOffset);
         }
         case variable: {
-            const slot = slotOf(ev, expression.isVarExp.var.isVarDeclaration);
+            auto declaration = expression.isVarExp.var.isVarDeclaration;
+            const slot = slotOf(ev, declaration);
             if (!slot.ok)
-                return null;
+                return buildLoad(ev, expression,
+                    buildOuterAddress(ev, declaration));
             if (slot.indirect)
                 return buildLoad(ev, expression,
                     new IndirectLocalAddress(slot.offset));
@@ -2579,9 +2683,27 @@ private Node buildValue(E)(E ev, Expression expression) {
             return buildStore(ev, cast(AssignExp) expression, scalar);
         case new_:
             return buildNew(ev, expression.isNewExp);
-        case typeid_: {
-            import dmd.dtemplate: isType;
+        case address: {
+            import snakebite.nativelayout: isStaticStructAddress;
 
+            auto operand = expression.isAddrExp.e1;
+            if (scalar.kind != Scalar.Kind.integral
+                    || isStaticStructAddress(expression.isAddrExp))
+                return null;
+            auto location = buildAddress(ev, operand);
+            return location is null ? null : new AddressValue(location);
+        }
+        case question:
+            return scalar.kind == Scalar.Kind.floating
+                ? buildConditional!(buildValue!E, ConditionalDouble)(
+                    ev, expression.isCondExp)
+                : buildConditional!(buildValue!E, ConditionalLong)(
+                    ev, expression.isCondExp);
+        case typeid_: {
+            import dmd.dtemplate: isExpression, isType;
+
+            if (auto object = isExpression(expression.isTypeidExp.obj))
+                return buildTypeidOf(ev, object, scalar);
             auto type = isType(expression.isTypeidExp.obj);
             if (type is null || scalar.kind != Scalar.Kind.integral)
                 return null;
@@ -2594,6 +2716,41 @@ private Node buildValue(E)(E ev, Expression expression) {
         case notIdentity: return buildIdentity!true(ev, expression.isIdentityExp);
         default:
             return null;
+    }
+}
+
+// `test ? first : second`, with `make` building the node of the result kind.
+private Node buildConditional(alias buildBranch, Result, E)(
+    E ev, imported!"dmd.expression".CondExp e,
+) {
+    auto test = buildTruth(ev, e.econd);
+    auto first = buildBranch(ev, e.e1);
+    auto second = buildBranch(ev, e.e2);
+    if (test is null || first is null || second is null)
+        return null;
+    return new Result(test, first, second);
+}
+
+// `typeid(object)`: the class information the object's vtable points to.
+// The vtable of an object of an interface type has the interface's own
+// information in between.
+private Node buildTypeidOf(E)(E ev, Expression object, in Scalar scalar) {
+    import dmd.typesem: toBasetype;
+
+    static if (E.nullCheckedEvaluator)
+        return null;
+    else {
+        if (scalar.kind != Scalar.Kind.integral)
+            return null;
+        auto node = buildValue(ev, object);
+        if (node is null)
+            return null;
+        const indirections = 2
+            + (object.type.toBasetype.isTypeClass.sym
+                .isInterfaceDeclaration !is null);
+        foreach (i; 0 .. indirections)
+            node = new Load!size_t(new Dereference(node));
+        return node;
     }
 }
 
@@ -2650,7 +2807,7 @@ private Node buildCast(E)(E ev, CastExp castExp, in Scalar scalar) {
     import snakebite.nativevalue: CastKind;
 
     if (castExp.lowering !is null)
-        return null;
+        return buildValue(ev, castExp.lowering);
     enum integral = Scalar.Kind.integral;
     enum floating = Scalar.Kind.floating;
     const plan = *ev._shared.facts.castOf(castExp);

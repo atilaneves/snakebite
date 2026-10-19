@@ -5,7 +5,7 @@ private:
 
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.backends.interpreter.nodetree:
-    TreeCallee, TreeFlow, TreeRoot, isScalar, isSlice, rootOf;
+    OuterVariable, TreeCallee, TreeFlow, TreeRoot, isScalar, isSlice, rootOf;
 import snakebite.nativelayout: tryTypeFacts, truthFacts;
 
 
@@ -3474,6 +3474,35 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto address = contextOf(owner) + layout.offsetOf(variable);
         return layout.isReturnPlace(variable)
             ? *cast(ubyte**) address : address;
+    }
+
+    // `storageOf` for a variable of an enclosing function, resolved once
+    // for a node that follows the static chain on every run. Not `ok` for a
+    // variable of the running function, one in static storage, and one whose
+    // owner's context is unreachable from here.
+    package OuterVariable outerVariableOf(VarDeclaration variable) {
+        if (variable.isDataseg)
+            return OuterVariable();
+        auto owner = outerFunctionOf(variable);
+        if (owner is null || owner is _function
+                || _layout.slotOf(variable) !is null)
+            return OuterVariable();
+        const path = staticChainOf(owner);
+        if (path is null)
+            return OuterVariable();
+        if (functionNeedsClosure(owner)) {
+            const closure = closureLayoutOf(owner);
+            if (closure.hasSlot(variable)) {
+                const slot = closure.slotOf(variable);
+                return OuterVariable(true, path, slot.offset, slot.isRef);
+            }
+        }
+        const layout = layoutOf(owner);
+        const slot = layout.slotOf(variable);
+        if (slot is null)
+            return OuterVariable(true, path, layout.offsetOf(variable), false);
+        return OuterVariable(
+            true, path, slot.offset, slot.isRef || slot.isReturnPlace);
     }
 
     package bool isRefStorage(VarDeclaration variable) {
