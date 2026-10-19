@@ -65,9 +65,21 @@ public struct CallPlan {
     // eightbyte of an INTEGER/SSE-class aggregate all read the same way,
     // so they share `word64`; `copy` is the rare aggregate eightbyte
     // narrower than 8 bytes, the only case that still needs a byte count.
-    private enum Load : ubyte {
+    public enum Load : ubyte {
         word64, zero8, zero16, zero32, sign8, sign16, sign32, copy, copy16,
         address,
+    }
+
+    // The bytes of an argument that `load` reads, for the loads that read
+    // a whole number of bytes from the start of the argument.
+    public static size_t loadWidth(Load load) {
+        final switch (load) {
+            case Load.word64: return 8;
+            case Load.zero8: case Load.sign8: return 1;
+            case Load.zero16: case Load.sign16: return 2;
+            case Load.zero32: case Load.sign32: return 4;
+            case Load.copy: case Load.copy16: case Load.address: return 0;
+        }
     }
 
     // One eightbyte's source and destination, fixed at prepare time. The
@@ -1201,11 +1213,11 @@ public extern(C) void executeCallPlan(
 // parameters of the plan; a call site passes the same number of arguments.
 // `order[r]` is the parameter that goes in integer register `r`; a register
 // past the last parameter has `order[r] == r` and is passed zero.
-// `loads[p]` says how parameter `p` is read: its width in the low bits, and
-// `0x80` when it is sign-extended and not zero-extended to a word. Null
+// `loads[p]` says how parameter `p` is read; only the loads of a whole
+// word, or of 1, 2 or 4 bytes zero- or sign-extended, take part. Null
 // otherwise.
 public extern(C) const(void)* directWordCallTarget(
-    const(void)* opaquePlan, out ubyte[3] order, out ubyte[3] loads,
+    const(void)* opaquePlan, out ubyte[3] order, out CallPlan.Load[3] loads,
     out size_t resultWidth, out size_t parameterCount,
 ) {
     import snakebite.ffi.sysv: CallFrame;
@@ -1232,17 +1244,12 @@ public extern(C) const(void)* directWordCallTarget(
     foreach (r; 0 .. 3)
         order[r] = cast(ubyte) r;
     foreach (move; plan._moves[0 .. plan._moveCount]) {
-        ubyte load;
-        switch (move.load) with (CallPlan.Load) {
-            case word64: load = 8; break;
-            case zero8: load = 1; break;
-            case zero16: load = 2; break;
-            case zero32: load = 4; break;
-            case sign8: load = 0x81; break;
-            case sign16: load = 0x82; break;
-            case sign32: load = 0x84; break;
-            default: return null;
-        }
+        with (CallPlan.Load)
+            if (move.load != word64 && move.load != zero8
+                    && move.load != zero16 && move.load != zero32
+                    && move.load != sign8 && move.load != sign16
+                    && move.load != sign32)
+                return null;
         const register = move.destinationOffset / size_t.sizeof;
         if (move.byteOffset != 0
                 || move.destinationOffset % size_t.sizeof != 0
@@ -1254,7 +1261,7 @@ public extern(C) const(void)* directWordCallTarget(
         registerTaken[register] = true;
         parameterSeen[move.parameterIndex] = true;
         order[register] = cast(ubyte) move.parameterIndex;
-        loads[move.parameterIndex] = load;
+        loads[move.parameterIndex] = move.load;
     }
     parameterCount = plan._parameterCount;
     if (plan._resultCount == 2) {
