@@ -2204,13 +2204,25 @@ private const(Instruction)* opCallDirectWide(
     const count = site.args.length;
     const loads = site.directLoads;
     // A register past the last argument is passed zero.
-    ulong[3] words;
-    foreach (i, argument; site.args)
-        words[i] = loadWord(operandStorage(frame, argument.callerOffset), loads[i]);
+    ulong first = loadWord(
+        operandStorage(frame, site.args[0].callerOffset), loads[0]);
+    ulong second = count > 1 ? loadWord(
+        operandStorage(frame, site.args[1].callerOffset), loads[1]) : 0;
+    ulong third = count > 2 ? loadWord(
+        operandStorage(frame, site.args[2].callerOffset), loads[2]) : 0;
+    if (site.directSwapped) {
+        const ulong[3] words = [first, second, third];
+        const order = site.directOrder;
+        first = words[order[0]];
+        second = words[order[1]];
+        third = words[order[2]];
+    }
+    // A discarded result goes to a scratch of the widest result.
+    ulong[2] scratch = void;
     callDirectWords(
-        site.directTarget, words, site.directOrder, site.returnWidth,
+        site.directTarget, first, second, third, site.returnWidth,
         pc.destination != discardResult
-            ? operandStorage(frame, pc.destination) : null);
+            ? operandStorage(frame, pc.destination) : cast(ubyte*) scratch.ptr);
     return pc + 1;
 }
 

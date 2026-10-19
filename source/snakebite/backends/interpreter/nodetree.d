@@ -1474,7 +1474,9 @@ private struct DirectWordCall {
             words[i] = loadWord(base + parameter.offset, _loads[i]);
         const target = _target, order = _order, width = _resultWidth;
         ev.crossNative({
-            callDirectWords(target, words, order, width, place);
+            callDirectWords(
+                target, words[order[0]], words[order[1]], words[order[2]],
+                width, place);
         });
     }
 }

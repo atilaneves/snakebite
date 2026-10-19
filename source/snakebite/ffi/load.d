@@ -46,21 +46,17 @@ ulong loadWord(const(ubyte)* place, Load load) @system pure nothrow @nogc {
     }
 }
 
-// Calls the `target` of `directWordCallTarget` with `words` placed in the
-// registers `order` says, and stores the result of `resultWidth` bytes at
-// `place`, unless `place` is null.
+// Calls the `target` of `directWordCallTarget` with the words of the
+// registers, and stores the result of `resultWidth` bytes at `place`.
 pragma(inline, true)
 void callDirectWords(
-    const(void)* target, in ulong[3] words, in ubyte[3] order,
+    const(void)* target, ulong first, ulong second, ulong third,
     size_t resultWidth, void* place,
 ) @system {
     static struct Pair { ulong low, high; }
     alias Direct = extern(C) Pair function(ulong, ulong, ulong);
 
-    const result = (cast(Direct) target)(
-        words[order[0]], words[order[1]], words[order[2]]);
-    if (place is null)
-        return;
+    const result = (cast(Direct) target)(first, second, third);
     switch (resultWidth) {
     case 1: *cast(ubyte*) place = cast(ubyte) result.low; break;
     case 2: *cast(ushort*) place = cast(ushort) result.low; break;
