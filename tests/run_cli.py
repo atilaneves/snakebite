@@ -2369,6 +2369,49 @@ def test_guest_fault_ends_the_process_with_the_signal(
     ) + "\n", output(result)
 
 
+# A fault in native code that the guest calls names the line of the call, on
+# the path that the tree runs and on the one that the old walker runs (a
+# function with a closure).
+NATIVE_FAULTS = [
+    ("function run by the tree",
+     "module main;\n"
+     "import core.stdc.string: strlen;\n"
+     "int len(const(char)* s) {\n"
+     "    int unused = 1;\n"
+     "    return cast(int) strlen(s);\n"
+     "}\n"
+     "int main() { return len(null); }\n",
+     5),
+    ("function run by the old walker",
+     "module main;\n"
+     "import core.stdc.string: strlen;\n"
+     "int len(const(char)* s) {\n"
+     "    int x = 1;\n"
+     "    auto d = () => x;\n"
+     "    return cast(int) strlen(s) + d();\n"
+     "}\n"
+     "int main() { return len(null); }\n",
+     6),
+]
+
+
+@pytest.mark.parametrize(
+    "source,line", [fault[1:] for fault in NATIVE_FAULTS],
+    ids=[fault[0] for fault in NATIVE_FAULTS],
+)
+def test_guest_fault_in_native_code_names_the_line_of_the_call(
+    tmp_path: Path, source: str, line: int,
+) -> None:
+    write(tmp_path / "app" / "main.d", source)
+
+    result = run_sb("--backend=interpreter", str(tmp_path / "app"), cwd=tmp_path)
+
+    assert result.returncode == -signal.SIGSEGV, output(result)
+    assert result.stderr == (
+        f"main.d({line}): fatal: null pointer dereference, in main.len\n"
+    ), output(result)
+
+
 # `int.min / -1` and `int.min % -1` trap in compiled D, whatever form the
 # operation takes. The interpreter does not trap on them yet.
 OVERFLOWING_DIVISIONS = [

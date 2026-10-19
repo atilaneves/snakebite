@@ -882,7 +882,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     // The word of the running call that names its full expression: null
     // while no guest call runs.
-    private const(void)** faultSlot() @system @nogc nothrow {
+    private const(void)** faultSlot() @system @nogc nothrow pure {
         auto guard = _innermost;
         return guard is null || guard._frame is null
             ? null : faultSlotOf(guard._frame);
@@ -890,7 +890,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     // What the fault handler reads: the function that runs, and the line of
     // the full expression that runs in it. Native code that the guest calls
-    // runs outside any expression of the guest, and then no line is known.
+    // runs inside the expression that calls it, and a fault there names the
+    // line of that call.
     extern(D) private static GuestPosition guestPosition(void* context)
     nothrow @nogc {
         import std.string: fromStringz;

@@ -83,12 +83,8 @@ public struct TemporaryLifetime {
         _destroy = destroy;
     }
 
-    public Expression root() const @nogc nothrow {
-        return cast(Expression) _expressions.root;
-    }
-
     public bool opens(in FullExpressionScope.Position position)
-        const @nogc nothrow
+        const @safe @nogc nothrow pure
     {
         return _expressions.opens(position);
     }
