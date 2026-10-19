@@ -177,8 +177,11 @@ public struct StorageResolver(Result, Adapter) {
 
         // An enum has its base type's layout: `enum E : int[3]` indexes
         // like `int[3]`.
-        auto indexBase = index.e1.type.toBasetype;
-        final switch (indexBase.ty) with (TY) {
+        static if (__traits(hasMember, Adapter, "indexBaseKindOf"))
+            const baseKind = _adapter.indexBaseKindOf(index);
+        else
+            const baseKind = index.e1.type.toBasetype.ty;
+        final switch (baseKind) with (TY) {
             // Static-array code generation evaluates the rightmost index
             // before recursing into the outer array expression. Keep that
             // language-defined order in the shared resolver; all other
@@ -230,7 +233,7 @@ public struct StorageResolver(Result, Adapter) {
                 Tnull, Tvector, Tint128, Tuns128, Ttraits, Tmixin,
                 Tnoreturn, Ttag:
                 internalFailure(text("`", index.toString, "` indexes a `",
-                    indexBase.toString, "`: dmd lowers associative array ",
+                    index.e1.type.toBasetype.toString, "`: dmd lowers associative array ",
                     "indexing to a call, indexes a vector through a cast to ",
                     "a static array and an aggregate through `opIndex`"));
         }
@@ -267,7 +270,10 @@ public struct StorageResolver(Result, Adapter) {
         // CatAssignExp is a BinAssignExp in dmd's AST. The typed overload
         // keeps that family dispatch complete without asking `isAssignExp`,
         // whose predicate only accepts the plain `EXP.assign` opcode.
-        auto target = resolve(compoundTarget(expression));
+        static if (__traits(hasMember, Adapter, "compoundTargetOf"))
+            auto target = resolve(_adapter.compoundTargetOf(expression));
+        else
+            auto target = resolve(compoundTarget(expression));
         if (auto cat = expression.isCatAssignExp)
             _adapter.storageCatAssignment(cast(CatAssignExp) cat, target);
         else

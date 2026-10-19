@@ -125,6 +125,20 @@ public struct TemporaryLifetime {
 
     // The slots of one guest call: given back, with their bytes, when the
     // call ends by any path.
+    // The bracket of a full expression that cannot register a
+    // destructor or a struct literal: only the value slots it reserved
+    // need to go back, and none of the expression bookkeeping applies.
+    public size_t plainMark() const {
+        return _temporaries.length;
+    }
+
+    public void releasePlain(in size_t mark) {
+        if (_temporaries.length > mark) {
+            _frames.release(_temporaries[mark].mark);
+            _temporaries.truncate(mark);
+        }
+    }
+
     public struct Activation {
         private TemporaryLifetime* _lifetime;
         private FrameStack.Mark _storage;

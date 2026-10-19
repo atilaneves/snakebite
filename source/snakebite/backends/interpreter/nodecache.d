@@ -19,7 +19,7 @@ public struct NodeCache(Value, size_t bits) {
         return entry.key is key ? &entry.value : null;
     }
 
-    public Value* insert(in void* key, in Value value)
+    public Value* insert(in void* key, Value value)
         @safe @nogc nothrow pure
     {
         auto entry = &_entries[indexOf(key)];

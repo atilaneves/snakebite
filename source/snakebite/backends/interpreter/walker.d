@@ -1175,10 +1175,16 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     // `type`'s facts, from the cache; computed on the first visit of any
     // node with this type.
+    pragma(inline, true)
     extern(D) private TypeFacts factsOf(Type type) {
         if (auto cached = _factsCache.find(cast(void*) type))
             return *cached;
 
+        return factsOfSlow(type);
+    }
+
+    pragma(inline, false)
+    extern(D) private TypeFacts factsOfSlow(Type type) {
         version(unittest) ++_typeLookups;
         return *_factsCache.insert(
             cast(void*) type, _shared.facts.typeOf(type));
@@ -2365,6 +2371,40 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             cast(void*) expression, comparisonPlan(expression));
     }
 
+    private NodeCache!(size_t, 9) _strides;
+    private NodeCache!(Expression, 9) _compoundTargets;
+    private NodeCache!(ubyte, 9) _indexBaseKinds;
+
+    extern(D) private size_t strideOf(IndexExp expression) {
+        import dmd.typesem: nextOf, toBasetype;
+
+        if (auto cached = _strides.find(cast(void*) expression))
+            return *cached;
+
+        return *_strides.insert(cast(void*) expression,
+            factsOf(expression.e1.type.toBasetype.nextOf).size);
+    }
+
+    extern(D) private Expression compoundTargetOf(BinAssignExp expression) {
+        import snakebite.frontend.storage: compoundTarget;
+
+        if (auto cached = _compoundTargets.find(cast(void*) expression))
+            return *cached;
+
+        return *_compoundTargets.insert(
+            cast(void*) expression, compoundTarget(expression));
+    }
+
+    extern(D) private TY indexBaseKindOf(IndexExp expression) {
+        import dmd.typesem: toBasetype;
+
+        if (auto cached = _indexBaseKinds.find(cast(void*) expression))
+            return cast(TY) *cached;
+
+        return cast(TY) *_indexBaseKinds.insert(cast(void*) expression,
+            cast(ubyte) expression.e1.type.toBasetype.ty);
+    }
+
     extern(D) private bool isPlainRoot(Expression root) {
         if (auto cached = _plainRoots.find(cast(void*) root))
             return *cached;
@@ -2429,8 +2469,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         scope void delegate() evaluate,
     ) {
         if (position != FullExpressionScope.Position.returnOperand
-                && isPlainRoot(root))
+                && isPlainRoot(root)) {
+            const mark = _temporaries.plainMark;
+            scope (exit) _temporaries.releasePlain(mark);
             return evaluate();
+        }
 
         scope (failure)
             if (position == FullExpressionScope.Position.returnOperand)
@@ -2485,8 +2528,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         in FullExpressionScope.Position position,
         Expression expression,
     ) {
-        if (isPlainRoot(expression))
+        if (isPlainRoot(expression)) {
+            const mark = _temporaries.plainMark;
+            scope (exit) _temporaries.releasePlain(mark);
             return truthOf(expression);
+        }
 
         bool result;
         fullExpressionValue!(void*)(position, expression,
@@ -3839,14 +3885,21 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return storageIndexValue(expression, 0);
         }
 
+        public auto indexBaseKindOf(IndexExp expression) {
+            return evaluator.indexBaseKindOf(expression);
+        }
+
+        public Expression compoundTargetOf(BinAssignExp expression) {
+            return evaluator.compoundTargetOf(expression);
+        }
+
         public void* storageDynamicIndex(
             IndexExp expression, void* base, void* index,
         ) {
             import snakebite.nativelayout:
                 arrayPointerOffset, loadIntegral;
 
-            const stride =
-                evaluator.factsOf(expression.e1.type.toBasetype.nextOf).size;
+            const stride = evaluator.strideOf(expression);
             const value = loadIntegral(index, size_t.sizeof, false);
             auto elements = cast(ubyte*) loadIntegral(
                 cast(ubyte*) base + arrayPointerOffset,
@@ -3861,8 +3914,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         ) {
             import snakebite.nativelayout: loadIntegral;
 
-            const stride =
-                evaluator.factsOf(expression.e1.type.toBasetype.nextOf).size;
+            const stride = evaluator.strideOf(expression);
             const value = loadIntegral(index, size_t.sizeof, false);
             return cast(ubyte*) base + value * stride;
         }
@@ -3872,8 +3924,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         ) {
             import snakebite.nativelayout: loadIntegral;
 
-            const stride =
-                evaluator.factsOf(expression.e1.type.toBasetype.nextOf).size;
+            const stride = evaluator.strideOf(expression);
             const value = loadIntegral(index, size_t.sizeof, false);
             return cast(ubyte*) pointer + value * stride;
         }
@@ -4079,7 +4130,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.frontend.storage: compoundTarget;
         import snakebite.nativevalue: loadFloating, storeFloating;
 
-        auto target_ = compoundTarget(expression);
+        auto target_ = compoundTargetOf(expression);
         auto target = resolvedTarget;
         if (target is null)
             target = addressOf(target_);
@@ -4175,7 +4226,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.frontend.storage: compoundTarget;
         import snakebite.nativevalue: applyComplex;
 
-        auto target_ = compoundTarget(expression);
+        auto target_ = compoundTargetOf(expression);
         auto target = resolvedTarget is null
             ? addressOf(target_) : resolvedTarget;
         const targetFacts = factsOf(target_.type);
@@ -4204,7 +4255,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.frontend.storage: compoundTarget;
         import snakebite.nativelayout: loadIntegral, storeIntegral;
 
-        auto target_ = compoundTarget(expression);
+        auto target_ = compoundTargetOf(expression);
         const targetFacts = factsOf(target_.type);
         // The operation has the width and signedness of the common type dmd
         // gave `e1`, which is wider than a narrow target and unsigned for an
