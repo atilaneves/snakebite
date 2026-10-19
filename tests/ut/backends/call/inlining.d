@@ -644,3 +644,69 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns an out-of-range index into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("inlining.bounds.loadInCalleeFailsAtItsOwnLine." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum loadLine = __LINE__; int load(int[] items, size_t index) { return items[index]; }
+
+            void main() {
+                import core.exception: RangeError;
+
+                auto items = [1, 2, 3];
+                size_t index = 5;
+                RangeError caught;
+                try
+                    load(items, index);
+                catch (RangeError error)
+                    caught = error;
+                assert(caught !is null);
+                assert(caught.msg == "index [5] is out of bounds for array of length 3");
+                assert(caught.file == __FILE__);
+                assert(caught.line == loadLine);
+                assert(load(items, 2) == 3);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns an out-of-range index into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("inlining.bounds.storeInCalleeFailsAtItsOwnLine." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum storeLine = __LINE__; void store(int[] items, size_t index, int value) { items[index] = value; }
+
+            void main() {
+                import core.exception: RangeError;
+
+                auto items = [1, 2, 3];
+                size_t index = 5;
+                RangeError caught;
+                try
+                    store(items, index, 9);
+                catch (RangeError error)
+                    caught = error;
+                assert(caught !is null);
+                assert(caught.msg == "index [5] is out of bounds for array of length 3");
+                assert(caught.file == __FILE__);
+                assert(caught.line == storeLine);
+                assert(items == [1, 2, 3]);
+                store(items, 1, 9);
+                assert(items == [1, 9, 3]);
+            }
+        });
+    }
+}
