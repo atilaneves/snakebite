@@ -1399,14 +1399,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         return callee;
     }
 
-    private NtCallee* ntWhy(FuncDeclaration function_, int why) {
-        import core.stdc.stdio: fprintf, stderr;
-        import core.stdc.stdlib: getenv;
-        if (getenv("NT_TRACE") !is null)
-            fprintf(stderr, "NOCALLEE %s why=%d\n", function_.ident.toChars, why);
-        return null;
-    }
-
     private NtCallee* ntMakeCallee(FuncDeclaration function_) {
         import dmd.astenums: TY, VarArg;
         import dmd.typesem: toBasetype;
@@ -1414,7 +1406,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto type = typeFunctionOf(function_);
         if (function_.fbody is null || function_.isCtorDeclaration !is null
                 || type.isRef || type.parameterList.varargs != VarArg.none)
-            return ntWhy(function_, 1);
+            return null;
         const decision = _callSelection.decisionOf(
             function_,
             (callee) => _program.isInterpreted(callee),
@@ -1422,18 +1414,18 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             hasIndependentNativeSymbol(function_),
         );
         if (decision.route != CallSelection.Route.guest)
-            return ntWhy(function_, 2);
+            return null;
         auto layout = callLayoutOf(function_);
         auto closurePlan = closurePlanOf(function_);
         if (closurePlan.needsClosure
                 || layout.returnPlace.offset != size_t.max
                 || (function_.isThis !is null)
                     != (layout.hiddenThis.variable !is null))
-            return ntWhy(function_, 3);
+            return null;
         auto returnType = function_.type.nextOf;
         if (returnType.toBasetype.ty != TY.Tvoid
                 && ntScalarOf(this, returnType).kind == NtKind.none)
-            return ntWhy(function_, 4);
+            return null;
         auto callee = new NtCallee;
         callee.function_ = function_;
         callee.layout = layout;
@@ -1458,15 +1450,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return;
         }
 
-        if (ntFullGuard) {
-            const guard = CallStateGuard(this);
-            ntEnter(callee, calleeFrame, place);
-            ntExecute(callee, calleeFrame);
-        } else {
-            const guard = NtCallGuard(this);
-            ntEnter(callee, calleeFrame, place);
-            ntExecute(callee, calleeFrame);
-        }
+        const guard = NtCallGuard(this);
+        ntEnter(callee, calleeFrame, place);
+        ntExecute(callee, calleeFrame);
     }
 
     private void ntEnter(NtCallee* callee, ubyte* calleeFrame, void* place) {
@@ -7992,15 +7978,6 @@ private final class NtGenericCondition(E) : NtBool {
 
 private enum NtArg : ubyte { i8, i16, i32, i64, f32, f64 }
 
-__gshared bool ntFullGuard, ntNested, ntSlowFrame;
-
-shared static this() {
-    import core.stdc.stdlib: getenv;
-    ntFullGuard = getenv("NT_FULLGUARD") !is null;
-    ntNested = getenv("NT_NESTED") !is null;
-    ntSlowFrame = getenv("NT_SLOWFRAME") !is null;
-}
-
 // Gives the frame stack back to the position it had when this was made.
 private struct NtFrame {
     private imported!"snakebite.framestack".FrameStack* _stack;
@@ -8096,13 +8073,9 @@ private final class NtCall(E) : NtNode {
         const layout = callee.layout;
         ubyte* base;
         auto calleeFrame = NtFrame(&ev._frames);
-        if (ntSlowFrame)
+        base = ev._frames.reserveFast(layout.size, layout.alignment);
+        if (base is null)
             base = ev._frames.reserve(layout.size, layout.alignment);
-        else {
-            base = ev._frames.reserveFast(layout.size, layout.alignment);
-            if (base is null)
-                base = ev._frames.reserve(layout.size, layout.alignment);
-        }
         if (layout.hiddenThis.variable !is null)
             *cast(size_t*) (base + layout.hiddenThis.parameter.offset)
                 = receiver;
@@ -8129,7 +8102,7 @@ private final class NtCall(E) : NtNode {
                     break;
             }
         }
-        if (ntNested || layout.retainsTemporaries)
+        if (layout.retainsTemporaries)
             ev._temporaries.withNestedCall(layout.retainsTemporaries, {
                 ev.ntRunCallee(callee, base, result);
             });
@@ -8420,28 +8393,18 @@ private NtNode ntBuildLoad(E)(E ev, Expression expression, NtNode address) {
 
 private NtNode ntBuildCall(E)(E ev, CallExp call) {
     import dmd.astenums: STC, TY;
-    NtNode fail(int why) {
-        import core.stdc.stdio: fprintf, stderr;
-        import core.stdc.stdlib: getenv;
-        if (getenv("NT_TRACE") !is null)
-            fprintf(stderr, "NOCALL %s:%d why=%d %s\n", call.loc.filename,
-                call.loc.linnum, why,
-                call.f is null ? "?" : call.f.ident.toChars);
-        return null;
-    }
     import dmd.typesem: toBasetype;
     import snakebite.backends.calls: CallSelection;
     import snakebite.frontend.dmd.dispatch: CallReceiver, readsVtable,
         receiverOf;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
 
-    import core.stdc.stdlib: getenv;
     if (call.f is null || call.vthis2 !is null || call.e1.isCommaExp !is null
-            || call.arguments is null || getenv("NT_NOCALL") !is null)
-        return fail(1);
+            || call.arguments is null)
+        return null;
     CallSelection.ScalarConstant constant;
     if (ev._callSelection.foldedScalarIntrinsic(call, constant))
-        return fail(2);
+        return null;
     auto function_ = ev._callSelection.definitionOf(
         call.f, (declaration) => ev._program.linkedFunctionOf(declaration));
     auto type = typeFunctionOf(function_);
@@ -8449,7 +8412,7 @@ private NtNode ntBuildCall(E)(E ev, CallExp call) {
     const isVoid = call.type.toBasetype.ty == TY.Tvoid;
     const result = isVoid ? NtScalar() : ntScalarOf(ev, call.type);
     if (!isVoid && result.kind == NtKind.none)
-        return fail(3);
+        return null;
 
     NtNode receiver;
     bool receiverIsAddress, virtual;
@@ -8465,15 +8428,15 @@ private NtNode ntBuildCall(E)(E ev, CallExp call) {
                 receiverIsAddress = true;
                 break;
             default:
-                return fail(4);
+                return null;
         }
         if (receiver is null)
-            return fail(5);
+            return null;
     }
 
     auto parameters = type.parameterList;
     if (call.arguments.length != parameters.length)
-        return fail(6);
+        return null;
     auto args = new NtNode[parameters.length];
     auto modes = new NtArg[parameters.length];
     foreach (i; 0 .. parameters.length) {
@@ -8485,7 +8448,7 @@ private NtNode ntBuildCall(E)(E ev, CallExp call) {
                 || declared.kind == NtKind.none
                 || given.kind != declared.kind
                 || given.facts.size != declared.facts.size)
-            return fail(7);
+            return null;
         if (declared.kind == NtKind.floating)
             modes[i] = declared.facts.size == 4 ? NtArg.f32 : NtArg.f64;
         else switch (declared.facts.size) {
@@ -8493,14 +8456,11 @@ private NtNode ntBuildCall(E)(E ev, CallExp call) {
             case 2: modes[i] = NtArg.i16; break;
             case 4: modes[i] = NtArg.i32; break;
             case 8: modes[i] = NtArg.i64; break;
-            default: return fail(8);
+            default: return null;
         }
         args[i] = ntBuildValue(ev, argument);
-        if (args[i] is null) {
-            import core.stdc.stdio: fprintf, stderr;
-            fprintf(stderr, "NOARG op=%d\n", cast(int) argument.op);
-            return fail(9);
-        }
+        if (args[i] is null)
+            return null;
     }
 
     auto node = new NtCall!E(ev, call, function_, receiver, receiverIsAddress,
@@ -8509,7 +8469,7 @@ private NtNode ntBuildCall(E)(E ev, CallExp call) {
     if (!virtual) {
         auto callee = ev.ntCalleeOf(function_);
         if (callee is null || !node.matches(callee))
-            return fail(10);
+            return null;
         node._callee = callee;
     }
     return node;
