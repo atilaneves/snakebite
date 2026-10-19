@@ -286,8 +286,9 @@ private final class IndexPointer : Node {
         _pointer = pointer; _index = index; _stride = stride;
     }
     override ubyte* executeAddr(ubyte* frame) {
+        auto pointer = cast(ubyte*) _pointer.executeLong(frame);
         const index = cast(size_t) _index.executeLong(frame);
-        return cast(ubyte*) _pointer.executeLong(frame) + index * _stride;
+        return pointer + index * _stride;
     }
 }
 
