@@ -2349,7 +2349,9 @@ private Node buildIdentity(bool negate, E)(E ev, IdentityExp e) {
     if (cast(DoubleNode) left is null && cast(DoubleNode) right is null) {
         // The same bits are the same value whatever the signedness.
         static Node same(L, R)(L l, R r) {
-            return new IntegerCompare!(negate ? "!=" : "==", false, L, R)(l, r);
+            enum op = negate ? "!=" : "==";
+            return new IntegerCompare!(op, false, L, R)(
+                IntegerTest!(op, false, L, R)(l, r));
         }
         return fuse!(same, long, longLeft, longRight)(
             operandOf(left), operandOf(right));
