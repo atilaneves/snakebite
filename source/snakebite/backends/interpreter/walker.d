@@ -226,6 +226,7 @@ import snakebite.backends.identity: IdentityPlan;
 import snakebite.backends.ifplan: IfPlan;
 import snakebite.backends.logical: LogicalPlan;
 import snakebite.backends.comparison: ComparisonPlan;
+import snakebite.backends.casts: CastPlan;
 import snakebite.backends.arithmetic: ArithmeticPlan;
 import snakebite.backends.controlflow: ControlFlowState,
     ScopeFrame, ScopePaths, scopePathsOf;
@@ -2820,7 +2821,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.nativelayout: TypeFacts, loadIntegral;
         import snakebite.nativevalue: loadFloating;
 
-        const truth = truthFacts(type);
+        auto cachedTruth = _truths.find(cast(void*) type);
+        if (cachedTruth is null)
+            cachedTruth = _truths.insert(cast(void*) type, truthFacts(type));
+        const truth = *cachedTruth;
         const buffer = cast(const(ubyte)*) value;
 
         if (truth.isFloat) {
@@ -2923,8 +2927,22 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         return *cast(void**) buffer.ptr;
     }
 
+    private NodeCache!(ulong, 10) _integerLiterals;
+    private NodeCache!(const(CastPlan)*, 9) _castPlans;
+    private NodeCache!(TypeFacts.Truth, 6) _truths;
+
     override void visit(IntegerExp expression) {
-        _nativeData.write(_type, _facts, expression, _place);
+        import dmd.expressionsem: toInteger;
+        import snakebite.nativelayout: storeIntegral;
+
+        if (!_facts.isIntegral)
+            return _nativeData.write(_type, _facts, expression, _place);
+
+        auto cached = _integerLiterals.find(cast(void*) expression);
+        if (cached is null)
+            cached = _integerLiterals.insert(
+                cast(void*) expression, expression.toInteger);
+        storeIntegral(_place, *cached, _facts.size);
     }
 
     override void visit(RealExp expression) {
@@ -5006,7 +5024,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // field; `.to` still names the cast `castTo` actually performed,
         // so it is the one `classify` has to see to tell that apart from
         // `.re`, whose `.to` and `.type` agree.
-        const ref plan = *_shared.facts.castOf(expression);
+        auto cachedPlan = _castPlans.find(cast(void*) expression);
+        if (cachedPlan is null)
+            cachedPlan = _castPlans.insert(
+                cast(void*) expression, _shared.facts.castOf(expression));
+        const ref plan = **cachedPlan;
 
         final switch (plan.kind) with (CastKind) {
         case copy:
