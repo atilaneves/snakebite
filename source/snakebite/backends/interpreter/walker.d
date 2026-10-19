@@ -5,7 +5,7 @@ private:
 
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.backends.interpreter.nodetree:
-    TreeCallee, TreeFlow, TreeRoot, isScalar, rootOf;
+    TreeCallee, TreeFlow, TreeRoot, isScalar, isSlice, rootOf;
 import snakebite.nativelayout: tryTypeFacts, truthFacts;
 
 
@@ -633,7 +633,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // plan of its statement, so nothing here needs the GC to keep it.
     private CStack!ActiveExceptionScope _activeExceptionScopes;
     private CStack!ExceptionCandidate _candidateScratch;
-    private RuntimeTypes* _runtimeTypes;
+    package RuntimeTypes* _runtimeTypes;
     // dmd gives every `arr[... $ ...]` a `lengthVar` declaration for its
     // `$`, which no statement declares and which therefore has no frame
     // slot - and needs none, since the length is a value `visit(IndexExp)`
@@ -655,7 +655,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // after it - the same cold-path-once shape as `_layouts`. Shared by
     // every thread's own evaluator (ADR-0006): owned by `Shared`, read
     // through this pointer.
-    private PlanCache* _plans;
+    package PlanCache* _plans;
     // A call expression is one call site, even when a loop visits it many
     // times. The plan cache remains the cold path; this side cache keeps
     // the prepared plan with the AST call site that uses it.
@@ -1091,6 +1091,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         return call;
     }
 
+    package bool resultIsReceiver(FuncDeclaration function_) {
+        return callShapeOf(function_).adapter.resultIsReceiver;
+    }
+
     private const(CallShape)* callShapeOf(FuncDeclaration function_) {
         if (auto cached = function_ in _calls)
             return cached;
@@ -1406,8 +1410,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import dmd.typesem: toBasetype;
 
         auto type = typeFunctionOf(function_);
-        if (function_.fbody is null || function_.isCtorDeclaration !is null
-                || type.isRef || type.parameterList.varargs != VarArg.none)
+        if (type.isRef || type.parameterList.varargs != VarArg.none)
             return null;
         const decision = _callSelection.decisionOf(
             function_,
@@ -1415,20 +1418,38 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             hasNativeSymbol(function_),
             hasIndependentNativeSymbol(function_),
         );
-        if (decision.route != CallSelection.Route.guest)
-            return null;
         auto layout = callLayoutOf(function_);
-        auto closurePlan = closurePlanOf(function_);
-        if (closurePlan.needsClosure
-                || layout.returnPlace.offset != size_t.max
+        const(ClosurePlan)* closurePlan;
+        final switch (decision.route) with (CallSelection.Route) {
+            case guest:
+                if (function_.fbody is null)
+                    return null;
+                closurePlan = closurePlanOf(function_);
+                if (closurePlan.needsClosure)
+                    return null;
+                break;
+            case native:
+                break;
+            case builtin:
+                if (decision.destinationParameter != size_t.max)
+                    return null;
+                break;
+            case vaStart, vaCopy, alloca:
+                return null;
+        }
+        if (layout.returnPlace.offset != size_t.max
                 || (function_.isThis !is null)
                     != (layout.hiddenThis.variable !is null))
             return null;
         auto returnType = function_.type.nextOf;
-        if (returnType.toBasetype.ty != TY.Tvoid && !isScalar(this, returnType))
+        // A constructor's result is its receiver.
+        if (function_.isCtorDeclaration is null
+                && returnType.toBasetype.ty != TY.Tvoid
+                && !isScalar(this, returnType) && !isSlice(returnType))
             return null;
         auto callee = new TreeCallee;
         callee.function_ = function_;
+        callee.decision = decision;
         callee.layout = layout;
         callee.closurePlan = closurePlan;
         callee.returnType = returnType;
@@ -1438,6 +1459,20 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             && (layout.alignment & (layout.alignment - 1)) == 0
             && layout.alignment < pageSize;
         return callee;
+    }
+
+    // Calls a native function or a builtin whose frame the caller has filled:
+    // the arguments are the parameter slots, as `executeRaw` hands them over.
+    package void runHostCallee(
+        TreeCallee* callee, const(CallPlan)* plan, ubyte* calleeFrame,
+        void* place,
+    ) {
+        auto arguments = argumentSlots(calleeFrame, callee.layout);
+        const slots = arguments.values;
+        if (plan is null)
+            callee.decision.builtinEntry(place, slots.ptr, slots.length);
+        else
+            callPlan(plan, place, slots);
     }
 
     // Runs the body of `callee`, whose frame at `calleeFrame` the caller has

@@ -730,3 +730,30 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// A class declared in a function and built with `new C(args)` is nested in
+// that function: the object gets the enclosing frame as its context before
+// the constructor runs, and the constructor reads a variable of that frame.
+static foreach (backend; Matrix!()) {
+    @("nested.newWithConstructor.readsEnclosingFrame." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int outer() {
+                int base = 40;
+                int mid() {
+                    class C {
+                        int v;
+                        this(int x) { v = x + base; }
+                    }
+                    auto c = new C(2);
+                    return c.v;
+                }
+                return mid();
+            }
+            int main() {
+                return outer() == 42 ? 0 : 1;
+            }
+        });
+    }
+}

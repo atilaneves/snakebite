@@ -11,7 +11,8 @@ private:
 
 import dmd.declaration: VarDeclaration;
 import dmd.expression: AssignExp, BinAssignExp, BinExp, CallExp, CastExp,
-    DeclarationExp, Expression, IndexExp, PostExp, ThisExp;
+    DeclarationExp, Expression, IdentityExp, IndexExp, NewExp, PostExp,
+    SliceExp, ThisExp;
 import dmd.func: FuncDeclaration;
 import dmd.location: Loc;
 import dmd.mtype: Type;
@@ -19,7 +20,9 @@ import dmd.statement: Statement;
 import snakebite.backends.checkplan: BoundsCheck;
 import snakebite.backends.controlflow: ControlFlowState;
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
+import snakebite.backends.sliceplan: SlicePlan;
 import snakebite.nativelayout: TypeFacts;
+import snakebite.nativevalue: CastLayout;
 import std.meta: AliasSeq;
 import std.traits: Select, isFloatingPoint;
 
@@ -57,6 +60,7 @@ package TreeRoot* rootOf(E)(
 // function.
 package struct TreeCallee {
     package FuncDeclaration function_;
+    package imported!"snakebite.backends.calls".CallSelection.Decision decision;
     package const(imported!"snakebite.backends.layout".FrameLayout)* layout;
     package const(imported!"snakebite.backends.closureplan".ClosurePlan)*
         closurePlan;
@@ -84,12 +88,21 @@ private struct Position {
     }
 }
 
+package bool isSlice(Type type) {
+    import dmd.astenums: TY;
+    import dmd.typesem: toBasetype;
+
+    return type !is null && type.toBasetype.ty == TY.Tarray;
+}
+
 private abstract class Node {
     public long executeLong(ubyte* frame) { assert(0); }
     public double executeDouble(ubyte* frame) { assert(0); }
     public bool executeBool(ubyte* frame) { return executeLong(frame) != 0; }
     public ubyte* executeAddr(ubyte* frame) { assert(0); }
     public void executeVoid(ubyte* frame) { assert(0); }
+    // Writes a dynamic array value (length, then pointer) to `dest`.
+    public void executeInto(ubyte* frame, ubyte* dest) { assert(0); }
     public TreeFlow executeStmt(ubyte* frame) { assert(0); }
     public bool runsAsStatement() { return false; }
     public void positionAt(Position position) { assert(0); }
@@ -312,6 +325,231 @@ private final class IndexPointer : Node {
         auto pointer = cast(ubyte*) _pointer.executeLong(frame);
         const index = cast(size_t) _index.executeLong(frame);
         return pointer + index * _stride;
+    }
+}
+
+// --- dynamic arrays ---------------------------------------------------
+// A dynamic array value is a length and a pointer, in the native layout. A
+// node of one writes that pair to `dest`. It reads every operand before it
+// writes, so `dest` can be the place of one of the operands.
+
+private struct SliceValue {
+    public size_t length;
+    public ubyte* pointer;
+}
+
+private enum lengthOffset = imported!"snakebite.nativelayout".arrayLengthOffset;
+private enum pointerOffset = imported!"snakebite.nativelayout".arrayPointerOffset;
+static assert(SliceValue.length.offsetof == lengthOffset
+    && SliceValue.pointer.offsetof == pointerOffset
+    && SliceValue.sizeof == imported!"snakebite.nativelayout".arrayValueSize);
+
+private abstract class SliceNode : Node {
+    public override void executeVoid(ubyte* frame) {
+        SliceValue discarded = void;
+        executeInto(frame, cast(ubyte*) &discarded);
+    }
+}
+
+private final class LocalSlice : SliceNode {
+    private size_t _offset;
+    public this(size_t offset) { _offset = offset; }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        *cast(SliceValue*) dest = *cast(SliceValue*) (frame + _offset);
+    }
+}
+
+private final class LoadSlice : SliceNode {
+    private Node _address;
+    public this(Node address) { _address = address; }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        SliceValue value = *cast(SliceValue*) _address.executeAddr(frame);
+        *cast(SliceValue*) dest = value;
+    }
+}
+
+private final class NullSlice : SliceNode {
+    public override void executeInto(ubyte*, ubyte* dest) {
+        *cast(SliceValue*) dest = SliceValue.init;
+    }
+}
+
+// One word of a dynamic array that is not an lvalue: `f().length`,
+// `f().ptr`.
+private final class SliceWord : LongNode {
+    private Node _slice;
+    private size_t _offset;
+    public this(Node slice, size_t offset) { _slice = slice; _offset = offset; }
+    public override long executeLong(ubyte* frame) {
+        SliceValue value = void;
+        _slice.executeInto(frame, cast(ubyte*) &value);
+        return *cast(size_t*) (cast(ubyte*) &value + _offset);
+    }
+    mixin BoolFromLong;
+}
+
+// The truth of a dynamic array: the shared truth decision names the words,
+// and one of them is not zero.
+private final class SliceTruth : BoolNode {
+    private Node _slice;
+    private size_t _first;
+    private size_t _second;
+
+    public this(Node slice, Type type) {
+        import snakebite.nativelayout: truthFacts;
+
+        const truth = truthFacts(type);
+        _slice = slice;
+        _first = truth.offset;
+        _second = truth.secondOffset;
+    }
+
+    public override bool executeBool(ubyte* frame) {
+        SliceValue value = void;
+        _slice.executeInto(frame, cast(ubyte*) &value);
+        const bytes = cast(const(ubyte)*) &value;
+        return *cast(const(size_t)*) (bytes + _first) != 0
+            || *cast(const(size_t)*) (bytes + _second) != 0;
+    }
+}
+
+// `x is y` on dynamic arrays: both words equal.
+private final class SliceIdentity(bool negate) : BoolNode {
+    private Node _left;
+    private Node _right;
+    public this(Node left, Node right) { _left = left; _right = right; }
+    public override bool executeBool(ubyte* frame) {
+        SliceValue left = void;
+        SliceValue right = void;
+        _left.executeInto(frame, cast(ubyte*) &left);
+        _right.executeInto(frame, cast(ubyte*) &right);
+        const same = left.length == right.length && left.pointer is right.pointer;
+        return negate ? !same : same;
+    }
+}
+
+// `x is y` on floating point values compares their bits.
+private final class FloatIdentity(bool negate, T, L, R) : BoolNode {
+    private L _left;
+    private R _right;
+    public this(L left, R right) { _left = left; _right = right; }
+    public override bool executeBool(ubyte* frame) {
+        const T left = cast(T) _left.value(frame);
+        const T right = cast(T) _right.value(frame);
+        static if (T.sizeof == 4)
+            const same = *cast(const(uint)*) &left == *cast(const(uint)*) &right;
+        else
+            const same = *cast(const(ulong)*) &left == *cast(const(ulong)*) &right;
+        return negate ? !same : same;
+    }
+}
+
+private enum SliceSource : ubyte { slice, pointer, staticArray }
+
+// `base[lower .. upper]`. The base is read before the bounds, as the
+// evaluator does.
+private final class SliceOf(SliceSource source) : SliceNode {
+    private FailBounds _fail;
+    private SliceExp _expression;
+    private Node _base;
+    private Node _lower;
+    private Node _upper;
+    private size_t _stride;
+    private size_t _staticLength;
+    private bool _checkOrder;
+    private bool _checkUpper;
+    private bool _reportsLength;
+    public this(FailBounds fail, SliceExp expression, Node base, Node lower,
+            Node upper, size_t stride, size_t staticLength,
+            in SlicePlan plan) {
+        _fail = fail; _expression = expression; _base = base; _lower = lower;
+        _upper = upper; _stride = stride; _staticLength = staticLength;
+        _checkOrder = plan.checkOrder; _checkUpper = plan.checkUpper;
+        _reportsLength = plan.reportsSourceLength;
+    }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        ubyte* base;
+        size_t length;
+        static if (source == SliceSource.slice) {
+            SliceValue value = void;
+            _base.executeInto(frame, cast(ubyte*) &value);
+            base = value.pointer;
+            length = value.length;
+        } else static if (source == SliceSource.pointer)
+            base = cast(ubyte*) _base.executeLong(frame);
+        else {
+            base = _base.executeAddr(frame);
+            length = _staticLength;
+        }
+        const lower = _lower is null ? size_t(0) : cast(size_t) _lower.executeLong(frame);
+        const upper = _upper is null ? length : cast(size_t) _upper.executeLong(frame);
+        if (_checkOrder && upper < lower || _checkUpper && upper > length)
+            fail(lower, upper, length);
+        *cast(SliceValue*) dest = SliceValue(upper - lower, base + lower * _stride);
+    }
+    pragma(inline, false)
+    private void fail(size_t lower, size_t upper, size_t length) {
+        const reported = _reportsLength ? length : 0;
+        _fail(BoundsCheck.slice, _expression.loc,
+            [cast(const(void)*) &lower, cast(const(void)*) &upper,
+                cast(const(void)*) &reported]);
+    }
+}
+
+// A cast between dynamic arrays of elements of different sizes keeps the
+// bytes: the shared cast operation scales the length.
+private final class ReinterpretSlice : SliceNode {
+    private Node _operand;
+    private CastLayout _layout;
+
+    public this(
+        Node operand, CastLayout layout,
+    ) {
+        _operand = operand; _layout = layout;
+    }
+
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        import snakebite.nativevalue: applyCast;
+
+        SliceValue value = void;
+        _operand.executeInto(frame, cast(ubyte*) &value);
+        applyCast(_layout, &value, dest);
+    }
+}
+
+private final class StaticArrayToSlice : SliceNode {
+    private Node _address;
+    private size_t _length;
+    public this(Node address, size_t length) { _address = address; _length = length; }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        *cast(SliceValue*) dest = SliceValue(_length, _address.executeAddr(frame));
+    }
+}
+
+// The element of a dynamic array that is not an lvalue.
+private final class IndexValue : Node {
+    private FailBounds _fail;
+    private IndexExp _expression;
+    private Node _array;
+    private Node _index;
+    private size_t _stride;
+    public this(FailBounds fail, IndexExp expression, Node array, Node index,
+            size_t stride) {
+        _fail = fail; _expression = expression; _array = array; _index = index;
+        _stride = stride;
+    }
+    public override ubyte* executeAddr(ubyte* frame) {
+        SliceValue value = void;
+        _array.executeInto(frame, cast(ubyte*) &value);
+        const index = cast(size_t) _index.executeLong(frame);
+        if (index >= value.length)
+            fail(index, value.length);
+        return value.pointer + index * _stride;
+    }
+    pragma(inline, false)
+    private void fail(size_t index, size_t length) {
+        _fail(BoundsCheck.index, _expression.loc,
+            [cast(const(void)*) &index, cast(const(void)*) &length]);
     }
 }
 
@@ -715,6 +953,53 @@ private final class PostStep(T, long delta) : LongNode {
     mixin StatementForm!"executeLong";
 }
 
+// A dynamic array stored to a frame slot or to the address of other storage.
+private final class StoreSlice(A) : SliceNode {
+    private A _address;
+    private Node _value;
+    public this(A address, Node value) { _address = address; _value = value; }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        auto address = _address.address(frame);
+        SliceValue value = void;
+        _value.executeInto(frame, cast(ubyte*) &value);
+        *cast(SliceValue*) address = value;
+        *cast(SliceValue*) dest = value;
+    }
+    public override void executeVoid(ubyte* frame) {
+        auto address = _address.address(frame);
+        _value.executeInto(frame, address);
+    }
+    mixin StatementForm!"executeVoid";
+}
+
+// `first, second`: `first` runs for its effect, and the node yields
+// `second` in whichever form the parent asks for.
+private final class Comma : Node {
+    private Node _first;
+    private Node _second;
+    public this(Node first, Node second) { _first = first; _second = second; }
+    public override long executeLong(ubyte* frame) {
+        _first.executeVoid(frame);
+        return _second.executeLong(frame);
+    }
+    public override bool executeBool(ubyte* frame) {
+        _first.executeVoid(frame);
+        return _second.executeBool(frame);
+    }
+    public override double executeDouble(ubyte* frame) {
+        _first.executeVoid(frame);
+        return _second.executeDouble(frame);
+    }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        _first.executeVoid(frame);
+        _second.executeInto(frame, dest);
+    }
+    public override void executeVoid(ubyte* frame) {
+        _first.executeVoid(frame);
+        _second.executeVoid(frame);
+    }
+}
+
 // --- statements -------------------------------------------------------
 
 private final class ExpressionStatement : Node {
@@ -722,6 +1007,9 @@ private final class ExpressionStatement : Node {
     private Position _position;
     public this(Node expression, Position position) {
         _expression = expression; _position = position;
+    }
+    public override void executeVoid(ubyte* frame) {
+        _expression.executeVoid(frame);
     }
     public override TreeFlow executeStmt(ubyte* frame) {
         _position.note;
@@ -739,12 +1027,15 @@ private Node statementOf(Node expression, Position position) {
 
 // A statement that does nothing but end with `flow`.
 private final class Jump(TreeFlow flow) : Node {
+    static if (flow == TreeFlow.normal)
+        public override void executeVoid(ubyte*) {}
     public override TreeFlow executeStmt(ubyte*) { return flow; }
 }
 
 private final class Sequence : Node {
     private Node[] _children;
     public this(Node[] children) { _children = children; }
+    public override void executeVoid(ubyte* frame) { executeStmt(frame); }
     public override TreeFlow executeStmt(ubyte* frame) {
         foreach (child; _children) {
             const flow = child.executeStmt(frame);
@@ -864,12 +1155,19 @@ private final class ReturnValue(T) : Node {
     }
     public override TreeFlow executeStmt(ubyte* frame) {
         _position.note;
-        static if (isFloatingPoint!T)
-            const T value = cast(T) _value.executeDouble(frame);
-        else
-            const T value = cast(T) _value.executeLong(frame);
-        if (*_place !is null)
-            *cast(T*) (*_place) = value;
+        static if (is(T == SliceValue)) {
+            if (*_place !is null)
+                _value.executeInto(frame, cast(ubyte*) *_place);
+            else
+                _value.executeVoid(frame);
+        } else {
+            static if (isFloatingPoint!T)
+                const T value = cast(T) _value.executeDouble(frame);
+            else
+                const T value = cast(T) _value.executeLong(frame);
+            if (*_place !is null)
+                *cast(T*) (*_place) = value;
+        }
         return TreeFlow.return_;
     }
 }
@@ -912,14 +1210,15 @@ private final class Uninitialised(E) : Node {
 
 // --- calls ------------------------------------------------------------
 
-private enum Argument : ubyte { i8, i16, i32, i64, f32, f64 }
+private enum Argument : ubyte { i8, i16, i32, i64, f32, f64, address, slice }
 
 private size_t sizeOf(Argument mode) {
     final switch (mode) with (Argument) {
         case i8: return 1;
         case i16: return 2;
         case f32, i32: return 4;
-        case f64, i64: return 8;
+        case f64, i64, address: return 8;
+        case slice: return SliceValue.sizeof;
     }
 }
 
@@ -941,9 +1240,11 @@ private struct FrameGuard {
     }
 }
 
-// A direct or virtual call of a guest function with scalar parameters and
-// result. It pushes the callee frame, evaluates each argument into its
-// parameter slot, and runs the callee's node tree.
+// A direct or virtual call with scalar, `ref` or dynamic array parameters,
+// and a scalar, dynamic array or no result. The callee is a guest function,
+// a native function or a builtin. It pushes the callee frame, evaluates each
+// argument into its parameter slot, and runs the callee: a guest callee's
+// node tree, or the native call through its plan.
 private final class Call(E) : Node {
     private E _ev;
     private CallExp _site;
@@ -955,29 +1256,48 @@ private final class Call(E) : Node {
     private bool _resultUnsigned;
     private bool _virtual;
     private bool _receiverIsAddress;
+    // A constructor call yields the object it constructed.
+    private bool _yieldsReceiver;
+    private imported!"snakebite.backends.calls".CallSelection.Route _route;
+    private const(imported!"snakebite.ffi.plan".CallPlan)* _plan;
     private TreeCallee* _callee;
     private const(void)* _vtable;
 
     public this(E ev, CallExp site, FuncDeclaration method, Node receiver,
             bool receiverIsAddress, bool virtual, Node[] args,
-            Argument[] modes, size_t resultSize, bool resultUnsigned) {
+            Argument[] modes, size_t resultSize, bool resultUnsigned,
+            bool yieldsReceiver) {
         _ev = ev; _site = site; _method = method; _receiver = receiver;
         _receiverIsAddress = receiverIsAddress; _virtual = virtual;
         _args = args; _modes = modes; _resultSize = resultSize;
-        _resultUnsigned = resultUnsigned;
+        _resultUnsigned = resultUnsigned; _yieldsReceiver = yieldsReceiver;
     }
 
     public final bool matches(TreeCallee* callee) {
         auto layout = callee.layout;
+        if (_virtual && callee.decision.route != _route)
+            return false;
         if (layout.parameters.length != _modes.length)
             return false;
         foreach (i, parameter; layout.parameters)
-            if (parameter.isRef || parameter.facts.size != sizeOf(_modes[i]))
+            if (parameter.isRef != (_modes[i] == Argument.address)
+                    || parameter.facts.size != sizeOf(_modes[i]))
                 return false;
         return _resultSize == 0 || callee.returnFacts.size == _resultSize;
     }
 
-    private void invoke(ubyte* frame, ulong* result) {
+    public final void bind(TreeCallee* callee) {
+        import snakebite.backends.calls: CallSelection;
+
+        _callee = callee;
+        const decision = CallSelection.atCallSite(callee.decision, _site);
+        _route = decision.route;
+        _plan = _route == CallSelection.Route.native
+            ? _ev._plans.of(callee.function_) : null;
+    }
+
+    // Returns the receiver of the call, 0 when there is none.
+    private size_t invoke(ubyte* frame, void* result) {
         auto ev = _ev;
         auto callee = _callee;
         size_t receiver;
@@ -988,7 +1308,7 @@ private final class Call(E) : Node {
             if (_virtual) {
                 if (receiver == 0) {
                     ev._executeMethodCall(_site, result, _method, null);
-                    return;
+                    return receiver;
                 }
                 const vtable = *cast(const(void)**) receiver;
                 if (vtable !is _vtable) {
@@ -997,7 +1317,7 @@ private final class Call(E) : Node {
                     if (callee is null || !matches(callee)) {
                         ev._executeMethodCall(
                             _site, result, _method, cast(void*) receiver);
-                        return;
+                        return receiver;
                     }
                     _callee = callee;
                     _vtable = vtable;
@@ -1035,45 +1355,75 @@ private final class Call(E) : Node {
                 case f64:
                     *cast(double*) place = node.executeDouble(frame);
                     break;
+                case address:
+                    *cast(ubyte**) place = node.executeAddr(frame);
+                    break;
+                case slice:
+                    node.executeInto(frame, place);
+                    break;
             }
         }
         if (layout.retainsTemporaries)
             ev._temporaries.withNestedCall(layout.retainsTemporaries, {
-                ev.runTreeCallee(callee, base, result);
+                run(callee, base, result);
             });
         else
-            ev.runTreeCallee(callee, base, result);
+            run(callee, base, result);
+        return receiver;
+    }
+
+    private void run(TreeCallee* callee, ubyte* base, void* result) {
+        import snakebite.backends.calls: CallSelection;
+
+        final switch (_route) with (CallSelection.Route) {
+            case guest:
+                _ev.runTreeCallee(callee, base, result);
+                break;
+            case native, builtin:
+                _ev.runHostCallee(callee, _plan, base, result);
+                break;
+            case vaStart, vaCopy, alloca:
+                assert(0, "makeTreeCallee yields no callee for this route");
+        }
     }
 
     public override long executeLong(ubyte* frame) {
-        ulong buffer;
-        invoke(frame, &buffer);
+        ulong[2] buffer;
+        const receiver = invoke(frame, _yieldsReceiver ? null : buffer.ptr);
+        if (_yieldsReceiver)
+            return receiver;
         switch (_resultSize) {
             case 1:
                 return _resultUnsigned
-                    ? cast(long) cast(ubyte) buffer : cast(long) cast(byte) buffer;
+                    ? cast(long) cast(ubyte) buffer[0] : cast(long) cast(byte) buffer[0];
             case 2:
                 return _resultUnsigned
-                    ? cast(long) cast(ushort) buffer
-                    : cast(long) cast(short) buffer;
+                    ? cast(long) cast(ushort) buffer[0]
+                    : cast(long) cast(short) buffer[0];
             case 4:
                 return _resultUnsigned
-                    ? cast(long) cast(uint) buffer : cast(long) cast(int) buffer;
+                    ? cast(long) cast(uint) buffer[0] : cast(long) cast(int) buffer[0];
             default:
-                return buffer;
+                return buffer[0];
         }
     }
 
     public override double executeDouble(ubyte* frame) {
-        ulong buffer;
-        invoke(frame, &buffer);
+        ulong[2] buffer;
+        invoke(frame, buffer.ptr);
         return _resultSize == 4
-            ? *cast(float*) &buffer : *cast(double*) &buffer;
+            ? *cast(float*) buffer.ptr : *cast(double*) buffer.ptr;
+    }
+
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        SliceValue buffer = void;
+        invoke(frame, &buffer);
+        *cast(SliceValue*) dest = buffer;
     }
 
     public override void executeVoid(ubyte* frame) {
-        ulong buffer;
-        invoke(frame, &buffer);
+        ulong[2] buffer;
+        invoke(frame, buffer.ptr);
     }
 }
 
@@ -1263,8 +1613,12 @@ private Node buildIndexAddress(E)(E ev, IndexExp indexed) {
     switch (indexed.e1.type.toBasetype.ty) with (TY) {
         case Tarray: {
             auto array = buildAddress(ev, indexed.e1);
-            if (array is null)
-                return null;
+            if (array is null) {
+                auto value = buildSlice(ev, indexed.e1);
+                return value is null ? null : new IndexValue(
+                    &ev.failArrayBounds, indexed, value, position,
+                    element.size);
+            }
             return indexOfArray(ev, indexed, array, position, element.size);
         }
         case Tsarray: {
@@ -1317,8 +1671,18 @@ private Node buildLoad(E)(E ev, Expression expression, Node address) {
     return byIntegral!(New!Load)(scalar.facts, address);
 }
 
+// Constructing a reference variable binds it to the address on the right
+// instead of storing a value through it.
+private bool bindsReference(E)(E ev, AssignExp e) {
+    auto variable = e.e1.isVarExp;
+    return e.isConstructExp !is null && variable !is null
+        && ev.isRefStorage(variable.var.isVarDeclaration);
+}
+
+// A call node: its argument nodes by parameter kind. Null when the call is
+// outside what `Call` runs.
 private Node buildCall(E)(E ev, CallExp call) {
-    import dmd.astenums: STC, TY;
+    import dmd.astenums: TY;
     import dmd.typesem: toBasetype;
     import snakebite.backends.calls: CallSelection;
     import snakebite.frontend.dmd.dispatch: CallReceiver, readsVtable,
@@ -1333,11 +1697,16 @@ private Node buildCall(E)(E ev, CallExp call) {
         return null;
     auto function_ = ev._callSelection.definitionOf(
         call.f, (declaration) => ev._program.linkedFunctionOf(declaration));
+    // A constructor call keeps the lifetime handling of the original path,
+    // except where `new` makes it (`buildConstructorCall`).
+    if (function_.isCtorDeclaration !is null)
+        return null;
     auto type = typeFunctionOf(function_);
 
     const isVoid = call.type.toBasetype.ty == TY.Tvoid;
-    const result = isVoid ? Scalar() : scalarOf(ev, call.type);
-    if (!isVoid && result.kind == Scalar.Kind.none)
+    const resultIsSlice = isSlice(call.type);
+    const result = isVoid || resultIsSlice ? Scalar() : scalarOf(ev, call.type);
+    if (!isVoid && !resultIsSlice && result.kind == Scalar.Kind.none)
         return null;
 
     Node receiver;
@@ -1360,45 +1729,328 @@ private Node buildCall(E)(E ev, CallExp call) {
             return null;
     }
 
-    auto parameters = type.parameterList;
-    if (call.arguments.length != parameters.length)
+    Node[] args;
+    Argument[] modes;
+    if (!buildArguments(ev, type, call.arguments, args, modes))
         return null;
-    auto args = new Node[parameters.length];
-    auto modes = new Argument[parameters.length];
-    foreach (i; 0 .. parameters.length) {
-        auto parameter = parameters[i];
-        auto argument = (*call.arguments)[i];
-        const declared = scalarOf(ev, parameter.type);
-        const given = scalarOf(ev, argument.type);
-        if ((parameter.storageClass & (STC.ref_ | STC.out_ | STC.lazy_)) != 0
-                || declared.kind == Scalar.Kind.none
-                || given.kind != declared.kind
-                || given.facts.size != declared.facts.size)
-            return null;
-        if (declared.kind == Scalar.Kind.floating)
-            modes[i] = declared.facts.size == 4 ? Argument.f32 : Argument.f64;
-        else switch (declared.facts.size) {
-            case 1: modes[i] = Argument.i8; break;
-            case 2: modes[i] = Argument.i16; break;
-            case 4: modes[i] = Argument.i32; break;
-            case 8: modes[i] = Argument.i64; break;
-            default: assert(0, "an integral scalar is 1, 2, 4 or 8 bytes");
-        }
-        args[i] = buildValue(ev, argument);
-        if (args[i] is null)
-            return null;
-    }
 
     auto node = new Call!E(ev, call, function_, receiver, receiverIsAddress,
-        virtual, args, modes, isVoid ? 0 : result.facts.size,
-        result.facts.isUnsigned);
+        virtual, args, modes,
+        isVoid ? 0 : resultIsSlice ? SliceValue.sizeof : result.facts.size,
+        result.facts.isUnsigned,
+        ev.resultIsReceiver(function_));
     if (!virtual) {
         auto callee = ev.treeCalleeOf(function_);
         if (callee is null || !node.matches(callee))
             return null;
-        node._callee = callee;
+        node.bind(callee);
     }
     return node;
+}
+
+// The nodes of the arguments of a call of `type`, one for each parameter,
+// and how each one is passed. False when one is outside the supported kinds.
+private bool buildArguments(E)(
+    E ev, imported!"dmd.mtype".TypeFunction type,
+    imported!"dmd.arraytypes".Expressions* arguments, out Node[] args,
+    out Argument[] modes,
+) {
+    import dmd.astenums: STC;
+
+    auto parameters = type.parameterList;
+    if (arguments.length != parameters.length)
+        return false;
+    args = new Node[parameters.length];
+    modes = new Argument[parameters.length];
+    foreach (i; 0 .. parameters.length) {
+        auto parameter = parameters[i];
+        auto argument = (*arguments)[i];
+        if ((parameter.storageClass & STC.lazy_) != 0)
+            return false;
+        if ((parameter.storageClass & (STC.ref_ | STC.out_)) != 0) {
+            modes[i] = Argument.address;
+            args[i] = buildAddress(ev, argument);
+        } else if (isSlice(parameter.type)) {
+            if (!isSlice(argument.type))
+                return false;
+            modes[i] = Argument.slice;
+            args[i] = buildSlice(ev, argument);
+        } else {
+            const declared = scalarOf(ev, parameter.type);
+            const given = scalarOf(ev, argument.type);
+            if (declared.kind == Scalar.Kind.none
+                    || given.kind != declared.kind
+                    || given.facts.size != declared.facts.size)
+                return false;
+            if (declared.kind == Scalar.Kind.floating)
+                modes[i] = declared.facts.size == 4 ? Argument.f32 : Argument.f64;
+            else switch (declared.facts.size) {
+                case 1: modes[i] = Argument.i8; break;
+                case 2: modes[i] = Argument.i16; break;
+                case 4: modes[i] = Argument.i32; break;
+                case 8: modes[i] = Argument.i64; break;
+                default: assert(0, "an integral scalar is 1, 2, 4 or 8 bytes");
+            }
+            args[i] = buildValue(ev, argument);
+        }
+        if (args[i] is null)
+            return false;
+    }
+    return true;
+}
+
+// The node that yields the dynamic array `expression`, or null when the
+// tree does not cover the expression.
+private Node buildSlice(E)(E ev, Expression expression) {
+    import dmd.tokens: EXP;
+
+    if (!isSlice(expression.type))
+        return null;
+    switch (expression.op) with (EXP) {
+        case variable: {
+            const slot = slotOf(ev, expression.isVarExp.var.isVarDeclaration);
+            if (!slot.ok)
+                return null;
+            return slot.indirect
+                ? new LoadSlice(new IndirectLocalAddress(slot.offset))
+                : new LocalSlice(slot.offset);
+        }
+        case dotVariable, star, index: {
+            auto address = buildAddress(ev, expression);
+            return address is null ? null : new LoadSlice(address);
+        }
+        case null_:
+            return new NullSlice;
+        case slice:
+            return buildSliceOf(ev, expression.isSliceExp);
+        case call:
+            return buildCall(ev, expression.isCallExp);
+        case new_:
+            return buildNew(ev, expression.isNewExp);
+        case cast_:
+            return buildSliceCast(ev, expression.isCastExp);
+        case comma:
+            return buildComma(ev, expression.isCommaExp, &buildSlice!E);
+        case assign, construct, blit:
+            return buildSliceStore(ev, cast(AssignExp) expression);
+        default:
+            return null;
+    }
+}
+
+private Node buildSliceStore(E)(E ev, AssignExp e) {
+    if (bindsReference(ev, e)
+            || (e.isConstructExp !is null && e.isConstructExp.lowering !is null)
+            || e.e1.isDotVarExp is null && e.e1.isVarExp is null
+                && e.e1.isIndexExp is null && e.e1.isPtrExp is null
+            || !isSlice(e.e1.type))
+        return null;
+    auto value = buildSlice(ev, e.e2);
+    if (value is null)
+        return null;
+    if (auto variable = e.e1.isVarExp) {
+        const slot = slotOf(ev, variable.var.isVarDeclaration);
+        if (!slot.ok)
+            return null;
+        if (!slot.indirect)
+            return new StoreSlice!FrameAddress(FrameAddress(slot.offset), value);
+    }
+    auto address = buildAddress(ev, e.e1);
+    return address is null
+        ? null : new StoreSlice!ChildAddress(ChildAddress(address), value);
+}
+
+// `first, second`: `second` is built by `buildSecond`.
+private Node buildComma(E)(
+    E ev, imported!"dmd.expression".CommaExp comma,
+    Node function(E, Expression) buildSecond,
+) {
+    auto first = buildEffect(ev, comma.e1);
+    auto second = buildSecond(ev, comma.e2);
+    return first is null || second is null ? null : new Comma(first, second);
+}
+
+private Node buildSliceOf(E)(E ev, SliceExp expression) {
+    import dmd.astenums: TY;
+    import dmd.expressionsem: toInteger;
+    import dmd.typesem: nextOf, toBasetype;
+    import snakebite.backends.sliceplan: planSlice;
+
+    const plan = planSlice(expression);
+    if (plan.yieldsStaticArray || expression.lengthVar !is null)
+        return null;
+    Node lower, upper;
+    if (expression.lwr !is null) {
+        lower = buildValue(ev, expression.lwr);
+        if (lower is null)
+            return null;
+    }
+    if (expression.upr !is null) {
+        upper = buildValue(ev, expression.upr);
+        if (upper is null)
+            return null;
+    }
+    auto sourceType = expression.e1.type.toBasetype;
+    const stride = ev.factsOf(sourceType.nextOf).size;
+    static Node make(SliceSource source)(
+        FailBounds fail, SliceExp expression, Node base, Node lower,
+        Node upper, size_t stride, size_t staticLength,
+        in SlicePlan plan,
+    ) {
+        return new SliceOf!source(fail, expression, base, lower, upper,
+            stride, staticLength, plan);
+    }
+    switch (sourceType.ty) with (TY) {
+        case Tarray: {
+            auto base = buildSlice(ev, expression.e1);
+            return base is null ? null : make!(SliceSource.slice)(
+                &ev.failArrayBounds, expression, base, lower, upper, stride,
+                0, plan);
+        }
+        case Tpointer: {
+            static if (E.nullCheckedEvaluator)
+                return null;
+            else {
+                auto base = buildValue(ev, expression.e1);
+                return base is null ? null : make!(SliceSource.pointer)(
+                    &ev.failArrayBounds, expression, base, lower, upper,
+                    stride, 0, plan);
+            }
+        }
+        case Tsarray: {
+            auto base = buildAddress(ev, expression.e1);
+            return base is null ? null : make!(SliceSource.staticArray)(
+                &ev.failArrayBounds, expression, base, lower, upper, stride,
+                cast(size_t) sourceType.isTypeSArray.dim.toInteger, plan);
+        }
+        default:
+            return null;
+    }
+}
+
+// A cast whose result is a dynamic array.
+private Node buildSliceCast(E)(E ev, CastExp castExp) {
+    import snakebite.backends.casts: layoutOf;
+    import snakebite.nativevalue: CastKind;
+
+    if (castExp.lowering !is null)
+        return null;
+    const plan = *ev._shared.facts.castOf(castExp);
+    with (CastKind) switch (plan.kind) {
+        case copy:
+            return isSlice(castExp.e1.type) ? buildSlice(ev, castExp.e1) : null;
+        case reinterpretSlice: {
+            if (!isSlice(castExp.e1.type))
+                return null;
+            auto operand = buildSlice(ev, castExp.e1);
+            return operand is null
+                ? null : new ReinterpretSlice(operand, layoutOf(plan));
+        }
+        case sarrayToSlice: {
+            auto address = buildAddress(ev, castExp.e1);
+            return address is null
+                ? null : new StaticArrayToSlice(address, plan.staticLength);
+        }
+        default:
+            return null;
+    }
+}
+
+// `new` yields the object it allocated. The allocation is the call of the
+// hook that dmd lowered it to. An object that needs more than that has its
+// constructor called on the allocation; a nested context, fields given in
+// order and the value of `new int(1)` stay with the evaluator.
+private Node buildNew(E)(E ev, NewExp expression) {
+    import dmd.astenums: TY;
+    import dmd.typesem: toBasetype;
+    import snakebite.backends.aggregateinit: NewPlan, planClassContext,
+        planNew, planPositionalFields;
+
+    const plan = planNew(expression);
+    if (plan.destination != NewPlan.Destination.lowering
+            || expression.lowering is null || plan.argumentPrefix !is null
+            || expression.thisexp !is null)
+        return null;
+    auto allocation = isSlice(expression.lowering.type)
+        ? buildSlice(ev, expression.lowering)
+        : buildValue(ev, expression.lowering);
+    if (allocation is null)
+        return null;
+
+    auto newtype = expression.newtype.toBasetype;
+    const aggregate = newtype.ty == TY.Tclass || newtype.ty == TY.Tstruct;
+    if (!aggregate) {
+        // `new int(1)` also stores its argument.
+        const stores = expression.type.toBasetype.ty == TY.Tpointer
+            && expression.arguments !is null && expression.arguments.length != 0;
+        return stores ? null : allocation;
+    }
+
+    const contextSteps = newtype.ty == TY.Tclass
+        ? planClassContext(expression).steps.length : 0;
+    if (contextSteps != 0)
+        return null;
+    if (expression.member !is null)
+        return buildConstructorCall(ev, expression, allocation);
+    const fieldSteps = newtype.ty == TY.Tstruct
+        ? planPositionalFields(
+            newtype.isTypeStruct.sym, expression.arguments).steps.length : 0;
+    return fieldSteps == 0 ? allocation : null;
+}
+
+// The constructor of `new`, called on the allocation.
+private Node buildConstructorCall(E)(E ev, NewExp expression, Node allocation) {
+    import dmd.astenums: VarArg;
+    import snakebite.frontend.dmd.functions: typeFunctionOf;
+
+    auto constructor = ev._callSelection.definitionOf(
+        expression.member,
+        (declaration) => ev._program.linkedFunctionOf(declaration));
+    auto type = typeFunctionOf(constructor);
+    if (expression.arguments is null || type.parameterList.varargs != VarArg.none)
+        return null;
+    Node[] args;
+    Argument[] modes;
+    if (!buildArguments(ev, type, expression.arguments, args, modes))
+        return null;
+    auto node = new Call!E(ev, null, constructor, allocation,
+        /* receiverIsAddress */ false, /* virtual */ false, args, modes,
+        /* resultSize */ 0, /* resultUnsigned */ false,
+        ev.resultIsReceiver(constructor));
+    auto callee = ev.treeCalleeOf(constructor);
+    if (callee is null || !node.matches(callee))
+        return null;
+    node.bind(callee);
+    return node;
+}
+
+// The effect of `expression`, whatever its type, or null.
+private Node buildEffect(E)(E ev, Expression expression) {
+    import dmd.astenums: TY;
+    import dmd.tokens: EXP;
+    import dmd.typesem: toBasetype;
+
+    if (auto declaration = expression.isDeclarationExp)
+        return buildDeclaration(ev, declaration);
+    if (isSlice(expression.type))
+        return buildSlice(ev, expression);
+    if (expression.type !is null && expression.type.toBasetype.ty == TY.Tvoid)
+        return expression.op == EXP.call
+            ? buildCall(ev, expression.isCallExp) : null;
+    return buildValue(ev, expression);
+}
+
+// The node that tests the truth of `expression`, as a condition does.
+private Node buildTruth(E)(E ev, Expression expression) {
+    import dmd.tokens: EXP;
+
+    if (expression.op == EXP.comma)
+        return buildComma(ev, expression.isCommaExp, &buildTruth!E);
+    if (isSlice(expression.type)) {
+        auto slice = buildSlice(ev, expression);
+        return slice is null ? null : new SliceTruth(slice, expression.type);
+    }
+    return buildValue(ev, expression);
 }
 
 // The node that yields `expression`'s scalar value.
@@ -1438,10 +2090,15 @@ private Node buildValue(E)(E ev, Expression expression) {
             return scalar.kind == Scalar.Kind.integral
                 ? new Constant!long(0) : null;
         case arrayLength: {
-            auto address = buildAddress(ev, expression.isArrayLengthExp.e1);
-            return address is null || scalar.kind != Scalar.Kind.integral
-                || scalar.facts.size != size_t.sizeof
-                ? null : new Load!size_t(address);
+            auto array = expression.isArrayLengthExp.e1;
+            if (scalar.kind != Scalar.Kind.integral
+                    || scalar.facts.size != size_t.sizeof)
+                return null;
+            auto address = buildAddress(ev, array);
+            if (address !is null)
+                return new Load!size_t(address);
+            auto value = buildSlice(ev, array);
+            return value is null ? null : new SliceWord(value, lengthOffset);
         }
         case variable: {
             const slot = slotOf(ev, expression.isVarExp.var.isVarDeclaration);
@@ -1491,8 +2148,8 @@ private Node buildValue(E)(E ev, Expression expression) {
             const plan = logicalPlan(logical);
             if (plan.right != LogicalPlan.Right.value || !plan.hasValue)
                 return null;
-            auto left = buildValue(ev, logical.e1);
-            auto right = buildValue(ev, logical.e2);
+            auto left = buildTruth(ev, logical.e1);
+            auto right = buildTruth(ev, logical.e2);
             if (left is null || right is null)
                 return null;
             if (!plan.andAnd)
@@ -1502,7 +2159,7 @@ private Node buildValue(E)(E ev, Expression expression) {
             return new AndAnd(left, right);
         }
         case not: {
-            auto operand = buildValue(ev, expression.isNotExp.e1);
+            auto operand = buildTruth(ev, expression.isNotExp.e1);
             return operand is null ? null : new Not(operand);
         }
         case negate: {
@@ -1545,8 +2202,66 @@ private Node buildValue(E)(E ev, Expression expression) {
         case minusMinus: return buildPost!(-1)(ev, expression.isPostExp, scalar);
         case assign, construct, blit:
             return buildStore(ev, cast(AssignExp) expression, scalar);
+        case new_:
+            return buildNew(ev, expression.isNewExp);
+        case typeid_: {
+            import dmd.dtemplate: isType;
+
+            auto type = isType(expression.isTypeidExp.obj);
+            if (type is null || scalar.kind != Scalar.Kind.integral)
+                return null;
+            return new Constant!long(cast(long) cast(size_t) cast(void*)
+                ev._runtimeTypes.get(type));
+        }
+        case comma:
+            return buildComma(ev, expression.isCommaExp, &buildValue!E);
+        case identity: return buildIdentity!false(ev, expression.isIdentityExp);
+        case notIdentity: return buildIdentity!true(ev, expression.isIdentityExp);
         default:
             return null;
+    }
+}
+
+private Node buildIdentity(bool negate, E)(E ev, IdentityExp e) {
+    import snakebite.backends.identity: identityPlan;
+
+    // `is` compares bits: the plan says how many, and which operands need
+    // no compare. The nodes below serve the widths they can carry.
+    const plan = identityPlan(e);
+    if (plan.staticArray || plan.skipCompare)
+        return null;
+    if (plan.width == SliceValue.sizeof) {
+        auto left = buildSlice(ev, e.e1);
+        auto right = buildSlice(ev, e.e2);
+        if (left !is null && right !is null)
+            return new SliceIdentity!negate(left, right);
+        return null;
+    }
+    auto left = buildValue(ev, e.e1);
+    auto right = buildValue(ev, e.e2);
+    if (left is null || right is null)
+        return null;
+    if (cast(DoubleNode) left is null && cast(DoubleNode) right is null) {
+        // The same bits are the same value whatever the signedness.
+        static Node same(L, R)(L l, R r) {
+            return new IntegerCompare!(negate ? "!=" : "==", false, L, R)(l, r);
+        }
+        return fuse!(same, long, longLeft, longRight)(
+            operandOf(left), operandOf(right));
+    }
+    if (cast(DoubleNode) left is null || cast(DoubleNode) right is null)
+        return null;
+    static Node bits(T)(Node l, Node r) {
+        static Node build(L, R)(L a, R b) {
+            return new FloatIdentity!(negate, T, L, R)(a, b);
+        }
+        return fuse!(build, double, onlyChild, onlyChild)(
+            operandOf(l), operandOf(r));
+    }
+    switch (plan.width) {
+        case float.sizeof: return bits!float(left, right);
+        case double.sizeof: return bits!double(left, right);
+        default: return null;
     }
 }
 
@@ -1561,10 +2276,12 @@ private Node buildCast(E)(E ev, CastExp castExp, in Scalar scalar) {
         return null;
     enum integral = Scalar.Kind.integral;
     enum floating = Scalar.Kind.floating;
+    const plan = *ev._shared.facts.castOf(castExp);
+    if (isSlice(castExp.e1.type))
+        return buildSliceToScalar(ev, castExp, plan.kind, scalar);
     const source = scalarOf(ev, castExp.e1.type);
     if (source.kind == Scalar.Kind.none)
         return null;
-    const plan = *ev._shared.facts.castOf(castExp);
     auto operand = buildValue(ev, castExp.e1);
     if (operand is null)
         return null;
@@ -1600,6 +2317,25 @@ private Node buildCast(E)(E ev, CastExp castExp, in Scalar scalar) {
         default:
             return null;
     }
+}
+
+// A cast of a dynamic array to its truth or to its pointer.
+private Node buildSliceToScalar(E)(
+    E ev, CastExp castExp, in imported!"snakebite.nativevalue".CastKind kind,
+    in Scalar scalar,
+) {
+    import snakebite.nativevalue: CastKind;
+
+    auto slice = buildSlice(ev, castExp.e1);
+    if (slice is null || scalar.kind != Scalar.Kind.integral)
+        return null;
+    if (kind == CastKind.truth)
+        return new SliceTruth(slice, castExp.e1.type);
+    if (kind != CastKind.sliceToPointer)
+        return null;
+    if (auto address = buildAddress(ev, castExp.e1))
+        return new Load!size_t(new FieldOfAddress(address, pointerOffset));
+    return new SliceWord(slice, pointerOffset);
 }
 
 private template binaryOf(string op) {
@@ -1799,6 +2535,8 @@ private Node buildStore(E)(E ev, AssignExp e, in Scalar scalar) {
             && e.e1.isVarExp is null && e.e1.isIndexExp is null
             && e.e1.isPtrExp is null)
         return null;
+    if (bindsReference(ev, e))
+        return null;
     const target = scalarOf(ev, e.e1.type);
     if (target.kind != scalar.kind || target.kind == Scalar.Kind.none
             || scalarOf(ev, e.e2.type).kind != target.kind
@@ -1874,11 +2612,37 @@ private Position positionOf(E)(E ev, Expression root) {
     return Position(ev._temporaries.rootSlot, cast(const(void)*) root);
 }
 
+// The statement that a declaration is: one for each runtime variable it
+// declares. A declaration of an alias, a type, a template or a manifest
+// constant has nothing to run.
 private Node buildDeclaration(E)(E ev, DeclarationExp declaration) {
+    import snakebite.backends.declaration: forEachRuntimeVariable;
+
+    Node[] nodes;
+    bool covered = true;
+    forEachRuntimeVariable(declaration.declaration, (variable) {
+        if (!covered)
+            return;
+        auto node = buildVariable(ev, variable, declaration);
+        if (node is null)
+            covered = false;
+        else
+            nodes ~= node;
+    });
+    if (!covered)
+        return null;
+    if (nodes.length == 0)
+        return new Jump!(TreeFlow.normal);
+    if (nodes.length == 1)
+        return nodes[0];
+    return new Sequence(nodes);
+}
+
+private Node buildVariable(E)(
+    E ev, VarDeclaration variable, DeclarationExp declaration) {
     import snakebite.nativelayout: initializerRunsForEffect, initializerValueOf;
 
-    auto variable = declaration.declaration.isVarDeclaration;
-    if (variable is null || variable.isDataseg)
+    if (variable.isDataseg)
         return null;
     if (variable._init is null || variable._init.isVoidInitializer !is null)
         return new Jump!(TreeFlow.normal);
@@ -1886,17 +2650,27 @@ private Node buildDeclaration(E)(E ev, DeclarationExp declaration) {
     if (initializer is null)
         return null;
     const scalar = scalarOf(ev, variable.type);
-    if (scalar.kind == Scalar.Kind.none)
+    const variableIsSlice = isSlice(variable.type);
+    if (scalar.kind == Scalar.Kind.none && !variableIsSlice)
         return null;
     if (initializerRunsForEffect(initializer, variable)) {
-        auto effect = buildValue(ev, initializer.exp);
+        auto effect = buildEffect(ev, initializer.exp);
         return effect is null
             ? null : statementOf(effect, positionOf(ev, declaration));
     }
     auto value = initializerValueOf(initializer);
     const slot = slotOf(ev, variable);
-    if (!slot.ok || slot.indirect || ev.isRefStorage(variable)
-            || scalarOf(ev, value.type).kind != scalar.kind
+    if (!slot.ok || slot.indirect || ev.isRefStorage(variable))
+        return null;
+    if (variableIsSlice) {
+        if (!isSlice(value.type))
+            return null;
+        auto node = buildSlice(ev, value);
+        return node is null ? null : statementOf(
+            new StoreSlice!FrameAddress(FrameAddress(slot.offset), node),
+            positionOf(ev, declaration));
+    }
+    if (scalarOf(ev, value.type).kind != scalar.kind
             || ev.factsOf(value.type).size != scalar.facts.size)
         return null;
     auto node = buildValue(ev, value);
@@ -1920,7 +2694,7 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
     }
 
     Node condition(Expression expression) {
-        auto node = buildValue(ev, expression);
+        auto node = buildTruth(ev, expression);
         return node is null ? new GenericCondition!E(ev, expression) : node;
     }
 
@@ -1961,17 +2735,18 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
                 auto node = buildDeclaration(ev, declaration);
                 return node is null ? generic() : node;
             }
-            if (expression.op != EXP.call && (expression.type is null
-                    || scalarOf(ev, expression.type).kind == Scalar.Kind.none))
-                return generic();
-            auto node = buildValue(ev, expression);
+            Node node;
+            if (isSlice(expression.type))
+                node = buildSlice(ev, expression);
+            else if (expression.op == EXP.call || (expression.type !is null
+                    && scalarOf(ev, expression.type).kind != Scalar.Kind.none))
+                node = buildValue(ev, expression);
             return node is null
                 ? generic() : statementOf(node, positionOf(ev, expression));
         }
         case If: {
             auto conditional = statement.isIfStatement;
-            if (conditional.param !is null
-                    || ifPlan(conditional).kind != IfPlan.Kind.condition
+            if (ifPlan(conditional).kind != IfPlan.Kind.condition
                     || conditional.ifbody is null)
                 return generic();
             auto node = new IfThenElse(condition(conditional.condition),
@@ -2002,6 +2777,8 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
                 node._body = child(loop._body, &node._body);
             return node;
         }
+        case Import:
+            return new Jump!(TreeFlow.normal);
         case Break:
             return statement.isBreakStatement.ident is null
                 ? new Jump!(TreeFlow.break_) : generic();
@@ -2028,9 +2805,27 @@ private Node buildReturn(E)(E ev, imported!"dmd.statement".ReturnStatement retur
         return generic();
     if (returned.exp is null)
         return new Jump!(TreeFlow.return_);
-    if (typeFunctionOf(ev._function).isRef
-            || ev._type.toBasetype.ty == TY.Tvoid)
+    if (typeFunctionOf(ev._function).isRef)
         return generic();
+    if (ev._type.toBasetype.ty == TY.Tvoid) {
+        // `return f();` in a function without a result: `f` runs, then the
+        // function ends.
+        auto effect = buildEffect(ev, returned.exp);
+        if (effect is null)
+            return generic();
+        auto sequence = new ShortSequence!2;
+        sequence._children[0] = statementOf(effect, positionOf(ev, returned.exp));
+        sequence._children[1] = new Jump!(TreeFlow.return_);
+        return sequence;
+    }
+    if (isSlice(ev._type)) {
+        if (!isSlice(returned.exp.type))
+            return generic();
+        auto slice = buildSlice(ev, returned.exp);
+        return slice is null
+            ? generic() : new ReturnValue!SliceValue(
+                &ev._place, slice, positionOf(ev, returned.exp));
+    }
     const scalar = scalarOf(ev, ev._type);
     if (scalar.kind == Scalar.Kind.none
             || scalarOf(ev, returned.exp.type).kind != scalar.kind
