@@ -3241,8 +3241,11 @@ static foreach (backend; Matrix!()) {
                     bump(even ? x : y);
                     even ? x++ : y++;
                     even ? bump(x) : bump(y);
+                    int* target = even ? &x : &y;
+                    *target += 100;
+                    total += *(even ? &p1.a : &p2.a);
                 }
-                return total == 356 && x == 6 && y == 6 ? 0 : 1;
+                return total == 364 && x == 206 && y == 206 ? 0 : 1;
             }
         });
     }

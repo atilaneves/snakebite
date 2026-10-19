@@ -1213,7 +1213,8 @@ private final class ConditionalVoid : Node {
     }
 }
 
-private final class ConditionalSlice : SliceNode {
+// A conditional whose branches write a slice, delegate or aggregate into `dest`.
+private final class ConditionalInto : SliceNode {
     private Node _test;
     private Node _first;
     private Node _second;
@@ -2378,21 +2379,24 @@ private VarDeclaration thisVariable(E)(E ev, ThisExp expression) {
     return variable;
 }
 
+private Node buildVariableAddress(E)(E ev, VarDeclaration variable) {
+    const slot = slotOf(ev, variable);
+    if (!slot.ok)
+        return buildOuterAddress(ev, variable);
+    return slot.indirect
+        ? new IndirectLocalAddress(slot.offset)
+        : new LocalAddress(slot.offset);
+}
+
 private Node buildAddress(E)(E ev, Expression expression) {
     import dmd.astenums: TY;
     import dmd.tokens: EXP;
     import dmd.typesem: toBasetype;
 
     switch (expression.op) with (EXP) {
-        case variable: {
-            auto declaration = expression.isVarExp.var.isVarDeclaration;
-            const slot = slotOf(ev, declaration);
-            if (!slot.ok)
-                return buildOuterAddress(ev, declaration);
-            return slot.indirect
-                ? new IndirectLocalAddress(slot.offset)
-                : new LocalAddress(slot.offset);
-        }
+        case variable:
+            return buildVariableAddress(
+                ev, expression.isVarExp.var.isVarDeclaration);
         case this_: {
             auto variable = thisVariable(ev, expression.isThisExp);
             const slot = slotOf(ev, variable);
@@ -2728,7 +2732,7 @@ private Node buildDelegate(E)(E ev, Expression expression) {
         case function_, delegate_:
             return new EvaluatedPair!E(ev, expression);
         case question:
-            return buildConditional!(buildDelegate!E, ConditionalSlice)(
+            return buildConditional!(buildDelegate!E, ConditionalInto)(
                 ev, expression.isCondExp);
         default:
             return null;
@@ -2755,7 +2759,7 @@ private Node buildSlice(E)(E ev, Expression expression) {
                 : new LocalSlice(slot.offset);
         }
         case question:
-            return buildConditional!(buildSlice!E, ConditionalSlice)(
+            return buildConditional!(buildSlice!E, ConditionalInto)(
                 ev, expression.isCondExp);
         case dotVariable, star, index: {
             auto address = buildAddress(ev, expression);
@@ -3050,7 +3054,8 @@ private Node logicalOf(in bool andAnd, Node left, Node right) {
 private Node buildValue(E)(E ev, Expression expression) {
     import dmd.tokens: EXP;
     import snakebite.backends.logical: LogicalPlan, logicalPlan;
-    import snakebite.nativelayout: loadIntegral;
+    import snakebite.frontend.storage: typeInfoAddressedBy;
+    import snakebite.nativelayout: isStaticStructAddress, loadIntegral;
     import snakebite.nativevalue: loadFloating;
 
     if (expression.op == EXP.call)
@@ -3199,17 +3204,32 @@ private Node buildValue(E)(E ev, Expression expression) {
             return buildStore(ev, cast(AssignExp) expression, scalar);
         case new_:
             return buildNew(ev, expression.isNewExp);
-        case function_, symbolOffset:
+        case function_:
             return scalar.kind == Scalar.Kind.integral
                 ? new EvaluatedWord!E(ev, expression) : null;
-        case address: {
-            import snakebite.nativelayout: isStaticStructAddress;
-
-            auto operand = expression.isAddrExp.e1;
-            if (scalar.kind != Scalar.Kind.integral
-                    || isStaticStructAddress(expression.isAddrExp))
+        case symbolOffset: {
+            // `&variable`. A function or a variable in static storage has
+            // an address that symbol resolution decides.
+            if (scalar.kind != Scalar.Kind.integral)
                 return null;
-            auto location = buildAddress(ev, operand);
+            auto symbol = expression.isSymOffExp;
+            auto variable = symbol.var.isVarDeclaration;
+            auto place = variable is null
+                ? null : buildVariableAddress(ev, variable);
+            if (place is null)
+                return new EvaluatedWord!E(ev, expression);
+            return new AddressValue(symbol.offset == 0
+                ? place : new FieldOfAddress(place, cast(size_t) symbol.offset));
+        }
+        case address: {
+            // The address of a static struct literal or of a type's
+            // `TypeInfo` is a constant that the evaluator resolves.
+            auto addressed = expression.isAddrExp;
+            if (scalar.kind != Scalar.Kind.integral
+                    || isStaticStructAddress(addressed)
+                    || addressed.typeInfoAddressedBy(*ev._runtimeTypes) !is null)
+                return null;
+            auto location = buildAddress(ev, addressed.e1);
             return location is null ? null : new AddressValue(location);
         }
         case typeid_: {
@@ -3803,10 +3823,11 @@ private Node buildAggregate(E)(E ev, Expression expression) {
         case arrayLiteral:
             return buildArrayLiteral(ev, expression.isArrayLiteralExp);
         case question:
-            return buildConditional(ev, expression.isCondExp, &buildAggregate!E);
+            return buildConditional!(buildAggregate!E, ConditionalInto)(
+                ev, expression.isCondExp);
         case comma:
             return buildComma(ev, expression.isCommaExp, &buildAggregate!E);
-        case variable, dotVariable, star, index: {
+        case variable, this_, dotVariable, star, index: {
             auto address = buildAddress(ev, expression);
             return address is null ? null : new AggregateCopy(
                 address, ev.factsOf(expression.type).size);
@@ -3996,12 +4017,7 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
                 auto node = buildDeclaration(ev, declaration);
                 return node is null ? generic() : node;
             }
-            Node node;
-            if (isSlice(expression.type))
-                node = buildSlice(ev, expression);
-            else if (expression.op == EXP.call || (expression.type !is null
-                    && scalarOf(ev, expression.type).kind != Scalar.Kind.none))
-                node = buildValue(ev, expression);
+            auto node = buildEffect(ev, expression);
             return node is null
                 ? generic() : statementOf(node, positionOf(ev, expression));
         }
