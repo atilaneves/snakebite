@@ -3300,6 +3300,14 @@ package bool checkedIndexAccess(
     return checkedIndexKind(handler, access, constantValue);
 }
 
+// The bytes that `handler` writes to its destination when it is a checked
+// load, otherwise 0.
+package size_t checkedLoadWidth(in Instruction.Handler handler) {
+    const found = handler in checkedInstanceOf;
+    return found !is null && found.access == CheckedAccess.load
+        ? found.elementSize : 0;
+}
+
 // A `check` does not read an element, so one size stands for all.
 package Instruction.Handler checkedIndexHandler(
     in CheckedAccess access, in bool fixedLength, in size_t indexWidth,
