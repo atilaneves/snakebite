@@ -35,6 +35,15 @@ private alias FuncDeclaration = imported!"dmd.func".FuncDeclaration;
 // executable at the same time. A slot is released only by
 // `CallbackBridge.release`, for a bridge whose entries no host code can
 // call any more; the next reservation reuses it.
+//
+// The pool also reserves one address range at start and maps each copied
+// chunk into the next page of it. An address in the template or in the
+// range is an entry, and `templateGuest` and `guestEntries` hold, for each
+// entry that runs a guest function, what a guest call needs to skip the
+// host: no hash lookup, no lock (ADR-0006). A chunk that does not fit in
+// the range, or every copied chunk when the reservation failed, works as
+// before and is found by the bridge's hash tables, so the pool still has
+// no fixed limit (ADR-0003).
 
 
 // What the pool hands a backend when host code calls one of its guest
@@ -76,6 +85,20 @@ private struct Slot {
     const(CallPlan)* plan;
     ptrdiff_t contextAdjustment;
     const(void)* nativeAddress;
+    // The bridge whose guest function this entry runs; null for a slot
+    // that does not name one. Holding it here keeps it alive for as long
+    // as `guestEntries` can name it.
+    const(void)* bridge;
+}
+
+
+// What `CallbackBridge.guestTarget` reads for an entry in the reserved
+// range. `word` is written last, with release, and is null while the entry
+// is free or forwards to a host function.
+private struct GuestEntry {
+    const(void)* bridge;
+    const(void)* word;
+    ptrdiff_t adjustment;
 }
 
 
@@ -97,7 +120,28 @@ public enum ChunkStrategy {
 }
 
 
+// 64 MiB of address space: 16384 one-page chunks, 4.16M entries. Nothing is
+// committed until a chunk is mapped, and the part of `guestEntries` that
+// describes a chunk is committed when the chunk's place in the range is
+// claimed.
+private enum reservedBytes = size_t(64) << 20;
+
 private __gshared Slot[callbackEntriesPerChunk] templateSlots;
+// The template's entries, in the same order.
+private __gshared GuestEntry[callbackEntriesPerChunk] templateGuest;
+
+// Set once by the module constructor, read without a lock afterwards. Both
+// are zero when the reservation failed.
+private __gshared const(ubyte)* rangeBase;
+private __gshared size_t rangeBytes;
+// One position for each 16 bytes of the range, in the same order.
+private __gshared GuestEntry* guestEntries;
+// How much of the range chunks use. Written under `mutex`.
+private __gshared size_t rangeUsed;
+// How much of `guestEntries` is committed, as a length of the range. Stored
+// with release under `mutex`, after the pages are readable; an address
+// at or past it is not an entry yet.
+private __gshared size_t rangeClaimed;
 private __gshared Chunk[] chunks;
 private __gshared const(void)*[] freeEntries;
 // The entries in use that the calling thread reserved and did not release.
@@ -126,6 +170,32 @@ shared static this() {
         );
 
     chunks = [Chunk(templateBase, templateSlots[], 0)];
+    reserveRange;
+}
+
+// Without the range every chunk is mapped wherever the kernel chooses and
+// found through the bridge's hash tables.
+private void reserveRange() {
+    import core.sys.posix.sys.mman:
+        MAP_ANON, MAP_FAILED, MAP_PRIVATE, PROT_NONE, PROT_READ, PROT_WRITE,
+        mmap, munmap;
+
+    enum flags = MAP_PRIVATE | MAP_ANON | MAP_NORESERVE;
+    const tableBytes = (reservedBytes / callbackEntryBytes)
+        * GuestEntry.sizeof;
+    auto range = mmap(null, reservedBytes, PROT_NONE, flags, -1, 0);
+    auto table = mmap(null, tableBytes, PROT_NONE, flags, -1, 0);
+    if (range == MAP_FAILED || table == MAP_FAILED) {
+        if (range != MAP_FAILED)
+            munmap(range, reservedBytes);
+        if (table != MAP_FAILED)
+            munmap(table, tableBytes);
+        return;
+    }
+
+    rangeBase = cast(const(ubyte)*) range;
+    rangeBytes = reservedBytes;
+    guestEntries = cast(GuestEntry*) table;
 }
 
 private const(ubyte)* templateBase() {
@@ -165,6 +235,7 @@ private const(void)* reserve(Slot slot) {
         freeEntries = freeEntries[0 .. $ - 1];
         *slotOf(entry) = slot;
         ++_entriesInUse;
+        publishGuest(entry, slot);
         return entry;
     }
 
@@ -179,21 +250,59 @@ private const(void)* reserve(Slot slot) {
     // The template slot table is static storage, which the GC does not scan.
     // Root the owner field explicitly so its backend remains valid for every
     // later callback, including a finalizer in the process-exit collection.
-    GC.addRange(
-        &chunk.slots[index].owner,
-        void*.sizeof,
-    );
-    return chunk.base + index * callbackEntryBytes;
+    // A copied chunk's table is GC memory that `chunks` keeps alive.
+    if (chunk.slots.ptr is templateSlots.ptr) {
+        GC.addRange(&chunk.slots[index].owner, void*.sizeof);
+        GC.addRange(&chunk.slots[index].bridge, void*.sizeof);
+    }
+    const entry = chunk.base + index * callbackEntryBytes;
+    publishGuest(entry, slot);
+    return entry;
+}
+
+
+// The table position of `address` when it is a template entry or in the
+// claimed part of the range; null for any other address.
+private GuestEntry* guestEntryOf(in const(void)* address) {
+    import core.atomic: atomicLoad, MemoryOrder;
+
+    const inTemplate = cast(size_t) address - cast(size_t) templateBase;
+    if (inTemplate < callbackEntriesPerChunk * callbackEntryBytes)
+        return &templateGuest[inTemplate / callbackEntryBytes];
+
+    const offset = cast(size_t) address - cast(size_t) rangeBase;
+    return offset < atomicLoad!(MemoryOrder.acq)(rangeClaimed)
+        ? &guestEntries[offset / callbackEntryBytes] : null;
+}
+
+
+// Callers hold `mutex`. The fields are written before `word`, whose
+// release store publishes them to `guestTarget`. The entry's address
+// reaches guest data only after this returns.
+private void publishGuest(in const(void)* entry, in Slot slot) {
+    import core.atomic: atomicStore, MemoryOrder;
+
+    auto guest = guestEntryOf(entry);
+    if (guest is null || slot.bridge is null || slot.nativeAddress !is null)
+        return;
+
+    guest.bridge = slot.bridge;
+    guest.adjustment = slot.contextAdjustment;
+    atomicStore!(MemoryOrder.rel)(guest.word, slot.function_);
 }
 
 
 // Makes `entries`, which `reserve` handed out, free for the next
 // reservation. Host code must not call them after this.
 private void releaseEntries(in const(void)*[] entries) {
+    import core.atomic: atomicStore, MemoryOrder;
+
     mutex.lock;
     scope(exit) mutex.unlock;
 
     foreach (entry; entries) {
+        if (auto guest = guestEntryOf(entry))
+            atomicStore!(MemoryOrder.rel)(guest.word, null);
         // A cleared slot keeps its GC range but roots nothing.
         *slotOf(entry) = Slot.init;
         freeEntries ~= entry;
@@ -223,7 +332,7 @@ public ptrdiff_t callbackEntriesInUse() {
 }
 
 
-// How many chunks the pool has, the template included.
+// How many chunks the pool has.
 version(unittest)
 public size_t callbackChunkCount() {
     mutex.lock;
@@ -253,27 +362,69 @@ public void beginCallbackChunk(ChunkStrategy strategy) {
 private Chunk allocateChunk(in ChunkStrategy strategy, in bool fallback) {
     auto slots = new Slot[callbackEntriesPerChunk];
     const bytes = templateEnd - templateBase;
+    auto target = claimRange(roundUpToPage(bytes));
 
     const(ubyte)* base;
     final switch (strategy) with (ChunkStrategy) {
         case protect:
-            base = copyThenProtect(bytes, slots.ptr);
+            base = copyThenProtect(bytes, slots.ptr, target);
             if (base is null) {
                 if (!fallback)
                     throw new Exception(
                         "ffi callback pool: mprotect refused to make the " ~
                             "chunk executable, and no fallback was allowed",
                     );
-                base = copyDualMapped(bytes, slots.ptr);
+                base = copyDualMapped(bytes, slots.ptr, target);
             }
             break;
 
         case dualMapping:
-            base = copyDualMapped(bytes, slots.ptr);
+            base = copyDualMapped(bytes, slots.ptr, target);
             break;
     }
 
     return Chunk(base, slots, 0);
+}
+
+
+// The next `size` bytes of the reserved range, or null when it is used up,
+// was never reserved, or the kernel refuses to commit the matching part of
+// `guestEntries`. Callers hold `mutex`.
+private ubyte* claimRange(in size_t size) {
+    import core.atomic: atomicStore, MemoryOrder;
+    import core.memory: pageSize;
+    import core.sys.posix.sys.mman: PROT_READ, PROT_WRITE, mprotect;
+
+    if (rangeUsed + size > rangeBytes)
+        return null;
+
+    const first = rangeUsed / callbackEntryBytes * GuestEntry.sizeof;
+    const last = (rangeUsed + size) / callbackEntryBytes * GuestEntry.sizeof;
+    const start = first / pageSize * pageSize;
+    if (mprotect(
+            cast(ubyte*) guestEntries + start,
+            roundUpToPage(last) - start,
+            PROT_READ | PROT_WRITE) != 0)
+        return null;
+
+    auto claimed = cast(ubyte*) rangeBase + rangeUsed;
+    rangeUsed += size;
+    atomicStore!(MemoryOrder.rel)(rangeClaimed, rangeUsed);
+    return claimed;
+}
+
+
+// Gives a mapping back: a chunk in the range goes back to reserved address
+// space, which later chunks may need, and any other mapping is unmapped.
+private void discardMapping(ubyte* mapping, in size_t size, in bool inRange) {
+    import core.sys.posix.sys.mman:
+        MAP_ANON, MAP_FIXED, MAP_PRIVATE, PROT_NONE, mmap, munmap;
+
+    if (inRange)
+        mmap(mapping, size, PROT_NONE,
+            MAP_PRIVATE | MAP_ANON | MAP_NORESERVE | MAP_FIXED, -1, 0);
+    else
+        munmap(mapping, size);
 }
 
 
@@ -292,17 +443,21 @@ private void fillChunk(
 }
 
 
-// An anonymous read-write mapping, filled, then flipped to read-execute.
-// Returns null, with the mapping released, when the kernel refuses the
-// flip - the one failure `allocateChunk` can fall back from.
-private const(ubyte)* copyThenProtect(in size_t bytes, Slot* slots) {
+// An anonymous read-write mapping at `target` (anywhere when null), filled,
+// then flipped to read-execute. Returns null, with the mapping released,
+// when the kernel refuses the flip - the one failure `allocateChunk` can
+// fall back from.
+private const(ubyte)* copyThenProtect(
+    in size_t bytes, Slot* slots, ubyte* target,
+) {
     import core.sys.posix.sys.mman:
-        MAP_ANON, MAP_FAILED, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE,
-        mmap, mprotect, munmap;
+        MAP_ANON, MAP_FAILED, MAP_FIXED, MAP_PRIVATE, PROT_EXEC, PROT_READ,
+        PROT_WRITE, mmap, mprotect;
 
     const size = roundUpToPage(bytes);
     auto mapping = cast(ubyte*) mmap(
-        null, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        target, size, PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANON | (target is null ? 0 : MAP_FIXED), -1, 0);
     if (mapping == cast(ubyte*) MAP_FAILED)
         throw new Exception(
             "ffi callback pool: " ~ errnoText("mmap of a new chunk"),
@@ -311,7 +466,7 @@ private const(ubyte)* copyThenProtect(in size_t bytes, Slot* slots) {
     fillChunk(mapping, mapping, slots);
 
     if (mprotect(mapping, size, PROT_READ | PROT_EXEC) != 0) {
-        munmap(mapping, size);
+        discardMapping(mapping, size, target !is null);
         return null;
     }
 
@@ -321,11 +476,14 @@ private const(ubyte)* copyThenProtect(in size_t bytes, Slot* slots) {
 
 // One anonymous memory file, mapped twice: a read-write view to fill, and
 // a read-execute view to keep. The write view is unmapped once filled, so
-// nothing stays writable and executable at the same time.
-private const(ubyte)* copyDualMapped(in size_t bytes, Slot* slots) {
+// nothing stays writable and executable at the same time. The read-execute
+// view goes to `target` (anywhere when null).
+private const(ubyte)* copyDualMapped(
+    in size_t bytes, Slot* slots, ubyte* target,
+) {
     import core.sys.posix.sys.mman:
-        MAP_FAILED, MAP_SHARED, PROT_EXEC, PROT_READ, PROT_WRITE, mmap,
-        munmap;
+        MAP_FAILED, MAP_FIXED, MAP_SHARED, PROT_EXEC, PROT_READ, PROT_WRITE,
+        mmap, munmap;
     import core.sys.posix.unistd: close, ftruncate;
 
     const size = roundUpToPage(bytes);
@@ -342,7 +500,8 @@ private const(ubyte)* copyDualMapped(in size_t bytes, Slot* slots) {
         );
 
     auto executable = cast(ubyte*) mmap(
-        null, size, PROT_READ | PROT_EXEC, MAP_SHARED, file, 0);
+        target, size, PROT_READ | PROT_EXEC,
+        MAP_SHARED | (target is null ? 0 : MAP_FIXED), file, 0);
     if (executable == cast(ubyte*) MAP_FAILED)
         throw new Exception(
             "ffi callback pool: "
@@ -352,7 +511,7 @@ private const(ubyte)* copyDualMapped(in size_t bytes, Slot* slots) {
     auto writable = cast(ubyte*) mmap(
         null, size, PROT_READ | PROT_WRITE, MAP_SHARED, file, 0);
     if (writable == cast(ubyte*) MAP_FAILED) {
-        munmap(executable, size);
+        discardMapping(executable, size, target !is null);
         throw new Exception(
             "ffi callback pool: "
                 ~ errnoText("read-write mapping of the memory file"),
@@ -364,6 +523,10 @@ private const(ubyte)* copyDualMapped(in size_t bytes, Slot* slots) {
 
     return executable;
 }
+
+
+// Linux's value; druntime does not declare it.
+private enum MAP_NORESERVE = 0x4000;
 
 
 private extern(C) int memfd_create(const(char)* name, uint flags) @nogc nothrow;
@@ -595,8 +758,10 @@ public struct CallbackBridge {
             if (registered.entry is null) {
                 auto plan = new CallPlan;
                 *plan = prepareCallback(registered.declaration);
-                const entry = reserve(Slot(
-                    _handler, _owner, word, registered.declaration, plan));
+                auto slot = Slot(
+                    _handler, _owner, word, registered.declaration, plan);
+                slot.bridge = &this;
+                const entry = reserve(slot);
                 _wordOfEntry.insert(entry, word);
                 _reserved ~= entry;
                 atomicStore!(MemoryOrder.rel)(registered.entry, entry);
@@ -643,6 +808,17 @@ public struct CallbackBridge {
     // Adjusted entries must retain their receiver offset when a backend
     // resolves them to guest calls. Stripping only the entry loses it.
     public GuestTarget guestTarget(const(void)* address) const {
+        import core.atomic: atomicLoad, MemoryOrder;
+
+        // An address in the template or in the range is an entry of some
+        // bridge or of none, and the table says which. It is read without
+        // a lock: `word` is stored last, with release.
+        if (const guest = guestEntryOf(address)) {
+            const word = atomicLoad!(MemoryOrder.acq)(guest.word);
+            return word !is null && guest.bridge is cast(const(void)*) &this
+                ? GuestTarget(word, guest.adjustment) : GuestTarget.init;
+        }
+
         if (auto adjusted = address in _adjustedGuestEntries)
             return GuestTarget(adjusted.word, adjusted.offset);
         if (const word = wordOf(address))
@@ -675,10 +851,12 @@ public struct CallbackBridge {
             auto plan = new CallPlan;
             *plan = prepareCallback(declaration);
             assert(plan.hasHiddenContext);
-            const reserved = reserve(Slot(
+            auto slot = Slot(
                 _handler, _owner, word, declaration, plan, adjustment,
                 contains(word) ? null : word,
-            ));
+            );
+            slot.bridge = &this;
+            const reserved = reserve(slot);
             _reserved ~= reserved;
             if (contains(word))
                 _adjustedGuestEntries.insert(reserved, key);

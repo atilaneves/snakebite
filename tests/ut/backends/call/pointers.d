@@ -1343,6 +1343,42 @@ static foreach (backend; Matrix!(
 }
 
 
+// A guest call through a function pointer reaches the function the pointer
+// names, for every one of more distinct functions than one chunk of
+// callback entries holds. Each function returns its own number so a call
+// that decodes the wrong entry changes the sum.
+static foreach (backend; Matrix!()) {
+    @("pointers.functionPointer.manyEntriesCalledFromGuest." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        import std.conv: text;
+        import std.range: iota;
+        import std.algorithm: map;
+        import std.array: join;
+
+        enum count = callbackEntriesPerChunk + 2;
+        const functions = count.iota
+            .map!(i => text("static int f", i, "() { return ", i, "; }"))
+            .join("\n");
+        const assignments = count.iota
+            .map!(i => text("pointers[", i, "] = &f", i, ";"))
+            .join("\n");
+        const code = functions
+            ~ "\nint answer() {\n"
+            ~ "int function()[" ~ text(count) ~ "] pointers;\n"
+            ~ assignments
+            ~ "\nint sum;\n"
+            ~ "foreach (pointer; pointers) sum = sum * 3 + pointer();\n"
+            ~ "return sum; }";
+        int expected;
+        foreach (i; 0 .. count)
+            expected = expected * 3 + i;
+
+        expected.shouldBeRetOf!(backend, code, "answer");
+    }
+}
+
+
 // Writing through the pointer changes the variable it points at, not a
 // copy of it: `p` and `b` name the same storage.
 static foreach (backend; Matrix!()) {
