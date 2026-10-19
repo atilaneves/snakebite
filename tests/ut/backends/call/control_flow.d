@@ -1901,3 +1901,63 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// A constant-index read in a comparison happens before the destructor of a temporary in the same full expression.
+static foreach (backend; Matrix!()) {
+    @("fullExpression.indexedReadBeforeDestructor.if." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Clear { int[]* values; int value; ~this() { (*values)[1] = 0; } }
+            int main() {
+                int[] values = [1, 9, 3];
+                if (Clear(&values, 5).value < values[1]) return 0;
+                return 1;
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("fullExpression.indexedReadBeforeDestructor.while." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Clear { int[]* values; int value; ~this() { (*values)[1] = 0; } }
+            int main() {
+                int[] values = [1, 9, 3];
+                while (Clear(&values, 5).value < values[1]) return 0;
+                return 1;
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("fullExpression.indexedReadBeforeDestructor.ternary." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Clear { int[]* values; int value; ~this() { (*values)[1] = 0; } }
+            int main() {
+                int[] values = [1, 9, 3];
+                return Clear(&values, 5).value < values[1] ? 0 : 1;
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("fullExpression.indexedReadBeforeDestructor.pointerWrite." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Clear { int* target; int value; ~this() { *target = 0; } }
+            int main() {
+                int[3] values = [1, 9, 3];
+                if (Clear(&values[1], 5).value < values[1]) return 0;
+                return 1;
+            }
+        });
+    }
+}
