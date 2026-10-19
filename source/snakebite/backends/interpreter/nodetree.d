@@ -2182,8 +2182,10 @@ private Node buildAddress(E)(E ev, Expression expression) {
         case this_: {
             auto variable = thisVariable(ev, expression.isThisExp);
             const slot = slotOf(ev, variable);
-            if (!slot.ok || expression.type.toBasetype.ty != TY.Tstruct)
+            if (expression.type.toBasetype.ty != TY.Tstruct)
                 return null;
+            if (!slot.ok)
+                return buildOuterAddress(ev, variable);
             return new IndirectLocalAddress(slot.offset);
         }
         case dotVariable: {
@@ -2843,9 +2845,15 @@ private Node buildValue(E)(E ev, Expression expression) {
                 : byIntegral!(New!Local)(scalar.facts, slot.offset);
         }
         case this_: {
-            const slot = slotOf(ev, thisVariable(ev, expression.isThisExp));
-            if (!slot.ok || scalar.kind != Scalar.Kind.integral)
+            auto variable = thisVariable(ev, expression.isThisExp);
+            const slot = slotOf(ev, variable);
+            if (scalar.kind != Scalar.Kind.integral)
                 return null;
+            if (!slot.ok) {
+                // The `this` of an enclosing method, read by a nested function.
+                auto outer = buildOuterAddress(ev, variable);
+                return outer is null ? null : new Load!size_t(outer);
+            }
             return new Local!long(slot.offset);
         }
         case dotVariable, star, index:
