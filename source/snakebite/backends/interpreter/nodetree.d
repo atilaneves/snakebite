@@ -109,6 +109,12 @@ private abstract class Node {
     public Branches ifThenElse(Position position) {
         return new IfThenElse!NodeCondition(NodeCondition(this), position);
     }
+
+    // `flag && this`, where `flag` is a `bool` frame slot.
+    public Node andFlag(size_t offset) {
+        return new Tested!(FlagAnd!NodeCondition)(
+            FlagAnd!NodeCondition(offset, NodeCondition(this)));
+    }
 }
 
 private abstract class LongNode : Node {
@@ -571,16 +577,6 @@ private final class AndAnd : BoolNode {
     }
 }
 
-// `flag && right`, where `flag` is a `bool` frame slot.
-private final class AndAndFlag : BoolNode {
-    private size_t _offset;
-    private Node _right;
-    public this(size_t offset, Node right) { _offset = offset; _right = right; }
-    public override bool executeBool(ubyte* frame) {
-        return *cast(ubyte*) (frame + _offset) != 0 && _right.executeBool(frame);
-    }
-}
-
 private final class OrOr : BoolNode {
     private Node _left;
     private Node _right;
@@ -624,34 +620,47 @@ private struct FloatTest(string op, L, R) {
     }
 }
 
-private mixin template TestNode() {
-    private Test _test;
-    public this(L left, R right) { _test = Test(left, right); }
+// `flag && right`, where `flag` is a `bool` frame slot.
+private struct FlagAnd(T) {
+    public enum mayFault = T.mayFault;
+
+    public size_t offset;
+    public T right;
+
+    public bool test(ubyte* frame) {
+        return *cast(ubyte*) (frame + offset) != 0 && right.test(frame);
+    }
+}
+
+// The node that evaluates a test, which a loop or an `if` can hold in its
+// place.
+private final class Tested(T) : BoolNode {
+    private T _test;
+    public this(T test) { _test = test; }
     public override bool executeBool(ubyte* frame) { return _test.test(frame); }
     public override Loop forLoop(
         ControlFlowState* controlFlow, Node increment, Position position,
     ) {
-        return new ForLoop!Test(controlFlow, _test, increment, position);
+        return new ForLoop!T(controlFlow, _test, increment, position);
     }
     public override Loop doLoop(
         ControlFlowState* controlFlow, Position position,
     ) {
-        return new DoLoop!Test(controlFlow, _test, position);
+        return new DoLoop!T(controlFlow, _test, position);
     }
     public override Branches ifThenElse(Position position) {
-        return new IfThenElse!Test(_test, position);
+        return new IfThenElse!T(_test, position);
     }
+    // A comparison of an `int` local does not become a bigger test than that.
+    static if (is(T == IntegerTest!(op, false, LocalOperand!int, R), string op, R))
+        public override Node andFlag(size_t offset) {
+            return new Tested!(FlagAnd!T)(FlagAnd!T(offset, _test));
+        }
 }
 
-private final class IntegerCompare(string op, bool unsigned, L, R) : BoolNode {
-    private alias Test = IntegerTest!(op, unsigned, L, R);
-    mixin TestNode;
-}
-
-private final class FloatCompare(string op, L, R) : BoolNode {
-    private alias Test = FloatTest!(op, L, R);
-    mixin TestNode;
-}
+private alias IntegerCompare(string op, bool unsigned, L, R)
+    = Tested!(IntegerTest!(op, unsigned, L, R));
+private alias FloatCompare(string op, L, R) = Tested!(FloatTest!(op, L, R));
 
 // --- casts ------------------------------------------------------------
 
@@ -1595,7 +1604,7 @@ private Node buildValue(E)(E ev, Expression expression) {
             if (!plan.andAnd)
                 return new OrOr(left, right);
             if (auto flag = cast(Local!ubyte) left)
-                return new AndAndFlag(flag._offset, right);
+                return right.andFlag(flag._offset);
             return new AndAnd(left, right);
         }
         case not: {
@@ -1759,10 +1768,10 @@ private Node buildCompare(string op, E)(E ev, BinExp e) {
         if (scalarOf(ev, e.e1.type).kind != Scalar.Kind.integral)
             return null;
         static Node signed(L, R)(L l, R r) {
-            return new IntegerCompare!(op, false, L, R)(l, r);
+            return new IntegerCompare!(op, false, L, R)(IntegerTest!(op, false, L, R)(l, r));
         }
         static Node unsigned(L, R)(L l, R r) {
-            return new IntegerCompare!(op, true, L, R)(l, r);
+            return new IntegerCompare!(op, true, L, R)(IntegerTest!(op, true, L, R)(l, r));
         }
         // Equal values have equal bits whatever the signedness.
         static if (op == "==" || op == "!=")
@@ -1778,7 +1787,7 @@ private Node buildCompare(string op, E)(E ev, BinExp e) {
     if (plan.kind == ComparisonPlan.Kind.floating
             && scalarOf(ev, e.e1.type).kind == Scalar.Kind.floating) {
         static Node build(L, R)(L l, R r) {
-            return new FloatCompare!(op, L, R)(l, r);
+            return new FloatCompare!(op, L, R)(FloatTest!(op, L, R)(l, r));
         }
         return ev.factsOf(e.e1.type).size == 8
             ? fuse!(build, double, doubleComparedLeft, doubleLeft)(
