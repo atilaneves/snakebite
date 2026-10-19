@@ -1337,6 +1337,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _controlFlow = ControlFlowState.init;
         _returned = ReturnedLvalue.init;
         ctfeBlockDepth = 0;
+        if (runNodeTree(function_, body_, layout))
+            return;
+
         while (true) {
             body_.accept(this);
             if (!_controlFlow.hasGoto)
@@ -1344,6 +1347,40 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
             _controlFlow.resume;
         }
+    }
+
+    private NtRoot[FuncDeclaration] _trees;
+    enum bool nullCheckedEvaluator = nullChecks;
+
+    // Runs `body_` as a node tree. Returns false when the original walk must
+    // run instead: a closure frame, or a goto that needs a seek.
+    private bool runNodeTree(
+        FuncDeclaration function_, Statement body_, const(FrameLayout)* layout,
+    ) {
+        import core.memory: GC;
+
+        // Building nodes allocates, which the GC forbids in a finalizer.
+        if (_activeClosurePlan.needsClosure || GC.inFinalizer)
+            return false;
+
+        NtRoot root;
+        if (auto found = function_ in _trees)
+            root = *found;
+        else {
+            root = new NtRoot;
+            root.layout = layout;
+            root.body_ = new NtUninit!(typeof(this))(this, body_, &root.body_);
+            _trees[function_] = root;
+        }
+        if (root.layout !is layout)
+            return false;
+
+        const flow = root.body_.executeStmt(_frameBase);
+        if (flow == NtFlow.generic && _controlFlow.hasGoto) {
+            _controlFlow.resume;
+            return false;
+        }
+        return true;
     }
 
     // `alloca`'s memory is the running function's, as compiled D has it:
@@ -7152,4 +7189,1379 @@ private struct Cache(Key, Value) {
 private void assertEveryNodeHandled() {
     static assert(
         imported!"snakebite.backends.nodecoverage".AssertEveryNodeHandled!(Evaluator!false));
+}
+
+// ---------------------------------------------------------------------
+// Executable node tree (prototype). A function body runs as a tree of
+// `NtNode` objects built lazily, one statement at a time, on the statement's
+// first execution. Anything outside the supported scalar subset runs through
+// a generic node that calls the visitor above for its dmd node.
+// ---------------------------------------------------------------------
+
+import dmd.declaration: VarDeclaration;
+import dmd.expression: AssignExp, BinAssignExp, BinExp, DeclarationExp,
+    Expression, IndexExp, PostExp, ThisExp;
+import dmd.mtype: Type;
+import dmd.statement: CompoundStatement, Statement;
+import snakebite.backends.checkplan: NtBoundsCheck = BoundsCheck;
+
+private enum NtFlow : ubyte { normal, break_, continue_, return_, generic }
+
+private abstract class NtNode {
+    long executeLong(ubyte* frame) { assert(0); }
+    double executeDouble(ubyte* frame) { assert(0); }
+    bool executeBool(ubyte* frame) { return executeLong(frame) != 0; }
+    ubyte* executeAddr(ubyte* frame) { assert(0); }
+    void executeVoid(ubyte* frame) { assert(0); }
+    NtFlow executeStmt(ubyte* frame) { assert(0); }
+}
+
+private abstract class NtLong : NtNode {
+    override void executeVoid(ubyte* frame) { executeLong(frame); }
+}
+
+private abstract class NtDouble : NtNode {
+    override bool executeBool(ubyte* frame) { return executeDouble(frame) != 0; }
+    override void executeVoid(ubyte* frame) { executeDouble(frame); }
+}
+
+private abstract class NtBool : NtLong {
+    abstract override bool executeBool(ubyte* frame);
+    override long executeLong(ubyte* frame) { return executeBool(frame) ? 1 : 0; }
+}
+
+private final class NtRoot {
+    const(void)* layout;
+    NtNode body_;
+}
+
+// --- leaves -----------------------------------------------------------
+
+private final class NtConstLong : NtLong {
+    private long _value;
+    this(long value) { _value = value; }
+    override long executeLong(ubyte*) { return _value; }
+}
+
+private final class NtConstDouble : NtDouble {
+    private double _value;
+    this(double value) { _value = value; }
+    override double executeDouble(ubyte*) { return _value; }
+}
+
+private final class NtLocalLong(T) : NtLong {
+    private size_t _offset;
+    this(size_t offset) { _offset = offset; }
+    override long executeLong(ubyte* frame) {
+        return *cast(T*) (frame + _offset);
+    }
+}
+
+private final class NtLocalDouble(T) : NtDouble {
+    private size_t _offset;
+    this(size_t offset) { _offset = offset; }
+    override double executeDouble(ubyte* frame) {
+        return *cast(T*) (frame + _offset);
+    }
+}
+
+private final class NtAddrLong(T) : NtLong {
+    private NtNode _address;
+    this(NtNode address) { _address = address; }
+    override long executeLong(ubyte* frame) {
+        return *cast(T*) _address.executeAddr(frame);
+    }
+}
+
+private final class NtAddrDouble(T) : NtDouble {
+    private NtNode _address;
+    this(NtNode address) { _address = address; }
+    override double executeDouble(ubyte* frame) {
+        return *cast(T*) _address.executeAddr(frame);
+    }
+}
+
+// --- addresses --------------------------------------------------------
+
+private final class NtLocalAddr : NtNode {
+    private size_t _offset;
+    this(size_t offset) { _offset = offset; }
+    override ubyte* executeAddr(ubyte* frame) { return frame + _offset; }
+}
+
+private final class NtIndirectLocalAddr : NtNode {
+    private size_t _offset;
+    this(size_t offset) { _offset = offset; }
+    override ubyte* executeAddr(ubyte* frame) {
+        return *cast(ubyte**) (frame + _offset);
+    }
+}
+
+private final class NtFieldOfAddr : NtNode {
+    private NtNode _base;
+    private size_t _offset;
+    this(NtNode base, size_t offset) { _base = base; _offset = offset; }
+    override ubyte* executeAddr(ubyte* frame) {
+        return _base.executeAddr(frame) + _offset;
+    }
+}
+
+private final class NtFieldOfPointer : NtNode {
+    private NtNode _pointer;
+    private size_t _offset;
+    this(NtNode pointer, size_t offset) { _pointer = pointer; _offset = offset; }
+    override ubyte* executeAddr(ubyte* frame) {
+        return cast(ubyte*) _pointer.executeLong(frame) + _offset;
+    }
+}
+
+private final class NtDeref : NtNode {
+    private NtNode _pointer;
+    this(NtNode pointer) { _pointer = pointer; }
+    override ubyte* executeAddr(ubyte* frame) {
+        return cast(ubyte*) _pointer.executeLong(frame);
+    }
+}
+
+private final class NtIndexDynamic(E) : NtNode {
+    private E _ev;
+    private IndexExp _expression;
+    private NtNode _array;
+    private NtNode _index;
+    private size_t _stride;
+    this(E ev, IndexExp expression, NtNode array, NtNode index, size_t stride) {
+        _ev = ev; _expression = expression; _array = array; _index = index;
+        _stride = stride;
+    }
+    override ubyte* executeAddr(ubyte* frame) {
+        const index = cast(size_t) _index.executeLong(frame);
+        auto array = _array.executeAddr(frame);
+        const length = *cast(size_t*) array;
+        if (index >= length)
+            fail(index, length);
+        return *cast(ubyte**) (array + size_t.sizeof) + index * _stride;
+    }
+    private void fail(size_t index, size_t length) {
+        _ev.failArrayBounds(NtBoundsCheck.index, _expression.loc,
+            [cast(const(void)*) &index, cast(const(void)*) &length]);
+    }
+}
+
+private final class NtIndexStatic(E) : NtNode {
+    private E _ev;
+    private IndexExp _expression;
+    private NtNode _array;
+    private NtNode _index;
+    private size_t _stride;
+    private size_t _length;
+    this(E ev, IndexExp expression, NtNode array, NtNode index, size_t stride,
+            size_t length) {
+        _ev = ev; _expression = expression; _array = array; _index = index;
+        _stride = stride; _length = length;
+    }
+    override ubyte* executeAddr(ubyte* frame) {
+        const index = cast(size_t) _index.executeLong(frame);
+        if (index >= _length)
+            fail(index);
+        return _array.executeAddr(frame) + index * _stride;
+    }
+    private void fail(size_t index) {
+        auto length = _length;
+        _ev.failArrayBounds(NtBoundsCheck.index, _expression.loc,
+            [cast(const(void)*) &index, cast(const(void)*) &length]);
+    }
+}
+
+private final class NtIndexPointer : NtNode {
+    private NtNode _pointer;
+    private NtNode _index;
+    private size_t _stride;
+    this(NtNode pointer, NtNode index, size_t stride) {
+        _pointer = pointer; _index = index; _stride = stride;
+    }
+    override ubyte* executeAddr(ubyte* frame) {
+        const index = cast(size_t) _index.executeLong(frame);
+        return cast(ubyte*) _pointer.executeLong(frame) + index * _stride;
+    }
+}
+
+// --- arithmetic -------------------------------------------------------
+
+private enum ntSimpleOp(string op) = op == "+" || op == "-" || op == "*"
+    || op == "&" || op == "|" || op == "^";
+private enum ntShiftOp(string op) = op == "<<" || op == ">>" || op == ">>>";
+
+private final class NtIntBin(string op, T) : NtLong {
+    private NtNode _left;
+    private NtNode _right;
+    static if (ntShiftOp!op) {
+        private imported!"snakebite.backends.shifts".ShiftPlan _plan;
+        this(NtNode left, NtNode right, typeof(_plan) plan) {
+            _left = left; _right = right; _plan = plan;
+        }
+    } else static if (!ntSimpleOp!op) {
+        private imported!"snakebite.nativelayout".TypeFacts _leftFacts;
+        private imported!"snakebite.nativelayout".TypeFacts _rightFacts;
+        this(NtNode left, NtNode right, typeof(_leftFacts) leftFacts,
+                typeof(_rightFacts) rightFacts) {
+            _left = left; _right = right;
+            _leftFacts = leftFacts; _rightFacts = rightFacts;
+        }
+    } else {
+        this(NtNode left, NtNode right) { _left = left; _right = right; }
+    }
+    override long executeLong(ubyte* frame) {
+        const a = _left.executeLong(frame);
+        const b = _right.executeLong(frame);
+        static if (ntShiftOp!op)
+            return cast(T) shifted(a, b, _plan);
+        else static if (ntSimpleOp!op)
+            return cast(T) mixin("a " ~ op ~ " b");
+        else
+            return cast(T) combine!op(a, b, _leftFacts, _rightFacts);
+    }
+}
+
+private final class NtFloatBin(string op, T) : NtDouble {
+    private NtNode _left;
+    private NtNode _right;
+    this(NtNode left, NtNode right) { _left = left; _right = right; }
+    override double executeDouble(ubyte* frame) {
+        const a = _left.executeDouble(frame);
+        const b = _right.executeDouble(frame);
+        return mixin("cast(T) a " ~ op ~ " cast(T) b");
+    }
+}
+
+private final class NtIntUnary(string op, T) : NtLong {
+    private NtNode _operand;
+    this(NtNode operand) { _operand = operand; }
+    override long executeLong(ubyte* frame) {
+        return cast(T) mixin(op ~ "_operand.executeLong(frame)");
+    }
+}
+
+private final class NtFloatNegate : NtDouble {
+    private NtNode _operand;
+    this(NtNode operand) { _operand = operand; }
+    override double executeDouble(ubyte* frame) {
+        return -_operand.executeDouble(frame);
+    }
+}
+
+private final class NtNot : NtBool {
+    private NtNode _operand;
+    this(NtNode operand) { _operand = operand; }
+    override bool executeBool(ubyte* frame) { return !_operand.executeBool(frame); }
+}
+
+private final class NtTruth : NtBool {
+    private NtNode _operand;
+    this(NtNode operand) { _operand = operand; }
+    override bool executeBool(ubyte* frame) { return _operand.executeBool(frame); }
+}
+
+private final class NtAndAnd : NtBool {
+    private NtNode _left;
+    private NtNode _right;
+    this(NtNode left, NtNode right) { _left = left; _right = right; }
+    override bool executeBool(ubyte* frame) {
+        return _left.executeBool(frame) && _right.executeBool(frame);
+    }
+}
+
+private final class NtOrOr : NtBool {
+    private NtNode _left;
+    private NtNode _right;
+    this(NtNode left, NtNode right) { _left = left; _right = right; }
+    override bool executeBool(ubyte* frame) {
+        return _left.executeBool(frame) || _right.executeBool(frame);
+    }
+}
+
+private final class NtIntCompare(string op, bool unsigned) : NtBool {
+    private NtNode _left;
+    private NtNode _right;
+    this(NtNode left, NtNode right) { _left = left; _right = right; }
+    override bool executeBool(ubyte* frame) {
+        const a = _left.executeLong(frame);
+        const b = _right.executeLong(frame);
+        static if (unsigned)
+            return mixin("cast(ulong) a " ~ op ~ " cast(ulong) b");
+        else
+            return mixin("a " ~ op ~ " b");
+    }
+}
+
+private final class NtFloatCompare(string op) : NtBool {
+    private NtNode _left;
+    private NtNode _right;
+    this(NtNode left, NtNode right) { _left = left; _right = right; }
+    override bool executeBool(ubyte* frame) {
+        const a = _left.executeDouble(frame);
+        const b = _right.executeDouble(frame);
+        return mixin("a " ~ op ~ " b");
+    }
+}
+
+// --- casts ------------------------------------------------------------
+
+private final class NtWrap(T) : NtLong {
+    private NtNode _operand;
+    this(NtNode operand) { _operand = operand; }
+    override long executeLong(ubyte* frame) {
+        return cast(T) _operand.executeLong(frame);
+    }
+}
+
+private final class NtLongToDouble(Source, Dest) : NtDouble {
+    private NtNode _operand;
+    this(NtNode operand) { _operand = operand; }
+    override double executeDouble(ubyte* frame) {
+        return cast(Dest) cast(Source) _operand.executeLong(frame);
+    }
+}
+
+private final class NtDoubleToLong(T) : NtLong {
+    private NtNode _operand;
+    this(NtNode operand) { _operand = operand; }
+    override long executeLong(ubyte* frame) {
+        return cast(T) _operand.executeDouble(frame);
+    }
+}
+
+private final class NtDoubleWidth(T) : NtDouble {
+    private NtNode _operand;
+    this(NtNode operand) { _operand = operand; }
+    override double executeDouble(ubyte* frame) {
+        return cast(T) _operand.executeDouble(frame);
+    }
+}
+
+// --- stores -----------------------------------------------------------
+
+private final class NtStoreLocalLong(T) : NtLong {
+    private size_t _offset;
+    private NtNode _value;
+    this(size_t offset, NtNode value) { _offset = offset; _value = value; }
+    override long executeLong(ubyte* frame) {
+        const T value = cast(T) _value.executeLong(frame);
+        *cast(T*) (frame + _offset) = value;
+        return value;
+    }
+}
+
+private final class NtStoreLocalDouble(T) : NtDouble {
+    private size_t _offset;
+    private NtNode _value;
+    this(size_t offset, NtNode value) { _offset = offset; _value = value; }
+    override double executeDouble(ubyte* frame) {
+        const T value = cast(T) _value.executeDouble(frame);
+        *cast(T*) (frame + _offset) = value;
+        return value;
+    }
+}
+
+private final class NtStoreAddrLong(T) : NtLong {
+    private NtNode _address;
+    private NtNode _value;
+    this(NtNode address, NtNode value) { _address = address; _value = value; }
+    override long executeLong(ubyte* frame) {
+        auto address = _address.executeAddr(frame);
+        const T value = cast(T) _value.executeLong(frame);
+        *cast(T*) address = value;
+        return value;
+    }
+}
+
+private final class NtStoreAddrDouble(T) : NtDouble {
+    private NtNode _address;
+    private NtNode _value;
+    this(NtNode address, NtNode value) { _address = address; _value = value; }
+    override double executeDouble(ubyte* frame) {
+        auto address = _address.executeAddr(frame);
+        const T value = cast(T) _value.executeDouble(frame);
+        *cast(T*) address = value;
+        return value;
+    }
+}
+
+// `target op= step` on an integral target of 32 or 64 bits. `_address` is
+// null for a frame-local target at `_offset`.
+private final class NtOpAssignLong(string op, T) : NtLong {
+    private NtNode _address;
+    private size_t _offset;
+    private NtNode _step;
+    static if (ntShiftOp!op)
+        private imported!"snakebite.backends.shifts".ShiftPlan _plan;
+    else static if (!ntSimpleOp!op) {
+        private imported!"snakebite.nativelayout".TypeFacts _operationFacts;
+        private imported!"snakebite.nativelayout".TypeFacts _stepFacts;
+    }
+    static if (ntShiftOp!op)
+        this(NtNode address, size_t offset, NtNode step, typeof(_plan) plan) {
+            _address = address; _offset = offset; _step = step; _plan = plan;
+        }
+    else static if (!ntSimpleOp!op)
+        this(NtNode address, size_t offset, NtNode step,
+                typeof(_operationFacts) operationFacts,
+                typeof(_stepFacts) stepFacts) {
+            _address = address; _offset = offset; _step = step;
+            _operationFacts = operationFacts; _stepFacts = stepFacts;
+        }
+    else
+        this(NtNode address, size_t offset, NtNode step) {
+            _address = address; _offset = offset; _step = step;
+        }
+    override long executeLong(ubyte* frame) {
+        auto target = _address is null
+            ? cast(T*) (frame + _offset) : cast(T*) _address.executeAddr(frame);
+        const b = _step.executeLong(frame);
+        const long a = *target;
+        static if (ntShiftOp!op)
+            const T result = cast(T) shifted(a, b, _plan);
+        else static if (ntSimpleOp!op)
+            const T result = cast(T) mixin("a " ~ op ~ " b");
+        else
+            const T result = cast(T) combine!op(
+                a, b, _operationFacts, _stepFacts);
+        *target = result;
+        return result;
+    }
+}
+
+private final class NtOpAssignDouble(string op, T) : NtDouble {
+    private NtNode _address;
+    private size_t _offset;
+    private NtNode _step;
+    this(NtNode address, size_t offset, NtNode step) {
+        _address = address; _offset = offset; _step = step;
+    }
+    override double executeDouble(ubyte* frame) {
+        auto target = _address is null
+            ? cast(T*) (frame + _offset) : cast(T*) _address.executeAddr(frame);
+        const b = _step.executeDouble(frame);
+        const T result = mixin("cast(T) *target " ~ op ~ " cast(T) b");
+        *target = result;
+        return result;
+    }
+}
+
+// `target++` and `target--`: the value is the old one.
+private final class NtPostStep(T, long delta) : NtLong {
+    private NtNode _address;
+    private size_t _offset;
+    this(NtNode address, size_t offset) { _address = address; _offset = offset; }
+    override long executeLong(ubyte* frame) {
+        auto target = _address is null
+            ? cast(T*) (frame + _offset) : cast(T*) _address.executeAddr(frame);
+        const T old = *target;
+        *target = cast(T) (old + delta);
+        return old;
+    }
+}
+
+// --- statements -------------------------------------------------------
+
+private final class NtExprStmt : NtNode {
+    private NtNode _expression;
+    this(NtNode expression) { _expression = expression; }
+    override NtFlow executeStmt(ubyte* frame) {
+        _expression.executeVoid(frame);
+        return NtFlow.normal;
+    }
+}
+
+private final class NtEmptyStmt : NtNode {
+    override NtFlow executeStmt(ubyte*) { return NtFlow.normal; }
+}
+
+private final class NtSeq : NtNode {
+    private NtNode[] _children;
+    this(NtNode[] children) { _children = children; }
+    override NtFlow executeStmt(ubyte* frame) {
+        foreach (child; _children) {
+            const flow = child.executeStmt(frame);
+            if (flow != NtFlow.normal)
+                return flow;
+        }
+        return NtFlow.normal;
+    }
+}
+
+private final class NtIf : NtNode {
+    private NtNode _condition;
+    private NtNode _then;
+    private NtNode _else;
+    this(NtNode condition) { _condition = condition; }
+    override NtFlow executeStmt(ubyte* frame) {
+        if (_condition.executeBool(frame))
+            return _then.executeStmt(frame);
+        if (_else !is null)
+            return _else.executeStmt(frame);
+        return NtFlow.normal;
+    }
+}
+
+private final class NtFor(E) : NtNode {
+    private E _ev;
+    private NtNode _condition;
+    private NtNode _body;
+    private NtNode _increment;
+    this(E ev, NtNode condition, NtNode increment) {
+        _ev = ev; _condition = condition; _increment = increment;
+    }
+    override NtFlow executeStmt(ubyte* frame) {
+        while (_condition is null || _condition.executeBool(frame)) {
+            if (_body !is null) {
+                const flow = _body.executeStmt(frame);
+                if (flow != NtFlow.normal) {
+                    if (flow == NtFlow.break_)
+                        return NtFlow.normal;
+                    if (flow == NtFlow.return_)
+                        return flow;
+                    if (flow == NtFlow.generic
+                            && _ev._controlFlow.leavesLoop(null))
+                        return _ev._controlFlow.hasTransfer
+                            ? NtFlow.generic : NtFlow.normal;
+                }
+            }
+            if (_increment !is null)
+                _increment.executeVoid(frame);
+        }
+        return NtFlow.normal;
+    }
+}
+
+private final class NtBreak : NtNode {
+    override NtFlow executeStmt(ubyte*) { return NtFlow.break_; }
+}
+
+private final class NtContinue : NtNode {
+    override NtFlow executeStmt(ubyte*) { return NtFlow.continue_; }
+}
+
+private final class NtReturnVoid : NtNode {
+    override NtFlow executeStmt(ubyte*) { return NtFlow.return_; }
+}
+
+private final class NtReturnLong(E, T) : NtNode {
+    private E _ev;
+    private NtNode _value;
+    this(E ev, NtNode value) { _ev = ev; _value = value; }
+    override NtFlow executeStmt(ubyte* frame) {
+        const T value = cast(T) _value.executeLong(frame);
+        if (_ev._place !is null)
+            *cast(T*) _ev._place = value;
+        return NtFlow.return_;
+    }
+}
+
+private final class NtReturnDouble(E, T) : NtNode {
+    private E _ev;
+    private NtNode _value;
+    this(E ev, NtNode value) { _ev = ev; _value = value; }
+    override NtFlow executeStmt(ubyte* frame) {
+        const T value = cast(T) _value.executeDouble(frame);
+        if (_ev._place !is null)
+            *cast(T*) _ev._place = value;
+        return NtFlow.return_;
+    }
+}
+
+private final class NtGenericStmt(E) : NtNode {
+    private E _ev;
+    private Statement _statement;
+    this(E ev, Statement statement) { _ev = ev; _statement = statement; }
+    override NtFlow executeStmt(ubyte*) {
+        _statement.accept(_ev);
+        return _ev._controlFlow.hasTransfer ? NtFlow.generic : NtFlow.normal;
+    }
+}
+
+private final class NtGenericCondition(E) : NtBool {
+    private E _ev;
+    private Expression _condition;
+    this(E ev, Expression condition) { _ev = ev; _condition = condition; }
+    override bool executeBool(ubyte*) { return _ev.conditionHolds(_condition); }
+}
+
+// Builds its statement's node on first execution and replaces itself in the
+// parent's slot.
+private final class NtUninit(E) : NtNode {
+    private E _ev;
+    private Statement _statement;
+    private NtNode* _slot;
+    this(E ev, Statement statement, NtNode* slot) {
+        _ev = ev; _statement = statement; _slot = slot;
+    }
+    override NtFlow executeStmt(ubyte* frame) {
+        auto node = ntBuildStatement(_ev, _statement, _slot);
+        *_slot = node;
+        return node.executeStmt(frame);
+    }
+}
+
+// --- builder ----------------------------------------------------------
+
+private alias NtShiftPlan = imported!"snakebite.backends.shifts".ShiftPlan;
+
+private enum NtKind : ubyte { none, integral, floating }
+
+private struct NtScalar {
+    NtKind kind;
+    imported!"snakebite.nativelayout".TypeFacts facts;
+}
+
+private NtScalar ntScalarOf(E)(E ev, Type type) {
+    import dmd.astenums: TY;
+    import dmd.typesem: toBasetype;
+
+    if (type is null)
+        return NtScalar();
+    switch (type.toBasetype.ty) with (TY) {
+        case Tbool, Tint8, Tuns8, Tint16, Tuns16, Tint32, Tuns32, Tint64,
+                Tuns64, Tchar, Twchar, Tdchar:
+            return NtScalar(NtKind.integral, ev.factsOf(type));
+        case Tpointer, Tclass:
+            return NtScalar(NtKind.integral, imported!"snakebite.nativelayout"
+                .TypeFacts(size_t.sizeof, size_t.sizeof, true, true));
+        case Tfloat32, Tfloat64:
+            return NtScalar(NtKind.floating, ev.factsOf(type));
+        default:
+            return NtScalar();
+    }
+}
+
+// Calls `make!T(args)` for the integral type of `facts`.
+private NtNode ntByIntegral(alias make, Args...)(
+    in imported!"snakebite.nativelayout".TypeFacts facts, Args args,
+) {
+    switch (facts.size) {
+        case 1: return facts.isUnsigned ? make!ubyte(args) : make!byte(args);
+        case 2: return facts.isUnsigned ? make!ushort(args) : make!short(args);
+        case 4: return facts.isUnsigned ? make!uint(args) : make!int(args);
+        case 8: return facts.isUnsigned ? make!ulong(args) : make!long(args);
+        default: return null;
+    }
+}
+
+private NtNode ntByWide(alias make, Args...)(
+    in imported!"snakebite.nativelayout".TypeFacts facts, Args args,
+) {
+    switch (facts.size) {
+        case 4: return facts.isUnsigned ? make!uint(args) : make!int(args);
+        case 8: return facts.isUnsigned ? make!ulong(args) : make!long(args);
+        default: return null;
+    }
+}
+
+private NtNode ntByFloating(alias make, Args...)(
+    in imported!"snakebite.nativelayout".TypeFacts facts, Args args,
+) {
+    switch (facts.size) {
+        case 4: return make!float(args);
+        case 8: return make!double(args);
+        default: return null;
+    }
+}
+
+private NtNode ntMakeLocalLong(T)(size_t offset) {
+    return new NtLocalLong!T(offset);
+}
+private NtNode ntMakeLocalDouble(T)(size_t offset) {
+    return new NtLocalDouble!T(offset);
+}
+private NtNode ntMakeAddrLong(T)(NtNode address) {
+    return new NtAddrLong!T(address);
+}
+private NtNode ntMakeAddrDouble(T)(NtNode address) {
+    return new NtAddrDouble!T(address);
+}
+private NtNode ntMakeWrap(T)(NtNode operand) { return new NtWrap!T(operand); }
+private NtNode ntMakeStoreLocalLong(T)(size_t offset, NtNode value) {
+    return new NtStoreLocalLong!T(offset, value);
+}
+private NtNode ntMakeStoreLocalDouble(T)(size_t offset, NtNode value) {
+    return new NtStoreLocalDouble!T(offset, value);
+}
+private NtNode ntMakeStoreAddrLong(T)(NtNode address, NtNode value) {
+    return new NtStoreAddrLong!T(address, value);
+}
+private NtNode ntMakeStoreAddrDouble(T)(NtNode address, NtNode value) {
+    return new NtStoreAddrDouble!T(address, value);
+}
+private NtNode ntMakeDoubleToLong(T)(NtNode operand) {
+    return new NtDoubleToLong!T(operand);
+}
+private NtNode ntMakeDoubleWidth(T)(NtNode operand) {
+    return new NtDoubleWidth!T(operand);
+}
+private NtNode ntMakeNegate(T)(NtNode operand) {
+    return new NtIntUnary!("-", T)(operand);
+}
+private NtNode ntMakeComplement(T)(NtNode operand) {
+    return new NtIntUnary!("~", T)(operand);
+}
+
+private struct NtSlot {
+    bool ok;
+    size_t offset;
+    bool indirect;
+}
+
+private NtSlot ntSlotOf(E)(E ev, VarDeclaration variable) {
+    import dmd.astenums: STC;
+    import snakebite.frontend.dmd.delegates: isCtfeVariable, outerFunctionOf;
+
+    if (variable is null || variable.isDataseg || isCtfeVariable(variable)
+            || variable.isSymbolDeclaration !is null
+            || (variable.storage_class & STC.lazy_) != 0)
+        return NtSlot();
+    const slot = ev._layout.slotOf(variable);
+    if (slot is null)
+        return NtSlot();
+    return NtSlot(true, slot.offset, slot.isRef || slot.isReturnPlace);
+}
+
+private VarDeclaration ntThisVariable(E)(E ev, ThisExp expression) {
+    import snakebite.backends.closureplan: ClosurePlan;
+    import snakebite.frontend.dmd.delegates: outerFunctionOf;
+
+    auto variable = expression.var is null
+        ? cast() ev._layout.hiddenThis.variable : expression.var;
+    if (variable is null)
+        return null;
+    auto owner = outerFunctionOf(variable);
+    if (owner !is null && ClosurePlan.receiverHops(owner).length != 0)
+        return null;
+    return variable;
+}
+
+private NtNode ntBuildAddress(E)(E ev, Expression expression) {
+    import dmd.astenums: TY;
+    import dmd.tokens: EXP;
+    import dmd.typesem: nextOf, toBasetype;
+    import dmd.expressionsem: toInteger;
+    import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
+
+    switch (expression.op) with (EXP) {
+        case variable: {
+            const slot = ntSlotOf(ev, expression.isVarExp.var.isVarDeclaration);
+            if (!slot.ok)
+                return null;
+            return slot.indirect
+                ? new NtIndirectLocalAddr(slot.offset)
+                : new NtLocalAddr(slot.offset);
+        }
+        case this_: {
+            auto variable = ntThisVariable(ev, expression.isThisExp);
+            const slot = ntSlotOf(ev, variable);
+            if (!slot.ok || expression.type.toBasetype.ty != TY.Tstruct)
+                return null;
+            return new NtIndirectLocalAddr(slot.offset);
+        }
+        case dotVariable: {
+            auto dot = expression.isDotVarExp;
+            auto field = dot.var.isVarDeclaration;
+            if (field is null || field.isBitFieldDeclaration !is null)
+                return null;
+            const baseKind = dot.e1.type.toBasetype.ty;
+            if (baseKind == TY.Tclass || baseKind == TY.Tpointer) {
+                static if (E.nullCheckedEvaluator)
+                    return null;
+                else {
+                    auto pointer = ntBuildValue(ev, dot.e1);
+                    return pointer is null ? null
+                        : new NtFieldOfPointer(pointer, field.offset);
+                }
+            }
+            auto base = ntBuildAddress(ev, dot.e1);
+            return base is null ? null : new NtFieldOfAddr(base, field.offset);
+        }
+        case star: {
+            static if (E.nullCheckedEvaluator)
+                return null;
+            else {
+                auto pointer = ntBuildValue(ev, expression.isPtrExp.e1);
+                return pointer is null ? null : new NtDeref(pointer);
+            }
+        }
+        case index: {
+            auto indexed = expression.isIndexExp;
+            if (indexed.lengthVar !is null)
+                return null;
+            auto element = ev.factsOf(indexed.e1.type.toBasetype.nextOf);
+            auto position = ntBuildValue(ev, indexed.e2);
+            if (position is null)
+                return null;
+            switch (indexed.e1.type.toBasetype.ty) with (TY) {
+                case Tarray: {
+                    auto array = ntBuildAddress(ev, indexed.e1);
+                    return array is null ? null : new NtIndexDynamic!E(
+                        ev, indexed, array, position, element.size);
+                }
+                case Tsarray: {
+                    auto array = ntBuildAddress(ev, indexed.e1);
+                    return array is null ? null : new NtIndexStatic!E(
+                        ev, indexed, array, position, element.size,
+                        cast(size_t) indexed.e1.type.toBasetype.isTypeSArray
+                            .dim.toInteger);
+                }
+                case Tpointer: {
+                    static if (E.nullCheckedEvaluator)
+                        return null;
+                    else {
+                        auto pointer = ntBuildValue(ev, indexed.e1);
+                        return pointer is null ? null : new NtIndexPointer(
+                            pointer, position, element.size);
+                    }
+                }
+                default:
+                    return null;
+            }
+        }
+        default:
+            return null;
+    }
+}
+
+private NtNode ntBuildLoad(E)(E ev, Expression expression, NtNode address) {
+    const scalar = ntScalarOf(ev, expression.type);
+    if (address is null || scalar.kind == NtKind.none)
+        return null;
+    if (scalar.kind == NtKind.floating)
+        return ntByFloating!ntMakeAddrDouble(scalar.facts, address);
+    return ntByIntegral!ntMakeAddrLong(scalar.facts, address);
+}
+
+// The node that yields `expression`'s scalar value, or null when the
+// expression is outside the supported subset.
+private NtNode ntBuildValue(E)(E ev, Expression expression) {
+    import dmd.astenums: TY;
+    import dmd.tokens: EXP;
+    import dmd.typesem: toBasetype;
+    import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
+    import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
+    import snakebite.backends.logical: logicalPlan, LogicalPlan;
+    import snakebite.backends.shifts: shiftPlan;
+    import snakebite.nativelayout: loadIntegral;
+    import snakebite.nativevalue: CastKind, loadFloating;
+
+    const scalar = ntScalarOf(ev, expression.type);
+    if (scalar.kind == NtKind.none)
+        return null;
+
+    NtNode binary(string op)(BinExp e) {
+        const plan = arithmeticPlan(e);
+        if (plan.kind == ArithmeticPlan.Kind.integral
+                && scalar.kind == NtKind.integral) {
+            auto left = ntBuildValue(ev, e.e1);
+            auto right = ntBuildValue(ev, e.e2);
+            if (left is null || right is null)
+                return null;
+            const leftFacts = ev.factsOf(e.e1.type);
+            const rightFacts = ev.factsOf(e.e2.type);
+            static NtNode make(T)(
+                NtNode l, NtNode r, typeof(leftFacts) lf, typeof(rightFacts) rf,
+                NtShiftPlan sp)
+            {
+                static if (ntShiftOp!op)
+                    return new NtIntBin!(op, T)(l, r, sp);
+                else static if (ntSimpleOp!op)
+                    return new NtIntBin!(op, T)(l, r);
+                else
+                    return new NtIntBin!(op, T)(l, r, lf, rf);
+            }
+            static if (ntShiftOp!op)
+                const sp = shiftPlan(e);
+            else
+                const sp = NtShiftPlan.init;
+            return ntByWide!make(scalar.facts, left, right, leftFacts,
+                rightFacts, sp);
+        }
+        static if (op == "+" || op == "-" || op == "*" || op == "/") {
+            if (plan.kind == ArithmeticPlan.Kind.floating
+                    && scalar.kind == NtKind.floating) {
+                auto left = ntBuildValue(ev, e.e1);
+                auto right = ntBuildValue(ev, e.e2);
+                if (left is null || right is null)
+                    return null;
+                static NtNode makeFloat(T)(NtNode l, NtNode r) {
+                    return new NtFloatBin!(op, T)(l, r);
+                }
+                return ntByFloating!makeFloat(scalar.facts, left, right);
+            }
+        }
+        return null;
+    }
+
+    NtNode compare(string op)(BinExp e) {
+        const plan = comparisonPlan(e);
+        auto left = ntBuildValue(ev, e.e1);
+        auto right = ntBuildValue(ev, e.e2);
+        if (left is null || right is null)
+            return null;
+        if (plan.kind == ComparisonPlan.Kind.integral) {
+            if (ntScalarOf(ev, e.e1.type).kind != NtKind.integral)
+                return null;
+            return plan.facts.isUnsigned
+                ? new NtIntCompare!(op, true)(left, right)
+                : new NtIntCompare!(op, false)(left, right);
+        }
+        if (plan.kind == ComparisonPlan.Kind.floating
+                && ntScalarOf(ev, e.e1.type).kind == NtKind.floating)
+            return new NtFloatCompare!op(left, right);
+        return null;
+    }
+
+    NtNode opAssign(string op)(BinAssignExp e) {
+        import snakebite.frontend.storage: compoundTarget;
+
+        if (compoundTarget(e) !is e.e1)
+            return null;
+        const plan = arithmeticPlan(e);
+        auto step = ntBuildValue(ev, e.e2);
+        if (step is null)
+            return null;
+        NtNode address;
+        size_t offset;
+        if (auto variable = e.e1.isVarExp) {
+            const slot = ntSlotOf(ev, variable.var.isVarDeclaration);
+            if (!slot.ok)
+                return null;
+            if (slot.indirect)
+                address = new NtIndirectLocalAddr(slot.offset);
+            else
+                offset = slot.offset;
+        } else {
+            address = ntBuildAddress(ev, e.e1);
+            if (address is null)
+                return null;
+        }
+        if (plan.kind == ArithmeticPlan.Kind.integral
+                && scalar.kind == NtKind.integral
+                && ntScalarOf(ev, e.e2.type).kind == NtKind.integral) {
+            const operationFacts = ev.factsOf(e.e1.type);
+            const stepFacts = ev.factsOf(e.e2.type);
+            if (operationFacts.size != scalar.facts.size
+                    || operationFacts.isUnsigned != scalar.facts.isUnsigned)
+                return null;
+            static NtNode make(T)(
+                NtNode a, size_t o, NtNode s, typeof(operationFacts) of,
+                typeof(stepFacts) sf, NtShiftPlan sp)
+            {
+                static if (ntShiftOp!op)
+                    return new NtOpAssignLong!(op, T)(a, o, s, sp);
+                else static if (ntSimpleOp!op)
+                    return new NtOpAssignLong!(op, T)(a, o, s);
+                else
+                    return new NtOpAssignLong!(op, T)(a, o, s, of, sf);
+            }
+            static if (ntShiftOp!op)
+                const sp = shiftPlan(e);
+            else
+                const sp = NtShiftPlan.init;
+            return ntByWide!make(scalar.facts, address, offset, step,
+                operationFacts, stepFacts, sp);
+        }
+        static if (op == "+" || op == "-" || op == "*" || op == "/") {
+            if (plan.kind == ArithmeticPlan.Kind.floating
+                    && scalar.kind == NtKind.floating
+                    && ntScalarOf(ev, e.e2.type).kind == NtKind.floating) {
+                static NtNode makeFloat(T)(NtNode a, size_t o, NtNode s) {
+                    return new NtOpAssignDouble!(op, T)(a, o, s);
+                }
+                return ntByFloating!makeFloat(scalar.facts, address, offset,
+                    step);
+            }
+        }
+        return null;
+    }
+
+    NtNode post(long delta)(PostExp e) {
+        const plan = arithmeticPlan(e);
+        if (plan.kind != ArithmeticPlan.Kind.integral
+                || scalar.kind != NtKind.integral)
+            return null;
+        NtNode address;
+        size_t offset;
+        if (auto variable = e.e1.isVarExp) {
+            const slot = ntSlotOf(ev, variable.var.isVarDeclaration);
+            if (!slot.ok)
+                return null;
+            if (slot.indirect)
+                address = new NtIndirectLocalAddr(slot.offset);
+            else
+                offset = slot.offset;
+        } else {
+            address = ntBuildAddress(ev, e.e1);
+            if (address is null)
+                return null;
+        }
+        static NtNode make(T)(NtNode a, size_t o) {
+            return new NtPostStep!(T, delta)(a, o);
+        }
+        return ntByWide!make(scalar.facts, address, offset);
+    }
+
+    NtNode store(AssignExp e) {
+        if ((e.isConstructExp !is null && e.isConstructExp.lowering !is null)
+                || e.e1.isDotVarExp is null
+                && e.e1.isVarExp is null && e.e1.isIndexExp is null
+                && e.e1.isPtrExp is null)
+            return null;
+        const target = ntScalarOf(ev, e.e1.type);
+        if (target.kind != scalar.kind || target.kind == NtKind.none
+                || ntScalarOf(ev, e.e2.type).kind != target.kind
+                || ev.factsOf(e.e2.type).size != target.facts.size)
+            return null;
+        auto value = ntBuildValue(ev, e.e2);
+        if (value is null)
+            return null;
+        if (auto variable = e.e1.isVarExp) {
+            const slot = ntSlotOf(ev, variable.var.isVarDeclaration);
+            if (!slot.ok)
+                return null;
+            if (!slot.indirect)
+                return target.kind == NtKind.floating
+                    ? ntByFloating!ntMakeStoreLocalDouble(
+                        target.facts, slot.offset, value)
+                    : ntByIntegral!ntMakeStoreLocalLong(
+                        target.facts, slot.offset, value);
+        }
+        auto address = ntBuildAddress(ev, e.e1);
+        if (address is null)
+            return null;
+        return target.kind == NtKind.floating
+            ? ntByFloating!ntMakeStoreAddrDouble(target.facts, address, value)
+            : ntByIntegral!ntMakeStoreAddrLong(target.facts, address, value);
+    }
+
+    switch (expression.op) with (EXP) {
+        case int64: {
+            if (scalar.kind != NtKind.integral)
+                return null;
+            align(8) ubyte[8] buffer;
+            ev._nativeData.write(expression.type, scalar.facts, expression,
+                buffer.ptr);
+            return new NtConstLong(loadIntegral(
+                buffer.ptr, scalar.facts.size, !scalar.facts.isUnsigned));
+        }
+        case float64: {
+            if (scalar.kind != NtKind.floating)
+                return null;
+            align(8) ubyte[8] buffer;
+            ev._nativeData.write(expression.type, scalar.facts, expression,
+                buffer.ptr);
+            return new NtConstDouble(loadFloating(
+                buffer.ptr, scalar.facts.size));
+        }
+        case variable: {
+            auto var = expression.isVarExp.var.isVarDeclaration;
+            const slot = ntSlotOf(ev, var);
+            if (!slot.ok)
+                return null;
+            if (slot.indirect)
+                return ntBuildLoad(ev, expression,
+                    new NtIndirectLocalAddr(slot.offset));
+            return scalar.kind == NtKind.floating
+                ? ntByFloating!ntMakeLocalDouble(scalar.facts, slot.offset)
+                : ntByIntegral!ntMakeLocalLong(scalar.facts, slot.offset);
+        }
+        case this_: {
+            auto var = ntThisVariable(ev, expression.isThisExp);
+            const slot = ntSlotOf(ev, var);
+            if (!slot.ok || scalar.kind != NtKind.integral)
+                return null;
+            return new NtLocalLong!ulong(slot.offset);
+        }
+        case dotVariable, star, index:
+            return ntBuildLoad(ev, expression, ntBuildAddress(ev, expression));
+        case cast_: {
+            auto castExp = expression.isCastExp;
+            if (castExp.lowering !is null)
+                return null;
+            const source = ntScalarOf(ev, castExp.e1.type);
+            if (source.kind == NtKind.none)
+                return null;
+            const plan = *ev._shared.facts.castOf(castExp);
+            auto operand = ntBuildValue(ev, castExp.e1);
+            if (operand is null)
+                return null;
+            with (CastKind) switch (plan.kind) {
+                case copy, narrow, widenSigned, widenUnsigned:
+                    if (source.kind != NtKind.integral
+                            || scalar.kind != NtKind.integral)
+                        return null;
+                    return ntByIntegral!ntMakeWrap(scalar.facts, operand);
+                case truth:
+                    return scalar.kind == NtKind.integral
+                        ? new NtTruth(operand) : null;
+                case integralToFloat:
+                    if (source.kind != NtKind.integral
+                            || scalar.kind != NtKind.floating)
+                        return null;
+                    static NtNode toDouble(Dest)(
+                        NtNode o, bool unsigned) {
+                        return unsigned
+                            ? new NtLongToDouble!(ulong, Dest)(o)
+                            : new NtLongToDouble!(long, Dest)(o);
+                    }
+                    return ntByFloating!toDouble(
+                        scalar.facts, operand, source.facts.isUnsigned);
+                case floatToIntegral:
+                    if (source.kind != NtKind.floating
+                            || scalar.kind != NtKind.integral)
+                        return null;
+                    return ntByIntegral!ntMakeDoubleToLong(
+                        scalar.facts, operand);
+                case floatWidth:
+                    if (source.kind != NtKind.floating
+                            || scalar.kind != NtKind.floating)
+                        return null;
+                    return ntByFloating!ntMakeDoubleWidth(
+                        scalar.facts, operand);
+                default:
+                    return null;
+            }
+        }
+        case add: return binary!"+"(expression.isBinExp);
+        case min: return binary!"-"(expression.isBinExp);
+        case mul: return binary!"*"(expression.isBinExp);
+        case div: return binary!"/"(expression.isBinExp);
+        case mod: return binary!"%"(expression.isBinExp);
+        case and: return binary!"&"(expression.isBinExp);
+        case or: return binary!"|"(expression.isBinExp);
+        case xor: return binary!"^"(expression.isBinExp);
+        case leftShift: return binary!"<<"(expression.isBinExp);
+        case rightShift: return binary!">>"(expression.isBinExp);
+        case unsignedRightShift: return binary!">>>"(expression.isBinExp);
+        case lessThan: return compare!"<"(expression.isBinExp);
+        case lessOrEqual: return compare!"<="(expression.isBinExp);
+        case greaterThan: return compare!">"(expression.isBinExp);
+        case greaterOrEqual: return compare!">="(expression.isBinExp);
+        case equal:
+            if (expression.isEqualExp.lowering !is null)
+                return null;
+            return compare!"=="(expression.isBinExp);
+        case notEqual:
+            if (expression.isEqualExp.lowering !is null)
+                return null;
+            return compare!"!="(expression.isBinExp);
+        case andAnd, orOr: {
+            auto logical = expression.isLogicalExp;
+            const plan = logicalPlan(logical);
+            if (plan.right != LogicalPlan.Right.value || !plan.hasValue)
+                return null;
+            auto left = ntBuildValue(ev, logical.e1);
+            auto right = ntBuildValue(ev, logical.e2);
+            if (left is null || right is null)
+                return null;
+            return plan.andAnd ? new NtAndAnd(left, right)
+                : new NtOrOr(left, right);
+        }
+        case not: {
+            auto operand = ntBuildValue(ev, expression.isNotExp.e1);
+            return operand is null ? null : new NtNot(operand);
+        }
+        case negate: {
+            auto operand = ntBuildValue(ev, expression.isNegExp.e1);
+            if (operand is null)
+                return null;
+            if (scalar.kind == NtKind.floating)
+                return new NtFloatNegate(operand);
+            return ntByWide!ntMakeNegate(scalar.facts, operand);
+        }
+        case tilde: {
+            auto operand = ntBuildValue(ev, expression.isComExp.e1);
+            if (operand is null || scalar.kind != NtKind.integral)
+                return null;
+            return ntByWide!ntMakeComplement(scalar.facts, operand);
+        }
+        case addAssign: return opAssign!"+"(expression.isBinAssignExp);
+        case minAssign: return opAssign!"-"(expression.isBinAssignExp);
+        case mulAssign: return opAssign!"*"(expression.isBinAssignExp);
+        case divAssign: return opAssign!"/"(expression.isBinAssignExp);
+        case modAssign: return opAssign!"%"(expression.isBinAssignExp);
+        case andAssign: return opAssign!"&"(expression.isBinAssignExp);
+        case orAssign: return opAssign!"|"(expression.isBinAssignExp);
+        case xorAssign: return opAssign!"^"(expression.isBinAssignExp);
+        case leftShiftAssign: return opAssign!"<<"(expression.isBinAssignExp);
+        case rightShiftAssign: return opAssign!">>"(expression.isBinAssignExp);
+        case unsignedRightShiftAssign:
+            return opAssign!">>>"(expression.isBinAssignExp);
+        case plusPlus: return post!1(expression.isPostExp);
+        case minusMinus: return post!(-1)(expression.isPostExp);
+        case assign, construct, blit:
+            return store(cast(AssignExp) expression);
+        default:
+            return null;
+    }
+}
+
+private NtNode ntBuildDeclaration(E)(E ev, Statement statement,
+        DeclarationExp declaration) {
+    import snakebite.nativelayout: initializerRunsForEffect, initializerValueOf;
+
+    auto variable = declaration.declaration.isVarDeclaration;
+    if (variable is null || variable.isDataseg)
+        return null;
+    if (variable._init is null || variable._init.isVoidInitializer !is null)
+        return new NtEmptyStmt;
+    auto initializer = variable._init.isExpInitializer;
+    if (initializer is null)
+        return null;
+    const scalar = ntScalarOf(ev, variable.type);
+    if (scalar.kind == NtKind.none)
+        return null;
+    if (initializerRunsForEffect(initializer, variable)) {
+        auto effect = ntBuildValue(ev, initializer.exp);
+        return effect is null ? null : new NtExprStmt(effect);
+    }
+    auto value = initializerValueOf(initializer);
+    const slot = ntSlotOf(ev, variable);
+    if (!slot.ok || slot.indirect || ev.isRefStorage(variable)
+            || ntScalarOf(ev, value.type).kind != scalar.kind
+            || ev.factsOf(value.type).size != scalar.facts.size)
+        return null;
+    auto node = ntBuildValue(ev, value);
+    if (node is null)
+        return null;
+    return new NtExprStmt(scalar.kind == NtKind.floating
+        ? ntByFloating!ntMakeStoreLocalDouble(scalar.facts, slot.offset, node)
+        : ntByIntegral!ntMakeStoreLocalLong(scalar.facts, slot.offset, node));
+}
+
+private NtNode ntBuildStatement(E)(E ev, Statement statement, NtNode* slot) {
+    import dmd.astenums: TY;
+    import dmd.astenums: STMT;
+    import dmd.typesem: toBasetype;
+    import snakebite.backends.ifplan: IfPlan, ifPlan;
+    import snakebite.frontend.dmd.functions: typeFunctionOf;
+
+    NtNode generic() {
+        import core.stdc.stdio: fprintf, stderr;
+        import core.stdc.stdlib: getenv;
+        if (getenv("NT_TRACE") !is null)
+            fprintf(stderr, "GENERIC %s:%d stmt=%d\n", statement.loc.filename,
+                statement.loc.linnum, cast(int) statement.stmt);
+        return new NtGenericStmt!E(ev, statement);
+    }
+
+    NtNode child(Statement inner, NtNode* where) {
+        return new NtUninit!E(ev, inner, where);
+    }
+
+    NtNode condition(Expression expression) {
+        auto node = ntBuildValue(ev, expression);
+        return node is null
+            ? new NtGenericCondition!E(ev, expression) : node;
+    }
+
+    switch (statement.stmt) with (STMT) {
+        case Compound, CompoundDeclaration: {
+            auto compound = cast(CompoundStatement) statement;
+            if (compound.statements is null)
+                return new NtEmptyStmt;
+            Statement[] inner;
+            foreach (candidate; *compound.statements)
+                if (candidate !is null)
+                    inner ~= candidate;
+            auto nodes = new NtNode[inner.length];
+            foreach (i, one; inner)
+                nodes[i] = child(one, &nodes[i]);
+            return new NtSeq(nodes);
+        }
+        case Scope: {
+            auto scoped = statement.isScopeStatement;
+            if (scoped.statement is null)
+                return new NtEmptyStmt;
+            return child(scoped.statement, slot);
+        }
+        case Exp: {
+            auto expression = statement.isExpStatement.exp;
+            if (expression is null)
+                return new NtEmptyStmt;
+            if (auto declaration = expression.isDeclarationExp) {
+                auto node = ntBuildDeclaration(ev, statement, declaration);
+                return node is null ? generic() : node;
+            }
+            if (expression.type is null
+                    || ntScalarOf(ev, expression.type).kind == NtKind.none)
+                return generic();
+            auto node = ntBuildValue(ev, expression);
+            return node is null ? generic() : new NtExprStmt(node);
+        }
+        case If: {
+            auto conditional = statement.isIfStatement;
+            if (conditional.param !is null
+                    || ifPlan(conditional).kind != IfPlan.Kind.condition
+                    || conditional.ifbody is null)
+                return generic();
+            auto node = new NtIf(condition(conditional.condition));
+            node._then = child(conditional.ifbody, &node._then);
+            if (conditional.elsebody !is null)
+                node._else = child(conditional.elsebody, &node._else);
+            return node;
+        }
+        case For: {
+            auto loop = statement.isForStatement;
+            import core.stdc.stdio: fprintf, stderr;
+            if (loop._init !is null) {
+                fprintf(stderr, "FOR init=%d rel=%d\n", loop._init !is null, loop.relatedLabeled !is null);
+                return generic();
+            }
+            NtNode test;
+            if (loop.condition !is null)
+                test = condition(loop.condition);
+            NtNode step;
+            if (loop.increment !is null) {
+                step = ntBuildValue(ev, loop.increment);
+                if (step is null) {
+                    fprintf(stderr, "FOR incr op=%d\n", cast(int) loop.increment.op);
+                    return generic();
+                }
+            }
+            auto node = new NtFor!E(ev, test, step);
+            if (loop._body !is null)
+                node._body = child(loop._body, &node._body);
+            return node;
+        }
+        case Break:
+            return statement.isBreakStatement.ident is null
+                ? new NtBreak : generic();
+        case Continue:
+            return statement.isContinueStatement.ident is null
+                ? new NtContinue : generic();
+        case Return: {
+            auto returned = statement.isReturnStatement;
+            if (returned.fesFunc !is null || returned.caseDim != 0)
+                return generic();
+            if (returned.exp is null)
+                return new NtReturnVoid;
+            if (typeFunctionOf(ev._function).isRef
+                    || ev._type.toBasetype.ty == TY.Tvoid)
+                return generic();
+            const scalar = ntScalarOf(ev, ev._type);
+            if (scalar.kind == NtKind.none
+                    || ntScalarOf(ev, returned.exp.type).kind != scalar.kind
+                    || ev.factsOf(returned.exp.type).size != scalar.facts.size)
+                return generic();
+            auto value = ntBuildValue(ev, returned.exp);
+            if (value is null)
+                return generic();
+            static NtNode makeLong(T)(E e, NtNode v) {
+                return new NtReturnLong!(E, T)(e, v);
+            }
+            static NtNode makeDouble(T)(E e, NtNode v) {
+                return new NtReturnDouble!(E, T)(e, v);
+            }
+            return scalar.kind == NtKind.floating
+                ? ntByFloating!makeDouble(scalar.facts, ev, value)
+                : ntByIntegral!makeLong(scalar.facts, ev, value);
+        }
+        default:
+            return generic();
+    }
 }
