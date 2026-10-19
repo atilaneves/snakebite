@@ -2372,6 +2372,27 @@ FAULTS = [
      "}\n"
      "int main() { Throwable thrown; raise(thrown); return 0; }\n",
      -signal.SIGSEGV, "fatal: null pointer dereference", "main.raise"),
+    ("getter on a null receiver",
+     "module main;\n"
+     "struct S {\n"
+     "    int field;\n"
+     "    int get() { return field; }\n"
+     "}\n"
+     "int main() { S good; good.get(); S* none; return none.get(); }\n",
+     -signal.SIGSEGV, "fatal: null pointer dereference", "main.S.get"),
+    ("fault in the body of a function that is one return",
+     "module main;\n"
+     "int load(int* pointer, int added) {\n"
+     "    // the body is one statement, so a call takes its short path\n"
+     "    return *pointer + added;\n"
+     "}\n"
+     "int main() {\n"
+     "    int value = 1;\n"
+     "    load(&value, 1);\n"
+     "    int* none;\n"
+     "    return load(none, 1);\n"
+     "}\n",
+     -signal.SIGSEGV, "fatal: null pointer dereference", "main.load"),
 ]
 
 
