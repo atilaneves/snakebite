@@ -7758,7 +7758,7 @@ private final class NtFor(E, C) : NtLoop {
                 }
             }
             if (_increment !is null)
-                _increment.executeVoid(frame);
+                _increment.executeStmt(frame);
         }
         return NtFlow.normal;
     }
@@ -9075,6 +9075,8 @@ private NtNode ntBuildStatement(E)(E ev, Statement statement, NtNode* slot) {
             NtNode step;
             if (loop.increment !is null) {
                 step = ntBuildValue(ev, loop.increment);
+                if (step !is null)
+                    step = ntStatement(step);
                 if (step is null) {
                     fprintf(stderr, "FOR incr op=%d\n", cast(int) loop.increment.op);
                     return generic();
