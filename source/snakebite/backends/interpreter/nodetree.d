@@ -119,12 +119,10 @@ package struct CalleeShape {
     package enum Kind : ubyte { unexamined, other, soleReturn, getter, setter }
 
     package Kind kind;
-    // The field of an accessor: where it is in the receiver, how wide, and
-    // the full expression a fault in the access names.
+    // The field of an accessor: where it is in the receiver and how wide.
     package size_t offset;
     package size_t size;
     package bool isUnsigned;
-    package const(void)* position;
 }
 
 // Where a variable of an enclosing function lives: the words to load from
@@ -2116,7 +2114,6 @@ private struct FastCallee {
     public size_t offset;
     public size_t size;
     public bool isUnsigned;
-    public const(void)* position;
     public Argument mode;
     // The run of a body: the slots for the arguments and, for a body that
     // is one `return`, the tree whose value comes back in a register. The
@@ -2125,33 +2122,6 @@ private struct FastCallee {
     public TreeRoot* root;
     public size_t hiddenOffset;
     public ArgumentSlot[] slots;
-}
-
-// Points the fault slot of a frame at the full expression of a callee that
-// the caller runs in place, and the evaluator at that callee, so that a
-// fault there is reported in the callee. Puts both back at the end.
-private struct AccessScope(E) {
-    private E _ev;
-    private const(void)** _slot;
-    private const(void)* _slotBefore;
-    private FuncDeclaration _functionBefore;
-
-    @disable this();
-    @disable this(this);
-
-    public this(E ev, ubyte* frame, FastCallee* fast) {
-        _ev = ev;
-        _slot = faultSlotOf(frame);
-        _slotBefore = *_slot;
-        _functionBefore = ev._function;
-        *_slot = fast.position;
-        ev._function = fast.callee.function_;
-    }
-
-    ~this() {
-        *_slot = _slotBefore;
-        _ev._function = _functionBefore;
-    }
 }
 
 // What every call node does once it has chosen its callee: the fields that
@@ -2353,7 +2323,6 @@ private final class Call(E) : Node {
                 fast.offset = shape.offset;
                 fast.size = shape.size;
                 fast.isUnsigned = shape.isUnsigned;
-                fast.position = shape.position;
                 if (_modes.length != 0)
                     fast.mode = _modes[0];
                 return fast;
@@ -2498,8 +2467,8 @@ private final class Call(E) : Node {
         if (resolve(receiver)) {
             auto fast = _fast;
             if (fast !is null) {
-                if (fast.kind == FastCallee.Kind.getter)
-                    return loadLong(fast, receiver, frame);
+                if (fast.kind == FastCallee.Kind.getter && receiver != 0)
+                    return loadLong(fast, receiver);
                 if (fast.kind == FastCallee.Kind.soleReturn
                         && returnsInRegister(fast))
                     return enterLong(fast, receiver, frame);
@@ -2516,8 +2485,8 @@ private final class Call(E) : Node {
         if (resolve(receiver)) {
             auto fast = _fast;
             if (fast !is null) {
-                if (fast.kind == FastCallee.Kind.getter)
-                    return loadDouble(fast, receiver, frame);
+                if (fast.kind == FastCallee.Kind.getter && receiver != 0)
+                    return loadDouble(fast, receiver);
                 if (fast.kind == FastCallee.Kind.soleReturn
                         && returnsInRegister(fast))
                     return enterDouble(fast, receiver, frame);
@@ -2534,7 +2503,7 @@ private final class Call(E) : Node {
         if (resolve(receiver)) {
             auto fast = _fast;
             if (fast !is null) {
-                if (fast.kind == FastCallee.Kind.setter) {
+                if (fast.kind == FastCallee.Kind.setter && receiver != 0) {
                     store(fast, receiver, frame);
                     return;
                 }
@@ -2585,9 +2554,9 @@ private final class Call(E) : Node {
     }
 
     // The access of a getter: one load at the receiver plus the offset of
-    // the field.
-    private long loadLong(FastCallee* fast, size_t receiver, ubyte* frame) {
-        auto access = AccessScope!E(_ev, frame, fast);
+    // the field. A null receiver never comes here: the callee runs it and
+    // reports the fault in the callee, so the access itself cannot fault.
+    private long loadLong(FastCallee* fast, size_t receiver) {
         const place = cast(const(ubyte)*) (receiver + fast.offset);
         switch (fast.size) {
             case 1:
@@ -2607,8 +2576,7 @@ private final class Call(E) : Node {
         }
     }
 
-    private double loadDouble(FastCallee* fast, size_t receiver, ubyte* frame) {
-        auto access = AccessScope!E(_ev, frame, fast);
+    private double loadDouble(FastCallee* fast, size_t receiver) {
         const place = cast(const(ubyte)*) (receiver + fast.offset);
         return fast.size == 4
             ? *cast(const(float)*) place : *cast(const(double)*) place;
@@ -2635,7 +2603,6 @@ private final class Call(E) : Node {
             case address, pair:
                 assert(0, "a setter takes a scalar by value");
         }
-        auto access = AccessScope!E(_ev, frame, fast);
         auto place = cast(ubyte*) (receiver + fast.offset);
         switch (fast.size) {
             case 1:
@@ -2780,8 +2747,7 @@ private void examine(E)(E ev, TreeCallee* callee) {
                     || scalar.facts.isUnsigned != result.facts.isUnsigned)
                 return;
             callee.shape = CalleeShape(CalleeShape.Kind.getter, field.offset,
-                scalar.facts.size, scalar.facts.isUnsigned,
-                cast(const(void)*) returned.exp);
+                scalar.facts.size, scalar.facts.isUnsigned);
         }
         return;
     }
@@ -2809,8 +2775,7 @@ private void examine(E)(E ev, TreeCallee* callee) {
                 || scalar.facts.size != callee.layout.parameters[0].facts.size)
             return;
         callee.shape = CalleeShape(CalleeShape.Kind.setter, field.offset,
-            scalar.facts.size, scalar.facts.isUnsigned,
-            cast(const(void)*) effect.exp);
+            scalar.facts.size, scalar.facts.isUnsigned);
     }
 }
 

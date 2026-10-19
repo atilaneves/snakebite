@@ -2380,6 +2380,14 @@ FAULTS = [
      "}\n"
      "int main() { S good; good.get(); S* none; return none.get(); }\n",
      -signal.SIGSEGV, "fatal: null pointer dereference", "main.S.get"),
+    ("setter on a null receiver",
+     "module main;\n"
+     "struct S {\n"
+     "    int field;\n"
+     "    void set(int value) { field = value; }\n"
+     "}\n"
+     "int main() { S good; good.set(1); S* none; none.set(2); return 0; }\n",
+     -signal.SIGSEGV, "fatal: null pointer dereference", "main.S.set"),
     ("fault in the body of a function that is one return",
      "module main;\n"
      "int load(int* pointer, int added) {\n"
