@@ -804,7 +804,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opFloatNotEqual3, opFloatLessThan3, opFloatLessOrEqual3,
         opFloatGreaterThan3, opFloatGreaterOrEqual3,
         CheckedAccess, opIndexPointer, opIndexSlice, opIndexStatic,
-        checkedIndexAccess, checkedIndexHandler, checkedLoadWidth, checkedIndexKind,
+        checkedIndexAccess, checkedIndexHandler, checkedLoadWidth,
+        checkedIndexKind,
         opBitAnd3, opBitOr3, opBitXor3, opShiftLeft3, opShiftRightLogical3,
         opShiftRightArithmetic3, opDivideSigned3, opDivideUnsigned3,
         opModuloSigned3, opModuloUnsigned3,
@@ -1605,9 +1606,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // The index of the checked load that is the only way into the return
     // `returnIndex` of `instructions` and writes the value it returns, or
-    // `size_t.max`. The failure code between them ends in a hook that does
-    // not return, and a failed load writes nothing, so the load can write
-    // the place of the caller itself.
+    // `size_t.max`. The failure code between them ends in a call. It is a
+    // hook that does not return, because `inlineBodyOfBuilt` copies a body
+    // only when all its call sites are failure hooks. A failed load writes
+    // nothing, so the load can write the place of the caller itself.
     private static size_t checkedLoadBefore(
         in Instruction[] instructions, in size_t returnIndex,
     ) {
@@ -1620,10 +1622,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             auto target = branchTargetField(probe);
             if (target is null || *target != returnIndex)
                 continue;
-            if (load != size_t.max || index >= returnIndex
-                    || checkedLoadWidth(instruction.handler) == 0
+            const width = checkedLoadWidth(instruction.handler);
+            if (load != size_t.max || index >= returnIndex || width == 0
                     || instruction.destination != returned.source
-                    || checkedLoadWidth(instruction.handler) != returned.width)
+                    || width != returned.width)
                 return size_t.max;
             load = index;
         }
