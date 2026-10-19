@@ -2313,7 +2313,74 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         in FullExpressionScope.Position position,
         Expression result,
     ) {
+        if (isPlainRoot(result))
+            return false;
+
         return _temporaries.readsResultAfterEnd(position, result);
+    }
+
+    // Whether `root` is a tree of scalar reads, arithmetic, comparisons,
+    // assignments and indexing, none of which reserves a temporary, runs
+    // a destructor or calls a function. Such a full expression has
+    // nothing to open or to release, so decided once per root.
+    private NodeCache!(bool, 10) _plainRoots;
+
+    extern(D) private bool isPlainRoot(Expression root) {
+        if (auto cached = _plainRoots.find(cast(void*) root))
+            return *cached;
+
+        return *_plainRoots.insert(cast(void*) root, isPlainTree(root, false));
+    }
+
+    extern(D) private static bool isPlainTree(Expression e, bool aggregate) {
+        import dmd.astenums: TY;
+        import dmd.typesem: toBasetype;
+
+        if (e is null || e.type is null)
+            return false;
+
+        switch (e.type.toBasetype.ty) {
+            case TY.Tint8, TY.Tuns8, TY.Tint16, TY.Tuns16, TY.Tint32,
+                    TY.Tuns32, TY.Tint64, TY.Tuns64, TY.Tbool, TY.Tchar,
+                    TY.Twchar, TY.Tdchar, TY.Tfloat32, TY.Tfloat64,
+                    TY.Tfloat80, TY.Tpointer:
+                break;
+            case TY.Tarray, TY.Tsarray:
+                if (!aggregate)
+                    return false;
+                break;
+            default:
+                return false;
+        }
+
+        switch (e.op) {
+            case EXP.int64:
+                return true;
+            case EXP.variable:
+                return e.isVarExp.var.isVarDeclaration !is null;
+            case EXP.add, EXP.min, EXP.mul, EXP.div, EXP.mod, EXP.and,
+                    EXP.or, EXP.xor, EXP.leftShift, EXP.rightShift,
+                    EXP.unsignedRightShift, EXP.lessThan, EXP.lessOrEqual,
+                    EXP.greaterThan, EXP.greaterOrEqual, EXP.notEqual,
+                    EXP.addAssign, EXP.minAssign, EXP.mulAssign,
+                    EXP.andAssign, EXP.orAssign, EXP.xorAssign:
+                auto binary = e.isBinExp;
+                return isPlainTree(binary.e1, false)
+                    && isPlainTree(binary.e2, false);
+            case EXP.assign, EXP.construct, EXP.blit:
+                auto binary = e.isBinExp;
+                return isPlainTree(binary.e1, false)
+                    && isPlainTree(binary.e2, false);
+            case EXP.index:
+                auto index = e.isIndexExp;
+                return isPlainTree(index.e1, true)
+                    && isPlainTree(index.e2, false);
+            case EXP.cast_:
+                auto cast_ = e.isCastExp;
+                return cast_.lowering is null && isPlainTree(cast_.e1, false);
+            default:
+                return false;
+        }
     }
 
     extern(D) protected override void withFullExpression(
@@ -2321,6 +2388,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         Expression root,
         scope void delegate() evaluate,
     ) {
+        if (position != FullExpressionScope.Position.returnOperand
+                && isPlainRoot(root))
+            return evaluate();
+
         scope (failure)
             if (position == FullExpressionScope.Position.returnOperand)
                 _returned = ReturnedLvalue.init;
@@ -2374,6 +2445,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         in FullExpressionScope.Position position,
         Expression expression,
     ) {
+        if (isPlainRoot(expression))
+            return truthOf(expression);
+
         bool result;
         fullExpressionValue!(void*)(position, expression,
             { result = truthOf(expression); },
