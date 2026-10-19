@@ -6964,7 +6964,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         with (ComparisonPlan.Kind) final switch (plan.kind) {
             case dynamicArray:
                 return compileMemcmpDynamicArrayEquality(
-                    expression, _destination);
+                    expression, plan, _destination);
             // A delegate is a plain `{context, function}` pair - dmd's own
             // native equality for it, like a static array's, is exactly its
             // bytes compared whole. `compileStaticArrayEquality` does
@@ -8845,7 +8845,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // bytewise element equality. All other array equality runs through that
     // lowering instead of entering this fast path.
     private void compileMemcmpDynamicArrayEquality(
-        EqualExp expression, in size_t destOffset,
+        EqualExp expression, in ComparisonPlan plan, in size_t destOffset,
     ) {
         import dmd.tokens: EXP;
         import snakebite.nativelayout: arrayValueSize;
@@ -8854,14 +8854,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const arrayFacts = TypeFacts(
             arrayValueSize, size_t.alignof, false, false, true, 0);
-        const elementFacts = typeFacts(expression.e1.type.nextOf);
 
         const leftOffset = reserveTemp(arrayFacts);
         evalArrayValueInto(expression.e1, leftOffset);
         const rightOffset = reserveTemp(arrayFacts);
         evalArrayValueInto(expression.e2, rightOffset);
 
-        emit(&opArrayEqual, leftOffset, rightOffset, elementFacts.size);
+        emit(&opArrayEqual, leftOffset, rightOffset, plan.elementSize);
         if (expression.op == EXP.notEqual)
             emit(&opLogicalNot, leftOffset, 0, 1);
         if (destOffset != leftOffset)

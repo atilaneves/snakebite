@@ -1898,3 +1898,102 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// A static array on either side of `==` compares with the same rule as a
+// dynamic one: the lengths first, then the elements.
+static foreach (backend; Matrix!()) {
+    @("arrayEqualityWithStaticOperands." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            bool sameAsStatic(int[] dynamic, ref int[3] fixed) {
+                return dynamic == fixed;
+            }
+
+            bool staticIsDifferent(ref int[3] fixed, int[] dynamic) {
+                return fixed != dynamic;
+            }
+
+            void main() {
+                int[3] three = [1, 2, 3];
+                int[3] other = [1, 2, 4];
+                int[2] two = [1, 2];
+                int[] dynamic = [1, 2, 3];
+                int[] shorter = [1, 2];
+
+                assert(sameAsStatic(dynamic, three));
+                assert(!sameAsStatic(dynamic, other));
+                assert(!sameAsStatic(shorter, three));
+                assert(!staticIsDifferent(three, dynamic));
+                assert(staticIsDifferent(other, dynamic));
+                assert(three == three);
+                assert(three != other);
+                assert(two == shorter);
+                assert(two != dynamic);
+                assert(three != two[]);
+            }
+        });
+    }
+}
+
+// An element with its own `opEquals` is not compared as bytes: dmd lowers
+// the comparison to call it.
+// Observed: `assert(left == same)` fails on Ctfe, which compares the
+// elements' bytes instead of calling `opEquals`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "array equality ignores a struct element's opEquals"),
+)) {
+    @("arrayEqualityOfStructsWithOpEquals." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Key {
+                int id;
+                int ignored;
+
+                bool opEquals(const Key other) const {
+                    return id == other.id;
+                }
+            }
+
+            void main() {
+                Key[] left = [Key(1, 10), Key(2, 20)];
+                Key[] same = [Key(1, 99), Key(2, 98)];
+                Key[] different = [Key(1, 10), Key(3, 20)];
+
+                assert(left == same);
+                assert(!(left != same));
+                assert(left != different);
+                assert(left != same[0 .. 1]);
+            }
+        });
+    }
+}
+
+// A string literal compared directly in a condition.
+static foreach (backend; Matrix!()) {
+    @("stringLiteralEqualityInConditions." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int classify(string w) {
+                int result;
+                if (w == "ab")
+                    result += 1;
+                if ("cd" != w)
+                    result += 10;
+                if (w == "")
+                    result += 100;
+                return result;
+            }
+
+            void main() {
+                assert(classify("ab") == 1 + 10);
+                assert(classify("cd") == 0);
+                assert(classify("abc") == 10);
+                assert(classify("") == 110);
+            }
+        });
+    }
+}

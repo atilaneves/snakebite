@@ -2589,21 +2589,35 @@ private Node buildBinary(string op, E)(E ev, BinExp e, in Scalar scalar) {
 // `==` and `!=`: dmd's lowering (a call to `__equals`) where it made one;
 // otherwise dynamic arrays compared as bytes, or a scalar compare.
 private Node buildEquality(bool negate, E)(E ev, EqualExp e) {
-    import dmd.typesem: nextOf, toBasetype;
     import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
 
     if (e.lowering !is null)
         return buildValue(ev, e.lowering);
     const plan = comparisonPlan(e);
-    if (plan.kind == ComparisonPlan.Kind.dynamicArray) {
-        auto left = buildSlice(ev, e.e1);
-        auto right = buildSlice(ev, e.e2);
+    if (plan.kind == ComparisonPlan.Kind.dynamicArray
+            || plan.kind == ComparisonPlan.Kind.staticArray) {
+        auto left = buildArrayOperand(ev, e.e1);
+        auto right = buildArrayOperand(ev, e.e2);
         if (left is null || right is null)
             return null;
-        return new SliceEquality!negate(left, right,
-            ev.factsOf(e.e1.type.toBasetype.nextOf).size);
+        return new SliceEquality!negate(left, right, plan.elementSize);
     }
     return buildCompare!(negate ? "!=" : "==")(ev, e);
+}
+
+// An operand of an array comparison as a dynamic array value: a static
+// array is its address and its length.
+private Node buildArrayOperand(E)(E ev, Expression operand) {
+    import dmd.astenums: TY;
+    import dmd.expressionsem: toInteger;
+    import dmd.typesem: toBasetype;
+
+    auto type = operand.type.toBasetype;
+    if (type.ty != TY.Tsarray)
+        return buildSlice(ev, operand);
+    auto address = buildAddress(ev, operand);
+    return address is null ? null : new StaticArrayToSlice(
+        address, cast(size_t) type.isTypeSArray.dim.toInteger);
 }
 
 private Node buildCompare(string op, E)(E ev, BinExp e) {

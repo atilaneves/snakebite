@@ -4722,7 +4722,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                     rightFacts.size, rightFacts.alignment);
                 const a = arrayOperand(expression.e1, left.base);
                 const b = arrayOperand(expression.e2, right.base);
-                const bytes = a.length * factsOf(leftType.nextOf).size;
+                const bytes = a.length * plan.elementSize;
                 equal = a.length == b.length
                     && (bytes == 0
                         || memcmp(a.elements, b.elements, bytes) == 0);
