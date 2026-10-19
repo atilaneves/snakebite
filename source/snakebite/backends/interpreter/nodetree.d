@@ -1231,9 +1231,10 @@ private final class ConditionalInto : SliceNode {
 
 // --- struct values ----------------------------------------------------
 
-// A struct value is written into the bytes at `dest`, as a slice is.
+// A struct or static array value is written into the bytes at `dest`, as a
+// slice is.
 
-// A struct whose bytes are known when the node is built.
+// A value whose bytes are known when the node is built.
 private final class ImageInto : Node {
     private immutable(ubyte)[] _image;
     public this(immutable(ubyte)[] image) { _image = image; }
@@ -3876,28 +3877,33 @@ private Node buildStructLiteral(E)(E ev, imported!"dmd.expression".StructLiteral
     return new StructLiteral(steps, facts.size, plan.zeroFill);
 }
 
-// `[a, b, c]` as a static array: each element fills its own place, and
-// `getElement` gives the elements that the literal leaves to its basis.
+// `[a, b, c]` as a static array: each element fills its own place. The
+// literal is written where the caller wants the result, with no staging
+// area, because only a return operand or a field of one reaches here.
 private Node buildArrayLiteral(E)(
     E ev, imported!"dmd.expression".ArrayLiteralExp literal,
 ) {
-    import dmd.expressionsem: toInteger;
-    import dmd.typesem: toBasetype;
+    import snakebite.backends.arrayliteral: ArrayLiteralPlan, planArrayLiteral;
+    import snakebite.nativelayout: isStoredLiteral;
 
-    auto arrayType = literal.type.toBasetype.isTypeSArray;
-    if (arrayType is null)
-        return null;
-    const count = cast(size_t) arrayType.dim.toInteger;
-    const stride = ev.factsOf(arrayType.next).size;
+    auto plan = planArrayLiteral(literal, ev._function);
+    assert(plan.result == ArrayLiteralPlan.Result.value,
+        "a static array literal is a value");
+    if (isStoredLiteral(literal)) {
+        auto image = new ubyte[ev.factsOf(literal.type).size];
+        ev._nativeData.write(
+            literal.type, ev.factsOf(literal.type), literal, image.ptr);
+        return new ImageInto(cast(immutable) image);
+    }
     Node[] steps;
-    foreach (i; 0 .. count) {
+    foreach (i; 0 .. plan.count) {
         auto node = buildFieldValue(
-            ev, i * stride, arrayType.next, literal.getElement(i));
+            ev, i * plan.elementFacts.size, plan.elementType, literal[i]);
         if (node is null)
             return null;
         steps ~= node;
     }
-    return new StructLiteral(steps, count * stride, false);
+    return new StructLiteral(steps, plan.bytes, false);
 }
 
 private Node buildInitStep(E)(E ev, InitStep step) {

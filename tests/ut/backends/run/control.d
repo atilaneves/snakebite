@@ -3285,6 +3285,7 @@ static foreach (backend; Matrix!()) {
             Inner copy(ref Inner source) { return source; }
             Plain at(Plain[] values, int i) { return values[i]; }
             int[3] filled(int n) { return [n, n + 1, n + 2]; }
+            int[2] constant() { return [1, 2]; }
 
             int main() {
                 int outerLocal = 100;
@@ -3310,7 +3311,7 @@ static foreach (backend; Matrix!()) {
                 Plain[2] two = [Plain(8, 9), Plain(10, 11)];
                 if (plain(true) != Plain(1, 2) || plain(false) != Plain(5, 6)
                         || copy(source) != source || at(two[], 1) != Plain(10, 11)
-                        || filled(4) != [4, 5, 6])
+                        || filled(4) != [4, 5, 6] || constant() != [1, 2])
                     return 5;
                 make(1, null);
                 return nested(5).get() == 105 ? 0 : 6;
