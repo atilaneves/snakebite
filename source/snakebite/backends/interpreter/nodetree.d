@@ -2225,29 +2225,23 @@ private Node buildValue(E)(E ev, Expression expression) {
 private Node buildIdentity(bool negate, E)(E ev, IdentityExp e) {
     import snakebite.backends.identity: identityPlan;
 
-    // The plan's width is the number of bytes dmd's comparison covers; a
-    // node serves the operands only if its own compare covers the same.
+    // `is` compares bits: the plan says how many, and which operands need
+    // no compare. The nodes below serve the widths they can carry.
     const plan = identityPlan(e);
     if (plan.staticArray || plan.skipCompare)
         return null;
-    if (isSlice(e.e1.type) && isSlice(e.e2.type)) {
-        if (plan.width != SliceValue.sizeof)
-            return null;
+    if (plan.width == SliceValue.sizeof) {
         auto left = buildSlice(ev, e.e1);
         auto right = buildSlice(ev, e.e2);
-        return left is null || right is null
-            ? null : new SliceIdentity!negate(left, right);
-    }
-    const operand = scalarOf(ev, e.e1.type);
-    if (operand.kind == Scalar.Kind.none
-            || scalarOf(ev, e.e2.type).kind != operand.kind
-            || operand.facts.size != plan.width)
+        if (left !is null && right !is null)
+            return new SliceIdentity!negate(left, right);
         return null;
+    }
     auto left = buildValue(ev, e.e1);
     auto right = buildValue(ev, e.e2);
     if (left is null || right is null)
         return null;
-    if (operand.kind == Scalar.Kind.integral) {
+    if (cast(DoubleNode) left is null && cast(DoubleNode) right is null) {
         // The same bits are the same value whatever the signedness.
         static Node same(L, R)(L l, R r) {
             return new IntegerCompare!(negate ? "!=" : "==", false, L, R)(l, r);
@@ -2255,6 +2249,8 @@ private Node buildIdentity(bool negate, E)(E ev, IdentityExp e) {
         return fuse!(same, long, longLeft, longRight)(
             operandOf(left), operandOf(right));
     }
+    if (cast(DoubleNode) left is null || cast(DoubleNode) right is null)
+        return null;
     static Node bits(T)(Node l, Node r) {
         static Node build(L, R)(L a, R b) {
             return new FloatIdentity!(negate, T, L, R)(a, b);
@@ -2262,7 +2258,11 @@ private Node buildIdentity(bool negate, E)(E ev, IdentityExp e) {
         return fuse!(build, double, onlyChild, onlyChild)(
             operandOf(l), operandOf(r));
     }
-    return byFloating!bits(operand.facts, left, right);
+    switch (plan.width) {
+        case float.sizeof: return bits!float(left, right);
+        case double.sizeof: return bits!double(left, right);
+        default: return null;
+    }
 }
 
 private template unaryOf(string op) {
