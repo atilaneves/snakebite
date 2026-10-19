@@ -9045,7 +9045,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // right operand exactly when D's own short-circuit rule says to -
     // `&&` skips it once the left side is already false, `||` once it is
     // already true - and whichever operand actually decided the answer is
-    // then reduced to a proper `bool` and copied out to `destOffset`.
+    // then reduced to a proper `bool` and copied out to `destOffset`. Two
+    // `bool` operands need no reduction: they already are `bool`, so they
+    // evaluate into one temporary instead (the fast path below).
     private void compileLogical(
         LogicalExp expression, in LogicalPlan plan,
         in size_t destOffset, in size_t width,
