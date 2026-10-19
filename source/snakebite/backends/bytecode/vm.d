@@ -343,8 +343,8 @@ public struct CallSite {
             return false;
         assert(function_.frameAlignment > 0
             && (function_.frameAlignment & (function_.frameAlignment - 1)) == 0);
-        const alignment = function_.frameAlignment > uint(Activation.alignof)
-            ? function_.frameAlignment : uint(Activation.alignof);
+        assert(function_.windowCallable);
+        const alignment = function_.activationAlignment;
         if (alignment > windowAlignment)
             return false;
         slot.frameOffset =
@@ -994,6 +994,19 @@ public struct Function {
     // is how far they reach from it.
     package size_t windowSlot = size_t.max;
     package size_t windowBytes;
+    // Facts about this function as a callee, fixed once it is compiled.
+    // Whether a caller can write the arguments into a call window: the
+    // layout has no D-variadic slots, no frame asks for a page of
+    // alignment, and there is no closure. The signature to compare against
+    // is `signature`, and the context slot, if any, is `contextOffset`.
+    package bool windowCallable;
+    // `frameAlignment`, raised to what an `Activation` needs.
+    package uint activationAlignment = uint(Activation.alignof);
+
+    package void fixActivationAlignment() {
+        activationAlignment = frameAlignment > uint(Activation.alignof)
+            ? frameAlignment : uint(Activation.alignof);
+    }
 }
 
 

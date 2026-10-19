@@ -1245,6 +1245,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         result.relocs = _relocs;
         result.windowSlot = _windowSlot;
         result.windowBytes = _windowReach;
+        result.windowCallable = windowFits(_function, _layout);
+        result.fixActivationAlignment();
         return result;
     }
 
