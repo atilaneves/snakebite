@@ -342,7 +342,13 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     }
 
     final override void visit(CmpExp expression) {
-        visitComparison(expression, comparisonPlan(expression));
+        visitComparison(expression, comparisonPlanOf(expression));
+    }
+
+    extern(D) protected ComparisonPlan comparisonPlanOf(
+        imported!"dmd.expression".BinExp expression,
+    ) {
+        return comparisonPlan(expression);
     }
 
     // The right operand of `&&` and `||` is a full expression

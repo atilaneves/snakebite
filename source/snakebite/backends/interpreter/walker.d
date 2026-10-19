@@ -226,6 +226,7 @@ import snakebite.backends.identity: IdentityPlan;
 import snakebite.backends.ifplan: IfPlan;
 import snakebite.backends.logical: LogicalPlan;
 import snakebite.backends.comparison: ComparisonPlan;
+import snakebite.backends.arithmetic: ArithmeticPlan;
 import snakebite.backends.controlflow: ControlFlowState,
     ScopeFrame, ScopePaths, scopePathsOf;
 import snakebite.backends.exceptionplan: CatchPlan, catchPlanOf;
@@ -2325,6 +2326,44 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // nothing to open or to release, so decided once per root.
     private NodeCache!(bool, 10) _plainRoots;
 
+    // The plan of an operator node is a function of its operand types,
+    // which do not change, so each node asks the type system once.
+    private NodeCache!(ArithmeticPlan, 10) _binaryPlans;
+    private NodeCache!(ArithmeticPlan, 8) _unaryPlans;
+    private NodeCache!(ComparisonPlan, 9) _comparisonPlans;
+
+    extern(D) private ArithmeticPlan arithmeticPlanOf(BinExp expression) {
+        import snakebite.backends.arithmetic: arithmeticPlan;
+
+        if (auto cached = _binaryPlans.find(cast(void*) expression))
+            return *cached;
+
+        return *_binaryPlans.insert(
+            cast(void*) expression, arithmeticPlan(expression));
+    }
+
+    extern(D) private ArithmeticPlan arithmeticPlanOf(UnaExp expression) {
+        import snakebite.backends.arithmetic: arithmeticPlan;
+
+        if (auto cached = _unaryPlans.find(cast(void*) expression))
+            return *cached;
+
+        return *_unaryPlans.insert(
+            cast(void*) expression, arithmeticPlan(expression));
+    }
+
+    extern(D) protected override ComparisonPlan comparisonPlanOf(
+        BinExp expression,
+    ) {
+        import snakebite.backends.comparison: comparisonPlan;
+
+        if (auto cached = _comparisonPlans.find(cast(void*) expression))
+            return *cached;
+
+        return *_comparisonPlans.insert(
+            cast(void*) expression, comparisonPlan(expression));
+    }
+
     extern(D) private bool isPlainRoot(Expression root) {
         if (auto cached = _plainRoots.find(cast(void*) root))
             return *cached;
@@ -3973,7 +4012,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
         import std.conv: text;
 
-        const plan = arithmeticPlan(expression);
+        const plan = arithmeticPlanOf(expression);
         with (ArithmeticPlan.Kind) final switch (plan.kind) {
             case integral, pointerOffset:
                 return storeIntegralAssign!op(expression, resolvedTarget);
@@ -4211,7 +4250,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
         import std.conv: text;
 
-        const plan = arithmeticPlan(expression);
+        const plan = arithmeticPlanOf(expression);
         with (ArithmeticPlan.Kind) final switch (plan.kind) {
             case integral:
                 return storeIntegralPost(expression, plan.facts);
@@ -4494,7 +4533,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.backends.comparison: comparisonPlan;
         import snakebite.nativelayout: storeIntegral;
 
-        const plan = comparisonPlan(expression);
+        const plan = comparisonPlanOf(expression);
         bool equal;
         with (ComparisonPlan.Kind) final switch (plan.kind) {
             case integral:
@@ -4739,7 +4778,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         enum floatingOperator = op == "+" || op == "-" || op == "*"
             || op == "/" || op == "%";
-        const plan = arithmeticPlan(expression);
+        const plan = arithmeticPlanOf(expression);
         with (ArithmeticPlan.Kind) final switch (plan.kind) {
             // Each operand widens to 64 bits with the signedness its own
             // type gives, `combine` reduces the two to one 64-bit result,
@@ -4867,7 +4906,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.nativevalue: negateComplex, storeFloating;
         import std.conv: text;
 
-        const plan = arithmeticPlan(expression);
+        const plan = arithmeticPlanOf(expression);
         with (ArithmeticPlan.Kind) final switch (plan.kind) {
             case integral: {
                 const a = asIntegral(expression.e1);
