@@ -489,6 +489,7 @@ private enum SliceSource : ubyte { slice, pointer, staticArray }
 // evaluator does.
 private final class SliceOf(SliceSource source) : SliceNode {
     private FailBounds _fail;
+    private TreeRoot* _root;
     private SliceExp _expression;
     private Node _base;
     private Node _lower;
@@ -498,10 +499,10 @@ private final class SliceOf(SliceSource source) : SliceNode {
     private bool _checkOrder;
     private bool _checkUpper;
     private bool _reportsLength;
-    public this(FailBounds fail, SliceExp expression, Node base, Node lower,
-            Node upper, size_t stride, size_t staticLength,
-            in SlicePlan plan) {
-        _fail = fail; _expression = expression; _base = base; _lower = lower;
+    public this(FailBounds fail, TreeRoot* root, SliceExp expression,
+            Node base, Node lower, Node upper, size_t stride,
+            size_t staticLength, in SlicePlan plan) {
+        _fail = fail; _root = root; _expression = expression; _base = base; _lower = lower;
         _upper = upper; _stride = stride; _staticLength = staticLength;
         _checkOrder = plan.checkOrder; _checkUpper = plan.checkUpper;
         _reportsLength = plan.reportsSourceLength;
@@ -523,13 +524,14 @@ private final class SliceOf(SliceSource source) : SliceNode {
         const lower = _lower is null ? size_t(0) : cast(size_t) _lower.executeLong(frame);
         const upper = _upper is null ? length : cast(size_t) _upper.executeLong(frame);
         if (_checkOrder && upper < lower || _checkUpper && upper > length)
-            fail(lower, upper, length);
+            fail(frame, lower, upper, length);
         *cast(SliceValue*) dest = SliceValue(upper - lower, base + lower * _stride);
     }
     pragma(inline, false)
-    private void fail(size_t lower, size_t upper, size_t length) {
+    private void fail(ubyte* frame, size_t lower, size_t upper,
+            size_t length) {
         const reported = _reportsLength ? length : 0;
-        _fail(BoundsCheck.slice, _expression.loc,
+        _fail(_root, frame, BoundsCheck.slice, _expression.loc,
             [cast(const(void)*) &lower, cast(const(void)*) &upper,
                 cast(const(void)*) &reported]);
     }
@@ -568,13 +570,14 @@ private final class StaticArrayToSlice : SliceNode {
 // The element of a dynamic array that is not an lvalue.
 private final class IndexValue : Node {
     private FailBounds _fail;
+    private TreeRoot* _root;
     private IndexExp _expression;
     private Node _array;
     private Node _index;
     private size_t _stride;
-    public this(FailBounds fail, IndexExp expression, Node array, Node index,
-            size_t stride) {
-        _fail = fail; _expression = expression; _array = array; _index = index;
+    public this(FailBounds fail, TreeRoot* root, IndexExp expression,
+            Node array, Node index, size_t stride) {
+        _fail = fail; _root = root; _expression = expression; _array = array; _index = index;
         _stride = stride;
     }
     public override ubyte* executeAddr(ubyte* frame) {
@@ -582,12 +585,12 @@ private final class IndexValue : Node {
         _array.executeInto(frame, cast(ubyte*) &value);
         const index = cast(size_t) _index.executeLong(frame);
         if (index >= value.length)
-            fail(index, value.length);
+            fail(frame, index, value.length);
         return value.pointer + index * _stride;
     }
     pragma(inline, false)
-    private void fail(size_t index, size_t length) {
-        _fail(BoundsCheck.index, _expression.loc,
+    private void fail(ubyte* frame, size_t index, size_t length) {
+        _fail(_root, frame, BoundsCheck.index, _expression.loc,
             [cast(const(void)*) &index, cast(const(void)*) &length]);
     }
 }
@@ -1759,7 +1762,7 @@ private Node buildIndexAddress(E)(E ev, IndexExp indexed) {
             if (array is null) {
                 auto value = buildSlice(ev, indexed.e1);
                 return value is null ? null : new IndexValue(
-                    &ev.failArrayBounds, indexed, value, position,
+                    &ev.failTreeBounds, ev._treeRoot, indexed, value, position,
                     element.size);
             }
             return indexOfArray(ev, indexed, array, position, element.size);
@@ -2038,18 +2041,18 @@ private Node buildSliceOf(E)(E ev, SliceExp expression) {
     auto sourceType = expression.e1.type.toBasetype;
     const stride = ev.factsOf(sourceType.nextOf).size;
     static Node make(SliceSource source)(
-        FailBounds fail, SliceExp expression, Node base, Node lower,
-        Node upper, size_t stride, size_t staticLength,
+        FailBounds fail, TreeRoot* root, SliceExp expression, Node base,
+        Node lower, Node upper, size_t stride, size_t staticLength,
         in SlicePlan plan,
     ) {
-        return new SliceOf!source(fail, expression, base, lower, upper,
+        return new SliceOf!source(fail, root, expression, base, lower, upper,
             stride, staticLength, plan);
     }
     switch (sourceType.ty) with (TY) {
         case Tarray: {
             auto base = buildSlice(ev, expression.e1);
             return base is null ? null : make!(SliceSource.slice)(
-                &ev.failArrayBounds, expression, base, lower, upper, stride,
+                &ev.failTreeBounds, ev._treeRoot, expression, base, lower, upper, stride,
                 0, plan);
         }
         case Tpointer: {
@@ -2058,14 +2061,14 @@ private Node buildSliceOf(E)(E ev, SliceExp expression) {
             else {
                 auto base = buildValue(ev, expression.e1);
                 return base is null ? null : make!(SliceSource.pointer)(
-                    &ev.failArrayBounds, expression, base, lower, upper,
+                    &ev.failTreeBounds, ev._treeRoot, expression, base, lower, upper,
                     stride, 0, plan);
             }
         }
         case Tsarray: {
             auto base = buildAddress(ev, expression.e1);
             return base is null ? null : make!(SliceSource.staticArray)(
-                &ev.failArrayBounds, expression, base, lower, upper, stride,
+                &ev.failTreeBounds, ev._treeRoot, expression, base, lower, upper, stride,
                 cast(size_t) sourceType.isTypeSArray.dim.toInteger, plan);
         }
         default:
