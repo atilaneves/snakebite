@@ -15,7 +15,8 @@
 set -euo pipefail
 sb=$(realpath "$1"); core=$2; k=$3; shift 3
 awfy=$HOME/coding/d/awfy/benchmarks/D
-declare -A inner=([Json]=100 [Sieve]=150 [Mandelbrot]=500 [Richards]=2 [Storage]=20 [List]=40 [NBody]=250000 [Havlak]=1 [DeltaBlue]=100)
+declare -A inner=([Json]=100 [Sieve]=150 [Mandelbrot]=500 [Richards]=2 [Storage]=20 [List]=40
+    [Bounce]=100 [NBody]=250000 [CD]=100 [Havlak]=1 [DeltaBlue]=100)
 benches=("$@"); [ ${#benches[@]} -eq 0 ] && benches=(Sieve Mandelbrot Richards Storage List)
 run() {
     (cd "$awfy" && taskset -c "$core" setarch -R "$@" "$sb" --DRT-gcopt=disable:1 -b interpreter \
