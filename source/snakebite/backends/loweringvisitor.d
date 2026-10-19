@@ -162,6 +162,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     }
 
     private void throwOperand(Expression operand) {
+        visitThrowBegin;
         size_t thrown;
         fullExpressionResult(FullExpressionScope.Position.throwOperand,
             operand,
@@ -271,6 +272,8 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
 
     protected abstract void visitWithOperand(WithStatement statement);
     protected abstract void visitWithBody(WithStatement statement);
+
+    protected void visitThrowBegin() {}
 
     // Evaluates the operand and returns a backend-defined handle for the
     // object it made. The handle is a plain number because a destructor of
