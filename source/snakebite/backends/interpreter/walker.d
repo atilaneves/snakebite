@@ -7256,6 +7256,7 @@ private final class NtLocalLong(T) : NtLong {
     override long executeLong(ubyte* frame) {
         return *cast(T*) (frame + _offset);
     }
+    mixin NtBoolFromLong;
 }
 
 private final class NtLocalDouble(T) : NtDouble {
@@ -7272,6 +7273,7 @@ private final class NtAddrLong(T) : NtLong {
     override long executeLong(ubyte* frame) {
         return *cast(T*) _address.executeAddr(frame);
     }
+    mixin NtBoolFromLong;
 }
 
 private final class NtAddrDouble(T) : NtDouble {
@@ -7513,6 +7515,7 @@ private final class NtWrap(T) : NtLong {
     override long executeLong(ubyte* frame) {
         return cast(T) _operand.executeLong(frame);
     }
+    mixin NtBoolFromLong;
 }
 
 private final class NtLongToDouble(Source, Dest) : NtDouble {
@@ -7711,16 +7714,34 @@ private final class NtIf : NtNode {
     }
 }
 
-private final class NtFor(E) : NtNode {
+private struct NtNodeCond {
+    NtNode node;
+    bool test(ubyte* frame) { return node is null || node.executeBool(frame); }
+}
+
+private struct NtCompareCond(string op, L, R) {
+    L left;
+    R right;
+    bool test(ubyte* frame) {
+        const a = left.value(frame);
+        const b = right.value(frame);
+        return mixin("a " ~ op ~ " b");
+    }
+}
+
+private abstract class NtLoop : NtNode {
+    protected NtNode _body;
+}
+
+private final class NtFor(E, C) : NtLoop {
     private E _ev;
-    private NtNode _condition;
-    private NtNode _body;
+    private C _condition;
     private NtNode _increment;
-    this(E ev, NtNode condition, NtNode increment) {
+    this(E ev, C condition, NtNode increment) {
         _ev = ev; _condition = condition; _increment = increment;
     }
     override NtFlow executeStmt(ubyte* frame) {
-        while (_condition is null || _condition.executeBool(frame)) {
+        while (_condition.test(frame)) {
             if (_body !is null) {
                 const flow = _body.executeStmt(frame);
                 if (flow != NtFlow.normal) {
@@ -7739,6 +7760,29 @@ private final class NtFor(E) : NtNode {
         }
         return NtFlow.normal;
     }
+}
+
+private NtLoop ntMakeFor(E)(E ev, NtNode test, NtNode step) {
+    import std.meta: AliasSeq;
+
+    if (auto fused = ntFuseLoopCondition(ev, test, step))
+        return fused;
+    return new NtFor!(E, NtNodeCond)(ev, NtNodeCond(test), step);
+}
+
+private NtLoop ntFuseLoopCondition(E)(E ev, NtNode test, NtNode step) {
+    import std.meta: AliasSeq;
+
+    static foreach (op; AliasSeq!("<", "<=", ">", ">=", "==", "!="))
+        static foreach (rk; AliasSeq!(NtOpKind.localInt, NtOpKind.constant)) {{
+            alias L = NtLocalOp!int;
+            alias R = NtOpType!rk;
+            if (auto compare = cast(NtIntCompareF!(op, false, L, R)) test)
+                return new NtFor!(E, NtCompareCond!(op, L, R))(
+                    ev, NtCompareCond!(op, L, R)(compare._left, compare._right),
+                    step);
+        }}
+    return null;
 }
 
 private final class NtBreak : NtNode {
@@ -7960,6 +8004,10 @@ private NtNode ntFuseDouble(alias make)(NtDOperand left, NtDOperand right) {
 
 // The statement form of an expression node: the statement runs the
 // expression directly, with no wrapper statement node.
+private mixin template NtBoolFromLong() {
+    override bool executeBool(ubyte* frame) { return executeLong(frame) != 0; }
+}
+
 private mixin template NtStatementForm(string method) {
     override bool runsAsStatement() { return true; }
     override NtFlow executeStmt(ubyte* frame) {
@@ -7977,6 +8025,7 @@ private final class NtIntBinF(string op, T, L, R) : NtLong {
         const b = _right.value(frame);
         return cast(T) mixin("a " ~ op ~ " b");
     }
+    mixin NtBoolFromLong;
 }
 
 private final class NtFloatBinF(string op, L, R) : NtDouble {
@@ -8087,6 +8136,15 @@ private final class NtOpAssignLocalF(string op, T, S) : NtLong {
     mixin NtStatementForm!"executeLong";
 }
 
+private final class NtAndAndFlag : NtBool {
+    private size_t _offset;
+    private NtNode _right;
+    this(size_t offset, NtNode right) { _offset = offset; _right = right; }
+    override bool executeBool(ubyte* frame) {
+        return *cast(ubyte*) (frame + _offset) != 0 && _right.executeBool(frame);
+    }
+}
+
 private final class NtSeq2 : NtNode {
     private NtNode _first;
     private NtNode _second;
@@ -8151,8 +8209,40 @@ private NtNode ntMakeStoreLocalDoubleConst(T)(size_t offset, double value) {
     return new NtStoreLocalDoubleConst!T(offset, cast(T) value);
 }
 
+private final class NtStoreLocalDoubleOf(B) : NtDouble {
+    private size_t _offset;
+    private B _value;
+    this(size_t offset, B value) { _offset = offset; _value = value; }
+    override double executeDouble(ubyte* frame) {
+        const double value = _value.executeDouble(frame);
+        *cast(double*) (frame + _offset) = value;
+        return value;
+    }
+    mixin NtStatementForm!"executeDouble";
+}
+
+private NtNode ntFuseStoreDouble(NtNode value, size_t offset) {
+    import std.meta: AliasSeq;
+
+    static foreach (op; AliasSeq!("+", "-", "*", "/"))
+        static foreach (lk; AliasSeq!(NtDKind.node, NtDKind.local,
+                NtDKind.constant))
+            static foreach (rk; AliasSeq!(NtDKind.node, NtDKind.local,
+                    NtDKind.constant))
+                static if ((lk != NtDKind.node || rk != NtDKind.node)
+                        && (lk != NtDKind.constant || rk != NtDKind.constant)) {{
+                    alias B = NtFloatBinF!(op, NtDopType!lk, NtDopType!rk);
+                    if (auto bin = cast(B) value)
+                        return new NtStoreLocalDoubleOf!B(offset, bin);
+                }}
+    return null;
+}
+
 private NtNode ntBuildStoreLocal(in NtScalar target, size_t offset,
         NtNode value) {
+    if (target.kind == NtKind.floating && target.facts.size == 8)
+        if (auto fused = ntFuseStoreDouble(value, offset))
+            return fused;
     if (target.kind == NtKind.floating) {
         if (auto leaf = cast(NtConstDouble) value)
             return ntByFloating!ntMakeStoreLocalDoubleConst(
@@ -8741,6 +8831,8 @@ private NtNode ntBuildValue(E)(E ev, Expression expression) {
                     if (source.kind != NtKind.integral
                             || scalar.kind != NtKind.integral)
                         return null;
+                    if (scalar.facts.size == 8)
+                        return operand;
                     return ntByIntegral!ntMakeWrap(scalar.facts, operand);
                 case truth:
                     return scalar.kind == NtKind.integral
@@ -8805,8 +8897,12 @@ private NtNode ntBuildValue(E)(E ev, Expression expression) {
             auto right = ntBuildValue(ev, logical.e2);
             if (left is null || right is null)
                 return null;
-            return plan.andAnd ? new NtAndAnd(left, right)
-                : new NtOrOr(left, right);
+            if (plan.andAnd) {
+                if (auto flag = cast(NtLocalLong!ubyte) left)
+                    return new NtAndAndFlag(flag._offset, right);
+                return new NtAndAnd(left, right);
+            }
+            return new NtOrOr(left, right);
         }
         case not: {
             auto operand = ntBuildValue(ev, expression.isNotExp.e1);
@@ -8981,7 +9077,7 @@ private NtNode ntBuildStatement(E)(E ev, Statement statement, NtNode* slot) {
                     return generic();
                 }
             }
-            auto node = new NtFor!E(ev, test, step);
+            auto node = ntMakeFor(ev, test, step);
             if (loop._body !is null)
                 node._body = child(loop._body, &node._body);
             return node;
