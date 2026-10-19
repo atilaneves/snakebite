@@ -1422,6 +1422,90 @@ private struct FrameGuard {
     }
 }
 
+// A native call that the plan shows to be one to three word arguments in
+// the first integer registers and an integer result: the node calls the
+// target with the words itself, and skips the plan's own work
+// (`directWordCallTarget`).
+private struct DirectWordCall {
+    private alias Load = imported!"snakebite.ffi.load".Load;
+    private struct Pair { ulong low, high; }
+    private alias Target = extern(C) Pair function(ulong, ulong, ulong);
+
+    private const(void)* _target;
+    private ubyte[3] _order;
+    private Load[3] _loads;
+    private size_t _count, _resultWidth;
+
+    // Whether the call of `callee` through `plan` is one. A receiver or a
+    // result that is not a whole number of words is not.
+    public bool decide(
+        const(imported!"snakebite.ffi.plan".CallPlan)* plan,
+        in TreeCallee* callee,
+    ) {
+        import snakebite.ffi.load: loadWidth;
+        import snakebite.ffi.plan: directWordCallTarget;
+
+        _target = null;
+        const layout = callee.layout;
+        if (plan is null || layout.hiddenThis.variable !is null)
+            return false;
+        size_t resultWidth, count;
+        const target = directWordCallTarget(
+            plan, _order, _loads, resultWidth, count);
+        if (target is null || count != layout.parameters.length
+                || callee.returnFacts.size != resultWidth)
+            return false;
+        foreach (i, parameter; layout.parameters)
+            if (parameter.isRef || parameter.facts.size != loadWidth(_loads[i]))
+                return false;
+        _target = target;
+        _count = count;
+        _resultWidth = resultWidth;
+        return true;
+    }
+
+    public bool decided() const { return _target !is null; }
+
+    public void run(E)(
+        E ev, in TreeCallee* callee, const(ubyte)* base, void* place,
+    ) {
+        ulong[3] words;
+        foreach (i, parameter; callee.layout.parameters)
+            words[i] = wordAt(base + parameter.offset, _loads[i]);
+        const target = cast(Target) _target;
+        const first = words[_order[0]], second = words[_order[1]],
+            third = words[_order[2]];
+        const width = _resultWidth;
+        ev.crossNative({
+            const result = target(first, second, third);
+            switch (width) {
+                case 1: *cast(ubyte*) place = cast(ubyte) result.low; break;
+                case 2: *cast(ushort*) place = cast(ushort) result.low; break;
+                case 4: *cast(uint*) place = cast(uint) result.low; break;
+                case 16:
+                    (cast(ulong*) place)[0] = result.low;
+                    (cast(ulong*) place)[1] = result.high;
+                    break;
+                default: *cast(ulong*) place = result.low; break;
+            }
+        });
+    }
+
+    private static ulong wordAt(const(ubyte)* place, Load load) {
+        final switch (load) with (Load) {
+            case word64: return *cast(const(ulong)*) place;
+            case zero32: return *cast(const(uint)*) place;
+            case sign32: return cast(ulong) cast(long) *cast(const(int)*) place;
+            case zero8: return *place;
+            case zero16: return *cast(const(ushort)*) place;
+            case sign8: return cast(ulong) cast(long) *cast(const(byte)*) place;
+            case sign16: return cast(ulong) cast(long) *cast(const(short)*) place;
+            case copy, copy16, address:
+                assert(0, "directWordCallTarget yields only word loads");
+        }
+    }
+}
+
 // A direct or virtual call with scalar, `ref` or dynamic array parameters,
 // and a scalar, dynamic array or no result. The callee is a guest function,
 // a native function or a builtin. It pushes the callee frame, evaluates each
@@ -1445,6 +1529,7 @@ private final class Call(E) : Node {
     private TreeCallee* _callee;
     private const(void)* _vtable;
     private TreeRoot* _root;
+    private DirectWordCall _direct;
 
     public this(E ev, CallExp site, FuncDeclaration method, Node receiver,
             bool receiverIsAddress, bool virtual, Node[] args,
@@ -1478,6 +1563,8 @@ private final class Call(E) : Node {
         _route = decision.route;
         _plan = _route == CallSelection.Route.native
             ? _ev._plans.of(callee.function_) : null;
+        if (!_virtual && _route == CallSelection.Route.native)
+            _direct.decide(_plan, callee);
     }
 
     // Returns the receiver of the call, 0 when there is none.
@@ -1571,7 +1658,13 @@ private final class Call(E) : Node {
             case guest:
                 _ev.runTreeCallee(callee, base, result);
                 break;
-            case native, builtin:
+            case native:
+                if (_direct.decided)
+                    _direct.run(_ev, callee, base, result);
+                else
+                    _ev.runHostCallee(callee, _plan, base, result);
+                break;
+            case builtin:
                 _ev.runHostCallee(callee, _plan, base, result);
                 break;
             case vaStart, vaCopy, alloca:
