@@ -1125,6 +1125,18 @@ private final class PostStep(T, long delta) : LongNode {
     mixin StatementForm!"executeLong";
 }
 
+// A `ref` variable bound to the address of other storage.
+private final class BindReference : Node {
+    private size_t _offset;
+    private Node _address;
+    public this(size_t offset, Node address) {
+        _offset = offset; _address = address;
+    }
+    public override void executeVoid(ubyte* frame) {
+        *cast(ubyte**) (frame + _offset) = _address.executeAddr(frame);
+    }
+}
+
 // A dynamic array stored to a frame slot or to the address of other storage.
 private final class StoreSlice(A) : SliceNode {
     private A _address;
@@ -3550,6 +3562,11 @@ private Node buildVariable(E)(
     auto initializer = variable._init.isExpInitializer;
     if (initializer is null)
         return null;
+    if (ev.isRefStorage(variable)
+            && !initializerRunsForEffect(initializer, variable))
+        return buildReferenceBinding(
+            ev, variable, initializerValueOf(initializer),
+            positionOf(ev, declaration));
     const scalar = scalarOf(ev, variable.type);
     const variableIsSlice = isSlice(variable.type);
     if (scalar.kind == Scalar.Kind.none && !variableIsSlice)
@@ -3579,6 +3596,19 @@ private Node buildVariable(E)(
         return null;
     return statementOf(storeToFrame(scalar, slot.offset, node),
         positionOf(ev, declaration));
+}
+
+// A `ref` variable holds the address of the storage it names, whatever the
+// type of that storage is.
+private Node buildReferenceBinding(E)(
+    E ev, VarDeclaration variable, Expression value, Position position,
+) {
+    const slot = slotOf(ev, variable);
+    if (!slot.ok)
+        return null;
+    auto address = buildAddress(ev, value);
+    return address is null
+        ? null : statementOf(new BindReference(slot.offset, address), position);
 }
 
 private Node buildStatement(E)(E ev, Statement statement, Node* slot) {

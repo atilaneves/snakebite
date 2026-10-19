@@ -3181,3 +3181,31 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// `foreach (ref element; ...)` declares a `ref` variable that holds the
+// address of the element, so writes through it change the array.
+static foreach (backend; Matrix!()) {
+    @("foreachRefBindsTheElement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Cell { int a; double b; }
+            int main() {
+                Cell[4] cells;
+                foreach (i, ref cell; cells) {
+                    cell.a = cast(int) i;
+                    cell.b = i * 0.5;
+                }
+                long[] dynamic = [1, 2, 3];
+                foreach (ref element; dynamic)
+                    element *= 2;
+                foreach_reverse (ref element; dynamic)
+                    element += 1;
+                double total = 0;
+                foreach (ref cell; cells)
+                    total += cell.a + cell.b;
+                return dynamic == [3, 5, 7] && total == 9.0 ? 0 : 1;
+            }
+        });
+    }
+}
