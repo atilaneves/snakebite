@@ -727,6 +727,18 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // A label stays pending while its wrapped statement is entered. The
     // wrapped loop takes it, even when dmd put a scope block between them.
     private Identifier _pendingLoopLabel;
+    // The tree whose nodes are being built (`Uninitialised`); each node that
+    // syncs later names it.
+    package TreeRoot* _treeRoot;
+    // The guard of the running call. A guard lives as long as its call, so
+    // no two calls that run at the same time have the same one.
+    private CallStateGuard* _innermost;
+    // The guard of the call that `_type`, `_facts`, `_frameBase`,
+    // `_closureBase`, `_layout`, `_activeClosurePlan`, `_pendingLoopLabel`,
+    // `_controlFlow`, `_returned` and `ctfeBlockDepth` (the function's
+    // fields) describe. A call whose tree nodes run none of the original
+    // evaluator leaves them to an outer call (`syncTree`).
+    private CallStateGuard* _fieldsOwner;
     // A control transfer carries DMD's resolved statement destination. The
     // state also records when a function is being resumed at that statement,
     // so every enclosing visitor can continue its normal statement sequence.
@@ -846,7 +858,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         ubyte entry; // Only its address matters: it marks an active entry.
         auto parent = _frames.backendEntry; // Restored as a mutable entry link.
         const frameMark = _frames.mark;
-        const guard = CallStateGuard(this);
+        auto guard = CallStateGuard(this);
         scope(exit) {
             unregister(&_guestRun);
             _frames.backendEntry = parent;
@@ -1114,7 +1126,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     // DMD fills `closureVars` while analyzing the body. This plan reads
     // that list with the closure decision after the same semantic pass.
-    private const(ClosurePlan)* closurePlanOf(
+    package const(ClosurePlan)* closurePlanOf(
         FuncDeclaration function_,
     ) {
         if (auto cached = function_ in _closurePlans)
@@ -1326,7 +1338,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         }
 
         returnPlace = layout.returnPlace.bind(&_frames, frameBase, returnPlace);
-        const guard = CallStateGuard(this);
+        auto guard = CallStateGuard(this);
+        takeFunctionFields;
 
         const closurePlan = closurePlanOf(function_);
         _closureBase = null;
@@ -1365,7 +1378,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     ) {
         if (auto found = function_ in _trees)
             return *found;
-        auto root = rootOf(this, body_, layout);
+        auto root = rootOf(this, function_, body_, layout);
         _trees[function_] = root;
         return root;
     }
@@ -1451,8 +1464,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         callee.function_ = function_;
         callee.decision = decision;
         callee.layout = layout;
-        callee.closurePlan = closurePlan;
-        callee.returnType = returnType;
         callee.returnFacts = factsOf(returnType);
         callee.reservesFast = layout.size != 0
             && layout.alignment != 0
@@ -1490,26 +1501,57 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return;
         }
 
-        const guard = CallStateGuard(this);
-        enterTreeCallee(callee, calleeFrame, place);
+        auto guard = CallStateGuard(this);
+        _place = place;
+        _function = callee.function_;
         executeTreeCallee(callee, calleeFrame);
     }
 
-    private void enterTreeCallee(
-        TreeCallee* callee, ubyte* calleeFrame, void* place,
-    ) {
+    // The original evaluator reads the function's fields; a tree node reads
+    // none of them. A call between tree nodes therefore leaves them alone,
+    // and each node that hands control to the original evaluator calls
+    // `syncTree` first, with the tree and frame it runs for. `_place` and
+    // `_function` are always the running call's: the return nodes write
+    // through `_place`, and the fault handler reads `_function` whatever
+    // runs.
+    //
+    // A call whose node synced gives the fields back when it ends, as the
+    // original evaluator's calls do, so the fields never describe a call
+    // that has ended.
+    package void syncTree(TreeRoot* root, ubyte* frame) {
+        if (_fieldsOwner is _innermost)
+            return;
+        setFunctionFields(root, frame);
+    }
+
+    pragma(inline, false)
+    private void setFunctionFields(TreeRoot* root, ubyte* frame) {
+        takeFunctionFields;
+        _type = root.returnType;
+        _facts = root.returnFacts;
+        _frameBase = frame;
         _closureBase = null;
-        _type = callee.returnType;
-        _facts = callee.returnFacts;
-        _place = place;
-        _frameBase = calleeFrame;
-        _layout = callee.layout;
-        _function = callee.function_;
-        _activeClosurePlan = callee.closurePlan;
+        _layout = root.layout;
+        _activeClosurePlan = root.closurePlan;
         _pendingLoopLabel = null;
-        _controlFlow = ControlFlowState.init;
         _returned = ReturnedLvalue.init;
         ctfeBlockDepth = 0;
+    }
+
+    // Makes the running call the owner of the function's fields, keeping
+    // the previous owner's values in its guard. Call it before writing them.
+    private void takeFunctionFields() {
+        if (_fieldsOwner !is _innermost)
+            _innermost.spill;
+    }
+
+    // A bounds check of a tree node failed.
+    extern(D) package void failTreeBounds(
+        TreeRoot* root, ubyte* frame,
+        in BoundsCheck check, in Loc loc, scope const(void*)[] extraArguments,
+    ) {
+        syncTree(root, frame);
+        failArrayBounds(check, loc, extraArguments);
     }
 
     private void executeTreeCallee(TreeCallee* callee, ubyte* calleeFrame) {
@@ -1521,6 +1563,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         }
         const flow = root.execute(calleeFrame);
         if (flow == TreeFlow.generic && _controlFlow.hasGoto) {
+            syncTree(root, calleeFrame);
             _controlFlow.resume;
             while (true) {
                 callee.function_.fbody.accept(this);
@@ -1995,59 +2038,84 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // destructor puts every one back when the call unwinds, normally or
     // by throw. One field list in one place, instead of a saved variable
     // plus a `scope(exit)` line per field growing at the call site.
+    //
+    // The function's fields (`_fieldsOwner`) are saved when the call first
+    // takes them (`spill`), not when it starts: a call between tree nodes
+    // often never does.
     private static struct CallStateGuard {
         private Evaluator _evaluator;
-        private Type _type;
-        private TypeFacts _facts;
+        private CallStateGuard* _outer;
         private void* _place;
-        private ubyte* _frameBase;
-        private ubyte* _closureBase;
-        private const(FrameLayout)* _layout;
-        private const(ClosurePlan)* _activeClosurePlan;
         private FuncDeclaration _function;
-        private Identifier _pendingLoopLabel;
-        private ControlFlowState _controlFlow;
-        private ReturnedLvalue _returned;
-        private uint _ctfeBlockDepth;
         private const(void)* _root;
         private size_t _activationMark;
+        // The fields below hold the previous owner's values, and are set only
+        // while `_evaluator._fieldsOwner is &this` (`spill`).
+        private CallStateGuard* _outerFieldsOwner = void;
+        private Type _type = void;
+        private TypeFacts _facts = void;
+        private ubyte* _frameBase = void;
+        private ubyte* _closureBase = void;
+        private const(FrameLayout)* _layout = void;
+        private const(ClosurePlan)* _activeClosurePlan = void;
+        private Identifier _pendingLoopLabel = void;
+        private ControlFlowState _controlFlow = void;
+        private ReturnedLvalue _returned = void;
+        private uint _ctfeBlockDepth = void;
 
         @disable this();
         @disable this(this);
 
         private this(Evaluator evaluator) {
             _evaluator = evaluator;
-            _type = evaluator._type;
-            _facts = evaluator._facts;
+            _outer = evaluator._innermost;
             _place = evaluator._place;
-            _frameBase = evaluator._frameBase;
-            _closureBase = evaluator._closureBase;
-            _layout = evaluator._layout;
-            _activeClosurePlan = evaluator._activeClosurePlan;
             _function = evaluator._function;
-            _pendingLoopLabel = evaluator._pendingLoopLabel;
-            _controlFlow = evaluator._controlFlow;
-            _returned = evaluator._returned;
-            _ctfeBlockDepth = evaluator.ctfeBlockDepth;
             _root = *evaluator._temporaries.rootSlot;
             _activationMark = evaluator._activationAllocations.length;
+            evaluator._innermost = &this;
         }
 
         ~this() {
+            _evaluator._place = _place;
+            _evaluator._function = _function;
+            *_evaluator._temporaries.rootSlot = _root;
+            if (_evaluator._fieldsOwner is &this)
+                unspill;
+            _evaluator._innermost = _outer;
+            if (_evaluator._activationAllocations.length > _activationMark)
+                _evaluator.releaseActivationAllocations(_activationMark);
+        }
+
+        pragma(inline, false)
+        private void spill() {
+            _outerFieldsOwner = _evaluator._fieldsOwner;
+            _type = _evaluator._type;
+            _facts = _evaluator._facts;
+            _frameBase = _evaluator._frameBase;
+            _closureBase = _evaluator._closureBase;
+            _layout = _evaluator._layout;
+            _activeClosurePlan = _evaluator._activeClosurePlan;
+            _pendingLoopLabel = _evaluator._pendingLoopLabel;
+            _controlFlow = _evaluator._controlFlow;
+            _returned = _evaluator._returned;
+            _ctfeBlockDepth = _evaluator.ctfeBlockDepth;
+            _evaluator._fieldsOwner = &this;
+        }
+
+        pragma(inline, false)
+        private void unspill() {
             _evaluator._type = _type;
             _evaluator._facts = _facts;
-            _evaluator._place = _place;
             _evaluator._frameBase = _frameBase;
             _evaluator._closureBase = _closureBase;
             _evaluator._layout = _layout;
             _evaluator._activeClosurePlan = _activeClosurePlan;
-            _evaluator._function = _function;
             _evaluator._pendingLoopLabel = _pendingLoopLabel;
             _evaluator._controlFlow = _controlFlow;
             _evaluator._returned = _returned;
             _evaluator.ctfeBlockDepth = _ctfeBlockDepth;
-            *_evaluator._temporaries.rootSlot = _root;
-            _evaluator.releaseActivationAllocations(_activationMark);
+            _evaluator._fieldsOwner = _outerFieldsOwner;
         }
     }
 

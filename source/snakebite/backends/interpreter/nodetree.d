@@ -31,9 +31,21 @@ import std.traits: Select, isFloatingPoint;
 // resolve.
 package enum TreeFlow : ubyte { normal, break_, continue_, return_, generic }
 
+// A function's tree, with what the evaluator's per-function fields hold while
+// the function runs. A tree node reads none of those fields; the nodes that
+// hand control to the evaluator set them first (`syncTree`).
 package struct TreeRoot {
     private const(imported!"snakebite.backends.layout".FrameLayout)* _layout;
     private Node _body;
+    package const(imported!"snakebite.backends.closureplan".ClosurePlan)*
+        closurePlan;
+    package Type returnType;
+    package TypeFacts returnFacts;
+
+    package const(imported!"snakebite.backends.layout".FrameLayout)* layout()
+        const {
+        return _layout;
+    }
 
     package bool hasLayout(
         in imported!"snakebite.backends.layout".FrameLayout* layout,
@@ -47,12 +59,17 @@ package struct TreeRoot {
 }
 
 package TreeRoot* rootOf(E)(
-    E ev, Statement body_,
+    E ev, FuncDeclaration function_, Statement body_,
     const(imported!"snakebite.backends.layout".FrameLayout)* layout,
 ) {
+    import dmd.typesem: nextOf;
+
     auto root = new TreeRoot;
     root._layout = layout;
-    root._body = new Uninitialised!E(ev, body_, &root._body);
+    root.closurePlan = ev.closurePlanOf(function_);
+    root.returnType = function_.type.nextOf;
+    root.returnFacts = ev.factsOf(root.returnType);
+    root._body = new Uninitialised!E(ev, body_, &root._body, root);
     return root;
 }
 
@@ -62,10 +79,7 @@ package struct TreeCallee {
     package FuncDeclaration function_;
     package imported!"snakebite.backends.calls".CallSelection.Decision decision;
     package const(imported!"snakebite.backends.layout".FrameLayout)* layout;
-    package const(imported!"snakebite.backends.closureplan".ClosurePlan)*
-        closurePlan;
     package TreeRoot* root;
-    package Type returnType;
     package TypeFacts returnFacts;
     // Whether the frame meets the contract of `FrameStack.reserveFast`.
     package bool reservesFast;
@@ -281,57 +295,60 @@ private final class Dereference : Node {
 }
 
 private alias FailBounds = void delegate(
-    in BoundsCheck, in Loc, scope const(void*)[],
+    TreeRoot*, ubyte*, in BoundsCheck, in Loc, scope const(void*)[],
 );
 
 private final class IndexDynamic(A, I) : Node {
     private FailBounds _fail;
+    private TreeRoot* _root;
     private IndexExp _expression;
     private A _array;
     private I _index;
     private size_t _stride;
-    public this(FailBounds fail, IndexExp expression, A array, I index, size_t stride) {
-        _fail = fail; _expression = expression; _array = array; _index = index;
-        _stride = stride;
+    public this(FailBounds fail, TreeRoot* root, IndexExp expression, A array,
+            I index, size_t stride) {
+        _fail = fail; _root = root; _expression = expression; _array = array;
+        _index = index; _stride = stride;
     }
     public override ubyte* executeAddr(ubyte* frame) {
         const index = cast(size_t) _index.value(frame);
         auto array = _array.address(frame);
         const length = *cast(size_t*) array;
         if (index >= length)
-            fail(index, length);
+            fail(frame, index, length);
         return *cast(ubyte**) (array + size_t.sizeof) + index * _stride;
     }
     // Out of line, so that the check costs the fast path no register.
     pragma(inline, false)
-    private void fail(size_t index, size_t length) {
-        _fail(BoundsCheck.index, _expression.loc,
+    private void fail(ubyte* frame, size_t index, size_t length) {
+        _fail(_root, frame, BoundsCheck.index, _expression.loc,
             [cast(const(void)*) &index, cast(const(void)*) &length]);
     }
 }
 
 private final class IndexStatic : Node {
     private FailBounds _fail;
+    private TreeRoot* _root;
     private IndexExp _expression;
     private Node _array;
     private Node _index;
     private size_t _stride;
     private size_t _length;
-    public this(FailBounds fail, IndexExp expression, Node array, Node index,
-            size_t stride, size_t length) {
-        _fail = fail; _expression = expression; _array = array; _index = index;
-        _stride = stride; _length = length;
+    public this(FailBounds fail, TreeRoot* root, IndexExp expression,
+            Node array, Node index, size_t stride, size_t length) {
+        _fail = fail; _root = root; _expression = expression; _array = array;
+        _index = index; _stride = stride; _length = length;
     }
     public override ubyte* executeAddr(ubyte* frame) {
         const index = cast(size_t) _index.executeLong(frame);
         if (index >= _length)
-            fail(index);
+            fail(frame, index);
         return _array.executeAddr(frame) + index * _stride;
     }
     pragma(inline, false)
-    private void fail(size_t index) {
+    private void fail(ubyte* frame, size_t index) {
         auto length = _length;
-        _fail(BoundsCheck.index, _expression.loc,
+        _fail(_root, frame, BoundsCheck.index, _expression.loc,
             [cast(const(void)*) &index, cast(const(void)*) &length]);
     }
 }
@@ -1280,8 +1297,12 @@ private final class ReturnValue(T) : Node {
 private final class GenericStatement(E) : Node {
     private E _ev;
     private Statement _statement;
-    public this(E ev, Statement statement) { _ev = ev; _statement = statement; }
-    public override TreeFlow executeStmt(ubyte*) {
+    private TreeRoot* _root;
+    public this(E ev, Statement statement) {
+        _ev = ev; _statement = statement; _root = ev._treeRoot;
+    }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        _ev.syncTree(_root, frame);
         // The evaluator runs the statement as it runs one outside the tree:
         // with no expression named until the statement opens one.
         *_ev._temporaries.rootSlot = null;
@@ -1293,8 +1314,14 @@ private final class GenericStatement(E) : Node {
 private final class GenericCondition(E) : BoolNode {
     private E _ev;
     private Expression _condition;
-    public this(E ev, Expression condition) { _ev = ev; _condition = condition; }
-    public override bool executeBool(ubyte*) { return _ev.conditionHolds(_condition); }
+    private TreeRoot* _root;
+    public this(E ev, Expression condition) {
+        _ev = ev; _condition = condition; _root = ev._treeRoot;
+    }
+    public override bool executeBool(ubyte* frame) {
+        _ev.syncTree(_root, frame);
+        return _ev.conditionHolds(_condition);
+    }
 }
 
 // Builds its statement's node on first execution and replaces itself in the
@@ -1303,10 +1330,17 @@ private final class Uninitialised(E) : Node {
     private E _ev;
     private Statement _statement;
     private Node* _slot;
-    public this(E ev, Statement statement, Node* slot) {
-        _ev = ev; _statement = statement; _slot = slot;
+    private TreeRoot* _root;
+    public this(E ev, Statement statement, Node* slot, TreeRoot* root) {
+        _ev = ev; _statement = statement; _slot = slot; _root = root;
     }
     public override TreeFlow executeStmt(ubyte* frame) {
+        // Building reads the function's layout and return type from the
+        // evaluator, and the nodes it makes name this tree.
+        _ev.syncTree(_root, frame);
+        auto outer = _ev._treeRoot;
+        _ev._treeRoot = _root;
+        scope(exit) _ev._treeRoot = outer;
         auto node = buildStatement(_ev, _statement, _slot);
         *_slot = node;
         return node.executeStmt(frame);
@@ -1367,6 +1401,7 @@ private final class Call(E) : Node {
     private const(imported!"snakebite.ffi.plan".CallPlan)* _plan;
     private TreeCallee* _callee;
     private const(void)* _vtable;
+    private TreeRoot* _root;
 
     public this(E ev, CallExp site, FuncDeclaration method, Node receiver,
             bool receiverIsAddress, bool virtual, Node[] args,
@@ -1376,6 +1411,7 @@ private final class Call(E) : Node {
         _receiverIsAddress = receiverIsAddress; _virtual = virtual;
         _args = args; _modes = modes; _resultSize = resultSize;
         _resultUnsigned = resultUnsigned; _yieldsReceiver = yieldsReceiver;
+        _root = ev._treeRoot;
     }
 
     public final bool matches(TreeCallee* callee) {
@@ -1412,6 +1448,7 @@ private final class Call(E) : Node {
                 : cast(size_t) _receiver.executeLong(frame);
             if (_virtual) {
                 if (receiver == 0) {
+                    ev.syncTree(_root, frame);
                     ev._executeMethodCall(_site, result, _method, null);
                     return receiver;
                 }
@@ -1420,6 +1457,7 @@ private final class Call(E) : Node {
                     callee = ev.virtualTreeCalleeOf(
                         _method, cast(void*) receiver);
                     if (callee is null || !matches(callee)) {
+                        ev.syncTree(_root, frame);
                         ev._executeMethodCall(
                             _site, result, _method, cast(void*) receiver);
                         return receiver;
@@ -1729,7 +1767,8 @@ private Node buildIndexAddress(E)(E ev, IndexExp indexed) {
         case Tsarray: {
             auto array = buildAddress(ev, indexed.e1);
             return array is null ? null : new IndexStatic(
-                &ev.failArrayBounds, indexed, array, position, element.size,
+                &ev.failTreeBounds, ev._treeRoot, indexed, array, position,
+                element.size,
                 cast(size_t) indexed.e1.type.toBasetype.isTypeSArray
                     .dim.toInteger);
         }
@@ -1759,10 +1798,11 @@ private Node indexOfArray(E)(E ev, IndexExp indexed, Node array,
             auto i = makeOperand!I(index);
             if (frameArray !is null)
                 return new IndexDynamic!(FrameAddress, I)(
-                    &ev.failArrayBounds, indexed,
+                    &ev.failTreeBounds, ev._treeRoot, indexed,
                     FrameAddress(frameArray._offset), i, stride);
             return new IndexDynamic!(ChildAddress, I)(
-                &ev.failArrayBounds, indexed, ChildAddress(array), i, stride);
+                &ev.failTreeBounds, ev._treeRoot, indexed,
+                ChildAddress(array), i, stride);
         }
     assert(0, "an operand kind outside the index kinds");
 }
@@ -2797,7 +2837,7 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
     }
 
     Node child(Statement inner, Node* where) {
-        return new Uninitialised!E(ev, inner, where);
+        return new Uninitialised!E(ev, inner, where, ev._treeRoot);
     }
 
     // The nodes of the statements that `inner` runs in order, built on
