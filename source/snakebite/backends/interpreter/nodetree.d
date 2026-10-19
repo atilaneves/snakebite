@@ -1578,7 +1578,7 @@ private struct DirectWordCall {
 
     public void run(E)(
         E ev, in TreeCallee* callee, const(ubyte)* base, void* place,
-    ) {
+    ) const {
         import snakebite.ffi.load: callDirectWords, loadWord;
 
         ulong[3] words;
@@ -1590,7 +1590,6 @@ private struct DirectWordCall {
                 target, words[order[0]], words[order[1]], words[order[2]],
                 width, place);
         });
-    }
     }
 }
 
