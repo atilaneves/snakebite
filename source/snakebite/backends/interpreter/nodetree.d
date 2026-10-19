@@ -17,6 +17,7 @@ import dmd.func: FuncDeclaration;
 import dmd.location: Loc;
 import dmd.mtype: Type;
 import dmd.statement: Statement;
+import snakebite.backends.aggregateinit: InitStep;
 import snakebite.backends.checkplan: BoundsCheck;
 import snakebite.backends.controlflow: ControlFlowState;
 import snakebite.backends.fullexpression: FullExpressionScope;
@@ -25,7 +26,7 @@ import snakebite.backends.interpreter.faultslot:
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.backends.sliceplan: SlicePlan;
 import snakebite.nativelayout: TypeFacts;
-import snakebite.nativevalue: CastLayout;
+import snakebite.nativevalue: BitfieldAccess, CastLayout;
 import std.meta: AliasSeq;
 import std.traits: Select, isFloatingPoint;
 
@@ -1224,6 +1225,141 @@ private final class ConditionalSlice : SliceNode {
             _first.executeInto(frame, dest);
         else
             _second.executeInto(frame, dest);
+    }
+}
+
+// --- struct values ----------------------------------------------------
+
+// A struct value is written into the bytes at `dest`, as a slice is.
+
+// A struct whose bytes are known when the node is built.
+private final class ImageInto : Node {
+    private immutable(ubyte)[] _image;
+    public this(immutable(ubyte)[] image) { _image = image; }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        dest[0 .. _image.length] = _image[];
+    }
+}
+
+private final class AggregateCopy : Node {
+    private Node _address;
+    private size_t _size;
+    public this(Node address, size_t size) { _address = address; _size = size; }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        import core.stdc.string: memmove;
+
+        auto source = _address.executeAddr(frame);
+        if (source !is dest)
+            memmove(dest, source, _size);
+    }
+}
+
+// A value that fills the field at `offset` of the struct at `dest`.
+private final class IntoOffset : Node {
+    private size_t _offset;
+    private Node _value;
+    public this(size_t offset, Node value) { _offset = offset; _value = value; }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        _value.executeInto(frame, dest + _offset);
+    }
+}
+
+private final class FieldStore(T) : Node {
+    private size_t _offset;
+    private Node _value;
+    public this(size_t offset, Node value) { _offset = offset; _value = value; }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        static if (isFloatingPoint!T)
+            const T value = cast(T) _value.executeDouble(frame);
+        else
+            const T value = cast(T) _value.executeLong(frame);
+        *cast(T*) (dest + _offset) = value;
+    }
+}
+
+// A static array field that every element of which is the one value.
+private final class FieldBroadcast(T) : Node {
+    private size_t _offset;
+    private size_t _count;
+    private Node _value;
+    public this(size_t offset, size_t count, Node value) {
+        _offset = offset; _count = count; _value = value;
+    }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        static if (isFloatingPoint!T)
+            const T value = cast(T) _value.executeDouble(frame);
+        else
+            const T value = cast(T) _value.executeLong(frame);
+        (cast(T*) (dest + _offset))[0 .. _count] = value;
+    }
+}
+
+private final class BitfieldStore : Node {
+    private size_t _offset;
+    private BitfieldAccess _access;
+    private Node _value;
+    public this(size_t offset, in BitfieldAccess access, Node value) {
+        _offset = offset; _access = access; _value = value;
+    }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        const value = _value.executeLong(frame);
+        _access.store(dest + _offset, cast(ulong) value);
+    }
+}
+
+// The hidden context field of a nested struct: the evaluator reads the
+// context of the running call.
+private final class ContextStore(E) : Node {
+    private E _ev;
+    private InitStep _step;
+    private TreeRoot* _root;
+    public this(E ev, InitStep step) {
+        _ev = ev; _step = step; _root = ev._treeRoot;
+    }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        _ev.syncTree(_root, frame);
+        _ev.applyVthisStep(_step, dest);
+    }
+}
+
+private final class StructLiteral : Node {
+    private Node[] _steps;
+    private size_t _size;
+    private bool _zeroFill;
+    public this(Node[] steps, size_t size, bool zeroFill) {
+        _steps = steps; _size = size; _zeroFill = zeroFill;
+    }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        if (_zeroFill)
+            dest[0 .. _size] = 0;
+        foreach (step; _steps)
+            step.executeInto(frame, dest);
+    }
+}
+
+private final class ReturnAggregate(E) : Node {
+    private E _ev;
+    private void** _place;
+    private Node _value;
+    private Position _position;
+    private size_t _size;
+    private uint _alignment;
+    public this(
+        E ev, Node value, Position position, in TypeFacts facts,
+    ) {
+        _ev = ev; _place = &ev._place; _value = value; _position = position;
+        _size = facts.size; _alignment = facts.alignment;
+    }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        _position.note(frame);
+        if (*_place !is null)
+            _value.executeInto(frame, cast(ubyte*) *_place);
+        else {
+            // The caller discarded the result, but the operand still runs.
+            auto scratch = _ev._frames.push(_size, _alignment);
+            _value.executeInto(frame, scratch.base);
+        }
+        return TreeFlow.return_;
     }
 }
 
@@ -3641,6 +3777,154 @@ private Node buildVariable(E)(
         positionOf(ev, declaration));
 }
 
+// A struct or a static array: a value of its own bytes, which is not a
+// register scalar or a slice.
+private bool isAggregate(Type type) {
+    import dmd.astenums: TY;
+    import dmd.typesem: toBasetype;
+
+    if (type is null)
+        return false;
+    const kind = type.toBasetype.ty;
+    return kind == TY.Tstruct || kind == TY.Tsarray;
+}
+
+// The node that writes the value of the struct or static array `expression`
+// where `executeInto` says. Null when the tree does not cover the
+// expression.
+private Node buildAggregate(E)(E ev, Expression expression) {
+    import dmd.tokens: EXP;
+
+    if (!isAggregate(expression.type))
+        return null;
+    switch (expression.op) with (EXP) {
+        case structLiteral:
+            return buildStructLiteral(ev, expression.isStructLiteralExp);
+        case arrayLiteral:
+            return buildArrayLiteral(ev, expression.isArrayLiteralExp);
+        case question:
+            return buildConditional(ev, expression.isCondExp, &buildAggregate!E);
+        case comma:
+            return buildComma(ev, expression.isCommaExp, &buildAggregate!E);
+        case variable, dotVariable, star, index: {
+            auto address = buildAddress(ev, expression);
+            return address is null ? null : new AggregateCopy(
+                address, ev.factsOf(expression.type).size);
+        }
+        default:
+            return null;
+    }
+}
+
+private Node buildStructLiteral(E)(E ev, imported!"dmd.expression".StructLiteralExp literal) {
+    import snakebite.nativelayout: isStoredLiteral;
+
+    const facts = ev.factsOf(literal.type);
+    if (literal.useStaticInit)
+        return new ImageInto(
+            cast(immutable(ubyte)[]) ev._nativeData.initialValue(
+                literal.type, literal.loc).idup);
+    if (isStoredLiteral(literal)) {
+        auto image = new ubyte[facts.size];
+        ev._nativeData.write(literal.type, facts, literal, image.ptr);
+        return new ImageInto(cast(immutable) image);
+    }
+    auto plan = *ev._shared.facts.structLiteralOf(literal);
+    Node[] steps;
+    foreach (step; plan.steps) {
+        auto node = buildInitStep(ev, step);
+        if (node is null)
+            return null;
+        steps ~= node;
+    }
+    return new StructLiteral(steps, facts.size, plan.zeroFill);
+}
+
+// `[a, b, c]` as a static array: each element fills its own place, and
+// `getElement` gives the elements that the literal leaves to its basis.
+private Node buildArrayLiteral(E)(
+    E ev, imported!"dmd.expression".ArrayLiteralExp literal,
+) {
+    import dmd.expressionsem: toInteger;
+    import dmd.typesem: toBasetype;
+
+    auto arrayType = literal.type.toBasetype.isTypeSArray;
+    if (arrayType is null)
+        return null;
+    const count = cast(size_t) arrayType.dim.toInteger;
+    const stride = ev.factsOf(arrayType.next).size;
+    Node[] steps;
+    foreach (i; 0 .. count) {
+        auto node = buildFieldValue(
+            ev, i * stride, arrayType.next, literal.getElement(i));
+        if (node is null)
+            return null;
+        steps ~= node;
+    }
+    return new StructLiteral(steps, count * stride, false);
+}
+
+private Node buildInitStep(E)(E ev, InitStep step) {
+    final switch (step.kind) with (InitStep.Kind) {
+        case vthis:
+            return new ContextStore!E(ev, step);
+        case value:
+            return buildFieldValue(ev, step.offset, step.type, step.source);
+        case bitfield: {
+            const scalar = scalarOf(ev, step.type);
+            if (scalar.kind != Scalar.Kind.integral
+                    || scalarOf(ev, step.source.type).kind != scalar.kind)
+                return null;
+            auto value = buildValue(ev, step.source);
+            return value is null ? null : new BitfieldStore(
+                step.offset, *ev._shared.facts.bitfieldOf(step.field), value);
+        }
+        case broadcast: {
+            const scalar = scalarOf(ev, step.type);
+            if (scalar.kind == Scalar.Kind.none)
+                return null;
+            auto value = buildValue(ev, step.source);
+            if (value is null)
+                return null;
+            static Node make(T)(size_t offset, size_t count, Node v) {
+                return new FieldBroadcast!T(offset, count, v);
+            }
+            return scalar.kind == Scalar.Kind.floating
+                ? byFloating!make(scalar.facts, step.offset, step.count, value)
+                : byIntegral!make(scalar.facts, step.offset, step.count, value);
+        }
+    }
+}
+
+private Node buildFieldValue(E)(
+    E ev, in size_t offset, Type type, Expression source,
+) {
+    if (isSlice(type)) {
+        if (!isSlice(source.type))
+            return null;
+        auto slice = buildSlice(ev, source);
+        return slice is null ? null : new IntoOffset(offset, slice);
+    }
+    if (isAggregate(type)) {
+        auto value = buildAggregate(ev, source);
+        return value is null ? null : new IntoOffset(offset, value);
+    }
+    const scalar = scalarOf(ev, type);
+    if (scalar.kind == Scalar.Kind.none
+            || scalarOf(ev, source.type).kind != scalar.kind
+            || ev.factsOf(source.type).size != scalar.facts.size)
+        return null;
+    auto value = buildValue(ev, source);
+    if (value is null)
+        return null;
+    static Node make(T)(size_t offset, Node v) {
+        return new FieldStore!T(offset, v);
+    }
+    return scalar.kind == Scalar.Kind.floating
+        ? byFloating!make(scalar.facts, offset, value)
+        : byIntegral!make(scalar.facts, offset, value);
+}
+
 // A `ref` variable holds the address of the storage it names, whatever the
 // type of that storage is.
 private Node buildReferenceBinding(E)(
@@ -3834,6 +4118,13 @@ private Node buildReturn(E)(E ev, imported!"dmd.statement".ReturnStatement retur
         return slice is null
             ? generic() : new ReturnValue!SliceValue(
                 &ev._place, slice, positionOf(ev, returned.exp));
+    }
+    if (isAggregate(ev._type)) {
+        if (!isAggregate(returned.exp.type))
+            return generic();
+        auto value = buildAggregate(ev, returned.exp);
+        return value is null ? generic() : new ReturnAggregate!E(
+            ev, value, positionOf(ev, returned.exp), ev.factsOf(ev._type));
     }
     const scalar = scalarOf(ev, ev._type);
     if (scalar.kind == Scalar.Kind.none

@@ -3247,3 +3247,71 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// `return` of a struct or static array value writes it into the place that
+// the caller gave. Each field of a literal is a scalar, a slice, a bit
+// field, a nested value, or an element that the literal repeats.
+static foreach (backend; Matrix!()) {
+    @("returnOfAggregateValues." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Inner { int x; double y; }
+            struct Outer {
+                Inner inner;
+                int[] slice;
+                bool flag;
+                ubyte small;
+                int[2] pair;
+                long wide = 9;
+            }
+            struct Bits { int a; uint low : 3; uint high : 5; ubyte tail; }
+            struct Plain { int a = 1; int b = 2; }
+
+            Outer make(int n, int[] s) {
+                return Outer(Inner(n, n * 0.5), s, n > 1, cast(ubyte) n,
+                    [n, n + 1]);
+            }
+            Outer pick(bool first, Inner chosen) {
+                return first
+                    ? Outer(chosen, null, true, 1, [1, 2], 3)
+                    : Outer(Inner(9, 9.5), [7], false, 2, [3, 4]);
+            }
+            Bits bits(int n) { return Bits(n, n & 7, n >> 3, 5); }
+            Plain plain(bool zero) { return zero ? Plain() : Plain(5, 6); }
+            Inner copy(ref Inner source) { return source; }
+            Plain at(Plain[] values, int i) { return values[i]; }
+            int[3] filled(int n) { return [n, n + 1, n + 2]; }
+
+            int main() {
+                int outerLocal = 100;
+                struct Nested { int a; int get() { return a + outerLocal; } }
+                Nested nested(int a) { return Nested(a); }
+
+                const o = make(3, [4, 5]);
+                if (o.inner != Inner(3, 1.5) || o.slice != [4, 5] || !o.flag
+                        || o.small != 3 || o.pair != [3, 4] || o.wide != 9)
+                    return 1;
+                const p = pick(true, Inner(7, 8.5));
+                if (p.inner != Inner(7, 8.5) || p.slice.length != 0
+                        || p.pair != [1, 2] || p.wide != 3)
+                    return 2;
+                const q = pick(false, Inner(0, 0));
+                if (q.inner != Inner(9, 9.5) || q.slice != [7] || q.flag
+                        || q.wide != 9)
+                    return 3;
+                const b = bits(37);
+                if (b.a != 37 || b.low != 5 || b.high != 4 || b.tail != 5)
+                    return 4;
+                Inner source = Inner(11, 12.5);
+                Plain[2] two = [Plain(8, 9), Plain(10, 11)];
+                if (plain(true) != Plain(1, 2) || plain(false) != Plain(5, 6)
+                        || copy(source) != source || at(two[], 1) != Plain(10, 11)
+                        || filled(4) != [4, 5, 6])
+                    return 5;
+                make(1, null);
+                return nested(5).get() == 105 ? 0 : 6;
+            }
+        });
+    }
+}

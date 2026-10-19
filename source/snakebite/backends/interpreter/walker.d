@@ -6459,7 +6459,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // (`step.source`), then adds `sourceAdjustment` if `thisexp`'s static
     // type is a base-class view narrower than the nested class's actual
     // lexical parent - see `classVthisStep`'s own doc (`aggregateinit.d`).
-    private void applyVthisStep(InitStep step, ubyte* base) {
+    package void applyVthisStep(InitStep step, ubyte* base) {
         import snakebite.nativelayout: loadIntegral, storeIntegral;
 
         if (step.source !is null) {
