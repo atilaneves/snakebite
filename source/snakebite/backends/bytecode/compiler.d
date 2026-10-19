@@ -9366,7 +9366,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto site = compileIndirectArguments(
             calleeType, expression.arguments, calleeLayout, args,
             calleeSlotOffset, isVoidCallee ? 0 : returnFacts.size,
-            /* hasContext */ true);
+            /* hasContext */ true, /* mayUseWindow */ false);
         compileNullCheck(objectOffset, expression.loc);
         compileClassVtableSlot(
             expression, objectOffset, callee, calleeSlotOffset);
@@ -10396,7 +10396,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto site = compileIndirectArguments(
             functionType, expression.arguments, calleeLayout, args,
             calleeOffset, isVoidCallee ? 0 : returnShape.returnFacts.size,
-            isDelegateCall);
+            isDelegateCall, /* mayUseWindow */ true);
         site.kind = CallSite.Kind.value;
         site.value.signature = valueCall.signature;
         const siteIndex = _callSites.length;
@@ -10411,6 +10411,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // The arguments and call site of a call whose callee address is read
     // from a frame slot at run time: a function pointer, a delegate, or a
     // class's vtable entry. `args` already holds the context or receiver.
+    // Only a call of a function pointer or delegate value may use a call
+    // window (`mayUseWindow`); a virtual call keeps the plain call site.
     // Every callee such a site can reach shares `functionType`'s own
     // parameters, so one argument plan covers declared parameters, the
     // `TypeInfo` and cursor of a D variadic, and the extra values of a C
@@ -10423,11 +10425,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t calleeOffset,
         in size_t returnWidth,
         in bool hasContext,
+        in bool mayUseWindow,
     ) {
         import dmd.astenums: VarArg;
 
         auto preparation = CallAdapter.Arguments.of(functionType, arguments);
-        if (functionType.parameterList.varargs == VarArg.none
+        if (mayUseWindow
+                && functionType.parameterList.varargs == VarArg.none
                 && calleeLayout.variadicTypes == size_t.max
                 && calleeLayout.variadicCursor == size_t.max
                 && (!hasContext
