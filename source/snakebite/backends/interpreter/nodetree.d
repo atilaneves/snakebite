@@ -2677,7 +2677,6 @@ private void examine(E)(E ev, TreeCallee* callee) {
     if (statements.length != 1)
         return;
     auto only = statements[0];
-    const returnFacts = callee.returnFacts;
     // The field of `this` that `expression` names, or null.
     VarDeclaration receiverField(Expression expression) {
         auto dot = expression.isDotVarExp;
@@ -2706,8 +2705,8 @@ private void examine(E)(E ev, TreeCallee* callee) {
             const scalar = scalarOf(ev, field.type);
             const result = scalarOf(ev, function_.type.nextOf);
             if (scalar.kind == Scalar.Kind.none || scalar.kind != result.kind
-                    || scalar.facts.size != returnFacts.size
-                    || scalar.facts.isUnsigned != returnFacts.isUnsigned)
+                    || scalar.facts.size != result.facts.size
+                    || scalar.facts.isUnsigned != result.facts.isUnsigned)
                 return;
             callee.shape = CalleeShape(CalleeShape.Kind.getter, field.offset,
                 scalar.facts.size, scalar.facts.isUnsigned,

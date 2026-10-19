@@ -286,3 +286,60 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+
+// A getter of a pointer or of a class reference gives the field as an
+// unsigned word, and a setter stores one: the values keep their address.
+static foreach (backend; Matrix!()) {
+    @("accessors.pointerAndReferenceFields." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                class Target {
+                    int value;
+                }
+
+                struct Holder {
+                    int* pointer;
+                    Target target;
+                    int* getPointer() { return pointer; }
+                    Target getTarget() { return target; }
+                    void setPointer(int* p) { pointer = p; }
+                    void setTarget(Target t) { target = t; }
+                }
+
+                class Owner {
+                    int* pointer;
+                    Target target;
+                    int* getPointer() { return pointer; }
+                    Target getTarget() { return target; }
+                }
+
+                int answer() {
+                    int number = 7;
+                    auto target = new Target;
+                    target.value = 35;
+                    Holder holder;
+                    holder.setPointer(&number);
+                    holder.setTarget(target);
+                    if (holder.getPointer() !is &number || *holder.getPointer() != 7)
+                        return 1;
+                    if (holder.getTarget() !is target || holder.getTarget().value != 35)
+                        return 2;
+                    auto owner = new Owner;
+                    owner.pointer = &number;
+                    owner.target = target;
+                    if (owner.getPointer() !is &number || owner.getTarget() !is target)
+                        return 3;
+                    Holder empty;
+                    if (empty.getPointer() !is null || empty.getTarget() !is null)
+                        return 4;
+                    return *holder.getPointer() + holder.getTarget().value;
+                }
+            },
+            "answer",
+        );
+    }
+}
