@@ -117,10 +117,26 @@ private enum simpleOp(string op) = op == "+" || op == "-" || op == "*"
     || op == "&" || op == "|" || op == "^";
 private enum shiftOp(string op) = op == "<<" || op == ">>" || op == ">>>";
 
-// Whether the node of `op` on `T` is built for every pair of operand kinds
-// instead of for two child nodes only.
-private enum fusesOperands(string op, T) = (op == "+" || op == "-" || op == "*")
-    && (is(T == int) || is(T == long));
+// The operand kinds that the node of `op` on `T` is built for. A 32-bit
+// operation has no 64-bit local operand: a 64-bit value reaches it through
+// a cast.
+private template operandsOf(string op, T) {
+    static if (op == "+" || op == "-" || op == "*") {
+        static if (is(T == int)) {
+            enum Kind[] lefts = intLeft;
+            enum Kind[] rights = intRight;
+        } else static if (is(T == long)) {
+            enum Kind[] lefts = longLeft;
+            enum Kind[] rights = longRight;
+        } else {
+            enum Kind[] lefts = onlyChild;
+            enum Kind[] rights = onlyChild;
+        }
+    } else {
+        enum Kind[] lefts = onlyChild;
+        enum Kind[] rights = onlyChild;
+    }
+}
 
 // --- leaves -----------------------------------------------------------
 
@@ -341,8 +357,6 @@ private Operand operandOf(Node node) {
         return Operand(Kind.localInt, node, leaf._offset);
     if (auto leaf = cast(Local!long) node)
         return Operand(Kind.localLong, node, leaf._offset);
-    if (auto leaf = cast(Local!ulong) node)
-        return Operand(Kind.localLong, node, leaf._offset);
     if (auto leaf = cast(Local!double) node)
         return Operand(Kind.localDouble, node, leaf._offset);
     return Operand(Kind.child, node);
@@ -373,36 +387,50 @@ private Op makeOperand(Op)(in Operand operand) {
         return Op(operand.offset);
 }
 
+// The operand kinds that a node is built for. A child of another kind is
+// read through its node.
+private enum Kind[] onlyChild = [Kind.child];
+private enum Kind[] intLeft = [Kind.child, Kind.localInt];
+private enum Kind[] intRight = [Kind.child, Kind.localInt, Kind.constant];
+private enum Kind[] longLeft = [Kind.child, Kind.localInt, Kind.localLong];
+private enum Kind[] longRight = [
+    Kind.child, Kind.localInt, Kind.localLong, Kind.constant,
+];
+private enum Kind[] unsignedLeft = [Kind.child, Kind.localLong];
+private enum Kind[] unsignedRight = [
+    Kind.child, Kind.localLong, Kind.constant,
+];
+private enum Kind[] doubleLeft = [
+    Kind.child, Kind.localDouble, Kind.constant,
+];
+private enum Kind[] doubleComparedLeft = [Kind.child, Kind.localDouble];
+
+private bool has(in Kind[] kinds, in Kind kind) {
+    foreach (candidate; kinds)
+        if (candidate == kind)
+            return true;
+    return false;
+}
+
 // Calls `make!(L, R)(left, right, args)`, with the operand structs that
-// match the kinds of `left` and `right`. When `operands` is false both are
-// children. A constant on the left is a child too, unless it is a double
-// and the right is not a constant: such a pair has no node.
-private Node fuse(alias make, V, bool operands, Args...)(
+// match the kinds of `left` and `right`, when the kinds are in `lefts` and
+// `rights`. Two constants make no node: the left one is read as a child.
+private Node fuse(alias make, V, Kind[] lefts, Kind[] rights, Args...)(
     Operand left, Operand right, Args args,
 ) {
-    static if (!operands) {
-        return make!(ChildOperand!V, ChildOperand!V)(
-            ChildOperand!V(left.node), ChildOperand!V(right.node), args);
-    } else {
-        static if (is(V == double)) {
-            alias lefts = AliasSeq!(Kind.child, Kind.localDouble, Kind.constant);
-            alias rights = lefts;
-        } else {
-            alias lefts = AliasSeq!(Kind.child, Kind.localInt, Kind.localLong);
-            alias rights = AliasSeq!(
-                Kind.child, Kind.localInt, Kind.localLong, Kind.constant);
-        }
-        if (left.kind == Kind.constant
-                && (!is(V == double) || right.kind == Kind.constant))
-            left.kind = Kind.child;
-        static foreach (lk; lefts)
-            static foreach (rk; rights)
+    if (!lefts.has(left.kind)
+            || (left.kind == Kind.constant && right.kind == Kind.constant))
+        left.kind = Kind.child;
+    if (!rights.has(right.kind))
+        right.kind = Kind.child;
+    static foreach (lk; lefts)
+        static foreach (rk; rights)
+            static if (lk != Kind.constant || rk != Kind.constant)
                 if (left.kind == lk && right.kind == rk)
                     return make!(OperandType!(lk, V), OperandType!(rk, V))(
                         makeOperand!(OperandType!(lk, V))(left),
                         makeOperand!(OperandType!(rk, V))(right), args);
-        assert(0, "an operand kind outside the fused kinds");
-    }
+    assert(0, "an operand kind outside the fused kinds");
 }
 
 // --- arithmetic -------------------------------------------------------
@@ -1027,14 +1055,34 @@ private Scalar scalarOf(E)(E ev, Type type) {
     }
 }
 
-// Calls `make!T(args)` for the integral type of `facts`.
+// Calls `make!T(args)` for the integral type of `facts`. A 64-bit value is
+// carried as `long` whatever its signedness: the node treats its bits alike.
 private Node byIntegral(alias make, Args...)(in TypeFacts facts, Args args) {
     switch (facts.size) {
         case 1: return facts.isUnsigned ? make!ubyte(args) : make!byte(args);
         case 2: return facts.isUnsigned ? make!ushort(args) : make!short(args);
         case 4: return facts.isUnsigned ? make!uint(args) : make!int(args);
-        case 8: return facts.isUnsigned ? make!ulong(args) : make!long(args);
+        case 8: return make!long(args);
         default: assert(0, "an integral scalar is 1, 2, 4 or 8 bytes");
+    }
+}
+
+// The same, for a node that gives a 64-bit unsigned value a type of its own.
+private Node byExactIntegral(alias make, Args...)(
+    in TypeFacts facts, Args args,
+) {
+    if (facts.size == 8 && facts.isUnsigned)
+        return make!ulong(args);
+    return byIntegral!make(facts, args);
+}
+
+// The same for the integral types of less than 64 bits.
+private Node byNarrow(alias make, Args...)(in TypeFacts facts, Args args) {
+    switch (facts.size) {
+        case 1: return facts.isUnsigned ? make!ubyte(args) : make!byte(args);
+        case 2: return facts.isUnsigned ? make!ushort(args) : make!short(args);
+        case 4: return facts.isUnsigned ? make!uint(args) : make!int(args);
+        default: assert(0, "a narrow integral scalar is 1, 2 or 4 bytes");
     }
 }
 
@@ -1043,7 +1091,7 @@ private Node byIntegral(alias make, Args...)(in TypeFacts facts, Args args) {
 private Node byWide(alias make, Args...)(in TypeFacts facts, Args args) {
     switch (facts.size) {
         case 4: return facts.isUnsigned ? make!uint(args) : make!int(args);
-        case 8: return facts.isUnsigned ? make!ulong(args) : make!long(args);
+        case 8: return make!long(args);
         default: return null;
     }
 }
@@ -1358,7 +1406,7 @@ private Node buildValue(E)(E ev, Expression expression) {
             const slot = slotOf(ev, thisVariable(ev, expression.isThisExp));
             if (!slot.ok || scalar.kind != Scalar.Kind.integral)
                 return null;
-            return new Local!ulong(slot.offset);
+            return new Local!long(slot.offset);
         }
         case dotVariable, star, index:
             return buildLoad(ev, expression, buildAddress(ev, expression));
@@ -1474,7 +1522,7 @@ private Node buildCast(E)(E ev, CastExp castExp, in Scalar scalar) {
                 return null;
             if (scalar.facts.size == 8)
                 return operand;
-            return byIntegral!(New!Wrap)(scalar.facts, operand);
+            return byNarrow!(New!Wrap)(scalar.facts, operand);
         case classReference:
             return new ClassUpcast(operand, plan.referenceOffset);
         case truth:
@@ -1492,7 +1540,7 @@ private Node buildCast(E)(E ev, CastExp castExp, in Scalar scalar) {
         case floatToIntegral:
             if (source.kind != floating || scalar.kind != integral)
                 return null;
-            return byIntegral!(New!FloatToInteger)(scalar.facts, operand);
+            return byExactIntegral!(New!FloatToInteger)(scalar.facts, operand);
         case floatWidth:
             if (source.kind != floating || scalar.kind != floating)
                 return null;
@@ -1507,7 +1555,8 @@ private template binaryOf(string op) {
         static Node make(L, R)(L l, R r, Operation!op o) {
             return new IntegerBinary!(op, T, L, R)(l, r, o);
         }
-        return fuse!(make, long, fusesOperands!(op, T))(
+        alias kinds = operandsOf!(op, T);
+        return fuse!(make, long, kinds.lefts, kinds.rights)(
             operandOf(left), operandOf(right), operation);
     }
 }
@@ -1536,8 +1585,12 @@ private Node buildBinary(string op, E)(E ev, BinExp e, in Scalar scalar) {
                 static Node build(L, R)(L a, R b) {
                     return new FloatBinary!(op, T, L, R)(a, b);
                 }
-                return fuse!(build, double, is(T == double))(
-                    operandOf(l), operandOf(r));
+                static if (is(T == double))
+                    return fuse!(build, double, doubleLeft, doubleLeft)(
+                        operandOf(l), operandOf(r));
+                else
+                    return fuse!(build, double, onlyChild, onlyChild)(
+                        operandOf(l), operandOf(r));
             }
             return byFloating!make(scalar.facts, left, right);
         }
@@ -1562,9 +1615,16 @@ private Node buildCompare(string op, E)(E ev, BinExp e) {
         static Node unsigned(L, R)(L l, R r) {
             return new IntegerCompare!(op, true, L, R)(l, r);
         }
-        return plan.facts.isUnsigned
-            ? fuse!(unsigned, long, true)(operandOf(left), operandOf(right))
-            : fuse!(signed, long, true)(operandOf(left), operandOf(right));
+        // Equal values have equal bits whatever the signedness.
+        static if (op == "==" || op == "!=")
+            return fuse!(signed, long, longLeft, longRight)(
+                operandOf(left), operandOf(right));
+        else
+            return plan.facts.isUnsigned
+                ? fuse!(unsigned, long, unsignedLeft, unsignedRight)(
+                    operandOf(left), operandOf(right))
+                : fuse!(signed, long, longLeft, longRight)(
+                    operandOf(left), operandOf(right));
     }
     if (plan.kind == ComparisonPlan.Kind.floating
             && scalarOf(ev, e.e1.type).kind == Scalar.Kind.floating) {
@@ -1572,8 +1632,10 @@ private Node buildCompare(string op, E)(E ev, BinExp e) {
             return new FloatCompare!(op, L, R)(l, r);
         }
         return ev.factsOf(e.e1.type).size == 8
-            ? fuse!(build, double, true)(operandOf(left), operandOf(right))
-            : fuse!(build, double, false)(operandOf(left), operandOf(right));
+            ? fuse!(build, double, doubleComparedLeft, doubleLeft)(
+                operandOf(left), operandOf(right))
+            : fuse!(build, double, onlyChild, onlyChild)(
+                operandOf(left), operandOf(right));
     }
     return null;
 }
@@ -1600,12 +1662,13 @@ private bool targetOf(E)(E ev, Expression expression, out Target target) {
 
 private template opAssignOf(string op) {
     Node opAssignOf(T)(Target target, Node step, Operation!op operation) {
-        static if (fusesOperands!(op, T)) {
+        alias steps = operandsOf!(op, T).rights;
+        static if (steps.length > 1) {
             if (target.node is null) {
                 static Node make(S, A)(S s, A a, Operation!op o) {
                     return new IntegerOpAssign!(op, T, A, S)(a, s, o);
                 }
-                return fuseStep!make(
+                return fuseStep!(make, steps)(
                     operandOf(step), FrameAddress(target.offset), operation);
             }
         }
@@ -1614,10 +1677,14 @@ private template opAssignOf(string op) {
     }
 }
 
-// `make!S(step, args)`, for the operand struct `S` of `step`.
-private Node fuseStep(alias make, Args...)(Operand step, Args args) {
-    static foreach (kind; AliasSeq!(
-            Kind.child, Kind.localInt, Kind.localLong, Kind.constant))
+// `make!S(step, args)`, for the operand struct `S` of `step`, when its kind
+// is in `steps`.
+private Node fuseStep(alias make, Kind[] steps, Args...)(
+    Operand step, Args args,
+) {
+    if (!steps.has(step.kind))
+        step.kind = Kind.child;
+    static foreach (kind; steps)
         if (step.kind == kind)
             return make!(OperandType!(kind, long))(
                 makeOperand!(OperandType!(kind, long))(step), args);

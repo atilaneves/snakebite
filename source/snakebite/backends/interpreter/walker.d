@@ -4,8 +4,8 @@ module snakebite.backends.interpreter.walker;
 private:
 
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
-import snakebite.backends.interpreter.nodetree: TreeCallee, TreeFlow, TreeRoot, isScalar,
-    rootOf;
+import snakebite.backends.interpreter.nodetree:
+    TreeCallee, TreeFlow, TreeRoot, isScalar, rootOf;
 import snakebite.nativelayout: tryTypeFacts, truthFacts;
 
 
