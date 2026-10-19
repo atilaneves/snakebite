@@ -343,3 +343,129 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+
+// A function of several statements, or with no result, is called with each
+// kind of result: an integer, a floating point value, a dynamic array and
+// none. The call runs again inside its own arguments and through a virtual
+// site that meets two classes, and an exception leaves no frame behind.
+static foreach (backend; Matrix!()) {
+    @("accessors.plainCalls." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                int twice(int v) {
+                    const doubled = v * 2;
+                    return doubled;
+                }
+
+                double scaled(double x, int n) {
+                    double r = x;
+                    foreach (i; 0 .. n)
+                        r *= 2;
+                    return r;
+                }
+
+                int[] firstTwo(int[] values) {
+                    const n = values.length < 2 ? values.length : 2;
+                    return values[0 .. n];
+                }
+
+                void accumulate(ref int total, int v) {
+                    const doubled = v * 2;
+                    total += doubled;
+                }
+
+                int accumulated(ref int total, int v) {
+                    accumulate(total, v);
+                    return v;
+                }
+
+                int nested(int v) {
+                    const inner = v > 0 ? nested(v - 1) : 0;
+                    return inner + v;
+                }
+
+                int boom(int v) {
+                    if (v > 2)
+                        throw new Exception("big");
+                    return v;
+                }
+
+                struct Pair {
+                    int a, b;
+                    void swap() {
+                        const t = a;
+                        a = b;
+                        b = t;
+                    }
+                    int sum() {
+                        const s = a + b;
+                        return s;
+                    }
+                }
+
+                class Base {
+                    int base = 1;
+                    int get() {
+                        const r = base;
+                        return r;
+                    }
+                }
+
+                class Derived : Base {
+                    override int get() {
+                        const r = base + 10;
+                        return r;
+                    }
+                }
+
+                int viaBase(Base b) {
+                    return b.get();
+                }
+
+                int answer() {
+                    if (twice(twice(3)) != 12)
+                        return 1;
+                    if (scaled(scaled(1.5, 1), 2) != 12.0)
+                        return 2;
+                    auto data = [1, 2, 3];
+                    if (firstTwo(firstTwo(data)).length != 2
+                            || firstTwo(data)[1] != 2)
+                        return 3;
+                    int total;
+                    accumulate(total, accumulated(total, 4));
+                    if (total != 8 + 8)
+                        return 4;
+                    if (nested(5) != 15)
+                        return 5;
+                    int caught;
+                    foreach (v; 0 .. 5) {
+                        try {
+                            boom(v);
+                        } catch (Exception) {
+                            ++caught;
+                        }
+                    }
+                    if (caught != 2 || boom(1) != 1)
+                        return 6;
+                    auto pair = Pair(1, 2);
+                    pair.swap();
+                    if (pair.a != 2 || pair.b != 1 || pair.sum() != 3)
+                        return 7;
+                    Base[2] both = [new Base, new Derived];
+                    int sum;
+                    foreach (round; 0 .. 2)
+                        foreach (b; both)
+                            sum += viaBase(b);
+                    if (sum != 2 * (1 + 11))
+                        return 8;
+                    return 26 + total;
+                }
+            },
+            "answer",
+        );
+    }
+}
