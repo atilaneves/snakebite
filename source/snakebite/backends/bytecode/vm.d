@@ -1920,6 +1920,37 @@ package const(Instruction)* opThrow(
 }
 
 
+// The copied frame remains owned by the caller. Only the throw operand runs
+// here, with its original function's tables and its own call windows.
+package alias opColdThrow =
+    executeCall!(runColdThrow, OperandKind.frame, OperandKind.immediate);
+
+private const(Instruction)* runColdThrow(Decoded)(ref Decoded execution) {
+    const site = &execution.callSites[execution.source];
+    const callee = site.callee !is null ? site.callee : site.prepareGuest();
+    const mark = execution.frames.mark;
+    scope(failure) execution.frames.release(mark);
+    const running = execution.activation.function_;
+    if (running.windowSlot != size_t.max)
+        execution.frames.raiseTo(
+            *cast(ubyte**) execution.storage(running.windowSlot)
+            + running.windowBytes);
+    auto activation = cast(Activation*) execution.frames.reserve(
+        Activation.sizeof, uint(Activation.alignof));
+    activation.frameMark = mark;
+    activation.frame = execution.destination;
+    activation.returnPlace = null;
+    initializeWindow(callee, activation.frame, execution.frames);
+    activation.pc = callee.instructions.ptr + execution.width;
+    activation.function_ = callee;
+    activation.cleanupMark = execution.frames.cleanupMark;
+    activation.parent = execution._dispatch.current;
+    activation.parent.resume = execution.next;
+    execution._dispatch.pending = activation;
+    return activation.pc;
+}
+
+
 // Calls `callSites[execution.source]`'s callee, one of the four
 // `CallSite.Kind`s:
 // a guest callee already compiled to `Instruction`s, a native one reached

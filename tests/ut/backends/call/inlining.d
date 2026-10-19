@@ -33,16 +33,26 @@ static foreach (backend; Matrix!()) {
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            void thrower(Exception thrown) { throw thrown; }
+            void thrower(Exception thrown, ref int counter) {
+                ++counter;
+                const keep = counter == 1;
+                throw keep ? thrown : new Exception("lost local");
+            }
+
+            void wrapper(ref int counter, Exception thrown) {
+                thrower(thrown, counter);
+            }
 
             void main() {
                 auto expected = new Exception("inlined");
                 bool caught;
+                int counter;
                 try
-                    thrower(expected);
+                    wrapper(counter, expected);
                 catch (Exception actual)
                     caught = actual is expected;
                 assert(caught);
+                assert(counter == 1);
             }
         });
     }

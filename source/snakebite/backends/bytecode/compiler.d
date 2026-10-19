@@ -573,8 +573,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     //
     // A compile that only a caller needs must not reach code that a plain
     // call would never reach, because `internalFailure` ends the process.
-    // `hasTinyBody` therefore admits only `return`, expression, `if`,
-    // compound, scope and `for` statements. None of these reaches
+    // `hasTinyBody` therefore admits only `return`, expression, `throw`,
+    // `if`, compound, scope and `for` statements. None of these reaches
     // `compileCtfeBlockWithLabels` (its body needs a label, which no
     // admitted statement holds, so `comeFrom` is false), and the other
     // `internalFailure` calls check states that dmd's semantic analysis has
@@ -623,7 +623,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             if (auto loop = statement.isForStatement)
                 return tiny(loop._init) && tiny(loop._body);
             return statement.isReturnStatement !is null
-                || statement.isExpStatement !is null;
+                || statement.isExpStatement !is null
+                || statement.isThrowStatement !is null;
         }
         return function_.fbody !is null && tiny(function_.fbody);
     }
@@ -843,7 +844,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opTemporaryRegister, opTemporarySuspend,
         opSliceCopy, opSliceFill, opSlicesConform,
         opStaticAddress, opStaticArrayEqual, opStaticLoad, opStaticStore,
-        opStoreBitfield, opStoreIndirect, opSubtract, opThrow, opZero,
+        opStoreBitfield, opStoreIndirect, opSubtract, opThrow, opZero, opColdThrow,
         opTlsAddress, opTlsLoad, opTlsStore;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: nextOf, toBasetype;
@@ -1181,6 +1182,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opReturnVoid, 0, 0, 0);
         auto inlineBody = inlineBodyOfBuilt;
         const resultPlace = redirectReturns;
+        // A cold entry uses the complete original frame, including its
+        // return-place slot. Nested copies already reserve that frame.
+        if (inlineBody !is null && _cold.length != 0) {
+            inlineBody.frameSize = _tempSize;
+            inlineBody.frameAlignment = _tempAlignment;
+        }
         resolveBranches();
 
         ExceptionHandler[] exceptionHandlers;
@@ -1394,8 +1401,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return false;
     }
 
-    // How many of `_callSites` call a druntime hook of a failed check.
+    // The copied call sites: failure hooks and cold throw continuations.
     private size_t _hookSites;
+
+    private struct ColdRange {
+        size_t first, end, siteFirst, siteEnd, hooks;
+    }
+    private ColdRange[] _cold;
+    private ColdRange[] _openCold;
+
+    private bool inCold(in size_t index) const {
+        foreach (range; _cold)
+            if (index >= range.first && index < range.end)
+                return true;
+        return false;
+    }
+
 
     // `inlineOperandsOf`, and the handlers whose `width` or `source` field is
     // not a plain operand. The operand analyses of `classify` read only
@@ -1407,6 +1428,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         enum N = Operand.ignored;
         if (inlineOperandsOf(handler, roles))
             return true;
+        if (handler is &opColdThrow) {
+            roles = Operands(S, Operand.callSite);
+            return true;
+        }
         if (handler is &opCall) {
             roles = Operands(N, Operand.callSite);
             return true;
@@ -1433,7 +1458,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // null. Called once the instructions are final except for fusing and
     // the resolution of branch targets to addresses.
     private InlineBody* inlineBodyOfBuilt() {
-        if (_callSites.length != _hookSites || _assertSites.length != 0
+        size_t coldSites, coldHooks;
+        foreach (range; _cold) {
+            coldSites += range.siteEnd - range.siteFirst;
+            coldHooks += range.hooks;
+        }
+        if (_callSites.length - coldSites != _hookSites - coldHooks
+                || _assertSites.length != 0
                 || _exceptionHandlers.length != 0
                 || _closureOffset != size_t.max
                 || _layout.returnPlace.offset != size_t.max
@@ -1441,20 +1472,51 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 || _layout.variadicCursor != size_t.max
                 || _instructions.length > Bytecode.maxInlineInstructions)
             return null;
-        foreach (instruction; _instructions) {
+        foreach (i, instruction; _instructions) {
             Operands roles;
-            if (!copyOperandsOf(instruction.handler, roles))
+            if (!inCold(i) && !copyOperandsOf(instruction.handler, roles))
                 return null;
         }
-        auto hookSites = _callSites.dup;
-        foreach (ref site; hookSites) {
+        auto instructions = _instructions.dup;
+        CallSite[] sites;
+        auto siteMap = new size_t[_callSites.length];
+        foreach (index, site; _callSites) {
+            bool cold;
+            foreach (range; _cold)
+                cold |= index >= range.siteFirst && index < range.siteEnd;
+            if (cold)
+                continue;
             if (site.cleanupStartIndex != size_t.max)
                 return null;
+            siteMap[index] = sites.length;
             site.args = site.args.dup;
+            sites ~= site;
         }
+        foreach (i, ref instruction; instructions)
+            if (!inCold(i) && (instruction.handler is &opCall
+                    || instruction.handler is &opColdThrow))
+                instruction.source = siteMap[instruction.source];
+        if (_cold.length != 0) {
+            auto bytecode = _bytecode;
+            auto function_ = _function;
+            const selfSite = sites.length;
+            sites ~= CallSite.guest(
+                deferred(() => bytecode.compileFunction(function_)), null, 0);
+            foreach (range; _cold) {
+                instructions[range.first] = Instruction(
+                    &opColdThrow, 0, selfSite, range.first);
+                foreach (i; range.first + 1 .. range.end)
+                    instructions[i] = Instruction(&opJump, range.end, 0, 0);
+            }
+        }
+        Reloc[] relocs;
+        foreach (reloc; _relocs)
+            if (reloc.place.section != Place.Section.instruction
+                    || !inCold(reloc.place.index))
+                relocs ~= reloc;
         return new InlineBody(
-            _instructions.dup, _constants.dup, _tempSize, _tempAlignment,
-            _relocs.dup, hookSites, _allocations.dup, _exposesFrame,
+            instructions, _constants.dup, _tempSize, _tempAlignment,
+            relocs, sites, _allocations.dup, _exposesFrame,
             _exposedFrames.dup);
     }
 
@@ -1469,7 +1531,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return true;
 
         static foreach (operation; AliasSeq!(
-            opThrow, opBranchTrue, opBranchFalse, opReturn, opJump,
+            opThrow, opColdThrow, opBranchTrue, opBranchFalse, opReturn, opJump,
             opReturnVoid, opStoreIndirect,
         ))
             if (handler is &operation)
@@ -1491,6 +1553,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import std.meta: AliasSeq;
 
         foreach (instruction; body_.instructions) {
+            if (instruction.handler is &opColdThrow)
+                return false;
             static foreach (operation; AliasSeq!(
                 opStoreIndirect, opFrameAddress,
             ))
@@ -1721,7 +1785,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         bool canDefer = !body_.exposesFrame;
         foreach (instruction; body_.instructions)
             if (instruction.handler is &opFrameAddress
-                    || instruction.handler is &opIndexStatic)
+                    || instruction.handler is &opIndexStatic
+                    || instruction.handler is &opColdThrow)
                 canDefer = false;
         size_t boundCount;
         const mayBind = bodyWritesOnlyItsFrame(body_);
@@ -2122,6 +2187,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const handler = instruction.handler;
             if (handler is null)
                 continue;
+            // The original cold body can expose addresses absent here.
+            if (handler is &opColdThrow)
+                return;
             if (handler is &opFrameAddress || handler is &opIndexStatic) {
                 if (!expose(instruction.source))
                     return;
@@ -2283,6 +2351,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             if (index < isTarget.length)
                 isTarget[index] = true;
         }
+        foreach (range; _cold)
+            mark(range.first);
         foreach (handler; _exceptionHandlers) {
             mark(handler._bodyStart);
             mark(handler._bodyEnd);
@@ -2930,6 +3000,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             if (reloc.place.section == Place.Section.instruction)
                 reloc.place.index = offsets[reloc.place.index];
 
+        foreach (ref range; _cold) {
+            range.first = offsets[range.first];
+            range.end = offsets[range.end];
+        }
         foreach (ref instruction; _instructions) {
             auto target = branchTargetField(instruction);
             if (target !is null)
@@ -3363,6 +3437,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _finished = true;
     }
 
+    protected override void visitThrowBegin() {
+        _openCold ~= ColdRange(_instructions.length, 0,
+            _callSites.length, 0, _hookSites);
+    }
+
     protected override size_t visitThrowOperand(
         Expression expression, bool readsAfterEnd,
     ) {
@@ -3390,6 +3469,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             offset = thrown;
         }
         emit(&opThrow, offset, 0, 0, 0);
+        auto range = _openCold[$ - 1];
+        _openCold.length--;
+        range.end = _instructions.length;
+        range.siteEnd = _callSites.length;
+        range.hooks = _hookSites - range.hooks;
+        // A nested throw belongs to this complete operand range.
+        if (_openCold.length == 0)
+            _cold ~= range;
         _finished = true;
     }
 
