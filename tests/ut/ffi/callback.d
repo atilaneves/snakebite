@@ -6,6 +6,8 @@ import dmd.func: FuncDeclaration;
 import snakebite.ffi.callback:
     beginCallbackChunk, callbackChunkCount, CallbackBridge, CallbackCall,
     ChunkStrategy;
+import snakebite.ffi.sysv:
+    snakebite_ffi_callback_chunk, snakebite_ffi_callback_chunk_end;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import std.conv: text;
@@ -97,6 +99,11 @@ private FuncDeclaration declarationOf(string code, string name) {
 }
 
 
+private bool inTemplateChunk(const(void)* entry) {
+    return entry >= cast(const(void)*) &snakebite_ffi_callback_chunk
+        && entry < cast(const(void)*) &snakebite_ffi_callback_chunk_end;
+}
+
 @("entry.vector4ArgumentAndReturn")
 unittest {
     auto function_ = declarationOf(
@@ -125,8 +132,10 @@ unittest {
 }
 
 
-// Calling an entry reaches the handler with the argument the host passed
-// and hands the host the handler's result.
+// An entry from the template chunk: the pool's first chunk is the one
+// linked into the binary, so the first entries this bridge asks for come
+// from it, and calling one reaches the handler with the argument the
+// host passed and hands the host the handler's result.
 @("entry.intOfInt")
 unittest {
     auto function_ = declarationOf(q{ extern(C) int twice(int x); }, "twice");
@@ -366,11 +375,12 @@ unittest {
 }
 
 
-// `beginCallbackChunk` forces a fresh chunk made with the given strategy,
-// so the entry reserved next lives in it. The dual-mapping strategy is the
-// fallback for a kernel that refuses to make written memory executable; a
-// kernel that allows it never takes that path on its own, so this drives
-// it directly.
+// A chunk the pool copied from the template at run time works the same
+// as the template: `beginCallbackChunk` forces a fresh chunk made with
+// the given strategy, so the entry reserved next lives outside the
+// binary's own chunk. The dual-mapping strategy is the fallback for a
+// kernel that refuses to make written memory executable; a kernel that
+// allows it never takes that path on its own, so this drives it directly.
 static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
     @("chunk." ~ text(strategy))
     unittest {
@@ -386,6 +396,8 @@ static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
         callbackChunkCount.should == chunksBefore + 1;
 
         auto entry = cast(IntOfInt) bridge.entryOf(&word);
+        inTemplateChunk(entry).should == false;
+
         entry(100).should == 201;
         recorded.integers.should == [100];
     }

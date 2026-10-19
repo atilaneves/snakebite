@@ -28,20 +28,22 @@ private alias FuncDeclaration = imported!"dmd.func".FuncDeclaration;
 // which finds the entry's slot and replays the slot's plan in reverse to
 // re-enter the backend that owns the slot.
 //
-// The template is only a source of bytes. When every slot in every chunk
-// is taken, the pool copies the template's bytes into a new mapping and
-// flips that mapping to read-execute (`allocateChunk`). Memory is never
-// writable and executable at the same time. A slot is released only by
+// The first chunk of entries is the template itself, linked into the
+// binary. When every slot in every chunk is taken, the pool copies the
+// template's bytes into a new mapping and flips that mapping to
+// read-execute (`allocateChunk`). Memory is never writable and
+// executable at the same time. A slot is released only by
 // `CallbackBridge.release`, for a bridge whose entries no host code can
 // call any more; the next reservation reuses it.
 //
-// The pool reserves one address range at start and maps each chunk into
-// the next page of it. An address in the range is an entry, and
-// `guestEntries` holds, for each entry that runs a guest function, what a
-// guest call needs to skip the host: no hash lookup, no lock (ADR-0006).
-// A chunk that does not fit in the range, or every chunk when the
-// reservation failed, works as before and is found by the bridge's hash
-// tables, so the pool still has no fixed limit (ADR-0003).
+// The pool also reserves one address range at start and maps each copied
+// chunk into the next page of it. An address in the template or in the
+// range is an entry, and `templateGuest` and `guestEntries` hold, for each
+// entry that runs a guest function, what a guest call needs to skip the
+// host: no hash lookup, no lock (ADR-0006). A chunk that does not fit in
+// the range, or every copied chunk when the reservation failed, works as
+// before and is found by the bridge's hash tables, so the pool still has
+// no fixed limit (ADR-0003).
 
 
 // What the pool hands a backend when host code calls one of its guest
@@ -119,8 +121,14 @@ public enum ChunkStrategy {
 
 
 // 64 MiB of address space: 16384 one-page chunks, 4.16M entries. Nothing is
-// committed until a chunk is mapped.
+// committed until a chunk is mapped, and the part of `guestEntries` that
+// describes a chunk is committed when the chunk's place in the range is
+// claimed.
 private enum reservedBytes = size_t(64) << 20;
+
+private __gshared Slot[callbackEntriesPerChunk] templateSlots;
+// The template's entries, in the same order.
+private __gshared GuestEntry[callbackEntriesPerChunk] templateGuest;
 
 // Set once by the module constructor, read without a lock afterwards. Both
 // are zero when the reservation failed.
@@ -130,6 +138,10 @@ private __gshared size_t rangeBytes;
 private __gshared GuestEntry* guestEntries;
 // How much of the range chunks use. Written under `mutex`.
 private __gshared size_t rangeUsed;
+// How much of `guestEntries` is committed, as a length of the range. Stored
+// with release under `mutex`, after the pages are readable; an address
+// at or past it is not an entry yet.
+private __gshared size_t rangeClaimed;
 private __gshared Chunk[] chunks;
 private __gshared const(void)*[] freeEntries;
 // The entries in use that the calling thread reserved and did not release.
@@ -157,6 +169,7 @@ shared static this() {
                 trailerOffset, ", expected ", entryBytes),
         );
 
+    chunks = [Chunk(templateBase, templateSlots[], 0)];
     reserveRange;
 }
 
@@ -171,7 +184,7 @@ private void reserveRange() {
     const tableBytes = (reservedBytes / callbackEntryBytes)
         * GuestEntry.sizeof;
     auto range = mmap(null, reservedBytes, PROT_NONE, flags, -1, 0);
-    auto table = mmap(null, tableBytes, PROT_READ | PROT_WRITE, flags, -1, 0);
+    auto table = mmap(null, tableBytes, PROT_NONE, flags, -1, 0);
     if (range == MAP_FAILED || table == MAP_FAILED) {
         if (range != MAP_FAILED)
             munmap(range, reservedBytes);
@@ -226,7 +239,7 @@ private const(void)* reserve(Slot slot) {
         return entry;
     }
 
-    if (chunks.length == 0 || chunks[$ - 1].used == callbackEntriesPerChunk)
+    if (chunks[$ - 1].used == callbackEntriesPerChunk)
         chunks ~= allocateChunk(ChunkStrategy.protect, true);
 
     auto chunk = &chunks[$ - 1];
@@ -237,20 +250,29 @@ private const(void)* reserve(Slot slot) {
     // The template slot table is static storage, which the GC does not scan.
     // Root the owner field explicitly so its backend remains valid for every
     // later callback, including a finalizer in the process-exit collection.
-    GC.addRange(
-        &chunk.slots[index].owner,
-        void*.sizeof,
-    );
+    // A copied chunk's table is GC memory that `chunks` keeps alive.
+    if (chunk.slots.ptr is templateSlots.ptr) {
+        GC.addRange(&chunk.slots[index].owner, void*.sizeof);
+        GC.addRange(&chunk.slots[index].bridge, void*.sizeof);
+    }
     const entry = chunk.base + index * callbackEntryBytes;
     publishGuest(entry, slot);
     return entry;
 }
 
 
-private GuestEntry* guestEntryOf(in const(void)* entry) {
-    const offset = cast(size_t) entry - cast(size_t) rangeBase;
-    return offset < rangeBytes ? &guestEntries[offset / callbackEntryBytes]
-        : null;
+// The table position of `address` when it is a template entry or in the
+// claimed part of the range; null for any other address.
+private GuestEntry* guestEntryOf(in const(void)* address) {
+    import core.atomic: atomicLoad, MemoryOrder;
+
+    const inTemplate = cast(size_t) address - cast(size_t) templateBase;
+    if (inTemplate < callbackEntriesPerChunk * callbackEntryBytes)
+        return &templateGuest[inTemplate / callbackEntryBytes];
+
+    const offset = cast(size_t) address - cast(size_t) rangeBase;
+    return offset < atomicLoad!(MemoryOrder.acq)(rangeClaimed)
+        ? &guestEntries[offset / callbackEntryBytes] : null;
 }
 
 
@@ -365,14 +387,29 @@ private Chunk allocateChunk(in ChunkStrategy strategy, in bool fallback) {
 }
 
 
-// The next `size` bytes of the reserved range, or null when it is used up
-// or was never reserved. Callers hold `mutex`.
+// The next `size` bytes of the reserved range, or null when it is used up,
+// was never reserved, or the kernel refuses to commit the matching part of
+// `guestEntries`. Callers hold `mutex`.
 private ubyte* claimRange(in size_t size) {
+    import core.atomic: atomicStore, MemoryOrder;
+    import core.memory: pageSize;
+    import core.sys.posix.sys.mman: PROT_READ, PROT_WRITE, mprotect;
+
     if (rangeUsed + size > rangeBytes)
+        return null;
+
+    const first = rangeUsed / callbackEntryBytes * GuestEntry.sizeof;
+    const last = (rangeUsed + size) / callbackEntryBytes * GuestEntry.sizeof;
+    const start = first / pageSize * pageSize;
+    if (mprotect(
+            cast(ubyte*) guestEntries + start,
+            roundUpToPage(last) - start,
+            PROT_READ | PROT_WRITE) != 0)
         return null;
 
     auto claimed = cast(ubyte*) rangeBase + rangeUsed;
     rangeUsed += size;
+    atomicStore!(MemoryOrder.rel)(rangeClaimed, rangeUsed);
     return claimed;
 }
 
@@ -516,14 +553,16 @@ private string errnoText(string what) {
 // Called by `snakebite_ffi_callback_common` for every callback: `entry`
 // is the entry the host called, `trailer` its chunk's trailer, and
 // `frame` the spilled argument registers plus where the host's stack
-// arguments start. A chunk names its own slot table in its trailer.
-// Nothing here takes a lock: the slot was fully written before its entry was ever handed out.
+// arguments start. A copied chunk names its own slot table in its
+// trailer; the template chunk's table is static. Nothing here takes a
+// lock: the slot was fully written before its entry was ever handed out.
 public extern(C) void snakebite_ffi_callback_handler(
     const(void)* entry,
     const(CallbackTrailer)* trailer,
     CallFrame* frame,
 ) {
-    auto slots = cast(Slot*) trailer.slots;
+    auto slots = trailer.slots is null
+        ? templateSlots.ptr : cast(Slot*) trailer.slots;
     const base = cast(const(ubyte)*) trailer
         - callbackEntriesPerChunk * callbackEntryBytes;
     const index = (cast(const(ubyte)*) entry - base) / callbackEntryBytes;
@@ -771,12 +810,10 @@ public struct CallbackBridge {
     public GuestTarget guestTarget(const(void)* address) const {
         import core.atomic: atomicLoad, MemoryOrder;
 
-        // An address in the range is an entry of some bridge or of none,
-        // and the table says which. It is read without a lock: `word` is
-        // stored last, with release.
-        const offset = cast(size_t) address - cast(size_t) rangeBase;
-        if (offset < rangeBytes) {
-            const guest = &guestEntries[offset / callbackEntryBytes];
+        // An address in the template or in the range is an entry of some
+        // bridge or of none, and the table says which. It is read without
+        // a lock: `word` is stored last, with release.
+        if (const guest = guestEntryOf(address)) {
             const word = atomicLoad!(MemoryOrder.acq)(guest.word);
             return word !is null && guest.bridge is cast(const(void)*) &this
                 ? GuestTarget(word, guest.adjustment) : GuestTarget.init;
