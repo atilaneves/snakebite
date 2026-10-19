@@ -465,6 +465,7 @@ Build reggaeBuild() {
     auto countFlags = CompilerFlags(releaseFlags.value ~ "-d-version=BytecodeCount");
     // `bin/sb` for `perf record --call-graph fp`; see "Performance work" in
     // CLAUDE.md.
+    // Not -g: ThinLTO in LDC 1.43 drops the full debug info of member functions.
     auto profFlags = CompilerFlags(releaseFlags.value ~ "--frame-pointer=all"
         ~ "-gline-tables-only");
     Target[] targets = assembledSources.map!assembledObject.array ~ [
