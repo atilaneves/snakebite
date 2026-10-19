@@ -40,7 +40,7 @@ package enum TreeFlow : ubyte { normal, break_, continue_, return_, generic }
 // hand control to the evaluator set them first (`syncTree`).
 package struct TreeRoot {
     private const(imported!"snakebite.backends.layout".FrameLayout)* _layout;
-    private Node _body;
+    private Statements _statements;
     package const(imported!"snakebite.backends.closureplan".ClosurePlan)*
         closurePlan;
     package Type returnType;
@@ -58,7 +58,7 @@ package struct TreeRoot {
     }
 
     package TreeFlow execute(ubyte* frame) {
-        return _body.executeStmt(frame);
+        return _statements.run(frame);
     }
 }
 
@@ -73,7 +73,11 @@ package TreeRoot* rootOf(E)(
     root.closurePlan = ev.closurePlanOf(function_);
     root.returnType = function_.type.nextOf;
     root.returnFacts = ev.factsOf(root.returnType);
-    root._body = new Uninitialised!E(ev, body_, &root._body, root);
+    auto statements = statementsOf(body_);
+    auto nodes = new Node[statements.length];
+    foreach (i, one; statements)
+        nodes[i] = new Uninitialised!E(ev, one, &nodes[i], root);
+    root._statements = Statements(nodes);
     return root;
 }
 
@@ -4011,10 +4015,11 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
         case Compound, CompoundDeclaration: {
             import dmd.statement: CompoundStatement;
 
-            auto compound = cast(CompoundStatement) statement;
-            if (compound.statements is null)
+            auto inner = statementsOf(statement);
+            if (inner.length == 0)
                 return new Jump!(TreeFlow.normal);
-            auto inner = statementsOf(compound);
+            if (inner.length == 1)
+                return buildStatement(ev, inner[0], slot);
             static foreach (count; AliasSeq!(2, 3))
                 if (inner.length == count) {
                     auto sequence = new ShortSequence!count;
@@ -4022,13 +4027,13 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
                         sequence._children[i] = child(one, &sequence._children[i]);
                     return sequence;
                 }
-            return new Sequence(children(compound));
+            return new Sequence(children(statement));
         }
         case Scope: {
             auto scoped = statement.isScopeStatement;
             if (scoped.statement is null)
                 return new Jump!(TreeFlow.normal);
-            return child(scoped.statement, slot);
+            return buildStatement(ev, scoped.statement, slot);
         }
         case Exp: {
             auto expression = statement.isExpStatement.exp;
@@ -4097,8 +4102,10 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
     }
 }
 
-// The statements that `statement` runs in order: a block's own, or the
-// statement itself.
+// The statements that `statement` runs in order: those of a block, with the
+// statements of the blocks and scopes inside it in place, or the statement
+// itself. A block or scope has no cleanup of its own: what a destructor or
+// `scope(exit)` runs is a statement that stays whole in the list.
 private Statement[] statementsOf(Statement statement) {
     import dmd.astenums: STMT;
     import dmd.statement: CompoundStatement;
@@ -4113,8 +4120,7 @@ private Statement[] statementsOf(Statement statement) {
             auto compound = cast(CompoundStatement) statement;
             if (compound.statements !is null)
                 foreach (candidate; *compound.statements)
-                    if (candidate !is null)
-                        inner ~= candidate;
+                    inner ~= statementsOf(candidate);
             return inner;
         }
         default:
