@@ -455,7 +455,9 @@ private struct Operation(string op) {
     }
 }
 
-private Operation!op operationOf(string op, E)(E ev, BinExp e) {
+// `e` keeps its own type: a compound assignment plans its shift differently
+// from a plain shift.
+private Operation!op operationOf(string op, E, B : BinExp)(E ev, B e) {
     import snakebite.backends.shifts: shiftPlan;
 
     static if (shiftOp!op)
