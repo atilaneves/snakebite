@@ -61,8 +61,8 @@ Measure with the existing tools. Do not write a new benchmark harness.
 - Before any profiling or optimisation, load the `linux-perf` and
   `performance-patterns` skills and follow them. Apply them to `bin/sb`,
   never to natively compiled guest code.
-- Profile a `bin/sb` built with the release flags plus
-  `--frame-pointer=all -g`, and record with `perf record --call-graph fp`.
+- Profile `bin/sb-prof` (`ninja bin/sb-prof`; the release `bin/sb` plus
+  `--frame-pointer=all -g`), and record with `perf record --call-graph fp`.
   Use the plain release build only for timings.
 - See the "Native baseline" section of issue #718 before any native
   comparison.
