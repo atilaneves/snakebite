@@ -4395,11 +4395,8 @@ package const(Instruction)* opLoadThenCopy(size_t loadWidth, size_t copyWidth,
     static if (frameOnly) {
         alias load = executeWith!(runLoadIndirect, OperandKind.frame,
             OperandKind.frame, 0, OperandKind.storage, loadWidth);
-        alias copy = executeWith!(runCopyFixed, OperandKind.frame,
-            OperandKind.frame, 0, OperandKind.storage, copyWidth, false);
     } else {
         alias load = opLoadIndirectFixed!loadWidth;
-        alias copy = opCopyFixed!copyWidth;
     }
     static if (chainedDispatch)
         // The chain reaches the copy by itself.
