@@ -40,6 +40,20 @@ private bool sameScalar(
     return a.equals(b) || (a.ty == b.ty && a.isTypeBasic !is null);
 }
 
+// An index without calls or side effects is only a read, and compiled D
+// performs that read when the element is accessed, after the calls in the
+// array expression. An index with side effects, or one that sees `$`, keeps
+// its place before the array expression. `isTrivialExp` allocates nothing,
+// which matters because guest finalizers resolve indexes while the
+// collector runs.
+public bool readsIndexAfterBase(imported!"dmd.expression".IndexExp index) {
+    import dmd.sideeffect: isTrivialExp;
+
+    return index.lengthVar is null
+        && isTrivialExp(index.e2)
+        && !isTrivialExp(index.e1);
+}
+
 // Resolves the storage named by an expression. `Result` is deliberately a
 // backend type: the interpreter returns a native pointer, while the bytecode
 // compiler returns a frame slot containing a native pointer. The resolver owns
@@ -184,10 +198,15 @@ public struct StorageResolver(Result, Adapter) {
             // language-defined order in the shared resolver; all other
             // index kinds evaluate the base before the index.
             case Tsarray: {
+                const baseFirst = readsIndexAfterBase(index);
+                Result base;
+                if (baseFirst)
+                    base = resolve(index.e1);
                 auto length = _adapter.storageStaticIndexLength(index);
                 auto indexValue = _adapter.storageIndexValue(index, length);
                 _adapter.storageIndexBounds(index, indexValue, length);
-                auto base = resolve(index.e1);
+                if (!baseFirst)
+                    base = resolve(index.e1);
                 return _adapter.storageStaticIndex(
                     index, base, indexValue);
             }
@@ -196,16 +215,19 @@ public struct StorageResolver(Result, Adapter) {
             // array expression. `$` needs the descriptor captured first,
             // so that special form keeps the extra early step.
             case Tarray: {
+                const baseFirst = index.lengthVar !is null
+                    || readsIndexAfterBase(index);
                 Result base;
                 size_t capturedLength;
-                if (index.lengthVar !is null) {
+                if (baseFirst) {
                     base = resolve(index.e1);
-                    capturedLength = _adapter.storageDynamicIndexLength(
-                        index, base);
+                    if (index.lengthVar !is null)
+                        capturedLength = _adapter.storageDynamicIndexLength(
+                            index, base);
                 }
                 auto indexValue = _adapter.storageIndexValue(
                     index, capturedLength);
-                if (index.lengthVar is null)
+                if (!baseFirst)
                     base = resolve(index.e1);
                 auto length = _adapter.storageDynamicIndexLength(index, base);
                 _adapter.storageIndexBounds(index, indexValue, length);
