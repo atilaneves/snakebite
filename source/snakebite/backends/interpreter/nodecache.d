@@ -14,13 +14,13 @@ public struct NodeCache(Value, size_t bits) {
 
     private Entry[1 << bits] _entries;
 
-    public Value* find(in void* key) @safe @nogc nothrow pure {
+    public Value* find(in void* key) @trusted @nogc nothrow pure {
         auto entry = &_entries[indexOf(key)];
         return entry.key is key ? &entry.value : null;
     }
 
     public Value* insert(in void* key, Value value)
-        @safe @nogc nothrow pure
+        @trusted @nogc nothrow pure
     {
         auto entry = &_entries[indexOf(key)];
         entry.key = key;

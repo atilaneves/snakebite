@@ -2973,7 +2973,16 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         return *cast(void**) buffer.ptr;
     }
 
-    private NodeCache!(ulong, 10) _integerLiterals;
+    // The folded constants a builtin call produces live in transient nodes
+    // whose address a later constant reuses, so an entry also holds the
+    // inputs of its answer and is trusted only while the node still has them.
+    private static struct IntegerLiteral {
+        ulong raw;
+        Type type;
+        ulong value;
+    }
+
+    private NodeCache!(IntegerLiteral, 10) _integerLiterals;
     private NodeCache!(const(CastPlan)*, 9) _castPlans;
     private NodeCache!(TypeFacts.Truth, 6) _truths;
 
@@ -2985,10 +2994,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return _nativeData.write(_type, _facts, expression, _place);
 
         auto cached = _integerLiterals.find(cast(void*) expression);
-        if (cached is null)
-            cached = _integerLiterals.insert(
-                cast(void*) expression, expression.toInteger);
-        storeIntegral(_place, *cached, _facts.size);
+        if (cached is null || cached.raw != expression.getInteger
+                || cached.type !is expression.type)
+            cached = _integerLiterals.insert(cast(void*) expression,
+                IntegerLiteral(expression.getInteger, expression.type,
+                    expression.toInteger));
+        storeIntegral(_place, cached.value, _facts.size);
     }
 
     override void visit(RealExp expression) {
