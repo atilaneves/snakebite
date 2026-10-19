@@ -4404,11 +4404,9 @@ private const(Instruction)* runAlloca(Decoded)(
 }
 
 
-// Zeroes `execution.width` bytes at `execution.destination` - a zero-init
-// struct
-// local or array element wider than the 8 bytes `opConstant`'s `storeWidth`
-// lays out, the only width this VM's integral opcodes cannot already carry
-// as a single constant.
+// Zeroes `execution.width` bytes at `execution.destination`: a zero-init
+// struct, a `null` of any shape, or a temporary. Widths 1, 4, 8 and 16 are
+// stored directly; any other width calls `memset`.
 package alias opZero =
     execute!(runZero, OperandKind.storage, OperandKind.immediate);
 

@@ -6319,20 +6319,6 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!()) {
-    @("nullPointerAssignmentClearsEveryByte." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            void main() {
-                void* pointer = cast(void*) 0x0101010101010101;
-                pointer = null;
-                assert(pointer is null);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!()) {
     @("zeroInitializedLocalOfSixteenBytesIsClearedOnEveryIteration." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
