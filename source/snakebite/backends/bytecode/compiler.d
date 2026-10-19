@@ -804,7 +804,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opFloatNotEqual3, opFloatLessThan3, opFloatLessOrEqual3,
         opFloatGreaterThan3, opFloatGreaterOrEqual3,
         CheckedAccess, opIndexPointer, opIndexSlice, opIndexStatic,
-        checkedIndexHandler,
+        checkedIndexAccess, checkedIndexHandler, checkedIndexKind,
         opBitAnd3, opBitOr3, opBitXor3, opShiftLeft3, opShiftRightLogical3,
         opShiftRightArithmetic3, opDivideSigned3, opDivideUnsigned3,
         opModuloSigned3, opModuloUnsigned3,
@@ -1270,7 +1270,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // How a copied instruction names frame storage. `ignored` marks a field
     // that holds no storage operand.
-    private enum Operand { ignored, storage, constant }
+    private enum Operand { ignored, storage, constant, callSite }
 
     private static struct Operands {
         Operand destination;
@@ -1374,11 +1374,40 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return false;
     }
 
+    // How many of `_callSites` call a druntime hook of a failed check.
+    private size_t _hookSites;
+
+    // `inlineOperandsOf`, and the handlers whose `width` or `source` field is
+    // not a plain operand. The operand analyses of `classify` read only
+    // `inlineOperandsOf`, because their reading of `width` does not fit these.
+    private static bool copyOperandsOf(
+        Instruction.Handler handler, out Operands roles,
+    ) {
+        enum S = Operand.storage;
+        enum N = Operand.ignored;
+        if (inlineOperandsOf(handler, roles))
+            return true;
+        if (handler is &opCall) {
+            roles = Operands(N, Operand.callSite);
+            return true;
+        }
+        CheckedAccess access;
+        bool constantValue;
+        if (checkedIndexKind(handler, access, constantValue)) {
+            // A check has no value operand, and a constant value is the
+            // address of a native constant.
+            roles = Operands(
+                access == CheckedAccess.check || constantValue ? N : S, S);
+            return true;
+        }
+        return false;
+    }
+
     // The copyable form of the function this compiler just finished, or
     // null. Called once the instructions are final except for fusing and
     // the resolution of branch targets to addresses.
     private InlineBody* inlineBodyOfBuilt() {
-        if (_callSites.length != 0 || _assertSites.length != 0
+        if (_callSites.length != _hookSites || _assertSites.length != 0
                 || _exceptionHandlers.length != 0
                 || _closureOffset != size_t.max
                 || _layout.returnPlace.offset != size_t.max
@@ -1388,18 +1417,29 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return null;
         foreach (instruction; _instructions) {
             Operands roles;
-            if (!inlineOperandsOf(instruction.handler, roles))
+            if (!copyOperandsOf(instruction.handler, roles))
                 return null;
+        }
+        auto hookSites = _callSites.dup;
+        foreach (ref site; hookSites) {
+            if (site.cleanupStartIndex != size_t.max)
+                return null;
+            site.args = site.args.dup;
         }
         return new InlineBody(
             _instructions.dup, _constants.dup, _tempSize, _tempAlignment,
-            _relocs.dup);
+            _relocs.dup, hookSites);
     }
 
     // Whether an instruction of a copied body leaves its `destination`
-    // field unwritten: it only reads it, or it is a store through it.
-    private bool leavesDestination(Instruction.Handler handler) {
+    // field unwritten: it only reads it, it is a store through it, or it is
+    // a hook call, which writes no frame slot.
+    private bool leavesDestination(in Instruction instruction) {
         import std.meta: AliasSeq;
+
+        const handler = instruction.handler;
+        if (handler is &opCall && instruction.destination == discardResult)
+            return true;
 
         static foreach (operation; AliasSeq!(
             opThrow, opBranchTrue, opBranchFalse, opReturn, opJump,
@@ -1410,6 +1450,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         static foreach (width; indirectCopyWidths)
             if (handler is &opStoreIndirectFixed!width)
                 return true;
+        CheckedAccess access;
+        if (checkedIndexAccess(handler, access))
+            return access != CheckedAccess.load;
         return isFusedBranch(handler);
     }
 
@@ -1429,7 +1472,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             static foreach (width; indirectCopyWidths)
                 if (instruction.handler is &opStoreIndirectFixed!width)
                     return false;
-            if (!leavesDestination(instruction.handler)
+            // A checked store writes through the array.
+            CheckedAccess access;
+            if (checkedIndexAccess(instruction.handler, access)
+                    && (access == CheckedAccess.store
+                        || access == CheckedAccess.storeUnchecked))
+                return false;
+            if (!leavesDestination(instruction)
                     && (instruction.destination & (1UL << 63)) != 0)
                 return false;
         }
@@ -1447,7 +1496,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // writes one pointer.
         enum indexWidth = size_t.sizeof;
         foreach (instruction; body_.instructions) {
-            if (leavesDestination(instruction.handler))
+            if (leavesDestination(instruction))
                 continue;
             size_t written = instruction.width == 0 ? 1 : instruction.width;
             static foreach (operation; AliasSeq!(
@@ -1455,6 +1504,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ))
                 if (instruction.handler is &operation)
                     written = indexWidth;
+            // A checked load writes one element of at most a word; its
+            // width field is packed.
+            CheckedAccess access;
+            if (checkedIndexAccess(instruction.handler, access))
+                written = indexWidth;
             if (instruction.destination < offset + width
                     && instruction.destination + written > offset)
                 return true;
@@ -1664,7 +1718,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         foreach (i, instruction; instructions) {
             Operands roles;
-            inlineOperandsOf(instruction.handler, roles);
+            copyOperandsOf(instruction.handler, roles);
             const isReturn = instruction.handler is &opReturn;
             if (isReturn || instruction.handler is &opReturnVoid) {
                 if (isReturn && destOffset != discardResult && !direct[i])
@@ -1683,8 +1737,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 copied.source = place(copied.source);
             else if (roles.source == Operand.constant)
                 copied.source += constantBase;
+            else if (roles.source == Operand.callSite) {
+                auto site = cast(CallSite) body_.callSites[instruction.source];
+                site.args = site.args.dup;
+                foreach (ref arg; site.args)
+                    arg.callerOffset = place(arg.callerOffset);
+                _callSites ~= site;
+                ++_hookSites;
+                copied.source = _callSites.length - 1;
+            }
             if (roles.right == Operand.storage)
                 copied.sourceWidth = place(copied.sourceWidth);
+            if (widthHoldsIndexSlot(copied.handler)) {
+                const low = 0xffff_ffffUL;
+                copied.width = (copied.width & ~low)
+                    | rebase(copied.width & low);
+            }
             if (auto target = branchTargetField(copied))
                 *target = positions[*target];
             _instructions ~= copied;
@@ -10515,6 +10583,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             Arg(lineOffset, 0, uint.sizeof),
         ] ~ extraArgs;
         _callSites ~= CallSite.native(cast(const(void)*) plan, args, 0);
+        ++_hookSites;
         emit(&opCall, discardResult, _callSites.length - 1, 0);
     }
 
