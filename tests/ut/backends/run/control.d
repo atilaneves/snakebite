@@ -3318,3 +3318,36 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// A function that returns `ref` gives the address of its operand, and the
+// constructor of a struct returns `this` that way.
+static foreach (backend; Matrix!()) {
+    @("returnOfReferences." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        69.shouldBeStatusOf!(backend, q{
+            struct Counter {
+                int n;
+                long w;
+                ref int get() { return n; }
+                ref long wide() { return w; }
+                this(int start) { n = start; }
+            }
+            ref int pickRef(ref int a, ref int b, bool first) {
+                return first ? a : b;
+            }
+            int main() {
+                int t;
+                Counter c = Counter(3);
+                foreach (i; 0 .. 3) {
+                    c.get() += 4;
+                    c.wide() += 5;
+                    int x = 1, y = 2;
+                    pickRef(x, y, i == 1) += 10;
+                    t += x + y;
+                }
+                return t + c.n + cast(int) c.w;
+            }
+        });
+    }
+}

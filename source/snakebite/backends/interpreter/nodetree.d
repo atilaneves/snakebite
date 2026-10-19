@@ -1338,6 +1338,21 @@ private final class StructLiteral : Node {
     }
 }
 
+// The result of a function that returns `ref` is the address of the operand.
+private final class ReturnReference : Node {
+    private void** _place;
+    private Node _address;
+    private Position _position;
+    public this(void** place, Node address, Position position) {
+        _place = place; _address = address; _position = position;
+    }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        _position.note(frame);
+        *cast(ubyte**) *_place = _address.executeAddr(frame);
+        return TreeFlow.return_;
+    }
+}
+
 private final class ReturnAggregate(E) : Node {
     private E _ev;
     private void** _place;
@@ -4114,8 +4129,11 @@ private Node buildReturn(E)(E ev, imported!"dmd.statement".ReturnStatement retur
         return generic();
     if (returned.exp is null)
         return new Jump!(TreeFlow.return_);
-    if (typeFunctionOf(ev._function).isRef)
-        return generic();
+    if (typeFunctionOf(ev._function).isRef) {
+        auto address = buildAddress(ev, returned.exp);
+        return address is null ? generic() : new ReturnReference(
+            &ev._place, address, positionOf(ev, returned.exp));
+    }
     if (ev._type.toBasetype.ty == TY.Tvoid) {
         // `return f();` in a function without a result: `f` runs, then the
         // function ends.
