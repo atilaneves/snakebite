@@ -1965,3 +1965,50 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// A temporary in an argument of the left operand is destroyed at the end
+// of the full expression, after the right operand runs.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "dmd's CTFE runs no destructor of a temporary in a condition"),
+)) {
+    @("condition.call.argumentTemporaryOutlivesRightOperand." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void record(ref int events, int event) {
+                events = events * 10 + event;
+            }
+
+            struct Temporary {
+                int* events;
+                int value;
+                ~this() { record(*events, 3); }
+            }
+
+            bool positive(ref int events, int n) {
+                record(events, 1);
+                return n > 0;
+            }
+
+            bool right(ref int events) {
+                record(events, 2);
+                return true;
+            }
+
+            int main() {
+                int events;
+                if (positive(events, Temporary(&events, 1).value)
+                        && right(events))
+                    record(events, 4);
+                if (events != 1234) return 1;
+                events = 0;
+                if (positive(events, Temporary(&events, 0).value)
+                        || right(events))
+                    record(events, 4);
+                if (events != 1234) return 2;
+                return 0;
+            }
+        });
+    }
+}
