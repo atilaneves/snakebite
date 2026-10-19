@@ -450,3 +450,33 @@ static foreach (freshChunk; [false, true]) {
         bridge.guestTarget(entry).word.should == null;
     }
 }
+
+
+// An entry that adjusts the receiver names its target together with the
+// adjustment, so a guest call through it passes the adjusted receiver on.
+static foreach (freshChunk; [false, true]) {
+    @("guestTarget.adjustedEntryNamesItsAdjustment." ~ text(freshChunk))
+    unittest {
+        import snakebite.frontend.dmd.functions: findStruct;
+
+        auto module_ = parseSnippet(q{
+            struct Holder {
+                int twice(int x) { return x; }
+            }
+        });
+        auto function_ = findFunction(findStruct(module_, "Holder"), "twice");
+        assert(function_ !is null, "No method `twice` in the snippet");
+        Recorded recorded;
+        auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
+        int word;
+        bridge.register(&word, function_);
+        if (freshChunk)
+            beginCallbackChunk(ChunkStrategy.protect);
+
+        const entry = bridge.adjustedEntryOf(&word, function_, -16);
+
+        const target = bridge.guestTarget(entry);
+        target.word.should == &word;
+        target.adjustment.should == -16;
+    }
+}
