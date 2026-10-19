@@ -9341,7 +9341,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // already true - and whichever operand actually decided the answer is
     // then reduced to a proper `bool` and copied out to `destOffset`. Two
     // `bool` operands need no reduction: they already are `bool`, so they
-    // evaluate into one temporary instead (the fast path below).
+    // evaluate into the destination instead (the fast path below).
     private void compileLogical(
         LogicalExp expression, in LogicalPlan plan,
         in size_t destOffset, in size_t width,
@@ -9350,13 +9350,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.typesem: toBasetype;
 
         const leftIsBool = expression.e1.type.toBasetype.ty == Tbool;
-        // Two `bool` operands evaluate into one temporary: the left value
+        // Two `bool` operands evaluate into the destination: the left value
         // stays when it decides, the right one overwrites it otherwise, so
         // there is neither a cast to `bool` nor a join jump.
         if (leftIsBool && expression.e2.type.toBasetype.ty == Tbool
                 && plan.right == LogicalPlan.Right.value
                 && destOffset != discardResult && plan.hasValue) {
-            const value = reserveTemp(typeFacts(expression.e1.type));
+            const value = destOffset;
             compileValue(FullExpressionScope.Position.condition,
                 expression.e1, value, 1);
             const shortIndex = _instructions.length;
@@ -9365,8 +9365,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 expression.e2, value, 1);
             _finished = false;
             _instructions[shortIndex].source = _instructions.length;
-            if (destOffset != value)
-                emit(&opCopy, destOffset, value, 1);
             return;
         }
         const leftOffset = compileCondition(expression.e1,
