@@ -19,6 +19,8 @@ import dmd.mtype: Type;
 import dmd.statement: Statement;
 import snakebite.backends.checkplan: BoundsCheck;
 import snakebite.backends.controlflow: ControlFlowState;
+import snakebite.backends.interpreter.faultslot:
+    fastFrameLead, faultSlotOf;
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.backends.sliceplan: SlicePlan;
 import snakebite.nativelayout: TypeFacts;
@@ -81,7 +83,10 @@ package struct TreeCallee {
     package const(imported!"snakebite.backends.layout".FrameLayout)* layout;
     package TreeRoot* root;
     package TypeFacts returnFacts;
-    // Whether the frame meets the contract of `FrameStack.reserveFast`.
+    // The bytes in front of the frame base, for its fault slot
+    // (`frameLead`), and whether the reservation meets the contract of
+    // `FrameStack.reserveFast` with `fastFrameLead` bytes in front.
+    package size_t lead;
     package bool reservesFast;
 }
 
@@ -90,15 +95,15 @@ package bool isScalar(E)(E ev, Type type) {
 }
 
 // Where a statement names the full expression it runs, so that a fault in
-// it reports that expression's line. A statement that cannot fault does not
-// need one, but this costs one store, and a node that decides what can
-// fault could be wrong.
+// it reports that expression's line: it stores the expression in the fault
+// slot of its frame. A statement that cannot fault does not need one, but
+// this costs one store, and a node that decides what can fault could be
+// wrong.
 private struct Position {
-    private const(void)** _slot;
     private const(void)* _root;
 
-    public void note() {
-        *_slot = _root;
+    public void note(ubyte* frame) {
+        *faultSlotOf(frame) = _root;
     }
 }
 
@@ -179,7 +184,7 @@ private mixin template StatementForm(string method) {
         _position = position;
     }
     public override TreeFlow executeStmt(ubyte* frame) {
-        _position.note;
+        _position.note(frame);
         mixin(method ~ "(frame);");
         return TreeFlow.normal;
     }
@@ -1095,7 +1100,7 @@ private final class ExpressionStatement : Node {
         _expression.executeVoid(frame);
     }
     public override TreeFlow executeStmt(ubyte* frame) {
-        _position.note;
+        _position.note(frame);
         _expression.executeVoid(frame);
         return TreeFlow.normal;
     }
@@ -1163,7 +1168,7 @@ private final class IfThenElse(C) : Branches {
         _condition = condition; _position = position;
     }
     public override TreeFlow executeStmt(ubyte* frame) {
-        _position.note;
+        _position.note(frame);
         if (_condition.test(frame))
             return _then.executeStmt(frame);
         if (_else !is null)
@@ -1207,7 +1212,7 @@ private final class ForLoop(C) : Loop {
     public override TreeFlow executeStmt(ubyte* frame) {
         for (;;) {
             static if (C.mayFault)
-                _position.note;
+                _position.note(frame);
             if (!_condition.test(frame))
                 break;
             const flow = _body.run(frame);
@@ -1265,7 +1270,7 @@ private final class DoLoop(C) : Loop {
                     return result;
             }
             static if (C.mayFault)
-                _position.note;
+                _position.note(frame);
         } while (_condition.test(frame));
         return TreeFlow.normal;
     }
@@ -1279,7 +1284,7 @@ private final class ReturnValue(T) : Node {
         _place = place; _value = value; _position = position;
     }
     public override TreeFlow executeStmt(ubyte* frame) {
-        _position.note;
+        _position.note(frame);
         static if (is(T == SliceValue)) {
             if (*_place !is null)
                 _value.executeInto(frame, cast(ubyte*) *_place);
@@ -1308,7 +1313,7 @@ private final class GenericStatement(E) : Node {
         _ev.syncTree(_root, frame);
         // The evaluator runs the statement as it runs one outside the tree:
         // with no expression named until the statement opens one.
-        *_ev._temporaries.rootSlot = null;
+        *faultSlotOf(frame) = null;
         _statement.accept(_ev);
         return _ev._controlFlow.hasTransfer ? TreeFlow.generic : TreeFlow.normal;
     }
@@ -1473,10 +1478,16 @@ private final class Call(E) : Node {
 
         const layout = callee.layout;
         auto calleeFrame = FrameGuard(&ev._frames);
+        // A frame of small alignment has the same lead whatever it is.
+        size_t lead = fastFrameLead;
         auto base = callee.reservesFast
-            ? ev._frames.reserveFast(layout.size, layout.alignment) : null;
-        if (base is null)
-            base = ev._frames.reserve(layout.size, layout.alignment);
+            ? ev._frames.reserveFast(layout.size + lead, fastFrameLead) : null;
+        if (base is null) {
+            lead = callee.lead;
+            base = ev._frames.reserve(layout.size + lead, cast(uint) lead);
+        }
+        base += lead;
+        *faultSlotOf(base) = null;
         if (layout.hiddenThis.variable !is null)
             *cast(size_t*) (base + layout.hiddenThis.parameter.offset)
                 = receiver;
@@ -2759,7 +2770,7 @@ private Node storeFusedDouble(Node value, FrameAddress address) {
 }
 
 private Position positionOf(E)(E ev, Expression root) {
-    return Position(ev._temporaries.rootSlot, cast(const(void)*) root);
+    return Position(cast(const(void)*) root);
 }
 
 // The statement that a declaration is: one for each runtime variable it

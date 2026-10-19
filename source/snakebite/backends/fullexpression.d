@@ -207,9 +207,6 @@ public struct FullExpressionScope {
         scope void delegate() end,
     ) {
         const outer = _depth == 0;
-        // A node-tree statement names its root while no scope is open, and
-        // the statement carries on after a scope of the evaluator closes.
-        const named = _root;
         if (outer) {
             _kind = kind;
             _root = root;
@@ -218,7 +215,7 @@ public struct FullExpressionScope {
         scope (exit) {
             --_depth;
             if (_depth == 0)
-                _root = named;
+                _root = null;
         }
         if (outer)
             begin();
@@ -259,13 +256,6 @@ public struct FullExpressionScope {
 
     public const(void)* root() const @safe @nogc nothrow pure {
         return _root;
-    }
-
-    // Where a node-tree statement names its root. The tree opens no scope
-    // for a statement that needs no temporaries, but a fault in it reports
-    // the line of the full expression that master reports.
-    public const(void)** rootSlot() return @system @nogc nothrow pure {
-        return &_root;
     }
 
     public bool rootOwnsTemporary() const {

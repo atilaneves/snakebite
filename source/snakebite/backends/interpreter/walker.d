@@ -558,6 +558,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     import dmd.dclass: ClassDeclaration;
     import dmd.dstruct: StructDeclaration;
     import snakebite.framestack: FrameStack, defaultFrameCapacity;
+    import snakebite.backends.interpreter.faultslot:
+        faultSlotOf, fastFrameLead, frameLead, pushCallFrame;
     import snakebite.backends.interpreter.stackpieces: StackPieces;
     import snakebite.backends.druntimehooks: DruntimeHook;
     import snakebite.ffi:
@@ -858,7 +860,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         ubyte entry; // Only its address matters: it marks an active entry.
         auto parent = _frames.backendEntry; // Restored as a mutable entry link.
         const frameMark = _frames.mark;
-        auto guard = CallStateGuard(this);
+        auto guard = CallStateGuard(this, null);
         scope(exit) {
             unregister(&_guestRun);
             _frames.backendEntry = parent;
@@ -878,9 +880,18 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             variadicCursor, variadicTypes);
     }
 
+    // The word of the running call that names its full expression: null
+    // while no guest call runs.
+    private const(void)** faultSlot() @system @nogc nothrow pure {
+        auto guard = _innermost;
+        return guard is null || guard._frame is null
+            ? null : faultSlotOf(guard._frame);
+    }
+
     // What the fault handler reads: the function that runs, and the line of
     // the full expression that runs in it. Native code that the guest calls
-    // runs outside any expression of the guest, and then no line is known.
+    // runs inside the expression that calls it, and a fault there names the
+    // line of that call.
     extern(D) private static GuestPosition guestPosition(void* context)
     nothrow @nogc {
         import std.string: fromStringz;
@@ -890,7 +901,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (function_ is null)
             return GuestPosition();
         const name = function_ in evaluator._shared.names;
-        const root = evaluator._temporaries.root;
+        auto slot = evaluator.faultSlot;
+        const root = slot is null ? null : cast(Expression) *slot;
         if (root is null)
             return GuestPosition(name is null ? null : *name);
         return GuestPosition(
@@ -922,7 +934,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto shape = callShapeOf(function_);
         layout.checkHostArgumentCount(
             args.length, function_, "interpreter");
-        auto frame = _frames.push(layout.size, layout.alignment);
+        auto frame = pushCallFrame(_frames, layout.size, layout.alignment);
         if (variadicCursor !is null) {
             assert(layout.variadicCursor != size_t.max);
             storeIntegral(frame.base + layout.variadicCursor,
@@ -1338,7 +1350,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         }
 
         returnPlace = layout.returnPlace.bind(&_frames, frameBase, returnPlace);
-        auto guard = CallStateGuard(this);
+        auto guard = CallStateGuard(this, frameBase);
         takeFunctionFields;
 
         const closurePlan = closurePlanOf(function_);
@@ -1465,10 +1477,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         callee.decision = decision;
         callee.layout = layout;
         callee.returnFacts = factsOf(returnType);
-        callee.reservesFast = layout.size != 0
-            && layout.alignment != 0
+        callee.lead = frameLead(layout.alignment);
+        callee.reservesFast = layout.alignment != 0
             && (layout.alignment & (layout.alignment - 1)) == 0
-            && layout.alignment < pageSize;
+            && layout.alignment <= fastFrameLead;
         return callee;
     }
 
@@ -1501,7 +1513,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return;
         }
 
-        auto guard = CallStateGuard(this);
+        auto guard = CallStateGuard(this, calleeFrame);
         _place = place;
         _function = callee.function_;
         executeTreeCallee(callee, calleeFrame);
@@ -2047,7 +2059,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         private CallStateGuard* _outer;
         private void* _place;
         private FuncDeclaration _function;
-        private const(void)* _root;
+        // The frame of the call, whose fault slot names the full expression
+        // that the call runs. Null for the entry of host code.
+        private ubyte* _frame;
         private size_t _activationMark;
         // The fields below hold the previous owner's values, and are set only
         // while `_evaluator._fieldsOwner is &this` (`spill`).
@@ -2066,12 +2080,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         @disable this();
         @disable this(this);
 
-        private this(Evaluator evaluator) {
+        private this(Evaluator evaluator, ubyte* frame) {
             _evaluator = evaluator;
+            _frame = frame;
             _outer = evaluator._innermost;
             _place = evaluator._place;
             _function = evaluator._function;
-            _root = *evaluator._temporaries.rootSlot;
             _activationMark = evaluator._activationAllocations.length;
             evaluator._innermost = &this;
         }
@@ -2079,7 +2093,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         ~this() {
             _evaluator._place = _place;
             _evaluator._function = _function;
-            *_evaluator._temporaries.rootSlot = _root;
             if (_evaluator._fieldsOwner is &this)
                 unspill;
             _evaluator._innermost = _outer;
@@ -2585,6 +2598,15 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         scope (failure)
             if (position == FullExpressionScope.Position.returnOperand)
                 _returned = ReturnedLvalue.init;
+        // A full expression that opens names itself in the slot of the
+        // running call, as a tree statement does; the one it interrupts
+        // comes back when it ends.
+        auto slot = faultSlot;
+        if (slot is null || !_temporaries.opens(position))
+            return _temporaries.withExpression(position, root, evaluate);
+        const interrupted = *slot;
+        *slot = cast(const(void)*) root;
+        scope (exit) *slot = interrupted;
         _temporaries.withExpression(position, root, evaluate);
     }
 
@@ -5692,7 +5714,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.nativelayout: storeIntegral;
 
         auto layout = layoutOf(inv);
-        auto frame = _frames.push(layout.size, layout.alignment);
+        auto frame = pushCallFrame(_frames, layout.size, layout.alignment);
         storeIntegral(
             frame.base + layout.hiddenThis.parameter.offset,
             cast(size_t) thisPointer, size_t.sizeof,
@@ -6159,7 +6181,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         auto constructor = expression.member;
         auto layout = layoutOf(constructor);
-        auto frame = _frames.push(layout.size, layout.alignment);
+        auto frame = pushCallFrame(_frames, layout.size, layout.alignment);
 
         import snakebite.nativelayout: storeIntegral;
 
@@ -6998,7 +7020,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // the callee's own.
         const slots = valueCall is null
             ? layout : valueCall.layoutFor(layout.hiddenThis.variable !is null);
-        auto frame = _frames.push(
+        auto frame = pushCallFrame(_frames,
             max(layout.size, slots.size), max(layout.alignment, slots.alignment));
 
         // `vthis` is dmd's one declaration for both hidden context
