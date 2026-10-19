@@ -1355,3 +1355,80 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+// A class reference converts to a class or an interface that its object has,
+// and to null for one it has not. `typeid` of an object is the information
+// of its dynamic class.
+// `typeid` of an expression of an interface type is the class information of
+// the interface, whatever class its object has.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot read a TypeInfo"),
+)) {
+    @("cast.class.typeidOfInterfaceExpression." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            interface Named { string name(); }
+            class Dog: Named { string name() { return "dog"; } }
+            class Cat: Named { string name() { return "cat"; } }
+
+            bool isNamed(Named named) {
+                return typeid(named).toString == typeid(Named).toString;
+            }
+
+            void main() {
+                Named dog = new Dog;
+                Named cat = new Cat;
+                foreach (round; 0 .. 3) {
+                    assert(isNamed(dog));
+                    assert(isNamed(cat));
+                }
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("cast.class.dynamicCastFollowsTheDynamicType." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            interface Named { string name(); }
+            interface Other { }
+            class Animal { }
+            class Dog: Animal, Named { string name() { return "dog"; } }
+            class Puppy: Dog { }
+            class Cat: Animal { }
+
+            int test(Animal animal) {
+                int bits;
+                if (cast(Dog) animal !is null) bits |= 1;
+                if (cast(Puppy) animal !is null) bits |= 2;
+                if (cast(Cat) animal !is null) bits |= 4;
+                if (cast(Named) animal !is null) bits |= 8;
+                if (cast(Other) animal !is null) bits |= 16;
+                if (animal !is null && typeid(animal) is typeid(Puppy)) bits |= 32;
+                return bits;
+            }
+
+            void main() {
+                Animal dog = new Dog;
+                Animal puppy = new Puppy;
+                Animal cat = new Cat;
+                Animal none;
+                foreach (round; 0 .. 3) {
+                    assert(test(dog) == 1 + 8);
+                    assert(test(puppy) == 1 + 2 + 8 + 32);
+                    assert(test(cat) == 4);
+                    assert(test(none) == 0);
+                }
+                Named named = cast(Named) puppy;
+                assert(named.name == "dog");
+                assert(cast(Animal) named is puppy);
+                assert((cast(Dog) puppy).name == "dog");
+            }
+        });
+    }
+}

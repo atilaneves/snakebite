@@ -2014,3 +2014,80 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+// A conditional expression runs the branch its condition selects and no
+// other, whatever the type of its result.
+static foreach (backend; Matrix!()) {
+    @("conditional.runsOnlyTheSelectedBranch." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Node { int value; this(int value) { this.value = value; } }
+
+            void main() {
+                int runs;
+                int count(int result) { ++runs; return result; }
+                double countDouble(double result) { ++runs; return result; }
+                Node countNode(Node result) { ++runs; return result; }
+                int[] countSlice(int[] result) { ++runs; return result; }
+
+                int[4] storage = [1, 2, 3, 4];
+                int* pointer = &storage[2];
+                auto first = new Node(1);
+                auto second = new Node(2);
+
+                foreach (selected; [false, true, false]) {
+                    runs = 0;
+                    const integral = selected ? count(10) : count(20);
+                    const floating = selected
+                        ? countDouble(1.5) : countDouble(2.5) + 1.0;
+                    auto node = selected ? countNode(first) : countNode(second);
+                    auto slice = selected
+                        ? countSlice(storage[0 .. 2]) : countSlice(storage[2 .. 4]);
+                    auto location = selected ? pointer : null;
+                    assert(runs == 4);
+                    assert(integral == (selected ? 10 : 20));
+                    assert(floating == (selected ? 1.5 : 3.5));
+                    assert(node.value == (selected ? 1 : 2));
+                    assert(slice == (selected ? [1, 2] : [3, 4]));
+                    assert((location is null) == !selected);
+                }
+            }
+        });
+    }
+}
+
+
+// The address of a variable or of an element is a pointer value like any
+// other: it is passed, compared and written through.
+static foreach (backend; Matrix!()) {
+    @("address.ofVariablesParametersFieldsAndElements." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Pair { int first; int second; }
+
+            void store(int* where, int value) { *where = value; }
+
+            void fill(ref int parameter, Pair* pair, int[] data) {
+                store(&parameter, 1);
+                store(&pair.second, 2);
+                store(&data[1], 3);
+                assert(cast(void*) &data[1] is cast(void*) (data.ptr + 1));
+            }
+
+            void main() {
+                int local;
+                Pair pair;
+                int[3] storage;
+                fill(local, &pair, storage[]);
+                assert(local == 1);
+                assert(pair == Pair(0, 2));
+                assert(storage == [0, 3, 0]);
+                store(&local, 9);
+                assert(local == 9);
+            }
+        });
+    }
+}

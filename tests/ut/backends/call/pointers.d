@@ -2384,3 +2384,269 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+// One call site of a function pointer reaches every target it is given, and
+// the target's parameters and result are the ones of the pointer's type.
+static foreach (backend; Matrix!()) {
+    @("pointers.functionPointer.oneSiteReachesEveryTarget." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int twice(int x) { return x * 2; }
+            int plusOne(int x) { return x + 1; }
+            int negate(int x) { return -x; }
+
+            int apply(int function(int) target, int x) { return target(x); }
+
+            void main() {
+                int function(int)[3] table = [&twice, &plusOne, &negate];
+                int total;
+                int expected;
+                foreach (round; 0 .. 4) {
+                    foreach (i, target; table)
+                        total += apply(target, round + cast(int) i);
+                    expected += twice(round) + plusOne(round + 1)
+                        + negate(round + 2);
+                }
+                assert(total == expected);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("pointers.functionPointer.parameterAndResultKinds." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            double scale(double x, ref int calls, int[] data) {
+                ++calls;
+                return x * data.length;
+            }
+            int[] tail(int[] data) { return data[1 .. $]; }
+            void bump(ref int x) { x += 10; }
+            float half(float x) { return x / 2; }
+            ubyte wrap(ubyte x) { return cast(ubyte) (x + 200); }
+
+            void main() {
+                auto scalePointer = &scale;
+                auto tailPointer = &tail;
+                auto bumpPointer = &bump;
+                auto halfPointer = &half;
+                auto wrapPointer = &wrap;
+                int calls;
+                int[] data = [1, 2, 3, 4];
+                assert(scalePointer(1.5, calls, data) == 6.0);
+                assert(calls == 1);
+                assert(tailPointer(data) == [2, 3, 4]);
+                bumpPointer(calls);
+                assert(calls == 11);
+                assert(halfPointer(5.0f) == 2.5f);
+                assert(wrapPointer(100) == 44);
+            }
+        });
+    }
+}
+
+
+// A function pointer can name host code as well as guest code.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret a function that has no source code"),
+)) {
+    @("pointers.functionPointer.hostTarget." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.stdlib: abs;
+            import core.stdc.string: strlen;
+
+            int guestAbs(int x) { return x < 0 ? -x : x; }
+
+            void main() {
+                extern(C) int function(int) hostAbs = &abs;
+                int function(int) guest = &guestAbs;
+                assert(hostAbs(-7) == 7);
+                assert(guest(-7) == 7);
+                extern(C) size_t function(const(char)*) length = &strlen;
+                assert(length("four") == 4);
+            }
+        });
+    }
+}
+
+
+// An argument of a call through a pointer can reach the same call again with
+// another target. Each run keeps the callee that it chose.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("pointers.functionPointer.argumentCallsSameSiteWithOtherTarget."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        10.shouldBeStatusOf!(backend, q{
+            import core.stdc.stdlib: abs;
+
+            extern(C) int twice(int x) { return 2 * x; }
+            alias F = extern(C) int function(int);
+
+            int rec(F f, F g, int n) {
+                return f(n > 0 ? rec(g, f, n - 1) : -5);
+            }
+
+            int main() {
+                int total;
+                foreach (round; 0 .. 3)
+                    total = rec(&twice, &abs, 1);
+                return total;
+            }
+        });
+    }
+}
+
+
+// The callee of a call through a delegate is evaluated once, also when the
+// target is host code.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("pointers.delegate.hostTargetEvaluatesCalleeOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder { size_t delegate() target; }
+            Holder* holder;
+            int calls;
+
+            Holder* getHolder() {
+                ++calls;
+                return holder;
+            }
+
+            size_t useTarget() {
+                return getHolder().target();
+            }
+
+            void main() {
+                auto object = new Object;
+                holder = new Holder;
+                holder.target = &object.toHash;
+                foreach (round; 0 .. 3)
+                    assert(useTarget() == object.toHash);
+                assert(calls == 3);
+            }
+        });
+    }
+}
+
+
+// A delegate call passes its context to the callee, whatever the callee is: a
+// nested function, a literal, a method of a class or a struct, or a method
+// reached through an interface.
+static foreach (backend; Matrix!()) {
+    @("pointers.delegate.oneSiteReachesEveryKindOfTarget." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            interface Shape { int area(); }
+            class Square: Shape {
+                int side;
+                this(int side) { this.side = side; }
+                int area() { return side * side; }
+            }
+            class Rectangle: Shape {
+                int width, height;
+                this(int width, int height) {
+                    this.width = width;
+                    this.height = height;
+                }
+                int area() { return width * height; }
+            }
+            class Base { int value() { return 1; } }
+            class Derived: Base { override int value() { return 2; } }
+            struct Counter {
+                int total;
+                int add(int amount) { total += amount; return total; }
+            }
+
+            int call(int delegate(int) target, int argument) {
+                return target(argument);
+            }
+
+            void main() {
+                int base = 100;
+                int addBase(int amount) { return base + amount; }
+                Counter counter;
+                Shape shape = new Rectangle(2, 5);
+                Base object = new Derived;
+                int delegate(int)[4] targets = [
+                    &addBase, &counter.add,
+                    delegate int(int amount) { return amount * 3; },
+                    (int amount) => (shape.area() + object.value()) * amount,
+                ];
+                int[4] results;
+                foreach (round; 1 .. 4)
+                    foreach (i, target; targets)
+                        results[i] += call(target, round);
+                assert(results[0] == 306);
+                assert(results[1] == 1 + 3 + 6);
+                assert(counter.total == 6);
+                assert(results[2] == 18);
+                assert(results[3] == 12 * 6);
+
+                int delegate() area = &shape.area;
+                int delegate() value = &object.value;
+                assert(area() == 10);
+                assert(value() == 2);
+                shape = new Square(4);
+                assert(area() == 10);
+                assert((&shape.area)() == 16);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("pointers.delegate.argumentsFieldsAndResults." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Handler {
+                double delegate(double) transform;
+                void delegate(ref int) mutate;
+                int[] delegate(int[]) trim;
+            }
+
+            // A scope delegate parameter is passed on to another call.
+            int twice(scope int delegate(int) target, int argument) {
+                return target(target(argument));
+            }
+            int forward(scope int delegate(int) target, int argument) {
+                return twice(target, argument);
+            }
+
+            void main() {
+                int offset = 7;
+                double factor = 1.5;
+                Handler handler;
+                handler.transform = (double x) => x * factor;
+                handler.mutate = (ref int x) { x += offset; };
+                handler.trim = (int[] data) => data[1 .. $ - 1];
+                assert(handler.transform(4.0) == 6.0);
+                int value = 1;
+                handler.mutate(value);
+                handler.mutate(value);
+                assert(value == 15);
+                assert(handler.trim([1, 2, 3, 4]) == [2, 3]);
+
+                assert(forward((int x) => x + offset, 0) == 14);
+                auto pointer = &handler.transform;
+                assert((*pointer)(2.0) == 3.0);
+            }
+        });
+    }
+}

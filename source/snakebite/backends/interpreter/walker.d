@@ -5,7 +5,7 @@ private:
 
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.backends.interpreter.nodetree:
-    TreeCallee, TreeFlow, TreeRoot, isScalar, isSlice, rootOf;
+    OuterVariable, TreeCallee, TreeFlow, TreeRoot, isScalar, isSlice, rootOf;
 import snakebite.nativelayout: tryTypeFacts, truthFacts;
 
 
@@ -1462,9 +1462,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             case vaStart, vaCopy, alloca:
                 return null;
         }
-        if (layout.returnPlace.offset != size_t.max
-                || (function_.isThis !is null)
-                    != (layout.hiddenThis.variable !is null))
+        if (layout.returnPlace.offset != size_t.max)
             return null;
         auto returnType = function_.type.nextOf;
         // A constructor's result is its receiver.
@@ -1482,6 +1480,15 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             && (layout.alignment & (layout.alignment - 1)) == 0
             && layout.alignment <= fastFrameLead;
         return callee;
+    }
+
+    // Evaluates `expression` into `place` for a tree node whose value the
+    // evaluator makes.
+    package void evaluateTreeValue(
+        TreeRoot* root, ubyte* frame, Expression expression, void* place,
+    ) {
+        syncTree(root, frame);
+        evaluate(expression, expression.type, place);
     }
 
     // Calls a native function or a builtin whose frame the caller has filled:
@@ -3474,6 +3481,35 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto address = contextOf(owner) + layout.offsetOf(variable);
         return layout.isReturnPlace(variable)
             ? *cast(ubyte**) address : address;
+    }
+
+    // `storageOf` for a variable of an enclosing function, resolved once
+    // for a node that follows the static chain on every run. Not `ok` for a
+    // variable of the running function, one in static storage, and one whose
+    // owner's context is unreachable from here.
+    package OuterVariable outerVariableOf(VarDeclaration variable) {
+        if (variable.isDataseg)
+            return OuterVariable();
+        auto owner = outerFunctionOf(variable);
+        if (owner is null || owner is _function
+                || _layout.slotOf(variable) !is null)
+            return OuterVariable();
+        const path = staticChainOf(owner);
+        if (path is null)
+            return OuterVariable();
+        if (functionNeedsClosure(owner)) {
+            const closure = closureLayoutOf(owner);
+            if (closure.hasSlot(variable)) {
+                const slot = closure.slotOf(variable);
+                return OuterVariable(true, path, slot.offset, slot.isRef);
+            }
+        }
+        const layout = layoutOf(owner);
+        const slot = layout.slotOf(variable);
+        if (slot is null)
+            return OuterVariable(true, path, layout.offsetOf(variable), false);
+        return OuterVariable(
+            true, path, slot.offset, slot.isRef || slot.isReturnPlace);
     }
 
     package bool isRefStorage(VarDeclaration variable) {
@@ -5518,15 +5554,13 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     override void visit(TypeidExp expression) {
         import dmd.dtemplate: isExpression, isType;
+        import snakebite.backends.classinfo: typeidLoadCount;
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
         if (auto value = isExpression(expression.obj)) {
             auto address = classReferenceOf(value);
-            const indirections = 2
-                + (value.type.toBasetype.isTypeClass.sym
-                    .isInterfaceDeclaration !is null);
-            foreach (i; 0 .. indirections)
+            foreach (i; 0 .. typeidLoadCount(value))
                 address = *cast(void**) address;
             storeIntegral(_place, cast(size_t) address, _facts.size);
             return;
@@ -6611,32 +6645,62 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto callee = resolved is null
             ? calleeOf(expression)
             : Callee(resolved, null, false);
-        // A function pointer or delegate that is null has neither: the call
-        // goes to address zero, as in compiled D.
-        if (callee.address !is null || callee.function_ is null) {
-            const target = _plans.guestTarget(callee.address);
-            if (target.word is null)
-                return _callIndirect(expression, callee.type,
-                    callee.address, callee.context, callee.fromDelegate,
-                    returnPlace);
-            callee.function_ = cast(FuncDeclaration) cast(void*) target.word;
-            callee.context = cast(ubyte*) callee.context + target.adjustment;
-        }
+        if (resolved is null)
+            return executeThroughValue(expression, callee, returnPlace);
         auto function_ = _callSelection.definitionOf(
             callee.function_,
             (declaration) => _program.linkedFunctionOf(declaration));
 
-        // A callee reached through a value has no receiver expression: a
-        // delegate carries its context, and a function pointer to a method
-        // (`&C.f`) carries none, so that method runs with a null `this`.
         void* classReceiver;
-        auto receiver = resolved is null
-            ? null : classReceiverOf(expression, function_);
+        auto receiver = classReceiverOf(expression, function_);
         if (receiver !is null)
             classReceiver = classReferenceOf(receiver);
         return executeCallOnReceiver(
             expression, returnPlace, callee, function_,
-            resolved is null, receiver !is null, classReceiver);
+            false, receiver !is null, classReceiver);
+    }
+
+    // The call of a function pointer or a delegate whose value a caller has
+    // already evaluated: `address` is the function word and `context` the
+    // context word of a delegate.
+    package CallResult _executeCallThroughValue(
+        CallExp expression, void* returnPlace,
+        void* address, void* context, in bool fromDelegate,
+    ) {
+        import dmd.typesem: nextOf, toBasetype;
+
+        static if (nullChecks)
+            if (address is null)
+                failNullDeref(expression.loc);
+        auto callee = Callee(null, context, fromDelegate, address,
+            fromDelegate
+                ? expression.e1.type.toBasetype.nextOf.isTypeFunction
+                : expression.e1.isPtrExp.type.isTypeFunction);
+        return executeThroughValue(expression, callee, returnPlace);
+    }
+
+    // A callee reached through a value has no receiver expression: a
+    // delegate carries its context, and a function pointer to a method
+    // (`&C.f`) carries none, so that method runs with a null `this`. A
+    // function pointer or delegate that is null has neither: the call goes
+    // to address zero, as in compiled D.
+    private CallResult executeThroughValue(
+        CallExp expression, Callee callee, void* returnPlace,
+    ) {
+        ptrdiff_t adjustment;
+        callee.function_ = guestFunctionOf(callee.address, adjustment);
+        if (callee.function_ is null)
+            return _callIndirect(expression, callee.type,
+                callee.address, callee.context, callee.fromDelegate,
+                returnPlace);
+        callee.context = cast(ubyte*) callee.context + adjustment;
+        auto function_ = _callSelection.definitionOf(
+            callee.function_,
+            (declaration) => _program.linkedFunctionOf(declaration));
+        enum viaValue = true, hasReceiver = false;
+        return executeCallOnReceiver(
+            expression, returnPlace, callee, function_,
+            viaValue, hasReceiver, null);
     }
 
     // The call of a statically resolved method, whose receiver object a
@@ -6936,12 +7000,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 return Callee(null, null, false, null, type);
             }
 
-            if (auto declaration =
-                    cast(void*) function_ in _shared.callableDeclarations)
-                return Callee(*declaration, null, false, null, type);
-            if (!_plans.isGuestWord(cast(void*) function_))
-                return Callee(null, null, false, cast(void*) function_, type);
-            return Callee(function_, null, false, null, type);
+            return Callee(null, null, false, cast(void*) function_, type);
         }
 
         const facts = factsOf(callee.type);
@@ -6963,13 +7022,24 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 failNullDeref(expression.loc);
             return Callee(null, cast(void*) context, true, null, type);
         }
-        if (auto declaration =
-                cast(void*) function_ in _shared.callableDeclarations)
-            return Callee(*declaration, cast(void*) context, true, null, type);
-        if (!_plans.isGuestWord(cast(void*) function_))
-            return Callee(null, cast(void*) context, true,
-                cast(void*) function_, type);
-        return Callee(function_, cast(void*) context, true, null, type);
+        return Callee(null, cast(void*) context, true,
+            cast(void*) function_, type);
+    }
+
+    // The guest function that the word of a function pointer or delegate
+    // names, and the adjustment of its context. A word is a guest function
+    // itself, or the address of a callback entry; null for a word that is
+    // neither, which host code runs.
+    package FuncDeclaration guestFunctionOf(
+        const(void)* word, out ptrdiff_t adjustment,
+    ) {
+        if (auto declaration = word in _shared.callableDeclarations)
+            return *declaration;
+        if (_plans.isGuestWord(word))
+            return cast(FuncDeclaration) cast(void*) word;
+        const target = _plans.guestTarget(word);
+        adjustment = target.adjustment;
+        return cast(FuncDeclaration) cast(void*) target.word;
     }
 
     private void* classReferenceOf(Expression expression) {
