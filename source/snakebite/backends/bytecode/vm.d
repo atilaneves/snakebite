@@ -509,7 +509,7 @@ private enum OperandKind {
     frame,
     // Storage known to be an address slot plus a displacement: decoding has no
     // test of the indirect bit either.
-    indirect,
+    split,
     // An operand the handler does not read, because the register argument
     // holds it. Its specialised form is `frame`, so that the handler's other
     // operands are decoded without the test too.
@@ -576,8 +576,14 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind,
         this.assertSites = activation.assertSites;
         this.frames = state.frames;
         _dispatch = state;
-        destination = decode!destinationKind(pc.destination);
-        source = decode!sourceKind(pc.source);
+        static if (destinationKind == OperandKind.split)
+            destination = splitStorage(pc.splitDestination);
+        else
+            destination = decode!destinationKind(pc.destination);
+        static if (sourceKind == OperandKind.split)
+            source = splitStorage(pc.splitSource);
+        else
+            source = decode!sourceKind(pc.source);
     }
 
     public const(Instruction)* next() const pure nothrow @nogc {
@@ -607,8 +613,6 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind,
             return operand;
         else static if (kind == OperandKind.frame)
             return _frame + operand;
-        else static if (kind == OperandKind.indirect)
-            return indirectStorageAt(_frame, operand);
         else static if (kind == OperandKind.result)
             return operand == discardResult ? null : storage(operand);
         else
@@ -622,13 +626,19 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind,
             return operandStorage(_frame, operand);
     }
 
-    public ubyte* rightStorage(in size_t operand) pure nothrow @nogc {
+    private ubyte* splitStorage(ref const SplitOperand operand)
+            pure nothrow @nogc {
+        return *cast(ubyte**) (_frame + operand.addressSlot)
+            + operand.displacement;
+    }
+
+    public ubyte* rightStorage() pure nothrow @nogc {
         static if (rightKind == OperandKind.frame)
-            return _frame + operand;
-        else static if (rightKind == OperandKind.indirect)
-            return indirectStorageAt(_frame, operand);
+            return _frame + _pc.sourceWidth;
+        else static if (rightKind == OperandKind.split)
+            return splitStorage(_pc.splitRight);
         else
-            return storage(operand);
+            return storage(_pc.sourceWidth);
     }
 }
 
@@ -901,6 +911,15 @@ private const(Instruction)* executeCall(
 }
 
 
+private struct SplitOperand {
+    uint displacement;
+    uint addressSlot;
+}
+
+static assert(SplitOperand.sizeof == size_t.sizeof);
+static assert(SplitOperand.addressSlot.offsetof == uint.sizeof);
+version (LittleEndian) {} else static assert(false);
+
 public struct Instruction {
     // A handler stores `activation.pc = pc` before it can throw, because the
     // position of a throw selects the exception handler. In an optimised LDC
@@ -952,10 +971,34 @@ public struct Instruction {
     //    sees it - then rewrites each index to the address it names, once
     //    the function's instructions have stopped growing and so can no
     //    longer move.
-    package size_t destination;
-    package size_t source;
+    union {
+        package size_t destination;
+        private SplitOperand splitDestination;
+    }
+    union {
+        package size_t source;
+        private SplitOperand splitSource;
+    }
     package size_t width;
-    package size_t sourceWidth;
+    union {
+        package size_t sourceWidth;
+        private SplitOperand splitRight;
+    }
+
+    public this(Handler handler, size_t destination = 0, size_t source = 0,
+        size_t width = 0, size_t sourceWidth = 0) @safe pure nothrow @nogc {
+        this.handler = handler;
+        this.destination = destination;
+        this.source = source;
+        this.width = width;
+        this.sourceWidth = sourceWidth;
+    }
+
+    static assert(destination.offsetof == size_t.sizeof);
+    static assert(source.offsetof == 2 * size_t.sizeof);
+    static assert(width.offsetof == 3 * size_t.sizeof);
+    static assert(sourceWidth.offsetof == 4 * size_t.sizeof);
+    static assert(Instruction.sizeof == 5 * size_t.sizeof);
 }
 
 
@@ -3286,8 +3329,7 @@ private const(Instruction)* runIndex(IndexBase base, Decoded)(
         auto first = execution.source;
     else
         auto first = *cast(ubyte**) execution.source;
-    const index = *cast(const(size_t)*) execution.rightStorage(
-        execution.sourceWidth);
+    const index = *cast(const(size_t)*) execution.rightStorage;
     *cast(ubyte**) execution.destination = first + index * execution.width;
     return execution.next;
 }
@@ -3496,7 +3538,7 @@ private ubyte* rightOperand(bool constant, Decoded)(ref Decoded execution) {
     static if (constant)
         return cast(ubyte*) execution.sourceWidth;
     else
-        return execution.rightStorage(execution.sourceWidth);
+        return execution.rightStorage;
 }
 
 private alias opInt3(string operation, bool constant = false) =
@@ -4364,7 +4406,7 @@ package const(Instruction)* opLoadThenCopy(size_t loadWidth, size_t copyWidth,
         return load(pc, activation, state, frame, r0, fp0);
     else {
         const next = load(pc, activation, state, frame, r0, fp0);
-        return copy(next, activation, state, frame, r0, fp0);
+        return next.handler(next, activation, state, frame, r0, fp0);
     }
 }
 
@@ -4905,10 +4947,10 @@ private void maskedInstances(alias executor, alias operation,
             && (!rightIndirect || right))
     {
         enum d = destinationKind != OperandKind.storage ? destinationKind
-            : destinationIndirect ? OperandKind.indirect : OperandKind.frame;
+            : destinationIndirect ? OperandKind.split : OperandKind.frame;
         enum s = sourceKind != OperandKind.storage ? sourceKind
-            : sourceIndirect ? OperandKind.indirect : OperandKind.frame;
-        enum r = rightIndirect ? OperandKind.indirect : OperandKind.frame;
+            : sourceIndirect ? OperandKind.split : OperandKind.frame;
+        enum r = rightIndirect ? OperandKind.split : OperandKind.frame;
         if (entry.masked is null)
             entry.masked = &(new MaskedHandlers[1])[0];
         (*entry.masked)[mask - 1][0] = &instance!(executor, operation, d, s, 0,
@@ -5174,11 +5216,21 @@ package void specialiseHandlers(Instruction[] instructions) {
         const(Instruction.Handler)[] row = entry.handlers[0][];
         if (frame)
             row = entry.handlers[1][];
-        else if (entry.masked !is null && (*entry.masked)[mask - 1][0] !is null)
+        const split = !frame && entry.masked !is null
+            && (*entry.masked)[mask - 1][0] !is null;
+        if (split)
             row = (*entry.masked)[mask - 1][];
         Instruction.Handler chosen = row[slot];
         if (chosen is null)
             chosen = row[0];
+        if (split) {
+            if (mask & 1)
+                instruction.destination &= ~indirectBit;
+            if (mask & 2)
+                instruction.source &= ~indirectBit;
+            if (mask & 4)
+                instruction.sourceWidth &= ~indirectBit;
+        }
         instruction.handler = chosen;
     }
 }
