@@ -1902,6 +1902,117 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A condition that calls a function, in each statement that has one. The
+// call returns true and false, runs exactly once, and the right operand of
+// `&&` and `||` runs only when the left one does not decide.
+
+static foreach (backend; Matrix!()) {
+    @("condition.call.caseBody." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            bool positive(int n) { return n > 0; }
+
+            bool tick(ref int calls) {
+                calls += 1;
+                return true;
+            }
+
+            int pick(ref int calls, int kind, int n) {
+                switch (kind) {
+                    case 1:
+                        if (positive(n) || tick(calls))
+                            return 11;
+                        return 12;
+                    default:
+                        return 13;
+                }
+            }
+
+            int main() {
+                int calls;
+                if (pick(calls, 1, 1) != 11 || calls != 0) return 1;
+                if (pick(calls, 1, 0) != 11 || calls != 1) return 2;
+                if (pick(calls, 2, 0) != 13 || calls != 1) return 3;
+                return 0;
+            }
+        });
+    }
+}
+
+// The temporary of the left operand is destroyed at the end of the full
+// expression. The right operand indexes with a call, and the comparison
+// reads it before that destructor runs.
+static foreach (backend; Matrix!()) {
+    @("condition.call.indexReadBeforeTemporaryDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Clear {
+                int[]* values;
+                int value;
+                ~this() { (*values)[1] = 0; }
+            }
+
+            int one() { return 1; }
+
+            int main() {
+                int[] values = [1, 9, 3];
+                if (Clear(&values, 5).value < values[one()])
+                    return 0;
+                return 1;
+            }
+        });
+    }
+}
+
+// A temporary in an argument of the left operand is destroyed at the end
+// of the full expression, after the right operand runs.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "dmd's CTFE runs no destructor of a temporary in a condition"),
+)) {
+    @("condition.call.argumentTemporaryOutlivesRightOperand." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void record(ref int events, int event) {
+                events = events * 10 + event;
+            }
+
+            struct Temporary {
+                int* events;
+                int value;
+                ~this() { record(*events, 3); }
+            }
+
+            bool positive(ref int events, int n) {
+                record(events, 1);
+                return n > 0;
+            }
+
+            bool right(ref int events) {
+                record(events, 2);
+                return true;
+            }
+
+            int main() {
+                int events;
+                if (positive(events, Temporary(&events, 1).value)
+                        && right(events))
+                    record(events, 4);
+                if (events != 1234) return 1;
+                events = 0;
+                if (positive(events, Temporary(&events, 0).value)
+                        || right(events))
+                    record(events, 4);
+                if (events != 1234) return 2;
+                return 0;
+            }
+        });
+    }
+}
+
 // An indexed read in a comparison happens before the destructor of a temporary in the same full expression.
 static foreach (backend; Matrix!()) {
     @("fullExpression.indexedReadBeforeDestructor.if." ~ backend.stringof)

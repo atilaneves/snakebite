@@ -7912,7 +7912,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             case index:
                 auto indexed = expression.isIndexExp;
                 return isPlainPlace(indexed.e1)
-                    && isPlainCondition(indexed.e2);
+                    && isPlainCondition(indexed.e2, No.calls);
             default:
                 return false;
         }
@@ -8068,10 +8068,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // A condition that creates no temporary with a lifetime of its own, so
     // that splitting `&&` and `||` into branches changes no destructor
-    // order: scalar operations on scalar variables and literals. Calls,
-    // aggregates, and everything else keep the value path.
-    private bool isPlainCondition(Expression expression) {
-        import dmd.astenums: STC, Tpointer;
+    // order: scalar operations on scalar variables and literals, and direct
+    // calls of them. Aggregates and everything else keep the value path.
+    private bool isPlainCondition(
+        Expression expression, in Flag!"calls" calls = Yes.calls,
+    ) {
+        import dmd.astenums: STC, Tpointer, VarArg;
         import dmd.typesem: toBasetype;
 
         const facts = typeFacts(expression.type);
@@ -8091,17 +8093,34 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             case add, min, mul, div, lessThan, lessOrEqual, greaterThan,
                     greaterOrEqual, equal, notEqual, andAnd, orOr:
                 auto binary = expression.isBinExp;
-                return isPlainCondition(binary.e1)
-                    && isPlainCondition(binary.e2);
+                return isPlainCondition(binary.e1, calls)
+                    && isPlainCondition(binary.e2, calls);
             case dotVariable, star, arrayLength, index:
                 return isPlainPlace(expression);
             case identity, notIdentity:
                 auto binary = expression.isBinExp;
                 return identityPlan(binary.isIdentityExp).reference
-                    && isPlainCondition(binary.e1)
-                    && isPlainCondition(binary.e2);
+                    && isPlainCondition(binary.e1, calls)
+                    && isPlainCondition(binary.e2, calls);
             case cast_, negate, not:
-                return isPlainCondition(expression.isUnaExp.e1);
+                return isPlainCondition(expression.isUnaExp.e1, calls);
+            case call:
+                if (!calls)
+                    return false;
+                auto call = expression.isCallExp;
+                if (call.f is null)
+                    return false;
+                auto tf = call.f.type.isTypeFunction;
+                if (tf is null || tf.parameterList.varargs != VarArg.none
+                        || tf.isRef)
+                    return false;
+                if (call.arguments !is null)
+                    foreach (argument; *call.arguments)
+                        if (!isPlainCondition(argument))
+                            return false;
+                if (auto dot = call.e1.isDotVarExp)
+                    return isPlainPlace(dot.e1);
+                return call.e1.isVarExp !is null;
             default:
                 return false;
         }
