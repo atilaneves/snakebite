@@ -40,14 +40,15 @@ private bool sameScalar(
     return a.equals(b) || (a.ty == b.ty && a.isTypeBasic !is null);
 }
 
-// An index without calls or side effects is only a read. For such an index
-// dmd and LDC both evaluate the array expression, calls included, first, so
-// the read sees what those calls changed. For other indexes (a TLS global, a
-// bounds-checked element, a call, `i++`) dmd and LDC disagree, so the order
-// is unspecified and the index keeps its place before the array expression.
-// An index that sees `$` also keeps that place. `isTrivialExp` allocates
-// nothing, which matters because guest finalizers resolve indexes while the
-// collector runs.
+// An index without calls or side effects is only a read, and it is read
+// after the array expression, calls included. Where that read is a local
+// through a pointer, a `__gshared` global, `*p` or a field, dmd and LDC both
+// do this. For a TLS global, which `isTrivialExp` also accepts, dmd reads the
+// index first and LDC after; the order is unspecified, and this is LDC's.
+// Any other index (a bounds-checked element, a call, `i++`) is evaluated
+// before the array expression, also an unspecified order. An index that sees
+// `$` keeps that place too. `isTrivialExp` allocates nothing, which matters
+// because guest finalizers resolve indexes while the collector runs.
 public bool readsIndexAfterBase(imported!"dmd.expression".IndexExp index) {
     import dmd.sideeffect: isTrivialExp;
 
