@@ -6833,16 +6833,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     override void visit(TypeidExp expression) {
         import dmd.dtemplate: isExpression, isType;
+        import snakebite.backends.classinfo: typeidLoadCount;
         import std.conv: text;
 
         requireDestination(expression);
 
         if (auto value = isExpression(expression.obj)) {
             evalInto(value, _destination, size_t.sizeof);
-            const indirections = 2
-                + (value.type.toBasetype.isTypeClass.sym
-                    .isInterfaceDeclaration !is null);
-            foreach (i; 0 .. indirections)
+            foreach (i; 0 .. typeidLoadCount(value))
                 emit(&opLoadIndirect, _destination, _destination, size_t.sizeof);
             return;
         }

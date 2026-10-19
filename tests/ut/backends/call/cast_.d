@@ -1360,6 +1360,36 @@ static foreach (backend; Matrix!()) {
 // A class reference converts to a class or an interface that its object has,
 // and to null for one it has not. `typeid` of an object is the information
 // of its dynamic class.
+// `typeid` of an expression of an interface type is the class information of
+// the interface, whatever class its object has.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot read a TypeInfo"),
+)) {
+    @("cast.class.typeidOfInterfaceExpression." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            interface Named { string name(); }
+            class Dog: Named { string name() { return "dog"; } }
+            class Cat: Named { string name() { return "cat"; } }
+
+            bool isNamed(Named named) {
+                return typeid(named).toString == typeid(Named).toString;
+            }
+
+            void main() {
+                Named dog = new Dog;
+                Named cat = new Cat;
+                foreach (round; 0 .. 3) {
+                    assert(isNamed(dog));
+                    assert(isNamed(cat));
+                }
+            }
+        });
+    }
+}
+
+
 static foreach (backend; Matrix!()) {
     @("cast.class.dynamicCastFollowsTheDynamicType." ~ backend.stringof)
     @Tags(backend.stringof)

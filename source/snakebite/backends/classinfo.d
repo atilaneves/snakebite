@@ -6,6 +6,7 @@ private:
 
 import dmd.aggregate: AggregateDeclaration;
 import dmd.dclass: ClassDeclaration;
+import dmd.expression: Expression;
 import dmd.func: FuncDeclaration;
 import object: Interface, TypeInfo_Class;
 
@@ -22,6 +23,18 @@ public struct Hooks {
     public immutable(void)* delegate(AggregateDeclaration declaration) rtInfo;
     public void delegate(ClassDeclaration declaration, TypeInfo_Class info)
         registerGenerated;
+}
+
+// How many pointers `typeid(object)` follows from the object reference
+// to its class information: the reference to the vtable, the vtable to
+// the information. The vtable of an object of an interface type has the
+// interface's own information in between.
+public size_t typeidLoadCount(Expression object) {
+    import dmd.typesem: toBasetype;
+
+    return 2
+        + (object.type.toBasetype.isTypeClass.sym
+            .isInterfaceDeclaration !is null);
 }
 
 // The `TypeInfo_Class` built for each guest class. Every thread that

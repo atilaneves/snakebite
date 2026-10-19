@@ -800,10 +800,7 @@ static foreach (backend; Matrix!()) {
 
 // A nested function reads and writes the fields of the object of the method
 // around it, through the `this` of that method.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "CTFE cannot access delegate function pointers"),
-)) {
+static foreach (backend; Matrix!()) {
     @("nested.outerThis.classAndStructMethods." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

@@ -1591,6 +1591,19 @@ private struct DirectWordCall {
                 width, place);
         });
     }
+    }
+}
+
+// A callee that a call node chose, with how the site runs it. Run by run it
+// is passed by value: a call in an argument can reach the same node again
+// and choose another callee, so a node field must not carry it past the
+// evaluation of the arguments.
+private struct Selection {
+    public TreeCallee* callee;
+    public imported!"snakebite.backends.calls".CallSelection.Route route;
+    public const(imported!"snakebite.ffi.plan".CallPlan)* plan;
+    // Set when the call is a direct word call.
+    public DirectWordCall* direct;
 }
 
 // What every call node does once it has chosen its callee: the fields that
@@ -1603,10 +1616,7 @@ private mixin template CalleeEntry(E) {
     private Argument[] _modes;
     private size_t _resultSize;
     private bool _resultUnsigned;
-    private imported!"snakebite.backends.calls".CallSelection.Route _route;
-    private const(imported!"snakebite.ffi.plan".CallPlan)* _plan;
     private TreeRoot* _root;
-    private DirectWordCall _direct;
 
     // Whether `callee` takes the arguments of this site and gives its result.
     private bool takesArguments(in TreeCallee* callee) const {
@@ -1620,21 +1630,22 @@ private mixin template CalleeEntry(E) {
         return _resultSize == 0 || callee.returnFacts.size == _resultSize;
     }
 
-    private void routeTo(TreeCallee* callee) {
+    private Selection selectionOf(TreeCallee* callee) {
         import snakebite.backends.calls: CallSelection;
 
         const decision = CallSelection.atCallSite(callee.decision, _site);
-        _route = decision.route;
-        _plan = _route == CallSelection.Route.native
-            ? _ev._plans.of(callee.function_) : null;
+        return Selection(callee, decision.route,
+            decision.route == CallSelection.Route.native
+                ? _ev._plans.of(callee.function_) : null);
     }
 
     // Runs `callee` with `hidden` as its context word, the arguments taken
     // from the caller's `frame`.
     private void enter(
-        TreeCallee* callee, size_t hidden, ubyte* frame, void* result,
+        in Selection selection, size_t hidden, ubyte* frame, void* result,
     ) {
         auto ev = _ev;
+        auto callee = selection.callee;
         const layout = callee.layout;
         auto calleeFrame = FrameGuard(&ev._frames);
         // A frame of small alignment has the same lead whatever it is.
@@ -1654,27 +1665,28 @@ private mixin template CalleeEntry(E) {
             storeArgument(node, _modes[i], frame, base + layout.parameters[i].offset);
         if (layout.retainsTemporaries)
             ev._temporaries.withNestedCall(layout.retainsTemporaries, {
-                run(callee, base, result);
+                run(selection, base, result);
             });
         else
-            run(callee, base, result);
+            run(selection, base, result);
     }
 
-    private void run(TreeCallee* callee, ubyte* base, void* result) {
+    private void run(in Selection selection, ubyte* base, void* result) {
         import snakebite.backends.calls: CallSelection;
 
-        final switch (_route) with (CallSelection.Route) {
+        auto callee = cast(TreeCallee*) selection.callee;
+        final switch (selection.route) with (CallSelection.Route) {
             case guest:
                 _ev.runTreeCallee(callee, base, result);
                 break;
             case native:
-                if (_direct.decided)
-                    _direct.run(_ev, callee, base, result);
+                if (selection.direct !is null)
+                    selection.direct.run(_ev, callee, base, result);
                 else
-                    _ev.runHostCallee(callee, _plan, base, result);
+                    _ev.runHostCallee(callee, selection.plan, base, result);
                 break;
             case builtin:
-                _ev.runHostCallee(callee, _plan, base, result);
+                _ev.runHostCallee(callee, selection.plan, base, result);
                 break;
             case vaStart, vaCopy, alloca:
                 assert(0, "makeTreeCallee yields no callee for this route");
@@ -1701,7 +1713,8 @@ private final class Call(E) : Node {
     private bool _receiverIsAddress;
     // A constructor call yields the object it constructed.
     private bool _yieldsReceiver;
-    private TreeCallee* _callee;
+    private Selection _selected;
+    private DirectWordCall _direct;
     private const(void)* _vtable;
 
     public this(E ev, CallExp site, FuncDeclaration method, Node receiver,
@@ -1716,7 +1729,7 @@ private final class Call(E) : Node {
     }
 
     public final bool matches(TreeCallee* callee) {
-        if (_virtual && callee.decision.route != _route)
+        if (_virtual && callee.decision.route != _selected.route)
             return false;
         // The receiver is the context word, and only a callee with one takes it.
         if ((_receiver !is null) != (callee.layout.hiddenThis.variable !is null))
@@ -1725,16 +1738,18 @@ private final class Call(E) : Node {
     }
 
     public final void bind(TreeCallee* callee) {
-        _callee = callee;
-        routeTo(callee);
-        if (!_virtual && _route == CallSelection.Route.native)
-            _direct.decide(_plan, callee);
+        import snakebite.backends.calls: CallSelection;
+
+        _selected = selectionOf(callee);
+        if (!_virtual && _selected.route == CallSelection.Route.native
+                && _direct.decide(_selected.plan, callee))
+            _selected.direct = &_direct;
     }
 
     // Returns the receiver of the call, 0 when there is none.
     private size_t invoke(ubyte* frame, void* result) {
         auto ev = _ev;
-        auto callee = _callee;
+        auto selected = _selected;
         size_t receiver;
         if (_receiver !is null) {
             receiver = _receiverIsAddress
@@ -1748,7 +1763,7 @@ private final class Call(E) : Node {
                 }
                 const vtable = *cast(const(void)**) receiver;
                 if (vtable !is _vtable) {
-                    callee = ev.virtualTreeCalleeOf(
+                    auto callee = ev.virtualTreeCalleeOf(
                         _method, cast(void*) receiver);
                     if (callee is null || !matches(callee)) {
                         ev.syncTree(_root, frame);
@@ -1756,12 +1771,13 @@ private final class Call(E) : Node {
                             _site, result, _method, cast(void*) receiver);
                         return receiver;
                     }
-                    _callee = callee;
+                    selected = selectionOf(callee);
+                    _selected = selected;
                     _vtable = vtable;
                 }
             }
         }
-        enter(callee, receiver, frame, result);
+        enter(selected, receiver, frame, result);
         return receiver;
     }
 
@@ -1817,7 +1833,7 @@ private final class IndirectCall(E) : Node {
     // The function that this site last called, and its callee when the tree
     // runs it.
     private FuncDeclaration _function;
-    private TreeCallee* _callee;
+    private Selection _selected;
 
     public this(E ev, CallExp site, Node target, bool viaDelegate,
             Node[] args, Argument[] modes, size_t resultSize,
@@ -1841,25 +1857,30 @@ private final class IndirectCall(E) : Node {
         auto function_ = ev.guestFunctionOf(
             cast(const(void)*) target.function_, adjustment);
         if (function_ !is _function) {
-            _callee = function_ is null ? null : calleeOf(function_);
+            _selected = function_ is null
+                ? Selection.init : selectionFor(function_);
             _function = function_;
         }
-        if (_callee is null) {
+        const selected = _selected;
+        if (selected.callee is null) {
             ev.syncTree(_root, frame);
-            ev._executeCallExpression(_site, result);
+            ev._executeCallThroughValue(_site, result,
+                cast(void*) target.function_, cast(void*) target.context,
+                _viaDelegate);
             return;
         }
-        enter(_callee, target.context + adjustment, frame, result);
+        enter(selected, target.context + adjustment, frame, result);
     }
 
-    private TreeCallee* calleeOf(FuncDeclaration function_) {
+    // The callee for `function_` that this tree runs, null when it runs
+    // none.
+    private Selection selectionFor(FuncDeclaration function_) {
         auto definition = _ev._callSelection.definitionOf(
             function_, (declaration) => _ev._program.linkedFunctionOf(declaration));
         auto callee = _ev.treeCalleeOf(definition);
         if (callee is null || !takesArguments(callee))
-            return null;
-        routeTo(callee);
-        return callee;
+            return Selection.init;
+        return selectionOf(callee);
     }
 
     public override long executeLong(ubyte* frame) {
@@ -2980,7 +3001,7 @@ private Node buildValue(E)(E ev, Expression expression) {
     }
 }
 
-// `test ? first : second`, with `make` building the node of the result kind.
+// `test ? first : second`, with `buildBranch` building each branch and `Result` the node.
 private Node buildConditional(alias buildBranch, Result, E)(
     E ev, imported!"dmd.expression".CondExp e,
 ) {
@@ -2996,7 +3017,7 @@ private Node buildConditional(alias buildBranch, Result, E)(
 // The vtable of an object of an interface type has the interface's own
 // information in between.
 private Node buildTypeidOf(E)(E ev, Expression object, in Scalar scalar) {
-    import dmd.typesem: toBasetype;
+    import snakebite.backends.classinfo: typeidLoadCount;
 
     static if (E.nullCheckedEvaluator)
         return null;
@@ -3006,10 +3027,7 @@ private Node buildTypeidOf(E)(E ev, Expression object, in Scalar scalar) {
         auto node = buildValue(ev, object);
         if (node is null)
             return null;
-        const indirections = 2
-            + (object.type.toBasetype.isTypeClass.sym
-                .isInterfaceDeclaration !is null);
-        foreach (i; 0 .. indirections)
+        foreach (i; 0 .. typeidLoadCount(object))
             node = new Load!size_t(new Dereference(node));
         return node;
     }

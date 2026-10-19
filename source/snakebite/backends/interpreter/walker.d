@@ -5554,15 +5554,13 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     override void visit(TypeidExp expression) {
         import dmd.dtemplate: isExpression, isType;
+        import snakebite.backends.classinfo: typeidLoadCount;
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
         if (auto value = isExpression(expression.obj)) {
             auto address = classReferenceOf(value);
-            const indirections = 2
-                + (value.type.toBasetype.isTypeClass.sym
-                    .isInterfaceDeclaration !is null);
-            foreach (i; 0 .. indirections)
+            foreach (i; 0 .. typeidLoadCount(value))
                 address = *cast(void**) address;
             storeIntegral(_place, cast(size_t) address, _facts.size);
             return;
@@ -6647,32 +6645,62 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto callee = resolved is null
             ? calleeOf(expression)
             : Callee(resolved, null, false);
-        // A function pointer or delegate that is null has neither: the call
-        // goes to address zero, as in compiled D.
-        if (resolved is null) {
-            ptrdiff_t adjustment;
-            callee.function_ = guestFunctionOf(callee.address, adjustment);
-            if (callee.function_ is null)
-                return _callIndirect(expression, callee.type,
-                    callee.address, callee.context, callee.fromDelegate,
-                    returnPlace);
-            callee.context = cast(ubyte*) callee.context + adjustment;
-        }
+        if (resolved is null)
+            return executeThroughValue(expression, callee, returnPlace);
         auto function_ = _callSelection.definitionOf(
             callee.function_,
             (declaration) => _program.linkedFunctionOf(declaration));
 
-        // A callee reached through a value has no receiver expression: a
-        // delegate carries its context, and a function pointer to a method
-        // (`&C.f`) carries none, so that method runs with a null `this`.
         void* classReceiver;
-        auto receiver = resolved is null
-            ? null : classReceiverOf(expression, function_);
+        auto receiver = classReceiverOf(expression, function_);
         if (receiver !is null)
             classReceiver = classReferenceOf(receiver);
         return executeCallOnReceiver(
             expression, returnPlace, callee, function_,
-            resolved is null, receiver !is null, classReceiver);
+            false, receiver !is null, classReceiver);
+    }
+
+    // The call of a function pointer or a delegate whose value a caller has
+    // already evaluated: `address` is the function word and `context` the
+    // context word of a delegate.
+    package CallResult _executeCallThroughValue(
+        CallExp expression, void* returnPlace,
+        void* address, void* context, in bool fromDelegate,
+    ) {
+        import dmd.typesem: nextOf, toBasetype;
+
+        static if (nullChecks)
+            if (address is null)
+                failNullDeref(expression.loc);
+        auto callee = Callee(null, context, fromDelegate, address,
+            fromDelegate
+                ? expression.e1.type.toBasetype.nextOf.isTypeFunction
+                : expression.e1.isPtrExp.type.isTypeFunction);
+        return executeThroughValue(expression, callee, returnPlace);
+    }
+
+    // A callee reached through a value has no receiver expression: a
+    // delegate carries its context, and a function pointer to a method
+    // (`&C.f`) carries none, so that method runs with a null `this`. A
+    // function pointer or delegate that is null has neither: the call goes
+    // to address zero, as in compiled D.
+    private CallResult executeThroughValue(
+        CallExp expression, Callee callee, void* returnPlace,
+    ) {
+        ptrdiff_t adjustment;
+        callee.function_ = guestFunctionOf(callee.address, adjustment);
+        if (callee.function_ is null)
+            return _callIndirect(expression, callee.type,
+                callee.address, callee.context, callee.fromDelegate,
+                returnPlace);
+        callee.context = cast(ubyte*) callee.context + adjustment;
+        auto function_ = _callSelection.definitionOf(
+            callee.function_,
+            (declaration) => _program.linkedFunctionOf(declaration));
+        enum viaValue = true, hasReceiver = false;
+        return executeCallOnReceiver(
+            expression, returnPlace, callee, function_,
+            viaValue, hasReceiver, null);
     }
 
     // The call of a statically resolved method, whose receiver object a

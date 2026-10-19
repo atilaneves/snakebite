@@ -2478,13 +2478,75 @@ static foreach (backend; Matrix!(
 }
 
 
+// An argument of a call through a pointer can reach the same call again with
+// another target. Each run keeps the callee that it chose.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("pointers.functionPointer.argumentCallsSameSiteWithOtherTarget."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        10.shouldBeStatusOf!(backend, q{
+            import core.stdc.stdlib: abs;
+
+            extern(C) int twice(int x) { return 2 * x; }
+            alias F = extern(C) int function(int);
+
+            int rec(F f, F g, int n) {
+                return f(n > 0 ? rec(g, f, n - 1) : -5);
+            }
+
+            int main() {
+                int total;
+                foreach (round; 0 .. 3)
+                    total = rec(&twice, &abs, 1);
+                return total;
+            }
+        });
+    }
+}
+
+
+// The callee of a call through a delegate is evaluated once, also when the
+// target is host code.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("pointers.delegate.hostTargetEvaluatesCalleeOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder { size_t delegate() target; }
+            Holder* holder;
+            int calls;
+
+            Holder* getHolder() {
+                ++calls;
+                return holder;
+            }
+
+            size_t useTarget() {
+                return getHolder().target();
+            }
+
+            void main() {
+                auto object = new Object;
+                holder = new Holder;
+                holder.target = &object.toHash;
+                foreach (round; 0 .. 3)
+                    assert(useTarget() == object.toHash);
+                assert(calls == 3);
+            }
+        });
+    }
+}
+
+
 // A delegate call passes its context to the callee, whatever the callee is: a
 // nested function, a literal, a method of a class or a struct, or a method
 // reached through an interface.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "CTFE cannot access delegate function pointers"),
-)) {
+static foreach (backend; Matrix!()) {
     @("pointers.delegate.oneSiteReachesEveryKindOfTarget." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -2548,10 +2610,7 @@ static foreach (backend; Matrix!(
 }
 
 
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "CTFE cannot access delegate function pointers"),
-)) {
+static foreach (backend; Matrix!()) {
     @("pointers.delegate.argumentsFieldsAndResults." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
