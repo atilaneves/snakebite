@@ -402,3 +402,51 @@ static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
         recorded.integers.should == [100];
     }
 }
+
+
+// `guestTarget` answers for the entries of its own bridge only: another
+// bridge, with its own table of guest functions, gets nothing for an address
+// that is not its entry, whichever chunk the entry is in.
+static foreach (freshChunk; [false, true]) {
+    @("guestTarget.otherBridgeGetsNothing." ~ text(freshChunk))
+    unittest {
+        auto function_ = declarationOf(
+            q{ extern(C) int twice(int x); }, "twice");
+        Recorded recorded;
+        auto owner = new CallbackBridge(&recordIntOfInt, &recorded);
+        auto other = new CallbackBridge(&recordIntOfInt, &recorded);
+        int word;
+        owner.register(&word, function_);
+        if (freshChunk)
+            beginCallbackChunk(ChunkStrategy.protect);
+        const entry = owner.entryOf(&word);
+
+        owner.guestTarget(entry).word.should == &word;
+        other.guestTarget(entry).word.should == null;
+    }
+}
+
+
+// A bridge that took the place of a released one, at the same address, does
+// not find the released bridge's functions behind entries that nobody has
+// reserved again.
+static foreach (freshChunk; [false, true]) {
+    @("guestTarget.releasedEntryNamesNothing." ~ text(freshChunk))
+    unittest {
+        auto function_ = declarationOf(
+            q{ extern(C) int twice(int x); }, "twice");
+        Recorded recorded;
+        auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
+        int word;
+        bridge.register(&word, function_);
+        if (freshChunk)
+            beginCallbackChunk(ChunkStrategy.protect);
+        const entry = bridge.entryOf(&word);
+        bridge.guestTarget(entry).word.should == &word;
+
+        bridge.release;
+        *bridge = CallbackBridge(&recordIntOfInt, &recorded);
+
+        bridge.guestTarget(entry).word.should == null;
+    }
+}
