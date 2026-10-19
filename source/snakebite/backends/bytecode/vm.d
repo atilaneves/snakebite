@@ -8,7 +8,7 @@ import snakebite.internalfailure: internalFailure;
 
 
 extern(C) const(void)* directWordCallTarget(
-    const(void)* opaquePlan, out ubyte[3] order, out CallPlan.Load[3] loads,
+    const(void)* opaquePlan, out ubyte[3] order, out Load[3] loads,
     out size_t resultWidth, out size_t parameterCount,
 );
 
@@ -32,7 +32,7 @@ import snakebite.backends.haltprocess: HaltAction, isHalt;
 import snakebite.backends.unwindplan:
     ExceptionCandidate, UnwindPlan, unwindPlanOf;
 import snakebite.callarguments: CallArguments;
-import snakebite.ffi.plan: CallPlan;
+import snakebite.ffi.load: Load, loadWidth;
 import snakebite.nativevalue: TypeFacts;
 import snakebite.nativevalue:
     CastKind, ComplexOperation, floatingToBool, loadFloating, loadSigned,
@@ -390,7 +390,7 @@ public struct CallSite {
     package const(void)* directTarget;
     package bool directSwapped;
     package ubyte[3] directOrder;
-    package CallPlan.Load[3] directLoads;
+    package Load[3] directLoads;
     package BuiltinCall builtinEntry;
     package size_t calleeSlotOffset;
     package bool hasContext;
@@ -1968,8 +1968,8 @@ private const(Instruction)* callWindow(Destination destination)(
 // One argument of a direct call, read as `load` says (see
 // `directWordCallTarget`).
 pragma(inline, true)
-private ulong directWord(const(ubyte)* place, CallPlan.Load load) {
-    final switch (load) with (CallPlan.Load) {
+private ulong directWord(const(ubyte)* place, Load load) {
+    final switch (load) with (Load) {
     case word64: return *cast(const(ulong)*) place;
     case zero32: return *cast(const(uint)*) place;
     case sign32: return cast(ulong) cast(long) *cast(const(int)*) place;
@@ -2010,7 +2010,7 @@ private const(Instruction)* opCallNative(
         const plan = site.nativePlan !is null
             ? site.nativePlan : site.prepareNativePlan();
         ubyte[3] order;
-        CallPlan.Load[3] loads;
+        Load[3] loads;
         size_t resultWidth;
         size_t parameterCount;
         const target = directWordCallTarget(
@@ -2023,8 +2023,8 @@ private const(Instruction)* opCallNative(
         if (eligible)
             foreach (i, argument; site.args) {
                 eligible = eligible
-                    && argument.width == CallPlan.loadWidth(loads[i]);
-                wholeWords = wholeWords && loads[i] == CallPlan.Load.word64;
+                    && argument.width == loadWidth(loads[i]);
+                wholeWords = wholeWords && loads[i] == Load.word64;
             }
         site.directTarget = target;
         site.directSwapped = order != [0, 1, 2];
