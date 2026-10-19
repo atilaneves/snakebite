@@ -3626,3 +3626,38 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// The receiver of a virtual call can run the same call site again with
+// another class. The outer call uses the method of its own receiver.
+static foreach (backend; Matrix!()) {
+    @("virtualCallRunsMethodOfItsReceiverWhenReceiverReentersSite." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base { int m() { return 0; } }
+            class A : Base { override int m() { return 1; } }
+            class B : Base { override int m() { return 2; } }
+
+            int f(int n) { return make(n).m(); }
+
+            Base make(int n) {
+                if (n > 0)
+                    f(n - 1);
+                if (n == 0)
+                    return new A;
+                return new B;
+            }
+
+            int main() {
+                foreach (i; 0 .. 3) {
+                    if (f(0) != 1)
+                        return 1;
+                    if (f(2) != 2)
+                        return 2;
+                }
+                return 0;
+            }
+        });
+    }
+}
