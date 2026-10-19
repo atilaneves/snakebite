@@ -87,6 +87,10 @@ public struct TemporaryLifetime {
         return cast(Expression) _expressions.root;
     }
 
+    public const(void)** rootSlot() return @system @nogc nothrow {
+        return _expressions.rootSlot;
+    }
+
     // A callee with a variable that can keep temporaries (`slots`) gets
     // slots of its own.
     public void withNestedCall(in bool slots, scope Action action) {

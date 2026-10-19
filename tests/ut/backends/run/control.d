@@ -118,6 +118,34 @@ static foreach (backend; Matrix!(
 }
 
 
+// Reading `__ctfe` at run time is not a frontend error. The variable has no
+// parent symbol, so asking dmd whether it is static data reports
+// "forward referenced" through the global diagnostic list, which another
+// thread's frontend call then throws as its own.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "CTFE selects the compile-time conditional branch"),
+)) {
+    @("readingCtfeVariableAtRunTimeReportsNoDiagnostic." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        import dmd.errors: diagnostics;
+        import std.algorithm: canFind;
+
+        diagnostics = null;
+        2.shouldBeRetOf!(backend, q{
+            int readsCtfeVariable() {
+                bool compileTime = __ctfe;
+                return compileTime ? 1 : 2;
+            }
+        }, "readsCtfeVariable");
+
+        foreach (diagnostic; diagnostics)
+            diagnostic.message.canFind("__ctfe").should == false;
+    }
+}
+
+
 // An ordinary switch selects one case, falls through until `break`, and
 // takes `default` when no case matches.
 // `fellThrough += value;` sums an `int` with the `uint` a `foreach` over

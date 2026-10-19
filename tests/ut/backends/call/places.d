@@ -393,3 +393,33 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+// D evaluates the operands of an index expression from left to right, so
+// `p` is read before `idx` changes it: the element comes from the old array.
+// ldc reads the index first and gives 200; dmd follows the specification.
+static foreach (backend; Matrix!()) {
+    @("places.order.pointerIndexReadsPointerFirst." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        2.shouldBeRetOf!(
+            backend,
+            q{
+                int idx(int** where, int* other) {
+                    *where = other;
+                    return 1;
+                }
+
+                int run() {
+                    int[2] first = [1, 2];
+                    int[2] second = [100, 200];
+                    int* p = &first[0];
+                    int* other = &second[0];
+                    int** pp = &p;
+                    int w = p[idx(pp, other)];
+                    return w;
+                }
+            },
+            "run",
+        );
+    }
+}

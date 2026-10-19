@@ -3,6 +3,9 @@ module snakebite.backends.interpreter.walker;
 
 private:
 
+import snakebite.backends.interpreter.integeroperations: combine, shifted;
+import snakebite.backends.interpreter.nodetree:
+    TreeCallee, TreeFlow, TreeRoot, isScalar, rootOf;
 import snakebite.nativelayout: tryTypeFacts, truthFacts;
 
 
@@ -596,13 +599,13 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     alias visit = LoweringVisitor.visit;
 
-    private Shared* _shared;
+    package Shared* _shared;
     // Every guest frame this thread runs lives in this one frame stack,
     // bump-allocated on call and popped on return. Frames never move;
     // overflow throws loudly.
-    private FrameStack _frames;
+    package FrameStack _frames;
     private StackPieces _stack;
-    private NativeData* _nativeData;
+    package NativeData* _nativeData;
     // This thread's reads of the shared tables, counted.
     private Cache!(LayoutKey, FrameLayout) _layouts;
     private Cache!(FuncDeclaration, CallShape) _calls;
@@ -614,7 +617,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // the call.
     private Cache!(FuncDeclaration, ClosurePlan) _closurePlans;
     private Cache!(StaticChainKey, Hop[]) _staticChains;
-    private CallSelection* _callSelection;
+    package CallSelection* _callSelection;
     version(unittest) private size_t _staticLookups;
     // A guest pointer can live in an unscanned frame, so the evaluator keeps
     // each backing allocation reachable for as long as guest state can be.
@@ -646,7 +649,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // The program being run: its `isInterpreted` is the one decision for
     // whether a callee is walked here or called natively, made on every
     // call this evaluator makes.
-    private const Program _program;
+    package const Program _program;
     // How to reach each already-compiled function this guest calls,
     // worked out on that function's first call and reused by every call
     // after it - the same cold-path-once shape as `_layouts`. Shared by
@@ -684,7 +687,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
     private BitfieldSlot[16] _recentBitfields;
     // Expression-scoped rvalues and temporary destructors have one owner.
-    private TemporaryLifetime _temporaries;
+    package TemporaryLifetime _temporaries;
     // The most recently asked-about `Type` and its facts: dmd interns
     // basic types, so a loop revisiting the same `int` node hits this
     // every time - a pointer compare instead of an AA hash lookup - and
@@ -701,33 +704,33 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // The destination: while walking statements, the enclosing function's
     // return type and return place; `evaluate` narrows it to each
     // subexpression's own destination.
-    private Type _type;
+    package Type _type;
     // `_type`'s facts, narrowed alongside it by `evaluate` so a node
     // visiting its own destination type - the common case - reads `_facts`
     // directly instead of paying a `factsOf` lookup for a type it is
     // already sitting on.
     private TypeFacts _facts;
-    private void* _place;
+    package void* _place;
     // The currently executing function's frame.
     private ubyte* _frameBase;
     // The current function's closure, or null when its locals stay in its
     // frame. A nested callee receives this pointer as its hidden context
     // when it captures a variable from this function.
     private ubyte* _closureBase;
-    private const(FrameLayout)* _layout;
+    package const(FrameLayout)* _layout;
     private const(ClosurePlan)* _activeClosurePlan;
     // The currently executing function's own declaration - `frameOf`'s
     // starting point for walking the static chain up from wherever
     // execution currently is, one hop of `outerVars`' own reasoning per
     // level of nesting.
-    private FuncDeclaration _function;
+    package FuncDeclaration _function;
     // A label stays pending while its wrapped statement is entered. The
     // wrapped loop takes it, even when dmd put a scope block between them.
     private Identifier _pendingLoopLabel;
     // A control transfer carries DMD's resolved statement destination. The
     // state also records when a function is being resumed at that statement,
     // so every enclosing visitor can continue its normal statement sequence.
-    private ControlFlowState _controlFlow;
+    package ControlFlowState _controlFlow;
     private SwitchStatement _switchStatement;
     private CStack!(void*) _activationAllocations;
     // Set when a halt starts to unwind this thread: no guest code runs on
@@ -1165,7 +1168,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     // `type`'s facts, from the cache; computed on the first visit of any
     // node with this type.
-    extern(D) private TypeFacts factsOf(Type type) {
+    extern(D) package TypeFacts factsOf(Type type) {
         if (type is _cachedType)
             return _cachedFacts;
 
@@ -1337,6 +1340,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _controlFlow = ControlFlowState.init;
         _returned = ReturnedLvalue.init;
         ctfeBlockDepth = 0;
+        if (runNodeTree(function_, body_, layout))
+            return;
+
         while (true) {
             body_.accept(this);
             if (!_controlFlow.hasGoto)
@@ -1344,6 +1350,161 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
             _controlFlow.resume;
         }
+    }
+
+    private TreeRoot*[FuncDeclaration] _trees;
+    private TreeCallee*[FuncDeclaration] _treeCallees;
+    package enum bool nullCheckedEvaluator = nullChecks;
+
+    private TreeRoot* treeRootFor(
+        FuncDeclaration function_, Statement body_, const(FrameLayout)* layout,
+    ) {
+        if (auto found = function_ in _trees)
+            return *found;
+        auto root = rootOf(this, body_, layout);
+        _trees[function_] = root;
+        return root;
+    }
+
+    // Runs `body_` as a node tree. Returns false when the original walk must
+    // run instead: a closure frame, or a goto that needs a seek.
+    private bool runNodeTree(
+        FuncDeclaration function_, Statement body_, const(FrameLayout)* layout,
+    ) {
+        import core.memory: GC;
+
+        // Building nodes allocates, which the GC forbids in a finalizer.
+        if (_activeClosurePlan.needsClosure || GC.inFinalizer)
+            return false;
+
+        auto root = treeRootFor(function_, body_, layout);
+        if (!root.hasLayout(layout))
+            return false;
+
+        const flow = root.execute(_frameBase);
+        if (flow == TreeFlow.generic && _controlFlow.hasGoto) {
+            _controlFlow.resume;
+            return false;
+        }
+        return true;
+    }
+
+    // What a direct call node needs to know about its callee, decided once
+    // per function. Null when the call node cannot place this callee's
+    // frame itself and the original call path must run.
+    package TreeCallee* treeCalleeOf(FuncDeclaration function_) {
+        if (auto found = function_ in _treeCallees)
+            return *found;
+        auto callee = makeTreeCallee(function_);
+        _treeCallees[function_] = callee;
+        return callee;
+    }
+
+    private TreeCallee* makeTreeCallee(FuncDeclaration function_) {
+        import core.memory: pageSize;
+        import dmd.astenums: TY, VarArg;
+        import dmd.typesem: toBasetype;
+
+        auto type = typeFunctionOf(function_);
+        if (function_.fbody is null || function_.isCtorDeclaration !is null
+                || type.isRef || type.parameterList.varargs != VarArg.none)
+            return null;
+        const decision = _callSelection.decisionOf(
+            function_,
+            (callee) => _program.isInterpreted(callee),
+            hasNativeSymbol(function_),
+            hasIndependentNativeSymbol(function_),
+        );
+        if (decision.route != CallSelection.Route.guest)
+            return null;
+        auto layout = callLayoutOf(function_);
+        auto closurePlan = closurePlanOf(function_);
+        if (closurePlan.needsClosure
+                || layout.returnPlace.offset != size_t.max
+                || (function_.isThis !is null)
+                    != (layout.hiddenThis.variable !is null))
+            return null;
+        auto returnType = function_.type.nextOf;
+        if (returnType.toBasetype.ty != TY.Tvoid && !isScalar(this, returnType))
+            return null;
+        auto callee = new TreeCallee;
+        callee.function_ = function_;
+        callee.layout = layout;
+        callee.closurePlan = closurePlan;
+        callee.returnType = returnType;
+        callee.returnFacts = factsOf(returnType);
+        callee.reservesFast = layout.size != 0
+            && layout.alignment != 0
+            && (layout.alignment & (layout.alignment - 1)) == 0
+            && layout.alignment < pageSize;
+        return callee;
+    }
+
+    // Runs the body of `callee`, whose frame at `calleeFrame` the caller has
+    // filled, leaving a scalar result at `place`. This is `executeRaw`'s
+    // guest case without the steps a direct call to a guest function with a
+    // scalar result has no use for.
+    package void runTreeCallee(
+        TreeCallee* callee, ubyte* calleeFrame, void* place,
+    ) {
+        ubyte here;
+        if (cast(size_t) &here < _stack.limit) {
+            _stack.continueOnNewPiece({
+                runTreeCallee(callee, calleeFrame, place);
+            });
+            return;
+        }
+
+        const guard = CallStateGuard(this);
+        enterTreeCallee(callee, calleeFrame, place);
+        executeTreeCallee(callee, calleeFrame);
+    }
+
+    private void enterTreeCallee(
+        TreeCallee* callee, ubyte* calleeFrame, void* place,
+    ) {
+        _closureBase = null;
+        _type = callee.returnType;
+        _facts = callee.returnFacts;
+        _place = place;
+        _frameBase = calleeFrame;
+        _layout = callee.layout;
+        _function = callee.function_;
+        _activeClosurePlan = callee.closurePlan;
+        _pendingLoopLabel = null;
+        _controlFlow = ControlFlowState.init;
+        _returned = ReturnedLvalue.init;
+        ctfeBlockDepth = 0;
+    }
+
+    private void executeTreeCallee(TreeCallee* callee, ubyte* calleeFrame) {
+        auto root = callee.root;
+        if (root is null) {
+            root = treeRootFor(callee.function_, callee.function_.fbody,
+                callee.layout);
+            callee.root = root;
+        }
+        const flow = root.execute(calleeFrame);
+        if (flow == TreeFlow.generic && _controlFlow.hasGoto) {
+            _controlFlow.resume;
+            while (true) {
+                callee.function_.fbody.accept(this);
+                if (!_controlFlow.hasGoto)
+                    break;
+                _controlFlow.resume;
+            }
+        }
+    }
+
+    // A virtual call node missed its cache: the callee for `vtable`, or null
+    // when the original path must run this call.
+    package TreeCallee* virtualTreeCalleeOf(
+        FuncDeclaration method, void* receiver,
+    ) {
+        const target = _plans.guestTarget(_virtualAddress(method, receiver));
+        if (target.word is null || target.adjustment != 0)
+            return null;
+        return treeCalleeOf(cast(FuncDeclaration) cast(void*) target.word);
     }
 
     // `alloca`'s memory is the running function's, as compiled D has it:
@@ -1435,7 +1596,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // refusal or a hand-built guest exception. It returns only when the
     // current function is not compiled with bounds checks, and the caller
     // then goes on as unchecked code does.
-    extern(D) private void failArrayBounds(
+    extern(D) package void failArrayBounds(
         in BoundsCheck check,
         in Loc loc,
         scope const(void*)[] extraArguments,
@@ -1813,6 +1974,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         private ControlFlowState _controlFlow;
         private ReturnedLvalue _returned;
         private uint _ctfeBlockDepth;
+        private const(void)* _root;
         private size_t _activationMark;
 
         @disable this();
@@ -1832,6 +1994,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             _controlFlow = evaluator._controlFlow;
             _returned = evaluator._returned;
             _ctfeBlockDepth = evaluator.ctfeBlockDepth;
+            _root = *evaluator._temporaries.rootSlot;
             _activationMark = evaluator._activationAllocations.length;
         }
 
@@ -1848,6 +2011,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             _evaluator._controlFlow = _controlFlow;
             _evaluator._returned = _returned;
             _evaluator.ctfeBlockDepth = _ctfeBlockDepth;
+            *_evaluator._temporaries.rootSlot = _root;
             _evaluator.releaseActivationAllocations(_activationMark);
         }
     }
@@ -2359,7 +2523,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // A condition is a full expression of its own on each evaluation - a
     // loop's every test included - so its temporaries are given back as
     // soon as its truth is known.
-    private bool conditionHolds(Expression condition) {
+    package bool conditionHolds(Expression condition) {
         return truthOfFullExpression(
             FullExpressionScope.Position.condition, condition);
     }
@@ -3187,7 +3351,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             ? *cast(ubyte**) address : address;
     }
 
-    private bool isRefStorage(VarDeclaration variable) {
+    package bool isRefStorage(VarDeclaration variable) {
         auto owner = outerFunctionOf(variable);
         if (owner !is null && functionNeedsClosure(owner)) {
             const closure = closureLayoutOf(owner);
@@ -6310,12 +6474,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _executeCallExpression(expression, _place);
     }
 
-    private CallResult _executeCallExpression(
+    package CallResult _executeCallExpression(
         CallExp expression, void* returnPlace,
     ) {
-        import core.stdc.string: memcpy;
         import snakebite.frontend.dmd.functions: unresolvedCalleeOf;
-        import std.conv: text;
 
         CallSelection.eachResolvedCalleePrefix(expression,
             (prefix) { runForEffect(prefix); });
@@ -6339,16 +6501,38 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             callee.function_,
             (declaration) => _program.linkedFunctionOf(declaration));
 
-        auto funcType = typeFunctionOf(function_);
-
         // A callee reached through a value has no receiver expression: a
         // delegate carries its context, and a function pointer to a method
         // (`&C.f`) carries none, so that method runs with a null `this`.
         void* classReceiver;
         auto receiver = resolved is null
             ? null : classReceiverOf(expression, function_);
-        if (receiver !is null) {
+        if (receiver !is null)
             classReceiver = classReferenceOf(receiver);
+        return executeCallOnReceiver(
+            expression, returnPlace, callee, function_,
+            resolved is null, receiver !is null, classReceiver);
+    }
+
+    // The call of a statically resolved method, whose receiver object a
+    // caller has already evaluated: the rest of `_executeCallExpression`.
+    package CallResult _executeMethodCall(
+        CallExp expression, void* returnPlace,
+        FuncDeclaration method, void* classReceiver,
+    ) {
+        enum viaValue = false, hasReceiver = true;
+        return executeCallOnReceiver(
+            expression, returnPlace, Callee(expression.f, null, false),
+            method, viaValue, hasReceiver, classReceiver);
+    }
+
+    private CallResult executeCallOnReceiver(
+        CallExp expression, void* returnPlace, Callee callee,
+        FuncDeclaration function_, in bool viaValue, in bool hasReceiver,
+        void* classReceiver,
+    ) {
+        auto funcType = typeFunctionOf(function_);
+        if (hasReceiver) {
             if (classReceiver is null && expression.readsVtable(function_)) {
                 // The vtable read is where the null receiver is met, after
                 // the arguments.
@@ -6383,7 +6567,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         }
 
         const isVariadic = funcType.parameterList.varargs == VarArg.variadic;
-        auto valueCall = resolved is null
+        auto valueCall = viaValue
             ? valueCallOf(expression, callee.type, callee.fromDelegate)
             : null;
         auto frame = bindFrame(
@@ -6986,95 +7170,6 @@ private real floatingResult(string op)(in real a, in real b, in size_t size) {
     return mixin("a " ~ op ~ " b");
 }
 
-private ulong combine(string op)(
-    in long a,
-    in long b,
-    in imported!"snakebite.nativelayout".TypeFacts aFacts,
-    in imported!"snakebite.nativelayout".TypeFacts bFacts,
-) {
-    static if (op == "<<" || op == ">>" || op == ">>>")
-        // dmd rejects a vector shift and a shift has its own `ShiftPlan`.
-        internalFailure();
-    else static if (op == "/" || op == "%")
-        return divided!op(a, b, sharedSignedness(aFacts, bFacts), aFacts.size);
-    else
-        // `+`, `-`, `*`, `&`, `|` and `^` leave the same low bits
-        // whichever way the operands were widened, so no signedness
-        // question arises.
-        return cast(ulong) mixin("a " ~ op ~ " b");
-}
-
-// The signedness that governs an operation whose answer depends on it.
-// dmd's usual arithmetic conversions bring both operands to one common
-// type before the interpreter sees the node - a narrower or differently
-// signed operand arrives wrapped in a `CastExp` - so the two agree.
-private bool sharedSignedness(
-    in imported!"snakebite.nativelayout".TypeFacts a,
-    in imported!"snakebite.nativelayout".TypeFacts b,
-) {
-    assert(a.isUnsigned == b.isUnsigned,
-        "D arithmetic conversions give both operands one signedness");
-
-    return a.isUnsigned;
-}
-
-// D leaves a division by zero undefined. It is not checked here: the host's
-// divide instruction raises SIGFPE, as it does for compiled D.
-private ulong divided(string op)(
-    in long a,
-    in long b,
-    in bool unsigned,
-    in size_t width,
-) {
-    // A signed operand arrives sign-extended to 64 bits, which is not its
-    // value as an operand of the operation's own unsigned type.
-    if (unsigned) {
-        const mask = width < ulong.sizeof
-            ? (1UL << (8 * width)) - 1 : ulong.max;
-        return mixin("(cast(ulong) a & mask) " ~ op
-            ~ " (cast(ulong) b & mask)");
-    }
-
-    // The other input the host's divide instruction traps on:
-    // `long.min / -1` has no representable quotient. Negation and a
-    // zero remainder are the answers the instruction gives for every
-    // other dividend, and the two's complement wrap `long.min` needs.
-    if (b == -1) {
-        static if (op == "/")
-            return -cast(ulong) a;
-        else
-            return 0;
-    }
-
-    return cast(ulong) mixin("a " ~ op ~ " b");
-}
-
-// A count outside `[0, width)` is undefined in D; the count is masked as
-// compiled D does on the host. `a` is 64 bits here, so a logical shift
-// clears the extension above the plan's width first.
-private ulong shifted(
-    in long a,
-    in long count,
-    in imported!"snakebite.backends.shifts".ShiftPlan plan,
-) {
-    import snakebite.nativevalue: shiftCount;
-
-    const width = plan.width * 8;
-    const b = shiftCount(count, plan.width);
-
-    with (imported!"snakebite.backends.shifts".ShiftPlan.Direction)
-        final switch (plan.direction) {
-            case left:
-                return cast(ulong) a << b;
-            case rightArithmetic:
-                return cast(ulong) (a >> b);
-            case rightLogical:
-                const bits = width == 64
-                    ? cast(ulong) a
-                    : cast(ulong) a & ((1UL << width) - 1);
-                return bits >> b;
-        }
-}
 // A (nested function, enclosing function) pair, by address: which chain of
 // hops leads from the one's frame to the other's context is fixed for
 // the pair.
