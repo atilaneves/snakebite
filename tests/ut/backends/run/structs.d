@@ -6354,3 +6354,33 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+static foreach (backend; Matrix!()) {
+    @("destructorsOfNestedBlocksRunAtTheEndOfTheirOwnBlock." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Guard {
+                int* log;
+                int id;
+                ~this() { *log = *log * 10 + id; }
+            }
+            void inFunctionBody(int* log) {
+                Guard guard = Guard(log, 5);
+            }
+            void main() {
+                int log;
+                {
+                    Guard first = Guard(&log, 1);
+                    {
+                        Guard second = Guard(&log, 2);
+                    }
+                    log = log * 10 + 3;
+                }
+                { Guard only = Guard(&log, 4); }
+                inFunctionBody(&log);
+                assert(log == 23145);
+            }
+        });
+    }
+}

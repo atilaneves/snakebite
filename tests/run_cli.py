@@ -2313,6 +2313,14 @@ FAULTS = [
      "}\n"
      "int main() { int* pointer; return load(pointer); }\n",
      -signal.SIGSEGV, "fatal: null pointer dereference", "main.load"),
+    ("null struct pointer field read",
+     "module main; struct Pair { int first; int second; }\n"
+     "int load(Pair* pair) {\n"
+     "    int unused = 1;\n"
+     "    return pair.second;\n"
+     "}\n"
+     "int main() { Pair* pair; return load(pair); }\n",
+     -signal.SIGSEGV, "fatal: null pointer dereference", "main.load"),
     ("integer division by zero",
      "module main;\n"
      "int divide(int dividend, int divisor) {\n"
