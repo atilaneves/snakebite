@@ -465,7 +465,8 @@ Build reggaeBuild() {
     auto countFlags = CompilerFlags(releaseFlags.value ~ "-d-version=BytecodeCount");
     // `bin/sb` for `perf record --call-graph fp`; see "Performance work" in
     // CLAUDE.md.
-    auto profFlags = CompilerFlags(releaseFlags.value ~ "--frame-pointer=all" ~ "-g");
+    auto profFlags = CompilerFlags(releaseFlags.value ~ "--frame-pointer=all"
+        ~ "-gline-tables-only");
     Target[] targets = assembledSources.map!assembledObject.array ~ [
         registryImageObject,
     ]
@@ -474,10 +475,12 @@ Build reggaeBuild() {
         ~ dubTarget("ldc2", "acceptance-test", "release", "at", releaseFlags)
         ~ dubTarget("ldc2", "sb", "release", "sb", releaseFlags)
         ~ dubTarget("ldc2", "sb", "sb-count", "sb-count", countFlags)
-        ~ dubTarget("ldc2", "sb", "sb-prof", "sb-prof", profFlags)
         ~ dubTarget("ldc2", "sb-repl", "release", "sb-repl", releaseFlags)
         ~ dubTarget("ldc2", "bench", "release", "bench", releaseFlags);
-    return Build(targets);
+    // Optional: `ninja bin/sb-prof` builds it, a plain `ninja` does not.
+    auto profTargets = dubTarget("ldc2", "sb", "sb-prof", "sb-prof", profFlags);
+    return Build(targets.map!(a => createTopLevelTarget(a)).array
+        ~ profTargets.map!(a => optional(a)).array);
 }
 
 mixin BuildgenMain;

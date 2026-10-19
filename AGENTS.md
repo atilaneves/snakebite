@@ -62,7 +62,8 @@ Measure with the existing tools. Do not write a new benchmark harness.
   `performance-patterns` skills and follow them. Apply them to `bin/sb`,
   never to natively compiled guest code.
 - Profile `bin/sb-prof` (`ninja bin/sb-prof`; the release `bin/sb` plus
-  `--frame-pointer=all -g`), and record with `perf record --call-graph fp`.
+  `--frame-pointer=all -gline-tables-only`; not in the default targets),
+  and record with `perf record --call-graph fp`.
   Use the plain release build only for timings.
 - See the "Native baseline" section of issue #718 before any native
   comparison.
