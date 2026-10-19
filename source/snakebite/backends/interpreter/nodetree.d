@@ -123,6 +123,7 @@ package struct CalleeShape {
     package size_t offset;
     package size_t size;
     package bool isUnsigned;
+    package bool isFloating;
 }
 
 // Where a variable of an enclosing function lives: the words to load from
@@ -2114,6 +2115,7 @@ private struct FastCallee {
     public size_t offset;
     public size_t size;
     public bool isUnsigned;
+    public bool isFloating;
     public Argument mode;
     // The run of a body: the slots for the arguments and, for a body that
     // is one `return`, the tree whose value comes back in a register. The
@@ -2287,6 +2289,24 @@ private final class Call(E) : Node {
         _fast = fastFormOf(callee, _selected);
     }
 
+    // The node that does the work of this site when its one callee is an
+    // accessor, null otherwise. It stands in for this node in the tree, so
+    // an access pays for no choice of callee: this node only runs the call
+    // for a null receiver.
+    public final Node accessor() {
+        auto fast = _fast;
+        if (_virtual || fast is null)
+            return null;
+        final switch (fast.kind) with (FastCallee.Kind) {
+            case getter:
+                return byScalarOf!makeGetter(fast, this);
+            case setter:
+                return byScalarOf!makeSetter(fast, this);
+            case soleReturn, plain:
+                return null;
+        }
+    }
+
     // The fast form of `callee` at this site, which the site makes once.
     private FastCallee* fastFormOf(TreeCallee* callee, in Selection selected) {
         FastCallee* fast;
@@ -2323,6 +2343,7 @@ private final class Call(E) : Node {
                 fast.offset = shape.offset;
                 fast.size = shape.size;
                 fast.isUnsigned = shape.isUnsigned;
+                fast.isFloating = shape.isFloating;
                 if (_modes.length != 0)
                     fast.mode = _modes[0];
                 return fast;
@@ -2700,6 +2721,97 @@ private final class Call(E) : Node {
     }
 }
 
+// Calls `make!T(call, offset)` for the type `T` of the field of an accessor.
+private Node byScalarOf(alias make, E)(FastCallee* fast, Call!E call) {
+    if (fast.isFloating)
+        return fast.size == 4
+            ? make!float(call, fast.offset) : make!double(call, fast.offset);
+    TypeFacts facts;
+    facts.size = fast.size;
+    facts.isUnsigned = fast.isUnsigned;
+    return byIntegral!make(facts, call, fast.offset);
+}
+
+private Node makeGetter(T, E)(Call!E call, size_t offset) {
+    return call._receiverIsAddress
+        ? new Getter!(E, T, true)(call, offset)
+        : new Getter!(E, T, false)(call, offset);
+}
+
+private Node makeSetter(T, E)(Call!E call, size_t offset) {
+    return call._receiverIsAddress
+        ? new Setter!(E, T, true)(call, offset)
+        : new Setter!(E, T, false)(call, offset);
+}
+
+// The call of a getter at a site that has one callee, as one load at the
+// receiver plus the offset of the field. A null receiver takes the general
+// call, which reports the fault in the callee.
+private final class Getter(E, T, bool receiverIsAddress) : Typed!T {
+    private Call!E _call;
+    private Operand _receiver;
+    private size_t _offset;
+
+    public this(Call!E call, size_t offset) {
+        _call = call; _receiver = call._receiver; _offset = offset;
+    }
+
+    static if (isFloatingPoint!T) {
+        public override double executeDouble(ubyte* frame) {
+            const receiver = receiverOn(frame);
+            if (receiver == 0)
+                return _call.generalDouble(receiver, frame);
+            return *cast(const(T)*) (receiver + _offset);
+        }
+    } else {
+        public override long executeLong(ubyte* frame) {
+            const receiver = receiverOn(frame);
+            if (receiver == 0)
+                return _call.generalLong(receiver, frame);
+            return *cast(const(T)*) (receiver + _offset);
+        }
+    }
+
+    private size_t receiverOn(ubyte* frame) {
+        static if (receiverIsAddress)
+            return cast(size_t) _receiver.readAddress(frame);
+        else
+            return cast(size_t) _receiver.readLong(frame);
+    }
+}
+
+// The call of a setter at a site that has one callee: the receiver runs,
+// then the argument, then one store of the width of the field. A null
+// receiver takes the general call before the argument runs, which runs it
+// once there.
+private final class Setter(E, T, bool receiverIsAddress) : Node {
+    private Call!E _call;
+    private Operand _receiver;
+    private Operand _argument;
+    private size_t _offset;
+
+    public this(Call!E call, size_t offset) {
+        _call = call; _receiver = call._receiver; _argument = call._args[0];
+        _offset = offset;
+    }
+
+    public override void executeVoid(ubyte* frame) {
+        static if (receiverIsAddress)
+            const receiver = cast(size_t) _receiver.readAddress(frame);
+        else
+            const receiver = cast(size_t) _receiver.readLong(frame);
+        if (receiver == 0) {
+            _call.generalVoid(receiver, frame);
+            return;
+        }
+        static if (isFloatingPoint!T)
+            const value = cast(T) _argument.readDouble(frame);
+        else
+            const value = cast(T) _argument.readLong(frame);
+        *cast(T*) (receiver + _offset) = value;
+    }
+}
+
 // Finds what the body of `callee` is, once, the first time a call node binds
 // it. A getter or a setter is only recognised when the accessor reads or
 // writes its field as the tree would, with no check of the receiver.
@@ -2747,7 +2859,8 @@ private void examine(E)(E ev, TreeCallee* callee) {
                     || scalar.facts.isUnsigned != result.facts.isUnsigned)
                 return;
             callee.shape = CalleeShape(CalleeShape.Kind.getter, field.offset,
-                scalar.facts.size, scalar.facts.isUnsigned);
+                scalar.facts.size, scalar.facts.isUnsigned,
+                scalar.kind == Scalar.Kind.floating);
         }
         return;
     }
@@ -2775,7 +2888,8 @@ private void examine(E)(E ev, TreeCallee* callee) {
                 || scalar.facts.size != callee.layout.parameters[0].facts.size)
             return;
         callee.shape = CalleeShape(CalleeShape.Kind.setter, field.offset,
-            scalar.facts.size, scalar.facts.isUnsigned);
+            scalar.facts.size, scalar.facts.isUnsigned,
+            scalar.kind == Scalar.Kind.floating);
     }
 }
 
@@ -3432,6 +3546,8 @@ private Node buildCall(E)(E ev, CallExp call) {
         if (callee is null || !node.matches(callee))
             return null;
         node.bind(callee);
+        if (auto accessor = node.accessor)
+            return accessor;
     }
     return node;
 }

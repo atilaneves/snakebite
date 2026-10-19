@@ -469,3 +469,68 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+
+// The one callee of an accessor site is known when the site is built: the
+// site runs again inside its own receiver and its own argument, and the
+// accessors of a final class method and of a struct reached by pointer or by
+// value give the same results.
+static foreach (backend; Matrix!()) {
+    @("accessors.reenteredSite." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                struct Link {
+                    Link* next;
+                    int value;
+                    Link* getNext() { return next; }
+                    int getValue() { return value; }
+                    void setValue(int v) { value = v; }
+                }
+
+                final class Cell {
+                    int value;
+                    final int getValue() { return value; }
+                    final void setValue(int v) { value = v; }
+                }
+
+                int sum(Link* link) {
+                    return link is null ? 0
+                        : link.getValue() + sum(link.getNext());
+                }
+
+                int viaReceiver(Link* link, int depth) {
+                    return (depth == 0 ? link : link.getNext()).getValue()
+                        + (depth == 0 ? 0 : viaReceiver(link.getNext(), depth - 1));
+                }
+
+                int viaArgument(Link* link, int depth) {
+                    link.setValue(depth == 0 ? 1 : viaArgument(link, depth - 1) + 1);
+                    return link.getValue();
+                }
+
+                int answer() {
+                    Link[3] links;
+                    foreach (i; 0 .. 3) {
+                        links[i].setValue(i + 1);
+                        if (i < 2)
+                            links[i].next = &links[i + 1];
+                    }
+                    if (sum(&links[0]) != 6)
+                        return 1;
+                    if (viaReceiver(&links[0], 2) != 2 + 3 + 3)
+                        return 2;
+                    if (viaArgument(&links[0], 4) != 5 || links[0].value != 5)
+                        return 3;
+                    auto cell = new Cell;
+                    cell.setValue(cell.getValue() + 20);
+                    cell.setValue(cell.getValue() + 17);
+                    return cell.getValue() + (links[2].getValue() == 3 ? 5 : 0);
+                }
+            },
+            "answer",
+        );
+    }
+}
