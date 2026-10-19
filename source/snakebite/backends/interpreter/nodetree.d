@@ -257,6 +257,23 @@ private final class Local(T) : Typed!T {
     }
 }
 
+// The value at `PointerAddress(slot, offset)`.
+private final class LoadField(T) : Typed!T {
+    private size_t _slot;
+    private size_t _offset;
+    public this(size_t slot, size_t offset) { _slot = slot; _offset = offset; }
+    static if (isFloatingPoint!T)
+        public override double executeDouble(ubyte* frame) {
+            return *cast(T*) (*cast(ubyte**) (frame + _slot) + _offset);
+        }
+    else {
+        public override long executeLong(ubyte* frame) {
+            return *cast(T*) (*cast(ubyte**) (frame + _slot) + _offset);
+        }
+        mixin BoolFromLong;
+    }
+}
+
 private final class Load(T) : Typed!T {
     private Node _address;
     public this(Node address) { _address = address; }
@@ -280,12 +297,16 @@ private final class LocalAddress : Node {
     public override ubyte* executeAddr(ubyte* frame) { return frame + _offset; }
 }
 
-// A parameter or local that holds the address of the storage it names.
-private final class IndirectLocalAddress : Node {
+// A pointer held in a frame slot, and a constant offset from it: a `ref`
+// parameter or a local that holds the address of the storage it names, the
+// field of such storage, and the field of a pointer or an object held in a
+// local.
+private final class PointerAddress : Node {
+    private size_t _slot;
     private size_t _offset;
-    public this(size_t offset) { _offset = offset; }
+    public this(size_t slot, size_t offset) { _slot = slot; _offset = offset; }
     public override ubyte* executeAddr(ubyte* frame) {
-        return *cast(ubyte**) (frame + _offset);
+        return *cast(ubyte**) (frame + _slot) + _offset;
     }
 }
 
@@ -2404,7 +2425,7 @@ private Node buildVariableAddress(E)(E ev, VarDeclaration variable) {
     if (!slot.ok)
         return buildOuterAddress(ev, variable);
     return slot.indirect
-        ? new IndirectLocalAddress(slot.offset)
+        ? new PointerAddress(slot.offset, 0)
         : new LocalAddress(slot.offset);
 }
 
@@ -2424,7 +2445,7 @@ private Node buildAddress(E)(E ev, Expression expression) {
                 return null;
             if (!slot.ok)
                 return buildOuterAddress(ev, variable);
-            return new IndirectLocalAddress(slot.offset);
+            return new PointerAddress(slot.offset, 0);
         }
         case dotVariable: {
             auto dot = expression.isDotVarExp;
@@ -2438,18 +2459,18 @@ private Node buildAddress(E)(E ev, Expression expression) {
                 else {
                     auto pointer = buildValue(ev, dot.e1);
                     return pointer is null ? null
-                        : new FieldOfPointer(pointer, field.offset);
+                        : pointerTarget(pointer, field.offset);
                 }
             }
             auto base = buildAddress(ev, dot.e1);
-            return base is null ? null : new FieldOfAddress(base, field.offset);
+            return base is null ? null : fieldOfAddress(base, field.offset);
         }
         case star: {
             static if (E.nullCheckedEvaluator)
                 return null;
             else {
                 auto pointer = buildValue(ev, expression.isPtrExp.e1);
-                return pointer is null ? null : new Dereference(pointer);
+                return pointer is null ? null : pointerTarget(pointer, 0);
             }
         }
         case index:
@@ -2527,13 +2548,53 @@ private Node indexOfArray(E)(E ev, IndexExp indexed, Node array,
     assert(0, "an operand kind outside the index kinds");
 }
 
+// The address of a field of the storage at `base`, the address of the field
+// of the pointer or object that `pointer` yields, and the storage that it
+// points to (`offset` 0). An address that is a frame slot, or a pointer held
+// in one, plus a constant, is one node.
+private Node fieldOfAddress(Node base, size_t offset) {
+    if (auto frame = cast(LocalAddress) base)
+        return new LocalAddress(frame._offset + offset);
+    if (auto indirect = cast(PointerAddress) base)
+        return new PointerAddress(indirect._slot, indirect._offset + offset);
+    return new FieldOfAddress(base, offset);
+}
+
+private Node pointerTarget(Node pointer, size_t offset) {
+    if (auto local = cast(Local!long) pointer)
+        return new PointerAddress(local._offset, offset);
+    return offset == 0
+        ? new Dereference(pointer) : new FieldOfPointer(pointer, offset);
+}
+
+// The node that reads a `scalar` at `address`.
+private Node loadOf(Node address, in Scalar scalar) {
+    static Node at(T)(Node address) {
+        if (auto frame = cast(LocalAddress) address)
+            return new Local!T(frame._offset);
+        if (auto indirect = cast(PointerAddress) address)
+            return new LoadField!T(indirect._slot, indirect._offset);
+        return new Load!T(address);
+    }
+    if (scalar.kind == Scalar.Kind.floating)
+        return byFloating!at(scalar.facts, address);
+    return byIntegral!at(scalar.facts, address);
+}
+
+private Node loadSlice(Node address) {
+    if (auto frame = cast(LocalAddress) address)
+        return new LocalSlice(frame._offset);
+    return new LoadSlice(address);
+}
+
+private enum wordScalar = Scalar(
+    Scalar.Kind.integral, TypeFacts(size_t.sizeof, size_t.sizeof, true, true));
+
 private Node buildLoad(E)(E ev, Expression expression, Node address) {
     const scalar = scalarOf(ev, expression.type);
     if (address is null || scalar.kind == Scalar.Kind.none)
         return null;
-    if (scalar.kind == Scalar.Kind.floating)
-        return byFloating!(New!Load)(scalar.facts, address);
-    return byIntegral!(New!Load)(scalar.facts, address);
+    return loadOf(address, scalar);
 }
 
 // Constructing a reference variable binds it to the address on the right
@@ -2740,12 +2801,12 @@ private Node buildDelegate(E)(E ev, Expression expression) {
                 return outer is null ? null : new LoadSlice(outer);
             }
             return slot.indirect
-                ? new LoadSlice(new IndirectLocalAddress(slot.offset))
+                ? new LoadSlice(new PointerAddress(slot.offset, 0))
                 : new LocalSlice(slot.offset);
         }
         case dotVariable, star, index: {
             auto address = buildAddress(ev, expression);
-            return address is null ? null : new LoadSlice(address);
+            return address is null ? null : loadSlice(address);
         }
         case null_:
             return new NullSlice;
@@ -2775,7 +2836,7 @@ private Node buildSlice(E)(E ev, Expression expression) {
                 return outer is null ? null : new LoadSlice(outer);
             }
             return slot.indirect
-                ? new LoadSlice(new IndirectLocalAddress(slot.offset))
+                ? new LoadSlice(new PointerAddress(slot.offset, 0))
                 : new LocalSlice(slot.offset);
         }
         case question:
@@ -3114,7 +3175,7 @@ private Node buildValue(E)(E ev, Expression expression) {
                 return null;
             auto address = buildAddress(ev, array);
             if (address !is null)
-                return new Load!size_t(address);
+                return loadOf(address, wordScalar);
             auto value = buildSlice(ev, array);
             return value is null ? null : new SliceWord(value, lengthOffset);
         }
@@ -3126,7 +3187,7 @@ private Node buildValue(E)(E ev, Expression expression) {
                     buildOuterAddress(ev, declaration));
             if (slot.indirect)
                 return buildLoad(ev, expression,
-                    new IndirectLocalAddress(slot.offset));
+                    new PointerAddress(slot.offset, 0));
             return scalar.kind == Scalar.Kind.floating
                 ? byFloating!(New!Local)(scalar.facts, slot.offset)
                 : byIntegral!(New!Local)(scalar.facts, slot.offset);
@@ -3432,7 +3493,7 @@ private Node buildSliceToScalar(E)(
     if (kind != CastKind.sliceToPointer)
         return null;
     if (auto address = buildAddress(ev, castExp.e1))
-        return new Load!size_t(new FieldOfAddress(address, pointerOffset));
+        return loadOf(fieldOfAddress(address, pointerOffset), wordScalar);
     return new SliceWord(slice, pointerOffset);
 }
 
@@ -3568,7 +3629,7 @@ private bool targetOf(E)(E ev, Expression expression, out Target target) {
         if (!slot.ok)
             return false;
         if (slot.indirect)
-            target = Target(new IndirectLocalAddress(slot.offset));
+            target = Target(new PointerAddress(slot.offset, 0));
         else
             target = Target(null, slot.offset);
         return true;
