@@ -9,23 +9,32 @@
 #
 # The host GC is disabled: with it on, a collection in one run and not in
 # another moved counts by up to 1.3 G. One warm-up run comes first, because
-# the first run of a new binary also builds the dependency image.
+# the first run of a new binary also builds the dependency image. Address
+# randomisation is off: with it on, runs of the same
+# binary differed by up to 50 M (Storage); without it they agree within 100.
 set -euo pipefail
 sb=$(realpath "$1"); core=$2; k=$3; shift 3
 awfy=$HOME/coding/d/awfy/benchmarks/D
 declare -A inner=([Sieve]=150 [Mandelbrot]=500 [Richards]=2 [Storage]=20 [List]=40)
 benches=("$@"); [ ${#benches[@]} -eq 0 ] && benches=(Sieve Mandelbrot Richards Storage List)
 run() {
-    (cd "$awfy" && taskset -c "$core" "$@" "$sb" --DRT-gcopt=disable:1 -b interpreter \
+    (cd "$awfy" && taskset -c "$core" setarch -R "$@" "$sb" --DRT-gcopt=disable:1 -b interpreter \
         -I src src -- --DRT-testmode=run-main "${args[@]}")
 }
 count() {
     local out
     args=("$1" "$2" "$3")
-    out=$(run perf stat -x, -e instructions:u 2>&1 >/dev/null)
+    out=$(run perf stat -x, -e "$events" 2>&1 >/dev/null)
     if ! grep -q instructions <<<"$out"; then echo "FAILED $1 $2: $out" >&2; exit 1; fi
-    grep instructions <<<"$out" | cut -d, -f1
+    grep instructions <<<"$out" | cut -d, -f1 | awk '/^[0-9]+$/ { s += $1 } END { print s }'
 }
+# A hybrid CPU has one PMU per core type, and each counts only on its own
+# cores; the sum is right on any core.
+if [ -d /sys/bus/event_source/devices/cpu_core ]; then
+    events=cpu_core/instructions/u,cpu_atom/instructions/u
+else
+    events=instructions:u
+fi
 args=(Sieve 1 1); run >/dev/null 2>&1
 printf '%-11s %16s %16s\n' benchmark instr/iteration first-run
 for b in "${benches[@]}"; do
