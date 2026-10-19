@@ -397,24 +397,24 @@ private final class IndexDynamic(A, I) : Node {
     }
 }
 
-private final class IndexStatic : Node {
+private final class IndexStatic(A, I) : Node {
     private FailBounds _fail;
     private TreeRoot* _root;
     private IndexExp _expression;
-    private Node _array;
-    private Node _index;
+    private A _array;
+    private I _index;
     private size_t _stride;
     private size_t _length;
     public this(FailBounds fail, TreeRoot* root, IndexExp expression,
-            Node array, Node index, size_t stride, size_t length) {
+            A array, I index, size_t stride, size_t length) {
         _fail = fail; _root = root; _expression = expression; _array = array;
         _index = index; _stride = stride; _length = length;
     }
     public override ubyte* executeAddr(ubyte* frame) {
-        const index = cast(size_t) _index.executeLong(frame);
+        const index = cast(size_t) _index.value(frame);
         if (index >= _length)
             fail(frame, index);
-        return _array.executeAddr(frame) + index * _stride;
+        return _array.address(frame) + index * _stride;
     }
     pragma(inline, false)
     private void fail(ubyte* frame, size_t index) {
@@ -725,6 +725,16 @@ private struct ConstantOperand(V) {
     public V value(ubyte*) { return constant; }
 }
 
+// A value of type `T` in storage that a pointer held in a frame slot points
+// to.
+private struct FieldOperand(T) {
+    public size_t slot;
+    public size_t offset;
+    public Carried!T value(ubyte* frame) {
+        return *cast(T*) (*cast(ubyte**) (frame + slot) + offset);
+    }
+}
+
 private struct ChildAddress {
     public Node node;
     public ubyte* address(ubyte* frame) { return node.executeAddr(frame); }
@@ -733,6 +743,16 @@ private struct ChildAddress {
 private struct FrameAddress {
     public size_t offset;
     public ubyte* address(ubyte* frame) { return frame + offset; }
+}
+
+// The address of storage that a pointer held in a frame slot points to,
+// `offset` bytes in.
+private struct PointerSlotAddress {
+    public size_t slot;
+    public size_t offset;
+    public ubyte* address(ubyte* frame) {
+        return *cast(ubyte**) (frame + slot) + offset;
+    }
 }
 
 // The address of an operation's target: a frame slot, or the address a node
@@ -747,13 +767,59 @@ private struct Target {
 
 // What the builder knows about a child node, to choose its operand struct.
 private struct Operand {
-    public enum Kind : ubyte { child, localInt, localLong, localDouble, constant }
+    public enum Kind : ubyte {
+        child, localInt, localLong, localDouble, constant,
+        fieldInt, fieldLong, fieldDouble,
+        childAddress, frameAddress, pointerAddress,
+    }
 
     public Kind kind;
     public Node node;
+    // The frame slot of a local, of a frame address, or of the pointer that
+    // a field or a pointer address holds.
     public size_t offset;
     public long integer;
     public double floating;
+    public size_t fieldOffset;
+
+    // The kind that reads the operand through its node.
+    public Kind demoted() const {
+        return kind >= Kind.childAddress ? Kind.childAddress : Kind.child;
+    }
+
+    // Reads the operand with no operand struct, for a consumer whose number of
+    // operands is not known when it is compiled.
+    public long readLong(ubyte* frame) {
+        switch (kind) with (Kind) {
+            case localInt: return *cast(int*) (frame + offset);
+            case localLong: return *cast(long*) (frame + offset);
+            case constant: return integer;
+            case fieldInt: return *cast(int*) fieldAt(frame);
+            case fieldLong: return *cast(long*) fieldAt(frame);
+            default: return node.executeLong(frame);
+        }
+    }
+
+    public double readDouble(ubyte* frame) {
+        switch (kind) with (Kind) {
+            case localDouble: return *cast(double*) (frame + offset);
+            case constant: return floating;
+            case fieldDouble: return *cast(double*) fieldAt(frame);
+            default: return node.executeDouble(frame);
+        }
+    }
+
+    public ubyte* readAddress(ubyte* frame) {
+        switch (kind) with (Kind) {
+            case frameAddress: return frame + offset;
+            case pointerAddress: return fieldAt(frame);
+            default: return node.executeAddr(frame);
+        }
+    }
+
+    private ubyte* fieldAt(ubyte* frame) {
+        return *cast(ubyte**) (frame + offset) + fieldOffset;
+    }
 }
 
 private alias Kind = Operand.Kind;
@@ -769,7 +835,22 @@ private Operand operandOf(Node node) {
         return Operand(Kind.localLong, node, leaf._offset);
     if (auto leaf = cast(Local!double) node)
         return Operand(Kind.localDouble, node, leaf._offset);
+    if (auto leaf = cast(LoadField!int) node)
+        return Operand(Kind.fieldInt, node, leaf._slot, 0, 0, leaf._offset);
+    if (auto leaf = cast(LoadField!long) node)
+        return Operand(Kind.fieldLong, node, leaf._slot, 0, 0, leaf._offset);
+    if (auto leaf = cast(LoadField!double) node)
+        return Operand(Kind.fieldDouble, node, leaf._slot, 0, 0, leaf._offset);
     return Operand(Kind.child, node);
+}
+
+private Operand addressOperandOf(Node node) {
+    if (auto address = cast(LocalAddress) node)
+        return Operand(Kind.frameAddress, node, address._offset);
+    if (auto address = cast(PointerAddress) node)
+        return Operand(Kind.pointerAddress, node, address._slot, 0, 0,
+            address._offset);
+    return Operand(Kind.childAddress, node);
 }
 
 private template OperandType(Kind kind, V) {
@@ -781,6 +862,18 @@ private template OperandType(Kind kind, V) {
         public alias OperandType = LocalOperand!long;
     else static if (kind == Kind.localDouble)
         public alias OperandType = LocalOperand!double;
+    else static if (kind == Kind.fieldInt)
+        public alias OperandType = FieldOperand!int;
+    else static if (kind == Kind.fieldLong)
+        public alias OperandType = FieldOperand!long;
+    else static if (kind == Kind.fieldDouble)
+        public alias OperandType = FieldOperand!double;
+    else static if (kind == Kind.childAddress)
+        public alias OperandType = ChildAddress;
+    else static if (kind == Kind.frameAddress)
+        public alias OperandType = FrameAddress;
+    else static if (kind == Kind.pointerAddress)
+        public alias OperandType = PointerSlotAddress;
     else
         public alias OperandType = ConstantOperand!V;
 }
@@ -788,6 +881,10 @@ private template OperandType(Kind kind, V) {
 private Op makeOperand(Op)(in Operand operand) {
     static if (is(Op == ChildOperand!V, V))
         return Op(cast() operand.node);
+    else static if (is(Op == ChildAddress))
+        return Op(cast() operand.node);
+    else static if (is(Op == FieldOperand!T, T) || is(Op == PointerSlotAddress))
+        return Op(operand.offset, operand.fieldOffset);
     else static if (is(Op == ConstantOperand!V, V)) {
         static if (is(V == double))
             return Op(operand.floating);
@@ -813,7 +910,60 @@ private enum Kind[] unsignedRight = [
 private enum Kind[] doubleLeft = [
     Kind.child, Kind.localDouble, Kind.constant,
 ];
-private enum Kind[] doubleComparedLeft = [Kind.child, Kind.localDouble];
+
+// The kinds of the operands of a test. A field is read in the test too.
+private enum Kind[] testLeft = [
+    Kind.child, Kind.localInt, Kind.localLong, Kind.fieldInt, Kind.fieldLong,
+];
+private enum Kind[] testRight = [
+    Kind.child, Kind.localInt, Kind.localLong, Kind.fieldInt, Kind.fieldLong,
+    Kind.constant,
+];
+private enum Kind[] unsignedTestLeft = [
+    Kind.child, Kind.localLong, Kind.fieldLong,
+];
+private enum Kind[] unsignedTestRight = [
+    Kind.child, Kind.localLong, Kind.fieldLong, Kind.constant,
+];
+private enum Kind[] doubleTestLeft = [
+    Kind.child, Kind.localDouble, Kind.fieldDouble,
+];
+private enum Kind[] doubleTestRight = [
+    Kind.child, Kind.localDouble, Kind.fieldDouble, Kind.constant,
+];
+
+// The kinds of the address that a store or an index reads its storage at.
+private enum Kind[] addressKinds = [
+    Kind.childAddress, Kind.frameAddress, Kind.pointerAddress,
+];
+private enum Kind[] indexKinds = [
+    Kind.child, Kind.localInt, Kind.localLong, Kind.fieldInt, Kind.fieldLong,
+];
+private enum Kind[] staticIndexKinds = [
+    Kind.child, Kind.localInt, Kind.localLong, Kind.fieldInt, Kind.fieldLong,
+    Kind.constant,
+];
+
+// The kinds of the value that a store or a return of a `T` reads. A narrower
+// integer or a `float` has the operand of a cast in front of every operand but
+// a constant, which is a child.
+private template valueKinds(T) {
+    static if (is(T == long))
+        public enum Kind[] valueKinds = [
+            Kind.child, Kind.constant, Kind.localInt, Kind.localLong,
+            Kind.fieldInt, Kind.fieldLong,
+        ];
+    else static if (is(T == int) || is(T == uint))
+        public enum Kind[] valueKinds = [
+            Kind.child, Kind.constant, Kind.localInt, Kind.fieldInt,
+        ];
+    else static if (is(T == double))
+        public enum Kind[] valueKinds = [
+            Kind.child, Kind.constant, Kind.localDouble, Kind.fieldDouble,
+        ];
+    else
+        public enum Kind[] valueKinds = [Kind.child, Kind.constant];
+}
 
 private bool has(in Kind[] kinds, in Kind kind) {
     foreach (candidate; kinds)
@@ -830,9 +980,9 @@ private Node fuse(alias make, V, Kind[] lefts, Kind[] rights, Args...)(
 ) {
     if (!lefts.has(left.kind)
             || (left.kind == Kind.constant && right.kind == Kind.constant))
-        left.kind = Kind.child;
+        left.kind = left.demoted;
     if (!rights.has(right.kind))
-        right.kind = Kind.child;
+        right.kind = right.demoted;
     static foreach (lk; lefts)
         static foreach (rk; rights)
             static if (lk != Kind.constant || rk != Kind.constant)
@@ -926,8 +1076,10 @@ private final class Truth : BoolNode {
     public override bool executeBool(ubyte* frame) { return _operand.executeBool(frame); }
 }
 
-// Whether evaluating an operand can fault, which it can when it is a node.
-private enum operandMayFault(O) = is(O == ChildOperand!(V, N), V, N);
+// Whether evaluating an operand can fault, which it can when it is a node or
+// reads through a pointer.
+private enum operandMayFault(O) = is(O == ChildOperand!(V, N), V, N)
+    || is(O == FieldOperand!T, T);
 
 // A test of two operands, which a loop or an `if` can hold in place of the
 // node that evaluates it.
@@ -1650,7 +1802,23 @@ private final class DoLoop(C) : Loop {
     }
 }
 
-private final class ReturnValue(T) : Node {
+private final class ReturnValue(T, V) : Node {
+    private void** _place;
+    private V _value;
+    private Position _position;
+    public this(void** place, V value, Position position) {
+        _place = place; _value = value; _position = position;
+    }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        _position.note(frame);
+        const T value = cast(T) _value.value(frame);
+        if (*_place !is null)
+            *cast(T*) (*_place) = value;
+        return TreeFlow.return_;
+    }
+}
+
+private final class ReturnSlice : Node {
     private void** _place;
     private Node _value;
     private Position _position;
@@ -1659,19 +1827,10 @@ private final class ReturnValue(T) : Node {
     }
     public override TreeFlow executeStmt(ubyte* frame) {
         _position.note(frame);
-        static if (is(T == SliceValue)) {
-            if (*_place !is null)
-                _value.executeInto(frame, cast(ubyte*) *_place);
-            else
-                _value.executeVoid(frame);
-        } else {
-            static if (isFloatingPoint!T)
-                const T value = cast(T) _value.executeDouble(frame);
-            else
-                const T value = cast(T) _value.executeLong(frame);
-            if (*_place !is null)
-                *cast(T*) (*_place) = value;
-        }
+        if (*_place !is null)
+            _value.executeInto(frame, cast(ubyte*) *_place);
+        else
+            _value.executeVoid(frame);
         return TreeFlow.return_;
     }
 }
@@ -1845,7 +2004,7 @@ private struct Selection {
 private mixin template CalleeEntry(E) {
     private E _ev;
     private CallExp _site;
-    private Node[] _args;
+    private Operand[] _args;
     private Argument[] _modes;
     private size_t _resultSize;
     private bool _resultUnsigned;
@@ -1894,8 +2053,8 @@ private mixin template CalleeEntry(E) {
         if (layout.hiddenThis.variable !is null)
             *cast(size_t*) (base + layout.hiddenThis.parameter.offset)
                 = hidden;
-        foreach (i, node; _args)
-            storeArgument(node, _modes[i], frame, base + layout.parameters[i].offset);
+        foreach (i, ref arg; _args)
+            storeArgument(arg, _modes[i], frame, base + layout.parameters[i].offset);
         if (layout.retainsTemporaries)
             ev._temporaries.withNestedCall(layout.retainsTemporaries, {
                 run(selection, base, result);
@@ -1941,7 +2100,8 @@ private final class Call(E) : Node {
     mixin CalleeEntry!E;
 
     private FuncDeclaration _method;
-    private Node _receiver;
+    private Operand _receiver;
+    private bool _hasReceiver;
     private bool _virtual;
     private bool _receiverIsAddress;
     // A constructor call yields the object it constructed.
@@ -1954,9 +2114,13 @@ private final class Call(E) : Node {
             bool receiverIsAddress, bool virtual, Node[] args,
             Argument[] modes, size_t resultSize, bool resultUnsigned,
             bool yieldsReceiver) {
-        _ev = ev; _site = site; _method = method; _receiver = receiver;
+        _ev = ev; _site = site; _method = method;
+        _hasReceiver = receiver !is null;
+        if (_hasReceiver)
+            _receiver = receiverIsAddress
+                ? addressOperandOf(receiver) : operandOf(receiver);
         _receiverIsAddress = receiverIsAddress; _virtual = virtual;
-        _args = args; _modes = modes; _resultSize = resultSize;
+        _args = argumentOperands(args, modes); _modes = modes; _resultSize = resultSize;
         _resultUnsigned = resultUnsigned; _yieldsReceiver = yieldsReceiver;
         _root = ev._treeRoot;
     }
@@ -1965,7 +2129,7 @@ private final class Call(E) : Node {
         if (_virtual && callee.decision.route != _selected.route)
             return false;
         // The receiver is the context word, and only a callee with one takes it.
-        if ((_receiver !is null) != (callee.layout.hiddenThis.variable !is null))
+        if (_hasReceiver != (callee.layout.hiddenThis.variable !is null))
             return false;
         return takesArguments(callee);
     }
@@ -1983,13 +2147,13 @@ private final class Call(E) : Node {
     private size_t invoke(ubyte* frame, void* result) {
         auto ev = _ev;
         size_t receiver;
-        if (_receiver !is null)
+        if (_hasReceiver)
             receiver = _receiverIsAddress
-                ? cast(size_t) _receiver.executeAddr(frame)
-                : cast(size_t) _receiver.executeLong(frame);
+                ? cast(size_t) _receiver.readAddress(frame)
+                : cast(size_t) _receiver.readLong(frame);
         // Read after the receiver runs: it can run this site again.
         auto selected = _selected;
-        if (_receiver !is null) {
+        if (_hasReceiver) {
             if (_virtual) {
                 if (receiver == 0) {
                     ev.syncTree(_root, frame);
@@ -2074,7 +2238,7 @@ private final class IndirectCall(E) : Node {
             Node[] args, Argument[] modes, size_t resultSize,
             bool resultUnsigned) {
         _ev = ev; _site = site; _target = target; _viaDelegate = viaDelegate;
-        _args = args; _modes = modes; _resultSize = resultSize;
+        _args = argumentOperands(args, modes); _modes = modes; _resultSize = resultSize;
         _resultUnsigned = resultUnsigned;
         _root = ev._treeRoot;
     }
@@ -2142,17 +2306,35 @@ private final class IndirectCall(E) : Node {
     }
 }
 
-// Evaluates `node` into the parameter slot `place` as `mode` says.
-private void storeArgument(Node node, Argument mode, ubyte* frame, ubyte* place) {
+// The operands that evaluate `args` into parameter slots as `modes` say.
+private Operand[] argumentOperands(Node[] args, Argument[] modes) {
+    auto operands = new Operand[args.length];
+    foreach (i, arg; args)
+        final switch (modes[i]) with (Argument) {
+            case address:
+                operands[i] = addressOperandOf(arg);
+                break;
+            case pair:
+                operands[i] = Operand(Kind.child, arg);
+                break;
+            case i8, i16, i32, i64, f32, f64:
+                operands[i] = operandOf(arg);
+                break;
+        }
+    return operands;
+}
+
+// Evaluates `arg` into the parameter slot `place` as `mode` says.
+private void storeArgument(ref Operand arg, Argument mode, ubyte* frame, ubyte* place) {
     final switch (mode) with (Argument) {
-        case i8: *cast(ubyte*) place = cast(ubyte) node.executeLong(frame); break;
-        case i16: *cast(ushort*) place = cast(ushort) node.executeLong(frame); break;
-        case i32: *cast(uint*) place = cast(uint) node.executeLong(frame); break;
-        case i64: *cast(ulong*) place = node.executeLong(frame); break;
-        case f32: *cast(float*) place = node.executeDouble(frame); break;
-        case f64: *cast(double*) place = node.executeDouble(frame); break;
-        case address: *cast(ubyte**) place = node.executeAddr(frame); break;
-        case pair: node.executeInto(frame, place); break;
+        case i8: *cast(ubyte*) place = cast(ubyte) arg.readLong(frame); break;
+        case i16: *cast(ushort*) place = cast(ushort) arg.readLong(frame); break;
+        case i32: *cast(uint*) place = cast(uint) arg.readLong(frame); break;
+        case i64: *cast(ulong*) place = arg.readLong(frame); break;
+        case f32: *cast(float*) place = arg.readDouble(frame); break;
+        case f64: *cast(double*) place = arg.readDouble(frame); break;
+        case address: *cast(ubyte**) place = arg.readAddress(frame); break;
+        case pair: arg.node.executeInto(frame, place); break;
     }
 }
 
@@ -2187,7 +2369,7 @@ private final class BuiltinOp : Node {
     private enum maxArguments = 4;
 
     private imported!"snakebite.backends.builtins".BuiltinCall _entry;
-    private Node[] _args;
+    private Operand[] _args;
     private Argument[] _modes;
     private size_t _resultSize;
     private bool _resultUnsigned;
@@ -2196,17 +2378,17 @@ private final class BuiltinOp : Node {
         typeof(_entry) entry, Node[] args, Argument[] modes,
         size_t resultSize, bool resultUnsigned,
     ) {
-        _entry = entry; _args = args; _modes = modes;
+        _entry = entry; _args = argumentOperands(args, modes); _modes = modes;
         _resultSize = resultSize; _resultUnsigned = resultUnsigned;
     }
 
     private void invoke(ubyte* frame, void* result) {
         ulong[maxArguments] values;
         const(void)*[maxArguments] pointers;
-        foreach (i, node; _args) {
+        foreach (i, ref arg; _args) {
             // `buildIntrinsicCall` takes only value arguments.
             auto place = cast(ubyte*) &values[i];
-            storeArgument(node, _modes[i], frame, place);
+            storeArgument(arg, _modes[i], frame, place);
             pointers[i] = place;
         }
         _entry(result, pointers.ptr, _args.length);
@@ -2507,9 +2689,18 @@ private Node buildIndexAddress(E)(E ev, IndexExp indexed) {
         }
         case Tsarray: {
             auto array = buildAddress(ev, indexed.e1);
-            return array is null ? null : new IndexStatic(
-                &ev.failTreeBounds, ev._treeRoot, indexed, array, position,
-                element.size,
+            if (array is null)
+                return null;
+            static Node make(A, I)(
+                A array, I position, FailBounds fail, TreeRoot* root,
+                IndexExp indexed, size_t stride, size_t length,
+            ) {
+                return new IndexStatic!(A, I)(
+                    fail, root, indexed, array, position, stride, length);
+            }
+            return fuse!(make, long, addressKinds, staticIndexKinds)(
+                addressOperandOf(array), operandOf(position),
+                &ev.failTreeBounds, ev._treeRoot, indexed, element.size,
                 cast(size_t) indexed.e1.type.toBasetype.isTypeSArray
                     .dim.toInteger);
         }
@@ -2529,23 +2720,16 @@ private Node buildIndexAddress(E)(E ev, IndexExp indexed) {
 
 private Node indexOfArray(E)(E ev, IndexExp indexed, Node array,
         Node position, size_t stride) {
-    auto index = operandOf(position);
-    if (index.kind == Kind.constant)
-        index.kind = Kind.child;
-    auto frameArray = cast(LocalAddress) array;
-    static foreach (kind; AliasSeq!(Kind.child, Kind.localInt, Kind.localLong))
-        if (index.kind == kind) {
-            alias I = OperandType!(kind, long);
-            auto i = makeOperand!I(index);
-            if (frameArray !is null)
-                return new IndexDynamic!(FrameAddress, I)(
-                    &ev.failTreeBounds, ev._treeRoot, indexed,
-                    FrameAddress(frameArray._offset), i, stride);
-            return new IndexDynamic!(ChildAddress, I)(
-                &ev.failTreeBounds, ev._treeRoot, indexed,
-                ChildAddress(array), i, stride);
-        }
-    assert(0, "an operand kind outside the index kinds");
+    static Node make(A, I)(
+        A array, I index, FailBounds fail, TreeRoot* root, IndexExp indexed,
+        size_t stride,
+    ) {
+        return new IndexDynamic!(A, I)(
+            fail, root, indexed, array, index, stride);
+    }
+    return fuse!(make, long, addressKinds, indexKinds)(
+        addressOperandOf(array), operandOf(position), &ev.failTreeBounds,
+        ev._treeRoot, indexed, stride);
 }
 
 // The address of a field of the storage at `base`, the address of the field
@@ -2886,11 +3070,11 @@ private Node buildSliceStore(E)(E ev, AssignExp e) {
         if (!slot.ok)
             return null;
         if (!slot.indirect)
-            return new StoreSlice!FrameAddress(FrameAddress(slot.offset), value);
+            return storeSlice(frameSlot(slot.offset), value);
     }
     auto address = buildAddress(ev, e.e1);
     return address is null
-        ? null : new StoreSlice!ChildAddress(ChildAddress(address), value);
+        ? null : storeSlice(addressOperandOf(address), value);
 }
 
 // `first, second`: `second` is built by `buildSecond`.
@@ -3405,7 +3589,7 @@ private Node buildIdentity(bool negate, E)(E ev, IdentityExp e) {
             return new IntegerCompare!(op, false, L, R)(
                 IntegerTest!(op, false, L, R)(l, r));
         }
-        return fuse!(same, long, longLeft, longRight)(
+        return fuse!(same, long, testLeft, testRight)(
             operandOf(left), operandOf(right));
     }
     if (cast(DoubleNode) left is null || cast(DoubleNode) right is null)
@@ -3598,13 +3782,13 @@ private Node buildCompare(string op, E)(E ev, BinExp e) {
         }
         // Equal values have equal bits whatever the signedness.
         static if (op == "==" || op == "!=")
-            return fuse!(signed, long, longLeft, longRight)(
+            return fuse!(signed, long, testLeft, testRight)(
                 operandOf(left), operandOf(right));
         else
             return plan.facts.isUnsigned
-                ? fuse!(unsigned, long, unsignedLeft, unsignedRight)(
+                ? fuse!(unsigned, long, unsignedTestLeft, unsignedTestRight)(
                     operandOf(left), operandOf(right))
-                : fuse!(signed, long, longLeft, longRight)(
+                : fuse!(signed, long, testLeft, testRight)(
                     operandOf(left), operandOf(right));
     }
     if (plan.kind == ComparisonPlan.Kind.floating
@@ -3613,7 +3797,7 @@ private Node buildCompare(string op, E)(E ev, BinExp e) {
             return new FloatCompare!(op, L, R)(FloatTest!(op, L, R)(l, r));
         }
         return ev.factsOf(e.e1.type).size == 8
-            ? fuse!(build, double, doubleComparedLeft, doubleLeft)(
+            ? fuse!(build, double, doubleTestLeft, doubleTestRight)(
                 operandOf(left), operandOf(right))
             : fuse!(build, double, onlyChild, onlyChild)(
                 operandOf(left), operandOf(right));
@@ -3649,7 +3833,7 @@ private template opAssignOf(string op) {
                 static Node make(S, A)(S s, A a, Operation!op o) {
                     return new IntegerOpAssign!(op, T, A, S)(a, s, o);
                 }
-                return fuseStep!(make, steps)(
+                return fuseStep!(make, long, steps)(
                     operandOf(step), FrameAddress(target.offset), operation);
             }
         }
@@ -3660,15 +3844,15 @@ private template opAssignOf(string op) {
 
 // `make!S(step, args)`, for the operand struct `S` of `step`, when its kind
 // is in `steps`.
-private Node fuseStep(alias make, Kind[] steps, Args...)(
+private Node fuseStep(alias make, V, Kind[] steps, Args...)(
     Operand step, Args args,
 ) {
     if (!steps.has(step.kind))
-        step.kind = Kind.child;
+        step.kind = step.demoted;
     static foreach (kind; steps)
         if (step.kind == kind)
-            return make!(OperandType!(kind, long))(
-                makeOperand!(OperandType!(kind, long))(step), args);
+            return make!(OperandType!(kind, V))(
+                makeOperand!(OperandType!(kind, V))(step), args);
     assert(0, "an operand kind outside the step kinds");
 }
 
@@ -3743,43 +3927,46 @@ private Node buildStore(E)(E ev, AssignExp e, in Scalar scalar) {
         if (!slot.ok)
             return null;
         if (!slot.indirect)
-            return storeToFrame(target, slot.offset, value);
+            return storeTo(target, frameSlot(slot.offset), value);
     }
     auto address = buildAddress(ev, e.e1);
-    return address is null ? null : storeToAddress(target, address, value);
+    return address is null
+        ? null : storeTo(target, addressOperandOf(address), value);
 }
 
-private Node storeOf(T, A, Value)(A address, Value value) {
-    return new Store!(T, A, Value)(address, value);
+// The operand that is the frame slot at `offset`.
+private Operand frameSlot(size_t offset) {
+    return Operand(Kind.frameAddress, null, offset);
 }
 
-private Node storeToFrame(in Scalar target, size_t offset, Node value) {
-    auto address = FrameAddress(offset);
-    if (target.kind == Scalar.Kind.floating) {
-        if (target.facts.size == 8)
-            if (auto fused = storeFusedDouble(value, address))
-                return fused;
-        if (auto leaf = cast(Constant!double) value)
-            return byFloating!storeOf(
-                target.facts, address, ConstantOperand!double(leaf._value));
-        return byFloating!storeOf(
-            target.facts, address, ChildOperand!double(value));
+private Node storeTo(in Scalar target, Operand address, Node value) {
+    static Node storeOf(T)(Operand address, Node value) {
+        static Node make(A, S)(A address, S value) {
+            return new Store!(T, A, S)(address, value);
+        }
+        static if (isFloatingPoint!T)
+            alias V = double;
+        else
+            alias V = long;
+        return fuse!(make, V, addressKinds, valueKinds!T)(
+            address, operandOf(value));
     }
-    if (auto leaf = cast(Constant!long) value)
-        return byIntegral!storeOf(
-            target.facts, address, ConstantOperand!long(leaf._value));
-    return byIntegral!storeOf(target.facts, address, ChildOperand!long(value));
+    if (target.kind == Scalar.Kind.floating) {
+        if (target.facts.size == 8 && address.kind == Kind.frameAddress)
+            if (auto fused = storeFusedDouble(
+                    value, FrameAddress(address.offset)))
+                return fused;
+        return byFloating!storeOf(target.facts, address, value);
+    }
+    return byIntegral!storeOf(target.facts, address, value);
 }
 
-private Node storeToAddress(in Scalar target, Node node, Node value) {
-    auto address = ChildAddress(node);
-    if (target.kind == Scalar.Kind.floating)
-        return byFloating!storeOf(
-            target.facts, address, ChildOperand!double(value));
-    if (auto leaf = cast(Constant!long) value)
-        return byIntegral!storeOf(
-            target.facts, address, ConstantOperand!long(leaf._value));
-    return byIntegral!storeOf(target.facts, address, ChildOperand!long(value));
+// A dynamic array stored to the storage at `address`.
+private Node storeSlice(Operand address, Node value) {
+    static Node make(A)(A address, Node value) {
+        return new StoreSlice!A(address, value);
+    }
+    return fuseStep!(make, long, addressKinds)(address, value);
 }
 
 // A store of a fused double operation: the operation's node is called
@@ -3865,7 +4052,7 @@ private Node buildVariable(E)(
             return null;
         auto node = buildSlice(ev, value);
         return node is null ? null : statementOf(
-            new StoreSlice!FrameAddress(FrameAddress(slot.offset), node),
+            storeSlice(frameSlot(slot.offset), node),
             positionOf(ev, declaration));
     }
     if (scalarOf(ev, value.type).kind != scalar.kind
@@ -3874,7 +4061,7 @@ private Node buildVariable(E)(
     auto node = buildValue(ev, value);
     if (node is null)
         return null;
-    return statementOf(storeToFrame(scalar, slot.offset, node),
+    return statementOf(storeTo(scalar, frameSlot(slot.offset), node),
         positionOf(ev, declaration));
 }
 
@@ -4223,7 +4410,7 @@ private Node buildReturn(E)(E ev, imported!"dmd.statement".ReturnStatement retur
             return generic();
         auto slice = buildSlice(ev, returned.exp);
         return slice is null
-            ? generic() : new ReturnValue!SliceValue(
+            ? generic() : new ReturnSlice(
                 &ev._place, slice, positionOf(ev, returned.exp));
     }
     if (isAggregate(ev._type)) {
@@ -4242,7 +4429,14 @@ private Node buildReturn(E)(E ev, imported!"dmd.statement".ReturnStatement retur
     if (value is null)
         return generic();
     static Node make(T)(void** place, Node v, Position p) {
-        return new ReturnValue!T(place, v, p);
+        static Node returning(S)(S value, void** place, Position p) {
+            return new ReturnValue!(T, S)(place, value, p);
+        }
+        static if (isFloatingPoint!T)
+            alias V = double;
+        else
+            alias V = long;
+        return fuseStep!(returning, V, valueKinds!T)(operandOf(v), place, p);
     }
     auto position = positionOf(ev, returned.exp);
     return scalar.kind == Scalar.Kind.floating
