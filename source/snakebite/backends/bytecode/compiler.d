@@ -7909,16 +7909,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // Where an operand of a three-address instruction is. A plain local is
     // used in place, unless `later` (the operand evaluated after this one)
     // has a side effect: it could write the local. A nothrow, strongly pure
-    // call has none, and cannot write a caller's local.
+    // call has none, and cannot write a caller's local. With
+    // `destructorsFollow`, the consumer reads the operands after destructors
+    // of temporaries ran, and such a destructor could write the place: the
+    // operand is then copied to a temporary whatever `later` is.
     private size_t operandInto(
         Expression operand, Expression later,
         in imported!"snakebite.nativelayout".TypeFacts facts,
-        in size_t width, in bool floating,
+        in size_t width, in bool floating, in bool destructorsFollow = false,
     ) {
         import dmd.sideeffect: hasSideEffect;
 
         const offset = operandPlace(operand, width, floating,
-            later is null || !hasSideEffect(later));
+            !destructorsFollow && (later is null || !hasSideEffect(later)));
         if (offset != size_t.max)
             return offset;
         const temp = reserveTemp(facts);
@@ -8208,16 +8211,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         size_t leftOffset, rightOffset;
         Address rightConstant;
+        // The branch reads the operands after the full expression ends: a
+        // destructor of a temporary in it could write a place first.
+        const destructorsFollow =
+            FullExpressionScope.hasOperandDestructors(comparison);
         fullExpression(position, comparison, {
             rightConstant = constantOf(right, facts.size, floating);
             if (!rightConstant.isNull)
                 leftOffset = operandInto(left, null, facts, facts.size,
-                    floating);
+                    floating, destructorsFollow);
             else {
                 leftOffset = operandInto(left, right, facts, facts.size,
-                    floating);
+                    floating, destructorsFollow);
                 rightOffset = operandInto(right, null, facts, facts.size,
-                    floating);
+                    floating, destructorsFollow);
             }
         });
         const kind = floating ? CompareKind.floating
