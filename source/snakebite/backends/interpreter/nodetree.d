@@ -1171,7 +1171,7 @@ private Slot slotOf(E)(E ev, VarDeclaration variable) {
     import dmd.astenums: STC;
     import snakebite.frontend.dmd.delegates: isCtfeVariable;
 
-    if (variable is null || variable.isDataseg || isCtfeVariable(variable)
+    if (variable is null || isCtfeVariable(variable) || variable.isDataseg
             || variable.isSymbolDeclaration !is null
             || (variable.storage_class & STC.lazy_) != 0)
         return Slot();
