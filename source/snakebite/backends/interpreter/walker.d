@@ -1352,7 +1352,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _returned = ReturnedLvalue.init;
         ctfeBlockDepth = 0;
         while (true) {
-            body_.accept(this);
+            dispatch(body_);
             if (!_controlFlow.hasGoto)
                 break;
 
@@ -1908,7 +1908,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (_controlFlow.seeking) {
             try {
                 if (statement._body !is null)
-                    statement._body.accept(this);
+                    dispatch(statement._body);
             } catch (GuestException exception) {
                 const plan = exceptionPlan(exception._guest.classinfo);
                 // Binding and visiting the handler mutate dmd's Catch node.
@@ -1918,7 +1918,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 if (catch_ !is null) {
                     bindCatchVariable(catch_, exception.take);
                     if (catch_.handler !is null)
-                        catch_.handler.accept(this);
+                        dispatch(catch_.handler);
                     return;
                 }
 
@@ -1929,12 +1929,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             if (_controlFlow.seeking)
                 foreach (catch_; *statement.catches)
                     if (catch_.handler !is null)
-                        catch_.handler.accept(this);
+                        dispatch(catch_.handler);
             return;
         }
 
         try {
-            statement._body.accept(this);
+            dispatch(statement._body);
         } catch (GuestException exception) {
             const plan = exceptionPlan(exception._guest.classinfo);
             // Binding and visiting the handler mutate dmd's Catch node.
@@ -1944,7 +1944,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             if (catch_ !is null) {
                 bindCatchVariable(catch_, exception.take);
                 if (catch_.handler !is null)
-                    catch_.handler.accept(this);
+                    dispatch(catch_.handler);
                 return;
             }
 
@@ -2095,22 +2095,22 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         bool runFinalizer;
         if (_controlFlow.seeking) {
             if (statement._body !is null)
-                statement._body.accept(this);
+                dispatch(statement._body);
             bodyRan = true;
             if (_controlFlow.seeking && statement.finalbody !is null)
-                statement.finalbody.accept(this);
+                dispatch(statement.finalbody);
             if (_controlFlow.seeking)
                 return;
         }
 
         try {
             if (!bodyRan && statement._body !is null)
-                statement._body.accept(this);
+                dispatch(statement._body);
 
             while (_controlFlow.hasGoto && !runsFinally(statement)) {
                 _controlFlow.resume;
                 if (statement._body !is null)
-                    statement._body.accept(this);
+                    dispatch(statement._body);
             }
         } catch (GuestException exception) {
             pendingException = exception.take;
@@ -2160,10 +2160,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (finalbody is null)
             return;
 
-        finalbody.accept(this);
+        dispatch(finalbody);
         while (_controlFlow.hasGoto) {
             _controlFlow.resume;
-            finalbody.accept(this);
+            dispatch(finalbody);
         }
     }
 
@@ -2191,7 +2191,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         foreach (child; *statement.statements) {
             if (child !is null) {
-                child.accept(this);
+                dispatch(child);
                 if (_controlFlow.hasTransfer)
                     return;
             }
@@ -2208,7 +2208,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         foreach (child; *statement.statements) {
             if (child !is null) {
-                child.accept(this);
+                dispatch(child);
                 if (_controlFlow.leavesLoop(loopLabel))
                     return;
             }
@@ -2227,7 +2227,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (statement.statement is null)
             return;
 
-        statement.statement.accept(this);
+        dispatch(statement.statement);
     }
 
     // Semantic analysis resolves every member in a `with` body through its
@@ -2248,7 +2248,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     protected override void visitWithBody(WithStatement statement) {
         if (statement._body !is null)
-            statement._body.accept(this);
+            dispatch(statement._body);
     }
 
     protected override void visitReturnOperand(
@@ -2559,7 +2559,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         scope (exit) _pendingLoopLabel = previousLabel;
 
         if (statement.statement !is null)
-            statement.statement.accept(this);
+            dispatch(statement.statement);
 
         _controlFlow.finishLabel(statement.ident);
     }
@@ -2605,7 +2605,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             _controlFlow.seek(cast(void*) selected);
         }
 
-        statement._body.accept(this);
+        dispatch(statement._body);
 
         while (true) {
             // The target of a pending `goto` or of an enclosing seek is
@@ -2623,7 +2623,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             // a `case` or a label alike, is inside this `switch`.
             auto pending = _controlFlow; // Restoring needs mutable identifiers.
             _controlFlow.resume;
-            statement._body.accept(this);
+            dispatch(statement._body);
             if (_controlFlow.seeking) {
                 _controlFlow = pending;
                 return;
@@ -2634,13 +2634,13 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     override void visit(CaseStatement statement) {
         _controlFlow.at(cast(void*) statement);
         if (statement.statement !is null)
-            statement.statement.accept(this);
+            dispatch(statement.statement);
     }
 
     override void visit(DefaultStatement statement) {
         _controlFlow.at(cast(void*) statement);
         if (statement.statement !is null)
-            statement.statement.accept(this);
+            dispatch(statement.statement);
     }
 
     override void visit(GotoCaseStatement statement) {
@@ -2700,7 +2700,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private void runForEffect(Expression expression) {
         if (expression.isDeclarationExp !is null
                 || isUnanalysed(expression)) {
-            expression.accept(this);
+            dispatch(expression);
             return;
         }
 
@@ -2708,7 +2708,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // also covers enclosing expressions such as `CommaExp` whose type is
         // the tuple result of their right operand.
         if (expression.type.ty == Ttuple) {
-            expression.accept(this);
+            dispatch(expression);
             return;
         }
 
@@ -2754,7 +2754,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             if (statement.ifbody !is null)
                 walkIfBody(statement, plan);
             if (_controlFlow.seeking && statement.elsebody !is null)
-                statement.elsebody.accept(this);
+                dispatch(statement.elsebody);
             return;
         }
 
@@ -2764,7 +2764,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return walkIfBody(statement, plan);
 
         if (statement.elsebody !is null)
-            statement.elsebody.accept(this);
+            dispatch(statement.elsebody);
     }
 
     private void walkIfBody(IfStatement statement, in IfPlan plan) {
@@ -2772,9 +2772,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return;
 
         if (plan.kind == IfPlan.Kind.ctfeBlock)
-            inCtfeBlock({ statement.ifbody.accept(this); });
+            inCtfeBlock({ dispatch(statement.ifbody); });
         else
-            statement.ifbody.accept(this);
+            dispatch(statement.ifbody);
     }
 
     override void visit(ForStatement statement) {
@@ -2784,7 +2784,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         bool bodyRan;
         if (_controlFlow.seeking) {
             if (statement._body !is null)
-                statement._body.accept(this);
+                dispatch(statement._body);
             if (_controlFlow.seeking)
                 return;
             bodyRan = true;
@@ -2794,7 +2794,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 || conditionHolds(statement.condition)) {
             if (statement._body !is null) {
                 if (!bodyRan)
-                    statement._body.accept(this);
+                    dispatch(statement._body);
                 bodyRan = false;
                 if (_controlFlow.leavesLoop(loopLabel))
                     return;
@@ -2815,7 +2815,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         bool bodyRan;
         if (_controlFlow.seeking) {
             if (statement._body !is null)
-                statement._body.accept(this);
+                dispatch(statement._body);
             if (_controlFlow.seeking)
                 return;
             bodyRan = true;
@@ -2823,7 +2823,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         while (true) {
             if (!bodyRan && statement._body !is null)
-                statement._body.accept(this);
+                dispatch(statement._body);
             bodyRan = false;
 
             if (_controlFlow.leavesLoop(loopLabel))
@@ -6486,7 +6486,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     override void visit(DotTypeExp expression) {
-        expression.e1.accept(this);
+        dispatch(expression.e1);
     }
 
     override void visit(CommaExp expression) {
@@ -6509,7 +6509,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         }
 
         runForEffect(expression.e1);
-        expression.e2.accept(this);
+        dispatch(expression.e2);
     }
 
     // `expression.f` is already statically resolved (dmd resolves direct
@@ -7126,6 +7126,89 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         evaluate(literal, literal.type, facts, base);
     }
 
+    // Keeps each visit body out of `dispatch`, so a cheap node does not pay
+    // for the prologue of the largest inlined body.
+    pragma(inline, false)
+    private void visitAs(Node, Base)(Base node) {
+        visit(cast(Node) cast(void*) node);
+    }
+
+    // Direct dispatch on the node kind for the hot cases: `accept` costs
+    // two indirect calls per node. A kind that is not listed takes `accept`.
+    private void dispatch(Expression expression) {
+        import dmd.expression;
+        import dmd.tokens: EXP;
+
+        switch (expression.op) {
+            case EXP.int64: visitAs!IntegerExp(expression); return;
+            case EXP.variable: visitAs!VarExp(expression); return;
+            case EXP.assign: visitAs!AssignExp(expression); return;
+            case EXP.construct: visitAs!ConstructExp(expression); return;
+            case EXP.blit: visitAs!BlitExp(expression); return;
+            case EXP.addAssign: visitAs!AddAssignExp(expression); return;
+            case EXP.minAssign: visitAs!MinAssignExp(expression); return;
+            case EXP.mulAssign: visitAs!MulAssignExp(expression); return;
+            case EXP.add: visitAs!AddExp(expression); return;
+            case EXP.min: visitAs!MinExp(expression); return;
+            case EXP.mul: visitAs!MulExp(expression); return;
+            case EXP.div: visitAs!DivExp(expression); return;
+            case EXP.mod: visitAs!ModExp(expression); return;
+            case EXP.and: visitAs!AndExp(expression); return;
+            case EXP.or: visitAs!OrExp(expression); return;
+            case EXP.xor: visitAs!XorExp(expression); return;
+            case EXP.leftShift: visitAs!ShlExp(expression); return;
+            case EXP.rightShift: visitAs!ShrExp(expression); return;
+            case EXP.unsignedRightShift: visitAs!UshrExp(expression); return;
+            case EXP.lessThan: visitAs!CmpExp(expression); return;
+            case EXP.greaterThan: visitAs!CmpExp(expression); return;
+            case EXP.lessOrEqual: visitAs!CmpExp(expression); return;
+            case EXP.greaterOrEqual: visitAs!CmpExp(expression); return;
+            case EXP.equal: visitAs!EqualExp(expression); return;
+            case EXP.notEqual: visitAs!EqualExp(expression); return;
+            case EXP.identity: visitAs!IdentityExp(expression); return;
+            case EXP.notIdentity: visitAs!IdentityExp(expression); return;
+            case EXP.andAnd: visitAs!LogicalExp(expression); return;
+            case EXP.orOr: visitAs!LogicalExp(expression); return;
+            case EXP.call: visitAs!CallExp(expression); return;
+            case EXP.cast_: visitAs!CastExp(expression); return;
+            case EXP.index: visitAs!IndexExp(expression); return;
+            case EXP.dotVariable: visitAs!DotVarExp(expression); return;
+            case EXP.star: visitAs!PtrExp(expression); return;
+            case EXP.address: visitAs!AddrExp(expression); return;
+            case EXP.question: visitAs!CondExp(expression); return;
+            case EXP.comma: visitAs!CommaExp(expression); return;
+            case EXP.arrayLength: visitAs!ArrayLengthExp(expression); return;
+            case EXP.not: visitAs!NotExp(expression); return;
+            case EXP.negate: visitAs!NegExp(expression); return;
+            case EXP.plusPlus: visitAs!PostExp(expression); return;
+            case EXP.minusMinus: visitAs!PostExp(expression); return;
+            case EXP.this_: visitAs!ThisExp(expression); return;
+            case EXP.null_: visitAs!NullExp(expression); return;
+            case EXP.slice: visitAs!SliceExp(expression); return;
+            case EXP.declaration: visitAs!DeclarationExp(expression); return;
+            case EXP.symbolOffset: visitAs!SymOffExp(expression); return;
+            default: expression.accept(this); return;
+        }
+    }
+
+    private void dispatch(Statement statement) {
+        import dmd.astenums: STMT;
+        import dmd.statement;
+
+        switch (statement.stmt) {
+            case STMT.Exp: visitAs!ExpStatement(statement); return;
+            case STMT.Compound: visitAs!CompoundStatement(statement); return;
+            case STMT.Scope: visitAs!ScopeStatement(statement); return;
+            case STMT.If: visitAs!IfStatement(statement); return;
+            case STMT.For: visitAs!ForStatement(statement); return;
+            case STMT.Return: visitAs!ReturnStatement(statement); return;
+            case STMT.Break: visitAs!BreakStatement(statement); return;
+            case STMT.Continue: visitAs!ContinueStatement(statement); return;
+            case STMT.Do: visitAs!DoStatement(statement); return;
+            default: statement.accept(this); return;
+        }
+    }
+
     // Evaluates `expression` into `type.size` bytes at `place`, then
     // restores the surrounding destination.
     private void evaluate(Expression expression, Type type, void* place) {
@@ -7153,7 +7236,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _type = type;
         _facts = facts;
         _place = place;
-        expression.accept(this);
+        dispatch(expression);
     }
 }
 
