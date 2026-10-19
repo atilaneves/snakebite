@@ -790,31 +790,76 @@ private struct Operand {
     // Reads the operand with no operand struct, for a consumer whose number of
     // operands is not known when it is compiled.
     public long readLong(ubyte* frame) {
-        switch (kind) with (Kind) {
+        final switch (kind) with (Kind) {
             case localInt: return *cast(int*) (frame + offset);
             case localLong: return *cast(long*) (frame + offset);
             case constant: return integer;
             case fieldInt: return *cast(int*) fieldAt(frame);
             case fieldLong: return *cast(long*) fieldAt(frame);
-            default: return node.executeLong(frame);
+            case child: return node.executeLong(frame);
+            case localDouble, fieldDouble, childAddress, frameAddress,
+                pointerAddress:
+                assert(0);
         }
     }
 
     public double readDouble(ubyte* frame) {
-        switch (kind) with (Kind) {
+        final switch (kind) with (Kind) {
             case localDouble: return *cast(double*) (frame + offset);
             case constant: return floating;
             case fieldDouble: return *cast(double*) fieldAt(frame);
-            default: return node.executeDouble(frame);
+            case child: return node.executeDouble(frame);
+            case localInt, localLong, fieldInt, fieldLong, childAddress,
+                frameAddress, pointerAddress:
+                assert(0);
         }
     }
 
     public ubyte* readAddress(ubyte* frame) {
-        switch (kind) with (Kind) {
+        final switch (kind) with (Kind) {
             case frameAddress: return frame + offset;
             case pointerAddress: return fieldAt(frame);
-            default: return node.executeAddr(frame);
+            case childAddress: return node.executeAddr(frame);
+            case child, localInt, localLong, localDouble, constant,
+                fieldInt, fieldLong, fieldDouble:
+                assert(0);
         }
+    }
+
+    // The operand that reads `node` when it runs.
+    public static Operand through(Node node) {
+        return Operand(Kind.child, node);
+    }
+
+    public static Operand throughAddress(Node node) {
+        return Operand(Kind.childAddress, node);
+    }
+
+    public static Operand constantLong(Node node, long value) {
+        auto operand = Operand(Kind.constant, node);
+        operand.integer = value;
+        return operand;
+    }
+
+    public static Operand constantDouble(Node node, double value) {
+        auto operand = Operand(Kind.constant, node);
+        operand.floating = value;
+        return operand;
+    }
+
+    public static Operand local(Kind kind, Node node, size_t offset) {
+        auto operand = Operand(kind, node);
+        operand.offset = offset;
+        return operand;
+    }
+
+    public static Operand field(
+        Kind kind, Node node, size_t slot, size_t fieldOffset,
+    ) {
+        auto operand = Operand(kind, node);
+        operand.offset = slot;
+        operand.fieldOffset = fieldOffset;
+        return operand;
     }
 
     private ubyte* fieldAt(ubyte* frame) {
@@ -826,31 +871,31 @@ private alias Kind = Operand.Kind;
 
 private Operand operandOf(Node node) {
     if (auto leaf = cast(Constant!long) node)
-        return Operand(Kind.constant, node, 0, leaf._value);
+        return Operand.constantLong(node, leaf._value);
     if (auto leaf = cast(Constant!double) node)
-        return Operand(Kind.constant, node, 0, 0, leaf._value);
+        return Operand.constantDouble(node, leaf._value);
     if (auto leaf = cast(Local!int) node)
-        return Operand(Kind.localInt, node, leaf._offset);
+        return Operand.local(Kind.localInt, node, leaf._offset);
     if (auto leaf = cast(Local!long) node)
-        return Operand(Kind.localLong, node, leaf._offset);
+        return Operand.local(Kind.localLong, node, leaf._offset);
     if (auto leaf = cast(Local!double) node)
-        return Operand(Kind.localDouble, node, leaf._offset);
+        return Operand.local(Kind.localDouble, node, leaf._offset);
     if (auto leaf = cast(LoadField!int) node)
-        return Operand(Kind.fieldInt, node, leaf._slot, 0, 0, leaf._offset);
+        return Operand.field(Kind.fieldInt, node, leaf._slot, leaf._offset);
     if (auto leaf = cast(LoadField!long) node)
-        return Operand(Kind.fieldLong, node, leaf._slot, 0, 0, leaf._offset);
+        return Operand.field(Kind.fieldLong, node, leaf._slot, leaf._offset);
     if (auto leaf = cast(LoadField!double) node)
-        return Operand(Kind.fieldDouble, node, leaf._slot, 0, 0, leaf._offset);
-    return Operand(Kind.child, node);
+        return Operand.field(Kind.fieldDouble, node, leaf._slot, leaf._offset);
+    return Operand.through(node);
 }
 
 private Operand addressOperandOf(Node node) {
     if (auto address = cast(LocalAddress) node)
-        return Operand(Kind.frameAddress, node, address._offset);
+        return Operand.local(Kind.frameAddress, node, address._offset);
     if (auto address = cast(PointerAddress) node)
-        return Operand(Kind.pointerAddress, node, address._slot, 0, 0,
+        return Operand.field(Kind.pointerAddress, node, address._slot,
             address._offset);
-    return Operand(Kind.childAddress, node);
+    return Operand.throughAddress(node);
 }
 
 private template OperandType(Kind kind, V) {
@@ -2315,7 +2360,7 @@ private Operand[] argumentOperands(Node[] args, Argument[] modes) {
                 operands[i] = addressOperandOf(arg);
                 break;
             case pair:
-                operands[i] = Operand(Kind.child, arg);
+                operands[i] = Operand.through(arg);
                 break;
             case i8, i16, i32, i64, f32, f64:
                 operands[i] = operandOf(arg);
@@ -3936,7 +3981,7 @@ private Node buildStore(E)(E ev, AssignExp e, in Scalar scalar) {
 
 // The operand that is the frame slot at `offset`.
 private Operand frameSlot(size_t offset) {
-    return Operand(Kind.frameAddress, null, offset);
+    return Operand.local(Kind.frameAddress, null, offset);
 }
 
 private Node storeTo(in Scalar target, Operand address, Node value) {
