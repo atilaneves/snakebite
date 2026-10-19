@@ -1338,7 +1338,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _returned = ReturnedLvalue.init;
         ctfeBlockDepth = 0;
         while (true) {
-            body_.accept(this);
+            checkedRoot(body_);
             if (!_controlFlow.hasGoto)
                 break;
 
@@ -1894,7 +1894,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (_controlFlow.seeking) {
             try {
                 if (statement._body !is null)
-                    statement._body.accept(this);
+                    checked(statement._body);
             } catch (GuestException exception) {
                 const plan = exceptionPlan(exception._guest.classinfo);
                 // Binding and visiting the handler mutate dmd's Catch node.
@@ -1904,7 +1904,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 if (catch_ !is null) {
                     bindCatchVariable(catch_, exception.take);
                     if (catch_.handler !is null)
-                        catch_.handler.accept(this);
+                        checked(catch_.handler);
                     return;
                 }
 
@@ -1915,12 +1915,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             if (_controlFlow.seeking)
                 foreach (catch_; *statement.catches)
                     if (catch_.handler !is null)
-                        catch_.handler.accept(this);
+                        checked(catch_.handler);
             return;
         }
 
         try {
-            statement._body.accept(this);
+            checked(statement._body);
         } catch (GuestException exception) {
             const plan = exceptionPlan(exception._guest.classinfo);
             // Binding and visiting the handler mutate dmd's Catch node.
@@ -1930,7 +1930,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             if (catch_ !is null) {
                 bindCatchVariable(catch_, exception.take);
                 if (catch_.handler !is null)
-                    catch_.handler.accept(this);
+                    checked(catch_.handler);
                 return;
             }
 
@@ -2081,22 +2081,22 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         bool runFinalizer;
         if (_controlFlow.seeking) {
             if (statement._body !is null)
-                statement._body.accept(this);
+                checked(statement._body);
             bodyRan = true;
             if (_controlFlow.seeking && statement.finalbody !is null)
-                statement.finalbody.accept(this);
+                checked(statement.finalbody);
             if (_controlFlow.seeking)
                 return;
         }
 
         try {
             if (!bodyRan && statement._body !is null)
-                statement._body.accept(this);
+                checked(statement._body);
 
             while (_controlFlow.hasGoto && !runsFinally(statement)) {
                 _controlFlow.resume;
                 if (statement._body !is null)
-                    statement._body.accept(this);
+                    checked(statement._body);
             }
         } catch (GuestException exception) {
             pendingException = exception.take;
@@ -2146,10 +2146,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (finalbody is null)
             return;
 
-        finalbody.accept(this);
+        checked(finalbody);
         while (_controlFlow.hasGoto) {
             _controlFlow.resume;
-            finalbody.accept(this);
+            checked(finalbody);
         }
     }
 
@@ -2177,7 +2177,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         foreach (child; *statement.statements) {
             if (child !is null) {
-                child.accept(this);
+                checked(child);
                 if (_controlFlow.hasTransfer)
                     return;
             }
@@ -2194,7 +2194,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         foreach (child; *statement.statements) {
             if (child !is null) {
-                child.accept(this);
+                checked(child);
                 if (_controlFlow.leavesLoop(loopLabel))
                     return;
             }
@@ -2213,7 +2213,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (statement.statement is null)
             return;
 
-        statement.statement.accept(this);
+        checked(statement.statement);
     }
 
     // Semantic analysis resolves every member in a `with` body through its
@@ -2234,7 +2234,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     protected override void visitWithBody(WithStatement statement) {
         if (statement._body !is null)
-            statement._body.accept(this);
+            checked(statement._body);
     }
 
     protected override void visitReturnOperand(
@@ -2393,7 +2393,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         scope (exit) _pendingLoopLabel = previousLabel;
 
         if (statement.statement !is null)
-            statement.statement.accept(this);
+            checked(statement.statement);
 
         _controlFlow.finishLabel(statement.ident);
     }
@@ -2439,7 +2439,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             _controlFlow.seek(cast(void*) selected);
         }
 
-        statement._body.accept(this);
+        checked(statement._body);
 
         while (true) {
             // The target of a pending `goto` or of an enclosing seek is
@@ -2457,7 +2457,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             // a `case` or a label alike, is inside this `switch`.
             auto pending = _controlFlow; // Restoring needs mutable identifiers.
             _controlFlow.resume;
-            statement._body.accept(this);
+            checked(statement._body);
             if (_controlFlow.seeking) {
                 _controlFlow = pending;
                 return;
@@ -2468,13 +2468,13 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     override void visit(CaseStatement statement) {
         _controlFlow.at(cast(void*) statement);
         if (statement.statement !is null)
-            statement.statement.accept(this);
+            checked(statement.statement);
     }
 
     override void visit(DefaultStatement statement) {
         _controlFlow.at(cast(void*) statement);
         if (statement.statement !is null)
-            statement.statement.accept(this);
+            checked(statement.statement);
     }
 
     override void visit(GotoCaseStatement statement) {
@@ -2534,7 +2534,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private void runForEffect(Expression expression) {
         if (expression.isDeclarationExp !is null
                 || isUnanalysed(expression)) {
-            expression.accept(this);
+            checked(expression);
             return;
         }
 
@@ -2542,7 +2542,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // also covers enclosing expressions such as `CommaExp` whose type is
         // the tuple result of their right operand.
         if (expression.type.ty == Ttuple) {
-            expression.accept(this);
+            checked(expression);
             return;
         }
 
@@ -2588,7 +2588,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             if (statement.ifbody !is null)
                 walkIfBody(statement, plan);
             if (_controlFlow.seeking && statement.elsebody !is null)
-                statement.elsebody.accept(this);
+                checked(statement.elsebody);
             return;
         }
 
@@ -2598,7 +2598,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return walkIfBody(statement, plan);
 
         if (statement.elsebody !is null)
-            statement.elsebody.accept(this);
+            checked(statement.elsebody);
     }
 
     private void walkIfBody(IfStatement statement, in IfPlan plan) {
@@ -2606,9 +2606,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return;
 
         if (plan.kind == IfPlan.Kind.ctfeBlock)
-            inCtfeBlock({ statement.ifbody.accept(this); });
+            inCtfeBlock({ checked(statement.ifbody); });
         else
-            statement.ifbody.accept(this);
+            checked(statement.ifbody);
     }
 
     override void visit(ForStatement statement) {
@@ -2618,7 +2618,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         bool bodyRan;
         if (_controlFlow.seeking) {
             if (statement._body !is null)
-                statement._body.accept(this);
+                checked(statement._body);
             if (_controlFlow.seeking)
                 return;
             bodyRan = true;
@@ -2628,7 +2628,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 || conditionHolds(statement.condition)) {
             if (statement._body !is null) {
                 if (!bodyRan)
-                    statement._body.accept(this);
+                    checked(statement._body);
                 bodyRan = false;
                 if (_controlFlow.leavesLoop(loopLabel))
                     return;
@@ -2649,7 +2649,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         bool bodyRan;
         if (_controlFlow.seeking) {
             if (statement._body !is null)
-                statement._body.accept(this);
+                checked(statement._body);
             if (_controlFlow.seeking)
                 return;
             bodyRan = true;
@@ -2657,7 +2657,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         while (true) {
             if (!bodyRan && statement._body !is null)
-                statement._body.accept(this);
+                checked(statement._body);
             bodyRan = false;
 
             if (_controlFlow.leavesLoop(loopLabel))
@@ -6270,7 +6270,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     override void visit(DotTypeExp expression) {
-        expression.e1.accept(this);
+        checked(expression.e1);
     }
 
     override void visit(CommaExp expression) {
@@ -6293,7 +6293,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         }
 
         runForEffect(expression.e1);
-        expression.e2.accept(this);
+        checked(expression.e2);
     }
 
     // `expression.f` is already statically resolved (dmd resolves direct
@@ -6372,6 +6372,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             }
         }
 
+        invCallee(expression, resolved is null ? 3 : expression.readsVtable(resolved) ? 2 : 1, function_);
         funcType = typeFunctionOf(function_);
         auto layout = callLayoutOf(function_);
         if (isNativeVariadic(function_)) {
@@ -6910,6 +6911,150 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         evaluate(literal, literal.type, facts, base);
     }
 
+
+    // ---- invariance prototype ----
+    protected extern(D) override void checked(Expression node) {
+        checkedImpl!false(node, node.op, node.loc);
+    }
+
+    protected extern(D) override void checked(Statement node) {
+        checkedImpl!true(node, node.stmt, node.loc);
+    }
+
+    private extern(D) void checkedRoot(Statement node) {
+        import snakebite.backends.interpreter.invariance: barrier, pop;
+        barrier;
+        scope(exit) pop;
+        checked(node);
+    }
+
+    private extern(D) void checkedImpl(bool isStatement, N)(N node, int kind, Loc loc) {
+        import inv = snakebite.backends.interpreter.invariance;
+        import snakebite.nativelayout: tryTypeFacts;
+
+        inv.Fact fact;
+        try {
+            static if (isStatement) {
+                fact.w[0] = _layout is null ? 0 : _layout.size;
+            } else {
+                fact.w[0] = _facts.size;
+                fact.w[1] = _facts.alignment | (cast(ulong) _facts.isIntegral << 32)
+                    | (cast(ulong) _facts.isUnsigned << 33)
+                    | (cast(ulong) _facts.isDynamicArray << 34);
+                fact.w[2] = _facts.elementSize;
+                fact.w[3] = _type is null ? 99 : _type.toBasetype.ty;
+                if (node.type !is null) {
+                    fact.w[3] |= cast(ulong) node.type.toBasetype.ty << 8;
+                    TypeFacts own;
+                    if (node.type.toBasetype.ty != Tfunction
+                            && node.type.toBasetype.ty != Ttuple
+                            && node.type.toBasetype.ty != Terror
+                            && tryTypeFacts(node.type, own)) {
+                        fact.w[4] = own.size;
+                        fact.w[5] = own.alignment | (cast(ulong) own.isIntegral << 32)
+                            | (cast(ulong) own.isUnsigned << 33);
+                    }
+                }
+                if (auto e = node.isVarExp)
+                    invVariable(e.var, fact);
+                else if (auto e = node.isSymOffExp)
+                    invVariable(e.var, fact);
+                else if (auto e = node.isDeclarationExp)
+                    invVariable(e.declaration.isDeclaration, fact);
+                else if (auto e = node.isThisExp)
+                    invVariable(e.var, fact);
+                else if (auto e = node.isCallExp)
+                    invCall(e, fact);
+            }
+        } catch (Throwable t) {
+            fact.w[11] = 0xdead;
+        }
+        static if (nullChecks) enum mode = 1; else enum mode = 0;
+        inv.record(cast(const(void)*) node, isStatement, kind, mode,
+            loc, fact, cast(const(void)*) _function, inv.parentOf, 0);
+        inv.push(cast(const(void)*) node);
+        scope(exit) inv.pop;
+        node.accept(this);
+    }
+
+    private extern(D) void invVariable(Declaration declaration, ref imported!"snakebite.backends.interpreter.invariance".Fact f) {
+        if (declaration is null) { f.w[6] = 100; return; }
+        if (isCtfeVariable(declaration)) { f.w[6] = 1; return; }
+        if (declaration is _dollar.var) { f.w[6] = 2; return; }
+        if (declaration.isSymbolDeclaration) { f.w[6] = 3; return; }
+        auto variable = declaration.isVarDeclaration;
+        if (variable is null) { f.w[6] = 101; return; }
+        if (variable.isDataseg) {
+            f.w[6] = 4;
+            f.w[7] = cast(ulong) _nativeData.storageOf(variable).ptr;
+            return;
+        }
+        auto owner = outerFunctionOf(variable);
+        f.w[8] = cast(ulong) cast(void*) owner;
+        const needsClosure = owner !is null && functionNeedsClosure(owner);
+        f.w[5] = needsClosure;
+        void chain() {
+            if (owner is _function) return;
+            const path = staticChainOf(owner);
+            f.w[10] = path is null ? 0 : path.length + 1;
+            ulong h;
+            foreach (hop; path)
+                h = h * 31 + hop.offset * 4 + hop.kind;
+            f.w[11] = h;
+        }
+        if (needsClosure) {
+            const closure = closureLayoutOf(owner);
+            if (closure.hasSlot(variable)) {
+                const slot = closure.slotOf(variable);
+                f.w[6] = 5;
+                f.w[7] = slot.offset;
+                f.w[9] = slot.isRef;
+                chain();
+                return;
+            }
+        }
+        if (auto slot = _layout.slotOf(variable)) {
+            f.w[6] = 6;
+            f.w[7] = slot.offset;
+            f.w[9] = slot.isRef | (cast(ulong) slot.isReturnPlace << 1);
+            return;
+        }
+        if (owner is null) { f.w[6] = 102; return; }
+        const layout = layoutOf(owner);
+        if (!layout.hasSlot(variable)) { f.w[6] = 8; f.w[7] = cast(ulong) cast(void*) variable; return; }
+        f.w[6] = 7;
+        f.w[7] = layout.offsetOf(variable);
+        f.w[9] = layout.isRef(variable) | (cast(ulong) layout.isReturnPlace(variable) << 1);
+        chain();
+    }
+
+    private extern(D) void invCall(CallExp expression, ref imported!"snakebite.backends.interpreter.invariance".Fact f) {
+        import snakebite.frontend.dmd.functions: unresolvedCalleeOf;
+        import snakebite.backends.calls: isIndirectDelegateCall;
+
+        auto resolved = expression.f is null
+            ? unresolvedCalleeOf(expression) : expression.f;
+        f.w[7] = cast(ulong) cast(void*) resolved;
+        if (resolved is null) {
+            f.w[6] = isIndirectDelegateCall(expression.e1.type) ? 4 : 3;
+            return;
+        }
+        f.w[6] = expression.readsVtable(resolved) ? 2 : 1;
+        auto definition = _callSelection.definitionOf(
+            resolved, (declaration) => _program.linkedFunctionOf(declaration));
+        f.w[8] = cast(ulong) cast(void*) definition;
+        f.w[9] = expression.arguments is null ? 0 : expression.arguments.length;
+        const layout = callLayoutOf(definition);
+        f.w[10] = layout.size;
+        f.w[11] = layout.alignment | (cast(ulong) layout.parameters.length << 32);
+    }
+
+    private extern(D) void invCallee(CallExp expression, int form, FuncDeclaration callee) {
+        import inv = snakebite.backends.interpreter.invariance;
+        inv.recordCallee(cast(const(void)*) expression, form,
+            cast(const(void)*) callee, expression.loc);
+    }
+
     // Evaluates `expression` into `type.size` bytes at `place`, then
     // restores the surrounding destination.
     private void evaluate(Expression expression, Type type, void* place) {
@@ -6937,7 +7082,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _type = type;
         _facts = facts;
         _place = place;
-        expression.accept(this);
+        checked(expression);
     }
 }
 

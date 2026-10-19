@@ -61,6 +61,9 @@ static foreach (name; __traits(allMembers, imported!"dmd.expression")) {
 extern(C++) package abstract class LoweringVisitor: Visitor {
     alias visit = Visitor.visit;
 
+    protected extern(D) void checked(Expression e) { e.accept(this); }
+    protected extern(D) void checked(imported!"dmd.statement".Statement s) { s.accept(this); }
+
     // Every backend uses the same terminal policy if closed dispatch fails.
     final override void visit(Expression expression) {
         import std.conv: text;
@@ -294,7 +297,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
             return;
         }
 
-        expression.lowering.accept(this);
+        checked(expression.lowering);
     }
 
     final override void visit(HaltExp) {
@@ -314,7 +317,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
                 visitConstantBytes(expression,
                     constant.bytes(typeFacts(expression.type).size));
             } else
-                constant.expression.accept(this);
+                checked(constant.expression);
             return;
         }
         visitUnfoldedCall(expression);
@@ -330,7 +333,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
 
     final override void visit(EqualExp expression) {
         if (expression.lowering !is null) {
-            expression.lowering.accept(this);
+            checked(expression.lowering);
             return;
         }
 
@@ -370,7 +373,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
 
     final override void visit(CatDcharAssignExp expression) {
         if (expression.lowering !is null) {
-            expression.lowering.accept(this);
+            checked(expression.lowering);
             return;
         }
         visitUnloweredCatDcharAssign(expression);
@@ -385,7 +388,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     // never runs such a literal.
     final override void visit(AssocArrayLiteralExp expression) {
         if (expression.lowering !is null) {
-            expression.lowering.accept(this);
+            checked(expression.lowering);
             return;
         }
 
@@ -403,7 +406,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
         if (expression.lowering !is null) {
             if (visitLoweredClassCast(expression))
                 return;
-            expression.lowering.accept(this);
+            checked(expression.lowering);
             return;
         }
 
@@ -458,12 +461,12 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     // `lowering` (`expressionsem.d` never constructs one without one), so
     // there is no unlowered form for a backend to refuse.
     final override void visit(LoweredAssignExp expression) {
-        expression.lowering.accept(this);
+        checked(expression.lowering);
     }
 
     final override void visit(ConstructExp expression) {
         if (expression.lowering !is null) {
-            expression.lowering.accept(this);
+            checked(expression.lowering);
             return;
         }
 
@@ -565,7 +568,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
 
         prepareNew(expression);
         scope (exit) restoreNew;
-        expression.lowering.accept(this);
+        checked(expression.lowering);
         visitLoweredNew(expression);
     }
 
@@ -620,8 +623,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
                 import snakebite.frontend.compiler: arrayLiteralLowering;
                 import snakebite.frontend.dmd.functions: moduleOf;
 
-                arrayLiteralLowering(expression, moduleOf(currentFunction))
-                    .accept(this);
+                checked(arrayLiteralLowering(expression, moduleOf(currentFunction)));
                 break;
             }
 
@@ -673,7 +675,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     // null under `-betterC` (`trySetCatExpLowering`), where it uses no GC.
     final override void visit(CatExp expression) {
         if (expression.lowering !is null) {
-            expression.lowering.accept(this);
+            checked(expression.lowering);
             return;
         }
 
