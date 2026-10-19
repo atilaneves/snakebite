@@ -8,8 +8,8 @@ import snakebite.internalfailure: internalFailure;
 
 
 extern(C) const(void)* directWordCallTarget(
-    const(void)* opaquePlan, out bool swapped, out size_t resultWidth,
-    out size_t parameterCount,
+    const(void)* opaquePlan, out ubyte[3] order, out ubyte[3] loads,
+    out size_t resultWidth, out size_t parameterCount,
 );
 
 extern(C) void executeCallPlan(
@@ -366,11 +366,14 @@ public struct CallSite {
     package const(void)* nativePlan;
     package const(void)* delegate() prepareNativePlan;
 
-    // A `native` site whose plan is one or two word arguments and one
-    // integer result called directly. Filled only at run time, with the
-    // protocol of `fast`: the thread that wins the `preparing` state writes
-    // `directTarget` and `directSwapped`, then publishes `directState`
-    // last. The two fields are valid once `directState` is `direct`.
+    // A `native` site whose plan is up to three word arguments and an
+    // integer result of one or two words called directly. Filled only at run
+    // time, with the protocol of `fast`: the thread that wins the
+    // `preparing` state writes `directTarget`, `directOrder` and
+    // `directLoads`, then publishes `directState` last. The fields are valid
+    // once `directState` is `direct`. `directOrder[r]` is the argument that
+    // goes in integer register `r`; `directLoads[a]` is how argument `a` is
+    // read (see `directWordCallTarget`).
     package enum DirectState : uint {
         unprepared,
         preparing,
@@ -380,7 +383,8 @@ public struct CallSite {
 
     package uint directState;
     package const(void)* directTarget;
-    package bool directSwapped;
+    package ubyte[3] directOrder;
+    package ubyte[3] directLoads;
     package BuiltinCall builtinEntry;
     package size_t calleeSlotOffset;
     package bool hasContext;
@@ -1017,7 +1021,7 @@ package void recordCallSiteRelocs(
         "calleeSlotOffset", "hasContext", "cleanupStartIndex",
         "cleanupEndIndex", "cleanupStart", "cleanupEnd", "windowSlot",
         "windowDisp", "windowScratch", "windowEnd", "windowAlignment",
-        "directState", "directTarget", "directSwapped",
+        "directState", "directTarget", "directOrder", "directLoads",
     );
     enum addressFields = AliasSeq!(
         "callee", "prepareGuest", "nativePlan", "prepareNativePlan",
@@ -1954,6 +1958,22 @@ private const(Instruction)* callWindow(Destination destination)(
         return callee.instructions.ptr;
 }
 
+// One argument of a direct call, read as `load` says (see
+// `directWordCallTarget`).
+pragma(inline, true)
+private ulong directWord(const(ubyte)* place, ubyte load) {
+    switch (load) {
+    case 8: return *cast(const(ulong)*) place;
+    case 4: return *cast(const(uint)*) place;
+    case 0x84: return cast(ulong) cast(long) *cast(const(int)*) place;
+    case 1: return *place;
+    case 2: return *cast(const(ushort)*) place;
+    case 0x81: return cast(ulong) cast(long) *cast(const(byte)*) place;
+    case 0x82: return cast(ulong) cast(long) *cast(const(short)*) place;
+    default: assert(false);
+    }
+}
+
 // A `native` site: decided once whether the plan is a direct word call.
 // Only the thread that wins the `preparing` state decides and writes the
 // fields; it publishes `directState` last. A thread that loses takes the
@@ -1978,19 +1998,22 @@ private const(Instruction)* opCallNative(
             return opCallNotDirect(pc, active, state, frame, r0, fp0);
         const plan = site.nativePlan !is null
             ? site.nativePlan : site.prepareNativePlan();
-        bool swapped;
+        ubyte[3] order;
+        ubyte[3] loads;
         size_t resultWidth;
         size_t parameterCount;
         const target = directWordCallTarget(
-            plan, swapped, resultWidth, parameterCount);
-        const eligible = target !is null
+            plan, order, loads, resultWidth, parameterCount);
+        bool eligible = target !is null
             && site.args.length == parameterCount
-            && site.args.length >= 1 && site.args.length <= 2
-            && site.args[0].width == 8
-            && (site.args.length == 1 || site.args[1].width == 8)
+            && site.args.length >= 1 && site.args.length <= 3
             && site.returnWidth == resultWidth;
+        if (eligible)
+            foreach (i, argument; site.args)
+                eligible = eligible && argument.width == (loads[i] & 0x7f);
         site.directTarget = target;
-        site.directSwapped = swapped;
+        site.directOrder = order;
+        site.directLoads = loads;
         atomicStore!(MemoryOrder.rel)(
             *stateSlot,
             uint(eligible ? State.direct : State.general));
@@ -1999,26 +2022,29 @@ private const(Instruction)* opCallNative(
     if (current != State.direct)
         return opCallNotDirect(pc, active, state, frame, r0, fp0);
 
-    alias Word2 = extern(C) ulong function(ulong, ulong);
+    static struct Pair { ulong low, high; }
+    alias Direct = extern(C) Pair function(ulong, ulong, ulong);
     // The position of a throw selects its handler.
     active.pc = pc;
     state.current = active;
-    ulong first = *cast(ulong*) operandStorage(frame, site.args[0].callerOffset);
-    ulong second = site.args.length == 2
-        ? *cast(ulong*) operandStorage(frame, site.args[1].callerOffset) : 0;
-    if (site.directSwapped) {
-        const swap = first;
-        first = second;
-        second = swap;
-    }
-    const result = (cast(Word2) site.directTarget)(first, second);
+    ulong[3] words = 0;
+    foreach (i, argument; site.args)
+        words[i] = directWord(
+            operandStorage(frame, argument.callerOffset), site.directLoads[i]);
+    const order = site.directOrder;
+    const result = (cast(Direct) site.directTarget)(
+        words[order[0]], words[order[1]], words[order[2]]);
     if (pc.destination != discardResult) {
         auto place = operandStorage(frame, pc.destination);
         switch (site.returnWidth) {
-        case 1: *place = cast(ubyte) result; break;
-        case 2: *cast(ushort*) place = cast(ushort) result; break;
-        case 4: *cast(uint*) place = cast(uint) result; break;
-        default: *cast(ulong*) place = result; break;
+        case 1: *place = cast(ubyte) result.low; break;
+        case 2: *cast(ushort*) place = cast(ushort) result.low; break;
+        case 4: *cast(uint*) place = cast(uint) result.low; break;
+        case 16:
+            (cast(ulong*) place)[0] = result.low;
+            (cast(ulong*) place)[1] = result.high;
+            break;
+        default: *cast(ulong*) place = result.low; break;
         }
     }
     return pc + 1;

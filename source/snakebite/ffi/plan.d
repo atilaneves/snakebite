@@ -1193,16 +1193,20 @@ public extern(C) void executeCallPlan(
     plan.call(returnPlace, arguments[0 .. argumentCount]);
 }
 
-// The address to call as `ulong function(ulong, ulong)` when this plan is
-// one or two word arguments in the first two integer registers and one
-// integer result of 1, 2, 4 or 8 bytes (`resultWidth`), with nothing else
-// for `callAt` to do, and the callee is not variadic. `parameterCount` is
-// the number of parameters of the plan; a call site passes the same number
-// of arguments. `swapped` says the second parameter goes in the first
-// register. Null otherwise.
+// The address to call as `Pair function(ulong, ulong, ulong)` (`Pair` is two
+// `ulong`s) when this plan is one to three word arguments in the first
+// integer registers and an integer result of 1, 2, 4 or 8 bytes, or of two
+// full eightbytes (`resultWidth` 16), with nothing else for `callAt` to do,
+// and the callee is not variadic. `parameterCount` is the number of
+// parameters of the plan; a call site passes the same number of arguments.
+// `order[r]` is the parameter that goes in integer register `r`; a register
+// past the last parameter has `order[r] == r` and is passed zero.
+// `loads[p]` says how parameter `p` is read: its width in the low bits, and
+// `0x80` when it is sign-extended and not zero-extended to a word. Null
+// otherwise.
 public extern(C) const(void)* directWordCallTarget(
-    const(void)* opaquePlan, out bool swapped, out size_t resultWidth,
-    out size_t parameterCount,
+    const(void)* opaquePlan, out ubyte[3] order, out ubyte[3] loads,
+    out size_t resultWidth, out size_t parameterCount,
 ) {
     import snakebite.ffi.sysv: CallFrame;
 
@@ -1210,26 +1214,53 @@ public extern(C) const(void)* directWordCallTarget(
     if (!plan._integerOnly || plan._variadicCall
             || plan._hiddenReturnPointer || plan._hiddenContext
             || plan._callbackArguments.length != 0
-            || plan._parameterCount < 1 || plan._parameterCount > 2
+            || plan._parameterCount < 1 || plan._parameterCount > 3
             || plan._moveCount != plan._parameterCount
-            || plan._realResultCount != 0 || plan._resultCount != 1
+            || plan._realResultCount != 0
+            || plan._resultCount < 1 || plan._resultCount > 2
             || plan._resultMoves[0].sourceOffset
                 != CallFrame.integerResult.offsetof)
         return null;
-    size_t[2] seen = [0, 1];
+    if (plan._resultCount == 2
+            && (plan._resultMoves[1].sourceOffset
+                    != CallFrame.integerResult.offsetof + size_t.sizeof
+                || plan._resultMoves[0].store != CallPlan.Store.byte8
+                || plan._resultMoves[1].store != CallPlan.Store.byte8))
+        return null;
+    bool[3] registerTaken;
+    bool[3] parameterSeen;
+    foreach (r; 0 .. 3)
+        order[r] = cast(ubyte) r;
     foreach (move; plan._moves[0 .. plan._moveCount]) {
-        if (move.load != CallPlan.Load.word64 || move.byteOffset != 0
-                || move.destinationOffset >= 2 * size_t.sizeof
-                || move.parameterIndex > 1)
+        ubyte load;
+        switch (move.load) with (CallPlan.Load) {
+            case word64: load = 8; break;
+            case zero8: load = 1; break;
+            case zero16: load = 2; break;
+            case zero32: load = 4; break;
+            case sign8: load = 0x81; break;
+            case sign16: load = 0x82; break;
+            case sign32: load = 0x84; break;
+            default: return null;
+        }
+        const register = move.destinationOffset / size_t.sizeof;
+        if (move.byteOffset != 0
+                || move.destinationOffset % size_t.sizeof != 0
+                || register >= plan._parameterCount
+                || move.parameterIndex >= plan._parameterCount
+                || registerTaken[register]
+                || parameterSeen[move.parameterIndex])
             return null;
-        seen[move.parameterIndex] = move.destinationOffset / size_t.sizeof;
+        registerTaken[register] = true;
+        parameterSeen[move.parameterIndex] = true;
+        order[register] = cast(ubyte) move.parameterIndex;
+        loads[move.parameterIndex] = load;
     }
-    if (plan._moveCount == 2 && seen[0] == seen[1])
-        return null;
-    if (plan._moveCount == 1 && seen[0] != 0)
-        return null;
-    swapped = plan._moveCount == 2 && seen[0] == 1;
     parameterCount = plan._parameterCount;
+    if (plan._resultCount == 2) {
+        resultWidth = 16;
+        return plan._address;
+    }
     final switch (plan._resultMoves[0].store) with (CallPlan.Store) {
         case byte1: resultWidth = 1; break;
         case byte2: resultWidth = 2; break;
