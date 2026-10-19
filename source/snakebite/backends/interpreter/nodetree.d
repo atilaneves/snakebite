@@ -1422,6 +1422,65 @@ private struct FrameGuard {
     }
 }
 
+// A native call that the plan shows to be one to three word arguments in
+// the first integer registers and an integer result of 1, 2, 4 or 8 bytes
+// or of two words (16 bytes): the node calls the target with the words
+// itself, and skips the plan's own work (`directWordCallTarget`).
+private struct DirectWordCall {
+    private alias Load = imported!"snakebite.ffi.load".Load;
+
+    private const(void)* _target;
+    private ubyte[3] _order;
+    private Load[3] _loads;
+    private size_t _resultWidth;
+
+    // Whether the call of `callee` through `plan` is one. A receiver, a `ref`
+    // parameter, a parameter whose size is not the load width of its word, or
+    // a result whose size is not the `resultWidth` of the plan is not.
+    public bool decide(
+        const(imported!"snakebite.ffi.plan".CallPlan)* plan,
+        in TreeCallee* callee,
+    ) {
+        import snakebite.ffi.load: loadWidth;
+        import snakebite.ffi.plan: directWordCallTarget;
+
+        _target = null;
+        const layout = callee.layout;
+        if (plan is null || layout.hiddenThis.variable !is null)
+            return false;
+        size_t resultWidth, count;
+        const target = directWordCallTarget(
+            plan, _order, _loads, resultWidth, count);
+        if (target is null || count != layout.parameters.length
+                || callee.returnFacts.size != resultWidth)
+            return false;
+        foreach (i, parameter; layout.parameters)
+            if (parameter.isRef || parameter.facts.size != loadWidth(_loads[i]))
+                return false;
+        _target = target;
+        _resultWidth = resultWidth;
+        return true;
+    }
+
+    public bool decided() const { return _target !is null; }
+
+    public void run(E)(
+        E ev, in TreeCallee* callee, const(ubyte)* base, void* place,
+    ) {
+        import snakebite.ffi.load: callDirectWords, loadWord;
+
+        ulong[3] words;
+        foreach (i, parameter; callee.layout.parameters)
+            words[i] = loadWord(base + parameter.offset, _loads[i]);
+        const target = _target, order = _order, width = _resultWidth;
+        ev.crossNative({
+            callDirectWords(
+                target, words[order[0]], words[order[1]], words[order[2]],
+                width, place);
+        });
+    }
+}
+
 // A direct or virtual call with scalar, `ref` or dynamic array parameters,
 // and a scalar, dynamic array or no result. The callee is a guest function,
 // a native function or a builtin. It pushes the callee frame, evaluates each
@@ -1445,6 +1504,7 @@ private final class Call(E) : Node {
     private TreeCallee* _callee;
     private const(void)* _vtable;
     private TreeRoot* _root;
+    private DirectWordCall _direct;
 
     public this(E ev, CallExp site, FuncDeclaration method, Node receiver,
             bool receiverIsAddress, bool virtual, Node[] args,
@@ -1478,6 +1538,8 @@ private final class Call(E) : Node {
         _route = decision.route;
         _plan = _route == CallSelection.Route.native
             ? _ev._plans.of(callee.function_) : null;
+        if (!_virtual && _route == CallSelection.Route.native)
+            _direct.decide(_plan, callee);
     }
 
     // Returns the receiver of the call, 0 when there is none.
@@ -1526,35 +1588,8 @@ private final class Call(E) : Node {
         if (layout.hiddenThis.variable !is null)
             *cast(size_t*) (base + layout.hiddenThis.parameter.offset)
                 = receiver;
-        foreach (i, node; _args) {
-            auto place = base + layout.parameters[i].offset;
-            final switch (_modes[i]) with (Argument) {
-                case i8:
-                    *cast(ubyte*) place = cast(ubyte) node.executeLong(frame);
-                    break;
-                case i16:
-                    *cast(ushort*) place = cast(ushort) node.executeLong(frame);
-                    break;
-                case i32:
-                    *cast(uint*) place = cast(uint) node.executeLong(frame);
-                    break;
-                case i64:
-                    *cast(ulong*) place = node.executeLong(frame);
-                    break;
-                case f32:
-                    *cast(float*) place = node.executeDouble(frame);
-                    break;
-                case f64:
-                    *cast(double*) place = node.executeDouble(frame);
-                    break;
-                case address:
-                    *cast(ubyte**) place = node.executeAddr(frame);
-                    break;
-                case slice:
-                    node.executeInto(frame, place);
-                    break;
-            }
-        }
+        foreach (i, node; _args)
+            storeArgument(node, _modes[i], frame, base + layout.parameters[i].offset);
         if (layout.retainsTemporaries)
             ev._temporaries.withNestedCall(layout.retainsTemporaries, {
                 run(callee, base, result);
@@ -1571,7 +1606,13 @@ private final class Call(E) : Node {
             case guest:
                 _ev.runTreeCallee(callee, base, result);
                 break;
-            case native, builtin:
+            case native:
+                if (_direct.decided)
+                    _direct.run(_ev, callee, base, result);
+                else
+                    _ev.runHostCallee(callee, _plan, base, result);
+                break;
+            case builtin:
                 _ev.runHostCallee(callee, _plan, base, result);
                 break;
             case vaStart, vaCopy, alloca:
@@ -1584,20 +1625,7 @@ private final class Call(E) : Node {
         const receiver = invoke(frame, _yieldsReceiver ? null : buffer.ptr);
         if (_yieldsReceiver)
             return receiver;
-        switch (_resultSize) {
-            case 1:
-                return _resultUnsigned
-                    ? cast(long) cast(ubyte) buffer[0] : cast(long) cast(byte) buffer[0];
-            case 2:
-                return _resultUnsigned
-                    ? cast(long) cast(ushort) buffer[0]
-                    : cast(long) cast(short) buffer[0];
-            case 4:
-                return _resultUnsigned
-                    ? cast(long) cast(uint) buffer[0] : cast(long) cast(int) buffer[0];
-            default:
-                return buffer[0];
-        }
+        return extendResult(buffer[0], _resultSize, _resultUnsigned);
     }
 
     public override double executeDouble(ubyte* frame) {
@@ -1617,6 +1645,153 @@ private final class Call(E) : Node {
         ulong[2] buffer;
         invoke(frame, buffer.ptr);
     }
+}
+
+// Evaluates `node` into the parameter slot `place` as `mode` says.
+private void storeArgument(Node node, Argument mode, ubyte* frame, ubyte* place) {
+    final switch (mode) with (Argument) {
+        case i8: *cast(ubyte*) place = cast(ubyte) node.executeLong(frame); break;
+        case i16: *cast(ushort*) place = cast(ushort) node.executeLong(frame); break;
+        case i32: *cast(uint*) place = cast(uint) node.executeLong(frame); break;
+        case i64: *cast(ulong*) place = node.executeLong(frame); break;
+        case f32: *cast(float*) place = node.executeDouble(frame); break;
+        case f64: *cast(double*) place = node.executeDouble(frame); break;
+        case address: *cast(ubyte**) place = node.executeAddr(frame); break;
+        case slice: node.executeInto(frame, place); break;
+    }
+}
+
+// The integer result of `size` bytes in `word`, extended to a `long`.
+private long extendResult(ulong word, size_t size, bool isUnsigned) {
+    switch (size) {
+        case 1: return isUnsigned ? cast(long) cast(ubyte) word : cast(long) cast(byte) word;
+        case 2: return isUnsigned ? cast(long) cast(ushort) word : cast(long) cast(short) word;
+        case 4: return isUnsigned ? cast(long) cast(uint) word : cast(long) cast(int) word;
+        default: return word;
+    }
+}
+
+// `core.math.sqrt` and `core.math.fabs` on a `float` or `double`: the host
+// operation on the operand's value, with no call.
+private final class FloatIntrinsic(T, string name) : DoubleNode {
+    private Node _operand;
+    public this(Node operand) { _operand = operand; }
+    public override double executeDouble(ubyte* frame) {
+        import core.math: fabs, sqrt;
+
+        const value = cast(T) _operand.executeDouble(frame);
+        return mixin(name ~ "(value)");
+    }
+}
+
+// A call of a declaration that the host code generator inlines, with by
+// value scalar arguments and a scalar or no result: the wrapper of the
+// shared builtin table reads the argument values where they are and writes
+// the result. There is no frame, no argument slots and no call plan.
+private final class BuiltinOp : Node {
+    private enum maxArguments = 4;
+
+    private imported!"snakebite.backends.builtins".BuiltinCall _entry;
+    private Node[] _args;
+    private Argument[] _modes;
+    private size_t _resultSize;
+    private bool _resultUnsigned;
+
+    public this(
+        typeof(_entry) entry, Node[] args, Argument[] modes,
+        size_t resultSize, bool resultUnsigned,
+    ) {
+        _entry = entry; _args = args; _modes = modes;
+        _resultSize = resultSize; _resultUnsigned = resultUnsigned;
+    }
+
+    private void invoke(ubyte* frame, void* result) {
+        ulong[maxArguments] values;
+        const(void)*[maxArguments] pointers;
+        foreach (i, node; _args) {
+            // `buildIntrinsicCall` takes only value arguments.
+            auto place = cast(ubyte*) &values[i];
+            storeArgument(node, _modes[i], frame, place);
+            pointers[i] = place;
+        }
+        _entry(result, pointers.ptr, _args.length);
+    }
+
+    public override long executeLong(ubyte* frame) {
+        ulong[2] buffer;
+        invoke(frame, buffer.ptr);
+        return extendResult(buffer[0], _resultSize, _resultUnsigned);
+    }
+
+    public override double executeDouble(ubyte* frame) {
+        ulong[2] buffer;
+        invoke(frame, buffer.ptr);
+        return _resultSize == 4
+            ? *cast(float*) buffer.ptr : *cast(double*) buffer.ptr;
+    }
+
+    public override void executeVoid(ubyte* frame) {
+        ulong[2] buffer;
+        invoke(frame, buffer.ptr);
+    }
+}
+
+// The node of a call that the host runs as one operation: `sqrt` and `fabs`
+// of a `float` or `double` computed in place, any other declaration the host
+// code generator inlines through its builtin wrapper. Null for any other
+// call.
+private Node buildIntrinsicCall(E)(E ev, CallExp call, FuncDeclaration function_) {
+    import dmd.astenums: TY;
+    import dmd.typesem: toBasetype;
+    import snakebite.backends.calls: CallSelection;
+    import snakebite.frontend.dmd.functions: typeFunctionOf;
+
+    const selected = ev._callSelection.floatIntrinsicOf(call, function_);
+    if (selected != CallSelection.FloatIntrinsic.none) {
+        const ty = call.type.toBasetype.ty;
+        auto argument = (*call.arguments)[0];
+        if ((ty != TY.Tfloat32 && ty != TY.Tfloat64)
+                || argument.type.toBasetype.ty != ty)
+            return null;
+        auto operand = buildValue(ev, argument);
+        if (operand is null)
+            return null;
+        const single = ty == TY.Tfloat32;
+        final switch (selected) with (CallSelection.FloatIntrinsic) {
+            case none: assert(0, "checked above");
+            case sqrt:
+                return single ? new FloatIntrinsic!(float, "sqrt")(operand)
+                    : new FloatIntrinsic!(double, "sqrt")(operand);
+            case fabs:
+                return single ? new FloatIntrinsic!(float, "fabs")(operand)
+                    : new FloatIntrinsic!(double, "fabs")(operand);
+        }
+    }
+
+    if (function_.fbody !is null || function_.isThis !is null
+            || call.e1.isCommaExp !is null)
+        return null;
+    auto callee = ev.treeCalleeOf(function_);
+    if (callee is null)
+        return null;
+    const decision = CallSelection.atCallSite(callee.decision, call);
+    if (decision.route != CallSelection.Route.builtin
+            || decision.destinationParameter != size_t.max
+            || call.arguments.length > BuiltinOp.maxArguments)
+        return null;
+    const isVoid = call.type.toBasetype.ty == TY.Tvoid;
+    const result = isVoid ? Scalar() : scalarOf(ev, call.type);
+    if (!isVoid && result.kind == Scalar.Kind.none)
+        return null;
+    Node[] args;
+    Argument[] modes;
+    if (!buildArguments(ev, typeFunctionOf(function_), call.arguments, args, modes))
+        return null;
+    foreach (mode; modes)
+        if (mode == Argument.address || mode == Argument.slice)
+            return null;
+    return new BuiltinOp(decision.builtinEntry, args, modes,
+        isVoid ? 0 : result.facts.size, result.facts.isUnsigned);
 }
 
 // --- the builder ------------------------------------------------------
@@ -1891,6 +2066,8 @@ private Node buildCall(E)(E ev, CallExp call) {
         return null;
     auto function_ = ev._callSelection.definitionOf(
         call.f, (declaration) => ev._program.linkedFunctionOf(declaration));
+    if (auto intrinsic = buildIntrinsicCall(ev, call, function_))
+        return intrinsic;
     // A constructor call keeps the lifetime handling of the original path,
     // except where `new` makes it (`buildConstructorCall`).
     if (function_.isCtorDeclaration !is null)

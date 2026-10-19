@@ -45,7 +45,7 @@ import snakebite.backends.haltprocess: HaltAction, isHalt;
 import snakebite.backends.unwindplan:
     ExceptionCandidate, UnwindPlan, unwindPlanOf;
 import snakebite.callarguments: CallArguments;
-import snakebite.ffi.load: Load, loadWidth;
+import snakebite.ffi.load: callDirectWords, Load, loadWidth, loadWord;
 import snakebite.nativevalue: TypeFacts;
 import snakebite.nativevalue:
     CastKind, ComplexOperation, floatingToBool, loadFloating, loadSigned,
@@ -2106,25 +2106,6 @@ private const(Instruction)* enterWindow(Destination destination, bool indirect)(
         return callee.instructions.ptr;
 }
 
-// One argument of a direct call, read as `load` says (see
-// `directWordCallTarget`).
-pragma(inline, true)
-private ulong directWord(const(ubyte)* place, Load load) {
-    final switch (load) with (Load) {
-    case word64: return *cast(const(ulong)*) place;
-    case zero32: return *cast(const(uint)*) place;
-    case sign32: return cast(ulong) cast(long) *cast(const(int)*) place;
-    case zero8: return *place;
-    case zero16: return *cast(const(ushort)*) place;
-    case sign8: return cast(ulong) cast(long) *cast(const(byte)*) place;
-    case sign16: return cast(ulong) cast(long) *cast(const(short)*) place;
-    case copy:
-    case copy16:
-    case address:
-        assert(false);
-    }
-}
-
 // A `native` site: decided once whether the plan is a direct word call.
 // Only the thread that wins the `preparing` state decides and writes the
 // fields; it publishes `directState` last. A thread that loses takes the
@@ -2217,19 +2198,17 @@ private const(Instruction)* opCallDirectWide(
     DispatchState* state,
     ubyte* frame,
 ) {
-    static struct Pair { ulong low, high; }
-    alias Direct = extern(C) Pair function(ulong, ulong, ulong);
     // The position of a throw selects its handler.
     active.pc = pc;
     state.current = active;
     const count = site.args.length;
     const loads = site.directLoads;
     // A register past the last argument is passed zero.
-    ulong first = directWord(
+    ulong first = loadWord(
         operandStorage(frame, site.args[0].callerOffset), loads[0]);
-    ulong second = count > 1 ? directWord(
+    ulong second = count > 1 ? loadWord(
         operandStorage(frame, site.args[1].callerOffset), loads[1]) : 0;
-    ulong third = count > 2 ? directWord(
+    ulong third = count > 2 ? loadWord(
         operandStorage(frame, site.args[2].callerOffset), loads[2]) : 0;
     if (site.directSwapped) {
         const ulong[3] words = [first, second, third];
@@ -2238,20 +2217,12 @@ private const(Instruction)* opCallDirectWide(
         second = words[order[1]];
         third = words[order[2]];
     }
-    const result = (cast(Direct) site.directTarget)(first, second, third);
-    if (pc.destination != discardResult) {
-        auto place = operandStorage(frame, pc.destination);
-        switch (site.returnWidth) {
-        case 1: *place = cast(ubyte) result.low; break;
-        case 2: *cast(ushort*) place = cast(ushort) result.low; break;
-        case 4: *cast(uint*) place = cast(uint) result.low; break;
-        case 16:
-            (cast(ulong*) place)[0] = result.low;
-            (cast(ulong*) place)[1] = result.high;
-            break;
-        default: *cast(ulong*) place = result.low; break;
-        }
-    }
+    // A discarded result goes to a scratch of the widest result.
+    ulong[2] scratch = void;
+    callDirectWords(
+        site.directTarget, first, second, third, site.returnWidth,
+        pc.destination != discardResult
+            ? operandStorage(frame, pc.destination) : cast(ubyte*) scratch.ptr);
     return pc + 1;
 }
 
