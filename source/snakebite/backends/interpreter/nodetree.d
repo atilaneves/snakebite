@@ -28,7 +28,7 @@ import std.traits: Select, isFloatingPoint;
 // resolve.
 package enum TreeFlow : ubyte { normal, break_, continue_, return_, generic }
 
-package final class TreeRoot {
+package struct TreeRoot {
     private const(imported!"snakebite.backends.layout".FrameLayout)* _layout;
     private Node _body;
 
@@ -43,7 +43,7 @@ package final class TreeRoot {
     }
 }
 
-package TreeRoot rootOf(E)(
+package TreeRoot* rootOf(E)(
     E ev, Statement body_,
     const(imported!"snakebite.backends.layout".FrameLayout)* layout,
 ) {
@@ -56,40 +56,57 @@ package TreeRoot rootOf(E)(
 // What a call node needs to know about its callee, decided once per
 // function.
 package struct TreeCallee {
-    FuncDeclaration function_;
-    const(imported!"snakebite.backends.layout".FrameLayout)* layout;
-    const(imported!"snakebite.backends.closureplan".ClosurePlan)* closurePlan;
-    TreeRoot root;
-    Type returnType;
-    TypeFacts returnFacts;
+    package FuncDeclaration function_;
+    package const(imported!"snakebite.backends.layout".FrameLayout)* layout;
+    package const(imported!"snakebite.backends.closureplan".ClosurePlan)*
+        closurePlan;
+    package TreeRoot* root;
+    package Type returnType;
+    package TypeFacts returnFacts;
+    // Whether the frame meets the contract of `FrameStack.reserveFast`.
+    package bool reservesFast;
 }
 
 package bool isScalar(E)(E ev, Type type) {
     return scalarOf(ev, type).kind != Scalar.Kind.none;
 }
 
+// Where a statement names the full expression it runs, so that a fault in
+// it reports that expression's line. A statement that cannot fault does not
+// need one, but this costs one store, and a node that decides what can
+// fault could be wrong.
+private struct Position {
+    private const(void)** _slot;
+    private const(void)* _root;
+
+    public void note() {
+        *_slot = _root;
+    }
+}
+
 private abstract class Node {
-    long executeLong(ubyte* frame) { assert(0); }
-    double executeDouble(ubyte* frame) { assert(0); }
-    bool executeBool(ubyte* frame) { return executeLong(frame) != 0; }
-    ubyte* executeAddr(ubyte* frame) { assert(0); }
-    void executeVoid(ubyte* frame) { assert(0); }
-    TreeFlow executeStmt(ubyte* frame) { assert(0); }
-    bool runsAsStatement() { return false; }
+    public long executeLong(ubyte* frame) { assert(0); }
+    public double executeDouble(ubyte* frame) { assert(0); }
+    public bool executeBool(ubyte* frame) { return executeLong(frame) != 0; }
+    public ubyte* executeAddr(ubyte* frame) { assert(0); }
+    public void executeVoid(ubyte* frame) { assert(0); }
+    public TreeFlow executeStmt(ubyte* frame) { assert(0); }
+    public bool runsAsStatement() { return false; }
+    public void positionAt(Position position) { assert(0); }
 }
 
 private abstract class LongNode : Node {
-    override void executeVoid(ubyte* frame) { executeLong(frame); }
+    public override void executeVoid(ubyte* frame) { executeLong(frame); }
 }
 
 private abstract class DoubleNode : Node {
-    override bool executeBool(ubyte* frame) { return executeDouble(frame) != 0; }
-    override void executeVoid(ubyte* frame) { executeDouble(frame); }
+    public override bool executeBool(ubyte* frame) { return executeDouble(frame) != 0; }
+    public override void executeVoid(ubyte* frame) { executeDouble(frame); }
 }
 
 private abstract class BoolNode : LongNode {
-    abstract override bool executeBool(ubyte* frame);
-    override long executeLong(ubyte* frame) { return executeBool(frame) ? 1 : 0; }
+    public abstract override bool executeBool(ubyte* frame);
+    public override long executeLong(ubyte* frame) { return executeBool(frame) ? 1 : 0; }
 }
 
 // The register type that carries a value of scalar type `T`, and the node
@@ -100,14 +117,20 @@ private alias Typed(T) = Select!(isFloatingPoint!T, DoubleNode, LongNode);
 // A class that is final calls its own `executeLong` directly, which a base
 // class cannot, so a node that is often a condition says so itself.
 private mixin template BoolFromLong() {
-    override bool executeBool(ubyte* frame) { return executeLong(frame) != 0; }
+    public override bool executeBool(ubyte* frame) { return executeLong(frame) != 0; }
 }
 
 // The node is also a statement: the enclosing sequence runs it with no
 // wrapper node.
 private mixin template StatementForm(string method) {
-    override bool runsAsStatement() { return true; }
-    override TreeFlow executeStmt(ubyte* frame) {
+    private Position _position;
+
+    public override bool runsAsStatement() { return true; }
+    public override void positionAt(Position position) {
+        _position = position;
+    }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        _position.note;
         mixin(method ~ "(frame);");
         return TreeFlow.normal;
     }
@@ -123,18 +146,18 @@ private enum shiftOp(string op) = op == "<<" || op == ">>" || op == ">>>";
 private template operandsOf(string op, T) {
     static if (op == "+" || op == "-" || op == "*") {
         static if (is(T == int)) {
-            enum Kind[] lefts = intLeft;
-            enum Kind[] rights = intRight;
+            public enum Kind[] lefts = intLeft;
+            public enum Kind[] rights = intRight;
         } else static if (is(T == long)) {
-            enum Kind[] lefts = longLeft;
-            enum Kind[] rights = longRight;
+            public enum Kind[] lefts = longLeft;
+            public enum Kind[] rights = longRight;
         } else {
-            enum Kind[] lefts = onlyChild;
-            enum Kind[] rights = onlyChild;
+            public enum Kind[] lefts = onlyChild;
+            public enum Kind[] rights = onlyChild;
         }
     } else {
-        enum Kind[] lefts = onlyChild;
-        enum Kind[] rights = onlyChild;
+        public enum Kind[] lefts = onlyChild;
+        public enum Kind[] rights = onlyChild;
     }
 }
 
@@ -142,22 +165,22 @@ private template operandsOf(string op, T) {
 
 private final class Constant(V) : Typed!V {
     private V _value;
-    this(V value) { _value = value; }
+    public this(V value) { _value = value; }
     static if (is(V == double))
-        override double executeDouble(ubyte*) { return _value; }
+        public override double executeDouble(ubyte*) { return _value; }
     else
-        override long executeLong(ubyte*) { return _value; }
+        public override long executeLong(ubyte*) { return _value; }
 }
 
 private final class Local(T) : Typed!T {
     private size_t _offset;
-    this(size_t offset) { _offset = offset; }
+    public this(size_t offset) { _offset = offset; }
     static if (isFloatingPoint!T)
-        override double executeDouble(ubyte* frame) {
+        public override double executeDouble(ubyte* frame) {
             return *cast(T*) (frame + _offset);
         }
     else {
-        override long executeLong(ubyte* frame) {
+        public override long executeLong(ubyte* frame) {
             return *cast(T*) (frame + _offset);
         }
         mixin BoolFromLong;
@@ -166,13 +189,13 @@ private final class Local(T) : Typed!T {
 
 private final class Load(T) : Typed!T {
     private Node _address;
-    this(Node address) { _address = address; }
+    public this(Node address) { _address = address; }
     static if (isFloatingPoint!T)
-        override double executeDouble(ubyte* frame) {
+        public override double executeDouble(ubyte* frame) {
             return *cast(T*) _address.executeAddr(frame);
         }
     else {
-        override long executeLong(ubyte* frame) {
+        public override long executeLong(ubyte* frame) {
             return *cast(T*) _address.executeAddr(frame);
         }
         mixin BoolFromLong;
@@ -183,15 +206,15 @@ private final class Load(T) : Typed!T {
 
 private final class LocalAddress : Node {
     private size_t _offset;
-    this(size_t offset) { _offset = offset; }
-    override ubyte* executeAddr(ubyte* frame) { return frame + _offset; }
+    public this(size_t offset) { _offset = offset; }
+    public override ubyte* executeAddr(ubyte* frame) { return frame + _offset; }
 }
 
 // A parameter or local that holds the address of the storage it names.
 private final class IndirectLocalAddress : Node {
     private size_t _offset;
-    this(size_t offset) { _offset = offset; }
-    override ubyte* executeAddr(ubyte* frame) {
+    public this(size_t offset) { _offset = offset; }
+    public override ubyte* executeAddr(ubyte* frame) {
         return *cast(ubyte**) (frame + _offset);
     }
 }
@@ -199,8 +222,8 @@ private final class IndirectLocalAddress : Node {
 private final class FieldOfAddress : Node {
     private Node _base;
     private size_t _offset;
-    this(Node base, size_t offset) { _base = base; _offset = offset; }
-    override ubyte* executeAddr(ubyte* frame) {
+    public this(Node base, size_t offset) { _base = base; _offset = offset; }
+    public override ubyte* executeAddr(ubyte* frame) {
         return _base.executeAddr(frame) + _offset;
     }
 }
@@ -208,16 +231,16 @@ private final class FieldOfAddress : Node {
 private final class FieldOfPointer : Node {
     private Node _pointer;
     private size_t _offset;
-    this(Node pointer, size_t offset) { _pointer = pointer; _offset = offset; }
-    override ubyte* executeAddr(ubyte* frame) {
+    public this(Node pointer, size_t offset) { _pointer = pointer; _offset = offset; }
+    public override ubyte* executeAddr(ubyte* frame) {
         return cast(ubyte*) _pointer.executeLong(frame) + _offset;
     }
 }
 
 private final class Dereference : Node {
     private Node _pointer;
-    this(Node pointer) { _pointer = pointer; }
-    override ubyte* executeAddr(ubyte* frame) {
+    public this(Node pointer) { _pointer = pointer; }
+    public override ubyte* executeAddr(ubyte* frame) {
         return cast(ubyte*) _pointer.executeLong(frame);
     }
 }
@@ -232,11 +255,11 @@ private final class IndexDynamic(A, I) : Node {
     private A _array;
     private I _index;
     private size_t _stride;
-    this(FailBounds fail, IndexExp expression, A array, I index, size_t stride) {
+    public this(FailBounds fail, IndexExp expression, A array, I index, size_t stride) {
         _fail = fail; _expression = expression; _array = array; _index = index;
         _stride = stride;
     }
-    override ubyte* executeAddr(ubyte* frame) {
+    public override ubyte* executeAddr(ubyte* frame) {
         const index = cast(size_t) _index.value(frame);
         auto array = _array.address(frame);
         const length = *cast(size_t*) array;
@@ -259,12 +282,12 @@ private final class IndexStatic : Node {
     private Node _index;
     private size_t _stride;
     private size_t _length;
-    this(FailBounds fail, IndexExp expression, Node array, Node index,
+    public this(FailBounds fail, IndexExp expression, Node array, Node index,
             size_t stride, size_t length) {
         _fail = fail; _expression = expression; _array = array; _index = index;
         _stride = stride; _length = length;
     }
-    override ubyte* executeAddr(ubyte* frame) {
+    public override ubyte* executeAddr(ubyte* frame) {
         const index = cast(size_t) _index.executeLong(frame);
         if (index >= _length)
             fail(index);
@@ -282,10 +305,10 @@ private final class IndexPointer : Node {
     private Node _pointer;
     private Node _index;
     private size_t _stride;
-    this(Node pointer, Node index, size_t stride) {
+    public this(Node pointer, Node index, size_t stride) {
         _pointer = pointer; _index = index; _stride = stride;
     }
-    override ubyte* executeAddr(ubyte* frame) {
+    public override ubyte* executeAddr(ubyte* frame) {
         auto pointer = cast(ubyte*) _pointer.executeLong(frame);
         const index = cast(size_t) _index.executeLong(frame);
         return pointer + index * _stride;
@@ -297,8 +320,8 @@ private final class IndexPointer : Node {
 // leaf's data in the parent: the call to the child is gone.
 
 private struct ChildOperand(V, N = Node) {
-    N node;
-    V value(ubyte* frame) {
+    public N node;
+    public V value(ubyte* frame) {
         static if (is(V == double))
             return node.executeDouble(frame);
         else
@@ -307,44 +330,44 @@ private struct ChildOperand(V, N = Node) {
 }
 
 private struct LocalOperand(T) {
-    size_t offset;
-    Carried!T value(ubyte* frame) { return *cast(T*) (frame + offset); }
+    public size_t offset;
+    public Carried!T value(ubyte* frame) { return *cast(T*) (frame + offset); }
 }
 
 private struct ConstantOperand(V) {
-    V constant;
-    V value(ubyte*) { return constant; }
+    public V constant;
+    public V value(ubyte*) { return constant; }
 }
 
 private struct ChildAddress {
-    Node node;
-    ubyte* address(ubyte* frame) { return node.executeAddr(frame); }
+    public Node node;
+    public ubyte* address(ubyte* frame) { return node.executeAddr(frame); }
 }
 
 private struct FrameAddress {
-    size_t offset;
-    ubyte* address(ubyte* frame) { return frame + offset; }
+    public size_t offset;
+    public ubyte* address(ubyte* frame) { return frame + offset; }
 }
 
 // The address of an operation's target: a frame slot, or the address a node
 // computes.
 private struct Target {
-    Node node;
-    size_t offset;
-    ubyte* address(ubyte* frame) {
+    public Node node;
+    public size_t offset;
+    public ubyte* address(ubyte* frame) {
         return node is null ? frame + offset : node.executeAddr(frame);
     }
 }
 
 // What the builder knows about a child node, to choose its operand struct.
 private struct Operand {
-    enum Kind : ubyte { child, localInt, localLong, localDouble, constant }
+    public enum Kind : ubyte { child, localInt, localLong, localDouble, constant }
 
-    Kind kind;
-    Node node;
-    size_t offset;
-    long integer;
-    double floating;
+    public Kind kind;
+    public Node node;
+    public size_t offset;
+    public long integer;
+    public double floating;
 }
 
 private alias Kind = Operand.Kind;
@@ -365,15 +388,15 @@ private Operand operandOf(Node node) {
 
 private template OperandType(Kind kind, V) {
     static if (kind == Kind.child)
-        alias OperandType = ChildOperand!V;
+        public alias OperandType = ChildOperand!V;
     else static if (kind == Kind.localInt)
-        alias OperandType = LocalOperand!int;
+        public alias OperandType = LocalOperand!int;
     else static if (kind == Kind.localLong)
-        alias OperandType = LocalOperand!long;
+        public alias OperandType = LocalOperand!long;
     else static if (kind == Kind.localDouble)
-        alias OperandType = LocalOperand!double;
+        public alias OperandType = LocalOperand!double;
     else
-        alias OperandType = ConstantOperand!V;
+        public alias OperandType = ConstantOperand!V;
 }
 
 private Op makeOperand(Op)(in Operand operand) {
@@ -440,13 +463,13 @@ private Node fuse(alias make, V, Kind[] lefts, Kind[] rights, Args...)(
 // besides its two operands.
 private struct Operation(string op) {
     static if (shiftOp!op)
-        imported!"snakebite.backends.shifts".ShiftPlan plan;
+        public imported!"snakebite.backends.shifts".ShiftPlan plan;
     else static if (!simpleOp!op) {
-        TypeFacts leftFacts;
-        TypeFacts rightFacts;
+        public TypeFacts leftFacts;
+        public TypeFacts rightFacts;
     }
 
-    ulong apply(in long a, in long b) const {
+    public ulong apply(in long a, in long b) const {
         static if (shiftOp!op)
             return shifted(a, b, plan);
         else static if (simpleOp!op)
@@ -473,10 +496,10 @@ private final class IntegerBinary(string op, T, L, R) : LongNode {
     private L _left;
     private R _right;
     private Operation!op _operation;
-    this(L left, R right, Operation!op operation) {
+    public this(L left, R right, Operation!op operation) {
         _left = left; _right = right; _operation = operation;
     }
-    override long executeLong(ubyte* frame) {
+    public override long executeLong(ubyte* frame) {
         const a = _left.value(frame);
         const b = _right.value(frame);
         return cast(T) _operation.apply(a, b);
@@ -487,8 +510,8 @@ private final class IntegerBinary(string op, T, L, R) : LongNode {
 private final class FloatBinary(string op, T, L, R) : DoubleNode {
     private L _left;
     private R _right;
-    this(L left, R right) { _left = left; _right = right; }
-    override double executeDouble(ubyte* frame) {
+    public this(L left, R right) { _left = left; _right = right; }
+    public override double executeDouble(ubyte* frame) {
         const a = _left.value(frame);
         const b = _right.value(frame);
         return mixin("cast(T) a " ~ op ~ " cast(T) b");
@@ -497,37 +520,37 @@ private final class FloatBinary(string op, T, L, R) : DoubleNode {
 
 private final class IntegerUnary(string op, T) : LongNode {
     private Node _operand;
-    this(Node operand) { _operand = operand; }
-    override long executeLong(ubyte* frame) {
+    public this(Node operand) { _operand = operand; }
+    public override long executeLong(ubyte* frame) {
         return cast(T) mixin(op ~ "_operand.executeLong(frame)");
     }
 }
 
 private final class FloatNegate : DoubleNode {
     private Node _operand;
-    this(Node operand) { _operand = operand; }
-    override double executeDouble(ubyte* frame) {
+    public this(Node operand) { _operand = operand; }
+    public override double executeDouble(ubyte* frame) {
         return -_operand.executeDouble(frame);
     }
 }
 
 private final class Not : BoolNode {
     private Node _operand;
-    this(Node operand) { _operand = operand; }
-    override bool executeBool(ubyte* frame) { return !_operand.executeBool(frame); }
+    public this(Node operand) { _operand = operand; }
+    public override bool executeBool(ubyte* frame) { return !_operand.executeBool(frame); }
 }
 
 private final class Truth : BoolNode {
     private Node _operand;
-    this(Node operand) { _operand = operand; }
-    override bool executeBool(ubyte* frame) { return _operand.executeBool(frame); }
+    public this(Node operand) { _operand = operand; }
+    public override bool executeBool(ubyte* frame) { return _operand.executeBool(frame); }
 }
 
 private final class AndAnd : BoolNode {
     private Node _left;
     private Node _right;
-    this(Node left, Node right) { _left = left; _right = right; }
-    override bool executeBool(ubyte* frame) {
+    public this(Node left, Node right) { _left = left; _right = right; }
+    public override bool executeBool(ubyte* frame) {
         return _left.executeBool(frame) && _right.executeBool(frame);
     }
 }
@@ -536,8 +559,8 @@ private final class AndAnd : BoolNode {
 private final class AndAndFlag : BoolNode {
     private size_t _offset;
     private Node _right;
-    this(size_t offset, Node right) { _offset = offset; _right = right; }
-    override bool executeBool(ubyte* frame) {
+    public this(size_t offset, Node right) { _offset = offset; _right = right; }
+    public override bool executeBool(ubyte* frame) {
         return *cast(ubyte*) (frame + _offset) != 0 && _right.executeBool(frame);
     }
 }
@@ -545,8 +568,8 @@ private final class AndAndFlag : BoolNode {
 private final class OrOr : BoolNode {
     private Node _left;
     private Node _right;
-    this(Node left, Node right) { _left = left; _right = right; }
-    override bool executeBool(ubyte* frame) {
+    public this(Node left, Node right) { _left = left; _right = right; }
+    public override bool executeBool(ubyte* frame) {
         return _left.executeBool(frame) || _right.executeBool(frame);
     }
 }
@@ -554,8 +577,8 @@ private final class OrOr : BoolNode {
 private final class IntegerCompare(string op, bool unsigned, L, R) : BoolNode {
     private L _left;
     private R _right;
-    this(L left, R right) { _left = left; _right = right; }
-    override bool executeBool(ubyte* frame) {
+    public this(L left, R right) { _left = left; _right = right; }
+    public override bool executeBool(ubyte* frame) {
         const a = _left.value(frame);
         const b = _right.value(frame);
         static if (unsigned)
@@ -568,8 +591,8 @@ private final class IntegerCompare(string op, bool unsigned, L, R) : BoolNode {
 private final class FloatCompare(string op, L, R) : BoolNode {
     private L _left;
     private R _right;
-    this(L left, R right) { _left = left; _right = right; }
-    override bool executeBool(ubyte* frame) {
+    public this(L left, R right) { _left = left; _right = right; }
+    public override bool executeBool(ubyte* frame) {
         const a = _left.value(frame);
         const b = _right.value(frame);
         return mixin("a " ~ op ~ " b");
@@ -581,8 +604,8 @@ private final class FloatCompare(string op, L, R) : BoolNode {
 private final class ClassUpcast : LongNode {
     private Node _operand;
     private long _offset;
-    this(Node operand, long offset) { _operand = operand; _offset = offset; }
-    override long executeLong(ubyte* frame) {
+    public this(Node operand, long offset) { _operand = operand; _offset = offset; }
+    public override long executeLong(ubyte* frame) {
         const value = _operand.executeLong(frame);
         return value == 0 ? 0 : value + _offset;
     }
@@ -590,8 +613,8 @@ private final class ClassUpcast : LongNode {
 
 private final class Wrap(T) : LongNode {
     private Node _operand;
-    this(Node operand) { _operand = operand; }
-    override long executeLong(ubyte* frame) {
+    public this(Node operand) { _operand = operand; }
+    public override long executeLong(ubyte* frame) {
         return cast(T) _operand.executeLong(frame);
     }
     mixin BoolFromLong;
@@ -599,24 +622,24 @@ private final class Wrap(T) : LongNode {
 
 private final class IntegerToFloat(Source, Dest) : DoubleNode {
     private Node _operand;
-    this(Node operand) { _operand = operand; }
-    override double executeDouble(ubyte* frame) {
+    public this(Node operand) { _operand = operand; }
+    public override double executeDouble(ubyte* frame) {
         return cast(Dest) cast(Source) _operand.executeLong(frame);
     }
 }
 
 private final class FloatToInteger(T) : LongNode {
     private Node _operand;
-    this(Node operand) { _operand = operand; }
-    override long executeLong(ubyte* frame) {
+    public this(Node operand) { _operand = operand; }
+    public override long executeLong(ubyte* frame) {
         return cast(T) _operand.executeDouble(frame);
     }
 }
 
 private final class FloatWidth(T) : DoubleNode {
     private Node _operand;
-    this(Node operand) { _operand = operand; }
-    override double executeDouble(ubyte* frame) {
+    public this(Node operand) { _operand = operand; }
+    public override double executeDouble(ubyte* frame) {
         return cast(T) _operand.executeDouble(frame);
     }
 }
@@ -626,9 +649,9 @@ private final class FloatWidth(T) : DoubleNode {
 private final class Store(T, A, V) : Typed!T {
     private A _address;
     private V _value;
-    this(A address, V value) { _address = address; _value = value; }
+    public this(A address, V value) { _address = address; _value = value; }
     static if (isFloatingPoint!T) {
-        override double executeDouble(ubyte* frame) {
+        public override double executeDouble(ubyte* frame) {
             auto address = _address.address(frame);
             const T value = cast(T) _value.value(frame);
             *cast(T*) address = value;
@@ -636,7 +659,7 @@ private final class Store(T, A, V) : Typed!T {
         }
         mixin StatementForm!"executeDouble";
     } else {
-        override long executeLong(ubyte* frame) {
+        public override long executeLong(ubyte* frame) {
             auto address = _address.address(frame);
             const T value = cast(T) _value.value(frame);
             *cast(T*) address = value;
@@ -651,10 +674,10 @@ private final class IntegerOpAssign(string op, T, A, S) : LongNode {
     private A _target;
     private S _step;
     private Operation!op _operation;
-    this(A target, S step, Operation!op operation) {
+    public this(A target, S step, Operation!op operation) {
         _target = target; _step = step; _operation = operation;
     }
-    override long executeLong(ubyte* frame) {
+    public override long executeLong(ubyte* frame) {
         auto target = cast(T*) _target.address(frame);
         const b = _step.value(frame);
         const long a = *target;
@@ -668,8 +691,8 @@ private final class IntegerOpAssign(string op, T, A, S) : LongNode {
 private final class FloatOpAssign(string op, T) : DoubleNode {
     private Target _target;
     private Node _step;
-    this(Target target, Node step) { _target = target; _step = step; }
-    override double executeDouble(ubyte* frame) {
+    public this(Target target, Node step) { _target = target; _step = step; }
+    public override double executeDouble(ubyte* frame) {
         auto target = cast(T*) _target.address(frame);
         const b = _step.executeDouble(frame);
         const T result = mixin("cast(T) *target " ~ op ~ " cast(T) b");
@@ -682,8 +705,8 @@ private final class FloatOpAssign(string op, T) : DoubleNode {
 // `target++` and `target--`: the value is the old one.
 private final class PostStep(T, long delta) : LongNode {
     private Target _target;
-    this(Target target) { _target = target; }
-    override long executeLong(ubyte* frame) {
+    public this(Target target) { _target = target; }
+    public override long executeLong(ubyte* frame) {
         auto target = cast(T*) _target.address(frame);
         const T old = *target;
         *target = cast(T) (old + delta);
@@ -696,27 +719,33 @@ private final class PostStep(T, long delta) : LongNode {
 
 private final class ExpressionStatement : Node {
     private Node _expression;
-    this(Node expression) { _expression = expression; }
-    override TreeFlow executeStmt(ubyte* frame) {
+    private Position _position;
+    public this(Node expression, Position position) {
+        _expression = expression; _position = position;
+    }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        _position.note;
         _expression.executeVoid(frame);
         return TreeFlow.normal;
     }
 }
 
-private Node statementOf(Node expression) {
-    return expression.runsAsStatement
-        ? expression : new ExpressionStatement(expression);
+private Node statementOf(Node expression, Position position) {
+    if (!expression.runsAsStatement)
+        return new ExpressionStatement(expression, position);
+    expression.positionAt(position);
+    return expression;
 }
 
 // A statement that does nothing but end with `flow`.
 private final class Jump(TreeFlow flow) : Node {
-    override TreeFlow executeStmt(ubyte*) { return flow; }
+    public override TreeFlow executeStmt(ubyte*) { return flow; }
 }
 
 private final class Sequence : Node {
     private Node[] _children;
-    this(Node[] children) { _children = children; }
-    override TreeFlow executeStmt(ubyte* frame) {
+    public this(Node[] children) { _children = children; }
+    public override TreeFlow executeStmt(ubyte* frame) {
         foreach (child; _children) {
             const flow = child.executeStmt(frame);
             if (flow != TreeFlow.normal)
@@ -729,7 +758,7 @@ private final class Sequence : Node {
 // A sequence of a few statements, whose children are fields.
 private final class ShortSequence(size_t length) : Node {
     private Node[length] _children;
-    override TreeFlow executeStmt(ubyte* frame) {
+    public override TreeFlow executeStmt(ubyte* frame) {
         static foreach (i; 0 .. length - 1) {{
             const flow = _children[i].executeStmt(frame);
             if (flow != TreeFlow.normal)
@@ -743,8 +772,12 @@ private final class IfThenElse : Node {
     private Node _condition;
     private Node _then;
     private Node _else;
-    this(Node condition) { _condition = condition; }
-    override TreeFlow executeStmt(ubyte* frame) {
+    private Position _position;
+    public this(Node condition, Position position) {
+        _condition = condition; _position = position;
+    }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        _position.note;
         if (_condition.executeBool(frame))
             return _then.executeStmt(frame);
         if (_else !is null)
@@ -754,14 +787,20 @@ private final class IfThenElse : Node {
 }
 
 private struct NodeCondition {
-    Node node;
-    bool test(ubyte* frame) { return node is null || node.executeBool(frame); }
+    public Node node;
+    public Position position;
+    public bool test(ubyte* frame) {
+        if (node is null)
+            return true;
+        position.note;
+        return node.executeBool(frame);
+    }
 }
 
 private struct CompareCondition(string op, L, R) {
-    L left;
-    R right;
-    bool test(ubyte* frame) {
+    public L left;
+    public R right;
+    public bool test(ubyte* frame) {
         const a = left.value(frame);
         const b = right.value(frame);
         return mixin("a " ~ op ~ " b");
@@ -776,11 +815,11 @@ private final class ForLoop(C) : Loop {
     private ControlFlowState* _controlFlow;
     private C _condition;
     private Node _increment;
-    this(ControlFlowState* controlFlow, C condition, Node increment) {
+    public this(ControlFlowState* controlFlow, C condition, Node increment) {
         _controlFlow = controlFlow; _condition = condition;
         _increment = increment;
     }
-    override TreeFlow executeStmt(ubyte* frame) {
+    public override TreeFlow executeStmt(ubyte* frame) {
         while (_condition.test(frame)) {
             if (_body !is null) {
                 const flow = _body.executeStmt(frame);
@@ -801,7 +840,9 @@ private final class ForLoop(C) : Loop {
     }
 }
 
-private Loop loopOf(Node test, Node step, ControlFlowState* controlFlow) {
+private Loop loopOf(
+    Node test, Position position, Node step, ControlFlowState* controlFlow,
+) {
     static foreach (op; AliasSeq!("<", "<=", ">", ">=", "==", "!="))
         static foreach (R; AliasSeq!(LocalOperand!int, ConstantOperand!long)) {{
             alias L = LocalOperand!int;
@@ -811,14 +852,18 @@ private Loop loopOf(Node test, Node step, ControlFlowState* controlFlow) {
                 return new ForLoop!Condition(
                     controlFlow, Condition(compare._left, compare._right), step);
         }}
-    return new ForLoop!NodeCondition(controlFlow, NodeCondition(test), step);
+    return new ForLoop!NodeCondition(controlFlow, NodeCondition(test, position), step);
 }
 
 private final class ReturnValue(T) : Node {
     private void** _place;
     private Node _value;
-    this(void** place, Node value) { _place = place; _value = value; }
-    override TreeFlow executeStmt(ubyte* frame) {
+    private Position _position;
+    public this(void** place, Node value, Position position) {
+        _place = place; _value = value; _position = position;
+    }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        _position.note;
         static if (isFloatingPoint!T)
             const T value = cast(T) _value.executeDouble(frame);
         else
@@ -832,8 +877,11 @@ private final class ReturnValue(T) : Node {
 private final class GenericStatement(E) : Node {
     private E _ev;
     private Statement _statement;
-    this(E ev, Statement statement) { _ev = ev; _statement = statement; }
-    override TreeFlow executeStmt(ubyte*) {
+    public this(E ev, Statement statement) { _ev = ev; _statement = statement; }
+    public override TreeFlow executeStmt(ubyte*) {
+        // The evaluator runs the statement as it runs one outside the tree:
+        // with no expression named until the statement opens one.
+        *_ev._temporaries.rootSlot = null;
         _statement.accept(_ev);
         return _ev._controlFlow.hasTransfer ? TreeFlow.generic : TreeFlow.normal;
     }
@@ -842,8 +890,8 @@ private final class GenericStatement(E) : Node {
 private final class GenericCondition(E) : BoolNode {
     private E _ev;
     private Expression _condition;
-    this(E ev, Expression condition) { _ev = ev; _condition = condition; }
-    override bool executeBool(ubyte*) { return _ev.conditionHolds(_condition); }
+    public this(E ev, Expression condition) { _ev = ev; _condition = condition; }
+    public override bool executeBool(ubyte*) { return _ev.conditionHolds(_condition); }
 }
 
 // Builds its statement's node on first execution and replaces itself in the
@@ -852,10 +900,10 @@ private final class Uninitialised(E) : Node {
     private E _ev;
     private Statement _statement;
     private Node* _slot;
-    this(E ev, Statement statement, Node* slot) {
+    public this(E ev, Statement statement, Node* slot) {
         _ev = ev; _statement = statement; _slot = slot;
     }
-    override TreeFlow executeStmt(ubyte* frame) {
+    public override TreeFlow executeStmt(ubyte* frame) {
         auto node = buildStatement(_ev, _statement, _slot);
         *_slot = node;
         return node.executeStmt(frame);
@@ -883,7 +931,7 @@ private struct FrameGuard {
     @disable this();
     @disable this(this);
 
-    this(imported!"snakebite.framestack".FrameStack* stack) {
+    public this(imported!"snakebite.framestack".FrameStack* stack) {
         _stack = stack;
         _mark = stack.mark;
     }
@@ -910,7 +958,7 @@ private final class Call(E) : Node {
     private TreeCallee* _callee;
     private const(void)* _vtable;
 
-    this(E ev, CallExp site, FuncDeclaration method, Node receiver,
+    public this(E ev, CallExp site, FuncDeclaration method, Node receiver,
             bool receiverIsAddress, bool virtual, Node[] args,
             Argument[] modes, size_t resultSize, bool resultUnsigned) {
         _ev = ev; _site = site; _method = method; _receiver = receiver;
@@ -919,7 +967,7 @@ private final class Call(E) : Node {
         _resultUnsigned = resultUnsigned;
     }
 
-    final bool matches(TreeCallee* callee) {
+    public final bool matches(TreeCallee* callee) {
         auto layout = callee.layout;
         if (layout.parameters.length != _modes.length)
             return false;
@@ -939,7 +987,7 @@ private final class Call(E) : Node {
                 : cast(size_t) _receiver.executeLong(frame);
             if (_virtual) {
                 if (receiver == 0) {
-                    ev._executeCallExpression(_site, result, true, null);
+                    ev._executeMethodCall(_site, result, _method, null);
                     return;
                 }
                 const vtable = *cast(const(void)**) receiver;
@@ -947,8 +995,8 @@ private final class Call(E) : Node {
                     callee = ev.virtualTreeCalleeOf(
                         _method, cast(void*) receiver);
                     if (callee is null || !matches(callee)) {
-                        ev._executeCallExpression(
-                            _site, result, true, cast(void*) receiver);
+                        ev._executeMethodCall(
+                            _site, result, _method, cast(void*) receiver);
                         return;
                     }
                     _callee = callee;
@@ -959,7 +1007,8 @@ private final class Call(E) : Node {
 
         const layout = callee.layout;
         auto calleeFrame = FrameGuard(&ev._frames);
-        auto base = ev._frames.reserveFast(layout.size, layout.alignment);
+        auto base = callee.reservesFast
+            ? ev._frames.reserveFast(layout.size, layout.alignment) : null;
         if (base is null)
             base = ev._frames.reserve(layout.size, layout.alignment);
         if (layout.hiddenThis.variable !is null)
@@ -996,7 +1045,7 @@ private final class Call(E) : Node {
             ev.runTreeCallee(callee, base, result);
     }
 
-    override long executeLong(ubyte* frame) {
+    public override long executeLong(ubyte* frame) {
         ulong buffer;
         invoke(frame, &buffer);
         switch (_resultSize) {
@@ -1015,14 +1064,14 @@ private final class Call(E) : Node {
         }
     }
 
-    override double executeDouble(ubyte* frame) {
+    public override double executeDouble(ubyte* frame) {
         ulong buffer;
         invoke(frame, &buffer);
         return _resultSize == 4
             ? *cast(float*) &buffer : *cast(double*) &buffer;
     }
 
-    override void executeVoid(ubyte* frame) {
+    public override void executeVoid(ubyte* frame) {
         ulong buffer;
         invoke(frame, &buffer);
     }
@@ -1032,10 +1081,10 @@ private final class Call(E) : Node {
 // Each function returns null for an expression the tree does not cover.
 
 private struct Scalar {
-    enum Kind : ubyte { none, integral, floating }
+    public enum Kind : ubyte { none, integral, floating }
 
-    Kind kind;
-    TypeFacts facts;
+    public Kind kind;
+    public TypeFacts facts;
 }
 
 private Scalar scalarOf(E)(E ev, Type type) {
@@ -1109,13 +1158,13 @@ private Node byFloating(alias make, Args...)(in TypeFacts facts, Args args) {
 
 // The factory of `Class!T`, for `byIntegral` and its siblings.
 private template New(alias Class) {
-    Node New(T, Args...)(Args args) { return new Class!T(args); }
+    public Node New(T, Args...)(Args args) { return new Class!T(args); }
 }
 
 private struct Slot {
-    bool ok;
-    size_t offset;
-    bool indirect;
+    public bool ok;
+    public size_t offset;
+    public bool indirect;
 }
 
 private Slot slotOf(E)(E ev, VarDeclaration variable) {
@@ -1149,7 +1198,7 @@ private VarDeclaration thisVariable(E)(E ev, ThisExp expression) {
 private Node buildAddress(E)(E ev, Expression expression) {
     import dmd.astenums: TY;
     import dmd.tokens: EXP;
-    import dmd.typesem: nextOf, toBasetype;
+    import dmd.typesem: toBasetype;
 
     switch (expression.op) with (EXP) {
         case variable: {
@@ -1502,7 +1551,7 @@ private Node buildValue(E)(E ev, Expression expression) {
 }
 
 private template unaryOf(string op) {
-    Node unaryOf(T)(Node operand) { return new IntegerUnary!(op, T)(operand); }
+    public Node unaryOf(T)(Node operand) { return new IntegerUnary!(op, T)(operand); }
 }
 
 private Node buildCast(E)(E ev, CastExp castExp, in Scalar scalar) {
@@ -1554,7 +1603,7 @@ private Node buildCast(E)(E ev, CastExp castExp, in Scalar scalar) {
 }
 
 private template binaryOf(string op) {
-    Node binaryOf(T)(Node left, Node right, Operation!op operation) {
+    public Node binaryOf(T)(Node left, Node right, Operation!op operation) {
         static Node make(L, R)(L l, R r, Operation!op o) {
             return new IntegerBinary!(op, T, L, R)(l, r, o);
         }
@@ -1664,7 +1713,7 @@ private bool targetOf(E)(E ev, Expression expression, out Target target) {
 }
 
 private template opAssignOf(string op) {
-    Node opAssignOf(T)(Target target, Node step, Operation!op operation) {
+    public Node opAssignOf(T)(Target target, Node step, Operation!op operation) {
         alias steps = operandsOf!(op, T).rights;
         static if (steps.length > 1) {
             if (target.node is null) {
@@ -1821,6 +1870,10 @@ private Node storeFusedDouble(Node value, FrameAddress address) {
     return null;
 }
 
+private Position positionOf(E)(E ev, Expression root) {
+    return Position(ev._temporaries.rootSlot, cast(const(void)*) root);
+}
+
 private Node buildDeclaration(E)(E ev, DeclarationExp declaration) {
     import snakebite.nativelayout: initializerRunsForEffect, initializerValueOf;
 
@@ -1837,7 +1890,8 @@ private Node buildDeclaration(E)(E ev, DeclarationExp declaration) {
         return null;
     if (initializerRunsForEffect(initializer, variable)) {
         auto effect = buildValue(ev, initializer.exp);
-        return effect is null ? null : statementOf(effect);
+        return effect is null
+            ? null : statementOf(effect, positionOf(ev, declaration));
     }
     auto value = initializerValueOf(initializer);
     const slot = slotOf(ev, variable);
@@ -1848,15 +1902,14 @@ private Node buildDeclaration(E)(E ev, DeclarationExp declaration) {
     auto node = buildValue(ev, value);
     if (node is null)
         return null;
-    return statementOf(storeToFrame(scalar, slot.offset, node));
+    return statementOf(storeToFrame(scalar, slot.offset, node),
+        positionOf(ev, declaration));
 }
 
 private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
-    import dmd.astenums: STMT, TY;
+    import dmd.astenums: STMT;
     import dmd.tokens: EXP;
-    import dmd.typesem: toBasetype;
     import snakebite.backends.ifplan: IfPlan, ifPlan;
-    import snakebite.frontend.dmd.functions: typeFunctionOf;
 
     Node generic() {
         return new GenericStatement!E(ev, statement);
@@ -1912,7 +1965,8 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
                     || scalarOf(ev, expression.type).kind == Scalar.Kind.none))
                 return generic();
             auto node = buildValue(ev, expression);
-            return node is null ? generic() : statementOf(node);
+            return node is null
+                ? generic() : statementOf(node, positionOf(ev, expression));
         }
         case If: {
             auto conditional = statement.isIfStatement;
@@ -1920,7 +1974,8 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
                     || ifPlan(conditional).kind != IfPlan.Kind.condition
                     || conditional.ifbody is null)
                 return generic();
-            auto node = new IfThenElse(condition(conditional.condition));
+            auto node = new IfThenElse(condition(conditional.condition),
+                positionOf(ev, conditional.condition));
             node._then = child(conditional.ifbody, &node._then);
             if (conditional.elsebody !is null)
                 node._else = child(conditional.elsebody, &node._else);
@@ -1938,9 +1993,11 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
                 step = buildValue(ev, loop.increment);
                 if (step is null)
                     return generic();
-                step = statementOf(step);
+                step = statementOf(step, positionOf(ev, loop.increment));
             }
-            auto node = loopOf(test, step, &ev._controlFlow);
+            auto node = loopOf(test,
+                loop.condition is null ? Position() : positionOf(ev, loop.condition),
+                step, &ev._controlFlow);
             if (loop._body !is null)
                 node._body = child(loop._body, &node._body);
             return node;
@@ -1982,8 +2039,11 @@ private Node buildReturn(E)(E ev, imported!"dmd.statement".ReturnStatement retur
     auto value = buildValue(ev, returned.exp);
     if (value is null)
         return generic();
-    static Node make(T)(void** place, Node v) { return new ReturnValue!T(place, v); }
+    static Node make(T)(void** place, Node v, Position p) {
+        return new ReturnValue!T(place, v, p);
+    }
+    auto position = positionOf(ev, returned.exp);
     return scalar.kind == Scalar.Kind.floating
-        ? byFloating!make(scalar.facts, &ev._place, value)
-        : byIntegral!make(scalar.facts, &ev._place, value);
+        ? byFloating!make(scalar.facts, &ev._place, value, position)
+        : byIntegral!make(scalar.facts, &ev._place, value, position);
 }

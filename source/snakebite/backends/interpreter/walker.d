@@ -1352,11 +1352,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         }
     }
 
-    private TreeRoot[FuncDeclaration] _trees;
+    private TreeRoot*[FuncDeclaration] _trees;
     private TreeCallee*[FuncDeclaration] _treeCallees;
     package enum bool nullCheckedEvaluator = nullChecks;
 
-    private TreeRoot treeRootFor(
+    private TreeRoot* treeRootFor(
         FuncDeclaration function_, Statement body_, const(FrameLayout)* layout,
     ) {
         if (auto found = function_ in _trees)
@@ -1401,6 +1401,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     private TreeCallee* makeTreeCallee(FuncDeclaration function_) {
+        import core.memory: pageSize;
         import dmd.astenums: TY, VarArg;
         import dmd.typesem: toBasetype;
 
@@ -1432,6 +1433,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         callee.closurePlan = closurePlan;
         callee.returnType = returnType;
         callee.returnFacts = factsOf(returnType);
+        callee.reservesFast = layout.size != 0
+            && layout.alignment != 0
+            && (layout.alignment & (layout.alignment - 1)) == 0
+            && layout.alignment < pageSize;
         return callee;
     }
 
@@ -1450,7 +1455,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return;
         }
 
-        const guard = TreeCallGuard(this);
+        const guard = CallStateGuard(this);
         enterTreeCallee(callee, calleeFrame, place);
         executeTreeCallee(callee, calleeFrame);
     }
@@ -1470,55 +1475,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _controlFlow = ControlFlowState.init;
         _returned = ReturnedLvalue.init;
         ctfeBlockDepth = 0;
-    }
-
-    // The state of a node-tree caller that a node-tree callee changes. A
-    // tree node only runs with no control transfer, label, returned lvalue
-    // or compile-time block pending, so those return to their initial values.
-    private static struct TreeCallGuard {
-        private Evaluator _evaluator;
-        private Type _type;
-        private TypeFacts _facts;
-        private void* _place;
-        private ubyte* _frameBase;
-        private ubyte* _closureBase;
-        private const(FrameLayout)* _layout;
-        private const(ClosurePlan)* _activeClosurePlan;
-        private FuncDeclaration _function;
-        private size_t _activationMark;
-
-        @disable this();
-        @disable this(this);
-
-        private this(Evaluator evaluator) {
-            _evaluator = evaluator;
-            _type = evaluator._type;
-            _facts = evaluator._facts;
-            _place = evaluator._place;
-            _frameBase = evaluator._frameBase;
-            _closureBase = evaluator._closureBase;
-            _layout = evaluator._layout;
-            _activeClosurePlan = evaluator._activeClosurePlan;
-            _function = evaluator._function;
-            _activationMark = evaluator._activationAllocations.length;
-        }
-
-        ~this() {
-            _evaluator._type = _type;
-            _evaluator._facts = _facts;
-            _evaluator._place = _place;
-            _evaluator._frameBase = _frameBase;
-            _evaluator._closureBase = _closureBase;
-            _evaluator._layout = _layout;
-            _evaluator._activeClosurePlan = _activeClosurePlan;
-            _evaluator._function = _function;
-            _evaluator._pendingLoopLabel = null;
-            _evaluator._controlFlow = ControlFlowState.init;
-            _evaluator._returned = ReturnedLvalue.init;
-            _evaluator.ctfeBlockDepth = 0;
-            if (_evaluator._activationAllocations.length > _activationMark)
-                _evaluator.releaseActivationAllocations(_activationMark);
-        }
     }
 
     private void executeTreeCallee(TreeCallee* callee, ubyte* calleeFrame) {
@@ -2018,6 +1974,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         private ControlFlowState _controlFlow;
         private ReturnedLvalue _returned;
         private uint _ctfeBlockDepth;
+        private const(void)* _root;
         private size_t _activationMark;
 
         @disable this();
@@ -2037,6 +1994,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             _controlFlow = evaluator._controlFlow;
             _returned = evaluator._returned;
             _ctfeBlockDepth = evaluator.ctfeBlockDepth;
+            _root = *evaluator._temporaries.rootSlot;
             _activationMark = evaluator._activationAllocations.length;
         }
 
@@ -2053,6 +2011,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             _evaluator._controlFlow = _controlFlow;
             _evaluator._returned = _returned;
             _evaluator.ctfeBlockDepth = _ctfeBlockDepth;
+            *_evaluator._temporaries.rootSlot = _root;
             _evaluator.releaseActivationAllocations(_activationMark);
         }
     }
@@ -6517,11 +6476,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     package CallResult _executeCallExpression(
         CallExp expression, void* returnPlace,
-        in bool receiverKnown = false, void* knownReceiver = null,
     ) {
-        import core.stdc.string: memcpy;
         import snakebite.frontend.dmd.functions: unresolvedCalleeOf;
-        import std.conv: text;
 
         CallSelection.eachResolvedCalleePrefix(expression,
             (prefix) { runForEffect(prefix); });
@@ -6545,17 +6501,38 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             callee.function_,
             (declaration) => _program.linkedFunctionOf(declaration));
 
-        auto funcType = typeFunctionOf(function_);
-
         // A callee reached through a value has no receiver expression: a
         // delegate carries its context, and a function pointer to a method
         // (`&C.f`) carries none, so that method runs with a null `this`.
         void* classReceiver;
         auto receiver = resolved is null
             ? null : classReceiverOf(expression, function_);
-        if (receiver !is null) {
-            classReceiver = receiverKnown
-                ? knownReceiver : classReferenceOf(receiver);
+        if (receiver !is null)
+            classReceiver = classReferenceOf(receiver);
+        return executeCallOnReceiver(
+            expression, returnPlace, callee, function_,
+            resolved is null, receiver !is null, classReceiver);
+    }
+
+    // The call of a statically resolved method, whose receiver object a
+    // caller has already evaluated: the rest of `_executeCallExpression`.
+    package CallResult _executeMethodCall(
+        CallExp expression, void* returnPlace,
+        FuncDeclaration method, void* classReceiver,
+    ) {
+        enum viaValue = false, hasReceiver = true;
+        return executeCallOnReceiver(
+            expression, returnPlace, Callee(expression.f, null, false),
+            method, viaValue, hasReceiver, classReceiver);
+    }
+
+    private CallResult executeCallOnReceiver(
+        CallExp expression, void* returnPlace, Callee callee,
+        FuncDeclaration function_, in bool viaValue, in bool hasReceiver,
+        void* classReceiver,
+    ) {
+        auto funcType = typeFunctionOf(function_);
+        if (hasReceiver) {
             if (classReceiver is null && expression.readsVtable(function_)) {
                 // The vtable read is where the null receiver is met, after
                 // the arguments.
@@ -6590,7 +6567,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         }
 
         const isVariadic = funcType.parameterList.varargs == VarArg.variadic;
-        auto valueCall = resolved is null
+        auto valueCall = viaValue
             ? valueCallOf(expression, callee.type, callee.fromDelegate)
             : null;
         auto frame = bindFrame(
