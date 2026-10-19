@@ -757,3 +757,95 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+// A nested function reads and writes the variables of every function around
+// it, whatever their type, and the parameter of one that is a `ref`.
+static foreach (backend; Matrix!()) {
+    @("nested.outerVariables.everyKindAtEveryDepth." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Pair { int first; int second; }
+
+            int outer(ref int total, int[] data, Pair pair) {
+                double scale = 0.5;
+                int* cursor = &total;
+                char letter = 'a';
+                int middle(int amount) {
+                    int inner() {
+                        total += data[1] + data.length;
+                        scale *= 2;
+                        ++letter;
+                        *cursor += pair.second;
+                        return pair.first + amount;
+                    }
+                    return inner() + inner();
+                }
+                const result = middle(10);
+                assert(scale == 2.0);
+                assert(letter == 'c');
+                return result;
+            }
+
+            void main() {
+                int total = 1;
+                assert(outer(total, [5, 6, 7], Pair(100, 3)) == 220);
+                assert(total == 1 + 2 * (6 + 3) + 2 * 3);
+            }
+        });
+    }
+}
+
+
+// A nested function reads and writes the fields of the object of the method
+// around it, through the `this` of that method.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot access delegate function pointers"),
+)) {
+    @("nested.outerThis.classAndStructMethods." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Accumulator {
+                int total;
+                int[] values = [3, 4, 5];
+
+                int sum() {
+                    foreach (value; values)
+                        add(value);
+                    void each(int delegate(int) visit) {
+                        foreach (value; values)
+                            total += visit(value);
+                    }
+                    each((int value) => value * 2);
+                    return total;
+                }
+                void add(int amount) { total += amount; }
+            }
+
+            struct Box {
+                int count;
+                int[] items;
+                int grow() {
+                    void push(int item) {
+                        items ~= item;
+                        ++count;
+                    }
+                    push(count);
+                    push(count);
+                    return count + cast(int) items.length;
+                }
+            }
+
+            void main() {
+                auto accumulator = new Accumulator;
+                assert(accumulator.sum() == 12 + 2 * 12);
+                Box box;
+                assert(box.grow() == 4);
+                assert(box.items == [0, 1]);
+            }
+        });
+    }
+}
