@@ -1749,12 +1749,14 @@ private final class Call(E) : Node {
     // Returns the receiver of the call, 0 when there is none.
     private size_t invoke(ubyte* frame, void* result) {
         auto ev = _ev;
-        auto selected = _selected;
         size_t receiver;
-        if (_receiver !is null) {
+        if (_receiver !is null)
             receiver = _receiverIsAddress
                 ? cast(size_t) _receiver.executeAddr(frame)
                 : cast(size_t) _receiver.executeLong(frame);
+        // Read after the receiver runs: it can run this site again.
+        auto selected = _selected;
+        if (_receiver !is null) {
             if (_virtual) {
                 if (receiver == 0) {
                     ev.syncTree(_root, frame);
