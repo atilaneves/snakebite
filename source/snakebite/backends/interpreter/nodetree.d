@@ -106,6 +106,22 @@ private abstract class Node {
     public TreeFlow executeStmt(ubyte* frame) { assert(0); }
     public bool runsAsStatement() { return false; }
     public void positionAt(Position position) { assert(0); }
+
+    // The statement nodes that hold this node as their condition. A node
+    // that is not a fused test is called through `NodeCondition`.
+    public Loop forLoop(
+        ControlFlowState* controlFlow, Node increment, Position position,
+    ) {
+        return new ForLoop!NodeCondition(
+            controlFlow, NodeCondition(this), increment, position);
+    }
+    public Loop doLoop(ControlFlowState* controlFlow, Position position) {
+        return new DoLoop!NodeCondition(
+            controlFlow, NodeCondition(this), position);
+    }
+    public Branches ifThenElse(Position position) {
+        return new IfThenElse!NodeCondition(NodeCondition(this), position);
+    }
 }
 
 private abstract class LongNode : Node {
@@ -812,13 +828,20 @@ private final class OrOr : BoolNode {
     }
 }
 
-private final class IntegerCompare(string op, bool unsigned, L, R) : BoolNode {
-    private L _left;
-    private R _right;
-    public this(L left, R right) { _left = left; _right = right; }
-    public override bool executeBool(ubyte* frame) {
-        const a = _left.value(frame);
-        const b = _right.value(frame);
+// Whether evaluating an operand can fault, which it can when it is a node.
+private enum operandMayFault(O) = is(O == ChildOperand!(V, N), V, N);
+
+// A test of two operands, which a loop or an `if` can hold in place of the
+// node that evaluates it.
+private struct IntegerTest(string op, bool unsigned, L, R) {
+    public enum mayFault = operandMayFault!L || operandMayFault!R;
+
+    public L left;
+    public R right;
+
+    public bool test(ubyte* frame) {
+        const a = left.value(frame);
+        const b = right.value(frame);
         static if (unsigned)
             return mixin("cast(ulong) a " ~ op ~ " cast(ulong) b");
         else
@@ -826,15 +849,46 @@ private final class IntegerCompare(string op, bool unsigned, L, R) : BoolNode {
     }
 }
 
-private final class FloatCompare(string op, L, R) : BoolNode {
-    private L _left;
-    private R _right;
-    public this(L left, R right) { _left = left; _right = right; }
-    public override bool executeBool(ubyte* frame) {
-        const a = _left.value(frame);
-        const b = _right.value(frame);
+private struct FloatTest(string op, L, R) {
+    public enum mayFault = operandMayFault!L || operandMayFault!R;
+
+    public L left;
+    public R right;
+
+    public bool test(ubyte* frame) {
+        const a = left.value(frame);
+        const b = right.value(frame);
         return mixin("a " ~ op ~ " b");
     }
+}
+
+private mixin template TestNode() {
+    private Test _test;
+    public this(L left, R right) { _test = Test(left, right); }
+    public override bool executeBool(ubyte* frame) { return _test.test(frame); }
+    public override Loop forLoop(
+        ControlFlowState* controlFlow, Node increment, Position position,
+    ) {
+        return new ForLoop!Test(controlFlow, _test, increment, position);
+    }
+    public override Loop doLoop(
+        ControlFlowState* controlFlow, Position position,
+    ) {
+        return new DoLoop!Test(controlFlow, _test, position);
+    }
+    public override Branches ifThenElse(Position position) {
+        return new IfThenElse!Test(_test, position);
+    }
+}
+
+private final class IntegerCompare(string op, bool unsigned, L, R) : BoolNode {
+    private alias Test = IntegerTest!(op, unsigned, L, R);
+    mixin TestNode;
+}
+
+private final class FloatCompare(string op, L, R) : BoolNode {
+    private alias Test = FloatTest!(op, L, R);
+    mixin TestNode;
 }
 
 // --- casts ------------------------------------------------------------
@@ -1032,17 +1086,26 @@ private final class Jump(TreeFlow flow) : Node {
     public override TreeFlow executeStmt(ubyte*) { return flow; }
 }
 
-private final class Sequence : Node {
-    private Node[] _children;
-    public this(Node[] children) { _children = children; }
-    public override void executeVoid(ubyte* frame) { executeStmt(frame); }
-    public override TreeFlow executeStmt(ubyte* frame) {
-        foreach (child; _children) {
-            const flow = child.executeStmt(frame);
+// The statements of a block, or of a loop body, in the order they run. Ends
+// at the first statement that does not finish normally.
+private struct Statements {
+    public Node[] nodes;
+
+    public TreeFlow run(ubyte* frame) {
+        foreach (node; nodes) {
+            const flow = node.executeStmt(frame);
             if (flow != TreeFlow.normal)
                 return flow;
         }
         return TreeFlow.normal;
+    }
+}
+
+private final class Sequence : Node {
+    private Statements _statements;
+    public this(Node[] children) { _statements = Statements(children); }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        return _statements.run(frame);
     }
 }
 
@@ -1059,17 +1122,20 @@ private final class ShortSequence(size_t length) : Node {
     }
 }
 
-private final class IfThenElse : Node {
-    private Node _condition;
-    private Node _then;
-    private Node _else;
+private abstract class Branches : Node {
+    protected Node _then;
+    protected Node _else;
+}
+
+private final class IfThenElse(C) : Branches {
+    private C _condition;
     private Position _position;
-    public this(Node condition, Position position) {
+    public this(C condition, Position position) {
         _condition = condition; _position = position;
     }
     public override TreeFlow executeStmt(ubyte* frame) {
         _position.note;
-        if (_condition.executeBool(frame))
+        if (_condition.test(frame))
             return _then.executeStmt(frame);
         if (_else !is null)
             return _else.executeStmt(frame);
@@ -1077,52 +1143,50 @@ private final class IfThenElse : Node {
     }
 }
 
+// The condition of a loop that has none.
+private struct Always {
+    public enum mayFault = false;
+
+    public bool test(ubyte*) { return true; }
+}
+
 private struct NodeCondition {
+    public enum mayFault = true;
+
     public Node node;
-    public Position position;
-    public bool test(ubyte* frame) {
-        if (node is null)
-            return true;
-        position.note;
-        return node.executeBool(frame);
-    }
+
+    public bool test(ubyte* frame) { return node.executeBool(frame); }
 }
 
-private struct CompareCondition(string op, L, R) {
-    public L left;
-    public R right;
-    public bool test(ubyte* frame) {
-        const a = left.value(frame);
-        const b = right.value(frame);
-        return mixin("a " ~ op ~ " b");
-    }
-}
-
+// A loop holds the statements of its body, not a node that runs them.
 private abstract class Loop : Node {
-    protected Node _body;
+    protected Statements _body;
 }
 
 private final class ForLoop(C) : Loop {
     private ControlFlowState* _controlFlow;
     private C _condition;
     private Node _increment;
-    public this(ControlFlowState* controlFlow, C condition, Node increment) {
+    private Position _position;
+    public this(
+        ControlFlowState* controlFlow, C condition, Node increment,
+        Position position,
+    ) {
         _controlFlow = controlFlow; _condition = condition;
-        _increment = increment;
+        _increment = increment; _position = position;
     }
     public override TreeFlow executeStmt(ubyte* frame) {
-        while (_condition.test(frame)) {
-            if (_body !is null) {
-                const flow = _body.executeStmt(frame);
-                if (flow != TreeFlow.normal) {
-                    if (flow == TreeFlow.break_)
-                        return TreeFlow.normal;
-                    if (flow == TreeFlow.return_)
-                        return flow;
-                    if (flow == TreeFlow.generic && _controlFlow.leavesLoop(null))
-                        return _controlFlow.hasTransfer
-                            ? TreeFlow.generic : TreeFlow.normal;
-                }
+        for (;;) {
+            static if (C.mayFault)
+                _position.note;
+            if (!_condition.test(frame))
+                break;
+            const flow = _body.run(frame);
+            if (flow != TreeFlow.normal) {
+                bool exit;
+                const result = afterBody(flow, _controlFlow, exit);
+                if (exit)
+                    return result;
             }
             if (_increment !is null)
                 _increment.executeStmt(frame);
@@ -1131,19 +1195,51 @@ private final class ForLoop(C) : Loop {
     }
 }
 
-private Loop loopOf(
-    Node test, Position position, Node step, ControlFlowState* controlFlow,
+// What a loop does after its body ends with `flow`: `exit` is set when the
+// loop ends, and the result is the flow that leaves it.
+private TreeFlow afterBody(
+    in TreeFlow flow, ControlFlowState* controlFlow, out bool exit,
 ) {
-    static foreach (op; AliasSeq!("<", "<=", ">", ">=", "==", "!="))
-        static foreach (R; AliasSeq!(LocalOperand!int, ConstantOperand!long)) {{
-            alias L = LocalOperand!int;
-            alias Compare = IntegerCompare!(op, false, L, R);
-            alias Condition = CompareCondition!(op, L, R);
-            if (auto compare = cast(Compare) test)
-                return new ForLoop!Condition(
-                    controlFlow, Condition(compare._left, compare._right), step);
-        }}
-    return new ForLoop!NodeCondition(controlFlow, NodeCondition(test, position), step);
+    exit = false;
+    if (flow == TreeFlow.break_) {
+        exit = true;
+        return TreeFlow.normal;
+    }
+    if (flow == TreeFlow.return_) {
+        exit = true;
+        return flow;
+    }
+    if (flow == TreeFlow.generic && controlFlow.leavesLoop(null)) {
+        exit = true;
+        return controlFlow.hasTransfer ? TreeFlow.generic : TreeFlow.normal;
+    }
+    return TreeFlow.normal;
+}
+
+private final class DoLoop(C) : Loop {
+    private ControlFlowState* _controlFlow;
+    private C _condition;
+    private Position _position;
+    public this(
+        ControlFlowState* controlFlow, C condition, Position position,
+    ) {
+        _controlFlow = controlFlow; _condition = condition;
+        _position = position;
+    }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        do {
+            const flow = _body.run(frame);
+            if (flow != TreeFlow.normal) {
+                bool exit;
+                const result = afterBody(flow, _controlFlow, exit);
+                if (exit)
+                    return result;
+            }
+            static if (C.mayFault)
+                _position.note;
+        } while (_condition.test(frame));
+        return TreeFlow.normal;
+    }
 }
 
 private final class ReturnValue(T) : Node {
@@ -2693,6 +2789,15 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
         return new Uninitialised!E(ev, inner, where);
     }
 
+    // The nodes of the statements that `inner` runs in order, built on
+    // first execution.
+    Node[] children(Statement inner) {
+        auto nodes = new Node[statementsOf(inner).length];
+        foreach (i, one; statementsOf(inner))
+            nodes[i] = child(one, &nodes[i]);
+        return nodes;
+    }
+
     Node condition(Expression expression) {
         auto node = buildTruth(ev, expression);
         return node is null ? new GenericCondition!E(ev, expression) : node;
@@ -2705,10 +2810,7 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
             auto compound = cast(CompoundStatement) statement;
             if (compound.statements is null)
                 return new Jump!(TreeFlow.normal);
-            Statement[] inner;
-            foreach (candidate; *compound.statements)
-                if (candidate !is null)
-                    inner ~= candidate;
+            auto inner = statementsOf(compound);
             static foreach (count; AliasSeq!(2, 3))
                 if (inner.length == count) {
                     auto sequence = new ShortSequence!count;
@@ -2716,10 +2818,7 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
                         sequence._children[i] = child(one, &sequence._children[i]);
                     return sequence;
                 }
-            auto nodes = new Node[inner.length];
-            foreach (i, one; inner)
-                nodes[i] = child(one, &nodes[i]);
-            return new Sequence(nodes);
+            return new Sequence(children(compound));
         }
         case Scope: {
             auto scoped = statement.isScopeStatement;
@@ -2749,7 +2848,7 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
             if (ifPlan(conditional).kind != IfPlan.Kind.condition
                     || conditional.ifbody is null)
                 return generic();
-            auto node = new IfThenElse(condition(conditional.condition),
+            auto node = condition(conditional.condition).ifThenElse(
                 positionOf(ev, conditional.condition));
             node._then = child(conditional.ifbody, &node._then);
             if (conditional.elsebody !is null)
@@ -2758,8 +2857,6 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
         }
         case For: {
             auto loop = statement.isForStatement;
-            if (loop._init !is null)
-                return generic();
             Node test;
             if (loop.condition !is null)
                 test = condition(loop.condition);
@@ -2770,11 +2867,20 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
                     return generic();
                 step = statementOf(step, positionOf(ev, loop.increment));
             }
-            auto node = loopOf(test,
-                loop.condition is null ? Position() : positionOf(ev, loop.condition),
-                step, &ev._controlFlow);
-            if (loop._body !is null)
-                node._body = child(loop._body, &node._body);
+            // dmd moves the initialiser out of every `for` before it runs.
+            assert(loop._init is null);
+            auto node = test is null
+                ? new ForLoop!Always(&ev._controlFlow, Always(), step, Position())
+                : test.forLoop(&ev._controlFlow, step,
+                    positionOf(ev, loop.condition));
+            node._body = Statements(children(loop._body));
+            return node;
+        }
+        case Do: {
+            auto loop = statement.isDoStatement;
+            auto node = condition(loop.condition).doLoop(
+                &ev._controlFlow, positionOf(ev, loop.condition));
+            node._body = Statements(children(loop._body));
             return node;
         }
         case Import:
@@ -2789,6 +2895,31 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
             return buildReturn(ev, statement.isReturnStatement);
         default:
             return generic();
+    }
+}
+
+// The statements that `statement` runs in order: a block's own, or the
+// statement itself.
+private Statement[] statementsOf(Statement statement) {
+    import dmd.astenums: STMT;
+    import dmd.statement: CompoundStatement;
+
+    if (statement is null)
+        return null;
+    switch (statement.stmt) with (STMT) {
+        case Scope:
+            return statementsOf(statement.isScopeStatement.statement);
+        case Compound, CompoundDeclaration: {
+            Statement[] inner;
+            auto compound = cast(CompoundStatement) statement;
+            if (compound.statements !is null)
+                foreach (candidate; *compound.statements)
+                    if (candidate !is null)
+                        inner ~= candidate;
+            return inner;
+        }
+        default:
+            return [statement];
     }
 }
 
