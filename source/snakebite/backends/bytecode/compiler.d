@@ -1396,6 +1396,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             roles = Operands(N, Operand.callSite);
             return true;
         }
+        // The left array is read from `destination`, which then takes the
+        // result; `width` is an element size.
+        if (handler is &opArrayEqual || handler is &opStaticArrayEqual) {
+            roles = Operands(S, S);
+            return true;
+        }
         CheckedAccess access;
         bool constantValue;
         if (checkedIndexKind(handler, access, constantValue)) {

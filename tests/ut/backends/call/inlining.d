@@ -677,3 +677,29 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+static foreach (backend; Matrix!()) {
+    @("inlining.arrayEqual.inSmallCalleeKeepsCallerLocals." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            bool same(int[] left, int[] right) { return left == right; }
+
+            void main() {
+                int first = 11;
+                int second = 22;
+                auto left = [1, 2, 3];
+                auto right = [1, 2, 3];
+                auto other = [1, 2, 4];
+                auto shorter = [1, 2];
+                assert(same(left, right));
+                assert(!same(left, other));
+                assert(!same(left, shorter));
+                assert(first == 11);
+                assert(second == 22);
+                assert(left == [1, 2, 3]);
+                assert(right == [1, 2, 3]);
+            }
+        });
+    }
+}
