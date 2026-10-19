@@ -1279,7 +1279,7 @@ private final class FieldStore(T) : Node {
     }
 }
 
-// A static array field that every element of which is the one value.
+// A static array field whose elements all hold the one value.
 private final class FieldBroadcast(T) : Node {
     private size_t _offset;
     private size_t _count;
@@ -3859,8 +3859,8 @@ private Node buildStructLiteral(E)(E ev, imported!"dmd.expression".StructLiteral
     const facts = ev.factsOf(literal.type);
     if (literal.useStaticInit)
         return new ImageInto(
-            cast(immutable(ubyte)[]) ev._nativeData.initialValue(
-                literal.type, literal.loc).idup);
+            (cast(const(ubyte)[]) ev._nativeData.initialValue(
+                literal.type, literal.loc)).idup);
     if (isStoredLiteral(literal)) {
         auto image = new ubyte[facts.size];
         ev._nativeData.write(literal.type, facts, literal, image.ptr);

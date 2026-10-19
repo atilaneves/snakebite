@@ -9,14 +9,6 @@ import snakebite.backends.identity: identityPlan;
 import snakebite.nativelayout: isIntegralSize, typeFacts;
 import std.typecons: Flag, No, Yes;
 
-package bool isRealFloatType(imported!"dmd.mtype".Type type) {
-    import dmd.astenums: Tfloat32, Tfloat64, Tfloat80;
-    import dmd.typesem: toBasetype;
-
-    const ty = type.toBasetype.ty;
-    return ty == Tfloat32 || ty == Tfloat64 || ty == Tfloat80;
-}
-
 // A condition that creates no temporary with a lifetime of its own, so
 // that splitting `&&` and `||` into branches changes no destructor
 // order: scalar operations on scalar variables and literals, and direct
@@ -102,4 +94,12 @@ package bool isPlainPlace(Expression expression) {
         default:
             return false;
     }
+}
+
+package bool isRealFloatType(imported!"dmd.mtype".Type type) {
+    import dmd.astenums: Tfloat32, Tfloat64, Tfloat80;
+    import dmd.typesem: toBasetype;
+
+    const ty = type.toBasetype.ty;
+    return ty == Tfloat32 || ty == Tfloat64 || ty == Tfloat80;
 }
