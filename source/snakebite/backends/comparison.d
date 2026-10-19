@@ -34,6 +34,11 @@ package struct ComparisonPlan {
     // `vector` only: how one lane compares, and its facts.
     Kind laneKind;
     TypeFacts laneFacts;
+    // `dynamicArray` and `staticArray` only: the size of one element of the
+    // left operand. Dmd leaves an `EqualExp` unlowered only when the
+    // elements compare as their bytes, so every backend compares
+    // `length * elementSize` bytes after comparing the lengths.
+    size_t elementSize;
 }
 
 // Semantic analysis has already applied D's usual arithmetic conversions.
@@ -43,7 +48,7 @@ package ComparisonPlan comparisonPlan(
     imported!"dmd.expression".BinExp expression,
 ) {
     import dmd.astenums: TY;
-    import dmd.typesem: toBasetype;
+    import dmd.typesem: nextOf, toBasetype;
 
     auto type = expression.e1.type.toBasetype;
     auto plan = ComparisonPlan(kindOf(type), typeFacts(type));
@@ -52,6 +57,9 @@ package ComparisonPlan comparisonPlan(
     if (plan.kind == ComparisonPlan.Kind.staticArray
             && expression.e2.type.toBasetype.ty == TY.Tarray)
         plan.kind = ComparisonPlan.Kind.dynamicArray;
+    if (plan.kind == ComparisonPlan.Kind.dynamicArray
+            || plan.kind == ComparisonPlan.Kind.staticArray)
+        plan.elementSize = typeFacts(type.nextOf).size;
     if (plan.kind == ComparisonPlan.Kind.vector) {
         auto lane = type.isTypeVector.elementType;
         plan.laneKind = kindOf(lane);

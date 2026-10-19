@@ -11,7 +11,7 @@ private:
 
 import dmd.declaration: VarDeclaration;
 import dmd.expression: AssignExp, BinAssignExp, BinExp, CallExp, CastExp,
-    DeclarationExp, Expression, IdentityExp, IndexExp, NewExp, PostExp,
+    DeclarationExp, EqualExp, Expression, IdentityExp, IndexExp, NewExp, PostExp,
     SliceExp, ThisExp;
 import dmd.func: FuncDeclaration;
 import dmd.location: Loc;
@@ -412,6 +412,16 @@ private final class LoadSlice : SliceNode {
     }
 }
 
+// A string literal: its length and the address of its code units, which
+// stay put for the life of the program.
+private final class ConstantSlice : SliceNode {
+    private SliceValue _value;
+    public this(SliceValue value) { _value = value; }
+    public override void executeInto(ubyte*, ubyte* dest) {
+        *cast(SliceValue*) dest = _value;
+    }
+}
+
 private final class NullSlice : SliceNode {
     public override void executeInto(ubyte*, ubyte* dest) {
         *cast(SliceValue*) dest = SliceValue.init;
@@ -468,6 +478,31 @@ private final class SliceIdentity(bool negate) : BoolNode {
         _left.executeInto(frame, cast(ubyte*) &left);
         _right.executeInto(frame, cast(ubyte*) &right);
         const same = left.length == right.length && left.pointer is right.pointer;
+        return negate ? !same : same;
+    }
+}
+
+// `a == b` on dynamic arrays whose elements compare as their bytes: equal
+// lengths and equal element bytes.
+private final class SliceEquality(bool negate) : BoolNode {
+    private Node _left;
+    private Node _right;
+    private size_t _elementSize;
+    public this(Node left, Node right, size_t elementSize) {
+        _left = left;
+        _right = right;
+        _elementSize = elementSize;
+    }
+    public override bool executeBool(ubyte* frame) {
+        import core.stdc.string: memcmp;
+
+        SliceValue left = void;
+        SliceValue right = void;
+        _left.executeInto(frame, cast(ubyte*) &left);
+        _right.executeInto(frame, cast(ubyte*) &right);
+        const bytes = left.length * _elementSize;
+        const same = left.length == right.length
+            && (bytes == 0 || memcmp(left.pointer, right.pointer, bytes) == 0);
         return negate ? !same : same;
     }
 }
@@ -1980,6 +2015,12 @@ private Node buildSlice(E)(E ev, Expression expression) {
         }
         case null_:
             return new NullSlice;
+        case string_: {
+            SliceValue value;
+            ev._nativeData.write(expression.type, ev.factsOf(expression.type),
+                expression, cast(ubyte*) &value);
+            return new ConstantSlice(value);
+        }
         case slice:
             return buildSliceOf(ev, expression.isSliceExp);
         case call:
@@ -2297,11 +2338,9 @@ private Node buildValue(E)(E ev, Expression expression) {
         case greaterThan: return buildCompare!">"(ev, expression.isBinExp);
         case greaterOrEqual: return buildCompare!">="(ev, expression.isBinExp);
         case equal:
-            return expression.isEqualExp.lowering !is null
-                ? null : buildCompare!"=="(ev, expression.isBinExp);
+            return buildEquality!false(ev, expression.isEqualExp);
         case notEqual:
-            return expression.isEqualExp.lowering !is null
-                ? null : buildCompare!"!="(ev, expression.isBinExp);
+            return buildEquality!true(ev, expression.isEqualExp);
         case andAnd, orOr: {
             auto logical = expression.isLogicalExp;
             const plan = logicalPlan(logical);
@@ -2545,6 +2584,40 @@ private Node buildBinary(string op, E)(E ev, BinExp e, in Scalar scalar) {
         }
     }
     return null;
+}
+
+// `==` and `!=`: dmd's lowering (a call to `__equals`) where it made one;
+// otherwise dynamic arrays compared as bytes, or a scalar compare.
+private Node buildEquality(bool negate, E)(E ev, EqualExp e) {
+    import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
+
+    if (e.lowering !is null)
+        return buildValue(ev, e.lowering);
+    const plan = comparisonPlan(e);
+    if (plan.kind == ComparisonPlan.Kind.dynamicArray
+            || plan.kind == ComparisonPlan.Kind.staticArray) {
+        auto left = buildArrayOperand(ev, e.e1);
+        auto right = buildArrayOperand(ev, e.e2);
+        if (left is null || right is null)
+            return null;
+        return new SliceEquality!negate(left, right, plan.elementSize);
+    }
+    return buildCompare!(negate ? "!=" : "==")(ev, e);
+}
+
+// An operand of an array comparison as a dynamic array value: a static
+// array is its address and its length.
+private Node buildArrayOperand(E)(E ev, Expression operand) {
+    import dmd.astenums: TY;
+    import dmd.expressionsem: toInteger;
+    import dmd.typesem: toBasetype;
+
+    auto type = operand.type.toBasetype;
+    if (type.ty != TY.Tsarray)
+        return buildSlice(ev, operand);
+    auto address = buildAddress(ev, operand);
+    return address is null ? null : new StaticArrayToSlice(
+        address, cast(size_t) type.isTypeSArray.dim.toInteger);
 }
 
 private Node buildCompare(string op, E)(E ev, BinExp e) {
