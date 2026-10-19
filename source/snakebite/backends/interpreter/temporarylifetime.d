@@ -87,8 +87,10 @@ public struct TemporaryLifetime {
         return cast(Expression) _expressions.root;
     }
 
-    public const(void)** rootSlot() return @system @nogc nothrow {
-        return _expressions.rootSlot;
+    public bool opens(in FullExpressionScope.Position position)
+        const @nogc nothrow
+    {
+        return _expressions.opens(position);
     }
 
     // A callee with a variable that can keep temporaries (`slots`) gets
