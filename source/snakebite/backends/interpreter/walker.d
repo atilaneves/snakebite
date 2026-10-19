@@ -1514,9 +1514,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     ) {
         ubyte here;
         if (cast(size_t) &here < _stack.limit) {
-            _stack.continueOnNewPiece({
-                runTreeCallee(callee, calleeFrame, place);
-            });
+            runTreeCalleeOnNewPiece(callee, calleeFrame, place);
             return;
         }
 
@@ -1524,6 +1522,17 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _place = place;
         _function = callee.function_;
         executeTreeCallee(callee, calleeFrame);
+    }
+
+    // The closure of the continuation sits in a frame of its own, so the
+    // frame of `runTreeCallee` carries none.
+    pragma(inline, false)
+    private void runTreeCalleeOnNewPiece(
+        TreeCallee* callee, ubyte* calleeFrame, void* place,
+    ) {
+        _stack.continueOnNewPiece({
+            runTreeCallee(callee, calleeFrame, place);
+        });
     }
 
     // The original evaluator reads the function's fields; a tree node reads
@@ -1581,15 +1590,23 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             callee.root = root;
         }
         const flow = root.execute(calleeFrame);
-        if (flow == TreeFlow.generic && _controlFlow.hasGoto) {
-            syncTree(root, calleeFrame);
+        if (flow == TreeFlow.generic && _controlFlow.hasGoto)
+            resumeAtGoto(callee, root, calleeFrame);
+    }
+
+    // The tree met a `goto` that it does not run: the original evaluator
+    // takes the body from there.
+    pragma(inline, false)
+    private void resumeAtGoto(
+        TreeCallee* callee, TreeRoot* root, ubyte* calleeFrame,
+    ) {
+        syncTree(root, calleeFrame);
+        _controlFlow.resume;
+        while (true) {
+            callee.function_.fbody.accept(this);
+            if (!_controlFlow.hasGoto)
+                break;
             _controlFlow.resume;
-            while (true) {
-                callee.function_.fbody.accept(this);
-                if (!_controlFlow.hasGoto)
-                    break;
-                _controlFlow.resume;
-            }
         }
     }
 
