@@ -2035,9 +2035,12 @@ private const(Instruction)* enterWindow(Destination destination, bool indirect)(
     ubyte* calleeFrame = cast(ubyte*) activation + fast.frameOffset;
     activation.frame = calleeFrame;
     static if (indirect)
-        if (adjustment != 0)
+        if (adjustment != 0) {
+            assert(callee.contextOffset != size_t.max,
+                "an adjustment only reaches a callee with a context slot");
             *cast(ubyte**) (calleeFrame + callee.contextOffset) +=
                 adjustment;
+        }
 
     // A result nobody reads still has a place to go.
     static if (destination == Destination.frame)
