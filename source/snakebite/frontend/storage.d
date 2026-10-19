@@ -57,6 +57,14 @@ public bool readsIndexAfterBase(imported!"dmd.expression".IndexExp index) {
         && !isTrivialExp(index.e1);
 }
 
+// The frontend proves the index range, including indexes made for foreach.
+// DMD and LDC omit the runtime check for this fact; operand evaluation stays.
+public bool needsIndexBoundsCheck(
+    in imported!"dmd.expression".IndexExp index,
+) @safe pure nothrow @nogc {
+    return !index.indexIsInBounds;
+}
+
 // Resolves the storage named by an expression. `Result` is deliberately a
 // backend type: the interpreter returns a native pointer, while the bytecode
 // compiler returns a frame slot containing a native pointer. The resolver owns
@@ -207,7 +215,8 @@ public struct StorageResolver(Result, Adapter) {
                     base = resolve(index.e1);
                 auto length = _adapter.storageStaticIndexLength(index);
                 auto indexValue = _adapter.storageIndexValue(index, length);
-                _adapter.storageIndexBounds(index, indexValue, length);
+                if (needsIndexBoundsCheck(index))
+                    _adapter.storageIndexBounds(index, indexValue, length);
                 if (!baseFirst)
                     base = resolve(index.e1);
                 return _adapter.storageStaticIndex(
@@ -235,7 +244,8 @@ public struct StorageResolver(Result, Adapter) {
                 if (!baseFirst)
                     base = resolve(index.e1);
                 auto length = _adapter.storageDynamicIndexLength(index, base);
-                _adapter.storageIndexBounds(index, indexValue, length);
+                if (needsIndexBoundsCheck(index))
+                    _adapter.storageIndexBounds(index, indexValue, length);
                 return _adapter.storageDynamicIndex(
                     index, base, indexValue);
             }

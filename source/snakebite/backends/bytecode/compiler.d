@@ -7665,6 +7665,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: Tarray, Tsarray;
         import dmd.sideeffect: hasSideEffect;
         import snakebite.backends.checkplan: boundsPlanOf, FailurePlan;
+        import snakebite.frontend.storage: needsIndexBoundsCheck;
 
         auto arrayType = expression.e1.type.toBasetype;
         shape.fixedLength = arrayType.ty == Tsarray;
@@ -7674,6 +7675,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return false;
         }
         if ((arrayType.ty != Tarray && !shape.fixedLength)
+                || !needsIndexBoundsCheck(expression)
                 || expression.lengthVar !is null
                 || hasSideEffect(expression.e2)
                 || !isPlainPlace(expression.e1))
@@ -7879,7 +7881,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t placeOfStaticIndex(
         IndexExp expression, Type arrayType, in bool inPlace,
     ) {
-        import snakebite.frontend.storage: readsIndexAfterBase;
+        import snakebite.frontend.storage:
+            needsIndexBoundsCheck, readsIndexAfterBase;
         import snakebite.nativelayout: arrayLengthOffset;
 
         const stride = typeFacts(arrayType.nextOf).size;
@@ -7900,11 +7903,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ? staticArrayPlace(expression.e1, true) : size_t.max;
         const index = indexOperand(
             expression, dimensionSlot, baseFirst ? null : expression.e1);
-        compileIndexCheck(Comparison.lessThan, index,
-            constantWord(dimension),
-            () => Arg(index, 0, size_t.sizeof),
-            () => constantArgument(dimension, size_t.sizeof),
-            expression.loc);
+        if (needsIndexBoundsCheck(expression))
+            compileIndexCheck(Comparison.lessThan, index,
+                constantWord(dimension),
+                () => Arg(index, 0, size_t.sizeof),
+                () => constantArgument(dimension, size_t.sizeof),
+                expression.loc);
         const array = baseFirst
             ? earlyArray : staticArrayPlace(expression.e1, true);
         const address = reserveTemp(pointerFacts);
@@ -7923,7 +7927,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         IndexExp expression, Type arrayType, in bool inPlace,
     ) {
         import dmd.sideeffect: hasSideEffect;
-        import snakebite.frontend.storage: readsIndexAfterBase;
+        import snakebite.frontend.storage:
+            needsIndexBoundsCheck, readsIndexAfterBase;
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
 
         const stride = typeFacts(arrayType.nextOf).size;
@@ -7941,11 +7946,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             if (literal != size_t.max && inPlace) {
                 array = placeOf(expression.e1, true);
                 if (array != size_t.max && !isIndirect(array)) {
-                    compileIndexCheck(Comparison.greaterThan,
-                        array + arrayLengthOffset, constantWord(literal),
-                        () => constantArgument(literal, size_t.sizeof),
-                        () => Arg(array + arrayLengthOffset, 0, size_t.sizeof),
-                        expression.loc);
+                    if (needsIndexBoundsCheck(expression))
+                        compileIndexCheck(Comparison.greaterThan,
+                            array + arrayLengthOffset, constantWord(literal),
+                            () => constantArgument(literal, size_t.sizeof),
+                            () => Arg(array + arrayLengthOffset, 0, size_t.sizeof),
+                            expression.loc);
                     return placeAt(
                         indirectStorage(array + arrayPointerOffset),
                         literal * stride);
@@ -7981,12 +7987,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t index,
     ) {
         import snakebite.nativelayout: arrayLengthOffset;
+        import snakebite.frontend.storage: needsIndexBoundsCheck;
 
         const length = placeAt(array, arrayLengthOffset);
-        compileIndexCheck(Comparison.lessThan, index, length,
-            () => Arg(index, 0, size_t.sizeof),
-            () => Arg(length, 0, size_t.sizeof),
-            expression.loc);
+        if (needsIndexBoundsCheck(expression))
+            compileIndexCheck(Comparison.lessThan, index, length,
+                () => Arg(index, 0, size_t.sizeof),
+                () => Arg(length, 0, size_t.sizeof),
+                expression.loc);
         const address = reserveTemp(pointerFacts);
         emit(&opIndexSlice, address, array, stride, index);
         return indirectStorage(address);
