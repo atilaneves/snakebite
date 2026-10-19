@@ -1860,3 +1860,41 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// Equality of dynamic arrays as a condition: length first, then the
+// elements. Floating elements compare by value, so NaN differs from itself
+// and negative zero equals zero.
+static foreach (backend; Matrix!()) {
+    @("dynamicArrayEqualityInConditions." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int count(string[] words, string wanted) {
+                int found;
+                foreach (word; words) {
+                    if (word == wanted)
+                        ++found;
+                    if (word != wanted)
+                        found += 10;
+                }
+                return found;
+            }
+
+            void main() {
+                assert(count(["ab", "abc", "ab", "", "ba"], "ab") == 2 + 30);
+                assert(count([""], "") == 1);
+
+                int[] ints = [1, 2, 3];
+                int[] same = [1, 2, 3];
+                if (ints != same || !(ints == same) || ints == ints[0 .. 2])
+                    assert(false);
+
+                double[] zero = [0.0];
+                double[] negativeZero = [-0.0];
+                double[] notNumber = [double.nan];
+                if (zero != negativeZero || notNumber == notNumber)
+                    assert(false);
+            }
+        });
+    }
+}
