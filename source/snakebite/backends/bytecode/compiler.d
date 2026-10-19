@@ -804,7 +804,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opFloatNotEqual3, opFloatLessThan3, opFloatLessOrEqual3,
         opFloatGreaterThan3, opFloatGreaterOrEqual3,
         CheckedAccess, opIndexPointer, opIndexSlice, opIndexStatic,
-        checkedIndexAccess, checkedIndexHandler, checkedLoadWidth, checkedIndexKind,
+        checkedIndexAccess, checkedIndexHandler, checkedIndexKind,
         opBitAnd3, opBitOr3, opBitXor3, opShiftLeft3, opShiftRightLogical3,
         opShiftRightArithmetic3, opDivideSigned3, opDivideUnsigned3,
         opModuloSigned3, opModuloUnsigned3,
@@ -1603,33 +1603,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return false;
     }
 
-    // The index of the checked load that is the only way into the return
-    // `returnIndex` of `instructions` and writes the value it returns, or
-    // `size_t.max`. The failure code between them ends in a hook that does
-    // not return, and a failed load writes nothing, so the load can write
-    // the place of the caller itself.
-    private static size_t checkedLoadBefore(
-        in Instruction[] instructions, in size_t returnIndex,
-    ) {
-        const returned = instructions[returnIndex];
-        if (instructions[returnIndex - 1].handler !is &opCall)
-            return size_t.max;
-        size_t load = size_t.max;
-        foreach (index, instruction; instructions) {
-            Instruction probe = instruction;
-            auto target = branchTargetField(probe);
-            if (target is null || *target != returnIndex)
-                continue;
-            if (load != size_t.max || index >= returnIndex
-                    || checkedLoadWidth(instruction.handler) == 0
-                    || instruction.destination != returned.source
-                    || checkedLoadWidth(instruction.handler) != returned.width)
-                return size_t.max;
-            load = index;
-        }
-        return load;
-    }
-
     // Whether `instruction` writes the whole of `destination` with a result
     // of `width` bytes in one machine word or less, from operands that do
     // not include `destination` itself (a two-address instruction reads it).
@@ -1714,28 +1687,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 positions[*target] = targetMark;
         }
         // A return whose copy to `destOffset` the instruction before it
-        // does instead. `direct` is indexed by the return, `writesDirect`
-        // by the instruction that writes the value.
+        // does instead.
         auto direct = new bool[instructions.length];
-        auto writesDirect = new bool[instructions.length];
         foreach (i, instruction; instructions) {
             if (instruction.handler !is &opReturn || destOffset == discardResult
-                    || i == 0 || (instruction.source & (1UL << 63)) != 0)
+                    || i == 0 || positions[i] == targetMark
+                    || (instruction.source & (1UL << 63)) != 0)
                 continue;
-            if (positions[i] != targetMark) {
-                const previous = instructions[i - 1];
-                if (previous.destination == instruction.source
-                        && writesWholeWord(previous, instruction.width)) {
-                    direct[i] = true;
-                    writesDirect[i - 1] = true;
-                }
-                continue;
-            }
-            const load = checkedLoadBefore(instructions, i);
-            if (load != size_t.max) {
-                direct[i] = true;
-                writesDirect[load] = true;
-            }
+            const previous = instructions[i - 1];
+            direct[i] = previous.destination == instruction.source
+                && writesWholeWord(previous, instruction.width);
         }
 
         const constantBase = _constants.length;
@@ -1769,7 +1730,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             }
             Instruction copied = instruction;
             if (roles.destination == Operand.storage)
-                copied.destination = writesDirect[i]
+                copied.destination = i + 1 < instructions.length
+                        && direct[i + 1]
                     ? destOffset : place(copied.destination);
             if (roles.source == Operand.storage)
                 copied.source = place(copied.source);
