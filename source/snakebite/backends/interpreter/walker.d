@@ -1091,6 +1091,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         return call;
     }
 
+    package bool resultIsReceiver(FuncDeclaration function_) {
+        return callShapeOf(function_).adapter.resultIsReceiver;
+    }
+
     private const(CallShape)* callShapeOf(FuncDeclaration function_) {
         if (auto cached = function_ in _calls)
             return cached;
@@ -1445,7 +1449,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return null;
         auto callee = new TreeCallee;
         callee.function_ = function_;
-        callee.route = decision.route;
+        callee.decision = decision;
         callee.layout = layout;
         callee.closurePlan = closurePlan;
         callee.returnType = returnType;
@@ -1454,9 +1458,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             && layout.alignment != 0
             && (layout.alignment & (layout.alignment - 1)) == 0
             && layout.alignment < pageSize;
-        if (decision.route == CallSelection.Route.native)
-            callee.plan = _plans.of(function_);
-        callee.builtinEntry = decision.builtinEntry;
         return callee;
     }
 
@@ -1466,20 +1467,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         TreeCallee* callee, const(CallPlan)* plan, ubyte* calleeFrame,
         void* place,
     ) {
-        import core.stdc.stdlib: alloca;
-
-        const layout = callee.layout;
-        const hasThis = layout.hiddenThis.variable !is null;
-        const count = layout.parameters.length + hasThis;
-        auto slots = (cast(const(void)**) alloca(
-            count * (const(void)*).sizeof))[0 .. count];
-        size_t next;
-        if (hasThis)
-            slots[next++] = calleeFrame + layout.hiddenThis.parameter.offset;
-        foreach (parameter; layout.parameters)
-            slots[next++] = calleeFrame + parameter.offset;
-        if (callee.route == CallSelection.Route.builtin && plan is null)
-            callee.builtinEntry(place, slots.ptr, count);
+        auto arguments = argumentSlots(calleeFrame, callee.layout);
+        const slots = arguments.values;
+        if (plan is null)
+            callee.decision.builtinEntry(place, slots.ptr, slots.length);
         else
             callPlan(plan, place, slots);
     }
