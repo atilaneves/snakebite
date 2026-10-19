@@ -2070,19 +2070,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // that the call runs. Null for the entry of host code.
         private ubyte* _frame;
         private size_t _activationMark;
-        // The fields below hold the previous owner's values, and are set only
-        // while `_evaluator._fieldsOwner is &this` (`spill`).
-        private CallStateGuard* _outerFieldsOwner = void;
-        private Type _type = void;
-        private TypeFacts _facts = void;
-        private ubyte* _frameBase = void;
-        private ubyte* _closureBase = void;
-        private const(FrameLayout)* _layout = void;
-        private const(ClosurePlan)* _activeClosurePlan = void;
-        private Identifier _pendingLoopLabel = void;
-        private ControlFlowState _controlFlow = void;
-        private ReturnedLvalue _returned = void;
-        private uint _ctfeBlockDepth = void;
 
         @disable this();
         @disable this(this);
@@ -2107,37 +2094,57 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 _evaluator.releaseActivationAllocations(_activationMark);
         }
 
+        // Keeps the previous owner's values of the function's fields on the
+        // evaluator's spill stack, until `unspill` takes them back.
         pragma(inline, false)
         private void spill() {
-            _outerFieldsOwner = _evaluator._fieldsOwner;
-            _type = _evaluator._type;
-            _facts = _evaluator._facts;
-            _frameBase = _evaluator._frameBase;
-            _closureBase = _evaluator._closureBase;
-            _layout = _evaluator._layout;
-            _activeClosurePlan = _evaluator._activeClosurePlan;
-            _pendingLoopLabel = _evaluator._pendingLoopLabel;
-            _controlFlow = _evaluator._controlFlow;
-            _returned = _evaluator._returned;
-            _ctfeBlockDepth = _evaluator.ctfeBlockDepth;
-            _evaluator._fieldsOwner = &this;
+            auto evaluator = _evaluator;
+            evaluator._spills.push(Spill(
+                evaluator._fieldsOwner, evaluator._type, evaluator._facts,
+                evaluator._frameBase, evaluator._closureBase,
+                evaluator._layout, evaluator._activeClosurePlan,
+                evaluator._pendingLoopLabel, evaluator._controlFlow,
+                evaluator._returned, evaluator.ctfeBlockDepth));
+            evaluator._fieldsOwner = &this;
         }
 
         pragma(inline, false)
         private void unspill() {
-            _evaluator._type = _type;
-            _evaluator._facts = _facts;
-            _evaluator._frameBase = _frameBase;
-            _evaluator._closureBase = _closureBase;
-            _evaluator._layout = _layout;
-            _evaluator._activeClosurePlan = _activeClosurePlan;
-            _evaluator._pendingLoopLabel = _pendingLoopLabel;
-            _evaluator._controlFlow = _controlFlow;
-            _evaluator._returned = _returned;
-            _evaluator.ctfeBlockDepth = _ctfeBlockDepth;
-            _evaluator._fieldsOwner = _outerFieldsOwner;
+            auto evaluator = _evaluator;
+            auto spilled = evaluator._spills.back;
+            evaluator._type = spilled.type;
+            evaluator._facts = spilled.facts;
+            evaluator._frameBase = spilled.frameBase;
+            evaluator._closureBase = spilled.closureBase;
+            evaluator._layout = spilled.layout;
+            evaluator._activeClosurePlan = spilled.activeClosurePlan;
+            evaluator._pendingLoopLabel = spilled.pendingLoopLabel;
+            evaluator._controlFlow = spilled.controlFlow;
+            evaluator._returned = spilled.returned;
+            evaluator.ctfeBlockDepth = spilled.ctfeBlockDepth;
+            evaluator._fieldsOwner = spilled.outerFieldsOwner;
+            evaluator._spills.pop;
         }
     }
+
+    // The previous owner's values of the function's fields, kept while a
+    // later call owns them. Guards spill and unspill in the order they end,
+    // so the last record is always the one of the guard that ends.
+    private static struct Spill {
+        private CallStateGuard* outerFieldsOwner;
+        private Type type;
+        private TypeFacts facts;
+        private ubyte* frameBase;
+        private ubyte* closureBase;
+        private const(FrameLayout)* layout;
+        private const(ClosurePlan)* activeClosurePlan;
+        private Identifier pendingLoopLabel;
+        private ControlFlowState controlFlow;
+        private ReturnedLvalue returned;
+        private uint ctfeBlockDepth;
+    }
+
+    private CStack!(Spill, true) _spills;
 
     // Where the hidden context and each explicit parameter's bytes sit in
     // the frame the caller just filled: what the FFI needs to hand them
