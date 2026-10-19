@@ -1524,6 +1524,38 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         executeTreeCallee(callee, calleeFrame);
     }
 
+    // Runs the body of a callee that is one `return`, whose frame at
+    // `calleeFrame` the caller has filled, and gives its value back in a
+    // register. `T` is `long` for an integral or `double` for a floating
+    // result.
+    package T runTreeValue(T)(
+        TreeRoot* root, FuncDeclaration function_, ubyte* calleeFrame,
+    ) {
+        ubyte here;
+        if (cast(size_t) &here < _stack.limit)
+            return runTreeValueOnNewPiece!T(root, function_, calleeFrame);
+
+        auto guard = CallStateGuard(this, calleeFrame);
+        _function = function_;
+        static if (is(T == long))
+            return root.returnLong(calleeFrame);
+        else
+            return root.returnDouble(calleeFrame);
+    }
+
+    // The closure of the continuation sits in a frame of its own, so the
+    // frame of `runTreeValue` carries none.
+    pragma(inline, false)
+    private T runTreeValueOnNewPiece(T)(
+        TreeRoot* root, FuncDeclaration function_, ubyte* calleeFrame,
+    ) {
+        T value;
+        _stack.continueOnNewPiece({
+            value = runTreeValue!T(root, function_, calleeFrame);
+        });
+        return value;
+    }
+
     // The closure of the continuation sits in a frame of its own, so the
     // frame of `runTreeCallee` carries none.
     pragma(inline, false)
