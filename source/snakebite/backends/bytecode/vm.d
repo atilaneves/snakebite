@@ -19,6 +19,12 @@ extern(C) void executeCallPlan(
     size_t argumentCount,
 );
 
+// The guest word behind `address`, or null when `address` is not an entry of
+// the backend that owns the plan, and the receiver adjustment of that entry.
+extern(C) const(void)* guestWordOf(
+    const(void)* opaquePlan, const(void)* address, out ptrdiff_t adjustment,
+);
+
 extern(C) bool executeIndirectCallPlan(
     const(void)* opaquePlan, ref const(void)* address, void* returnPlace,
     scope const(void*)* arguments, size_t argumentCount,
@@ -123,12 +129,16 @@ public struct CallSite {
         in Window window,
     ) {
         auto site = guest(prepare, args, returnWidth);
-        site.windowSlot = window.baseSlot;
-        site.windowDisp = window.activation;
-        site.windowScratch = window.scratch;
-        site.windowEnd = window.end;
-        site.windowAlignment = window.alignment;
+        site.useWindow(window);
         return site;
+    }
+
+    package void useWindow(in Window window) {
+        windowSlot = window.baseSlot;
+        windowDisp = window.activation;
+        windowScratch = window.scratch;
+        windowEnd = window.end;
+        windowAlignment = window.alignment;
     }
 
     // Where a caller lays out one call. The frame of the caller holds a
@@ -284,6 +294,27 @@ public struct CallSite {
         // How far past the activation the committed bytes must reach: the
         // frame and the call windows of the callee.
         package size_t reachBytes;
+
+        // Sets every field but `state` and `callee` to what a call needs of
+        // `function_`, a callee that a call window can hold.
+        package static void measure(
+            ref FastCall slot, in Function function_,
+        ) {
+            const alignment = function_.activationAlignment;
+            slot.frameOffset =
+                (Activation.sizeof + alignment - 1) & ~(size_t(alignment) - 1);
+            slot.alignment = alignment;
+            slot.frameBytes = slot.frameOffset + function_.frameSize;
+            const unusedStore = Activation.resume.offsetof - slot.frameOffset;
+            slot.placeStore = function_.returnPlace.offset == size_t.max
+                ? unusedStore : function_.returnPlace.offset;
+            slot.windowStore = function_.windowSlot == size_t.max
+                ? unusedStore : function_.windowSlot;
+            slot.windowBase = (slot.frameBytes + alignment - 1)
+                & ~(size_t(alignment) - 1);
+            slot.reachBytes = function_.windowSlot == size_t.max
+                ? slot.frameBytes : slot.windowBase + function_.windowBytes;
+        }
     }
 
     package FastCall fast;
@@ -343,23 +374,17 @@ public struct CallSite {
             return false;
         assert(function_.frameAlignment > 0
             && (function_.frameAlignment & (function_.frameAlignment - 1)) == 0);
-        const alignment = function_.frameAlignment > uint(Activation.alignof)
-            ? function_.frameAlignment : uint(Activation.alignof);
-        if (alignment > windowAlignment)
+        assert(function_.windowCallable);
+        if (function_.activationAlignment > windowAlignment)
             return false;
-        slot.frameOffset =
-            (Activation.sizeof + alignment - 1) & ~(size_t(alignment) - 1);
-        slot.alignment = alignment;
-        slot.frameBytes = slot.frameOffset + function_.frameSize;
-        const unusedStore = Activation.resume.offsetof - slot.frameOffset;
-        slot.placeStore = function_.returnPlace.offset == size_t.max
-            ? unusedStore : function_.returnPlace.offset;
-        slot.windowStore = function_.windowSlot == size_t.max
-            ? unusedStore : function_.windowSlot;
-        slot.windowBase = (slot.frameBytes + alignment - 1)
-            & ~(size_t(alignment) - 1);
-        slot.reachBytes = function_.windowSlot == size_t.max
-            ? slot.frameBytes : slot.windowBase + function_.windowBytes;
+        const facts = &function_.windowFacts;
+        slot.frameBytes = facts.frameBytes;
+        slot.frameOffset = facts.frameOffset;
+        slot.alignment = facts.alignment;
+        slot.placeStore = facts.placeStore;
+        slot.windowStore = facts.windowStore;
+        slot.windowBase = facts.windowBase;
+        slot.reachBytes = facts.reachBytes;
         slot.callee = function_;
         return true;
     }
@@ -994,6 +1019,24 @@ public struct Function {
     // is how far they reach from it.
     package size_t windowSlot = size_t.max;
     package size_t windowBytes;
+    // Facts about this function as a callee, fixed once it is compiled.
+    // Whether a caller can write the arguments into a call window: the
+    // layout has no D-variadic slots, no frame asks for a page of
+    // alignment, and there is no closure. The signature to compare against
+    // is `signature`, and the context slot, if any, is `contextOffset`.
+    package bool windowCallable;
+    // `frameAlignment`, raised to what an `Activation` needs.
+    package uint activationAlignment = uint(Activation.alignof);
+
+    // What a call of this function through a call window needs, but for
+    // `callee` and `state`.
+    package CallSite.FastCall windowFacts;
+
+    package void fixWindowFacts() {
+        activationAlignment = frameAlignment > uint(Activation.alignof)
+            ? frameAlignment : uint(Activation.alignof);
+        CallSite.FastCall.measure(windowFacts, this);
+    }
 }
 
 
@@ -1914,6 +1957,67 @@ private const(Instruction)* callWindow(Destination destination)(
             *cast(shared(uint)*) &fast.state) != CallSite.FastCall.State.ready)
         return opCallSlow(pc, active, state, frame, r0, fp0);
 
+    return enterWindow!(destination, false)(
+        pc, active, state, frame, r0, fp0, site, fast, fast.callee, 0);
+}
+
+public alias opCallIndirectWindowFrame =
+    callIndirectWindow!(Destination.frame);
+public alias opCallIndirectWindowIndirect =
+    callIndirectWindow!(Destination.indirect);
+public alias opCallIndirectWindowDiscard =
+    callIndirectWindow!(Destination.discard);
+
+// A call through a function pointer or a delegate, with the arguments in a
+// call window that the compiler laid out from the signature of the value.
+// When the value is an entry of this backend for a function whose frame
+// reads the window as it is, the call enters that function like a window
+// call. Any other value, and a callee that the window does not fit, take
+// `opCallSlow`, which reads the arguments from the window.
+private const(Instruction)* callIndirectWindow(Destination destination)(
+    const(Instruction)* pc,
+    Activation* active,
+    DispatchState* state,
+    ubyte* frame,
+    ulong r0,
+    double fp0,
+) {
+    version (BytecodeCount) {
+        static __gshared CountSlot slot;
+        countExecution(&slot, "opCallIndirectWindow." ~ destination.stringof);
+    }
+    const site = &active.callSites[pc.source];
+    const address = *cast(const(void)**) (frame + site.calleeSlotOffset);
+    ptrdiff_t adjustment;
+    const callee = cast(const(Function)*)
+        guestWordOf(site.nativePlan, address, adjustment);
+    if (callee is null
+            || !callee.windowCallable
+            || callee.signature !is site.value.signature
+            || callee.activationAlignment > site.windowAlignment
+            || (callee.contextOffset != size_t.max) != site.hasContext)
+        return opCallSlow(pc, active, state, frame, r0, fp0);
+
+    return enterWindow!(destination, true)(
+        pc, active, state, frame, r0, fp0, site, &callee.windowFacts, callee,
+        adjustment);
+}
+
+// Links the activation of `fast.callee` in the window of `site` and enters
+// it. `adjustment` is added to the context slot of the callee.
+pragma(inline, true)
+private const(Instruction)* enterWindow(Destination destination, bool indirect)(
+    const(Instruction)* pc,
+    Activation* active,
+    DispatchState* state,
+    ubyte* frame,
+    ulong r0,
+    double fp0,
+    const(CallSite)* site,
+    const(CallSite.FastCall)* fast,
+    const(Function)* callee,
+    in ptrdiff_t adjustment,
+) {
     ubyte* base = *cast(ubyte**) (frame + site.windowSlot);
     auto activation = cast(Activation*) (base + site.windowDisp);
     auto frames = state.frames;
@@ -1930,6 +2034,13 @@ private const(Instruction)* callWindow(Destination destination)(
     activation.frameMark = mark;
     ubyte* calleeFrame = cast(ubyte*) activation + fast.frameOffset;
     activation.frame = calleeFrame;
+    static if (indirect)
+        if (adjustment != 0) {
+            assert(callee.contextOffset != size_t.max,
+                "an adjustment only reaches a callee with a context slot");
+            *cast(ubyte**) (calleeFrame + callee.contextOffset) +=
+                adjustment;
+        }
 
     // A result nobody reads still has a place to go.
     static if (destination == Destination.frame)
@@ -1944,7 +2055,6 @@ private const(Instruction)* callWindow(Destination destination)(
     *cast(void**) (calleeFrame + fast.placeStore) = place;
     *cast(ubyte**) (calleeFrame + fast.windowStore) =
         cast(ubyte*) activation + fast.windowBase;
-    const callee = fast.callee;
     activation.pc = callee.instructions.ptr;
     activation.function_ = callee;
     activation.cleanupMark = frames.cleanupMark;

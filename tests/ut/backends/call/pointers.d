@@ -39,6 +39,47 @@ static foreach (backend; Matrix!()) {
 }
 
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot cast a pointer to an integer"),
+)) {
+    @("pointers.functionPointer.overAlignedCallee." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Wide { align(32) long word; }
+
+            long wide(long first, long second) {
+                Wide value;
+                value.word = first;
+                assert((cast(size_t) &value.word) % 32 == 0);
+                return value.word * 10 + second;
+            }
+
+            // The window starts wherever the frame of the caller ends, so
+            // callers with different frame sizes put it at both 16 byte
+            // offsets of a 32 byte boundary.
+            long viaOne(long function(long, long) callee) {
+                long pad = 1;
+                return callee(4, 2) + pad - 1;
+            }
+
+            long viaTwo(long function(long, long) callee) {
+                long[2] pad = [1, 1];
+                return callee(4, 2) + pad[0] - pad[1];
+            }
+
+            void main() {
+                long function(long, long) callee = &wide;
+                assert(callee(4, 2) == 42);
+                assert(viaOne(callee) == 42);
+                assert(viaTwo(callee) == 42);
+            }
+        });
+    }
+}
+
+
 private alias BoolCallback = extern(D) bool function();
 
 

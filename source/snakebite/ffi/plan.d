@@ -1260,6 +1260,17 @@ public extern(C) const(void)* directWordCallTarget(
     return plan._address;
 }
 
+public extern(C) const(void)* guestWordOf(
+    const(void)* opaquePlan, const(void)* address, out ptrdiff_t adjustment,
+) {
+    const plan = cast(const(CallPlan)*) opaquePlan;
+    if (plan is null || plan._callbacks is null)
+        return null;
+    const target = plan._callbacks.guestTarget(address);
+    adjustment = target.adjustment;
+    return target.word;
+}
+
 public extern(C) bool executeIndirectCallPlan(
     const(void)* opaquePlan, ref const(void)* address, void* returnPlace,
     scope const(void*)* arguments, size_t argumentCount,
