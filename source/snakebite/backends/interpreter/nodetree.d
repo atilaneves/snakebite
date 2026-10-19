@@ -1619,6 +1619,150 @@ private final class Call(E) : Node {
     }
 }
 
+// `core.math.sqrt` and `core.math.fabs` on a `float` or `double`: the host
+// operation on the operand's value, with no call.
+private final class FloatIntrinsic(T, string name) : DoubleNode {
+    private Node _operand;
+    public this(Node operand) { _operand = operand; }
+    public override double executeDouble(ubyte* frame) {
+        import core.math: fabs, sqrt;
+
+        const value = cast(T) _operand.executeDouble(frame);
+        return mixin(name ~ "(value)");
+    }
+}
+
+// A call of a declaration that the host code generator inlines, with by
+// value scalar arguments and a scalar or no result: the wrapper of the
+// shared builtin table reads the argument values where they are and writes
+// the result. There is no frame, no argument slots and no call plan.
+private final class BuiltinOp : Node {
+    private enum maxArguments = 4;
+
+    private imported!"snakebite.backends.builtins".BuiltinCall _entry;
+    private Node[] _args;
+    private Argument[] _modes;
+    private size_t _resultSize;
+    private bool _resultUnsigned;
+
+    public this(
+        typeof(_entry) entry, Node[] args, Argument[] modes,
+        size_t resultSize, bool resultUnsigned,
+    ) {
+        _entry = entry; _args = args; _modes = modes;
+        _resultSize = resultSize; _resultUnsigned = resultUnsigned;
+    }
+
+    private void invoke(ubyte* frame, void* result) {
+        ulong[maxArguments] values;
+        const(void)*[maxArguments] pointers;
+        foreach (i, node; _args) {
+            auto place = cast(ubyte*) &values[i];
+            final switch (_modes[i]) with (Argument) {
+                case i8: *cast(ubyte*) place = cast(ubyte) node.executeLong(frame); break;
+                case i16: *cast(ushort*) place = cast(ushort) node.executeLong(frame); break;
+                case i32: *cast(uint*) place = cast(uint) node.executeLong(frame); break;
+                case i64: *cast(ulong*) place = node.executeLong(frame); break;
+                case f32: *cast(float*) place = node.executeDouble(frame); break;
+                case f64: *cast(double*) place = node.executeDouble(frame); break;
+                case address, slice:
+                    assert(0, "buildIntrinsicCall takes only value arguments");
+            }
+            pointers[i] = place;
+        }
+        _entry(result, pointers.ptr, _args.length);
+    }
+
+    public override long executeLong(ubyte* frame) {
+        ulong[2] buffer;
+        invoke(frame, buffer.ptr);
+        switch (_resultSize) {
+            case 1:
+                return _resultUnsigned
+                    ? cast(long) cast(ubyte) buffer[0] : cast(long) cast(byte) buffer[0];
+            case 2:
+                return _resultUnsigned
+                    ? cast(long) cast(ushort) buffer[0]
+                    : cast(long) cast(short) buffer[0];
+            case 4:
+                return _resultUnsigned
+                    ? cast(long) cast(uint) buffer[0] : cast(long) cast(int) buffer[0];
+            default:
+                return buffer[0];
+        }
+    }
+
+    public override double executeDouble(ubyte* frame) {
+        ulong[2] buffer;
+        invoke(frame, buffer.ptr);
+        return _resultSize == 4
+            ? *cast(float*) buffer.ptr : *cast(double*) buffer.ptr;
+    }
+
+    public override void executeVoid(ubyte* frame) {
+        ulong[2] buffer;
+        invoke(frame, buffer.ptr);
+    }
+}
+
+// The node of a call that the host runs as one operation: `sqrt` and `fabs`
+// of a `float` or `double` computed in place, any other declaration the host
+// code generator inlines through its builtin wrapper. Null for any other
+// call.
+private Node buildIntrinsicCall(E)(E ev, CallExp call, FuncDeclaration function_) {
+    import dmd.astenums: TY;
+    import dmd.typesem: toBasetype;
+    import snakebite.backends.calls: CallSelection;
+    import snakebite.frontend.dmd.functions: typeFunctionOf;
+
+    const selected = ev._callSelection.floatIntrinsicOf(call, function_);
+    if (selected != CallSelection.FloatIntrinsic.none) {
+        const ty = call.type.toBasetype.ty;
+        auto argument = (*call.arguments)[0];
+        if ((ty != TY.Tfloat32 && ty != TY.Tfloat64)
+                || argument.type.toBasetype.ty != ty)
+            return null;
+        auto operand = buildValue(ev, argument);
+        if (operand is null)
+            return null;
+        const single = ty == TY.Tfloat32;
+        final switch (selected) with (CallSelection.FloatIntrinsic) {
+            case none: assert(0, "checked above");
+            case sqrt:
+                return single ? new FloatIntrinsic!(float, "sqrt")(operand)
+                    : new FloatIntrinsic!(double, "sqrt")(operand);
+            case fabs:
+                return single ? new FloatIntrinsic!(float, "fabs")(operand)
+                    : new FloatIntrinsic!(double, "fabs")(operand);
+        }
+    }
+
+    if (function_.fbody !is null || function_.isThis !is null
+            || call.e1.isCommaExp !is null)
+        return null;
+    auto callee = ev.treeCalleeOf(function_);
+    if (callee is null)
+        return null;
+    const decision = CallSelection.atCallSite(callee.decision, call);
+    if (decision.route != CallSelection.Route.builtin
+            || decision.destinationParameter != size_t.max
+            || call.arguments.length > BuiltinOp.maxArguments)
+        return null;
+    const isVoid = call.type.toBasetype.ty == TY.Tvoid;
+    const result = isVoid ? Scalar() : scalarOf(ev, call.type);
+    if (!isVoid && result.kind == Scalar.Kind.none)
+        return null;
+    Node[] args;
+    Argument[] modes;
+    if (!buildArguments(ev, typeFunctionOf(function_), call.arguments, args, modes))
+        return null;
+    foreach (mode; modes)
+        if (mode == Argument.address || mode == Argument.slice)
+            return null;
+    return new BuiltinOp(decision.builtinEntry, args, modes,
+        isVoid ? 0 : result.facts.size, result.facts.isUnsigned);
+}
+
 // --- the builder ------------------------------------------------------
 // Each function returns null for an expression the tree does not cover.
 
@@ -1891,6 +2035,8 @@ private Node buildCall(E)(E ev, CallExp call) {
         return null;
     auto function_ = ev._callSelection.definitionOf(
         call.f, (declaration) => ev._program.linkedFunctionOf(declaration));
+    if (auto intrinsic = buildIntrinsicCall(ev, call, function_))
+        return intrinsic;
     // A constructor call keeps the lifetime handling of the original path,
     // except where `new` makes it (`buildConstructorCall`).
     if (function_.isCtorDeclaration !is null)
