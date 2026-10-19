@@ -9054,6 +9054,25 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.typesem: toBasetype;
 
         const leftIsBool = expression.e1.type.toBasetype.ty == Tbool;
+        // Two `bool` operands evaluate into one temporary: the left value
+        // stays when it decides, the right one overwrites it otherwise, so
+        // there is neither a cast to `bool` nor a join jump.
+        if (leftIsBool && expression.e2.type.toBasetype.ty == Tbool
+                && plan.right == LogicalPlan.Right.value
+                && destOffset != discardResult && plan.hasValue) {
+            const value = reserveTemp(typeFacts(expression.e1.type));
+            compileValue(FullExpressionScope.Position.condition,
+                expression.e1, value, 1);
+            const shortIndex = _instructions.length;
+            emit(plan.andAnd ? &opBranchFalse : &opBranchTrue, value, 0, 1);
+            compileValue(FullExpressionScope.Position.logicalOperand,
+                expression.e2, value, 1);
+            _finished = false;
+            _instructions[shortIndex].source = _instructions.length;
+            if (destOffset != value)
+                emit(&opCopy, destOffset, value, 1);
+            return;
+        }
         const leftOffset = compileCondition(expression.e1,
             FullExpressionScope.Position.condition, leftIsBool);
         const leftInPlace = leftIsBool

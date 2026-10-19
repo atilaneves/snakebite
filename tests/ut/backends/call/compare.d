@@ -1871,3 +1871,140 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+
+// `&&` and `||` over `bool` operands give the same answer whatever the
+// value goes to: a variable, an argument, a field, an array element, or
+// the destination being one of the operands.
+static foreach (backend; Matrix!()) {
+    @("compare.logicalValueDestinations." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { bool flag; }
+
+            bool identity(bool value) { return value; }
+
+            int main() {
+                foreach (bits; 0 .. 4) {
+                    const bool a = (bits & 1) != 0;
+                    const bool b = (bits & 2) != 0;
+
+                    bool x = a;
+                    x = b || x;
+                    if (x != (b || a)) return 1;
+                    x = a;
+                    x = x && b;
+                    if (x != (a && b)) return 2;
+                    x = b;
+                    x = a || x;
+                    if (x != (a || b)) return 3;
+                    x = b;
+                    x = a && x;
+                    if (x != (a && b)) return 4;
+
+                    if (identity(a && b) != (bits == 3)) return 5;
+                    if (identity(a || b) != (bits != 0)) return 6;
+
+                    S s;
+                    s.flag = a && b;
+                    if (s.flag != (bits == 3)) return 7;
+                    s.flag = a || b;
+                    if (s.flag != (bits != 0)) return 8;
+
+                    bool[2] array;
+                    array[1] = a && b;
+                    array[0] = a || b;
+                    if (array[1] != (bits == 3)) return 9;
+                    if (array[0] != (bits != 0)) return 10;
+                }
+                return 0;
+            }
+        });
+    }
+}
+
+
+// Operands that are calls with side effects run in order, and the right one
+// only when the left one does not decide, in every kind of enclosing
+// statement.
+static foreach (backend; Matrix!()) {
+    @("compare.logicalValueSideEffects." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            bool probe(int* log, int id, bool value) {
+                *log = *log * 10 + id;
+                return value;
+            }
+
+            int inIf(bool first, bool second, bool useAnd) {
+                int log;
+                if (true) {
+                    bool r = useAnd ? probe(&log, 1, first) && probe(&log, 2, second)
+                        : probe(&log, 1, first) || probe(&log, 2, second);
+                    log = log * 10 + (r ? 1 : 0);
+                }
+                return log;
+            }
+
+            int inLoop(bool first, bool second) {
+                int log;
+                foreach (i; 0 .. 2) {
+                    bool r = probe(&log, 1, first) && probe(&log, 2, second);
+                    log = log * 10 + (r ? 1 : 0);
+                }
+                return log;
+            }
+
+            int inCase(int selector, bool first, bool second) {
+                int log;
+                switch (selector) {
+                    case 1:
+                        bool r = probe(&log, 1, first) || probe(&log, 2, second);
+                        log = log * 10 + (r ? 1 : 0);
+                        break;
+                    default:
+                        break;
+                }
+                return log;
+            }
+
+            int inTry(bool first, bool second) {
+                int log;
+                try {
+                    bool r = probe(&log, 1, first) && probe(&log, 2, second);
+                    log = log * 10 + (r ? 1 : 0);
+                    throw new Exception("x");
+                } catch (Exception) {
+                    bool r = probe(&log, 3, first) || probe(&log, 4, second);
+                    log = log * 10 + (r ? 1 : 0);
+                }
+                return log;
+            }
+
+            bool last(int* log, bool first, bool second) {
+                return probe(log, 1, first) && probe(log, 2, second);
+            }
+
+            int main() {
+                if (inIf(true, true, true) != 121) return 1;
+                if (inIf(false, true, true) != 10) return 2;
+                if (inIf(true, false, false) != 11) return 3;
+                if (inIf(false, false, false) != 120) return 4;
+                if (inLoop(true, false) != 120120) return 5;
+                if (inLoop(false, true) != 1010) return 6;
+                if (inCase(1, true, false) != 11) return 7;
+                if (inCase(1, false, true) != 121) return 8;
+                if (inCase(2, true, true) != 0) return 9;
+                if (inTry(true, false) != 12031) return 10;
+                if (inTry(false, true) != 10341) return 11;
+                int log;
+                if (last(&log, true, true) != true || log != 12) return 12;
+                log = 0;
+                if (last(&log, false, true) != false || log != 1) return 13;
+                return 0;
+            }
+        });
+    }
+}
