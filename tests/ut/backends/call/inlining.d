@@ -703,3 +703,26 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+static foreach (backend; Matrix!()) {
+    @("inlining.parameters.receiverPointerChangedByCallee." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Item {
+                int value;
+                int replace(Item** slot, Item* replacement) {
+                    *slot = replacement;
+                    return value;
+                }
+            }
+            void main() {
+                Item first = Item(3);
+                Item second = Item(9);
+                Item* current = &first;
+                assert(current.replace(&current, &second) == 3);
+                assert(current is &second);
+            }
+        });
+    }
+}

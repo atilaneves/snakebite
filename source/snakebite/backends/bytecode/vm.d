@@ -997,6 +997,13 @@ package struct InlineBody {
     // The sites of the `opCall` instructions of the body: only calls of
     // druntime hooks, which a failed check makes.
     package CallSite[] callSites;
+    package struct FrameRange {
+        package size_t offset;
+        package size_t size;
+    }
+    package FrameRange[] allocations;
+    package bool exposesFrame;
+    package FrameRange[] exposedFrames;
 }
 
 

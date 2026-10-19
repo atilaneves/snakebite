@@ -910,6 +910,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private PendingExceptionHandler[] _exceptionHandlers;
     private size_t _tempSize;
     private uint _tempAlignment;
+    private InlineBody.FrameRange[] _allocations;
+    private bool _exposesFrame;
+    private InlineBody.FrameRange[] _exposedFrames;
+    private struct DeferredBinding {
+        size_t copy;
+        Arg arg;
+        size_t start;
+        size_t end;
+    }
+    private DeferredBinding[] _deferredBindings;
     // The frame slot that holds where the call windows start, past the end of
     // this frame, so that nothing the callee of a call can write is a
     // temporary of this function. `size_t.max` until a call needs it.
@@ -1125,6 +1135,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _isRefReturn = isRefReturn;
         _tempSize = layout.size;
         _tempAlignment = layout.alignment;
+        foreach (slot; layout.allocatedSlots)
+            _allocations ~= InlineBody.FrameRange(slot.offset,
+                slot.facts.size == 0 ? 1 : slot.facts.size);
 
         auto closurePlan = closurePlanOf(function_);
         if (closurePlan.needsClosure) {
@@ -1156,6 +1169,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (_pendingDefaultJumps.length != 0)
             internalFailure("every `default` a jump targets was compiled");
 
+        bindDeferredArguments;
         forwardCopies;
         removeEmptyLifetimes;
         // Dispatch tests no end of stream: the last instruction ends the
@@ -1440,7 +1454,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
         return new InlineBody(
             _instructions.dup, _constants.dup, _tempSize, _tempAlignment,
-            _relocs.dup, hookSites);
+            _relocs.dup, hookSites, _allocations.dup, _exposesFrame,
+            _exposedFrames.dup);
     }
 
     // Whether an instruction of a copied body leaves its `destination`
@@ -1693,6 +1708,21 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (body_.frameAlignment > _tempAlignment)
             _tempAlignment = body_.frameAlignment;
 
+        foreach (allocation; body_.allocations)
+            _allocations ~= InlineBody.FrameRange(
+                base + allocation.offset, allocation.size);
+        if (body_.exposesFrame)
+            _exposedFrames ~= InlineBody.FrameRange(base, body_.frameSize);
+        foreach (range; body_.exposedFrames)
+            _exposedFrames ~= InlineBody.FrameRange(
+                base + range.offset, range.size);
+
+        const deferredStart = _deferredBindings.length;
+        bool canDefer = !body_.exposesFrame;
+        foreach (instruction; body_.instructions)
+            if (instruction.handler is &opFrameAddress
+                    || instruction.handler is &opIndexStatic)
+                canDefer = false;
         size_t boundCount;
         const mayBind = bodyWritesOnlyItsFrame(body_);
         foreach (arg; args) {
@@ -1700,9 +1730,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     && (arg.callerOffset & (1UL << 63)) == 0
                     && !bodyWrites(body_, arg.calleeOffset, arg.width))
                 args[boundCount++] = arg;
-            else
+            else {
+                if (!mayBind && canDefer && arg.width != 0
+                        && isFrameOperand(arg.callerOffset)
+                        && !bodyWrites(body_, arg.calleeOffset, arg.width))
+                    _deferredBindings ~= DeferredBinding(
+                        _instructions.length,
+                        Arg(arg.callerOffset, base + arg.calleeOffset,
+                            arg.width));
                 emit(&opCopy, base + arg.calleeOffset, arg.callerOffset,
                     arg.width);
+            }
         }
         const bound = args[0 .. boundCount];
         size_t rebase(in size_t offset) {
@@ -1810,6 +1848,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             if (auto target = branchTargetField(copied))
                 *target = positions[*target];
             _instructions ~= copied;
+        }
+
+        foreach (ref binding; _deferredBindings[deferredStart .. $]) {
+            binding.start = start;
+            binding.end = end;
         }
 
         foreach (original; body_.relocs) {
@@ -2033,6 +2076,161 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
+
+    // A pointer store cannot change a value whose allocation has never
+    // supplied an address. Check the complete caller, including loop backs
+    // and addresses formed after this inline call.
+    private void bindDeferredArguments() {
+        import std.meta: AliasSeq;
+
+        if (_deferredBindings.length == 0 || _exposesFrame)
+            return;
+        auto exposed = new bool[_allocations.length];
+        size_t allocationOf(in size_t offset, in size_t width) {
+            size_t low;
+            size_t high = _allocations.length;
+            while (low < high) {
+                const middle = low + (high - low) / 2;
+                const allocation = _allocations[middle];
+                if (offset < allocation.offset)
+                    high = middle;
+                else if (offset - allocation.offset >= allocation.size)
+                    low = middle + 1;
+                else
+                    return width <= allocation.size
+                            - (offset - allocation.offset)
+                        ? middle : _allocations.length;
+            }
+            return _allocations.length;
+        }
+        bool expose(in size_t operand) {
+            if (!isFrameOperand(operand))
+                return true;
+            const at = allocationOf(operand, 1);
+            if (at == _allocations.length)
+                return false;
+            exposed[at] = true;
+            return true;
+        }
+        foreach (range; _exposedFrames)
+            foreach (i, allocation; _allocations)
+                if (overlaps(range.offset, range.size,
+                        allocation.offset, allocation.size))
+                    exposed[i] = true;
+
+        foreach (instruction; _instructions) {
+            const handler = instruction.handler;
+            if (handler is null)
+                continue;
+            if (handler is &opFrameAddress || handler is &opIndexStatic) {
+                if (!expose(instruction.source))
+                    return;
+                continue;
+            }
+            bool call;
+            static foreach (operation; AliasSeq!(
+                opCall, opCallWindowFrame, opCallWindowIndirect,
+                opCallWindowDiscard, opCallIndirectWindowFrame,
+                opCallIndirectWindowIndirect, opCallIndirectWindowDiscard,
+            ))
+                if (handler is &operation)
+                    call = true;
+            if (call) {
+                const site = _callSites[instruction.source];
+                if (instruction.destination != discardResult
+                        && site.returnWidth != 0
+                        && !expose(instruction.destination))
+                    return;
+                final switch (site.kind) with (CallSite.Kind) {
+                    case guest:
+                        break;
+                    case native, builtin:
+                        foreach (arg; site.args)
+                            if (arg.width != 0 && !expose(arg.callerOffset))
+                                return;
+                        break;
+                    case indirect, value:
+                        foreach (arg; site.nativeArgs)
+                            if (arg.width != 0 && !expose(arg.callerOffset))
+                                return;
+                        foreach (arg; site.value.surplus)
+                            if (arg.width != 0 && !expose(arg.callerOffset))
+                                return;
+                        break;
+                }
+                continue;
+            }
+            if (handler is &opTemporaryRegister) {
+                if (!expose(instruction.destination))
+                    return;
+                continue;
+            }
+            if (handler is &opTemporaryArmAddress) {
+                if (!expose(instruction.source))
+                    return;
+                continue;
+            }
+            Operands roles;
+            if (copyOperandsOf(handler, roles))
+                continue;
+            bool known;
+            static foreach (operation; AliasSeq!(
+                opStaticStore, opStaticAddress, opAssert, opAlloca,
+                opTemporaryBegin, opTemporarySuspend, opTemporaryArm,
+                opTemporaryEnd, opDivideSigned, opDivideSigned32,
+                opDivideUnsigned, opModuloSigned, opModuloSigned32,
+                opModuloUnsigned, opFloatAdd, opFloatSubtract,
+                opFloatMultiply, opFloatDivide, opFloatModulo, opFloatNegate,
+                opFloatAbs, opFloatSqrt, opFloatToBool, opFloatWidthCast,
+                opFloatEqual, opFloatNotEqual, opFloatLessThan,
+                opFloatLessOrEqual, opFloatGreaterThan, opFloatGreaterOrEqual,
+                opLoadBitfield, opStoreBitfield,
+            ))
+                if (handler is &operation)
+                    known = true;
+            if (!known)
+                return;
+        }
+
+        foreach (binding; _deferredBindings) {
+            const arg = binding.arg;
+            const at = allocationOf(arg.callerOffset, arg.width);
+            if (at == _allocations.length || exposed[at])
+                continue;
+            size_t rebase(in size_t offset) {
+                return offset >= arg.calleeOffset
+                        && offset - arg.calleeOffset < arg.width
+                    ? arg.callerOffset + (offset - arg.calleeOffset)
+                    : offset;
+            }
+            size_t place(in size_t operand) {
+                return isFrameOperand(operand) ? rebase(operand)
+                    : withAddressSlot(operand, rebase(addressSlotOf(operand)));
+            }
+            foreach (ref instruction;
+                    _instructions[binding.start .. binding.end]) {
+                Operands roles;
+                if (!copyOperandsOf(instruction.handler, roles))
+                    internalFailure("a deferred inline body has known operands");
+                if (roles.destination == Operand.storage)
+                    instruction.destination = place(instruction.destination);
+                if (roles.source == Operand.storage)
+                    instruction.source = place(instruction.source);
+                else if (roles.source == Operand.callSite)
+                    foreach (ref argument;
+                            _callSites[instruction.source].args)
+                        argument.callerOffset = place(argument.callerOffset);
+                if (roles.right == Operand.storage)
+                    instruction.sourceWidth = place(instruction.sourceWidth);
+                if (widthHoldsIndexSlot(instruction.handler)) {
+                    enum low = 0xffff_ffffUL;
+                    instruction.width = (instruction.width & ~low)
+                        | rebase(instruction.width & low);
+                }
+            }
+            _instructions[binding.copy].handler = null;
+        }
+    }
 
     // Copy forwarding. A temporary that one instruction fills and one copy
     // empties makes the producer write the copy's destination instead; a
@@ -2771,6 +2969,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t reserveStorage(in TypeFacts facts) {
         const offset = alignUp(_tempSize, facts.alignment);
         _tempSize = offset + facts.size;
+        if (facts.size != 0)
+            _allocations ~= InlineBody.FrameRange(offset, facts.size);
         if (facts.alignment > _tempAlignment)
             _tempAlignment = facts.alignment;
 
@@ -4420,6 +4620,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             if (_closureOffset != size_t.max)
                 return _closureOffset;
 
+            _exposesFrame = true;
             const result = reserveTemp(pointerFacts);
             emit(&opFrameAddress, result, 0, size_t.sizeof);
             return result;
