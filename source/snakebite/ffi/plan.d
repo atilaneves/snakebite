@@ -1271,6 +1271,14 @@ public extern(C) const(void)* guestWordOf(
     return target.word;
 }
 
+public extern(C) void executeHostCallPlan(
+    const(void)* opaquePlan, const(void)* address, void* returnPlace,
+    scope const(void*)* arguments, size_t argumentCount,
+) {
+    (cast(const(CallPlan)*) opaquePlan).callAt(
+        address, returnPlace, arguments[0 .. argumentCount]);
+}
+
 public extern(C) bool executeIndirectCallPlan(
     const(void)* opaquePlan, ref const(void)* address, void* returnPlace,
     scope const(void*)* arguments, size_t argumentCount,

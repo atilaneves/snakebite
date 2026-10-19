@@ -40,6 +40,23 @@ private bool sameScalar(
     return a.equals(b) || (a.ty == b.ty && a.isTypeBasic !is null);
 }
 
+// An index without calls or side effects is only a read, and it is read
+// after the array expression, calls included. Where that read is a local
+// through a pointer, a `__gshared` global, `*p` or a field, dmd and LDC both
+// do this. For a TLS global, which `isTrivialExp` also accepts, dmd reads the
+// index first and LDC after; the order is unspecified, and this is LDC's.
+// Any other index (a bounds-checked element, a call, `i++`) is evaluated
+// before the array expression, also an unspecified order. An index that sees
+// `$` keeps that place too. `isTrivialExp` allocates nothing, which matters
+// because guest finalizers resolve indexes while the collector runs.
+public bool readsIndexAfterBase(imported!"dmd.expression".IndexExp index) {
+    import dmd.sideeffect: isTrivialExp;
+
+    return index.lengthVar is null
+        && isTrivialExp(index.e2)
+        && !isTrivialExp(index.e1);
+}
+
 // Resolves the storage named by an expression. `Result` is deliberately a
 // backend type: the interpreter returns a native pointer, while the bytecode
 // compiler returns a frame slot containing a native pointer. The resolver owns
@@ -179,33 +196,43 @@ public struct StorageResolver(Result, Adapter) {
         // like `int[3]`.
         auto indexBase = index.e1.type.toBasetype;
         final switch (indexBase.ty) with (TY) {
-            // Static-array code generation evaluates the rightmost index
-            // before recursing into the outer array expression. Keep that
-            // language-defined order in the shared resolver; all other
-            // index kinds evaluate the base before the index.
+            // A trivial index is read after the base, as dmd and LDC both
+            // do. For any other index the compilers disagree, so the order
+            // is unspecified; the shared resolver evaluates that index
+            // before the base.
             case Tsarray: {
+                const baseFirst = readsIndexAfterBase(index);
+                Result base;
+                if (baseFirst)
+                    base = resolve(index.e1);
                 auto length = _adapter.storageStaticIndexLength(index);
                 auto indexValue = _adapter.storageIndexValue(index, length);
                 _adapter.storageIndexBounds(index, indexValue, length);
-                auto base = resolve(index.e1);
+                if (!baseFirst)
+                    base = resolve(index.e1);
                 return _adapter.storageStaticIndex(
                     index, base, indexValue);
             }
 
-            // A normal dynamic-array index evaluates its index before the
-            // array expression. `$` needs the descriptor captured first,
-            // so that special form keeps the extra early step.
+            // A trivial index is read after the base, as dmd and LDC both
+            // do. Any other index is evaluated before the base, an
+            // unspecified order that is kept. `$` needs the descriptor
+            // captured first, so that special form keeps the extra early
+            // step.
             case Tarray: {
+                const baseFirst = index.lengthVar !is null
+                    || readsIndexAfterBase(index);
                 Result base;
                 size_t capturedLength;
-                if (index.lengthVar !is null) {
+                if (baseFirst) {
                     base = resolve(index.e1);
-                    capturedLength = _adapter.storageDynamicIndexLength(
-                        index, base);
+                    if (index.lengthVar !is null)
+                        capturedLength = _adapter.storageDynamicIndexLength(
+                            index, base);
                 }
                 auto indexValue = _adapter.storageIndexValue(
                     index, capturedLength);
-                if (index.lengthVar is null)
+                if (!baseFirst)
                     base = resolve(index.e1);
                 auto length = _adapter.storageDynamicIndexLength(index, base);
                 _adapter.storageIndexBounds(index, indexValue, length);

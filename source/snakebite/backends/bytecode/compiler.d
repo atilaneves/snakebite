@@ -7677,6 +7677,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t placeOfStaticIndex(
         IndexExp expression, Type arrayType, in bool inPlace,
     ) {
+        import snakebite.frontend.storage: readsIndexAfterBase;
         import snakebite.nativelayout: arrayLengthOffset;
 
         const stride = typeFacts(arrayType.nextOf).size;
@@ -7692,13 +7693,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opConstant, dimensionSlot, addConstant(cast(long) dimension),
                 size_t.sizeof);
         }
-        const index = indexOperand(expression, dimensionSlot, expression.e1);
+        const baseFirst = readsIndexAfterBase(expression);
+        const earlyArray = baseFirst
+            ? staticArrayPlace(expression.e1, true) : size_t.max;
+        const index = indexOperand(
+            expression, dimensionSlot, baseFirst ? null : expression.e1);
         compileIndexCheck(Comparison.lessThan, index,
             constantWord(dimension),
             () => Arg(index, 0, size_t.sizeof),
             () => constantArgument(dimension, size_t.sizeof),
             expression.loc);
-        const array = staticArrayPlace(expression.e1, true);
+        const array = baseFirst
+            ? earlyArray : staticArrayPlace(expression.e1, true);
         const address = reserveTemp(pointerFacts);
         emit(&opIndexStatic, address, array, stride, index);
         return indirectStorage(address);
@@ -7715,6 +7721,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         IndexExp expression, Type arrayType, in bool inPlace,
     ) {
         import dmd.sideeffect: hasSideEffect;
+        import snakebite.frontend.storage: readsIndexAfterBase;
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
 
         const stride = typeFacts(arrayType.nextOf).size;
@@ -7745,8 +7752,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     return placeOfSliceAt(expression, array, stride,
                         literalOperand(literal));
             }
-            index = indexOperand(expression, size_t.max, expression.e1);
-            array = sliceOperand(expression.e1, true);
+            if (readsIndexAfterBase(expression)) {
+                array = sliceOperand(expression.e1, true);
+                index = indexOperand(expression, size_t.max, null);
+            } else {
+                index = indexOperand(expression, size_t.max, expression.e1);
+                array = sliceOperand(expression.e1, true);
+            }
         }
         return placeOfSliceAt(expression, array, stride, index);
     }
@@ -7909,16 +7921,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // Where an operand of a three-address instruction is. A plain local is
     // used in place, unless `later` (the operand evaluated after this one)
     // has a side effect: it could write the local. A nothrow, strongly pure
-    // call has none, and cannot write a caller's local.
+    // call has none, and cannot write a caller's local. With
+    // `destructorsFollow`, the consumer reads the operands after destructors
+    // of temporaries ran, and such a destructor could write the place: the
+    // operand is then copied to a temporary whatever `later` is.
     private size_t operandInto(
         Expression operand, Expression later,
         in imported!"snakebite.nativelayout".TypeFacts facts,
-        in size_t width, in bool floating,
+        in size_t width, in bool floating, in bool destructorsFollow = false,
     ) {
         import dmd.sideeffect: hasSideEffect;
 
         const offset = operandPlace(operand, width, floating,
-            later is null || !hasSideEffect(later));
+            !destructorsFollow && (later is null || !hasSideEffect(later)));
         if (offset != size_t.max)
             return offset;
         const temp = reserveTemp(facts);
@@ -8227,16 +8242,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         size_t leftOffset, rightOffset;
         Address rightConstant;
+        // The branch reads the operands after the full expression ends: a
+        // destructor of a temporary in it could write a place first.
+        const destructorsFollow =
+            FullExpressionScope.hasOperandDestructors(comparison);
         fullExpression(position, comparison, {
             rightConstant = constantOf(right, facts.size, floating);
             if (!rightConstant.isNull)
                 leftOffset = operandInto(left, null, facts, facts.size,
-                    floating);
+                    floating, destructorsFollow);
             else {
                 leftOffset = operandInto(left, right, facts, facts.size,
-                    floating);
+                    floating, destructorsFollow);
                 rightOffset = operandInto(right, null, facts, facts.size,
-                    floating);
+                    floating, destructorsFollow);
             }
         });
         const kind = floating ? CompareKind.floating
@@ -9358,7 +9377,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         CallExp expression, FuncDeclaration callee, in size_t destOffset,
     ) {
         import dmd.astenums: STC, Tvoid, VarArg;
-        import snakebite.backends.calls: arityMismatches;
+        import snakebite.backends.calls: arityMismatches, ValueCall;
         import snakebite.frontend.dmd.dispatch: classReceiverOf;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
@@ -9381,7 +9400,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         evalInto(receiver, objectOffset, size_t.sizeof);
 
         const calleeSlotOffset = reserveTemp(pointerFacts);
-        auto calleeLayout = FrameLayout.ofParameters(calleeType, true);
+        auto valueCall = ValueCall.of(calleeType, true);
+        const calleeLayout = valueCall.layout;
         Arg[] args;
         args ~= Arg(
             objectOffset, calleeLayout.hiddenThis.parameter.offset,
@@ -9391,13 +9411,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto site = compileIndirectArguments(
             calleeType, expression.arguments, calleeLayout, args,
             calleeSlotOffset, isVoidCallee ? 0 : returnFacts.size,
-            /* hasContext */ true, /* mayUseWindow */ false);
+            /* hasContext */ true, /* mayUseWindow */ true);
         compileNullCheck(objectOffset, expression.loc);
         compileClassVtableSlot(
             expression, objectOffset, callee, calleeSlotOffset);
+        site.value.signature = valueCall.signature;
         const siteIndex = _callSites.length;
+        const windowed = site.windowSlot != size_t.max;
         _callSites ~= site;
-        emit(&opCall, destOffset, siteIndex, 0);
+        const place = nativeResultPlace(destOffset, isVoidCallee, returnFacts);
+        emit(windowed ? indirectWindowCallHandler(place) : &opCall,
+            place, siteIndex, 0);
     }
 
     // `callee`'s own compiled override, read out of the object's instance
@@ -10436,8 +10460,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // The arguments and call site of a call whose callee address is read
     // from a frame slot at run time: a function pointer, a delegate, or a
     // class's vtable entry. `args` already holds the context or receiver.
-    // Only a call of a function pointer or delegate value may use a call
-    // window (`mayUseWindow`); a virtual call keeps the plain call site.
+    // `mayUseWindow` puts the context and arguments in a call window.
     // Every callee such a site can reach shares `functionType`'s own
     // parameters, so one argument plan covers declared parameters, the
     // `TypeInfo` and cursor of a D variadic, and the extra values of a C
@@ -10452,15 +10475,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in bool hasContext,
         in bool mayUseWindow,
     ) {
+        import core.memory: pageSize;
         import dmd.astenums: VarArg;
 
         auto preparation = CallAdapter.Arguments.of(functionType, arguments);
+        // A frame that asks for a page of alignment is called the generic
+        // way, as `windowFits` decides for a known callee.
         if (mayUseWindow
                 && functionType.parameterList.varargs == VarArg.none
-                && calleeLayout.variadicTypes == size_t.max
-                && calleeLayout.variadicCursor == size_t.max
-                && (!hasContext
-                    || calleeLayout.hiddenThis.parameter.facts.size != 0))
+                && calleeLayout.alignment < pageSize)
             return compileIndirectWindowArguments(
                 functionType, preparation, calleeLayout, args, calleeOffset,
                 returnWidth, hasContext);

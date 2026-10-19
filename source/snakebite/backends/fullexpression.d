@@ -91,7 +91,7 @@ public struct FullExpressionScope {
     // `appendDtors` leaves the result unchanged when `varsInScope` has no
     // destructor. Inner `toElemDtor` operands consume their own entries;
     // declarations in a called function do not belong to this expression.
-    private static bool hasOperandDestructors(
+    public static bool hasOperandDestructors(
         imported!"dmd.expression".Expression result,
     ) {
         import dmd.astenums: STC;
