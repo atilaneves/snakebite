@@ -48,6 +48,37 @@ package struct TreeRoot {
         closurePlan;
     package Type returnType;
     package TypeFacts returnFacts;
+    // Whether a call of this tree runs without a `CallStateGuard`. It holds
+    // when every statement has its node and no node hands control to the
+    // original evaluator for the rest of the call: the evaluator then never
+    // reads a field that the call would have to own. A statement that has
+    // not run has no node yet, and its node may be one that hands control
+    // over, so the flag waits for the last statement. Once set it stays set,
+    // because nothing more is built.
+    package bool lean;
+    private uint _unbuilt;
+    private uint _handingOver;
+
+    // A statement whose node is not built yet.
+    package void expectBuild() {
+        ++_unbuilt;
+    }
+
+    package void built() {
+        --_unbuilt;
+        settle;
+    }
+
+    // A node that runs through the evaluator for the rest of the call: it
+    // needs the call's state to last from one node to the next. A node with
+    // its own fallback for one operation (`handOver`) is not one of these.
+    package void handsOver() {
+        ++_handingOver;
+    }
+
+    private void settle() {
+        lean = _unbuilt == 0 && _handingOver == 0;
+    }
 
     package const(imported!"snakebite.backends.layout".FrameLayout)* layout()
         const {
@@ -124,6 +155,14 @@ package struct CalleeShape {
     package size_t size;
     package bool isUnsigned;
     package bool isFloating;
+    package const(void)* position;
+}
+
+// What the fault handler reads when the load or the store of an accessor
+// faults: the accessor, and the full expression that it runs.
+package struct AccessSite {
+    package FuncDeclaration function_;
+    package const(void)* position;
 }
 
 // Where a variable of an enclosing function lives: the words to load from
@@ -1572,6 +1611,7 @@ private final class ContextStore(E) : Node {
     private TreeRoot* _root;
     public this(E ev, InitStep step) {
         _ev = ev; _step = step; _root = ev._treeRoot;
+        _root.handsOver;
     }
     public override void executeInto(ubyte* frame, ubyte* dest) {
         _ev.syncTree(_root, frame);
@@ -1671,6 +1711,7 @@ private final class EvaluatedWord(E) : LongNode {
     private TreeRoot* _root;
     public this(E ev, Expression expression) {
         _ev = ev; _expression = expression; _root = ev._treeRoot;
+        _root.handsOver;
     }
     public override long executeLong(ubyte* frame) {
         size_t value;
@@ -1686,6 +1727,7 @@ private final class EvaluatedPair(E) : SliceNode {
     private TreeRoot* _root;
     public this(E ev, Expression expression) {
         _ev = ev; _expression = expression; _root = ev._treeRoot;
+        _root.handsOver;
     }
     public override void executeInto(ubyte* frame, ubyte* dest) {
         _ev.evaluateTreeValue(_root, frame, _expression, dest);
@@ -1931,6 +1973,7 @@ private final class GenericStatement(E) : Node {
     private TreeRoot* _root;
     public this(E ev, Statement statement) {
         _ev = ev; _statement = statement; _root = ev._treeRoot;
+        _root.handsOver;
     }
     public override TreeFlow executeStmt(ubyte* frame) {
         _ev.syncTree(_root, frame);
@@ -1954,6 +1997,7 @@ private final class GenericCondition(E) : BoolNode {
     ) {
         _ev = ev; _condition = condition; _position = position;
         _root = ev._treeRoot;
+        _root.handsOver;
     }
     public override bool executeBool(ubyte* frame) {
         _ev.syncTree(_root, frame);
@@ -1970,6 +2014,7 @@ private final class Uninitialised(E) : Node {
     private TreeRoot* _root;
     public this(E ev, Statement statement, Node* slot, TreeRoot* root) {
         _ev = ev; _statement = statement; _slot = slot; _root = root;
+        root.expectBuild;
     }
     public override TreeFlow executeStmt(ubyte* frame) {
         // Building reads the function's layout and return type from the
@@ -1980,6 +2025,7 @@ private final class Uninitialised(E) : Node {
         scope(exit) _ev._treeRoot = outer;
         auto node = buildStatement(_ev, _statement, _slot);
         *_slot = node;
+        _root.built;
         return node.executeStmt(frame);
     }
 }
@@ -2116,6 +2162,7 @@ private struct FastCallee {
     public size_t size;
     public bool isUnsigned;
     public bool isFloating;
+    public AccessSite site;
     public Argument mode;
     // The run of a body: the slots for the arguments and, for a body that
     // is one `return`, the tree whose value comes back in a register. The
@@ -2344,6 +2391,7 @@ private final class Call(E) : Node {
                 fast.size = shape.size;
                 fast.isUnsigned = shape.isUnsigned;
                 fast.isFloating = shape.isFloating;
+                fast.site = AccessSite(callee.function_, shape.position);
                 if (_modes.length != 0)
                     fast.mode = _modes[0];
                 return fast;
@@ -2425,8 +2473,9 @@ private final class Call(E) : Node {
     pragma(inline, false)
     private void originalPath(ubyte* frame, void* result, size_t receiver) {
         auto ev = _ev;
-        ev.syncTree(_root, frame);
-        ev._executeMethodCall(_site, result, _method, cast(void*) receiver);
+        ev.handOver(_root, frame, {
+            ev._executeMethodCall(_site, result, _method, cast(void*) receiver);
+        });
     }
 
     // The callee of this run once the receiver ran, in `_selected`. False
@@ -2578,29 +2627,31 @@ private final class Call(E) : Node {
     // the field. A null receiver never comes here: the callee runs it and
     // reports the fault in the callee, so the access itself cannot fault.
     private long loadLong(FastCallee* fast, size_t receiver) {
-        const place = cast(const(ubyte)*) (receiver + fast.offset);
+        const place = receiver + fast.offset;
+        auto site = &fast.site;
         switch (fast.size) {
             case 1:
                 return fast.isUnsigned
-                    ? cast(long) *cast(const(ubyte)*) place
-                    : cast(long) *cast(const(byte)*) place;
+                    ? cast(long) loadField!ubyte(_ev, site, place)
+                    : cast(long) loadField!byte(_ev, site, place);
             case 2:
                 return fast.isUnsigned
-                    ? cast(long) *cast(const(ushort)*) place
-                    : cast(long) *cast(const(short)*) place;
+                    ? cast(long) loadField!ushort(_ev, site, place)
+                    : cast(long) loadField!short(_ev, site, place);
             case 4:
                 return fast.isUnsigned
-                    ? cast(long) *cast(const(uint)*) place
-                    : cast(long) *cast(const(int)*) place;
+                    ? cast(long) loadField!uint(_ev, site, place)
+                    : cast(long) loadField!int(_ev, site, place);
             default:
-                return *cast(const(long)*) place;
+                return loadField!long(_ev, site, place);
         }
     }
 
     private double loadDouble(FastCallee* fast, size_t receiver) {
-        const place = cast(const(ubyte)*) (receiver + fast.offset);
+        const place = receiver + fast.offset;
         return fast.size == 4
-            ? *cast(const(float)*) place : *cast(const(double)*) place;
+            ? loadField!float(_ev, &fast.site, place)
+            : loadField!double(_ev, &fast.site, place);
     }
 
     // The access of a setter: the argument runs after the receiver, then
@@ -2624,19 +2675,20 @@ private final class Call(E) : Node {
             case address, pair:
                 assert(0, "a setter takes a scalar by value");
         }
-        auto place = cast(ubyte*) (receiver + fast.offset);
+        const place = receiver + fast.offset;
+        auto site = &fast.site;
         switch (fast.size) {
             case 1:
-                *place = cast(ubyte) bits;
+                storeField!ubyte(_ev, site, place, cast(ubyte) bits);
                 break;
             case 2:
-                *cast(ushort*) place = cast(ushort) bits;
+                storeField!ushort(_ev, site, place, cast(ushort) bits);
                 break;
             case 4:
-                *cast(uint*) place = cast(uint) bits;
+                storeField!uint(_ev, site, place, cast(uint) bits);
                 break;
             default:
-                *cast(ulong*) place = bits;
+                storeField!ulong(_ev, site, place, bits);
                 break;
         }
     }
@@ -2725,35 +2777,59 @@ private final class Call(E) : Node {
 private Node byScalarOf(alias make, E)(FastCallee* fast, Call!E call) {
     if (fast.isFloating)
         return fast.size == 4
-            ? make!float(call, fast.offset) : make!double(call, fast.offset);
+            ? make!float(call, fast.offset, &fast.site)
+            : make!double(call, fast.offset, &fast.site);
     TypeFacts facts;
     facts.size = fast.size;
     facts.isUnsigned = fast.isUnsigned;
-    return byIntegral!make(facts, call, fast.offset);
+    return byIntegral!make(facts, call, fast.offset, &fast.site);
 }
 
-private Node makeGetter(T, E)(Call!E call, size_t offset) {
+private Node makeGetter(T, E)(Call!E call, size_t offset, AccessSite* site) {
     return call._receiverIsAddress
-        ? new Getter!(E, T, true)(call, offset)
-        : new Getter!(E, T, false)(call, offset);
+        ? new Getter!(E, T, true)(call, offset, site)
+        : new Getter!(E, T, false)(call, offset, site);
 }
 
-private Node makeSetter(T, E)(Call!E call, size_t offset) {
+private Node makeSetter(T, E)(Call!E call, size_t offset, AccessSite* site) {
     return call._receiverIsAddress
-        ? new Setter!(E, T, true)(call, offset)
-        : new Setter!(E, T, false)(call, offset);
+        ? new Setter!(E, T, true)(call, offset, site)
+        : new Setter!(E, T, false)(call, offset, site);
+}
+
+// The load or the store of an accessor, with the evaluator told which
+// accessor runs: the access is the one instruction that can fault, and the
+// fault is the accessor's.
+private T loadField(T, E)(E ev, AccessSite* site, size_t place) {
+    import core.atomic: MemoryOrder, atomicStore;
+
+    atomicStore!(MemoryOrder.raw)(ev._access, site);
+    const value = *cast(const(T)*) place;
+    atomicStore!(MemoryOrder.raw)(ev._access, null);
+    return value;
+}
+
+private void storeField(T, E)(E ev, AccessSite* site, size_t place, T value) {
+    import core.atomic: MemoryOrder, atomicStore;
+
+    atomicStore!(MemoryOrder.raw)(ev._access, site);
+    *cast(T*) place = value;
+    atomicStore!(MemoryOrder.raw)(ev._access, null);
 }
 
 // The call of a getter at a site that has one callee, as one load at the
 // receiver plus the offset of the field. A null receiver takes the general
 // call, which reports the fault in the callee.
 private final class Getter(E, T, bool receiverIsAddress) : Typed!T {
+    private E _ev;
     private Call!E _call;
     private Operand _receiver;
     private size_t _offset;
+    private AccessSite* _site;
 
-    public this(Call!E call, size_t offset) {
-        _call = call; _receiver = call._receiver; _offset = offset;
+    public this(Call!E call, size_t offset, AccessSite* site) {
+        _ev = call._ev; _call = call; _receiver = call._receiver;
+        _offset = offset; _site = site;
     }
 
     static if (isFloatingPoint!T) {
@@ -2761,14 +2837,14 @@ private final class Getter(E, T, bool receiverIsAddress) : Typed!T {
             const receiver = receiverOn(frame);
             if (receiver == 0)
                 return _call.generalDouble(receiver, frame);
-            return *cast(const(T)*) (receiver + _offset);
+            return loadField!T(_ev, _site, receiver + _offset);
         }
     } else {
         public override long executeLong(ubyte* frame) {
             const receiver = receiverOn(frame);
             if (receiver == 0)
                 return _call.generalLong(receiver, frame);
-            return *cast(const(T)*) (receiver + _offset);
+            return loadField!T(_ev, _site, receiver + _offset);
         }
     }
 
@@ -2785,14 +2861,16 @@ private final class Getter(E, T, bool receiverIsAddress) : Typed!T {
 // receiver takes the general call before the argument runs, which runs it
 // once there.
 private final class Setter(E, T, bool receiverIsAddress) : Node {
+    private E _ev;
     private Call!E _call;
     private Operand _receiver;
     private Operand _argument;
     private size_t _offset;
+    private AccessSite* _site;
 
-    public this(Call!E call, size_t offset) {
-        _call = call; _receiver = call._receiver; _argument = call._args[0];
-        _offset = offset;
+    public this(Call!E call, size_t offset, AccessSite* site) {
+        _ev = call._ev; _call = call; _receiver = call._receiver;
+        _argument = call._args[0]; _offset = offset; _site = site;
     }
 
     public override void executeVoid(ubyte* frame) {
@@ -2808,7 +2886,7 @@ private final class Setter(E, T, bool receiverIsAddress) : Node {
             const value = cast(T) _argument.readDouble(frame);
         else
             const value = cast(T) _argument.readLong(frame);
-        *cast(T*) (receiver + _offset) = value;
+        storeField!T(_ev, _site, receiver + _offset, value);
     }
 }
 
@@ -2860,7 +2938,8 @@ private void examine(E)(E ev, TreeCallee* callee) {
                 return;
             callee.shape = CalleeShape(CalleeShape.Kind.getter, field.offset,
                 scalar.facts.size, scalar.facts.isUnsigned,
-                scalar.kind == Scalar.Kind.floating);
+                scalar.kind == Scalar.Kind.floating,
+                cast(const(void)*) returned.exp);
         }
         return;
     }
@@ -2889,7 +2968,8 @@ private void examine(E)(E ev, TreeCallee* callee) {
             return;
         callee.shape = CalleeShape(CalleeShape.Kind.setter, field.offset,
             scalar.facts.size, scalar.facts.isUnsigned,
-            scalar.kind == Scalar.Kind.floating);
+            scalar.kind == Scalar.Kind.floating,
+            cast(const(void)*) effect.exp);
     }
 }
 
@@ -2949,10 +3029,11 @@ private final class IndirectCall(E) : Node {
         }
         const selected = _selected;
         if (selected.callee is null) {
-            ev.syncTree(_root, frame);
-            ev._executeCallThroughValue(_site, result,
-                cast(void*) target.function_, cast(void*) target.context,
-                _viaDelegate);
+            ev.handOver(_root, frame, {
+                ev._executeCallThroughValue(_site, result,
+                    cast(void*) target.function_, cast(void*) target.context,
+                    _viaDelegate);
+            });
             return;
         }
         enter(selected, target.context + adjustment, frame, result);
