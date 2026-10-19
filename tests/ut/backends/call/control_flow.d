@@ -2155,3 +2155,29 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// The temporary of the left operand is destroyed at the end of the full
+// expression. The right operand indexes with a call, and the comparison
+// reads it before that destructor runs.
+static foreach (backend; Matrix!()) {
+    @("condition.call.indexReadBeforeTemporaryDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Clear {
+                int[]* values;
+                int value;
+                ~this() { (*values)[1] = 0; }
+            }
+
+            int one() { return 1; }
+
+            int main() {
+                int[] values = [1, 9, 3];
+                if (Clear(&values, 5).value < values[one()])
+                    return 0;
+                return 1;
+            }
+        });
+    }
+}
