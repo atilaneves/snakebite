@@ -19,6 +19,7 @@ import dmd.mtype: Type;
 import dmd.statement: Statement;
 import snakebite.backends.checkplan: BoundsCheck;
 import snakebite.backends.controlflow: ControlFlowState;
+import snakebite.backends.fullexpression: FullExpressionScope;
 import snakebite.backends.interpreter.faultslot:
     fastFrameLead, faultSlotOf;
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
@@ -893,34 +894,10 @@ private final class FloatNegate : DoubleNode {
     }
 }
 
-private final class Not : BoolNode {
-    private Node _operand;
-    public this(Node operand) { _operand = operand; }
-    public override bool executeBool(ubyte* frame) { return !_operand.executeBool(frame); }
-}
-
 private final class Truth : BoolNode {
     private Node _operand;
     public this(Node operand) { _operand = operand; }
     public override bool executeBool(ubyte* frame) { return _operand.executeBool(frame); }
-}
-
-private final class AndAnd : BoolNode {
-    private Node _left;
-    private Node _right;
-    public this(Node left, Node right) { _left = left; _right = right; }
-    public override bool executeBool(ubyte* frame) {
-        return _left.executeBool(frame) && _right.executeBool(frame);
-    }
-}
-
-private final class OrOr : BoolNode {
-    private Node _left;
-    private Node _right;
-    public this(Node left, Node right) { _left = left; _right = right; }
-    public override bool executeBool(ubyte* frame) {
-        return _left.executeBool(frame) || _right.executeBool(frame);
-    }
 }
 
 // Whether evaluating an operand can fault, which it can when it is a node.
@@ -967,6 +944,39 @@ private struct FlagAnd(T) {
     public bool test(ubyte* frame) {
         return *cast(ubyte*) (frame + offset) != 0 && right.test(frame);
     }
+}
+
+// `left && right`, `left || right` and `!operand` as tests: the branch form
+// of a condition, which a loop or an `if` holds in place of a node that
+// evaluates it.
+private struct AndTest {
+    public enum mayFault = true;
+
+    public Node left;
+    public Node right;
+
+    public bool test(ubyte* frame) {
+        return left.executeBool(frame) && right.executeBool(frame);
+    }
+}
+
+private struct OrTest {
+    public enum mayFault = true;
+
+    public Node left;
+    public Node right;
+
+    public bool test(ubyte* frame) {
+        return left.executeBool(frame) || right.executeBool(frame);
+    }
+}
+
+private struct NotTest {
+    public enum mayFault = true;
+
+    public Node operand;
+
+    public bool test(ubyte* frame) { return !operand.executeBool(frame); }
 }
 
 // The node that evaluates a test, which a loop or an `if` can hold in its
@@ -1468,13 +1478,19 @@ private final class GenericStatement(E) : Node {
 private final class GenericCondition(E) : BoolNode {
     private E _ev;
     private Expression _condition;
+    private FullExpressionScope.Position _position;
     private TreeRoot* _root;
-    public this(E ev, Expression condition) {
-        _ev = ev; _condition = condition; _root = ev._treeRoot;
+    public this(
+        E ev, Expression condition,
+        in FullExpressionScope.Position position
+            = FullExpressionScope.Position.condition,
+    ) {
+        _ev = ev; _condition = condition; _position = position;
+        _root = ev._treeRoot;
     }
     public override bool executeBool(ubyte* frame) {
         _ev.syncTree(_root, frame);
-        return _ev.conditionHolds(_condition);
+        return _ev.conditionHolds(_condition, _position);
     }
 }
 
@@ -2796,6 +2812,7 @@ private Node buildEffect(E)(E ev, Expression expression) {
 // The node that tests the truth of `expression`, as a condition does.
 private Node buildTruth(E)(E ev, Expression expression) {
     import dmd.tokens: EXP;
+    import snakebite.backends.plaincondition: isPlainCondition;
 
     if (expression.op == EXP.comma)
         return buildComma(ev, expression.isCommaExp, &buildTruth!E);
@@ -2803,7 +2820,47 @@ private Node buildTruth(E)(E ev, Expression expression) {
         auto slice = buildSlice(ev, expression);
         return slice is null ? null : new SliceTruth(slice, expression.type);
     }
+    const splits = expression.op == EXP.andAnd || expression.op == EXP.orOr
+        || expression.op == EXP.not;
+    if (splits && isPlainCondition(expression))
+        return buildBranches(ev, expression, FullExpressionScope.Position.condition);
     return buildValue(ev, expression);
+}
+
+// The node of a condition that makes no temporary of its own, so that each
+// operand of `&&`, `||` and `!` can be a test of its own: an operand that
+// the tree does not build goes to the evaluator as a full expression, as it
+// does inside the evaluator's own `&&`.
+private Node buildBranches(E)(
+    E ev, Expression expression, in FullExpressionScope.Position position,
+) {
+    import dmd.tokens: EXP;
+
+    Node operand(Expression one, in FullExpressionScope.Position where) {
+        const splits = one.op == EXP.andAnd || one.op == EXP.orOr
+            || one.op == EXP.not;
+        if (splits)
+            return buildBranches(ev, one, where);
+        auto node = buildTruth(ev, one);
+        return node is null ? new GenericCondition!E(ev, one, where) : node;
+    }
+
+    if (expression.op == EXP.not)
+        return new Tested!NotTest(NotTest(
+            operand(expression.isNotExp.e1, position)));
+    auto logical = expression.isLogicalExp;
+    return logicalOf(
+        expression.op == EXP.andAnd,
+        operand(logical.e1, position),
+        operand(logical.e2, FullExpressionScope.Position.logicalOperand));
+}
+
+private Node logicalOf(in bool andAnd, Node left, Node right) {
+    if (!andAnd)
+        return new Tested!OrTest(OrTest(left, right));
+    if (auto flag = cast(Local!ubyte) left)
+        return right.andFlag(flag._offset);
+    return new Tested!AndTest(AndTest(left, right));
 }
 
 // The node that yields `expression`'s scalar value.
@@ -2911,15 +2968,11 @@ private Node buildValue(E)(E ev, Expression expression) {
             auto right = buildTruth(ev, logical.e2);
             if (left is null || right is null)
                 return null;
-            if (!plan.andAnd)
-                return new OrOr(left, right);
-            if (auto flag = cast(Local!ubyte) left)
-                return right.andFlag(flag._offset);
-            return new AndAnd(left, right);
+            return logicalOf(plan.andAnd, left, right);
         }
         case not: {
             auto operand = buildTruth(ev, expression.isNotExp.e1);
-            return operand is null ? null : new Not(operand);
+            return operand is null ? null : new Tested!NotTest(NotTest(operand));
         }
         case negate: {
             auto operand = buildValue(ev, expression.isNegExp.e1);

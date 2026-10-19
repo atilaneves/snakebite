@@ -3149,3 +3149,35 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A condition with no temporary splits at `&&`, `||` and `!`. `limit` lives in
+// the closure of a delegate that escapes, so a test of it is not a read of a
+// frame slot.
+static foreach (backend; Matrix!()) {
+    @("logicalConditionsWithAClosureOperand." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int limit = 3;
+                int calls;
+                int delegate() read = () => limit;
+                bool bump() { ++calls; return true; }
+                int taken;
+                foreach (i; 0 .. 6) {
+                    if (i > 0 && limit > i && !(i == 2))
+                        taken += 10;
+                    if (!(i > 1) || limit == i)
+                        taken += 1;
+                    if (i > 0 && bump())
+                        taken += 100;
+                    while (i < 0 || limit < i) {
+                        taken += 1000;
+                        break;
+                    }
+                }
+                return taken == 2513 + read() - 3 && calls == 5 ? 0 : 1;
+            }
+        });
+    }
+}
