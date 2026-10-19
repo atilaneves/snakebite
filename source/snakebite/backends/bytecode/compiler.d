@@ -8053,8 +8053,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // A condition that creates no temporary with a lifetime of its own, so
     // that splitting `&&` and `||` into branches changes no destructor
-    // order: scalar operations on scalar variables and literals. Calls,
-    // aggregates, and everything else keep the value path.
+    // order: scalar operations on scalar variables and literals, and direct
+    // calls of them. Aggregates and everything else keep the value path.
     private bool isPlainCondition(Expression expression) {
         import dmd.astenums: STC, Tpointer;
         import dmd.typesem: toBasetype;
@@ -8087,6 +8087,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     && isPlainCondition(binary.e2);
             case cast_, negate, not:
                 return isPlainCondition(expression.isUnaExp.e1);
+            case call:
+                // A direct call with a scalar result and plain arguments
+                // creates no temporary with a lifetime.
+                auto call = expression.isCallExp;
+                if (call.f is null)
+                    return false;
+                auto tf = call.f.type.isTypeFunction;
+                if (tf is null || tf.parameterList.varargs != imported!"dmd.astenums".VarArg.none
+                        || tf.isRef)
+                    return false;
+                if (call.arguments !is null)
+                    foreach (argument; *call.arguments)
+                        if (!isPlainCondition(argument))
+                            return false;
+                if (auto dot = call.e1.isDotVarExp)
+                    return isPlainPlace(dot.e1);
+                return call.e1.isVarExp !is null;
             default:
                 return false;
         }
