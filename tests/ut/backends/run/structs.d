@@ -6317,3 +6317,54 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+static foreach (backend; Matrix!()) {
+    @("nullPointerAssignmentClearsEveryByte." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                void* pointer = cast(void*) 0x0101010101010101;
+                pointer = null;
+                assert(pointer is null);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("zeroInitializedLocalOfSixteenBytesIsClearedOnEveryIteration." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Wide { long a, b; }
+            void main() {
+                foreach (round; 0 .. 2) {
+                    Wide wide;
+                    assert(wide.a == 0 && wide.b == 0);
+                    wide.a = 1;
+                    wide.b = 2;
+                }
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("zeroInitializedLocalOfTwentyFourBytesIsClearedOnEveryIteration." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Wider { long a, b, c; }
+            void main() {
+                foreach (round; 0 .. 2) {
+                    Wider wider;
+                    assert(wider.a == 0 && wider.b == 0 && wider.c == 0);
+                    wider.a = 1;
+                    wider.b = 2;
+                    wider.c = 3;
+                }
+            }
+        });
+    }
+}
