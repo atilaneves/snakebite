@@ -568,20 +568,19 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     }
 
     // Limits of a callee that a caller copies in place of a call. A longer
-    // callee stays a call. Measured on the tardy test suite and on six
-    // AWFY benchmarks: 24 statements and 100 instructions compile as fast
-    // as 12 and 40 (within noise) and run in the same number of bytecodes.
+    // callee stays a call. The statement budget also bounds compile work
+    // for a callee whose bytecode turns out to be too large to copy.
     //
     // A compile that only a caller needs must not reach code that a plain
     // call would never reach, because `internalFailure` ends the process.
     // `hasTinyBody` therefore admits only `return`, expression, `if`,
-    // compound and scope statements. None of these reaches
+    // compound, scope and `for` statements. None of these reaches
     // `compileCtfeBlockWithLabels` (its body needs a label, which no
     // admitted statement holds, so `comeFrom` is false), and the other
     // `internalFailure` calls check states that dmd's semantic analysis has
     // already excluded for any function body. A callee that takes an
     // address throws `SpeculationRejected` instead (`operandAddress`).
-    private enum maxSpeculativeStatements = 24;
+    private enum maxSpeculativeStatements = 64;
     private enum maxInlineInstructions = 100;
 
     // The deepest chain of callees that compile only for a caller. A
@@ -621,6 +620,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             if (auto conditional = statement.isIfStatement)
                 return tiny(conditional.ifbody)
                     && tiny(conditional.elsebody);
+            if (auto loop = statement.isForStatement)
+                return tiny(loop._init) && tiny(loop._body);
             return statement.isReturnStatement !is null
                 || statement.isExpStatement !is null;
         }
