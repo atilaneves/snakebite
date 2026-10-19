@@ -79,6 +79,16 @@ carries it with the function value.
 The values supplied to a call: hidden context and type information,
 declared parameter values or references, and any variadic extra values.
 
+**Call window**:
+The memory that a direct call from guest code to a compiled guest function
+uses for the callee: `[scratch][activation][parameter slots]`, aligned to at
+least 16 bytes. It starts above the whole frame of the caller; a nested window
+starts above the open one. The caller evaluates each call argument and the call
+receiver straight into its slot, and the callee writes its result straight to
+the place the caller passed, so nothing is copied. A **window call** is a call
+that uses one. Other calls (virtual calls, function pointers, delegates, and
+callees whose temporaries need alignment above 16) take the general call path.
+
 **Prepared facts**:
 Information computed before a guest callback runs, so its execution can use
 that information without asking frontend questions or building it on first use.
