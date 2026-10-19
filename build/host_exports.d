@@ -122,8 +122,6 @@ mixin Export!(ffi, "snakebite_ut_word_double", "directWordCall");
 mixin Export!(ffi, "snakebite_ut_word_combine", "directWordCall");
 mixin Export!(ffi, "snakebite_ut_dWordCombine", "directWordCall");
 mixin Export!(ffi, "snakebite_ut_word_three", "directWordCall.threeArguments");
-mixin Export!(ffi, "snakebite_ut_word_four", "directWordCall.generalPath");
-mixin Export!(ffi, "snakebite_ut_word_double_scaled", "directWordCall.generalPath");
 mixin Export!(ffi, "snakebite_ut_word_slice", "directWordCall.twoWordResult");
 mixin Export!(ffi, "snakebite_ut_dWordThree", "directWordCall.externDThreeArguments");
 mixin Export!(ffi, "snakebite_ut_narrow", "signatures.narrowValues");

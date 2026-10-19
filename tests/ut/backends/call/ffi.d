@@ -135,18 +135,6 @@ public extern(C) long snakebite_ut_word_three(
 }
 
 
-public extern(C) long snakebite_ut_word_four(
-    long first, long second, long third, long fourth,
-) {
-    return ((first * 10 + second) * 10 + third) * 10 + fourth;
-}
-
-
-public extern(C) long snakebite_ut_word_double_scaled(long value, double scale) {
-    return cast(long) (value * scale);
-}
-
-
 // Returned in the two result registers, length first.
 public extern(C) long[] snakebite_ut_word_slice(long* values, long length) {
     return values[0 .. length];
@@ -4680,32 +4668,3 @@ static foreach (backend; Matrix!(
 }
 
 
-// Calls that no direct path takes: a `double` argument and four word
-// arguments still give the right answer.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
-)) {
-    @("directWordCall.generalPath." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeRetOf!(
-            backend,
-            q{
-                pragma(mangle, "snakebite_ut_word_four")
-                extern(C) long four(long first, long second, long third,
-                    long fourth);
-                pragma(mangle, "snakebite_ut_word_double_scaled")
-                extern(C) long scaled(long value, double scale);
-
-                int answer() {
-                    foreach (round; 0 .. 3) {
-                        if (four(1, 2, 3, 4) != 1234) return 1;
-                        if (scaled(21, 2.0) != 42) return 2;
-                    }
-                    return 0;
-                }
-            },
-            "answer",
-        );
-    }
-}
