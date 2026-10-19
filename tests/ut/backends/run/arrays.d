@@ -1756,9 +1756,10 @@ static foreach (backend; Matrix!(
 }
 
 
-// Compiled D evaluates the base of an index expression, calls included,
-// before the index operand, so the index reads a variable the base's call
-// changed.
+// A trivial index operand (a plain read) is read after the calls in the base
+// of the index expression, so it sees a variable the base's call changed.
+// dmd and LDC agree on this order. For other indexes they disagree and the
+// order is unspecified.
 
 static foreach (backend; Matrix!()) {
     @("indexAfterBaseCallLoadDynamic." ~ backend.stringof)

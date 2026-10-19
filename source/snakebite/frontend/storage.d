@@ -40,11 +40,13 @@ private bool sameScalar(
     return a.equals(b) || (a.ty == b.ty && a.isTypeBasic !is null);
 }
 
-// An index without calls or side effects is only a read, and compiled D
-// performs that read when the element is accessed, after the calls in the
-// array expression. An index with side effects, or one that sees `$`, keeps
-// its place before the array expression. `isTrivialExp` allocates nothing,
-// which matters because guest finalizers resolve indexes while the
+// An index without calls or side effects is only a read. For such an index
+// dmd and LDC both evaluate the array expression, calls included, first, so
+// the read sees what those calls changed. For other indexes (a TLS global, a
+// bounds-checked element, a call, `i++`) dmd and LDC disagree, so the order
+// is unspecified and the index keeps its place before the array expression.
+// An index that sees `$` also keeps that place. `isTrivialExp` allocates
+// nothing, which matters because guest finalizers resolve indexes while the
 // collector runs.
 public bool readsIndexAfterBase(imported!"dmd.expression".IndexExp index) {
     import dmd.sideeffect: isTrivialExp;
@@ -193,10 +195,10 @@ public struct StorageResolver(Result, Adapter) {
         // like `int[3]`.
         auto indexBase = index.e1.type.toBasetype;
         final switch (indexBase.ty) with (TY) {
-            // Static-array code generation evaluates the rightmost index
-            // before recursing into the outer array expression. Keep that
-            // language-defined order in the shared resolver; all other
-            // index kinds evaluate the base before the index.
+            // A trivial index is read after the base, as dmd and LDC both
+            // do. For any other index the compilers disagree, so the order
+            // is unspecified; the shared resolver evaluates that index
+            // before the base.
             case Tsarray: {
                 const baseFirst = readsIndexAfterBase(index);
                 Result base;
@@ -211,9 +213,11 @@ public struct StorageResolver(Result, Adapter) {
                     index, base, indexValue);
             }
 
-            // A normal dynamic-array index evaluates its index before the
-            // array expression. `$` needs the descriptor captured first,
-            // so that special form keeps the extra early step.
+            // A trivial index is read after the base, as dmd and LDC both
+            // do. Any other index is evaluated before the base, an
+            // unspecified order that is kept. `$` needs the descriptor
+            // captured first, so that special form keeps the extra early
+            // step.
             case Tarray: {
                 const baseFirst = index.lengthVar !is null
                     || readsIndexAfterBase(index);
