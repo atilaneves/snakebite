@@ -1135,7 +1135,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto closurePlan = closurePlanOf(function_);
         if (closurePlan.needsClosure) {
             _closureLayout = closurePlan.layout;
-            _closureOffset = reserveStorage(pointerFacts);
+            _closureOffset = layout.closure;
         }
     }
 

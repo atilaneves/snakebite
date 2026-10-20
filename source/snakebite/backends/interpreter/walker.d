@@ -717,10 +717,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     package void* _place;
     // The currently executing function's frame.
     private ubyte* _frameBase;
-    // The current function's closure, or null when its locals stay in its
-    // frame. A nested callee receives this pointer as its hidden context
-    // when it captures a variable from this function.
-    private ubyte* _closureBase;
     package const(FrameLayout)* _layout;
     private const(ClosurePlan)* _activeClosurePlan;
     // The currently executing function's own declaration - `frameOf`'s
@@ -754,7 +750,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // instruction, so a fault in it is the accessor's, not its caller's.
     package AccessSite* _access;
     // The guard or claim of the call that `_type`, `_facts`, `_frameBase`,
-    // `_closureBase`, `_layout`, `_activeClosurePlan`, `_pendingLoopLabel`,
+    // `_layout`, `_activeClosurePlan`, `_pendingLoopLabel`,
     // `_controlFlow`, `_returned` and `ctfeBlockDepth` (the function's
     // fields) describe. A call whose tree nodes run none of the original
     // evaluator leaves them to an outer call (`syncTree`).
@@ -1179,14 +1175,25 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         return &closurePlanOf(function_).layout;
     }
 
-    private ubyte* allocateClosure(
+    // The running function's closure: its context when it has one.
+    private ubyte* closureBase() {
+        return *cast(ubyte**) (_frameBase + _layout.closure);
+    }
+
+    // Allocates the closure of `function_`, whose frame at `frameBase` the
+    // call has filled, when it has one, and keeps its address in the frame:
+    // the step that starts the body. A tree's call has not set the
+    // function's fields, so the closure's layout comes with the call.
+    package void openClosure(
         FuncDeclaration function_,
+        const(ClosureLayout)* closureLayout,
         ubyte* frameBase,
         const(FrameLayout)* layout,
     ) {
         import core.stdc.string: memcpy, memset;
-        import snakebite.nativelayout: storeIntegral;
-        const closureLayout = closureLayoutOf(function_);
+
+        if (layout.closure == size_t.max)
+            return;
         const padding = closureLayout.alignment - 1;
         // Captured values can own the only references to other GC objects.
         auto allocation = new void[](closureLayout.size + padding);
@@ -1214,7 +1221,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             );
         }
 
-        return closure;
+        *cast(ubyte**) (frameBase + layout.closure) = closure;
     }
 
     // `type`'s facts, from the cache; computed on the first visit of any
@@ -1377,10 +1384,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         takeFunctionFields;
 
         const closurePlan = closurePlanOf(function_);
-        _closureBase = null;
-        if (closurePlan.needsClosure)
-            _closureBase = allocateClosure(function_, frameBase, layout);
-
         _type = function_.type.nextOf;
         _facts = factsOf(_type);
         // A `value` result is in the word of the frame until the call ends.
@@ -1453,19 +1456,26 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     // Runs `body_` as a node tree. Returns false when the original walk must
-    // run instead: a closure frame, or a goto that needs a seek.
+    // run instead: a goto that needs a seek, or a body that the tree does not
+    // start, whose closure the walk then opens.
     private bool runNodeTree(
         FuncDeclaration function_, Statement body_, const(FrameLayout)* layout,
     ) {
         import core.memory: GC;
 
         // Building nodes allocates, which the GC forbids in a finalizer.
-        if (_activeClosurePlan.needsClosure || GC.inFinalizer)
+        if (GC.inFinalizer) {
+            openClosure(function_, &_activeClosurePlan.layout, _frameBase,
+                layout);
             return false;
+        }
 
         auto root = treeRootFor(function_, body_, layout);
-        if (!root.hasLayout(layout))
+        if (!root.hasLayout(layout)) {
+            openClosure(function_, &_activeClosurePlan.layout, _frameBase,
+                layout);
             return false;
+        }
 
         const flow = root.execute(_frameBase);
         if (flow == TreeFlow.generic && _controlFlow.hasGoto) {
@@ -1494,8 +1504,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             == VarArg.variadic;
         final switch (decision.route) with (CallSelection.Route) {
             case guest:
-                if (function_.fbody is null
-                        || closurePlanOf(function_).needsClosure)
+                if (function_.fbody is null)
                     return null;
                 break;
             case native, builtin:
@@ -1843,7 +1852,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _type = root.returnType;
         _facts = root.returnFacts;
         _frameBase = frame;
-        _closureBase = null;
         _layout = root.layout;
         _activeClosurePlan = root.closurePlan;
         _pendingLoopLabel = null;
@@ -2447,7 +2455,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             auto evaluator = _evaluator;
             evaluator._spills.push(Spill(
                 evaluator._fieldsOwner, evaluator._type, evaluator._facts,
-                evaluator._frameBase, evaluator._closureBase,
+                evaluator._frameBase,
                 evaluator._layout, evaluator._activeClosurePlan,
                 evaluator._pendingLoopLabel, evaluator._controlFlow,
                 evaluator._returned, evaluator.ctfeBlockDepth));
@@ -2461,7 +2469,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             evaluator._type = spilled.type;
             evaluator._facts = spilled.facts;
             evaluator._frameBase = spilled.frameBase;
-            evaluator._closureBase = spilled.closureBase;
             evaluator._layout = spilled.layout;
             evaluator._activeClosurePlan = spilled.activeClosurePlan;
             evaluator._pendingLoopLabel = spilled.pendingLoopLabel;
@@ -2504,7 +2511,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         private Type type;
         private TypeFacts facts;
         private ubyte* frameBase;
-        private ubyte* closureBase;
         private const(FrameLayout)* layout;
         private const(ClosurePlan)* activeClosurePlan;
         private Identifier pendingLoopLabel;
@@ -3850,7 +3856,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.nativelayout: loadIntegral;
 
         if (owner is _function)
-            return functionNeedsClosure(_function) ? _closureBase : _frameBase;
+            return functionNeedsClosure(_function) ? closureBase : _frameBase;
 
         const path = staticChainOf(owner);
         if (path is null)
@@ -3957,13 +3963,20 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         return staticChainOf(owner);
     }
 
-    // `storageOf` for a variable of an enclosing function, resolved once
-    // for a node that follows the static chain on every run. Not `ok` for a
-    // variable of the running function, one in static storage, and one whose
-    // owner's context is unreachable from here.
+    // `storageOf` for a variable of an enclosing function or of the running
+    // function's closure, resolved once for a node that follows the static
+    // chain on every run. Not `ok` for a variable in the running frame, one
+    // in static storage, and one whose owner's context is unreachable from
+    // here.
     package OuterVariable outerVariableOf(VarDeclaration variable) {
         if (variable.isDataseg)
             return OuterVariable();
+        if (inOwnClosure(variable)) {
+            const slot = closureLayoutOf(_function).slotOf(variable);
+            return OuterVariable(true,
+                [Hop(Hop.Kind.frameSlot, _layout.closure)],
+                slot.offset, slot.isRef);
+        }
         auto owner = outerFunctionOf(variable);
         if (owner is null || owner is _function
                 || _layout.slotOf(variable) !is null)
@@ -3984,6 +3997,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return OuterVariable(true, path, layout.offsetOf(variable), false);
         return OuterVariable(
             true, path, slot.offset, slot.isRef || slot.isReturnPlace);
+    }
+
+    // Whether `variable` lives in the closure of the running function.
+    package bool inOwnClosure(VarDeclaration variable) {
+        return _layout.closure != size_t.max
+            && closureLayoutOf(_function).hasSlot(variable);
     }
 
     package bool isRefStorage(VarDeclaration variable) {

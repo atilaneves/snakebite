@@ -846,3 +846,134 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+// A delegate literal that captures a local makes dmd move the local to a
+// heap closure. The delegate escapes through a module variable, the stack
+// is reused, and each later call still reaches the same closure.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write a module variable"),
+)) {
+    @("nested.closure.escapedDelegateCalledLater." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int delegate() saved;
+            void keep(int start) {
+                int count = start;
+                saved = () => ++count;
+            }
+            int clobber(int depth) {
+                int[32] junk = 7;
+                return depth == 0 ? junk[3] : clobber(depth - 1) + junk[5];
+            }
+            int main() {
+                keep(40);
+                clobber(8);
+                saved();
+                return saved() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A nested function and a delegate literal change the same closure
+// variable, and the function that owns it reads the result.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write a module variable"),
+)) {
+    @("nested.closure.nestedFunctionAndLiteralChangeOneVariable."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void delegate(int) saved;
+            int run(int start) {
+                int total = start;
+                void bump() { total += 10; }
+                saved = (int amount) { total += amount; };
+                bump();
+                saved(5);
+                bump();
+                return total;
+            }
+            int main() {
+                return run(1) == 26 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// dmd copies a captured parameter to the closure when the function starts.
+// A write after the capture changes the copy that the delegate reads.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write a module variable"),
+)) {
+    @("nested.closure.parameterWrittenAfterCapture." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int delegate() saved;
+            int run(int value) {
+                saved = () => value * 2;
+                value += 1;
+                return saved();
+            }
+            int main() {
+                return run(4) == 10 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A caught exception that a delegate captures is a closure variable: the
+// handler stores the exception there.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write a module variable"),
+)) {
+    @("nested.closure.capturedCatchVariable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            string delegate() saved;
+            int run() {
+                try
+                    throw new Exception("boom");
+                catch (Exception e)
+                    saved = () => e.msg;
+                return cast(int) saved().length;
+            }
+            int main() {
+                return run() == 4 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A `ref` local that a delegate captures has its slot in the closure: the
+// slot holds the address of the storage that the local names.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot write a module variable"),
+)) {
+    @("nested.closure.capturedReferenceLocal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int delegate() saved;
+            int[2] values = [40, 2];
+            int run() {
+                ref int first = values[0];
+                saved = () => first + values[1];
+                first += 0;
+                return saved();
+            }
+            int main() {
+                return run() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
