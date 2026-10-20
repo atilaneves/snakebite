@@ -2415,6 +2415,14 @@ FAULTS = [
      "    return 0;\n"
      "}\n",
      -signal.SIGSEGV, "fatal: invalid memory access", "main.S.set"),
+    ("fault in a native function that the guest calls with its words",
+     "module main; import core.stdc.string: strlen;\n"
+     "size_t load(const(char)* text) {\n"
+     "    size_t unused = 1;\n"
+     "    return strlen(text) + unused;\n"
+     "}\n"
+     "int main() { return cast(int) load(null); }\n",
+     -signal.SIGSEGV, "fatal: null pointer dereference", "main.load"),
     ("fault in the body of a function that is one return",
      "module main;\n"
      "int load(int* pointer, int added) {\n"

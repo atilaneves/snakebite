@@ -59,6 +59,11 @@ public struct StackPieces {
         resumeBaseWith(_current, work, Deeper.yes);
     }
 
+    // Whether the walker runs on the base, not on a piece.
+    public bool onBase() const @safe @nogc nothrow pure {
+        return _current is null;
+    }
+
     // Runs a host call on the base.
     public void runOnBase(scope void delegate() call) @system {
         if (_current is null) {

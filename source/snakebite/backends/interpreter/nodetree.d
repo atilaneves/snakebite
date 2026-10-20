@@ -24,6 +24,7 @@ import snakebite.backends.fullexpression: FullExpressionScope;
 import snakebite.backends.interpreter.faultslot:
     fastFrameLead, faultSlotOf;
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
+import snakebite.ffi.load: callDirectWordsPair, extendWord, storeWordResult, WordPair;
 import snakebite.backends.sliceplan: SlicePlan;
 import snakebite.nativelayout: TypeFacts;
 import snakebite.nativevalue: BitfieldAccess, CastLayout;
@@ -210,6 +211,9 @@ package struct TreeCallee {
     package bool reservesFast;
     // What the body of the callee is, found when a call node first binds it.
     package CalleeShape shape;
+    // Whether a native callee is a direct word call, found when a call node
+    // first binds it.
+    package DirectWordCall direct;
 }
 
 // The body of a function when it is a getter (`return this.field;`), a
@@ -2526,61 +2530,133 @@ private struct FrameGuard {
 
 // A native call that the plan shows to be one to three word arguments in
 // the first integer registers and an integer result of 1, 2, 4 or 8 bytes
-// or of two words (16 bytes): the node calls the target with the words
-// itself, and skips the plan's own work (`directWordCallTarget`).
+// or of two words (16 bytes): the site calls the target with the words
+// itself, and skips the plan's own work (`directWordCallTarget`). It is
+// decided once for each callee.
 private struct DirectWordCall {
-    private alias Load = imported!"snakebite.ffi.load".Load;
+    public enum State : ubyte { unexamined, other, direct }
 
+    // How a site reads the word of one argument: as it is, from its low
+    // bytes extended as the plan says, or as the bytes of an aggregate.
+    public enum Read : ubyte { word, extended, aggregate }
+
+    public State state;
     private const(void)* _target;
     private ubyte[3] _order;
-    private Load[3] _loads;
+    // How the low bytes of a parameter's word extend to 64 bits.
+    private imported!"snakebite.ffi.load".Load[3] _loads;
     private size_t _resultWidth;
 
-    // Whether the call of `callee` through `plan` is one. A receiver, a `ref`
-    // parameter, a parameter whose size is not the load width of its word, or
-    // a result whose size is not the `resultWidth` of the plan is not.
-    public bool decide(
+    // Examines the call of `callee` through `plan`. A receiver, a `ref`
+    // parameter, a parameter whose size is not the load width of its word, a
+    // result whose size is not the `resultWidth` of the plan, or temporaries
+    // that the callee keeps make it not one.
+    public void decide(
         const(imported!"snakebite.ffi.plan".CallPlan)* plan,
         in TreeCallee* callee,
     ) {
-        import snakebite.ffi.load: loadWidth;
+        import snakebite.ffi.load: Load, loadWidth;
         import snakebite.ffi.plan: directWordCallTarget;
 
-        _target = null;
+        state = State.other;
         const layout = callee.layout;
-        if (plan is null || layout.hiddenThis.variable !is null)
-            return false;
+        if (plan is null || layout.hiddenThis.variable !is null
+                || layout.retainsTemporaries)
+            return;
         size_t resultWidth, count;
+        Load[3] loads;
         const target = directWordCallTarget(
-            plan, _order, _loads, resultWidth, count);
+            plan, _order, loads, resultWidth, count);
         if (target is null || count != layout.parameters.length
                 || callee.returnFacts.size != resultWidth)
-            return false;
-        foreach (i, parameter; layout.parameters)
-            if (parameter.isRef || parameter.facts.size != loadWidth(_loads[i]))
-                return false;
+            return;
+        foreach (i, parameter; layout.parameters) {
+            const width = loadWidth(loads[i]);
+            if (parameter.isRef || parameter.facts.size != width)
+                return;
+            _loads[i] = loads[i];
+        }
         _target = target;
         _resultWidth = resultWidth;
-        return true;
+        state = State.direct;
     }
 
-    public bool decided() const { return _target !is null; }
+    // How a site reads an argument that it passes as `mode`. The plan of a
+    // direct word call has no `ref`, floating or two-word parameter.
+    public static Read readOf(in Argument mode) {
+        import snakebite.internalfailure: internalFailure;
 
-    public void run(E)(
-        E ev, in TreeCallee* callee, const(ubyte)* base, void* place,
+        final switch (mode) with (Argument) {
+            case i64: return Read.word;
+            case i8, i16, i32: return Read.extended;
+            case aggregate: return Read.aggregate;
+            case f32, f64, address, pair:
+                internalFailure("a direct word call has an argument that is "
+                    ~ "not one word");
+        }
+    }
+
+    // The word of parameter `parameter`, read from `arg` as `read` says.
+    pragma(inline, true)
+    public ulong wordOf(
+        ref Operand arg, in Read read, in size_t parameter, ubyte* frame,
     ) const {
-        import snakebite.ffi.load: callDirectWords, loadWord;
-
-        ulong[3] words;
-        foreach (i, parameter; callee.layout.parameters)
-            words[i] = loadWord(base + parameter.offset, _loads[i]);
-        const target = _target, order = _order, width = _resultWidth;
-        ev.crossNative({
-            callDirectWords(
-                target, words[order[0]], words[order[1]], words[order[2]],
-                width, place);
-        });
+        final switch (read) with (Read) {
+            case word:
+                return arg.readLong(frame);
+            case extended:
+                return extendWord(arg.readLong(frame), _loads[parameter]);
+            case aggregate:
+                ulong bytes;
+                arg.node.executeInto(frame, cast(ubyte*) &bytes);
+                return bytes;
+        }
     }
+
+    // Whether the plan passes each parameter in the register of its index.
+    public bool inOrder() const {
+        return _order == [0, 1, 2];
+    }
+
+    // Calls the target with the words of the parameters, on the base of
+    // the native stack, as every call of native code is.
+    pragma(inline, true)
+    public WordPair call(bool inOrder, E)(E ev, ref const ulong[3] words) const {
+        if (!ev.onBaseStack)
+            return callOnBase(ev, words);
+        static if (inOrder) {
+            const first = words[0], second = words[1], third = words[2];
+        } else {
+            const first = words[_order[0]], second = words[_order[1]],
+                third = words[_order[2]];
+        }
+        try
+            return callDirectWordsPair(_target, first, second, third);
+        catch (Throwable thrown)
+            ev.rethrowFromNative(thrown);
+    }
+
+    pragma(inline, false)
+    private WordPair callOnBase(E)(E ev, ref const ulong[3] words) const {
+        WordPair result;
+        ev.crossNative({
+            result = callDirectWordsPair(
+                _target, words[_order[0]], words[_order[1]],
+                words[_order[2]]);
+        });
+        return result;
+    }
+}
+
+// The direct word call of `callee`, which `plan` runs, or null when the
+// callee has none.
+private const(DirectWordCall)* directWordCallOf(
+    TreeCallee* callee, const(imported!"snakebite.ffi.plan".CallPlan)* plan,
+) {
+    auto direct = &callee.direct;
+    if (direct.state == DirectWordCall.State.unexamined)
+        direct.decide(plan, callee);
+    return direct.state == DirectWordCall.State.direct ? direct : null;
 }
 
 // A callee that a call node chose, with how the site runs it. Run by run it
@@ -2592,7 +2668,7 @@ private struct Selection {
     public imported!"snakebite.backends.calls".CallSelection.Route route;
     public const(imported!"snakebite.ffi.plan".CallPlan)* plan;
     // Set when the call is a direct word call.
-    public DirectWordCall* direct;
+    public const(DirectWordCall)* direct;
 }
 
 // What a call node does for one callee in place of a general call: the
@@ -2762,13 +2838,7 @@ private mixin template CalleeEntry(E) {
             case guest:
                 _ev.runTreeCallee(callee, base, result);
                 break;
-            case native:
-                if (selection.direct !is null)
-                    selection.direct.run(_ev, callee, base, result);
-                else
-                    _ev.runHostCallee(callee, selection.plan, base, result);
-                break;
-            case builtin:
+            case native, builtin:
                 _ev.runHostCallee(callee, selection.plan, base, result);
                 break;
             case vaStart, vaCopy, alloca:
@@ -2876,7 +2946,6 @@ private final class Call(E) : Node {
     mixin CalleeEntry!E;
     mixin Dispatch!E;
 
-    private DirectWordCall _direct;
     // The fast form of each callee this site has met, null for none.
     private FastCallee*[TreeCallee*] _fasts;
     private bool _hasFast;
@@ -2899,10 +2968,42 @@ private final class Call(E) : Node {
         import snakebite.backends.calls: CallSelection;
 
         _selected = selectionOf(callee);
-        if (!_virtual && _selected.route == CallSelection.Route.native
-                && _direct.decide(_selected.plan, callee))
-            _selected.direct = &_direct;
+        if (!_virtual && _selected.route == CallSelection.Route.native)
+            _selected.direct = directWordCallOf(callee, _selected.plan);
         _fast = fastFormOf(callee, _selected);
+    }
+
+    // The node that runs this site when its one callee is a direct word
+    // call, null otherwise. It reads each word from its operand and gives
+    // the callee no frame.
+    public final Node nativeWordCall() {
+        import snakebite.internalfailure: internalFailure;
+
+        auto direct = _selected.direct;
+        if (direct is null)
+            return null;
+        switch (_args.length) {
+            case 1: return nativeWordCallOf!1(direct);
+            case 2: return nativeWordCallOf!2(direct);
+            case 3: return nativeWordCallOf!3(direct);
+            default:
+                internalFailure("a direct word call has no argument or more "
+                    ~ "than three");
+        }
+    }
+
+    private Node nativeWordCallOf(size_t count)(
+        const(DirectWordCall)* direct,
+    ) {
+        Operand[count] operands = _args[0 .. count];
+        DirectWordCall.Read[count] reads;
+        foreach (i, mode; _modes)
+            reads[i] = DirectWordCall.readOf(mode);
+        if (direct.inOrder)
+            return new NativeWordCall!(E, count, true)(
+                _ev, direct, operands, reads, _resultSize, _resultUnsigned);
+        return new NativeWordCall!(E, count, false)(
+            _ev, direct, operands, reads, _resultSize, _resultUnsigned);
     }
 
     private void chose(TreeCallee* callee, in Selection selected) {
@@ -3269,6 +3370,48 @@ private final class Call(E) : Node {
         auto calleeFrame = FrameGuard(&ev._frames);
         auto base = placeArguments(fast.callee, receiver, frame);
         return ev.runTreeValue!double(fast.root, fast.callee.function_, base);
+    }
+}
+
+// A non-virtual call of a native function that is a direct word call, with
+// `count` arguments. The words go to the target in the order of the
+// registers, with no copy into a callee frame. `inOrder` says that the plan
+// passes each parameter in the register of its index.
+private final class NativeWordCall(E, size_t count, bool inOrder) : Node {
+    private E _ev;
+    private const(DirectWordCall)* _direct;
+    private Operand[count] _operands;
+    private DirectWordCall.Read[count] _reads;
+    private size_t _resultSize;
+    private bool _resultUnsigned;
+
+    public this(
+        E ev, const(DirectWordCall)* direct, Operand[count] operands,
+        DirectWordCall.Read[count] reads, size_t resultSize,
+        bool resultUnsigned,
+    ) {
+        _ev = ev; _direct = direct; _operands = operands; _reads = reads;
+        _resultSize = resultSize; _resultUnsigned = resultUnsigned;
+    }
+
+    pragma(inline, true)
+    private WordPair invoke(ubyte* frame) {
+        ulong[3] words = 0;
+        static foreach (i; 0 .. count)
+            words[i] = _direct.wordOf(_operands[i], _reads[i], i, frame);
+        return _direct.call!inOrder(_ev, words);
+    }
+
+    public override long executeLong(ubyte* frame) {
+        return extendResult(invoke(frame).low, _resultSize, _resultUnsigned);
+    }
+
+    public override void executeVoid(ubyte* frame) {
+        invoke(frame);
+    }
+
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        storeWordResult(invoke(frame), _resultSize, dest);
     }
 }
 
@@ -4435,6 +4578,8 @@ private Node buildCall(E)(E ev, CallExp call) {
         node.bind(callee);
         if (auto accessor = node.accessor)
             return accessor;
+        if (auto native = node.nativeWordCall)
+            return native;
     }
     return node;
 }

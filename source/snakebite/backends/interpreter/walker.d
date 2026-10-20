@@ -1805,16 +1805,28 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         try {
             _stack.runOnBase(call);
         } catch (Throwable thrown) {
-            if (isHalt(thrown)) {
-                _halted = true;
-                throw thrown;
-            }
-            if (cast(SnakebiteException) thrown !is null
-                    || cast(GuestException) thrown !is null)
-                throw thrown;
-
-            throw GuestException.make(thrown);
+            rethrowFromNative(thrown);
         }
+    }
+
+    // Whether the walker runs on the base of the native stack, where native
+    // code runs.
+    package bool onBaseStack() const {
+        return _stack.onBase;
+    }
+
+    // Throws again what native code threw, as `crossNative` says.
+    pragma(inline, false)
+    extern(D) package noreturn rethrowFromNative(Throwable thrown) {
+        if (isHalt(thrown)) {
+            _halted = true;
+            throw thrown;
+        }
+        if (cast(SnakebiteException) thrown !is null
+                || cast(GuestException) thrown !is null)
+            throw thrown;
+
+        throw GuestException.make(thrown);
     }
 
     // What a failed bounds check does under the program's flags. For
