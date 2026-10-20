@@ -530,6 +530,111 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A `long` element fill of a sub-slice: all 8 bytes of a negative value
+// reach each element, and the elements outside the slice stay.
+static foreach (backend; Matrix!(
+)) {
+    @("dynamicSliceScalarFill.long." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                long[] a = [1, 2, 3, 4];
+                a[1 .. 3] = -0x1_0000_0002;
+                assert(a[0] == 1 && a[3] == 4);
+                assert(a[1] == -0x1_0000_0002 && a[2] == -0x1_0000_0002);
+            }
+        });
+    }
+}
+
+// A dynamic array element fill: each element gets the length and the
+// pointer of the right side.
+static foreach (backend; Matrix!(
+)) {
+    @("dynamicSliceScalarFill.string." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                string[] a = ["a", "bb", "ccc"];
+                a[] = "dddd";
+                assert(a[0] == "dddd" && a[1] == "dddd" && a[2] == "dddd");
+                assert(a[0].ptr is a[2].ptr);
+            }
+        });
+    }
+}
+
+// A static array of class references that a declaration with no
+// initializer gives `null` elements, which dmd writes as `a[] = null`.
+// Then a fill gives every element the same object.
+static foreach (backend; Matrix!(
+)) {
+    @("staticArrayFill.classReferences." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C { int x; this(int x) { this.x = x; } }
+            void main() {
+                C[3] a;
+                assert(a[0] is null && a[1] is null && a[2] is null);
+                a[] = new C(5);
+                assert(a[0] is a[2] && a[1].x == 5);
+            }
+        });
+    }
+}
+
+// A static array of structs whose initial value is all zero bits, declared
+// with no initializer: dmd writes its initializer as the integer 0. The
+// storage held other values before, from an earlier call.
+static foreach (backend; Matrix!(
+)) {
+    @("staticArrayFill.zeroStructs." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct P { int x; int y; }
+            int dirty() {
+                int[8] a = 7;
+                return a[3];
+            }
+            int clean() {
+                P[4] a;
+                int sum;
+                foreach (p; a)
+                    sum += p.x + p.y;
+                return sum;
+            }
+            void main() {
+                assert(dirty() == 7);
+                assert(clean() == 0);
+            }
+        });
+    }
+}
+
+// An assignment of a scalar to a static array through a pointer, as
+// `core.lifetime.move` clears its source: dmd writes it as `(*p)[] = 0`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot cast a struct pointer to a pointer to bytes"),
+)) {
+    @("staticArrayFill.throughPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int x; long y; }
+            void main() {
+                S s = S(1, 2);
+                *cast(ubyte[S.sizeof]*) &s = 0;
+                assert(s.x == 0 && s.y == 0);
+            }
+        });
+    }
+}
+
 // A struct with a postblit: dmd lowers `a[] = v` to `_d_arraysetassign`,
 // which runs the postblit once per element and the destructor on each
 // overwritten element.

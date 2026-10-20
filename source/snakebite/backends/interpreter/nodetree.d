@@ -892,6 +892,55 @@ private final class SliceCopy : SliceNode {
     }
 }
 
+// `to[] = value` for a scalar element of type `T`: the target slice runs
+// first, then `value`, once, before any element changes. Then `a[] = a[0]`
+// fills with the old first element.
+private final class SliceFill(T) : SliceNode {
+    private Node _to;
+    private Node _value;
+    public this(Node to, Node value) { _to = to; _value = value; }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        SliceValue to = void;
+        _to.executeInto(frame, cast(ubyte*) &to);
+        static if (isFloatingPoint!T)
+            const value = cast(T) _value.executeDouble(frame);
+        else
+            const value = cast(T) _value.executeLong(frame);
+        (cast(T*) to.pointer)[0 .. to.length] = value;
+        *cast(SliceValue*) dest = to;
+    }
+}
+
+// `to[] = value` for an element that is a struct, a static array or a value
+// of two words: the order is that of `SliceFill`, and each element gets a
+// copy of the bytes of `value`.
+private final class SliceFillBytes : SliceNode {
+    private imported!"snakebite.framestack".FrameStack* _frames;
+    private Node _to;
+    private Node _value;
+    private size_t _size;
+    private uint _alignment;
+    public this(
+        imported!"snakebite.framestack".FrameStack* frames, Node to,
+        Node value, in TypeFacts facts,
+    ) {
+        _frames = frames; _to = to; _value = value;
+        _size = facts.size; _alignment = facts.alignment;
+    }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        import core.stdc.string: memcpy;
+
+        SliceValue to = void;
+        _to.executeInto(frame, cast(ubyte*) &to);
+        auto storage = FrameGuard(_frames);
+        auto value = _frames.reserve(_size, _alignment);
+        _value.executeInto(frame, value);
+        foreach (i; 0 .. to.length)
+            memcpy(to.pointer + i * _size, value, _size);
+        *cast(SliceValue*) dest = to;
+    }
+}
+
 // A cast between dynamic arrays of elements of different sizes keeps the
 // bytes: the shared cast operation scales the length.
 private final class ReinterpretSlice : SliceNode {
@@ -5433,8 +5482,10 @@ private bool isStoreTarget(Expression target) {
 }
 
 // An assignment to a slice. A slice that dmd typed as a static array is the
-// place of its elements, and `a[] = v` fills; both stay with the evaluator.
-// Every other one copies the elements of the array on the right side.
+// place of its elements and stays with the evaluator. dmd marks `a[] = v`
+// with `blockAssign` exactly when it cast `v` to the element type: `v` fills
+// every element. Every other one copies the elements of the array on the
+// right side.
 private Node buildSliceAssignment(E)(
     E ev, AssignExp assignment, SliceExp target,
 ) {
@@ -5443,16 +5494,62 @@ private Node buildSliceAssignment(E)(
     import snakebite.backends.sliceplan: planSlice;
 
     if (planSlice(target).yieldsStaticArray
-            || assignment.memset == MemorySet.blockAssign
             || (assignment.isConstructExp !is null
                 && assignment.isConstructExp.lowering !is null))
         return null;
     auto to = buildSliceOf(ev, target);
+    if (to is null)
+        return null;
+    auto element = assignment.type.toBasetype.nextOf;
+    if (assignment.memset == MemorySet.blockAssign)
+        return buildSliceFill(ev, to, element, assignment.e2);
     auto from = buildSlice(ev, assignment.e2);
-    if (to is null || from is null)
+    if (from is null)
         return null;
     return new SliceCopy(&ev.failTreeBounds, ev._treeRoot, assignment.loc,
-        to, from, ev.factsOf(assignment.type.toBasetype.nextOf).size);
+        to, from, ev.factsOf(element).size);
+}
+
+// `to[] = value`, where `value` has the type `element`. A scalar element is
+// carried in a register; any other element is a copy of the bytes of
+// `value`.
+private Node buildSliceFill(E)(E ev, Node to, Type element, Expression value) {
+    const scalar = scalarOf(ev, element);
+    final switch (scalar.kind) with (Scalar.Kind) {
+        case integral, floating: {
+            if (scalarOf(ev, value.type).kind != scalar.kind
+                    || ev.factsOf(value.type).size != scalar.facts.size)
+                return null;
+            auto node = buildValue(ev, value);
+            if (node is null)
+                return null;
+            static Node make(T)(Node to, Node value) {
+                return new SliceFill!T(to, value);
+            }
+            return scalar.kind == floating
+                ? byFloating!make(scalar.facts, to, node)
+                : byWidth!make(scalar.facts, to, node);
+        }
+        case none: {
+            auto node = isAggregate(element)
+                ? buildAggregateFor(ev, element, value)
+                : buildPair(ev, element, value);
+            return node is null ? null : new SliceFillBytes(
+                &ev._frames, to, node, ev.factsOf(element));
+        }
+    }
+}
+
+// Calls `make!T(args)` for the unsigned integral type of the width of
+// `facts`, for a node that only moves the bits of a value.
+private Node byWidth(alias make, Args...)(in TypeFacts facts, Args args) {
+    switch (facts.size) {
+        case 1: return make!ubyte(args);
+        case 2: return make!ushort(args);
+        case 4: return make!uint(args);
+        case 8: return make!ulong(args);
+        default: assert(0, "an integral scalar is 1, 2, 4 or 8 bytes");
+    }
 }
 
 // A store of a dynamic array or a delegate.
@@ -6785,15 +6882,18 @@ private Node buildAggregate(E)(E ev, Expression expression) {
 }
 
 // The struct or static array `value` of the type `target`, or null. dmd
-// writes the value of a struct whose initial value is all zero bits as the
-// integer 0 (`getInitExp`), as in `s = 0, s.this(args)`.
+// writes the value of a struct whose initial value is all zero bits, and of
+// a static array of such structs, as the integer 0 (`getInitExp`;
+// `dsymbolsem.d` for a declaration with no initializer), as in
+// `s = 0, s.this(args)`.
 private Node buildAggregateFor(E)(E ev, Type target, Expression value) {
-    import dmd.astenums: TY;
-    import dmd.typesem: toBasetype;
+    import dmd.expressionsem: toInteger;
 
     const size = ev.factsOf(target).size;
-    if (value.isIntegerExp !is null && target.toBasetype.ty == TY.Tstruct)
+    if (value.isIntegerExp !is null && !isAggregate(value.type)) {
+        assert(value.toInteger == 0, "dmd writes only an all-zero aggregate as an integer");
         return new ZeroInto(size);
+    }
     if (!isAggregate(value.type) || ev.factsOf(value.type).size != size)
         return null;
     return buildAggregate(ev, value);
