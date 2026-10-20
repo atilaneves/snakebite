@@ -22,7 +22,7 @@ import snakebite.backends.checkplan: BoundsCheck;
 import snakebite.backends.controlflow: ControlFlowState;
 import snakebite.backends.fullexpression: FullExpressionScope;
 import snakebite.backends.interpreter.faultslot:
-    faultSlotOf, placeSlotOf;
+    fastFrameLead, faultSlotOf, placeSlotOf;
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.ffi.load: callDirectWordsPair, extendWord, storeWordResult, WordPair;
 import snakebite.backends.sliceplan: SlicePlan;
@@ -2982,6 +2982,8 @@ private struct Selection {
     public const(imported!"snakebite.ffi.plan".CallPlan)* plan;
     // Set when the call is a direct word call.
     public const(DirectWordCall)* direct;
+    // How this site evaluates its arguments into the slots of the callee.
+    public ArgumentStep[] steps;
 }
 
 // What a call node does for one callee in place of a general call: the
@@ -2994,6 +2996,7 @@ private struct FastCallee {
 
     public Kind kind;
     public TreeCallee* callee;
+    public ArgumentStep[] steps;
 
     // The access of a getter or a setter.
     public size_t offset;
@@ -3006,6 +3009,14 @@ private struct FastCallee {
     // a register. The tree of the callee does not exist until the callee
     // has run once, so `root` is found then.
     public TreeRoot* root;
+}
+
+// How a call evaluates one argument into its parameter slot in the frame of
+// one callee.
+private struct ArgumentStep {
+    public ArgumentWriter write;
+    public size_t offset;
+    public Operand operand;
 }
 
 // What every call node does once it has chosen its callee: the fields that
@@ -3026,6 +3037,7 @@ private mixin template CalleeEntry(E) {
     // when the callee returns.
     private FuncDeclaration _caller;
     private ArgumentWriter[] _writers;
+    private ArgumentStep[][TreeCallee*] _steps;
 
     private void takeArguments(SiteArguments arguments) {
         _args = argumentOperands(arguments.nodes, arguments.modes);
@@ -3050,12 +3062,25 @@ private mixin template CalleeEntry(E) {
         import snakebite.backends.calls: CallSelection;
 
         const decision = CallSelection.atCallSite(callee.decision, _site);
+        auto steps = stepsOf(callee);
         if (decision.route != CallSelection.Route.native)
-            return Selection(callee, decision.route, null);
+            return Selection(callee, decision.route, null, null, steps);
         const plan = callee.plan !is null
             ? callee.plan : _ev._plans.of(callee.function_);
         return Selection(callee, decision.route, plan,
-            directWordCallOf(callee, plan));
+            directWordCallOf(callee, plan), steps);
+    }
+
+    // The steps of this site for `callee`, which the site makes once.
+    private ArgumentStep[] stepsOf(TreeCallee* callee) {
+        if (auto found = callee in _steps)
+            return *found;
+        // `takesArguments` made the three lengths equal.
+        auto steps = new ArgumentStep[_args.length];
+        foreach (i, ref step; steps)
+            step = ArgumentStep(_writers[i], callee.slots[i].offset, _args[i]);
+        _steps[callee] = steps;
+        return steps;
     }
 
     // Reserves the frame of `callee`, which the caller's guard gives back,
@@ -3063,21 +3088,36 @@ private mixin template CalleeEntry(E) {
     // guest or native callee at a node starts here.
     pragma(inline, true)
     private ubyte* placeArguments(
-        in TreeCallee* callee, size_t hidden, ubyte* frame,
+        in TreeCallee* callee, ArgumentStep[] steps, size_t hidden,
+        ubyte* frame,
+    ) {
+        return callee.reservesFast
+            ? placeIn!true(callee, steps, hidden, frame)
+            : placeIn!false(callee, steps, hidden, frame);
+    }
+
+    // `placeArguments` for a caller that knows what `callee.reservesFast`
+    // says, so the frame has a lead of `fastFrameLead` and the reservation
+    // is one bump.
+    pragma(inline, reservesFast)
+    private ubyte* placeIn(bool reservesFast)(
+        in TreeCallee* callee, ArgumentStep[] steps, size_t hidden,
+        ubyte* frame,
     ) {
         auto ev = _ev;
-        auto base = callee.reservesFast
-            ? ev._frames.reserveAligned16(callee.reservation)
-            : ev._frames.reserve(callee.reservation, cast(uint) callee.lead);
-        base += callee.lead;
+        static if (reservesFast) {
+            enum lead = fastFrameLead;
+            auto base = ev._frames.reserveAligned16(callee.reservation);
+        } else {
+            const lead = callee.lead;
+            auto base = ev._frames.reserve(callee.reservation, cast(uint) lead);
+        }
+        base += lead;
         *faultSlotOf(base) = null;
         if (callee.contextOffset != size_t.max)
             *cast(size_t*) (base + callee.contextOffset) = hidden;
-        // `takesArguments` made the three lengths equal.
-        auto parameters = callee.slots.ptr;
-        auto writers = _writers.ptr;
-        foreach (i, ref arg; _args)
-            writers[i](arg, frame, base + parameters[i].offset);
+        foreach (ref step; steps)
+            step.write(step.operand, frame, base + step.offset);
         return base;
     }
 
@@ -3090,7 +3130,8 @@ private mixin template CalleeEntry(E) {
         auto ev = _ev;
         auto callee = selection.callee;
         auto calleeFrame = FrameGuard(&ev._frames);
-        auto base = placeArguments(callee, hidden, frame);
+        auto base = placeArguments(
+            callee, cast(ArgumentStep[]) selection.steps, hidden, frame);
         runCall(selection, base, result, /* nested */ false, frame);
     }
 
@@ -3103,7 +3144,8 @@ private mixin template CalleeEntry(E) {
         auto ev = _ev;
         auto callee = selection.callee;
         auto calleeFrame = FrameGuard(&ev._frames);
-        auto base = placeArguments(callee, hidden, frame);
+        auto base = placeArguments(
+            callee, cast(ArgumentStep[]) selection.steps, hidden, frame);
         auto place = callee.layout.returnPlace.bind(&ev._frames, base, dest);
         // A callee whose variable aliases the place of the result arms the
         // record of the caller for that place, unless the call is nested.
@@ -3386,6 +3428,7 @@ private final class Call(E) : Node {
         const shape = callee.shape;
         auto fast = new FastCallee;
         fast.callee = callee;
+        fast.steps = cast(ArgumentStep[]) selected.steps;
         final switch (shape.kind) with (CalleeShape.Kind) {
             case unexamined:
                 assert(0, "examine leaves no callee unexamined");
@@ -3643,7 +3686,7 @@ private final class Call(E) : Node {
     ) {
         auto ev = _ev;
         auto calleeFrame = FrameGuard(&ev._frames);
-        auto base = placeArguments(fast.callee, receiver, frame);
+        auto base = placeIn!true(fast.callee, fast.steps, receiver, frame);
         ev.runTreeCallee(fast.callee, base, result, _caller, frame);
     }
 
@@ -3671,7 +3714,7 @@ private final class Call(E) : Node {
     private long enterLong(FastCallee* fast, size_t receiver, ubyte* frame) {
         auto ev = _ev;
         auto calleeFrame = FrameGuard(&ev._frames);
-        auto base = placeArguments(fast.callee, receiver, frame);
+        auto base = placeIn!true(fast.callee, fast.steps, receiver, frame);
         return ev.runTreeValue!long(
             fast.root, fast.callee.function_, base, _caller, frame);
     }
@@ -3680,7 +3723,7 @@ private final class Call(E) : Node {
     private double enterDouble(FastCallee* fast, size_t receiver, ubyte* frame) {
         auto ev = _ev;
         auto calleeFrame = FrameGuard(&ev._frames);
-        auto base = placeArguments(fast.callee, receiver, frame);
+        auto base = placeIn!true(fast.callee, fast.steps, receiver, frame);
         return ev.runTreeValue!double(
             fast.root, fast.callee.function_, base, _caller, frame);
     }
@@ -3904,7 +3947,9 @@ private final class ConstructorCall(E) : Node {
                 // The callee writes its receiver, which is the result.
                 ulong[2] result = void;
                 auto calleeFrame = FrameGuard(&ev._frames);
-                auto base = placeArguments(selected.callee, receiver, frame);
+                auto base = placeArguments(
+                    selected.callee, cast(ArgumentStep[]) selected.steps,
+                    receiver, frame);
                 runCall(selected, base, result.ptr, _receiverIsAddress, frame);
             },
             { ev._temporaries.armConstructor(object); });
