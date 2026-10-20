@@ -385,7 +385,9 @@ private final class PointerAddress : Node {
 // A variable of an enclosing function: the static chain's words from the
 // running frame, then the variable's offset.
 private final class OuterAddress : Node {
-    private const(imported!"snakebite.backends.closureplan".Hop)[] _hops;
+    import snakebite.backends.closureplan: Hop;
+
+    private const(Hop)[] _hops;
     private size_t _offset;
     private bool _indirect;
     public this(OuterVariable variable) {
@@ -1744,12 +1746,11 @@ private final class EvaluatedPair(E) : SliceNode {
 // finds null stays null: such a delegate does not capture, so its context is
 // never read.
 private final class FrameDelegate : SliceNode {
-    private const(imported!"snakebite.backends.closureplan".Hop)[] _hops;
+    import snakebite.backends.closureplan: Hop;
+
+    private const(Hop)[] _hops;
     private void* _function;
-    public this(
-        const(imported!"snakebite.backends.closureplan".Hop)[] hops,
-        void* function_,
-    ) {
+    public this(const(Hop)[] hops, void* function_) {
         _hops = hops; _function = function_;
     }
     public override void executeInto(ubyte* frame, ubyte* dest) {
@@ -3848,23 +3849,23 @@ private Node buildMadeDelegate(E)(
         return new EvaluatedPair!E(ev, expression);
     auto function_ = ev.functionAddressOf(target.function_);
     if (!target.needsContext)
-        return constantDelegate(null, function_);
+        return constantDelegate(function_);
     // A function that runs as a tree has no closure (`runNodeTree`), so its
     // own context is its frame: no hops.
     if (target.contextOwner is ev._function)
-        return new FrameDelegate(null, function_);
+        return new FrameDelegate(/* hops */ null, function_);
     const hops = ev.staticChainTo(target.contextOwner);
     return hops is null
-        ? constantDelegate(null, function_) : new FrameDelegate(hops, function_);
+        ? constantDelegate(function_) : new FrameDelegate(hops, function_);
 }
 
-private Node constantDelegate(void* context, void* function_) {
+private Node constantDelegate(void* function_) {
     import snakebite.nativelayout:
         delegateContextOffset, delegateFunctionOffset;
 
     SliceValue value;
     auto bytes = cast(ubyte*) &value;
-    *cast(void**) (bytes + delegateContextOffset) = context;
+    *cast(void**) (bytes + delegateContextOffset) = null;
     *cast(void**) (bytes + delegateFunctionOffset) = function_;
     return new ConstantSlice(value);
 }
