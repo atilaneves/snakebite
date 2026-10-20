@@ -408,6 +408,38 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A slice copy whose lengths differ throws a `RangeError` that names the
+// file and line of the copy, and leaves the target unchanged.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE reports an array length mismatch as a compile-time error"),
+)) {
+    @("dynamicSliceCopy.lengthMismatchNamesFileAndLine." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+            void main() {
+                int[] a = [0, 0, 0];
+                int[] b = [1, 2];
+                string file;
+                size_t line;
+                size_t expected;
+                try {
+                    expected = __LINE__ + 1;
+                    a[] = b;
+                } catch (RangeError error) {
+                    file = error.file;
+                    line = error.line;
+                }
+                assert(file == __FILE__);
+                assert(line == expected);
+                assert(a == [0, 0, 0]);
+            }
+        });
+    }
+}
+
 
 // `a[] = S(1, 2)` for a plain struct element broadcasts the whole struct
 // value, every field, into each element.
