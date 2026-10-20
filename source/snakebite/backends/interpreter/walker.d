@@ -1784,8 +1784,14 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     // Gives the running call, whose frame is `frame`, a state of its own,
     // which lasts until the call returns (`runTreeCallee`) or an exception
-    // that leaves it is caught (`RunningCall`). Its result place is the one
-    // in its frame.
+    // that leaves it is caught (`RunningCall`).
+    //
+    // `_place` becomes the word in the frame, which is where the call's
+    // result goes when the call writes one (`runTreeCallee`). A call that
+    // returns in a register (`runTreeValue`) has no place, and the word
+    // holds a debug-only poison: the copy is never used as a place, because
+    // only a return statement run by the original evaluator writes through
+    // `_place`, and the body of such a call is one return that the tree runs.
     pragma(inline, false)
     private void claim(TreeRoot* root, ubyte* frame) {
         if (_claimCount == _claims.length)
@@ -2363,6 +2369,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // takes them (`spill`), not when it starts: a call between tree nodes
     // often never does.
     private static struct CallState {
+        @disable this(this);
+
         private Evaluator _evaluator;
         private CallState* _outer;
         private void* _place;
@@ -3021,11 +3029,32 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // comes back when it ends.
         auto slot = faultSlot;
         if (slot is null || !_temporaries.opens(position))
-            return _temporaries.withExpression(position, root, evaluate);
+            return withExpressionOf(_innermostFrame, position, root, evaluate);
         const interrupted = *slot;
         *slot = cast(const(void)*) root;
         scope (exit) *slot = interrupted;
-        _temporaries.withExpression(position, root, evaluate);
+        withExpressionOf(_innermostFrame, position, root, evaluate);
+    }
+
+    // Runs `evaluate` as the full expression `root` of the call whose frame
+    // is `frame`. When an exception ends it, the destructors of its
+    // temporaries run before a `try` catches it, and they run guest code of
+    // the evaluator, which reads the state of the running call. The calls
+    // that the exception left without a guard still have their claims
+    // (`runTreeCallee`), so those end first and the state of the running
+    // call is the innermost again.
+    extern(D) package void withExpressionOf(
+        ubyte* frame,
+        in FullExpressionScope.Position position,
+        Expression root,
+        scope void delegate() evaluate,
+    ) {
+        _temporaries.withExpression(position, root, {
+            scope (failure)
+                while (_innermostFrame !is frame)
+                    releaseClaim;
+            evaluate();
+        });
     }
 
     protected override void visitReturnTransfer(ReturnStatement statement) {

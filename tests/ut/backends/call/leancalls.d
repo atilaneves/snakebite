@@ -540,3 +540,95 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+
+// An exception leaves an evaluated callee inside a full expression whose
+// temporary has a destructor. The destructor runs guest code that reads its
+// own frame before the `try` catches the exception, and the catching function
+// still reads its own frame afterwards.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd CTFE does not destroy a temporary that a throw leaves"),
+)) {
+    @("leancalls.throwPastEvaluatedCalleeWithTemporary." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                struct Guard {
+                    int* runs;
+                    int value;
+
+                    ~this() {
+                        int step = value;
+                        switch (step % 2) {
+                            case 0:
+                                step += 1;
+                                break;
+                            default:
+                                step += 2;
+                                break;
+                        }
+                        *runs += step - value;
+                    }
+                }
+
+                int thrower(int x) {
+                    if (x % 3 == 0)
+                        throw new Exception("thrown");
+                    return x;
+                }
+
+                int evaluated(int x) {
+                    int y = x;
+                    switch (y % 2) {
+                        case 0:
+                            y += 10;
+                            break;
+                        default:
+                            y += 20;
+                            break;
+                    }
+                    return thrower(y) + y;
+                }
+
+                int catcher(int x, ref int runs) {
+                    int local = x * 3;
+                    switch (local % 4) {
+                        case 0:
+                            local += 1;
+                            break;
+                        default:
+                            local += 2;
+                            break;
+                    }
+                    int result;
+                    try
+                        result = Guard(&runs, x).value + evaluated(x);
+                    catch (Exception)
+                        result = -local;
+                    switch (result % 2) {
+                        case 0:
+                            result += local;
+                            break;
+                        default:
+                            result -= local;
+                            break;
+                    }
+                    return result;
+                }
+
+                int answer() {
+                    int sum;
+                    int runs;
+                    foreach (i; 0 .. 30)
+                        sum += catcher(i, runs);
+                    // 15 even values add 1 and 15 odd values add 2: 45 in all.
+                    return runs == 45 && sum == 852 ? 42 : runs * 10000 + sum;
+                }
+            },
+            "answer",
+        );
+    }
+}
