@@ -354,3 +354,189 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// A statement that the evaluator runs sits on a path that a function called
+// many times takes only now and then. Each call that takes it still gives its
+// caller back the caller's own state: the caller's next statement that the
+// evaluator runs reads the caller's frame.
+static foreach (backend; Matrix!()) {
+    @("leancalls.coldEvaluatedStatementInHotCallee." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                int leaf(int x) { return x + 1; }
+
+                int hot(int x) {
+                    int y = x * 2;
+                    if (x % 97 == 96) {
+                        switch (y % 3) {
+                            case 0:
+                                y += leaf(y);
+                                break;
+                            default:
+                                y -= 1;
+                                break;
+                        }
+                    }
+                    return y + leaf(x);
+                }
+
+                int caller(int x) {
+                    int total = hot(x);
+                    switch (total % 2) {
+                        case 0:
+                            total += 1;
+                            break;
+                        default:
+                            total += 2;
+                            break;
+                    }
+                    return total;
+                }
+
+                int answer() {
+                    int sum;
+                    foreach (i; 0 .. 1000)
+                        sum += caller(i);
+                    return sum == 1505258 ? 42 : sum;
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// `alloca` memory lasts until the function that allocated it returns, in
+// every call of a loop. A callee's own `alloca` and an exception that a
+// callee throws past another callee's `alloca` leave the caller's block as it
+// was.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call alloca"),
+)) {
+    @("leancalls.allocaInLoopOfCalls." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                import core.stdc.stdlib: alloca;
+
+                int helper(int seed) {
+                    auto q = cast(int*) alloca(4 * int.sizeof);
+                    foreach (i; 0 .. 4)
+                        q[i] = -seed;
+                    return q[0];
+                }
+
+                int failing(int seed) {
+                    auto q = cast(int*) alloca(4 * int.sizeof);
+                    foreach (i; 0 .. 4)
+                        q[i] = seed * 7;
+                    if (seed % 5 == 0)
+                        throw new Exception("thrown");
+                    return q[3];
+                }
+
+                int middle(int seed) {
+                    int result;
+                    try
+                        result = failing(seed);
+                    catch (Exception)
+                        result = -1;
+                    return result;
+                }
+
+                int user(int seed) {
+                    auto p = cast(int*) alloca(4 * int.sizeof);
+                    foreach (i; 0 .. 4)
+                        p[i] = seed + i;
+                    int other = helper(seed) + middle(seed);
+                    int sum;
+                    foreach (i; 0 .. 4)
+                        sum += p[i];
+                    return sum + other;
+                }
+
+                int answer() {
+                    int total;
+                    foreach (i; 0 .. 200)
+                        total += user(i);
+                    return total == 172860 ? 42 : total;
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// An exception leaves a callee that ran a statement through the evaluator.
+// The function that catches it runs statements through the evaluator before
+// and after its `try`, and those read its own frame.
+static foreach (backend; Matrix!()) {
+    @("leancalls.throwPastEvaluatedCallee." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                int thrower(int x) {
+                    if (x % 3 == 0)
+                        throw new Exception("thrown");
+                    return x;
+                }
+
+                int evaluated(int x) {
+                    int y = x;
+                    switch (y % 2) {
+                        case 0:
+                            y += 10;
+                            break;
+                        default:
+                            y += 20;
+                            break;
+                    }
+                    return thrower(y) + y;
+                }
+
+                int catcher(int x) {
+                    int local = x * 3;
+                    switch (local % 4) {
+                        case 0:
+                            local += 1;
+                            break;
+                        default:
+                            local += 2;
+                            break;
+                    }
+                    int result;
+                    try
+                        result = evaluated(x);
+                    catch (Exception)
+                        result = -local;
+                    switch (result % 2) {
+                        case 0:
+                            result += local;
+                            break;
+                        default:
+                            result -= local;
+                            break;
+                    }
+                    return result;
+                }
+
+                int answer() {
+                    int sum;
+                    foreach (i; 0 .. 30)
+                        sum += catcher(i);
+                    return sum == 1552 ? 42 : sum;
+                }
+            },
+            "answer",
+        );
+    }
+}
