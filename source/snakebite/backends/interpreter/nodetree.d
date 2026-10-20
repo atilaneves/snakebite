@@ -7535,38 +7535,45 @@ private template binaryOf(string op) {
 private Node buildBinary(string op, E)(E ev, BinExp e, in Scalar scalar) {
     import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
 
-    const plan = arithmeticPlan(e);
-    if (plan.kind == ArithmeticPlan.Kind.integral
-            && scalar.kind == Scalar.Kind.integral) {
-        auto left = buildValue(ev, e.e1);
-        auto right = buildValue(ev, e.e2);
-        if (left is null || right is null)
-            return null;
-        return byWide!(binaryOf!op)(
-            scalar.facts, left, right, operationOf!op(ev, e));
-    }
-    static if (op == "+" || op == "-" || op == "*" || op == "/") {
-        if (plan.kind == ArithmeticPlan.Kind.floating
-                && scalar.kind == Scalar.Kind.floating) {
+    final switch (arithmeticPlan(e).kind) with (ArithmeticPlan.Kind) {
+        // dmd has scaled the offset of a pointer by the size of the pointee,
+        // and a pointer difference is a byte count until the division that
+        // dmd puts around it: both are arithmetic on words.
+        case integral, pointerOffset, pointerDifference: {
+            if (scalar.kind != Scalar.Kind.integral)
+                return null;
             auto left = buildValue(ev, e.e1);
             auto right = buildValue(ev, e.e2);
             if (left is null || right is null)
                 return null;
-            static Node make(T)(Node l, Node r) {
-                static Node build(L, R)(L a, R b) {
-                    return new FloatBinary!(op, T, L, R)(a, b);
-                }
-                static if (is(T == double))
-                    return fuse!(build, double, doubleLeft, doubleLeft)(
-                        operandOf(l), operandOf(r));
-                else
-                    return fuse!(build, double, onlyChild, onlyChild)(
-                        operandOf(l), operandOf(r));
-            }
-            return byFloating!make(scalar.facts, left, right);
+            return byWide!(binaryOf!op)(
+                scalar.facts, left, right, operationOf!op(ev, e));
         }
+        case floating:
+            static if (op == "+" || op == "-" || op == "*" || op == "/") {
+                if (scalar.kind != Scalar.Kind.floating)
+                    return null;
+                auto left = buildValue(ev, e.e1);
+                auto right = buildValue(ev, e.e2);
+                if (left is null || right is null)
+                    return null;
+                static Node make(T)(Node l, Node r) {
+                    static Node build(L, R)(L a, R b) {
+                        return new FloatBinary!(op, T, L, R)(a, b);
+                    }
+                    static if (is(T == double))
+                        return fuse!(build, double, doubleLeft, doubleLeft)(
+                            operandOf(l), operandOf(r));
+                    else
+                        return fuse!(build, double, onlyChild, onlyChild)(
+                            operandOf(l), operandOf(r));
+                }
+                return byFloating!make(scalar.facts, left, right);
+            } else
+                return null;
+        case complex, vector:
+            return null;
     }
-    return null;
 }
 
 // `==` and `!=`: dmd's lowering (a call to `__equals`) where it made one;

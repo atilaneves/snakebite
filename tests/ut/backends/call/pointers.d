@@ -2004,6 +2004,42 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// dmd converts the offset of `pointer + offset` to `ptrdiff_t` and scales
+// it by the size of the pointee, and puts the pointer first when the
+// offset is on the left. A negative `int` offset moves the pointer back and
+// a `uint` offset moves it forward. Each value is a local, not an operand
+// of `assert`, so that the function computes it.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE divides the negative byte offset of `middle - back` "
+        ~ "by the element size as an unsigned number"),
+)) {
+    @("pointers.offset.signedAndEitherSide." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        450_105_010L.shouldBeRetOf!(
+            backend,
+            q{
+                long offsets() {
+                    long[5] values = [10, 20, 30, 40, 50];
+                    long* middle = &values[2];
+                    int back = -2;
+                    uint forward = 2;
+                    long* first = middle + back;
+                    long* last = forward + middle;
+                    long* again = middle - forward;
+                    long* end = middle - back;
+                    long distance = last - first;
+                    return *first + *last * 100 + *again * 10_000
+                        + *end * 1_000_000 + distance * 100_000_000;
+                }
+            },
+            "offsets",
+        );
+    }
+}
+
+
 // `&c.get` on a class method is dmd's `DelegateExp` too, with the object
 // reference as context instead of a struct's inline storage.
 static foreach (backend; Matrix!()) {
