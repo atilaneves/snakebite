@@ -1819,10 +1819,10 @@ private final class PostStep(T, long delta) : LongNode {
 }
 
 // A `ref` variable bound to the address of other storage.
-private final class BindReference : Node {
-    private Target _slot;
+private final class BindReference(S) : Node {
+    private S _slot;
     private Node _address;
-    public this(Target slot, Node address) {
+    public this(S slot, Node address) {
         _slot = slot; _address = address;
     }
     public override void executeVoid(ubyte* frame) {
@@ -8295,21 +8295,20 @@ private Node buildFieldValue(E)(
 private Node buildReferenceBinding(E)(
     E ev, VarDeclaration variable, Expression value, Position position,
 ) {
-    const slot = slotOf(ev, variable);
-    Target target;
-    if (slot.ok)
-        target = Target(null, slot.offset);
-    else {
-        // A reference that a delegate captures has its slot in the closure.
-        auto outer = ev.outerVariableOf(variable);
-        if (!outer.ok)
-            return null;
-        outer.indirect = false;
-        target = Target(new OuterAddress(outer));
-    }
     auto address = buildAddress(ev, value);
-    return address is null
-        ? null : statementOf(new BindReference(target, address), position);
+    if (address is null)
+        return null;
+    const slot = slotOf(ev, variable);
+    if (slot.ok)
+        return statementOf(new BindReference!FrameAddress(
+            FrameAddress(slot.offset), address), position);
+    // A reference that a delegate captures has its slot in the closure.
+    auto outer = ev.outerVariableOf(variable);
+    if (!outer.ok)
+        return null;
+    outer.indirect = false;
+    return statementOf(new BindReference!ChildAddress(
+        ChildAddress(new OuterAddress(outer)), address), position);
 }
 
 private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
