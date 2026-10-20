@@ -1533,7 +1533,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         auto root = callee.root;
         if (root !is null && root.lean) {
-            auto lean = LeanCall!true(
+            auto lean = LeanCall!(LeanPlace.placed)(
                 this, calleeFrame, callee.function_, place);
             root.execute(calleeFrame);
             return;
@@ -1564,7 +1564,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return runTreeValueOnNewPiece!T(root, function_, calleeFrame);
 
         if (root.lean) {
-            auto lean = LeanCall!false(this, calleeFrame, function_, null);
+            auto lean = LeanCall!(LeanPlace.unplaced)(
+                this, calleeFrame, function_, null);
             return returnValueOf!T(root, calleeFrame);
         }
 
@@ -1642,8 +1643,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         ctfeBlockDepth = 0;
     }
 
-    // Makes the running call the owner of the function's fields, keeping
-    // the previous owner's values in its guard. Call it before writing them.
+    // Makes the innermost call the owner of the function's fields. When it
+    // is not the owner yet, `spill` pushes the previous owner's values on
+    // the spill stack, for its guard to take back when it ends. Call it
+    // before writing the fields.
     private void takeFunctionFields() {
         if (_fieldsOwner !is _innermost)
             _innermost.spill;
@@ -2178,9 +2181,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // guard is on the chain, and no `alloca` of this call can exist, because
     // an `alloca` is run by a node that hands control over. Its end gives
     // the caller its state back, normally or by throw.
-    private static struct LeanCall(bool placed) {
+    private enum LeanPlace : bool { unplaced, placed }
+
+    private static struct LeanCall(LeanPlace placement) {
         private Evaluator _evaluator;
-        static if (placed)
+        static if (placement == LeanPlace.placed)
             private void* _place;
         private FuncDeclaration _function;
         private ubyte* _faultFrame;
@@ -2193,7 +2198,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             void* place,
         ) {
             _evaluator = evaluator;
-            static if (placed) {
+            static if (placement == LeanPlace.placed) {
                 _place = evaluator._place;
                 evaluator._place = place;
             }
@@ -2204,7 +2209,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         }
 
         ~this() {
-            static if (placed)
+            static if (placement == LeanPlace.placed)
                 _evaluator._place = _place;
             _evaluator._function = _function;
             _evaluator._faultFrame = _faultFrame;

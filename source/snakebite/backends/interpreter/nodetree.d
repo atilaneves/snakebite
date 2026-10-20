@@ -2134,17 +2134,11 @@ private struct Selection {
     public DirectWordCall* direct;
 }
 
-// One argument of a call, placed in its parameter slot of the callee frame.
-private struct ArgumentSlot {
-    public Operand node;
-    public size_t offset;
-    public Argument mode;
-}
-
 // What a call node does for one callee in place of a general call: the
 // field access of a getter or a setter, or the run of a body that is one
 // `return`, whose value comes back in a register. It belongs to the node
-// and the callee together and does not change after the node makes it.
+// and the callee together. The node makes it once; the one field that
+// changes afterwards is `root`, which is found when the callee has run.
 private struct FastCallee {
     public enum Kind : ubyte { getter, setter, soleReturn, plain }
 
@@ -2164,13 +2158,10 @@ private struct FastCallee {
     public bool isFloating;
     public AccessSite site;
     public Argument mode;
-    // The run of a body: the slots for the arguments and, for a body that
-    // is one `return`, the tree whose value comes back in a register. The
-    // tree of the callee does not exist until the callee has run once, so
-    // `root` is found then.
+    // For a body that is one `return`, the tree whose value comes back in
+    // a register. The tree of the callee does not exist until the callee
+    // has run once, so `root` is found then.
     public TreeRoot* root;
-    public size_t hiddenOffset;
-    public ArgumentSlot[] slots;
 }
 
 // What every call node does once it has chosen its callee: the fields that
@@ -2206,16 +2197,15 @@ private mixin template CalleeEntry(E) {
                 ? _ev._plans.of(callee.function_) : null);
     }
 
-    // Runs `callee` with `hidden` as its context word, the arguments taken
-    // from the caller's `frame`.
+    // Reserves the frame of `callee`, which the caller's guard gives back,
+    // and evaluates the arguments of this site into it. Every run of a
+    // guest or native callee at a node starts here.
     pragma(inline, true)
-    private void enter(
-        in Selection selection, size_t hidden, ubyte* frame, void* result,
+    private ubyte* placeArguments(
+        in TreeCallee* callee, size_t hidden, ubyte* frame,
     ) {
         auto ev = _ev;
-        auto callee = selection.callee;
         const layout = callee.layout;
-        auto calleeFrame = FrameGuard(&ev._frames);
         // A frame of small alignment has the same lead whatever it is.
         size_t lead = fastFrameLead;
         auto base = callee.reservesFast
@@ -2229,9 +2219,25 @@ private mixin template CalleeEntry(E) {
         if (layout.hiddenThis.variable !is null)
             *cast(size_t*) (base + layout.hiddenThis.parameter.offset)
                 = hidden;
+        // `takesArguments` made the three lengths equal.
+        auto parameters = layout.parameters.ptr;
+        auto modes = _modes.ptr;
         foreach (i, ref arg; _args)
-            storeArgument(arg, _modes[i], frame, base + layout.parameters[i].offset);
-        if (layout.retainsTemporaries)
+            storeArgument(arg, modes[i], frame, base + parameters[i].offset);
+        return base;
+    }
+
+    // Runs `callee` with `hidden` as its context word, the arguments taken
+    // from the caller's `frame`.
+    pragma(inline, true)
+    private void enter(
+        in Selection selection, size_t hidden, ubyte* frame, void* result,
+    ) {
+        auto ev = _ev;
+        auto callee = selection.callee;
+        auto calleeFrame = FrameGuard(&ev._frames);
+        auto base = placeArguments(callee, hidden, frame);
+        if (callee.layout.retainsTemporaries)
             runRetaining(selection, base, result);
         else
             run(selection, base, result);
@@ -2382,8 +2388,10 @@ private final class Call(E) : Node {
         auto fast = new FastCallee;
         fast.callee = callee;
         final switch (shape.kind) with (CalleeShape.Kind) {
-            case unexamined, other:
-                return bodyOf(fast, callee, false);
+            case unexamined:
+                assert(0, "examine leaves no callee unexamined");
+            case other:
+                return bodyOf(fast, callee, BodyKind.plain);
             case getter, setter:
                 fast.kind = shape.kind == getter
                     ? FastCallee.Kind.getter : FastCallee.Kind.setter;
@@ -2396,7 +2404,7 @@ private final class Call(E) : Node {
                     fast.mode = _modes[0];
                 return fast;
             case soleReturn:
-                return bodyOf(fast, callee, true);
+                return bodyOf(fast, callee, BodyKind.soleReturn);
         }
     }
 
@@ -2404,21 +2412,17 @@ private final class Call(E) : Node {
     // slots of `fast`. When it is only a `return` with a result that fits a
     // register, the value can come back in a register.
     private FastCallee* bodyOf(
-        FastCallee* fast, TreeCallee* callee, bool isSoleReturn,
+        FastCallee* fast, TreeCallee* callee, BodyKind bodyKind,
     ) {
-        const layout = callee.layout;
-        if (!callee.reservesFast || layout.retainsTemporaries)
+        if (!callee.reservesFast || callee.layout.retainsTemporaries)
             return null;
-        fast.kind = isSoleReturn && _resultSize != 0
+        fast.kind = bodyKind == BodyKind.soleReturn && _resultSize != 0
                 && _resultSize <= size_t.sizeof
             ? FastCallee.Kind.soleReturn : FastCallee.Kind.plain;
-        fast.hiddenOffset = layout.hiddenThis.variable is null
-            ? size_t.max : layout.hiddenThis.parameter.offset;
-        foreach (i, node; _args)
-            fast.slots ~= ArgumentSlot(
-                node, layout.parameters[i].offset, _modes[i]);
         return fast;
     }
+
+    private enum BodyKind : bool { plain, soleReturn }
 
     // Runs the receiver, which is the word the callee takes as its context.
     private size_t runReceiver(ubyte* frame) {
@@ -2438,19 +2442,22 @@ private final class Call(E) : Node {
 
     // The general call, once the receiver has run.
     private void invokeOn(size_t receiver, ubyte* frame, void* result) {
-        // Read after the receiver runs: it can run this site again.
-        auto selected = _selected;
-        if (_virtual) {
-            if (receiver == 0) {
-                originalPath(frame, result, receiver);
-                return;
-            }
-            const vtable = *cast(const(void)**) receiver;
-            if (vtable !is _vtable && !meet(vtable, receiver, selected)) {
-                originalPath(frame, result, receiver);
-                return;
-            }
+        finishCall(resolve(receiver), receiver, frame, result);
+    }
+
+    // The general call once `resolve` has run: the callee in `_selected`, or
+    // the original path when `resolve` found none.
+    pragma(inline, true)
+    private void finishCall(
+        bool resolved, size_t receiver, ubyte* frame, void* result,
+    ) {
+        if (!resolved) {
+            originalPath(frame, result, receiver);
+            return;
         }
+        // A copy: the arguments can run this site again and select another
+        // callee.
+        auto selected = _selected;
         enter(selected, receiver, frame, result);
     }
 
@@ -2480,6 +2487,7 @@ private final class Call(E) : Node {
 
     // The callee of this run once the receiver ran, in `_selected`. False
     // when the original path must run the call.
+    pragma(inline, true)
     private bool resolve(size_t receiver) {
         if (!_virtual)
             return true;
@@ -2534,7 +2542,8 @@ private final class Call(E) : Node {
     pragma(inline, false)
     private long executeLongOfFastSite(ubyte* frame) {
         const receiver = runReceiver(frame);
-        if (resolve(receiver)) {
+        const resolved = resolve(receiver);
+        if (resolved) {
             auto fast = _fast;
             if (fast !is null) {
                 if (fast.kind == FastCallee.Kind.getter && receiver != 0)
@@ -2546,13 +2555,14 @@ private final class Call(E) : Node {
                     return runLong(fast, receiver, frame);
             }
         }
-        return generalLong(receiver, frame);
+        return generalLong(resolved, receiver, frame);
     }
 
     pragma(inline, false)
     private double executeDoubleOfFastSite(ubyte* frame) {
         const receiver = runReceiver(frame);
-        if (resolve(receiver)) {
+        const resolved = resolve(receiver);
+        if (resolved) {
             auto fast = _fast;
             if (fast !is null) {
                 if (fast.kind == FastCallee.Kind.getter && receiver != 0)
@@ -2564,13 +2574,14 @@ private final class Call(E) : Node {
                     return runDouble(fast, receiver, frame);
             }
         }
-        return generalDouble(receiver, frame);
+        return generalDouble(resolved, receiver, frame);
     }
 
     pragma(inline, false)
     private void executeVoidOfFastSite(ubyte* frame) {
         const receiver = runReceiver(frame);
-        if (resolve(receiver)) {
+        const resolved = resolve(receiver);
+        if (resolved) {
             auto fast = _fast;
             if (fast !is null) {
                 if (fast.kind == FastCallee.Kind.setter && receiver != 0) {
@@ -2583,14 +2594,15 @@ private final class Call(E) : Node {
                 }
             }
         }
-        generalVoid(receiver, frame);
+        generalVoid(resolved, receiver, frame);
     }
 
     pragma(inline, false)
     private void executeIntoOfFastSite(ubyte* frame, ubyte* dest) {
         const receiver = runReceiver(frame);
         SliceValue buffer = void;
-        if (resolve(receiver)) {
+        const resolved = resolve(receiver);
+        if (resolved) {
             auto fast = _fast;
             if (fast !is null && fast.runsBody) {
                 runPlain(fast, receiver, frame, &buffer);
@@ -2598,27 +2610,28 @@ private final class Call(E) : Node {
                 return;
             }
         }
-        invokeOn(receiver, frame, &buffer);
+        finishCall(resolved, receiver, frame, &buffer);
         *cast(SliceValue*) dest = buffer;
     }
 
     pragma(inline, false)
-    private double generalDouble(size_t receiver, ubyte* frame) {
+    private double generalDouble(bool resolved, size_t receiver, ubyte* frame) {
         ulong[2] buffer;
-        invokeOn(receiver, frame, buffer.ptr);
+        finishCall(resolved, receiver, frame, buffer.ptr);
         return floatingResult(buffer);
     }
 
     pragma(inline, false)
-    private void generalVoid(size_t receiver, ubyte* frame) {
+    private void generalVoid(bool resolved, size_t receiver, ubyte* frame) {
         ulong[2] buffer;
-        invokeOn(receiver, frame, buffer.ptr);
+        finishCall(resolved, receiver, frame, buffer.ptr);
     }
 
     pragma(inline, false)
-    private long generalLong(size_t receiver, ubyte* frame) {
+    private long generalLong(bool resolved, size_t receiver, ubyte* frame) {
         ulong[2] buffer;
-        invokeOn(receiver, frame, _yieldsReceiver ? null : buffer.ptr);
+        finishCall(resolved, receiver, frame,
+            _yieldsReceiver ? null : buffer.ptr);
         return _yieldsReceiver
             ? receiver : extendResult(buffer[0], _resultSize, _resultUnsigned);
     }
@@ -2706,14 +2719,14 @@ private final class Call(E) : Node {
     }
 
     // Runs a callee that the register form does not cover: the frame, the
-    // arguments in their slots, and the callee's tree, with the result in
-    // `result`. No selection is copied and no route is chosen.
+    // arguments, and the callee's tree, with the result in `result`. No
+    // selection is copied and no route is chosen.
     private void runPlain(
         FastCallee* fast, size_t receiver, ubyte* frame, void* result,
     ) {
         auto ev = _ev;
         auto calleeFrame = FrameGuard(&ev._frames);
-        auto base = placeArguments(fast, receiver, frame);
+        auto base = placeArguments(fast.callee, receiver, frame);
         ev.runTreeCallee(fast.callee, base, result);
     }
 
@@ -2737,39 +2750,15 @@ private final class Call(E) : Node {
     private long enterLong(FastCallee* fast, size_t receiver, ubyte* frame) {
         auto ev = _ev;
         auto calleeFrame = FrameGuard(&ev._frames);
-        auto base = placeArguments(fast, receiver, frame);
+        auto base = placeArguments(fast.callee, receiver, frame);
         return ev.runTreeValue!long(fast.root, fast.callee.function_, base);
     }
 
     private double enterDouble(FastCallee* fast, size_t receiver, ubyte* frame) {
         auto ev = _ev;
         auto calleeFrame = FrameGuard(&ev._frames);
-        auto base = placeArguments(fast, receiver, frame);
+        auto base = placeArguments(fast.callee, receiver, frame);
         return ev.runTreeValue!double(fast.root, fast.callee.function_, base);
-    }
-
-    // Reserves the frame of the callee, which the caller's guard gives
-    // back, and evaluates the arguments into it.
-    private ubyte* placeArguments(
-        FastCallee* fast, size_t receiver, ubyte* frame,
-    ) {
-        auto ev = _ev;
-        auto callee = fast.callee;
-        size_t lead = fastFrameLead;
-        auto base = ev._frames.reserveFast(
-            callee.layout.size + lead, fastFrameLead);
-        if (base is null) {
-            lead = callee.lead;
-            base = ev._frames.reserve(
-                callee.layout.size + lead, cast(uint) lead);
-        }
-        base += lead;
-        *faultSlotOf(base) = null;
-        if (fast.hiddenOffset != size_t.max)
-            *cast(size_t*) (base + fast.hiddenOffset) = receiver;
-        foreach (ref slot; fast.slots)
-            storeArgument(slot.node, slot.mode, frame, base + slot.offset);
-        return base;
     }
 }
 
@@ -2827,6 +2816,9 @@ private final class Getter(E, T, bool receiverIsAddress) : Typed!T {
     private size_t _offset;
     private AccessSite* _site;
 
+    // The node stands in for a non-virtual site, which always has its callee.
+    private enum nonVirtual = true;
+
     public this(Call!E call, size_t offset, AccessSite* site) {
         _ev = call._ev; _call = call; _receiver = call._receiver;
         _offset = offset; _site = site;
@@ -2836,14 +2828,14 @@ private final class Getter(E, T, bool receiverIsAddress) : Typed!T {
         public override double executeDouble(ubyte* frame) {
             const receiver = receiverOn(frame);
             if (receiver == 0)
-                return _call.generalDouble(receiver, frame);
+                return _call.generalDouble(nonVirtual, receiver, frame);
             return loadField!T(_ev, _site, receiver + _offset);
         }
     } else {
         public override long executeLong(ubyte* frame) {
             const receiver = receiverOn(frame);
             if (receiver == 0)
-                return _call.generalLong(receiver, frame);
+                return _call.generalLong(nonVirtual, receiver, frame);
             return loadField!T(_ev, _site, receiver + _offset);
         }
     }
@@ -2868,6 +2860,9 @@ private final class Setter(E, T, bool receiverIsAddress) : Node {
     private size_t _offset;
     private AccessSite* _site;
 
+    // The node stands in for a non-virtual site, which always has its callee.
+    private enum nonVirtual = true;
+
     public this(Call!E call, size_t offset, AccessSite* site) {
         _ev = call._ev; _call = call; _receiver = call._receiver;
         _argument = call._args[0]; _offset = offset; _site = site;
@@ -2879,7 +2874,7 @@ private final class Setter(E, T, bool receiverIsAddress) : Node {
         else
             const receiver = cast(size_t) _receiver.readLong(frame);
         if (receiver == 0) {
-            _call.generalVoid(receiver, frame);
+            _call.generalVoid(nonVirtual, receiver, frame);
             return;
         }
         static if (isFloatingPoint!T)
