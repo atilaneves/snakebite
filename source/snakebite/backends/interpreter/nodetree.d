@@ -3320,6 +3320,8 @@ private final class Call(E) : Node {
     // The fast form of the callee in `_selected`. The two change together,
     // with no code between that could run this site again.
     private FastCallee* _fast;
+    // The shift that brings the sign bit of an integer result to bit 63.
+    private ubyte _resultShift;
 
     public this(E ev, CallExp site, FuncDeclaration method, Node receiver,
             bool receiverIsAddress, bool virtual, SiteArguments arguments,
@@ -3329,7 +3331,18 @@ private final class Call(E) : Node {
         takeArguments(arguments);
         _resultSize = resultSize;
         _resultUnsigned = resultUnsigned;
+        _resultShift = resultSize == 0 || resultSize >= long.sizeof
+            ? 0 : cast(ubyte) (8 * (long.sizeof - resultSize));
         _root = ev._treeRoot;
+    }
+
+    // The integer result in the low bytes of `word`, extended to a `long`.
+    pragma(inline, true)
+    private long extended(ulong word) const {
+        const shifted = word << _resultShift;
+        return _resultUnsigned
+            ? cast(long) (shifted >>> _resultShift)
+            : cast(long) shifted >> _resultShift;
     }
 
     public final void bind(TreeCallee* callee) {
@@ -3554,7 +3567,7 @@ private final class Call(E) : Node {
     private long generalLong(bool resolved, size_t receiver, ubyte* frame) {
         ulong[2] buffer;
         finishCall(resolved, receiver, frame, buffer.ptr);
-        return extendResult(buffer[0], _resultSize, _resultUnsigned);
+        return extended(buffer[0]);
     }
 
     // The access of a getter: one load at the receiver plus the offset of
@@ -3672,7 +3685,7 @@ private final class Call(E) : Node {
     private long runLong(FastCallee* fast, size_t receiver, ubyte* frame) {
         ulong[2] buffer = void;
         runPlain(fast, receiver, frame, buffer.ptr);
-        return extendResult(buffer[0], _resultSize, _resultUnsigned);
+        return extended(buffer[0]);
     }
 
     pragma(inline, true)
