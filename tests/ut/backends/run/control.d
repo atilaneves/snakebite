@@ -3149,3 +3149,205 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A condition with no temporary splits at `&&`, `||` and `!`. A comparison of
+// a `real` is not a register scalar of the interpreter's tree, so the
+// operands that hold one run as conditions of their own.
+static foreach (backend; Matrix!()) {
+    @("logicalConditionsWithAWideOperand." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                real wide = 2.5L;
+                int calls;
+                bool bump() { ++calls; return true; }
+                int taken;
+                foreach (i; 0 .. 6) {
+                    if (i > 0 && wide > i && !(i == 2))
+                        taken += 10;
+                    if (!(wide < i) || i == 5)
+                        taken += 1;
+                    if (i > 3 || wide > 1.5L && bump())
+                        taken += 100;
+                    while (i < 0 || wide < i - 0.5L) {
+                        taken += 1000;
+                        break;
+                    }
+                }
+                return taken == 2614 && calls == 4 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// `foreach (ref element; ...)` declares a `ref` variable that holds the
+// address of the element, so writes through it change the array.
+static foreach (backend; Matrix!()) {
+    @("foreachRefBindsTheElement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Cell { int a; double b; }
+            int main() {
+                Cell[4] cells;
+                foreach (i, ref cell; cells) {
+                    cell.a = cast(int) i;
+                    cell.b = i * 0.5;
+                }
+                long[] dynamic = [1, 2, 3];
+                foreach (ref element; dynamic)
+                    element *= 2;
+                foreach_reverse (ref element; dynamic)
+                    element += 1;
+                double total = 0;
+                foreach (ref cell; cells)
+                    total += cell.a + cell.b;
+                return dynamic == [3, 5, 7] && total == 9.0 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A conditional expression runs only the arm that its condition selects,
+// whether it yields a scalar, a slice, an lvalue or nothing.
+static foreach (backend; Matrix!()) {
+    @("conditionalExpressionForms." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Pair { int a; int b; }
+            void bump(ref int x) { ++x; }
+            int pick(int n, bool even) { return even ? n * 2 : -n; }
+            int[] shorter(int[] a, int[] b) { return a.length < b.length ? a : b; }
+            double mix(bool even) { return even ? 0.5 : 2.5; }
+            int main() {
+                int x, y;
+                Pair p1 = Pair(1, 2);
+                Pair p2 = Pair(3, 4);
+                int[] s1 = [1, 2];
+                int[] s2 = [3];
+                int total;
+                foreach (i; 0 .. 4) {
+                    const even = i % 2 == 0;
+                    total += even ? 10 : 1;
+                    total += cast(int) (mix(even) * 2);
+                    const bool flag = even ? i > 0 : true;
+                    total += flag ? 100 : 0;
+                    total += (even ? s1 : s2).length;
+                    total += (even ? p1 : p2).b;
+                    total += pick(i, even) + shorter(s1, s2).length;
+                    bump(even ? x : y);
+                    even ? x++ : y++;
+                    even ? bump(x) : bump(y);
+                    int* target = even ? &x : &y;
+                    *target += 100;
+                    total += *(even ? &p1.a : &p2.a);
+                }
+                return total == 364 && x == 206 && y == 206 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// `return` of a struct or static array value writes it into the place that
+// the caller gave. Each field of a literal is a scalar, a slice, a bit
+// field, a nested value, or an element that the literal repeats.
+static foreach (backend; Matrix!()) {
+    @("returnOfAggregateValues." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Inner { int x; double y; }
+            struct Outer {
+                Inner inner;
+                int[] slice;
+                bool flag;
+                ubyte small;
+                int[2] pair;
+                long wide = 9;
+            }
+            struct Bits { int a; uint low : 3; uint high : 5; ubyte tail; }
+            struct Plain { int a = 1; int b = 2; }
+
+            Outer make(int n, int[] s) {
+                return Outer(Inner(n, n * 0.5), s, n > 1, cast(ubyte) n,
+                    [n, n + 1]);
+            }
+            Outer pick(bool first, Inner chosen) {
+                return first
+                    ? Outer(chosen, null, true, 1, [1, 2], 3)
+                    : Outer(Inner(9, 9.5), [7], false, 2, [3, 4]);
+            }
+            Bits bits(int n) { return Bits(n, n & 7, n >> 3, 5); }
+            Plain plain(bool zero) { return zero ? Plain() : Plain(5, 6); }
+            Inner copy(ref Inner source) { return source; }
+            Plain at(Plain[] values, int i) { return values[i]; }
+            int[3] filled(int n) { return [n, n + 1, n + 2]; }
+            int[2] constant() { return [1, 2]; }
+
+            int main() {
+                int outerLocal = 100;
+                struct Nested { int a; int get() { return a + outerLocal; } }
+                Nested nested(int a) { return Nested(a); }
+
+                const o = make(3, [4, 5]);
+                if (o.inner != Inner(3, 1.5) || o.slice != [4, 5] || !o.flag
+                        || o.small != 3 || o.pair != [3, 4] || o.wide != 9)
+                    return 1;
+                const p = pick(true, Inner(7, 8.5));
+                if (p.inner != Inner(7, 8.5) || p.slice.length != 0
+                        || p.pair != [1, 2] || p.wide != 3)
+                    return 2;
+                const q = pick(false, Inner(0, 0));
+                if (q.inner != Inner(9, 9.5) || q.slice != [7] || q.flag
+                        || q.wide != 9)
+                    return 3;
+                const b = bits(37);
+                if (b.a != 37 || b.low != 5 || b.high != 4 || b.tail != 5)
+                    return 4;
+                Inner source = Inner(11, 12.5);
+                Plain[2] two = [Plain(8, 9), Plain(10, 11)];
+                if (plain(true) != Plain(1, 2) || plain(false) != Plain(5, 6)
+                        || copy(source) != source || at(two[], 1) != Plain(10, 11)
+                        || filled(4) != [4, 5, 6] || constant() != [1, 2])
+                    return 5;
+                make(1, null);
+                return nested(5).get() == 105 ? 0 : 6;
+            }
+        });
+    }
+}
+
+// A function that returns `ref` gives the address of its operand, and the
+// constructor of a struct returns `this` that way.
+static foreach (backend; Matrix!()) {
+    @("returnOfReferences." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        69.shouldBeStatusOf!(backend, q{
+            struct Counter {
+                int n;
+                long w;
+                ref int get() { return n; }
+                ref long wide() { return w; }
+                this(int start) { n = start; }
+            }
+            ref int pickRef(ref int a, ref int b, bool first) {
+                return first ? a : b;
+            }
+            int main() {
+                int t;
+                Counter c = Counter(3);
+                foreach (i; 0 .. 3) {
+                    c.get() += 4;
+                    c.wide() += 5;
+                    int x = 1, y = 2;
+                    pickRef(x, y, i == 1) += 10;
+                    t += x + y;
+                }
+                return t + c.n + cast(int) c.w;
+            }
+        });
+    }
+}

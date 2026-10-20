@@ -17,14 +17,16 @@ import dmd.func: FuncDeclaration;
 import dmd.location: Loc;
 import dmd.mtype: Type;
 import dmd.statement: Statement;
+import snakebite.backends.aggregateinit: InitStep;
 import snakebite.backends.checkplan: BoundsCheck;
 import snakebite.backends.controlflow: ControlFlowState;
+import snakebite.backends.fullexpression: FullExpressionScope;
 import snakebite.backends.interpreter.faultslot:
     fastFrameLead, faultSlotOf;
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.backends.sliceplan: SlicePlan;
 import snakebite.nativelayout: TypeFacts;
-import snakebite.nativevalue: CastLayout;
+import snakebite.nativevalue: BitfieldAccess, CastLayout;
 import std.meta: AliasSeq;
 import std.traits: Select, isFloatingPoint;
 
@@ -893,34 +895,10 @@ private final class FloatNegate : DoubleNode {
     }
 }
 
-private final class Not : BoolNode {
-    private Node _operand;
-    public this(Node operand) { _operand = operand; }
-    public override bool executeBool(ubyte* frame) { return !_operand.executeBool(frame); }
-}
-
 private final class Truth : BoolNode {
     private Node _operand;
     public this(Node operand) { _operand = operand; }
     public override bool executeBool(ubyte* frame) { return _operand.executeBool(frame); }
-}
-
-private final class AndAnd : BoolNode {
-    private Node _left;
-    private Node _right;
-    public this(Node left, Node right) { _left = left; _right = right; }
-    public override bool executeBool(ubyte* frame) {
-        return _left.executeBool(frame) && _right.executeBool(frame);
-    }
-}
-
-private final class OrOr : BoolNode {
-    private Node _left;
-    private Node _right;
-    public this(Node left, Node right) { _left = left; _right = right; }
-    public override bool executeBool(ubyte* frame) {
-        return _left.executeBool(frame) || _right.executeBool(frame);
-    }
 }
 
 // Whether evaluating an operand can fault, which it can when it is a node.
@@ -967,6 +945,39 @@ private struct FlagAnd(T) {
     public bool test(ubyte* frame) {
         return *cast(ubyte*) (frame + offset) != 0 && right.test(frame);
     }
+}
+
+// `left && right`, `left || right` and `!operand` as tests: the branch form
+// of a condition, which a loop or an `if` holds in place of a node that
+// evaluates it.
+private struct AndTest {
+    public enum mayFault = true;
+
+    public Node left;
+    public Node right;
+
+    public bool test(ubyte* frame) {
+        return left.executeBool(frame) && right.executeBool(frame);
+    }
+}
+
+private struct OrTest {
+    public enum mayFault = true;
+
+    public Node left;
+    public Node right;
+
+    public bool test(ubyte* frame) {
+        return left.executeBool(frame) || right.executeBool(frame);
+    }
+}
+
+private struct NotTest {
+    public enum mayFault = true;
+
+    public Node operand;
+
+    public bool test(ubyte* frame) { return !operand.executeBool(frame); }
 }
 
 // The node that evaluates a test, which a loop or an `if` can hold in its
@@ -1115,6 +1126,18 @@ private final class PostStep(T, long delta) : LongNode {
     mixin StatementForm!"executeLong";
 }
 
+// A `ref` variable bound to the address of other storage.
+private final class BindReference : Node {
+    private size_t _offset;
+    private Node _address;
+    public this(size_t offset, Node address) {
+        _offset = offset; _address = address;
+    }
+    public override void executeVoid(ubyte* frame) {
+        *cast(ubyte**) (frame + _offset) = _address.executeAddr(frame);
+    }
+}
+
 // A dynamic array stored to a frame slot or to the address of other storage.
 private final class StoreSlice(A) : SliceNode {
     private A _address;
@@ -1162,7 +1185,36 @@ private final class ConditionalDouble : DoubleNode {
     }
 }
 
-private final class ConditionalSlice : SliceNode {
+private final class ConditionalAddress : Node {
+    private Node _test;
+    private Node _first;
+    private Node _second;
+    public this(Node test, Node first, Node second) {
+        _test = test; _first = first; _second = second;
+    }
+    public override ubyte* executeAddr(ubyte* frame) {
+        return _test.executeBool(frame)
+            ? _first.executeAddr(frame) : _second.executeAddr(frame);
+    }
+}
+
+private final class ConditionalVoid : Node {
+    private Node _test;
+    private Node _first;
+    private Node _second;
+    public this(Node test, Node first, Node second) {
+        _test = test; _first = first; _second = second;
+    }
+    public override void executeVoid(ubyte* frame) {
+        if (_test.executeBool(frame))
+            _first.executeVoid(frame);
+        else
+            _second.executeVoid(frame);
+    }
+}
+
+// A conditional whose branches write a slice, delegate or aggregate into `dest`.
+private final class ConditionalInto : SliceNode {
     private Node _test;
     private Node _first;
     private Node _second;
@@ -1174,6 +1226,157 @@ private final class ConditionalSlice : SliceNode {
             _first.executeInto(frame, dest);
         else
             _second.executeInto(frame, dest);
+    }
+}
+
+// --- struct values ----------------------------------------------------
+
+// A struct or static array value is written into the bytes at `dest`, as a
+// slice is.
+
+// A value whose bytes are known when the node is built.
+private final class ImageInto : Node {
+    private immutable(ubyte)[] _image;
+    public this(immutable(ubyte)[] image) { _image = image; }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        dest[0 .. _image.length] = _image[];
+    }
+}
+
+private final class AggregateCopy : Node {
+    private Node _address;
+    private size_t _size;
+    public this(Node address, size_t size) { _address = address; _size = size; }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        import core.stdc.string: memmove;
+
+        auto source = _address.executeAddr(frame);
+        if (source !is dest)
+            memmove(dest, source, _size);
+    }
+}
+
+// A value that fills the field at `offset` of the struct at `dest`.
+private final class IntoOffset : Node {
+    private size_t _offset;
+    private Node _value;
+    public this(size_t offset, Node value) { _offset = offset; _value = value; }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        _value.executeInto(frame, dest + _offset);
+    }
+}
+
+private final class FieldStore(T) : Node {
+    private size_t _offset;
+    private Node _value;
+    public this(size_t offset, Node value) { _offset = offset; _value = value; }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        static if (isFloatingPoint!T)
+            const T value = cast(T) _value.executeDouble(frame);
+        else
+            const T value = cast(T) _value.executeLong(frame);
+        *cast(T*) (dest + _offset) = value;
+    }
+}
+
+// A static array field whose elements all hold the one value.
+private final class FieldBroadcast(T) : Node {
+    private size_t _offset;
+    private size_t _count;
+    private Node _value;
+    public this(size_t offset, size_t count, Node value) {
+        _offset = offset; _count = count; _value = value;
+    }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        static if (isFloatingPoint!T)
+            const T value = cast(T) _value.executeDouble(frame);
+        else
+            const T value = cast(T) _value.executeLong(frame);
+        (cast(T*) (dest + _offset))[0 .. _count] = value;
+    }
+}
+
+private final class BitfieldStore : Node {
+    private size_t _offset;
+    private BitfieldAccess _access;
+    private Node _value;
+    public this(size_t offset, in BitfieldAccess access, Node value) {
+        _offset = offset; _access = access; _value = value;
+    }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        const value = _value.executeLong(frame);
+        _access.store(dest + _offset, cast(ulong) value);
+    }
+}
+
+// The hidden context field of a nested struct: the evaluator reads the
+// context of the running call.
+private final class ContextStore(E) : Node {
+    private E _ev;
+    private InitStep _step;
+    private TreeRoot* _root;
+    public this(E ev, InitStep step) {
+        _ev = ev; _step = step; _root = ev._treeRoot;
+    }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        _ev.syncTree(_root, frame);
+        _ev.applyVthisStep(_step, dest);
+    }
+}
+
+private final class StructLiteral : Node {
+    private Node[] _steps;
+    private size_t _size;
+    private bool _zeroFill;
+    public this(Node[] steps, size_t size, bool zeroFill) {
+        _steps = steps; _size = size; _zeroFill = zeroFill;
+    }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        if (_zeroFill)
+            dest[0 .. _size] = 0;
+        foreach (step; _steps)
+            step.executeInto(frame, dest);
+    }
+}
+
+// The result of a function that returns `ref` is the address of the operand.
+private final class ReturnReference : Node {
+    private void** _place;
+    private Node _address;
+    private Position _position;
+    public this(void** place, Node address, Position position) {
+        _place = place; _address = address; _position = position;
+    }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        _position.note(frame);
+        *cast(ubyte**) *_place = _address.executeAddr(frame);
+        return TreeFlow.return_;
+    }
+}
+
+private final class ReturnAggregate(E) : Node {
+    private E _ev;
+    private void** _place;
+    private Node _value;
+    private Position _position;
+    private size_t _size;
+    private uint _alignment;
+    public this(
+        E ev, Node value, Position position, in TypeFacts facts,
+    ) {
+        _ev = ev; _place = &ev._place; _value = value; _position = position;
+        _size = facts.size; _alignment = facts.alignment;
+    }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        _position.note(frame);
+        if (*_place !is null)
+            _value.executeInto(frame, cast(ubyte*) *_place);
+        else {
+            // The caller discarded the result, but the operand still runs.
+            auto scratch = _ev._frames.push(_size, _alignment);
+            _value.executeInto(frame, scratch.base);
+        }
+        return TreeFlow.return_;
     }
 }
 
@@ -1468,13 +1671,19 @@ private final class GenericStatement(E) : Node {
 private final class GenericCondition(E) : BoolNode {
     private E _ev;
     private Expression _condition;
+    private FullExpressionScope.Position _position;
     private TreeRoot* _root;
-    public this(E ev, Expression condition) {
-        _ev = ev; _condition = condition; _root = ev._treeRoot;
+    public this(
+        E ev, Expression condition,
+        in FullExpressionScope.Position position
+            = FullExpressionScope.Position.condition,
+    ) {
+        _ev = ev; _condition = condition; _position = position;
+        _root = ev._treeRoot;
     }
     public override bool executeBool(ubyte* frame) {
         _ev.syncTree(_root, frame);
-        return _ev.conditionHolds(_condition);
+        return _ev.conditionHolds(_condition, _position);
     }
 }
 
@@ -2186,21 +2395,24 @@ private VarDeclaration thisVariable(E)(E ev, ThisExp expression) {
     return variable;
 }
 
+private Node buildVariableAddress(E)(E ev, VarDeclaration variable) {
+    const slot = slotOf(ev, variable);
+    if (!slot.ok)
+        return buildOuterAddress(ev, variable);
+    return slot.indirect
+        ? new IndirectLocalAddress(slot.offset)
+        : new LocalAddress(slot.offset);
+}
+
 private Node buildAddress(E)(E ev, Expression expression) {
     import dmd.astenums: TY;
     import dmd.tokens: EXP;
     import dmd.typesem: toBasetype;
 
     switch (expression.op) with (EXP) {
-        case variable: {
-            auto declaration = expression.isVarExp.var.isVarDeclaration;
-            const slot = slotOf(ev, declaration);
-            if (!slot.ok)
-                return buildOuterAddress(ev, declaration);
-            return slot.indirect
-                ? new IndirectLocalAddress(slot.offset)
-                : new LocalAddress(slot.offset);
-        }
+        case variable:
+            return buildVariableAddress(
+                ev, expression.isVarExp.var.isVarDeclaration);
         case this_: {
             auto variable = thisVariable(ev, expression.isThisExp);
             const slot = slotOf(ev, variable);
@@ -2238,6 +2450,9 @@ private Node buildAddress(E)(E ev, Expression expression) {
         }
         case index:
             return buildIndexAddress(ev, expression.isIndexExp);
+        case question:
+            return buildConditional!(buildAddress!E, ConditionalAddress)(
+                ev, expression.isCondExp);
         default:
             return null;
     }
@@ -2533,7 +2748,7 @@ private Node buildDelegate(E)(E ev, Expression expression) {
         case function_, delegate_:
             return new EvaluatedPair!E(ev, expression);
         case question:
-            return buildConditional!(buildDelegate!E, ConditionalSlice)(
+            return buildConditional!(buildDelegate!E, ConditionalInto)(
                 ev, expression.isCondExp);
         default:
             return null;
@@ -2560,7 +2775,7 @@ private Node buildSlice(E)(E ev, Expression expression) {
                 : new LocalSlice(slot.offset);
         }
         case question:
-            return buildConditional!(buildSlice!E, ConditionalSlice)(
+            return buildConditional!(buildSlice!E, ConditionalInto)(
                 ev, expression.isCondExp);
         case dotVariable, star, index: {
             auto address = buildAddress(ev, expression);
@@ -2787,15 +3002,20 @@ private Node buildEffect(E)(E ev, Expression expression) {
         return buildDeclaration(ev, declaration);
     if (isSlice(expression.type))
         return buildSlice(ev, expression);
-    if (expression.type !is null && expression.type.toBasetype.ty == TY.Tvoid)
+    if (expression.type !is null && expression.type.toBasetype.ty == TY.Tvoid) {
+        if (expression.op == EXP.question)
+            return buildConditional!(buildEffect!E, ConditionalVoid)(
+                ev, expression.isCondExp);
         return expression.op == EXP.call
             ? buildCall(ev, expression.isCallExp) : null;
+    }
     return buildValue(ev, expression);
 }
 
 // The node that tests the truth of `expression`, as a condition does.
 private Node buildTruth(E)(E ev, Expression expression) {
     import dmd.tokens: EXP;
+    import snakebite.backends.plaincondition: isPlainCondition;
 
     if (expression.op == EXP.comma)
         return buildComma(ev, expression.isCommaExp, &buildTruth!E);
@@ -2803,14 +3023,55 @@ private Node buildTruth(E)(E ev, Expression expression) {
         auto slice = buildSlice(ev, expression);
         return slice is null ? null : new SliceTruth(slice, expression.type);
     }
+    const splits = expression.op == EXP.andAnd || expression.op == EXP.orOr
+        || expression.op == EXP.not;
+    if (splits && isPlainCondition(expression))
+        return buildBranches(ev, expression, FullExpressionScope.Position.condition);
     return buildValue(ev, expression);
+}
+
+// The node of a condition that makes no temporary of its own, so that each
+// operand of `&&`, `||` and `!` can be a test of its own: an operand that
+// the tree does not build goes to the evaluator as a full expression, as it
+// does inside the evaluator's own `&&`.
+private Node buildBranches(E)(
+    E ev, Expression expression, in FullExpressionScope.Position position,
+) {
+    import dmd.tokens: EXP;
+
+    Node operand(Expression one, in FullExpressionScope.Position where) {
+        const splits = one.op == EXP.andAnd || one.op == EXP.orOr
+            || one.op == EXP.not;
+        if (splits)
+            return buildBranches(ev, one, where);
+        auto node = buildTruth(ev, one);
+        return node is null ? new GenericCondition!E(ev, one, where) : node;
+    }
+
+    if (expression.op == EXP.not)
+        return new Tested!NotTest(NotTest(
+            operand(expression.isNotExp.e1, position)));
+    auto logical = expression.isLogicalExp;
+    return logicalOf(
+        expression.op == EXP.andAnd,
+        operand(logical.e1, position),
+        operand(logical.e2, FullExpressionScope.Position.logicalOperand));
+}
+
+private Node logicalOf(in bool andAnd, Node left, Node right) {
+    if (!andAnd)
+        return new Tested!OrTest(OrTest(left, right));
+    if (auto flag = cast(Local!ubyte) left)
+        return right.andFlag(flag._offset);
+    return new Tested!AndTest(AndTest(left, right));
 }
 
 // The node that yields `expression`'s scalar value.
 private Node buildValue(E)(E ev, Expression expression) {
     import dmd.tokens: EXP;
     import snakebite.backends.logical: LogicalPlan, logicalPlan;
-    import snakebite.nativelayout: loadIntegral;
+    import snakebite.frontend.storage: typeInfoAddressedBy;
+    import snakebite.nativelayout: isStaticStructAddress, loadIntegral;
     import snakebite.nativevalue: loadFloating;
 
     if (expression.op == EXP.call)
@@ -2911,15 +3172,11 @@ private Node buildValue(E)(E ev, Expression expression) {
             auto right = buildTruth(ev, logical.e2);
             if (left is null || right is null)
                 return null;
-            if (!plan.andAnd)
-                return new OrOr(left, right);
-            if (auto flag = cast(Local!ubyte) left)
-                return right.andFlag(flag._offset);
-            return new AndAnd(left, right);
+            return logicalOf(plan.andAnd, left, right);
         }
         case not: {
             auto operand = buildTruth(ev, expression.isNotExp.e1);
-            return operand is null ? null : new Not(operand);
+            return operand is null ? null : new Tested!NotTest(NotTest(operand));
         }
         case negate: {
             auto operand = buildValue(ev, expression.isNegExp.e1);
@@ -2963,25 +3220,34 @@ private Node buildValue(E)(E ev, Expression expression) {
             return buildStore(ev, cast(AssignExp) expression, scalar);
         case new_:
             return buildNew(ev, expression.isNewExp);
-        case function_, symbolOffset:
+        case function_:
             return scalar.kind == Scalar.Kind.integral
                 ? new EvaluatedWord!E(ev, expression) : null;
-        case address: {
-            import snakebite.nativelayout: isStaticStructAddress;
-
-            auto operand = expression.isAddrExp.e1;
-            if (scalar.kind != Scalar.Kind.integral
-                    || isStaticStructAddress(expression.isAddrExp))
+        case symbolOffset: {
+            // `&variable`. A function or a variable in static storage has
+            // an address that symbol resolution decides.
+            if (scalar.kind != Scalar.Kind.integral)
                 return null;
-            auto location = buildAddress(ev, operand);
+            auto symbol = expression.isSymOffExp;
+            auto variable = symbol.var.isVarDeclaration;
+            auto place = variable is null
+                ? null : buildVariableAddress(ev, variable);
+            if (place is null)
+                return new EvaluatedWord!E(ev, expression);
+            return new AddressValue(symbol.offset == 0
+                ? place : new FieldOfAddress(place, cast(size_t) symbol.offset));
+        }
+        case address: {
+            // The address of a static struct literal or of a type's
+            // `TypeInfo` is a constant that the evaluator resolves.
+            auto addressed = expression.isAddrExp;
+            if (scalar.kind != Scalar.Kind.integral
+                    || isStaticStructAddress(addressed)
+                    || addressed.typeInfoAddressedBy(*ev._runtimeTypes) !is null)
+                return null;
+            auto location = buildAddress(ev, addressed.e1);
             return location is null ? null : new AddressValue(location);
         }
-        case question:
-            return scalar.kind == Scalar.Kind.floating
-                ? buildConditional!(buildValue!E, ConditionalDouble)(
-                    ev, expression.isCondExp)
-                : buildConditional!(buildValue!E, ConditionalLong)(
-                    ev, expression.isCondExp);
         case typeid_: {
             import dmd.dtemplate: isExpression, isType;
 
@@ -2995,6 +3261,20 @@ private Node buildValue(E)(E ev, Expression expression) {
         }
         case comma:
             return buildComma(ev, expression.isCommaExp, &buildValue!E);
+        case question: {
+            auto conditional = expression.isCondExp;
+            bool differs(Expression arm) {
+                return scalarOf(ev, arm.type).kind != scalar.kind
+                    || ev.factsOf(arm.type).size != scalar.facts.size;
+            }
+            if (differs(conditional.e1) || differs(conditional.e2))
+                return null;
+            return scalar.kind == Scalar.Kind.floating
+                ? buildConditional!(buildValue!E, ConditionalDouble)(
+                    ev, conditional)
+                : buildConditional!(buildValue!E, ConditionalLong)(
+                    ev, conditional);
+        }
         case identity: return buildIdentity!false(ev, expression.isIdentityExp);
         case notIdentity: return buildIdentity!true(ev, expression.isIdentityExp);
         default:
@@ -3497,6 +3777,11 @@ private Node buildVariable(E)(
     auto initializer = variable._init.isExpInitializer;
     if (initializer is null)
         return null;
+    if (ev.isRefStorage(variable)
+            && !initializerRunsForEffect(initializer, variable))
+        return buildReferenceBinding(
+            ev, variable, initializerValueOf(initializer),
+            positionOf(ev, declaration));
     const scalar = scalarOf(ev, variable.type);
     const variableIsSlice = isSlice(variable.type);
     if (scalar.kind == Scalar.Kind.none && !variableIsSlice)
@@ -3526,6 +3811,173 @@ private Node buildVariable(E)(
         return null;
     return statementOf(storeToFrame(scalar, slot.offset, node),
         positionOf(ev, declaration));
+}
+
+// A struct or a static array: a value of its own bytes, which is not a
+// register scalar or a slice.
+private bool isAggregate(Type type) {
+    import dmd.astenums: TY;
+    import dmd.typesem: toBasetype;
+
+    if (type is null)
+        return false;
+    const kind = type.toBasetype.ty;
+    return kind == TY.Tstruct || kind == TY.Tsarray;
+}
+
+// The node that writes the value of the struct or static array `expression`
+// where `executeInto` says. Null when the tree does not cover the
+// expression.
+private Node buildAggregate(E)(E ev, Expression expression) {
+    import dmd.tokens: EXP;
+
+    if (!isAggregate(expression.type))
+        return null;
+    switch (expression.op) with (EXP) {
+        case structLiteral:
+            return buildStructLiteral(ev, expression.isStructLiteralExp);
+        case arrayLiteral:
+            return buildArrayLiteral(ev, expression.isArrayLiteralExp);
+        case question:
+            return buildConditional!(buildAggregate!E, ConditionalInto)(
+                ev, expression.isCondExp);
+        case comma:
+            return buildComma(ev, expression.isCommaExp, &buildAggregate!E);
+        case variable, this_, dotVariable, star, index: {
+            auto address = buildAddress(ev, expression);
+            return address is null ? null : new AggregateCopy(
+                address, ev.factsOf(expression.type).size);
+        }
+        default:
+            return null;
+    }
+}
+
+private Node buildStructLiteral(E)(E ev, imported!"dmd.expression".StructLiteralExp literal) {
+    import snakebite.nativelayout: isStoredLiteral;
+
+    const facts = ev.factsOf(literal.type);
+    if (literal.useStaticInit)
+        return new ImageInto(
+            (cast(const(ubyte)[]) ev._nativeData.initialValue(
+                literal.type, literal.loc)).idup);
+    if (isStoredLiteral(literal)) {
+        auto image = new ubyte[facts.size];
+        ev._nativeData.write(literal.type, facts, literal, image.ptr);
+        return new ImageInto(cast(immutable) image);
+    }
+    auto plan = *ev._shared.facts.structLiteralOf(literal);
+    Node[] steps;
+    foreach (step; plan.steps) {
+        auto node = buildInitStep(ev, step);
+        if (node is null)
+            return null;
+        steps ~= node;
+    }
+    return new StructLiteral(steps, facts.size, plan.zeroFill);
+}
+
+// `[a, b, c]` as a static array: each element fills its own place. The
+// literal is written where the caller wants the result, with no staging
+// area, because only a return operand or a field of one reaches here.
+private Node buildArrayLiteral(E)(
+    E ev, imported!"dmd.expression".ArrayLiteralExp literal,
+) {
+    import snakebite.backends.arrayliteral: ArrayLiteralPlan, planArrayLiteral;
+    import snakebite.nativelayout: isStoredLiteral;
+
+    auto plan = planArrayLiteral(literal, ev._function);
+    assert(plan.result == ArrayLiteralPlan.Result.value,
+        "a static array literal is a value");
+    if (isStoredLiteral(literal)) {
+        auto image = new ubyte[ev.factsOf(literal.type).size];
+        ev._nativeData.write(
+            literal.type, ev.factsOf(literal.type), literal, image.ptr);
+        return new ImageInto(cast(immutable) image);
+    }
+    Node[] steps;
+    foreach (i; 0 .. plan.count) {
+        auto node = buildFieldValue(
+            ev, i * plan.elementFacts.size, plan.elementType, literal[i]);
+        if (node is null)
+            return null;
+        steps ~= node;
+    }
+    return new StructLiteral(steps, plan.bytes, false);
+}
+
+private Node buildInitStep(E)(E ev, InitStep step) {
+    final switch (step.kind) with (InitStep.Kind) {
+        case vthis:
+            return new ContextStore!E(ev, step);
+        case value:
+            return buildFieldValue(ev, step.offset, step.type, step.source);
+        case bitfield: {
+            const scalar = scalarOf(ev, step.type);
+            if (scalar.kind != Scalar.Kind.integral
+                    || scalarOf(ev, step.source.type).kind != scalar.kind)
+                return null;
+            auto value = buildValue(ev, step.source);
+            return value is null ? null : new BitfieldStore(
+                step.offset, *ev._shared.facts.bitfieldOf(step.field), value);
+        }
+        case broadcast: {
+            const scalar = scalarOf(ev, step.type);
+            if (scalar.kind == Scalar.Kind.none)
+                return null;
+            auto value = buildValue(ev, step.source);
+            if (value is null)
+                return null;
+            static Node make(T)(size_t offset, size_t count, Node v) {
+                return new FieldBroadcast!T(offset, count, v);
+            }
+            return scalar.kind == Scalar.Kind.floating
+                ? byFloating!make(scalar.facts, step.offset, step.count, value)
+                : byIntegral!make(scalar.facts, step.offset, step.count, value);
+        }
+    }
+}
+
+private Node buildFieldValue(E)(
+    E ev, in size_t offset, Type type, Expression source,
+) {
+    if (isSlice(type)) {
+        if (!isSlice(source.type))
+            return null;
+        auto slice = buildSlice(ev, source);
+        return slice is null ? null : new IntoOffset(offset, slice);
+    }
+    if (isAggregate(type)) {
+        auto value = buildAggregate(ev, source);
+        return value is null ? null : new IntoOffset(offset, value);
+    }
+    const scalar = scalarOf(ev, type);
+    if (scalar.kind == Scalar.Kind.none
+            || scalarOf(ev, source.type).kind != scalar.kind
+            || ev.factsOf(source.type).size != scalar.facts.size)
+        return null;
+    auto value = buildValue(ev, source);
+    if (value is null)
+        return null;
+    static Node make(T)(size_t offset, Node v) {
+        return new FieldStore!T(offset, v);
+    }
+    return scalar.kind == Scalar.Kind.floating
+        ? byFloating!make(scalar.facts, offset, value)
+        : byIntegral!make(scalar.facts, offset, value);
+}
+
+// A `ref` variable holds the address of the storage it names, whatever the
+// type of that storage is.
+private Node buildReferenceBinding(E)(
+    E ev, VarDeclaration variable, Expression value, Position position,
+) {
+    const slot = slotOf(ev, variable);
+    if (!slot.ok)
+        return null;
+    auto address = buildAddress(ev, value);
+    return address is null
+        ? null : statementOf(new BindReference(slot.offset, address), position);
 }
 
 private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
@@ -3586,12 +4038,7 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
                 auto node = buildDeclaration(ev, declaration);
                 return node is null ? generic() : node;
             }
-            Node node;
-            if (isSlice(expression.type))
-                node = buildSlice(ev, expression);
-            else if (expression.op == EXP.call || (expression.type !is null
-                    && scalarOf(ev, expression.type).kind != Scalar.Kind.none))
-                node = buildValue(ev, expression);
+            auto node = buildEffect(ev, expression);
             return node is null
                 ? generic() : statementOf(node, positionOf(ev, expression));
         }
@@ -3688,8 +4135,11 @@ private Node buildReturn(E)(E ev, imported!"dmd.statement".ReturnStatement retur
         return generic();
     if (returned.exp is null)
         return new Jump!(TreeFlow.return_);
-    if (typeFunctionOf(ev._function).isRef)
-        return generic();
+    if (typeFunctionOf(ev._function).isRef) {
+        auto address = buildAddress(ev, returned.exp);
+        return address is null ? generic() : new ReturnReference(
+            &ev._place, address, positionOf(ev, returned.exp));
+    }
     if (ev._type.toBasetype.ty == TY.Tvoid) {
         // `return f();` in a function without a result: `f` runs, then the
         // function ends.
@@ -3708,6 +4158,13 @@ private Node buildReturn(E)(E ev, imported!"dmd.statement".ReturnStatement retur
         return slice is null
             ? generic() : new ReturnValue!SliceValue(
                 &ev._place, slice, positionOf(ev, returned.exp));
+    }
+    if (isAggregate(ev._type)) {
+        if (!isAggregate(returned.exp.type))
+            return generic();
+        auto value = buildAggregate(ev, returned.exp);
+        return value is null ? generic() : new ReturnAggregate!E(
+            ev, value, positionOf(ev, returned.exp), ev.factsOf(ev._type));
     }
     const scalar = scalarOf(ev, ev._type);
     if (scalar.kind == Scalar.Kind.none

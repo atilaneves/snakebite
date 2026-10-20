@@ -2655,9 +2655,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // A condition is a full expression of its own on each evaluation - a
     // loop's every test included - so its temporaries are given back as
     // soon as its truth is known.
-    package bool conditionHolds(Expression condition) {
-        return truthOfFullExpression(
-            FullExpressionScope.Position.condition, condition);
+    package bool conditionHolds(
+        Expression condition,
+        in FullExpressionScope.Position position
+            = FullExpressionScope.Position.condition,
+    ) {
+        return truthOfFullExpression(position, condition);
     }
 
     private bool truthOfFullExpression(
@@ -6456,7 +6459,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // (`step.source`), then adds `sourceAdjustment` if `thisexp`'s static
     // type is a base-class view narrower than the nested class's actual
     // lexical parent - see `classVthisStep`'s own doc (`aggregateinit.d`).
-    private void applyVthisStep(InitStep step, ubyte* base) {
+    package void applyVthisStep(InitStep step, ubyte* base) {
         import snakebite.nativelayout: loadIntegral, storeIntegral;
 
         if (step.source !is null) {
