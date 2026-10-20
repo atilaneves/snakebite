@@ -406,9 +406,9 @@ public struct CallSite {
     package const(void)* nativePlan;
     package const(void)* delegate() prepareNativePlan;
 
-    // A `native` site whose plan is up to three word arguments and an
-    // integer result of one or two words called directly. Filled only at run
-    // time, with the protocol of `fast`: the thread that wins the
+    // A `native` site whose plan is zero to three word arguments and no
+    // result or an integer result of one or two words called directly.
+    // Filled only at run time, with the protocol of `fast`: the thread that wins the
     // `preparing` state writes the `direct*` fields, then publishes
     // `directState` last. They are valid once `directState` is `direct` or
     // `wide`. `direct` is one or two arguments that are whole words and a
@@ -2211,11 +2211,13 @@ private const(Instruction)* opCallNative(
         size_t parameterCount;
         const target = directWordCallTarget(
             plan, order, loads, resultWidth, parameterCount);
+        // A site whose `returnWidth` is `0` keeps no result, whatever the
+        // callee returns.
         bool eligible = target !is null
             && site.args.length == parameterCount
-            && site.args.length >= 1 && site.args.length <= 3
-            && site.returnWidth == resultWidth;
-        bool wholeWords = resultWidth != 16 && site.args.length <= 2;
+            && (site.returnWidth == 0 || site.returnWidth == resultWidth);
+        bool wholeWords = resultWidth != 16
+            && site.args.length >= 1 && site.args.length <= 2;
         if (eligible)
             foreach (i, argument; site.args) {
                 eligible = eligible
@@ -2253,6 +2255,7 @@ private const(Instruction)* opCallNative(
     if (pc.destination != discardResult) {
         auto place = operandStorage(frame, pc.destination);
         switch (site.returnWidth) {
+        case 0: break;
         case 1: *place = cast(ubyte) result; break;
         case 2: *cast(ushort*) place = cast(ushort) result; break;
         case 4: *cast(uint*) place = cast(uint) result; break;
@@ -2262,8 +2265,8 @@ private const(Instruction)* opCallNative(
     return pc + 1;
 }
 
-// A direct call whose arguments are extended or reordered, or that has three
-// arguments or a result of two words.
+// A direct call whose arguments are extended or reordered, or that has no
+// argument, three arguments or a result of two words.
 pragma(inline, false)
 private const(Instruction)* opCallDirectWide(
     CallSite* site,
@@ -2278,8 +2281,8 @@ private const(Instruction)* opCallDirectWide(
     const count = site.args.length;
     const loads = site.directLoads;
     // A register past the last argument is passed zero.
-    ulong first = loadWord(
-        operandStorage(frame, site.args[0].callerOffset), loads[0]);
+    ulong first = count > 0 ? loadWord(
+        operandStorage(frame, site.args[0].callerOffset), loads[0]) : 0;
     ulong second = count > 1 ? loadWord(
         operandStorage(frame, site.args[1].callerOffset), loads[1]) : 0;
     ulong third = count > 2 ? loadWord(
