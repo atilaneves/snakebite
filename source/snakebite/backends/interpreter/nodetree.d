@@ -2712,11 +2712,6 @@ private mixin template CalleeEntry(E) {
     }
 }
 
-// A direct or virtual call with scalar, `ref` or dynamic array parameters,
-// and a scalar, dynamic array or no result. The callee is a guest function,
-// a native function or a builtin. It pushes the callee frame, evaluates each
-// argument into its parameter slot, and runs the callee: a guest callee's
-// node tree, or the native call through its plan.
 // What a direct or virtual call node does to choose its callee: the
 // receiver, which is the context word of the callee, the callee of the last
 // vtable that the site met, and the original path for a call that the tree
@@ -2801,6 +2796,12 @@ private mixin template Dispatch(E) {
     }
 }
 
+// A direct or virtual call with scalar, `ref`, dynamic array, delegate,
+// struct or static array parameters, and a scalar, dynamic array or no
+// result. The callee is a guest function, a native function or a builtin.
+// It pushes the callee frame, evaluates each argument into its parameter
+// slot, and runs the callee: a guest callee's node tree, or the native call
+// through its plan.
 private final class Call(E) : Node {
     mixin CalleeEntry!E;
     mixin Dispatch!E;
@@ -4261,7 +4262,7 @@ private Node buildIndirectCall(E)(E ev, CallExp call) {
         return null;
     if (resultIsAggregate)
         return new IndirectCall!(E, true)(ev, call, target, viaDelegate,
-            arguments, ev.factsOf(call.type), false);
+            arguments, ev.factsOf(call.type), /* resultUnsigned */ false);
     TypeFacts facts;
     facts.size = isVoid ? 0 : resultIsSlice ? SliceValue.sizeof : result.facts.size;
     return new IndirectCall!(E, false)(ev, call, target, viaDelegate,
@@ -4782,7 +4783,7 @@ private Node buildTruthAfterEnd(E)(
 ) {
     auto lvalue = FullExpressionScope.lvalueOf(expression);
     auto built = buildRegion(ev, nested, () => buildAddress(ev, lvalue));
-    if (built.node is null)
+    if (built.node is null || !built.scoped)
         return null;
     return new ScopedTruth!E(new Scoped!E(ev, built.node, expression, where,
         positionOf(ev, expression)), expression.type);
@@ -5871,11 +5872,11 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
     Node condition(Expression expression) {
         enum where = FullExpressionScope.Position.condition;
         auto built = buildRegion(ev, false, () => buildTruth(ev, expression));
-        if (built.node !is null && readsAfterEnd(built, where, expression))
-            built.node = buildTruthAfterEnd(ev, expression, where, false);
-        if (built.node is null)
-            return new GenericCondition!E(ev, expression);
-        return endingAt(ev, built, expression, where);
+        auto node = built.node is null ? null
+            : readsAfterEnd(built, where, expression)
+                ? buildTruthAfterEnd(ev, expression, where, false)
+                : endingAt(ev, built, expression, where);
+        return node is null ? new GenericCondition!E(ev, expression) : node;
     }
 
     // The node of the full expression `expression`, which runs as a
@@ -6157,7 +6158,7 @@ private Node buildReturnAfterEnd(E)(E ev, Expression operand) {
     enum where = FullExpressionScope.Position.returnOperand;
     auto built = buildRegion(ev, false,
         () => buildAddress(ev, FullExpressionScope.lvalueOf(operand)));
-    if (built.node is null)
+    if (built.node is null || !built.scoped)
         return null;
     return new ScopedReturn!E(ev, new Scoped!E(ev, built.node, operand,
         where, positionOf(ev, operand)), ev.factsOf(ev._type));
