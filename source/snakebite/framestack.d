@@ -53,9 +53,11 @@ public struct FrameStack {
     private size_t _limit;
     // The end of the bytes `reserveFast` can hand out: committed, and
     // inside the limit.
-    private size_t _fastEnd;
+    private ubyte* _fastEnd;
     private size_t _reservation;
-    private size_t _used;
+    // The first byte above everything reserved. A pointer, not an offset,
+    // so the bump of a call frame does not add the base.
+    private ubyte* _top;
     private void[][] _allocations;
     // Every base address handed to `GC.addRange` so far: one per grown
     // chunk (see `commit`), each removed in turn when this frame stack
@@ -111,7 +113,8 @@ public struct FrameStack {
             );
 
         _committed = roundUpToPage(capacity);
-        _fastEnd = _committed < _limit ? _committed : _limit;
+        _top = _base;
+        _fastEnd = _base + (_committed < _limit ? _committed : _limit);
         if (mprotect(_base, _committed, PROT_READ | PROT_WRITE) != 0) {
             import core.sys.posix.sys.mman: munmap;
 
@@ -145,7 +148,11 @@ public struct FrameStack {
     }
 
     public Mark mark() const {
-        return _used;
+        return used;
+    }
+
+    private size_t used() const {
+        return _top - _base;
     }
 
     public size_t cleanupMark() const {
@@ -216,7 +223,7 @@ public struct FrameStack {
                     "-byte alignment: the backing buffer is page-aligned"),
             );
 
-        const alignedUsed = roundUp(_used, alignment);
+        const alignedUsed = roundUp(used, alignment);
         if (alignedUsed > _limit || size > _limit - alignedUsed)
             throw new Exception(
                 text("frame stack overflow: need ", size,
@@ -234,7 +241,7 @@ public struct FrameStack {
         const end = alignedUsed + size;
         if (end > _committed)
             commit(end);
-        _used = end;
+        _top = _base + end;
         return _base + alignedUsed;
     }
 
@@ -245,12 +252,12 @@ public struct FrameStack {
     public ubyte* reserveCommitted(in size_t size, in uint alignment) @system {
         import core.memory: pageSize;
 
-        const alignedUsed = (_used + alignment - 1) & ~(size_t(alignment) - 1);
+        const alignedUsed = (used + alignment - 1) & ~(size_t(alignment) - 1);
         if (size != 0 && alignment - 1 < pageSize
                 && alignedUsed <= _limit && size <= _limit - alignedUsed
                 && alignedUsed <= _committed
                 && size <= _committed - alignedUsed) {
-            _used = alignedUsed + size;
+            _top = _base + alignedUsed + size;
             return _base + alignedUsed;
         }
         return reserve(size, alignment);
@@ -261,11 +268,13 @@ public struct FrameStack {
     // `null` when the bytes are not committed: the caller takes `reserve`.
     pragma(inline, true)
     public ubyte* reserveFast(in size_t size, in uint alignment) @system {
-        const alignedUsed = (_used + alignment - 1) & ~(size_t(alignment) - 1);
-        if (alignedUsed > _fastEnd || size > _fastEnd - alignedUsed)
+        // The base is page aligned, so an aligned address is an aligned
+        // offset.
+        auto aligned = alignedUp(_top, alignment);
+        if (aligned > _fastEnd || size > _fastEnd - aligned)
             return null;
-        _used = alignedUsed + size;
-        return _base + alignedUsed;
+        _top = aligned + size;
+        return aligned;
     }
 
     // `reserve` with an alignment of 16, for a caller that checked once
@@ -274,18 +283,20 @@ public struct FrameStack {
     pragma(inline, true)
     public ubyte* reserveAligned16(in size_t size) @system {
         enum uint alignment = 16;
-        const alignedUsed = (_used + alignment - 1) & ~size_t(alignment - 1);
-        // A frame size never comes near `size_t.max`, so the sum cannot wrap.
-        const end = alignedUsed + size;
+        auto aligned = alignedUp(_top, alignment);
+        // A frame size never comes near the end of the address space, so
+        // the sum cannot wrap.
+        auto end = aligned + size;
         if (end > _fastEnd)
             return reserve(size, alignment);
-        _used = end;
-        return _base + alignedUsed;
+        _top = end;
+        return aligned;
     }
 
     // The first byte above everything reserved.
+    pragma(inline, true)
     public ubyte* top() @system {
-        return _base + _used;
+        return _top;
     }
 
     // Makes every byte below `end` reserved, for a callee frame that the
@@ -295,9 +306,9 @@ public struct FrameStack {
     // with the checks.
     pragma(inline, true)
     public bool claimFast(ubyte* end, ubyte* reach) @system {
-        if (reach - _base > _fastEnd)
+        if (reach > _fastEnd)
             return false;
-        _used = end - _base;
+        _top = end;
         return true;
     }
 
@@ -313,7 +324,7 @@ public struct FrameStack {
                     _limit));
         if (needed > _committed)
             commit(needed);
-        _used = used;
+        _top = end;
     }
 
     // Commits the bytes below `end` without reserving them.
@@ -374,8 +385,24 @@ public struct FrameStack {
     }
 
     private void popTo(in Mark mark) {
-        assert(mark <= _used, "frame stack popped out of LIFO order");
-        _used = mark;
+        assert(mark <= used, "frame stack popped out of LIFO order");
+        _top = _base + mark;
+    }
+
+    // Gives back everything reserved above `top`, which `top()` gave.
+    pragma(inline, true)
+    public void releaseTo(ubyte* top) {
+        assert(top <= _top, "frame stack popped out of LIFO order");
+        _top = top;
+    }
+
+    // `address` rounded up to the power of two `alignment`.
+    pragma(inline, true)
+    private static ubyte* alignedUp(ubyte* address, in uint alignment)
+        @system @nogc nothrow pure
+    {
+        const mask = size_t(alignment) - 1;
+        return cast(ubyte*) ((cast(size_t) address + mask) & ~mask);
     }
 
     private void commit(in size_t end) @system {
@@ -423,7 +450,7 @@ public struct FrameStack {
         GC.addRange(grown, committed - _committed);
         _registeredRanges.push(grown);
         _committed = committed;
-        _fastEnd = _committed < _limit ? _committed : _limit;
+        _fastEnd = _base + (_committed < _limit ? _committed : _limit);
     }
 
     private static size_t roundUpToPage(in size_t value)

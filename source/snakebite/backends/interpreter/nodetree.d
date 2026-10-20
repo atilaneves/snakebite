@@ -2791,18 +2791,18 @@ private struct SiteArguments {
 // Gives the frame stack back to the position it had when this was made.
 private struct FrameGuard {
     private imported!"snakebite.framestack".FrameStack* _stack;
-    private size_t _mark;
+    private ubyte* _top;
 
     @disable this();
     @disable this(this);
 
     public this(imported!"snakebite.framestack".FrameStack* stack) {
         _stack = stack;
-        _mark = stack.mark;
+        _top = stack.top;
     }
 
     ~this() {
-        _stack.release(_mark);
+        _stack.releaseTo(_top);
     }
 }
 
