@@ -656,6 +656,27 @@ private final class NullSlice : SliceNode {
     }
 }
 
+// A cast whose result is zero whatever its operand is, as a cast of
+// `typeof(null)` is: the operand runs for its effect only.
+private final class ZeroAfter : LongNode {
+    private Node _operand;
+    public this(Node operand) { _operand = operand; }
+    public override long executeLong(ubyte* frame) {
+        _operand.executeVoid(frame);
+        return 0;
+    }
+}
+
+// The same, for a result of two words: a dynamic array or a delegate.
+private final class ZeroPairAfter : SliceNode {
+    private Node _operand;
+    public this(Node operand) { _operand = operand; }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        _operand.executeVoid(frame);
+        *cast(SliceValue*) dest = SliceValue.init;
+    }
+}
+
 // One word of a dynamic array that is not an lvalue: `f().length`,
 // `f().ptr`.
 private final class SliceWord : LongNode {
@@ -802,6 +823,36 @@ private final class SliceOf(SliceSource source) : SliceNode {
         _fail(_root, frame, BoundsCheck.slice, _expression.loc,
             [cast(const(void)*) &lower, cast(const(void)*) &upper,
                 cast(const(void)*) &reported]);
+    }
+}
+
+// `to[] = from[]`: the target slice runs first, then the source. The lengths
+// must be equal and the two must not overlap, which the failure plan of the
+// bounds check decides what to do about.
+private final class SliceCopy : SliceNode {
+    private FailBounds _fail;
+    private TreeRoot* _root;
+    private Loc _loc;
+    private Node _to;
+    private Node _from;
+    private size_t _elementSize;
+    public this(FailBounds fail, TreeRoot* root, in Loc loc, Node to,
+            Node from, size_t elementSize) {
+        _fail = fail; _root = root; _loc = loc; _to = to; _from = from;
+        _elementSize = elementSize;
+    }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        import snakebite.backends.slicecopy: copyUnchecked, slicesConform;
+
+        SliceValue to = void, from = void;
+        _to.executeInto(frame, cast(ubyte*) &to);
+        _from.executeInto(frame, cast(ubyte*) &from);
+        auto target = to.pointer[0 .. to.length];
+        const source = from.pointer[0 .. from.length];
+        if (!slicesConform(target, source, _elementSize))
+            _fail(_root, frame, BoundsCheck.sliceCopy, _loc, null);
+        copyUnchecked(target, source, _elementSize);
+        *cast(SliceValue*) dest = to;
     }
 }
 
@@ -1704,8 +1755,100 @@ private final class BitfieldStore : Node {
     }
 }
 
-// The hidden context field of a nested struct: the evaluator reads the
-// context of the running call.
+// An object that `new` made, with the steps that initialise it run at its
+// address.
+private final class Initialised : LongNode {
+    private Node _object;
+    private Node[] _steps;
+    public this(Node object, Node[] steps) { _object = object; _steps = steps; }
+    public override long executeLong(ubyte* frame) {
+        const object = _object.executeLong(frame);
+        foreach (step; _steps)
+            step.executeInto(frame, cast(ubyte*) object);
+        return object;
+    }
+}
+
+// An expression that runs among the steps that initialise an object.
+private final class EffectStep : Node {
+    private Node _effect;
+    public this(Node effect) { _effect = effect; }
+    public override void executeInto(ubyte* frame, ubyte*) {
+        _effect.executeVoid(frame);
+    }
+}
+
+// The storage that a placement `new` names. A class object there starts as
+// the initial image of its class.
+private final class PlacedObject : LongNode {
+    private Node _place;
+    private const(void)[] _image;
+    public this(Node place, const(void)[] image) { _place = place; _image = image; }
+    public override long executeLong(ubyte* frame) {
+        import core.stdc.string: memcpy;
+
+        auto object = _place.executeAddr(frame);
+        if (_image.length != 0)
+            memcpy(object, _image.ptr, _image.length);
+        return cast(long) object;
+    }
+}
+
+// A class object in the frame, as a `scope` class or a `new` of a `scope`
+// variable's initialiser has: it lasts as long as the call does.
+private final class FrameObject(E) : LongNode {
+    private E _ev;
+    private size_t _size;
+    private uint _alignment;
+    private const(void)[] _image;
+    public this(E ev, size_t size, uint alignment, const(void)[] image) {
+        _ev = ev; _size = size; _alignment = alignment; _image = image;
+    }
+    public override long executeLong(ubyte*) {
+        import core.stdc.string: memcpy;
+
+        auto object = _ev._frames.reserve(_size, _alignment);
+        memcpy(object, _image.ptr, _image.length);
+        return cast(long) object;
+    }
+}
+
+// The hidden context field of a nested class made with an outer object: the
+// object, moved to the view of the class the nested class is declared in.
+private final class ContextFromValue : Node {
+    private size_t _offset;
+    private Node _value;
+    private long _adjustment;
+    public this(size_t offset, Node value, long adjustment) {
+        _offset = offset; _value = value; _adjustment = adjustment;
+    }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        *cast(long*) (dest + _offset) = _value.executeLong(frame) + _adjustment;
+    }
+}
+
+// The hidden context field of an aggregate made in a function: the running
+// frame, or the frame of an enclosing function, reached through the static
+// chain.
+private final class FrameContextStore : Node {
+    import snakebite.backends.closureplan: Hop;
+
+    private size_t _offset;
+    private const(Hop)[] _hops;
+    public this(size_t offset, const(Hop)[] hops) { _offset = offset; _hops = hops; }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        auto context = frame;
+        foreach (hop; _hops) {
+            if (context is null)
+                break;
+            context = *cast(ubyte**) (context + hop.offset);
+        }
+        *cast(ubyte**) (dest + _offset) = context;
+    }
+}
+
+// The hidden context field of a nested aggregate whose context the
+// evaluator finds: the context of the running call.
 private final class ContextStore(E) : Node {
     private E _ev;
     private InitStep _step;
@@ -3985,7 +4128,8 @@ private Scalar scalarOf(E)(E ev, Type type) {
         case Tbool, Tint8, Tuns8, Tint16, Tuns16, Tint32, Tuns32, Tint64,
                 Tuns64, Tchar, Twchar, Tdchar:
             return Scalar(Scalar.Kind.integral, ev.factsOf(type));
-        case Tpointer, Tclass:
+        // `typeof(null)` is a word whose only value is zero.
+        case Tpointer, Tclass, Tnull:
             return Scalar(Scalar.Kind.integral,
                 TypeFacts(size_t.sizeof, size_t.sizeof, true, true));
         case Tfloat32, Tfloat64:
@@ -4631,8 +4775,28 @@ private Node buildDelegate(E)(E ev, Expression expression) {
         case question:
             return buildConditional!(buildDelegate!E, ConditionalInto)(
                 ev, expression.isCondExp);
+        case cast_:
+            return buildDelegateCast(ev, expression.isCastExp);
         default:
             return null;
+    }
+}
+
+// A cast to a delegate: of another delegate, which keeps both words, or of
+// `typeof(null)`.
+private Node buildDelegateCast(E)(E ev, CastExp castExp) {
+    import snakebite.nativevalue: CastKind;
+
+    if (castExp.lowering !is null)
+        return buildDelegate(ev, castExp.lowering);
+    const plan = *ev._shared.facts.castOf(castExp);
+    with (CastKind) switch (plan.kind) {
+        case copy:
+            return buildDelegate(ev, castExp.e1);
+        case zero:
+            return buildZeroPair(ev, castExp.e1);
+        default:
+            assert(0, "a cast to a delegate copies a delegate or is of `null`");
     }
 }
 
@@ -4732,8 +4896,12 @@ private Node buildSlice(E)(E ev, Expression expression) {
             return buildSliceCast(ev, expression.isCastExp);
         case comma:
             return buildComma(ev, expression.isCommaExp, &buildSlice!E);
-        case assign, construct, blit:
-            return buildPairStore(ev, cast(AssignExp) expression);
+        case assign, construct, blit: {
+            auto assignment = cast(AssignExp) expression;
+            if (auto target = assignment.e1.isSliceExp)
+                return buildSliceAssignment(ev, assignment, target);
+            return buildPairStore(ev, assignment);
+        }
         default:
             return null;
     }
@@ -4747,6 +4915,27 @@ private bool isStoreTarget(Expression target) {
         return returnsReference(call);
     return target.isDotVarExp !is null || target.isVarExp !is null
         || target.isIndexExp !is null || target.isPtrExp !is null;
+}
+
+// An assignment to a slice. A slice that dmd typed as a static array is the
+// place of its elements, and `a[] = v` fills; both stay with the evaluator.
+// Every other one copies the elements of the array on the right side.
+private Node buildSliceAssignment(E)(E ev, AssignExp assignment, SliceExp target) {
+    import dmd.expression: MemorySet;
+    import dmd.typesem: nextOf, toBasetype;
+    import snakebite.backends.sliceplan: planSlice;
+
+    if (planSlice(target).yieldsStaticArray
+            || assignment.memset == MemorySet.blockAssign
+            || (assignment.isConstructExp !is null
+                && assignment.isConstructExp.lowering !is null))
+        return null;
+    auto to = buildSliceOf(ev, target);
+    auto from = buildSlice(ev, assignment.e2);
+    if (to is null || from is null)
+        return null;
+    return new SliceCopy(&ev.failTreeBounds, ev._treeRoot, assignment.loc,
+        to, from, ev.factsOf(assignment.type.toBasetype.nextOf).size);
 }
 
 // A store of a dynamic array or a delegate.
@@ -4868,51 +5057,157 @@ private Node buildSliceCast(E)(E ev, CastExp castExp) {
             return address is null
                 ? null : new StaticArrayToSlice(address, plan.staticLength);
         }
+        case zero:
+            return buildZeroPair(ev, castExp.e1);
         default:
             return null;
     }
 }
 
-// `new` yields the object it allocated. The allocation is the call of the
-// hook that dmd lowered it to. An object that needs more than that has its
-// constructor called on the allocation; a nested context, fields given in
-// order and the value of `new int(1)` stay with the evaluator.
+// A cast to a value of two words that is zero: only `typeof(null)` casts to
+// one.
+private Node buildZeroPair(E)(E ev, Expression operand) {
+    auto value = buildValue(ev, operand);
+    return value is null ? null : new ZeroPairAfter(value);
+}
+
+// `new` yields the object it made. Its storage is the call of the hook that
+// dmd lowered it to, the place of a placement `new`, or a frame temporary;
+// `driveInit` decides the order of what follows at the object: its hidden
+// contexts, then its constructor call or the fields given in order. The
+// value of `new int(1)` fills the new storage as a field at offset 0 does.
 private Node buildNew(E)(E ev, NewExp expression) {
     import dmd.astenums: TY;
     import dmd.typesem: toBasetype;
-    import snakebite.backends.aggregateinit: NewPlan, planClassContext,
-        planNew, planPositionalFields;
+    import snakebite.backends.aggregateinit: AggregateInitPlan, InitStep,
+        NewPlan, planClassContext, planNew, planPositionalFields;
 
-    const plan = planNew(expression);
-    if (plan.destination != NewPlan.Destination.lowering
-            || expression.lowering is null || plan.argumentPrefix !is null
-            || expression.thisexp !is null)
-        return null;
-    auto allocation = isSlice(expression.lowering.type)
-        ? buildSlice(ev, expression.lowering)
-        : buildValue(ev, expression.lowering);
-    if (allocation is null)
+    auto plan = planNew(expression);
+    auto storage = buildNewStorage(ev, expression, plan);
+    if (storage is null)
         return null;
 
-    auto newtype = expression.newtype.toBasetype;
-    const aggregate = newtype.ty == TY.Tclass || newtype.ty == TY.Tstruct;
-    if (!aggregate) {
-        // `new int(1)` also stores its argument.
-        const stores = expression.type.toBasetype.ty == TY.Tpointer
-            && expression.arguments !is null && expression.arguments.length != 0;
-        return stores ? null : allocation;
+    AggregateInitPlan initialisation;
+    final switch (plan.objectKind) with (NewPlan.ObjectKind) {
+        case class_:
+            initialisation = planClassContext(expression);
+            break;
+        case struct_:
+            initialisation = planPositionalFields(
+                expression.newtype.toBasetype.isTypeStruct.sym,
+                expression.member is null ? expression.arguments : null);
+            break;
+        case scalar: {
+            const stores = expression.type.toBasetype.ty == TY.Tpointer
+                && expression.arguments !is null
+                && expression.arguments.length != 0;
+            if (!stores)
+                return storage;
+            assert(expression.arguments.length == 1,
+                "dmd rejects more than one argument for a scalar `new`");
+            auto value = buildFieldValue(ev, 0, expression.newtype,
+                (*expression.arguments)[0]);
+            return value is null ? null : new Initialised(storage, [value]);
+        }
     }
 
-    const contextSteps = newtype.ty == TY.Tclass
-        ? planClassContext(expression).steps.length : 0;
-    if (contextSteps != 0)
-        return null;
-    if (expression.member !is null)
-        return buildConstructorCall(ev, expression, allocation);
-    const fieldSteps = newtype.ty == TY.Tstruct
-        ? planPositionalFields(
-            newtype.isTypeStruct.sym, expression.arguments).steps.length : 0;
-    return fieldSteps == 0 ? allocation : null;
+    Node[] steps;
+    foreach (step; initialisation.steps)
+        if (step.kind == InitStep.Kind.vthis)
+            steps ~= buildVthisStep(ev, step);
+    if (expression.member !is null) {
+        if (plan.argumentPrefix !is null) {
+            auto prefix = buildEffect(ev, plan.argumentPrefix);
+            if (prefix is null)
+                return null;
+            steps ~= new EffectStep(prefix);
+        }
+        return buildConstructorCall(ev, expression,
+            steps.length == 0 ? storage : new Initialised(storage, steps));
+    }
+    foreach (step; initialisation.steps) {
+        if (step.kind == InitStep.Kind.vthis)
+            continue;
+        auto node = buildInitStep(ev, step);
+        if (node is null)
+            return null;
+        steps ~= node;
+    }
+    return steps.length == 0 ? storage : new Initialised(storage, steps);
+}
+
+// The storage of the object that `new` makes, before `driveInit`.
+private Node buildNewStorage(E)(
+    E ev, NewExp expression,
+    imported!"snakebite.backends.aggregateinit".NewPlan plan,
+) {
+    import dmd.typesem: toBasetype;
+    import snakebite.backends.aggregateinit: NewPlan;
+
+    final switch (plan.destination) with (NewPlan.Destination) {
+        case lowering:
+            // dmd lowers every heap `new` in code that runs.
+            if (expression.lowering is null)
+                return null;
+            return isSlice(expression.lowering.type)
+                ? buildSlice(ev, expression.lowering)
+                : buildValue(ev, expression.lowering);
+        case placement: {
+            auto place = buildAddress(ev, plan.placement);
+            if (place is null)
+                return null;
+            return new PlacedObject(place,
+                plan.objectKind == NewPlan.ObjectKind.class_
+                    ? classImageOf(ev, expression) : null);
+        }
+        case stack: {
+            assert(plan.objectKind == NewPlan.ObjectKind.class_,
+                "only a class object lives in the frame");
+            auto declaration = expression.newtype.toBasetype.isTypeClass.sym;
+            return new FrameObject!E(ev, declaration.structsize,
+                declaration.alignsize == 0 ? 1 : declaration.alignsize,
+                classImageOf(ev, expression));
+        }
+    }
+}
+
+// The initial bytes of an object of the class that `expression` makes.
+private const(void)[] classImageOf(E)(E ev, NewExp expression) {
+    import dmd.typesem: toBasetype;
+
+    return ev._shared.classRuntimeInfo(
+        expression.newtype.toBasetype.isTypeClass.sym).m_init;
+}
+
+// The hidden context of a nested aggregate. A nested class made with an
+// outer object (`outer.new Inner`) takes that object, seen as the class it
+// is nested in. Otherwise it is the context of the symbol the aggregate was
+// made in: the frame of this function or of one that encloses it, or one
+// that the evaluator finds.
+private Node buildVthisStep(E)(E ev, InitStep step) {
+    import snakebite.backends.dualcontext: ContextSource, contextSourceOf;
+
+    if (step.source !is null) {
+        auto value = buildValue(ev, step.source);
+        return value is null
+            ? new ContextStore!E(ev, step)
+            : new ContextFromValue(step.offset, value, step.sourceAdjustment);
+    }
+    const source = contextSourceOf(ev._function, step.contextOwner);
+    final switch (source.kind) with (ContextSource.Kind) {
+        case none:
+            return new FieldStore!long(step.offset, new Constant!long(0));
+        case frame: {
+            if (source.function_ is ev._function)
+                return new FrameContextStore(step.offset, null);
+            const hops = ev.staticChainTo(cast() source.function_);
+            return hops is null
+                ? new ContextStore!E(ev, step)
+                : new FrameContextStore(step.offset, hops);
+        }
+        case receiver, overrider:
+            return new ContextStore!E(ev, step);
+    }
 }
 
 // The constructor of `new`, called on the allocation.
@@ -5391,6 +5686,8 @@ private Node buildCast(E)(E ev, CastExp castExp, in Scalar scalar) {
             return new ClassUpcast(operand, plan.referenceOffset);
         case truth:
             return scalar.kind == integral ? new Truth(operand) : null;
+        case zero:
+            return scalar.kind == integral ? new ZeroAfter(operand) : null;
         case integralToFloat:
             if (source.kind != integral || scalar.kind != floating)
                 return null;
@@ -6046,7 +6343,7 @@ private Node buildArrayLiteral(E)(
 private Node buildInitStep(E)(E ev, InitStep step) {
     final switch (step.kind) with (InitStep.Kind) {
         case vthis:
-            return new ContextStore!E(ev, step);
+            return buildVthisStep(ev, step);
         case value:
             return buildFieldValue(ev, step.offset, step.type, step.source);
         case bitfield: {
