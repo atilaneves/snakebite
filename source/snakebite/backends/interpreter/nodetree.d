@@ -2101,11 +2101,21 @@ private mixin template CalleeEntry(E) {
         foreach (i, ref arg; _args)
             storeArgument(arg, _modes[i], frame, base + layout.parameters[i].offset);
         if (layout.retainsTemporaries)
-            ev._temporaries.withNestedCall(layout.retainsTemporaries, {
-                run(selection, base, result);
-            });
+            runRetaining(selection, base, result);
         else
             run(selection, base, result);
+    }
+
+    // The closure sits in a frame of its own, so the frame of `enter`
+    // carries none.
+    pragma(inline, false)
+    private void runRetaining(
+        in Selection selection, ubyte* base, void* result,
+    ) {
+        _ev._temporaries.withNestedCall(
+            selection.callee.layout.retainsTemporaries, {
+                run(selection, base, result);
+            });
     }
 
     private void run(in Selection selection, ubyte* base, void* result) {
