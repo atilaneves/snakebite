@@ -22,7 +22,8 @@ import snakebite.backends.checkplan: BoundsCheck;
 import snakebite.backends.controlflow: ControlFlowState;
 import snakebite.backends.fullexpression: FullExpressionScope;
 import snakebite.backends.interpreter.faultslot:
-    ResultWord, fastFrameLead, faultSlotOf, resultPlaceOf, resultWordOf;
+    FaultSite, ResultWord, fastFrameLead, faultSlotOf, resultPlaceOf,
+    resultWordOf, siteWord;
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.ffi.load: callDirectWordsPair, extendWord, storeWordResult, WordPair;
 import snakebite.backends.sliceplan: SlicePlan;
@@ -48,6 +49,10 @@ package struct TreeRoot {
         closurePlan;
     package Type returnType;
     package TypeFacts returnFacts;
+    package FuncDeclaration function_;
+    // The fault slot of a call before its first statement names one: the
+    // function with no expression.
+    package const(void)* entrySite;
     package ResultWord resultWord;
     // How a `value` result fills its word from the bytes of its type.
     private ResultExtension _extension;
@@ -128,6 +133,8 @@ package TreeRoot* rootOf(E)(
     root.closurePlan = ev.closurePlanOf(function_);
     root.returnType = function_.type.nextOf;
     root.returnFacts = ev.factsOf(root.returnType);
+    root.function_ = function_;
+    root.entrySite = siteWord(new FaultSite(function_, null));
     root.resultWord = resultWordFor(ev, function_);
     if (root.resultWord == ResultWord.value) {
         // The bits of a floating result are zero-extended.
@@ -265,6 +272,9 @@ package struct TreeCallee {
     package size_t reservation;
     package size_t contextOffset;
     package bool reservesFast;
+    // What a call writes in the fault slot of a guest callee
+    // (`TreeRoot.entrySite`), null for a callee that host code runs.
+    package const(void)* entrySite;
     // What the body of the callee is, found when a call node first binds it.
     package CalleeShape shape;
     // Whether a native callee is a direct word call, found when a call node
@@ -307,16 +317,16 @@ package bool isScalar(E)(E ev, Type type) {
     return scalarOf(ev, type).kind != Scalar.Kind.none;
 }
 
-// Where a statement names the full expression it runs, so that a fault in
-// it reports that expression's line: it stores the expression in the fault
-// slot of its frame. A statement that cannot fault does not need one, but
-// this costs one store, and a node that decides what can fault could be
-// wrong.
+// Where a statement names its function and the full expression it runs, so
+// that a fault in it reports them: it stores the site of the expression
+// (`siteWord`) in the fault slot of its frame. A statement that cannot
+// fault does not need one, but this costs one store, and a node that
+// decides what can fault could be wrong.
 private struct Position {
-    private const(void)* _root;
+    private const(void)* _site;
 
     public void note(ubyte* frame) {
-        *faultSlotOf(frame) = _root;
+        *faultSlotOf(frame) = _site;
     }
 }
 
@@ -3105,9 +3115,6 @@ private mixin template CalleeEntry(E) {
     // What the callee writes at the place that the site gives it.
     private CalleeResult _result;
     private TreeRoot* _root;
-    // The function whose tree holds this site: the running function again
-    // when the callee returns.
-    private FuncDeclaration _caller;
     private ArgumentWriter[] _writers;
     private ArgumentStep[][TreeCallee*] _steps;
 
@@ -3115,7 +3122,6 @@ private mixin template CalleeEntry(E) {
         _args = argumentOperands(arguments.nodes, arguments.modes);
         _modes = arguments.modes;
         _sizes = arguments.sizes;
-        _caller = _ev._function;
         _writers = writersOf(_args, _modes);
     }
 
@@ -3185,7 +3191,7 @@ private mixin template CalleeEntry(E) {
             auto base = ev._frames.reserve(callee.reservation, cast(uint) lead);
         }
         base += lead;
-        *faultSlotOf(base) = null;
+        *faultSlotOf(base) = callee.entrySite;
         if (callee.contextOffset != size_t.max)
             *cast(size_t*) (base + callee.contextOffset) = hidden;
         foreach (ref step; steps)
@@ -3260,7 +3266,7 @@ private mixin template CalleeEntry(E) {
         auto callee = cast(TreeCallee*) selection.callee;
         final switch (selection.route) with (CallSelection.Route) {
             case guest:
-                _ev.runTreeCallee(callee, base, result, _caller, frame);
+                _ev.runTreeCallee(callee, base, result, frame);
                 break;
             case native, builtin:
                 _ev.runHostCallee(callee, selection.plan, base, result);
@@ -3734,7 +3740,7 @@ private final class Call(E) : Node {
             "a call that takes a value calls a callee that gives one");
         auto calleeFrame = FrameGuard(&ev._frames);
         auto base = placeIn!true(callee, fast.steps, receiver, frame);
-        ev.runTree(callee, base, _caller, frame);
+        ev.runTree(callee, base, frame);
         return *resultWordOf(base);
     }
 
@@ -3749,7 +3755,7 @@ private final class Call(E) : Node {
         auto calleeFrame = FrameGuard(&ev._frames);
         auto base = placeIn!true(callee, fast.steps, receiver, frame);
         *resultPlaceOf(base) = place;
-        ev.runTree(callee, base, _caller, frame);
+        ev.runTree(callee, base, frame);
     }
 }
 
@@ -6901,7 +6907,7 @@ private Node storeFusedDouble(Node value, FrameAddress address) {
 }
 
 private Position positionOf(E)(E ev, Expression root) {
-    return Position(cast(const(void)*) root);
+    return Position(siteWord(new FaultSite(ev._function, cast(const(void)*) root)));
 }
 
 // The statement that a declaration is: one for each runtime variable it

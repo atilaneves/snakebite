@@ -570,7 +570,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     import snakebite.framestack: FrameStack, defaultFrameCapacity;
     import snakebite.backends.interpreter.faultslot:
         ResultWord, faultSlotOf, fastFrameLead, frameLead, pushCallFrame,
-        resultPlaceOf, resultWordOf;
+        resultPlaceOf, resultWordOf, siteOf;
     import snakebite.backends.interpreter.stackpieces: StackPieces;
     import snakebite.backends.druntimehooks: DruntimeHook;
     import snakebite.ffi:
@@ -921,6 +921,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         } else {
             auto slot = evaluator.faultSlot;
             position = slot is null ? null : *slot;
+            if (auto site = siteOf(position)) {
+                function_ = cast() site.function_;
+                position = site.expression;
+            }
         }
         if (function_ is null)
             return GuestPosition();
@@ -1494,8 +1498,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (callee is null)
             return null;
         const layout = callee.layout;
-        if (decision.route == CallSelection.Route.guest)
+        if (decision.route == CallSelection.Route.guest) {
             callee.root = treeRootFor(function_, function_.fbody, layout);
+            callee.entrySite = callee.root.entrySite;
+        }
         callee.slots = layout.parameters;
         callee.declared = layout.parameters.length;
         if (variadic) {
@@ -1678,24 +1684,24 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // The general entry of a call node, for any result.
     package void runTreeCallee(
         TreeCallee* callee, ubyte* calleeFrame, void* place,
-        FuncDeclaration caller, ubyte* callerFrame,
+        ubyte* callerFrame,
     ) {
         import snakebite.ffi.load: WordPair, storeWordResult;
 
         auto root = callee.root;
         final switch (root.resultWord) {
             case ResultWord.value:
-                runTree(callee, calleeFrame, caller, callerFrame);
+                runTree(callee, calleeFrame, callerFrame);
                 if (place !is null)
                     storeWordResult(WordPair(*resultWordOf(calleeFrame)),
                         root.returnFacts.size, place);
                 break;
             case ResultWord.place:
                 *resultPlaceOf(calleeFrame) = place;
-                runTree(callee, calleeFrame, caller, callerFrame);
+                runTree(callee, calleeFrame, callerFrame);
                 break;
             case ResultWord.none:
-                runTree(callee, calleeFrame, caller, callerFrame);
+                runTree(callee, calleeFrame, callerFrame);
                 break;
         }
     }
@@ -1705,18 +1711,20 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // `executeRaw`'s guest case without the steps a direct call to a guest
     // function has no use for. Every call that a node makes runs here.
     //
-    // `caller` and `callerFrame` are the function and the frame of the node
-    // that calls, which the running call has again when the callee returns.
-    // The call has no guard: a node of the callee that needs the original
-    // evaluator claims the call's state (`claim`), and the claim ends when
-    // the call returns. An exception that leaves the call skips both, and
-    // what catches the exception puts its own state back (`RunningCall`).
+    // `callerFrame` is the frame of the node that calls, which the running
+    // call has again when the callee returns. The call leaves `_function`
+    // alone: the fault slot of the callee names its function (`FaultSite`),
+    // and a node that hands control to the original evaluator names it
+    // first (`syncTree`). The call has no guard: a node of the callee that
+    // needs the original evaluator claims the call's state (`claim`), and
+    // the claim ends when the call returns. An exception that leaves the
+    // call skips both, and what catches the exception puts its own state
+    // back (`RunningCall`).
     pragma(inline, true)
     package void runTree(
-        TreeCallee* callee, ubyte* calleeFrame, FuncDeclaration caller,
-        ubyte* callerFrame,
+        TreeCallee* callee, ubyte* calleeFrame, ubyte* callerFrame,
     ) {
-        assert(_function is caller && _faultFrame is callerFrame,
+        assert(_faultFrame is callerFrame,
             "a call node runs in the call of its own tree");
         ubyte here;
         if (cast(size_t) &here < _stack.limit) {
@@ -1724,12 +1732,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return;
         }
 
-        _function = callee.function_;
         _faultFrame = calleeFrame;
         const flow = callee.root.execute(calleeFrame);
         if (_innermostFrame is calleeFrame)
             endClaimedCall(callee, calleeFrame, flow);
-        _function = caller;
         _faultFrame = callerFrame;
     }
 
@@ -1766,9 +1772,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // The original evaluator reads the function's fields; a tree node reads
     // none of them. A call between tree nodes therefore leaves them alone,
     // and each node that hands control to the original evaluator calls
-    // `syncTree` first, with the tree and frame it runs for. `_function` is
-    // the running call's, except between a throw in a call without a guard
-    // and the `try` that catches it (`RunningCall`).
+    // `syncTree` first, with the tree and frame it runs for. A call between
+    // tree nodes does not set `_function` either, so every sync names the
+    // function: after a `try` caught a throw, `_function` is what it was
+    // when the `try` began (`RunningCall`), which can be the function of
+    // another call, also when the running call still has its claim.
     //
     // A call that has no state of its own yet claims it here. A call whose
     // node synced gives the fields back when it ends, as the original
@@ -1779,6 +1787,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             claim(root, frame);
             return;
         }
+        _function = root.function_;
         if (_fieldsOwner is _innermost)
             return;
         setFunctionFields(root, frame);
@@ -1799,6 +1808,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto state = _claims[_claimCount++];
         state.begin(this, frame);
         _place = root.resultPlace(frame);
+        _function = root.function_;
         setFunctionFields(root, frame);
     }
 

@@ -1,11 +1,12 @@
 module snakebite.backends.interpreter.faultslot;
 
-// A guest call's frame has a word in front of its base that names the full
-// expression the call runs, so that a guest fault reports its source line.
-// A tree node stores into it at a fixed offset from the frame pointer it
-// already holds, and the fault handler reads the word of the running call.
-// Each call has its own word, so threads and nested calls never share one.
-// The word in front of it is the result word of the call (`resultWordOf`).
+// A guest call's frame has a word in front of its base, the fault slot, that
+// names the function and the full expression the call runs, so that a guest
+// fault reports its function and source line. A tree node stores into it at
+// a fixed offset from the frame pointer it already holds, and the fault
+// handler reads the slot of the running call. Each call has its own slot, so
+// threads and nested calls never share one. The word in front of it is the
+// result word of the call (`resultWordOf`).
 
 private:
 
@@ -13,9 +14,36 @@ import snakebite.framestack: FrameStack;
 
 public enum faultSlotBytes = (const(void)*).sizeof;
 
-// The word of the call whose frame starts at `frame`.
+// The fault slot of the call whose frame starts at `frame`. It holds one
+// of:
+// - a `FaultSite` that `siteWord` tagged: a call node writes the entry site
+//   of its callee (the function, no expression), and a tree statement
+//   writes its own site before it runs;
+// - an untagged full expression, which the original evaluator writes; the
+//   function is the evaluator's `_function`, which names the call that ran
+//   the evaluator (`syncTree`, `executeRaw`);
+// - null: no expression yet, and the function is `_function`.
 public const(void)** faultSlotOf(ubyte* frame) @system @nogc nothrow pure {
     return cast(const(void)**) (frame - faultSlotBytes);
+}
+
+// A function and the full expression in it that runs, or none.
+public struct FaultSite {
+    public imported!"dmd.func".FuncDeclaration function_;
+    public const(void)* expression;
+}
+
+// The word of a fault slot that names `site`: its address with bit 0 set,
+// which no expression has.
+public const(void)* siteWord(const(FaultSite)* site) @trusted @nogc nothrow pure {
+    return cast(const(void)*) (cast(size_t) site | 1);
+}
+
+// The site that the word of a fault slot names, or null when the word is
+// untagged.
+public const(FaultSite)* siteOf(const(void)* word) @trusted @nogc nothrow pure {
+    const bits = cast(size_t) word;
+    return bits & 1 ? cast(const(FaultSite)*) (bits & ~size_t(1)) : null;
 }
 
 // What the result word of a call holds. It is decided once for each

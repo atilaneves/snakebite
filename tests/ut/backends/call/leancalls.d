@@ -818,3 +818,61 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+
+// A `try` in a call catches a throw that left a call below it, after a
+// statement of the same call ran in the evaluator. A statement of the call
+// that runs for the first time after that is built for its own function,
+// not for the function that called it, which returns `ref`.
+static foreach (backend; Matrix!()) {
+    @("leancalls.statementBuiltAfterCaughtThrow." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                int boom(int mode) {
+                    if (mode != 0)
+                        throw new Exception("boom");
+                    return mode;
+                }
+
+                int late(int mode) {
+                    int value = mode;
+                    try {
+                        switch (value) {
+                            default:
+                                value += 1;
+                                break;
+                        }
+                        value += boom(mode);
+                    } catch (Exception) {
+                        value += 10;
+                    }
+                    if (mode == 2)
+                        return value + 29;
+                    return value;
+                }
+
+                ref int holder(ref int stored, int mode) {
+                    if (mode == 2) {
+                        stored = late(mode);
+                        return stored;
+                    }
+                    stored = late(mode);
+                    return stored;
+                }
+
+                int answer() {
+                    int stored;
+                    int total = holder(stored, 0);
+                    total += holder(stored, 1);
+                    total += holder(stored, 2);
+                    // late(0) is 1, late(1) is 12 and late(2) is 42.
+                    return total == 55 && stored == 42 ? 42 : total;
+                }
+            },
+            "answer",
+        );
+    }
+}

@@ -2436,6 +2436,20 @@ FAULTS = [
      "    return load(none, 1);\n"
      "}\n",
      -signal.SIGSEGV, "fatal: null pointer dereference", "main.load"),
+    ("fault in the first statement of a callee of an evaluated caller",
+     "module main;\n"
+     "int load(int* pointer) {\n"
+     "    // the callee names itself, not its caller that the evaluator ran\n"
+     "    return *pointer;\n"
+     "}\n"
+     "int main() {\n"
+     "    int value = 1;\n"
+     "    switch (value) { default: break; }\n"
+     "    load(&value);\n"
+     "    int* none;\n"
+     "    return load(none);\n"
+     "}\n",
+     -signal.SIGSEGV, "fatal: null pointer dereference", "main.load"),
     ("fault in the body of a try statement",
      "module main;\n"
      "int load(int* pointer) {\n"
