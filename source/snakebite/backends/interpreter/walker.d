@@ -6,7 +6,7 @@ private:
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.backends.interpreter.nodetree:
     AccessSite, CalleeResult, OuterVariable, TreeCallee, TreeFlow, TreeRoot,
-    isAggregate, isScalar, isSlice, resultWordFor, rootOf;
+    isAggregate, isPair, isScalar, isSlice, resultWordFor, rootOf;
 import snakebite.nativelayout: tryTypeFacts, truthFacts;
 
 
@@ -1640,7 +1640,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 ? CalleeResult.aggregate : CalleeResult.value;
         if (result == CalleeResult.value && function_.isCtorDeclaration is null
                 && returnType.toBasetype.ty != TY.Tvoid
-                && !isScalar(this, returnType) && !isSlice(returnType))
+                && !isScalar(this, returnType) && !isPair(returnType))
             return null;
         auto callee = new TreeCallee;
         callee.function_ = function_;

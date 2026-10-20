@@ -2484,7 +2484,7 @@ private final class Comma : Node {
 }
 
 // A value the evaluator makes, for a delegate whose making is not the
-// tree's to decide: one with a receiver or with a pair of contexts.
+// tree's to decide: one with a pair of contexts.
 private final class EvaluatedPair(E) : SliceNode {
     private E _ev;
     private Expression _expression;
@@ -2517,6 +2517,46 @@ private final class FrameDelegate : SliceNode {
         *cast(ubyte**) (dest + delegateContextOffset)
             = contextAlong(frame, _hops);
         *cast(void**) (dest + delegateFunctionOffset) = _function;
+    }
+}
+
+// How a delegate to a method finds its words: the receiver is the address
+// of a struct or a class reference, and the function word is the method's
+// own or the one in the vtable of the reference.
+private enum MethodReceiver : ubyte { structAddress, reference, virtualReference }
+
+// A delegate to a method: the receiver as the context, and the method's
+// function word, resolved when the node is built or, for a virtual method,
+// read from the receiver's vtable.
+private final class MethodDelegate(E, MethodReceiver kind) : SliceNode {
+    private E _ev;
+    private Node _receiver;
+    // The function word, or the index of the method in the vtable.
+    private size_t _function;
+    private Loc _loc;
+    private TreeRoot* _root;
+    public this(E ev, Node receiver, size_t function_, in Loc loc) {
+        _ev = ev; _receiver = receiver; _function = function_; _loc = loc;
+        _root = ev._treeRoot;
+    }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        import snakebite.nativelayout:
+            delegateContextOffset, delegateFunctionOffset;
+
+        static if (kind == MethodReceiver.structAddress)
+            auto context = cast(void*) _receiver.executeAddr(frame);
+        else {
+            auto context = cast(void*) _receiver.executeLong(frame);
+            static if (E.nullCheckedEvaluator)
+                if (context is null)
+                    _ev.failTreeNullDeref(_root, frame, _loc);
+        }
+        static if (kind == MethodReceiver.virtualReference)
+            const function_ = (*cast(size_t**) context)[_function];
+        else
+            const function_ = _function;
+        *cast(void**) (dest + delegateContextOffset) = context;
+        *cast(size_t*) (dest + delegateFunctionOffset) = function_;
     }
 }
 
@@ -5165,12 +5205,12 @@ private Node buildCall(E)(E ev, CallExp call) {
     const isConstructor = function_.isCtorDeclaration !is null;
     const resultIsAddress = type.isRef || isConstructor;
     const isVoid = call.type.toBasetype.ty == TY.Tvoid;
-    const resultIsSlice = isSlice(call.type);
+    const resultIsPair = isPair(call.type);
     const resultIsAggregate = isAggregate(call.type);
-    const result = resultIsAddress || isVoid || resultIsSlice
+    const result = resultIsAddress || isVoid || resultIsPair
             || resultIsAggregate
         ? Scalar() : scalarOf(ev, call.type);
-    if (!resultIsAddress && !isVoid && !resultIsSlice && !resultIsAggregate
+    if (!resultIsAddress && !isVoid && !resultIsPair && !resultIsAggregate
             && result.kind == Scalar.Kind.none)
         return null;
 
@@ -5242,7 +5282,7 @@ private Node buildCall(E)(E ev, CallExp call) {
     }
     auto node = new Call!E(ev, call, function_, receiver, receiverIsAddress,
         virtual, arguments,
-        isVoid ? 0 : resultIsSlice ? SliceValue.sizeof : result.facts.size,
+        isVoid ? 0 : resultIsPair ? SliceValue.sizeof : result.facts.size,
         result.facts.isUnsigned);
     if (!virtual) {
         if (!node.matches(callee))
@@ -5366,11 +5406,11 @@ private Node buildIndirectCall(E)(E ev, CallExp call) {
             /* resultUnsigned */ true);
     }
     const isVoid = call.type.toBasetype.ty == TY.Tvoid;
-    const resultIsSlice = isSlice(call.type);
+    const resultIsPair = isPair(call.type);
     const resultIsAggregate = isAggregate(call.type);
-    const result = isVoid || resultIsSlice || resultIsAggregate
+    const result = isVoid || resultIsPair || resultIsAggregate
         ? Scalar() : scalarOf(ev, call.type);
-    if (!isVoid && !resultIsSlice && !resultIsAggregate
+    if (!isVoid && !resultIsPair && !resultIsAggregate
             && result.kind == Scalar.Kind.none)
         return null;
 
@@ -5382,7 +5422,7 @@ private Node buildIndirectCall(E)(E ev, CallExp call) {
             viaDelegate, arguments, ev.factsOf(call.type),
             /* resultUnsigned */ false);
     TypeFacts facts;
-    facts.size = isVoid ? 0 : resultIsSlice ? SliceValue.sizeof : result.facts.size;
+    facts.size = isVoid ? 0 : resultIsPair ? SliceValue.sizeof : result.facts.size;
     return new IndirectCall!(E, CalleeResult.value)(ev, call, target,
         viaDelegate, arguments, facts, result.facts.isUnsigned);
 }
@@ -5536,6 +5576,11 @@ package bool isDelegate(Type type) {
     return type !is null && type.toBasetype.ty == TY.Tdelegate;
 }
 
+// A value of two words: a dynamic array or a delegate.
+package bool isPair(Type type) {
+    return isSlice(type) || isDelegate(type);
+}
+
 // The node that yields the delegate `expression` as two words, or null when
 // the tree does not cover the expression.
 private Node buildDelegate(E)(E ev, Expression expression) {
@@ -5560,10 +5605,10 @@ private Node buildDelegate(E)(E ev, Expression expression) {
             return address is null ? null : loadSlice(address);
         }
         case call: {
-            // The value of a `ref` result, read at its address.
+            // The value of a `ref` result is read at its address.
             auto call = expression.isCallExp;
             if (!returnsReference(call))
-                return null;
+                return buildCall(ev, call);
             auto address = buildCall(ev, call);
             return address is null ? null : loadSlice(address);
         }
@@ -5638,10 +5683,9 @@ private Node buildDelegateCast(E)(E ev, CastExp castExp) {
     }
 }
 
-// A delegate literal or `&nested`: the context of the function that the
-// target is nested in, as the evaluator's `storeDelegateValue` finds it, and
-// the target's function word. A delegate with a receiver or with a pair of
-// contexts is made by the evaluator.
+// A delegate literal, `&nested` or `&receiver.method`: the context, as the
+// evaluator's `storeDelegateValue` finds it, and the target's function word.
+// A delegate with a pair of contexts is made by the evaluator.
 private Node buildMadeDelegate(E)(
     E ev, Expression expression,
     imported!"snakebite.frontend.dmd.delegates".DelegateTarget target,
@@ -5652,8 +5696,10 @@ private Node buildMadeDelegate(E)(
     if (target.function_ is null)
         internalFailure("a delegate expression names a function and has a "
             ~ "delegate type");
-    if (target.receiver !is null || isDualContext(target.function_))
+    if (isDualContext(target.function_))
         return new EvaluatedPair!E(ev, expression);
+    if (target.receiver !is null)
+        return buildMethodDelegate(ev, expression, target);
     auto function_ = ev.functionAddressOf(target.function_);
     if (!target.needsContext)
         return constantDelegate(function_);
@@ -5664,6 +5710,27 @@ private Node buildMadeDelegate(E)(
     const hops = ev.staticChainTo(target.contextOwner);
     return hops is null
         ? constantDelegate(function_) : new FrameDelegate(hops, function_);
+}
+
+private Node buildMethodDelegate(E)(
+    E ev, Expression expression,
+    imported!"snakebite.frontend.dmd.delegates".DelegateTarget target,
+) {
+    if (target.receiverIsAddress) {
+        auto address = buildAddress(ev, target.receiver);
+        return address is null ? null
+            : new MethodDelegate!(E, MethodReceiver.structAddress)(ev, address,
+                cast(size_t) ev.functionAddressOf(target.function_),
+                expression.loc);
+    }
+    auto reference = buildValue(ev, target.receiver);
+    if (reference is null)
+        return null;
+    if (target.virtualDispatch)
+        return new MethodDelegate!(E, MethodReceiver.virtualReference)(ev,
+            reference, target.function_.vtblIndex, expression.loc);
+    return new MethodDelegate!(E, MethodReceiver.reference)(ev, reference,
+        cast(size_t) ev.functionAddressOf(target.function_), expression.loc);
 }
 
 private Node constantDelegate(void* function_) {
@@ -7788,10 +7855,8 @@ private Node buildReturnOperand(E)(
         sequence._children[1] = new Jump!(TreeFlow.return_);
         return sequence;
     }
-    if (isSlice(ev._type)) {
-        if (!isSlice(returned.exp.type))
-            return null;
-        auto slice = buildSlice(ev, returned.exp);
+    if (isPair(ev._type)) {
+        auto slice = buildPair(ev, ev._type, returned.exp);
         return slice is null ? null : new ReturnSlice(
             slice, positionOf(ev, returned.exp));
     }
