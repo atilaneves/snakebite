@@ -569,7 +569,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     import dmd.dstruct: StructDeclaration;
     import snakebite.framestack: FrameStack, defaultFrameCapacity;
     import snakebite.backends.interpreter.faultslot:
-        faultSlotOf, fastFrameLead, frameLead, placeSlotOf, pushCallFrame;
+        faultSlotOf, fastFrameLead, frameLead, placeNotRead, placeSlotOf,
+        pushCallFrame;
     import snakebite.backends.interpreter.stackpieces: StackPieces;
     import snakebite.backends.druntimehooks: DruntimeHook;
     import snakebite.ffi:
@@ -1704,6 +1705,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return runTreeValueOnNewPiece!T(
                 root, function_, calleeFrame, caller, callerFrame);
 
+        debug *placeSlotOf(calleeFrame) = placeNotRead;
         if (root.lean) {
             _function = function_;
             _faultFrame = calleeFrame;
@@ -1763,7 +1765,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // none of them. A call between tree nodes therefore leaves them alone,
     // and each node that hands control to the original evaluator calls
     // `syncTree` first, with the tree and frame it runs for. `_function` is
-    // always the running call's: the fault handler reads it whatever runs.
+    // the running call's, except between a throw in a call without a guard
+    // and the `try` that catches it (`RunningCall`).
     //
     // A call whose node synced gives the fields back when it ends, as the
     // original evaluator's calls do, so the fields never describe a call

@@ -19,11 +19,18 @@ public const(void)** faultSlotOf(ubyte* frame) @system @nogc nothrow pure {
 }
 
 // Where the result of the call whose frame starts at `frame` goes, or null
-// when its caller discards it. The call writes it before its body runs, and
-// a return statement writes through it.
+// when its caller discards it. A call that gives its result in a register
+// (`runTreeValue`) never writes the word: its body is one return statement
+// that hands the value back, and nothing else reads the word of a frame.
+// Every other call writes it before its body runs, and a return statement
+// writes through it. A debug build writes `placeNotRead` in the word of a
+// call that never writes it, so a read of it faults.
 public void** placeSlotOf(ubyte* frame) @system @nogc nothrow pure {
     return cast(void**) (frame - 2 * faultSlotBytes);
 }
+
+// The word of a call that gives its result in a register, in a debug build.
+public enum placeNotRead = cast(void*) 1;
 
 // The lead of every frame whose alignment is no more than this: a call
 // node reserves such a frame with no computation.
