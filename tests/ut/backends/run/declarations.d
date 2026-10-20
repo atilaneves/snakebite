@@ -107,6 +107,43 @@ static foreach (backend; Matrix!(
 }
 
 
+// A thread-local variable has one copy for each thread, also when the same
+// function reads and writes it on both threads.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a thread-local variable"),
+)) {
+    @("threadLocalVariableHasOneCopyForEachThread." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.thread: Thread;
+
+            int counter;
+
+            int bump(int amount) {
+                counter += amount;
+                return counter;
+            }
+
+            void worker() {
+                assert(bump(10) == 10);
+                assert(bump(10) == 20);
+            }
+
+            void main() {
+                assert(bump(1) == 1);
+                assert(bump(1) == 2);
+                auto thread = new Thread(&worker);
+                thread.start;
+                thread.join;
+                assert(bump(1) == 3);
+            }
+        });
+    }
+}
+
+
 // A trace function for the functions of `pragma(crt_constructor)` and
 // `pragma(crt_destructor)`. Compiled D runs them with no druntime, so they
 // cannot call `trace`, which uses the GC.

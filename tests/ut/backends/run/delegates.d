@@ -255,6 +255,63 @@ static foreach (backend; Matrix!(
 }
 
 
+// `&add` taken in a sibling nested function has the context of the function
+// that both are nested in: the sibling reaches it through its own context.
+// Here the delegate is kept in a local, so that context is a closure.
+static foreach (backend; Matrix!()) {
+    @("siblingNestedFunctionDelegateReachesEnclosingClosure." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        9.shouldBeRetOf!(backend, q{
+            int run() {
+                int total;
+                void add(int amount) {
+                    total += amount;
+                }
+                void twice(int amount) {
+                    auto dg = &add;
+                    dg(amount);
+                    dg(amount);
+                }
+                twice(3);
+                twice(1);
+                add(1);
+                return total;
+            }
+        }, "run");
+    }
+}
+
+
+// As above, with the delegate passed to a `scope` parameter, so that the
+// enclosing function keeps its frame on the stack.
+static foreach (backend; Matrix!()) {
+    @("siblingNestedFunctionDelegateReachesEnclosingFrame." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        9.shouldBeRetOf!(backend, q{
+            void call(scope void delegate(int) dg, int amount) {
+                dg(amount);
+            }
+            int run() {
+                int total;
+                void add(int amount) {
+                    total += amount;
+                }
+                void twice(int amount) {
+                    call(&add, amount);
+                    call(&add, amount);
+                }
+                twice(3);
+                twice(1);
+                add(1);
+                return total;
+            }
+        }, "run");
+    }
+}
+
+
 // `key in aa` gives a pointer to the matched value, not the value
 // itself, so calling through it is a call through a delegate pointer,
 // not a call on a delegate. dmd's own `(*handler)(...)` syntax for that

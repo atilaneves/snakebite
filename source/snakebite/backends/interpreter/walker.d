@@ -3661,6 +3661,26 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             ? *cast(ubyte**) address : address;
     }
 
+    // The storage of a variable in static storage, resolved once for a tree
+    // node. A thread-local variable's is this thread's copy: an evaluator
+    // and its trees belong to one thread (`ExecutionStates`).
+    package ubyte* staticAddressOf(VarDeclaration variable) {
+        return staticSlotOf(variable);
+    }
+
+    // The function word of a function pointer or a delegate to `function_`,
+    // resolved once for a tree node.
+    package void* functionAddressOf(FuncDeclaration function_) {
+        return callableAddress(function_, 0);
+    }
+
+    // The words to load from the running frame outward to reach `owner`'s
+    // context, for a tree node that follows them on every run; null when
+    // `owner` is not on the static chain.
+    extern(D) package const(Hop)[] staticChainTo(FuncDeclaration owner) {
+        return staticChainOf(owner);
+    }
+
     // `storageOf` for a variable of an enclosing function, resolved once
     // for a node that follows the static chain on every run. Not `ok` for a
     // variable of the running function, one in static storage, and one whose
