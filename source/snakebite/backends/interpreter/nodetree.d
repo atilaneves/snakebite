@@ -835,6 +835,9 @@ private final class SliceOf(SliceSource source, bool dollar) : SliceNode {
     private bool _checkUpper;
     private bool _reportsLength;
     private size_t _dollar;
+    private Operand _lowerOperand;
+    private Operand _upperOperand;
+    private Operand _baseOperand;
     public this(FailBounds fail, TreeRoot* root, SliceExp expression,
             Node base, Node lower, Node upper, size_t stride,
             size_t staticLength, in SlicePlan plan, size_t dollarOffset) {
@@ -842,6 +845,12 @@ private final class SliceOf(SliceSource source, bool dollar) : SliceNode {
         _upper = upper; _stride = stride; _staticLength = staticLength;
         _checkOrder = plan.checkOrder; _checkUpper = plan.checkUpper;
         _reportsLength = plan.reportsSourceLength; _dollar = dollarOffset;
+        if (lower !is null)
+            _lowerOperand = operandOf(lower);
+        if (upper !is null)
+            _upperOperand = operandOf(upper);
+        static if (source == SliceSource.pointer)
+            _baseOperand = operandOf(base);
     }
     public override void executeInto(ubyte* frame, ubyte* dest) {
         ubyte* base;
@@ -852,15 +861,15 @@ private final class SliceOf(SliceSource source, bool dollar) : SliceNode {
             base = value.pointer;
             length = value.length;
         } else static if (source == SliceSource.pointer)
-            base = cast(ubyte*) _base.executeLong(frame);
+            base = cast(ubyte*) _baseOperand.readLong(frame);
         else {
             base = _base.executeAddr(frame);
             length = _staticLength;
         }
         static if (dollar)
             *cast(size_t*) (frame + _dollar) = length;
-        const lower = _lower is null ? size_t(0) : cast(size_t) _lower.executeLong(frame);
-        const upper = _upper is null ? length : cast(size_t) _upper.executeLong(frame);
+        const lower = _lower is null ? size_t(0) : cast(size_t) _lowerOperand.readLong(frame);
+        const upper = _upper is null ? length : cast(size_t) _upperOperand.readLong(frame);
         if (_checkOrder && upper < lower || _checkUpper && upper > length)
             fail(frame, lower, upper, length);
         *cast(SliceValue*) dest = SliceValue(upper - lower, base + lower * _stride);
@@ -879,29 +888,45 @@ private final class SliceOf(SliceSource source, bool dollar) : SliceNode {
 // must be equal and the two must not overlap, which the failure plan of the
 // bounds check decides what to do about.
 private final class SliceCopy : SliceNode {
+    private enum notLocal = size_t.max;
     private FailBounds _fail;
     private TreeRoot* _root;
     private Loc _loc;
     private Node _to;
     private Node _from;
+    // The frame slot of a source that is a local, or `notLocal`.
+    private size_t _fromLocal = notLocal;
     private size_t _elementSize;
     public this(FailBounds fail, TreeRoot* root, in Loc loc, Node to,
             Node from, size_t elementSize) {
         _fail = fail; _root = root; _loc = loc; _to = to; _from = from;
         _elementSize = elementSize;
+        if (auto local = cast(LocalSlice) from)
+            _fromLocal = local._offset;
     }
+    mixin StatementForm!"executeVoid";
     public override void executeInto(ubyte* frame, ubyte* dest) {
+        *cast(SliceValue*) dest = copy(frame);
+    }
+    public override void executeVoid(ubyte* frame) {
+        copy(frame);
+    }
+    pragma(inline, true)
+    private SliceValue copy(ubyte* frame) {
         import snakebite.backends.slicecopy: copyUnchecked, slicesConform;
 
         SliceValue to = void, from = void;
         _to.executeInto(frame, cast(ubyte*) &to);
-        _from.executeInto(frame, cast(ubyte*) &from);
+        if (_fromLocal == notLocal)
+            _from.executeInto(frame, cast(ubyte*) &from);
+        else
+            from = *cast(SliceValue*) (frame + _fromLocal);
         auto target = to.pointer[0 .. to.length];
         const source = from.pointer[0 .. from.length];
         if (!slicesConform(target, source, _elementSize))
             _fail(_root, frame, BoundsCheck.sliceCopy, _loc, null);
         copyUnchecked(target, source, _elementSize);
-        *cast(SliceValue*) dest = to;
+        return to;
     }
 }
 
@@ -5660,6 +5685,10 @@ private Node buildSliceOf(E)(E ev, SliceExp expression) {
     const plan = planSlice(expression);
     if (plan.yieldsStaticArray)
         return null;
+    // `a[]` of a dynamic array is `a`: it has no bounds to check.
+    if (expression.lwr is null && expression.upr is null
+            && expression.e1.type.toBasetype.ty == TY.Tarray)
+        return buildSlice(ev, expression.e1);
     Node lower, upper;
     if (expression.lwr !is null) {
         lower = buildValue(ev, expression.lwr);
@@ -7238,6 +7267,8 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
         return built.node is null ? null : endingAt(ev, built, expression, where);
     }
 
+    if (runsNothing(statement))
+        return new Jump!(TreeFlow.normal);
     switch (statement.stmt) with (STMT) {
         case Compound, CompoundDeclaration: {
             import dmd.statement: CompoundStatement;
@@ -7268,8 +7299,6 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
             import dmd.statement: ExpStatement;
 
             auto expression = (cast(ExpStatement) statement).exp;
-            if (expression is null)
-                return new Jump!(TreeFlow.normal);
             enum where = FullExpressionScope.Position.expressionStatement;
             if (auto declaration = expression.isDeclarationExp) {
                 auto node = effect(expression, where,
@@ -7335,12 +7364,6 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
             node._body = Statements(children(loop._body));
             return node;
         }
-        case Import:
-            return new Jump!(TreeFlow.normal);
-        // dmd rewrites a scope guard in a block into a `try` statement. One
-        // that is a whole `catch` handler stays, and runs nothing.
-        case ScopeGuard:
-            return new Jump!(TreeFlow.normal);
         case TryCatch: {
             auto tried = statement.isTryCatchStatement;
             auto node = new Catching!E(ev, tried);
@@ -7403,7 +7426,36 @@ private Statement[] statementsOf(Statement statement) {
             return inner;
         }
         default:
-            return [statement];
+            return runsNothing(statement) ? null : [statement];
+    }
+}
+
+// Whether `statement` has nothing to run: an import, an empty expression
+// statement, or a declaration of no runtime variable (an alias, a type, a
+// template, a manifest constant). dmd rewrites a scope guard in a block
+// into a `try` statement; one that is a whole `catch` handler stays, and
+// runs nothing.
+private bool runsNothing(Statement statement) {
+    import dmd.astenums: STMT;
+    import dmd.statement: ExpStatement;
+    import snakebite.backends.declaration: forEachRuntimeVariable;
+
+    switch (statement.stmt) with (STMT) {
+        case Import, ScopeGuard:
+            return true;
+        case Exp: {
+            auto expression = (cast(ExpStatement) statement).exp;
+            if (expression is null)
+                return true;
+            auto declaration = expression.isDeclarationExp;
+            if (declaration is null)
+                return false;
+            bool any;
+            forEachRuntimeVariable(declaration.declaration, (variable) { any = true; });
+            return !any;
+        }
+        default:
+            return false;
     }
 }
 
