@@ -2259,7 +2259,10 @@ private const(Instruction)* opCallNative(
         case 1: *place = cast(ubyte) result; break;
         case 2: *cast(ushort*) place = cast(ushort) result; break;
         case 4: *cast(uint*) place = cast(uint) result; break;
-        default: *cast(ulong*) place = result; break;
+        case 8: *cast(ulong*) place = result; break;
+        default:
+            assert(false, "a direct word call result has a width of "
+                ~ "0, 1, 2, 4 or 8 here");
         }
     }
     return pc + 1;
