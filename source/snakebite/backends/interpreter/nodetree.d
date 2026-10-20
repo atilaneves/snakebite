@@ -4792,18 +4792,42 @@ private Node buildDelegate(E)(E ev, Expression expression) {
 // A cast to a delegate: of another delegate, which keeps both words, or of
 // `typeof(null)`.
 private Node buildDelegateCast(E)(E ev, CastExp castExp) {
+    import snakebite.internalfailure: internalFailure;
     import snakebite.nativevalue: CastKind;
 
     if (castExp.lowering !is null)
         return buildDelegate(ev, castExp.lowering);
     const plan = *ev._shared.facts.castOf(castExp);
-    with (CastKind) switch (plan.kind) {
+    final switch (plan.kind) with (CastKind) {
         case copy:
             return buildDelegate(ev, castExp.e1);
         case zero:
             return buildZeroPair(ev, castExp.e1);
-        default:
-            assert(0, "a cast to a delegate copies a delegate or is of `null`");
+        case classReference:
+        case integralToFloat:
+        case floatToIntegral:
+        case floatToPointer:
+        case pointerToFloat:
+        case floatWidth:
+        case complexToReal:
+        case complexToImaginary:
+        case complexToIntegral:
+        case complexWidth:
+        case realToComplex:
+        case integralToComplex:
+        case imaginaryToComplex:
+        case sarrayToSlice:
+        case sarrayToPointer:
+        case sliceToPointer:
+        case pointerToArray:
+        case pointerToIntegral:
+        case delegateToPointer:
+        case reinterpretSlice:
+        case narrow:
+        case widenSigned:
+        case widenUnsigned:
+        case truth:
+            internalFailure("a cast to a delegate copies a delegate or is of `null`");
     }
 }
 
@@ -5046,6 +5070,7 @@ private Node buildSliceOf(E)(E ev, SliceExp expression) {
 // A cast whose result is a dynamic array.
 private Node buildSliceCast(E)(E ev, CastExp castExp) {
     import snakebite.backends.casts: layoutOf;
+    import snakebite.internalfailure: internalFailure;
     import snakebite.nativevalue: CastKind;
 
     if (castExp.lowering !is null)
@@ -5088,7 +5113,7 @@ private Node buildZeroPair(E)(E ev, Expression operand) {
 private Node buildNew(E)(E ev, NewExp expression) {
     import dmd.astenums: TY;
     import dmd.typesem: toBasetype;
-    import snakebite.backends.aggregateinit: AggregateInitPlan, InitStep,
+    import snakebite.backends.aggregateinit: AggregateInitPlan, driveInit,
         NewPlan, planClassContext, planNew, planPositionalFields;
 
     auto plan = planNew(expression);
@@ -5120,29 +5145,56 @@ private Node buildNew(E)(E ev, NewExp expression) {
         }
     }
 
-    Node[] steps;
-    foreach (step; initialisation.steps)
-        if (step.kind == InitStep.Kind.vthis)
-            steps ~= buildVthisStep(ev, step);
-    if (expression.member !is null) {
+    auto hooks = NewInitHooks!E(ev);
+    Node call;
+    driveInit(hooks, initialisation, expression.member !is null, {
         if (plan.argumentPrefix !is null) {
             auto prefix = buildEffect(ev, plan.argumentPrefix);
             if (prefix is null)
-                return null;
-            steps ~= new EffectStep(prefix);
+                return;
+            hooks.steps ~= new EffectStep(prefix);
         }
-        return buildConstructorCall(ev, expression,
-            steps.length == 0 ? storage : new Initialised(storage, steps));
+        call = buildConstructorCall(ev, expression,
+            hooks.steps.length == 0 ? storage : new Initialised(storage, hooks.steps));
+    });
+    if (expression.member !is null)
+        return call;
+    if (hooks.failed)
+        return null;
+    return hooks.steps.length == 0 ? storage : new Initialised(storage, hooks.steps);
+}
+
+// The tree hooks of `driveInit`: each step appends its node, and a step that
+// the tree does not build, where the evaluator falls back, is recorded.
+private struct NewInitHooks(E) {
+    import snakebite.backends.aggregateinit: InitStep;
+
+    E ev;
+    Node[] steps;
+    bool failed;
+
+    void applyVthis(InitStep step) {
+        steps ~= buildVthisStep(ev, step);
     }
-    foreach (step; initialisation.steps) {
-        if (step.kind == InitStep.Kind.vthis)
-            continue;
-        auto node = buildInitStep(ev, step);
+
+    void applyValue(InitStep step) {
+        append(buildInitStep(ev, step));
+    }
+
+    void applyBitfield(InitStep step) {
+        append(buildInitStep(ev, step));
+    }
+
+    void applyBroadcast(InitStep step) {
+        append(buildInitStep(ev, step));
+    }
+
+    private void append(Node node) {
         if (node is null)
-            return null;
-        steps ~= node;
+            failed = true;
+        else
+            steps ~= node;
     }
-    return steps.length == 0 ? storage : new Initialised(storage, steps);
 }
 
 // The storage of the object that `new` makes, before `driveInit`.
@@ -5669,6 +5721,7 @@ private template unaryOf(string op) {
 }
 
 private Node buildCast(E)(E ev, CastExp castExp, in Scalar scalar) {
+    import snakebite.internalfailure: internalFailure;
     import snakebite.nativevalue: CastKind;
 
     if (castExp.lowering !is null)
