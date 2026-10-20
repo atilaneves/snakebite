@@ -26,6 +26,12 @@ public struct StackPieces {
 
     private Piece _current;
 
+    // Whether a guest call that starts here must continue on a new piece.
+    pragma(inline, true)
+    public bool pastLimit() const @system @nogc nothrow {
+        return stackPointer < limit;
+    }
+
     // The walker is entered from host code, on the stack that the host code
     // runs on, and no walk is active on this evaluator. The limit is the one
     // of that stack until the entry ends.
@@ -243,13 +249,36 @@ private Bounds _threadBounds;
 // The guest uses the upper half of a thread's stack. The rest is for what
 // has no check: the frames of one guest function, host code, the collector.
 private size_t limitOfCurrentStack() @system {
-    ubyte here;
-    const stackPointer = cast(size_t) &here;
+    const here = stackPointer;
     if (_threadBounds.high == 0)
         _threadBounds = boundsOfThisThread;
-    if (stackPointer < _threadBounds.low || stackPointer >= _threadBounds.high)
+    if (here < _threadBounds.low || here >= _threadBounds.high)
         return size_t.max;
     return _threadBounds.low + (_threadBounds.high - _threadBounds.low) / 2;
+}
+
+
+// The stack pointer of the caller. The register itself where the compiler
+// can read it in line: the address of a local would give the caller a
+// frame slot that it has no other use for.
+pragma(inline, true)
+private size_t stackPointer() @system @nogc nothrow {
+    version (LDC) {
+        version (X86_64) {
+            import ldc.llvmasm: __asm;
+
+            return __asm!size_t("mov %rsp, $0", "=r");
+        } else
+            return addressOfLocal;
+    } else
+        return addressOfLocal;
+}
+
+
+pragma(inline, true)
+private size_t addressOfLocal() @system @nogc nothrow {
+    ubyte here;
+    return cast(size_t) &here;
 }
 
 

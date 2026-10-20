@@ -1364,8 +1364,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             break;
         }
 
-        ubyte here;
-        if (cast(size_t) &here < _stack.limit) {
+        if (_stack.pastLimit) {
             _stack.continueOnNewPiece({
                 executeRaw(function_, returnPlace, frameBase, layout,
                     callSite, arguments, argumentCount, callbackEntry);
@@ -1741,8 +1740,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     ) {
         assert(_faultFrame is callerFrame,
             "a call node runs in the call of its own tree");
-        ubyte here;
-        if (cast(size_t) &here < _stack.limit) {
+        if (_stack.pastLimit) {
             runTreeOnNewPiece(callee, calleeFrame);
             return;
         }
