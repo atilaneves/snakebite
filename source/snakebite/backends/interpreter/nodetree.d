@@ -41,7 +41,9 @@ package enum TreeFlow : ubyte { normal, break_, continue_, return_, generic }
 // hand control to the evaluator set them first (`syncTree`).
 package struct TreeRoot {
     private const(imported!"snakebite.backends.layout".FrameLayout)* _layout;
-    private Statements _statements;
+    // The statements of the body: one node, a short sequence whose
+    // children are fields, or a sequence.
+    private Node _body;
     // The return statement of a function whose body is only that statement,
     // once it has run: a call that takes the value in a register runs it.
     private Node _soleReturn;
@@ -64,7 +66,7 @@ package struct TreeRoot {
     }
 
     package TreeFlow execute(ubyte* frame) {
-        return _statements.run(frame);
+        return _body.executeStmt(frame);
     }
 
     package bool hasSoleReturn() const {
@@ -92,11 +94,34 @@ package TreeRoot* rootOf(E)(
     root.returnType = function_.type.nextOf;
     root.returnFacts = ev.factsOf(root.returnType);
     auto statements = statementsOf(body_);
-    auto nodes = new Node[statements.length];
-    foreach (i, one; statements)
-        nodes[i] = new Uninitialised!E(ev, one, &nodes[i], root);
-    root._statements = Statements(nodes);
-    return root;
+    Node uninitialised(Statement one, Node* slot) {
+        return new Uninitialised!E(ev, one, slot, root);
+    }
+    switch (statements.length) {
+        case 0:
+            root._body = new Jump!(TreeFlow.normal);
+            return root;
+        case 1:
+            root._body = uninitialised(statements[0], &root._body);
+            return root;
+        static foreach (count; 2 .. 7) {
+            case count: {
+                auto sequence = new ShortSequence!count;
+                foreach (i, one; statements)
+                    sequence._children[i] = uninitialised(
+                        one, &sequence._children[i]);
+                root._body = sequence;
+                return root;
+            }
+        }
+        default: {
+            auto nodes = new Node[statements.length];
+            foreach (i, one; statements)
+                nodes[i] = uninitialised(one, &nodes[i]);
+            root._body = new Sequence(nodes);
+            return root;
+        }
+    }
 }
 
 // The nodes of the full expression that the builder is building whose work
