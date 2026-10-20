@@ -2420,3 +2420,24 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+// An array literal as the argument of a call: dmd allocates its elements
+// for the call.
+static foreach (backend; Matrix!()) {
+    @("arrayLiteralArgumentOfCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int sum(int[] values) {
+                int total;
+                foreach (value; values)
+                    total += value;
+                return total;
+            }
+            int main() {
+                return sum([10, 20, 12]) == 42 ? 0 : 1;
+            }
+        });
+    }
+}

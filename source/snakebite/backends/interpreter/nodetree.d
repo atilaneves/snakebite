@@ -2131,6 +2131,35 @@ private final class ContextStore(E) : Node {
     }
 }
 
+// The address of storage, once `elements` are written there.
+private final class FilledStorage : LongNode {
+    private Node _storage;
+    private Node _elements;
+    public this(Node storage, Node elements) {
+        _storage = storage; _elements = elements;
+    }
+    public override long executeLong(ubyte* frame) {
+        const address = _storage.executeLong(frame);
+        _elements.executeInto(frame, cast(ubyte*) address);
+        return address;
+    }
+}
+
+// The dynamic array of `length` elements at the address that `storage`
+// gives.
+private final class SliceOfStorage : SliceNode {
+    private Node _storage;
+    private size_t _length;
+    public this(Node storage, size_t length) {
+        _storage = storage; _length = length;
+    }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        const address = _storage.executeLong(frame);
+        *cast(size_t*) (dest + lengthOffset) = _length;
+        *cast(long*) (dest + pointerOffset) = address;
+    }
+}
+
 private final class StructLiteral : Node {
     private Node[] _steps;
     private size_t _size;
@@ -6441,6 +6470,8 @@ private Node buildSlice(E)(E ev, Expression expression) {
                 expression, cast(ubyte*) &value);
             return new ConstantSlice(value);
         }
+        case arrayLiteral:
+            return buildArrayLiteralSlice(ev, expression.isArrayLiteralExp);
         case slice:
             return buildSliceOf(ev, expression.isSliceExp);
         case call: {
@@ -7117,6 +7148,20 @@ private Node buildValue(E)(E ev, Expression expression) {
         case null_:
             return scalar.kind == Scalar.Kind.integral
                 ? new Constant!long(0) : null;
+        // A string literal as a pointer: the address of its bytes.
+        case string_: {
+            void* address;
+            ev._nativeData.write(expression.type, ev.factsOf(expression.type),
+                expression, &address);
+            return new Constant!long(cast(long) address);
+        }
+        case arrayLiteral: {
+            import snakebite.backends.arrayliteral: planArrayLiteral;
+
+            auto literal = expression.isArrayLiteralExp;
+            return buildArrayLiteralStorage(
+                ev, literal, planArrayLiteral(literal, ev._function));
+        }
         case arrayLength: {
             auto array = expression.isArrayLengthExp.e1;
             if (scalar.kind != Scalar.Kind.integral
@@ -8135,6 +8180,55 @@ private Node buildArrayLiteral(E)(
         steps ~= node;
     }
     return new StructLiteral(steps, plan.bytes, false);
+}
+
+// The pointer to the elements of `[a, b, c]` as a dynamic array or a
+// pointer: the storage that the plan gives, with each element written
+// there before the result names it, as an element can read the old value
+// of the destination.
+private Node buildArrayLiteralStorage(E)(
+    E ev, imported!"dmd.expression".ArrayLiteralExp literal,
+    imported!"snakebite.backends.arrayliteral".ArrayLiteralPlan plan,
+) {
+    import snakebite.backends.arrayliteral: ArrayLiteralPlan;
+    import snakebite.frontend.compiler: arrayLiteralLowering;
+    import snakebite.frontend.dmd.functions: moduleOf;
+
+    Node storage;
+    final switch (plan.storage) with (ArrayLiteralPlan.Storage) {
+        case empty:
+            return new Constant!long(0);
+        case temporary:
+            storage = new AddressValue(
+                new LocalAddress(ev._layout.arrayLiteralOffset(literal)));
+            break;
+        case lowering:
+            storage = buildValue(ev,
+                arrayLiteralLowering(literal, moduleOf(ev._function)));
+            if (storage is null)
+                return null;
+            break;
+    }
+    Node[] steps;
+    foreach (i; 0 .. plan.count) {
+        auto node = buildFieldValue(
+            ev, i * plan.elementFacts.size, plan.elementType, literal[i]);
+        if (node is null)
+            return null;
+        steps ~= node;
+    }
+    return new FilledStorage(storage, new StructLiteral(steps, plan.bytes, false));
+}
+
+private Node buildArrayLiteralSlice(E)(
+    E ev, imported!"dmd.expression".ArrayLiteralExp literal,
+) {
+    import snakebite.backends.arrayliteral: planArrayLiteral;
+
+    // `auto`: dmd's element type stays mutable.
+    auto plan = planArrayLiteral(literal, ev._function);
+    auto storage = buildArrayLiteralStorage(ev, literal, plan);
+    return storage is null ? null : new SliceOfStorage(storage, plan.count);
 }
 
 private Node buildInitStep(E)(E ev, InitStep step) {
