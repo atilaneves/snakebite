@@ -3808,7 +3808,7 @@ private Node buildDelegate(E)(E ev, Expression expression) {
         case null_:
             return new NullSlice;
         case assign, construct, blit:
-            return buildSliceStore(ev, cast(AssignExp) expression);
+            return buildPairStore(ev, cast(AssignExp) expression);
         case function_: {
             import snakebite.frontend.dmd.delegates: delegateTargetOf;
 
@@ -3922,13 +3922,14 @@ private Node buildSlice(E)(E ev, Expression expression) {
         case comma:
             return buildComma(ev, expression.isCommaExp, &buildSlice!E);
         case assign, construct, blit:
-            return buildSliceStore(ev, cast(AssignExp) expression);
+            return buildPairStore(ev, cast(AssignExp) expression);
         default:
             return null;
     }
 }
 
-private Node buildSliceStore(E)(E ev, AssignExp e) {
+// A store of a dynamic array or a delegate.
+private Node buildPairStore(E)(E ev, AssignExp e) {
     if (bindsReference(ev, e)
             || (e.isConstructExp !is null && e.isConstructExp.lowering !is null)
             || e.e1.isDotVarExp is null && e.e1.isVarExp is null
