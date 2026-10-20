@@ -198,9 +198,13 @@ package enum CalleeResult : ubyte { value, aggregate, reference }
 // What a call node needs to know about its callee, decided once per
 // function.
 package struct TreeCallee {
+    import snakebite.backends.calls: CallSelection;
+    import snakebite.backends.layout: FrameLayout;
+    import snakebite.ffi.plan: CallPlan;
+
     package FuncDeclaration function_;
-    package imported!"snakebite.backends.calls".CallSelection.Decision decision;
-    package const(imported!"snakebite.backends.layout".FrameLayout)* layout;
+    package CallSelection.Decision decision;
+    package const(FrameLayout)* layout;
     package TreeRoot* root;
     // The slots that a call fills in the frame, in the order that it fills
     // them, and the bytes that it reserves for the frame. They are the
@@ -208,12 +212,14 @@ package struct TreeCallee {
     // of the extra arguments and the `TypeInfo` tuple of a guest callee; the
     // tuple, the parameters and each extra argument of one call site for a
     // host callee, after the frame of its layout.
-    package const(imported!"snakebite.backends.layout".FrameLayout.Parameter)[]
-        slots;
+    package const(FrameLayout.Parameter)[] slots;
+    // How many of the slots are declared parameters, which come first. The
+    // call site of an indirect call agrees on it with the callee.
+    package size_t declared;
     package size_t frameSize;
     // The plan of a native callee, made for one call site when the callee is
     // variadic. Null when the call site makes it.
-    package const(imported!"snakebite.ffi.plan".CallPlan)* plan;
+    package const(CallPlan)* plan;
     package TypeFacts returnFacts;
     package CalleeResult result;
     // The bytes in front of the frame base, for its fault slot
@@ -2188,9 +2194,11 @@ private final class LoadChain : Node {
 // that frame and the call gives both back together. The value is the address
 // of the storage, which the cursor of the callee holds.
 private final class VariadicExtras : LongNode {
-    private imported!"snakebite.framestack".FrameStack* _frames;
-    private const(imported!"snakebite.backends.interpreter.walker"
-        .VariadicCallPlan)* _plan;
+    import snakebite.backends.interpreter.walker: VariadicCallPlan;
+    import snakebite.framestack: FrameStack;
+
+    private FrameStack* _frames;
+    private const(VariadicCallPlan)* _plan;
     private Operand[] _args;
     private Argument[] _modes;
     public this(E)(E ev, SiteArguments extras, typeof(_plan) plan) {
@@ -2574,9 +2582,13 @@ private enum Argument : ubyte {
 // The arguments of a call site: the node of each one, how it is passed, and
 // the bytes that it fills in its parameter slot.
 private struct SiteArguments {
+    import dmd.astenums: StorageClass;
+
     public Node[] nodes;
     public Argument[] modes;
     public size_t[] sizes;
+    // How many of the arguments fill declared parameters, which come first.
+    public size_t declared;
 
     public void append(Node node, Argument mode, size_t size) {
         nodes ~= node;
@@ -2587,8 +2599,7 @@ private struct SiteArguments {
     // Appends the node of `argument` for a parameter of `parameterType` with
     // `storageClass`; false when the tree does not build it.
     public bool build(E)(
-        E ev, Type parameterType,
-        imported!"dmd.astenums".StorageClass storageClass,
+        E ev, Type parameterType, StorageClass storageClass,
         Expression argument,
     ) {
         Node node;
@@ -3913,6 +3924,7 @@ private final class IndirectCall(E, CalleeResult result) : Node {
 
     private Node _target;
     private bool _viaDelegate;
+    private size_t _declared;
     // The function that this site last called, and its callee when the tree
     // runs it.
     private FuncDeclaration _function;
@@ -3925,6 +3937,7 @@ private final class IndirectCall(E, CalleeResult result) : Node {
             bool resultUnsigned) {
         _ev = ev; _site = site; _target = target; _viaDelegate = viaDelegate;
         takeArguments(arguments);
+        _declared = arguments.declared;
         _resultSize = facts.size;
         _resultUnsigned = resultUnsigned;
         static if (result == CalleeResult.aggregate)
@@ -3979,7 +3992,10 @@ private final class IndirectCall(E, CalleeResult result) : Node {
         auto definition = _ev._callSelection.definitionOf(
             function_, (declaration) => _ev._program.linkedFunctionOf(declaration));
         auto callee = _ev.treeCalleeOf(definition);
-        if (callee is null || !takesArguments(callee))
+        // The slots of a variadic shape are not declared parameters, so a
+        // callee and a site agree on which slots are declared.
+        if (callee is null || callee.declared != _declared
+                || !takesArguments(callee))
             return Selection.init;
         return selectionOf(callee);
     }
@@ -4190,9 +4206,7 @@ private Node buildIntrinsicCall(E)(E ev, CallExp call, FuncDeclaration function_
     if (!isVoid && result.kind == Scalar.Kind.none)
         return null;
     SiteArguments arguments;
-    // A builtin is host code, which takes each argument in a slot of its own.
-    if (!buildArguments(ev, typeFunctionOf(function_), call.arguments,
-            arguments, Extras.separate))
+    if (!buildArguments(ev, typeFunctionOf(function_), call.arguments, arguments))
         return null;
     foreach (mode; arguments.modes)
         if (mode == Argument.address || mode == Argument.pair
@@ -4881,6 +4895,10 @@ private bool buildArguments(E)(
     const typesIndex = type.isDstyleVariadic ? 0 : size_t.max;
     const firstDeclared = typesIndex == 0 ? 1 : 0;
     const firstExtra = firstDeclared + parameters.length;
+    // A call of a K&R function type can pass more arguments than the type
+    // declares: the original call path runs it.
+    if (parameters.varargs == VarArg.KRvariadic)
+        return false;
     if (variadic ? arguments.length < firstExtra
             : arguments.length != parameters.length)
         internalFailure("dmd checks the arity of a call");
@@ -4903,6 +4921,7 @@ private bool buildArguments(E)(
                 (*arguments)[firstDeclared + i]))
             return false;
     }
+    site.declared = parameters.length;
     if (!variadic)
         return true;
 

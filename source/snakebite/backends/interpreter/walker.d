@@ -1478,6 +1478,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return null;
         const layout = callee.layout;
         callee.slots = layout.parameters;
+        callee.declared = layout.parameters.length;
         if (variadic) {
             // The cursor of the extra arguments, then the `TypeInfo` tuple of
             // a D variadic callee, as the original call fills them.
