@@ -76,11 +76,13 @@ WordPair callDirectWordsPair(
     return (cast(Direct) target)(first, second, third);
 }
 
-// Stores `result` at `place` as a result of `resultWidth` bytes.
+// Stores `result` at `place` as a result of `resultWidth` bytes. A width of
+// `0` is no result, and stores nothing.
 pragma(inline, true)
 void storeWordResult(in WordPair result, size_t resultWidth, void* place)
         @system pure nothrow @nogc {
     switch (resultWidth) {
+    case 0: break;
     case 1: *cast(ubyte*) place = cast(ubyte) result.low; break;
     case 2: *cast(ushort*) place = cast(ushort) result.low; break;
     case 4: *cast(uint*) place = cast(uint) result.low; break;

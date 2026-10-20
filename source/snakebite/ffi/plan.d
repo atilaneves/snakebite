@@ -1186,15 +1186,17 @@ public extern(C) void executeCallPlan(
 }
 
 // The address to call as `Pair function(ulong, ulong, ulong)` (`Pair` is two
-// `ulong`s) when this plan is one to three word arguments in the first
-// integer registers and an integer result of 1, 2, 4 or 8 bytes, or of two
-// full eightbytes (`resultWidth` 16), with nothing else for `callAt` to do,
-// and the callee is not variadic. `parameterCount` is the number of
-// parameters of the plan; a call site passes the same number of arguments.
-// `order[r]` is the parameter that goes in integer register `r`; a register
-// past the last parameter has `order[r] == r` and is passed zero.
-// `loads[p]` says how parameter `p` is read; only the loads of a whole
-// word, or of 1, 2 or 4 bytes zero- or sign-extended, take part. Null
+// `ulong`s) when this plan is zero to three word arguments in the first
+// integer registers and no result (`resultWidth` 0), an integer result of 1,
+// 2, 4 or 8 bytes, or one of two full eightbytes (`resultWidth` 16), with
+// nothing else for `callAt` to do, and the callee is not variadic. A context
+// (`this`), a `ref` parameter and a `ref` result are each one pointer word,
+// so they take part as any other word does. `parameterCount` is the number of
+// parameters of the plan, the context included; a call site passes the same
+// number of arguments. `order[r]` is the parameter that goes in integer
+// register `r`; a register past the last parameter has `order[r] == r` and is
+// passed zero. `loads[p]` says how parameter `p` is read; only the loads of a
+// whole word, or of 1, 2 or 4 bytes zero- or sign-extended, take part. Null
 // otherwise.
 public extern(C) const(void)* directWordCallTarget(
     const(void)* opaquePlan, out ubyte[3] order, out CallPlan.Load[3] loads,
@@ -1204,14 +1206,14 @@ public extern(C) const(void)* directWordCallTarget(
 
     const plan = cast(const(CallPlan)*) opaquePlan;
     if (!plan._integerOnly || plan._variadicCall
-            || plan._hiddenReturnPointer || plan._hiddenContext
+            || plan._hiddenReturnPointer
             || plan._callbackArguments.length != 0
-            || plan._parameterCount < 1 || plan._parameterCount > 3
+            || plan._parameterCount > 3
             || plan._moveCount != plan._parameterCount
             || plan._realResultCount != 0
-            || plan._resultCount < 1 || plan._resultCount > 2
-            || plan._resultMoves[0].sourceOffset
-                != CallFrame.integerResult.offsetof)
+            || plan._resultCount > 2
+            || (plan._resultCount != 0 && plan._resultMoves[0].sourceOffset
+                != CallFrame.integerResult.offsetof))
         return null;
     if (plan._resultCount == 2
             && (plan._resultMoves[1].sourceOffset
@@ -1244,6 +1246,10 @@ public extern(C) const(void)* directWordCallTarget(
         loads[move.parameterIndex] = move.load;
     }
     parameterCount = plan._parameterCount;
+    if (plan._resultCount == 0) {
+        resultWidth = 0;
+        return plan._address;
+    }
     if (plan._resultCount == 2) {
         resultWidth = 16;
         return plan._address;

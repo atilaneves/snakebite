@@ -1606,8 +1606,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         callee.function_ = function_;
         callee.decision = decision;
         callee.layout = callLayoutOf(function_);
+        // A `void` result has no bytes.
         callee.returnFacts = result == CalleeResult.reference
-            ? TypeFacts.pointer : factsOf(returnType);
+            ? TypeFacts.pointer
+            : returnType.toBasetype.ty == TY.Tvoid
+                ? TypeFacts.init : factsOf(returnType);
         callee.result = result;
         return callee;
     }
