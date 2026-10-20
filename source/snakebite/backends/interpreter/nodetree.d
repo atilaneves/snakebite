@@ -3840,8 +3840,9 @@ private void examine(E)(E ev, TreeCallee* callee) {
             return;
         callee.shape.kind = CalleeShape.Kind.soleReturn;
         static if (!E.nullCheckedEvaluator) {
+            // The access of a getter runs no arguments.
             auto field = receiverField(returned.exp);
-            if (field is null)
+            if (field is null || callee.slots.length != 0)
                 return;
             const scalar = scalarOf(ev, field.type);
             const result = scalarOf(ev, function_.type.nextOf);

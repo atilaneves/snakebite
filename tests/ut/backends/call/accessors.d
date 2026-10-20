@@ -195,6 +195,38 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// A method that only returns a field still evaluates its arguments.
+static foreach (backend; Matrix!()) {
+    @("accessors.getterArgumentsRun." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                struct S {
+                    int f = 5;
+                    int get(int unused) { return f; }
+                }
+
+                int bump(ref int count) {
+                    return ++count;
+                }
+
+                int answer() {
+                    S s;
+                    int count;
+                    int total;
+                    foreach (i; 0 .. 3)
+                        total += s.get(bump(count));
+                    return count == 3 && total == 15 ? 42 : 1;
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
 // A function whose body is one `return` is called again while its caller
 // still evaluates the arguments of the same call, and many levels deep.
 static foreach (backend; Matrix!()) {
