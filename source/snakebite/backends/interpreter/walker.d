@@ -1621,8 +1621,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private static void reserveFrame(
         TreeCallee* callee, in size_t size, in uint alignment,
     ) {
-        callee.frameSize = size;
         callee.lead = frameLead(alignment);
+        callee.reservation = size + callee.lead;
+        const hiddenThis = callee.layout.hiddenThis;
+        callee.contextOffset = hiddenThis.variable is null
+            ? size_t.max : hiddenThis.parameter.offset;
         callee.reservesFast = alignment != 0
             && (alignment & (alignment - 1)) == 0
             && alignment <= fastFrameLead;
@@ -1663,6 +1666,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // evaluator claims the call's state (`claim`), and the claim ends when
     // the call returns. An exception that leaves the call skips both, and
     // what catches the exception puts its own state back (`RunningCall`).
+    pragma(inline, true)
     package void runTreeCallee(
         TreeCallee* callee, ubyte* calleeFrame, void* place,
         FuncDeclaration caller, ubyte* callerFrame,
@@ -1701,6 +1705,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // `calleeFrame` the caller has filled, and gives its value back in a
     // register. `T` is `long` for an integral or `double` for a floating
     // result. `caller` and `callerFrame` are as `runTreeCallee` says.
+    pragma(inline, true)
     package T runTreeValue(T)(
         TreeRoot* root, FuncDeclaration function_, ubyte* calleeFrame,
         FuncDeclaration caller, ubyte* callerFrame,
