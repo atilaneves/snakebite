@@ -1617,8 +1617,11 @@ private final class Store(T, A, V) : Typed!T {
     }
 }
 
-// `target op= step` on an integral target of 32 or 64 bits.
-private final class IntegerOpAssign(string op, T, A, S) : LongNode {
+// `target op= step` on an integral target under an integral operation. The
+// target is read as `L`, which is `T` or, for a narrow logical shift, its
+// unsigned form, and widened to 64 bits; the operation then works at the
+// width and signedness of its own type.
+private final class IntegerOpAssign(string op, T, L, A, S) : LongNode {
     private A _target;
     private S _step;
     private Operation!op _operation;
@@ -1628,7 +1631,7 @@ private final class IntegerOpAssign(string op, T, A, S) : LongNode {
     public override long executeLong(ubyte* frame) {
         auto target = cast(T*) _target.address(frame);
         const b = _step.value(frame);
-        const long a = *target;
+        const long a = *cast(L*) target;
         const T result = cast(T) _operation.apply(a, b);
         *target = result;
         return result;
@@ -1636,18 +1639,34 @@ private final class IntegerOpAssign(string op, T, A, S) : LongNode {
     mixin StatementForm!"executeLong";
 }
 
-private final class FloatOpAssign(string op, T) : DoubleNode {
+// `target op= step` under a floating operation that runs in `P`. A `float`
+// target under a `double` step and an integral target are read converted to
+// `P`, and the result is converted back to `T`.
+private final class FloatOpAssign(string op, T, P, bool targetFirst)
+        : Select!(isFloatingPoint!T, DoubleNode, LongNode) {
     private Target _target;
     private Node _step;
     public this(Target target, Node step) { _target = target; _step = step; }
-    public override double executeDouble(ubyte* frame) {
+    private T run(ubyte* frame) {
         auto target = cast(T*) _target.address(frame);
-        const b = _step.executeDouble(frame);
-        const T result = mixin("cast(T) *target " ~ op ~ " cast(T) b");
+        static if (targetFirst) {
+            const P a = *target;
+            const b = _step.executeDouble(frame);
+        } else {
+            const b = _step.executeDouble(frame);
+            const P a = *target;
+        }
+        const T result = cast(T) mixin("a " ~ op ~ " cast(P) b");
         *target = result;
         return result;
     }
-    mixin StatementForm!"executeDouble";
+    static if (isFloatingPoint!T) {
+        public override double executeDouble(ubyte* frame) { return run(frame); }
+        mixin StatementForm!"executeDouble";
+    } else {
+        public override long executeLong(ubyte* frame) { return run(frame); }
+        mixin StatementForm!"executeLong";
+    }
 }
 
 // `target++` and `target--`: the value is the old one.
@@ -6573,18 +6592,30 @@ private bool targetOf(E)(E ev, Expression expression, out Target target) {
 }
 
 private template opAssignOf(string op) {
-    public Node opAssignOf(T)(Target target, Node step, Operation!op operation) {
+    public Node opAssignOf(T)(
+        Target target, Node step, Operation!op operation, bool signExtend,
+    ) {
+        import std.traits: isSigned, Unsigned;
+
+        // A 64-bit target is read with no extension.
+        static if (isSigned!T && T.sizeof < long.sizeof)
+            if (!signExtend)
+                return make!(T, Unsigned!T)(target, step, operation);
+        return make!(T, T)(target, step, operation);
+    }
+
+    private Node make(T, L)(Target target, Node step, Operation!op operation) {
         alias steps = operandsOf!(op, T).rights;
         static if (steps.length > 1) {
             if (target.node is null) {
                 static Node make(S, A)(S s, A a, Operation!op o) {
-                    return new IntegerOpAssign!(op, T, A, S)(a, s, o);
+                    return new IntegerOpAssign!(op, T, L, A, S)(a, s, o);
                 }
                 return fuseStep!(make, long, steps)(
                     operandOf(step), FrameAddress(target.offset), operation);
             }
         }
-        return new IntegerOpAssign!(op, T, Target, ChildOperand!long)(
+        return new IntegerOpAssign!(op, T, L, Target, ChildOperand!long)(
             target, ChildOperand!long(step), operation);
     }
 }
@@ -6603,42 +6634,88 @@ private Node fuseStep(alias make, V, Kind[] steps, Args...)(
     assert(0, "an operand kind outside the step kinds");
 }
 
+// `target op= step`. dmd runs the operation in the common type of both
+// operands: a narrower target, or an integral one under a floating step,
+// arrives wrapped in the cast that promotes it, and the result is converted
+// back to the target's own type.
 private Node buildOpAssign(string op, E)(E ev, BinAssignExp e, in Scalar scalar) {
     import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
+    import snakebite.backends.shifts: shiftPlan;
     import snakebite.frontend.storage: compoundTarget;
 
-    if (compoundTarget(e) !is e.e1)
-        return null;
     const plan = arithmeticPlan(e);
     auto step = buildValue(ev, e.e2);
     if (step is null)
         return null;
     Target target;
-    if (!targetOf(ev, e.e1, target))
+    if (!targetOf(ev, compoundTarget(e), target))
         return null;
-    if (plan.kind == ArithmeticPlan.Kind.integral
-            && scalar.kind == Scalar.Kind.integral
-            && scalarOf(ev, e.e2.type).kind == Scalar.Kind.integral) {
-        const operationFacts = ev.factsOf(e.e1.type);
-        if (operationFacts.size != scalar.facts.size
-                || operationFacts.isUnsigned != scalar.facts.isUnsigned)
-            return null;
-        return byWide!(opAssignOf!op)(
-            scalar.facts, target, step, operationOf!op(ev, e));
-    }
-    static if (op == "+" || op == "-" || op == "*" || op == "/") {
-        if (plan.kind == ArithmeticPlan.Kind.floating
-                && scalar.kind == Scalar.Kind.floating
-                && scalarOf(ev, e.e2.type).kind == Scalar.Kind.floating) {
-            static Node make(T)(Target t, Node s) {
-                return new FloatOpAssign!(op, T)(t, s);
-            }
-            return byFloating!make(scalar.facts, target, step);
+    final switch (plan.kind) with (ArithmeticPlan.Kind) {
+        case integral, pointerOffset: {
+            static if (shiftOp!op)
+                const signExtend = shiftPlan(e).signExtend;
+            else
+                const signExtend = !scalar.facts.isUnsigned;
+            return byIntegral!(opAssignOf!op)(scalar.facts, target, step,
+                operationOf!op(ev, e), signExtend);
         }
+        case floating:
+            static if (op == "+" || op == "-" || op == "*" || op == "/"
+                    || op == "%")
+                return buildFloatingOpAssign!op(ev, e, scalar, target, step);
+            else
+                assert(0, "dmd rejects bitwise and shift operators on "
+                    ~ "floating operands");
+        case complex, vector:
+            assert(0, "`buildValue` drops non-scalar targets and dmd rejects "
+                ~ "a complex result for a scalar target");
+        case pointerDifference:
+            assert(0, "`-=` cannot store a pointer difference in a pointer");
     }
-    return null;
 }
 
+private Node buildFloatingOpAssign(string op, E)(
+    E ev, BinAssignExp e, in Scalar scalar, Target target, Node step,
+) {
+    import snakebite.backends.compoundassign: compoundConversion;
+
+    const conversion = compoundConversion(e);
+    // The type the operation runs in: an integral target's comes from the
+    // shared conversion, a floating target's is the operation's own.
+    const precision = conversion.crossesKind
+        ? conversion.load.destFacts.size : ev.factsOf(e.e1.type).size;
+    static Node make(T)(
+        Target target, Node step, in size_t precision, in bool targetFirst,
+    ) {
+        static Node at(P)(Target target, Node step, in bool targetFirst) {
+            static if (P.sizeof < T.sizeof)
+                assert(0, "an operation is at least as wide as its target");
+            else
+                return targetFirst
+                    ? new FloatOpAssign!(op, T, P, true)(target, step)
+                    : new FloatOpAssign!(op, T, P, false)(target, step);
+        }
+        switch (precision) {
+            case float.sizeof: return at!float(target, step, targetFirst);
+            case double.sizeof: return at!double(target, step, targetFirst);
+            case real.sizeof: return at!real(target, step, targetFirst);
+            default: assert(0, "a floating operation is 4, 8 or 16 bytes");
+        }
+    }
+    final switch (scalar.kind) with (Scalar.Kind) {
+        case floating:
+            return byFloating!make(scalar.facts, target, step, precision,
+                conversion.readsTargetFirst);
+        case integral:
+            return byExactIntegral!make(scalar.facts, target, step, precision,
+                conversion.readsTargetFirst);
+        case none:
+            assert(0, "a compound assignment's target is a scalar");
+    }
+}
+
+// `target++` and `target--` on an integral target of any width: the value is
+// the old one, and the new one wraps in the target's own type.
 private Node buildPost(long delta, E)(E ev, PostExp e, in Scalar scalar) {
     import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
 
@@ -6650,7 +6727,7 @@ private Node buildPost(long delta, E)(E ev, PostExp e, in Scalar scalar) {
     if (!targetOf(ev, e.e1, target))
         return null;
     static Node make(T)(Target t) { return new PostStep!(T, delta)(t); }
-    return byWide!make(scalar.facts, target);
+    return byIntegral!make(scalar.facts, target);
 }
 
 private Node buildStore(E)(E ev, AssignExp e, in Scalar scalar) {
