@@ -3815,13 +3815,14 @@ private final class ReferenceCall(E) : Node {
 // of a temporary that it constructs until the constructor returns.
 //
 // A record of the temporaries names a struct temporary, which a constructor
-// reaches only through the address of its receiver. The callee of such a
-// call is a call of its own for the temporaries, as the original path runs
-// every callee, so that a constructor that the callee calls on the same
-// storage (another constructor of the struct, the constructor of a field at
-// offset 0) does not take over the record of this one. A class object and
-// the allocation of `new` are never a temporary, so their callee is a call
-// of its own only when a variable of it keeps temporaries.
+// reaches only through the address of its receiver. A callee that the
+// interpreter runs is a call of its own for the temporaries, so that a
+// constructor that it calls on the same storage (another constructor of the
+// struct, the constructor of a field at offset 0) does not take over the
+// record of this one. On the direct native path the callee makes no
+// temporaries, and a callback into guest code opens its own nested call. A
+// class object and the allocation of `new` are never a temporary, so their
+// callee is a call of its own only when a variable of it keeps temporaries.
 private final class ConstructorCall(E) : Node {
     mixin CalleeEntry!E;
     mixin Dispatch!E;

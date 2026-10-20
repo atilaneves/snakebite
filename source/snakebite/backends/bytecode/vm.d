@@ -406,9 +406,9 @@ public struct CallSite {
     package const(void)* nativePlan;
     package const(void)* delegate() prepareNativePlan;
 
-    // A `native` site whose plan is up to three word arguments and no
-    // result or an integer result of one or two words called directly. Filled only at run
-    // time, with the protocol of `fast`: the thread that wins the
+    // A `native` site whose plan is zero to three word arguments and no
+    // result or an integer result of one or two words called directly.
+    // Filled only at run time, with the protocol of `fast`: the thread that wins the
     // `preparing` state writes the `direct*` fields, then publishes
     // `directState` last. They are valid once `directState` is `direct` or
     // `wide`. `direct` is one or two arguments that are whole words and a
