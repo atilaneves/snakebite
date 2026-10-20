@@ -734,9 +734,14 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // The tree whose nodes are being built (`Uninitialised`); each node that
     // syncs later names it.
     package TreeRoot* _treeRoot;
-    // The guard of the running call. A guard lives as long as its call, so
-    // no two calls that run at the same time have the same one.
-    private CallStateGuard* _innermost;
+    // The state of the innermost call that has one: a guard, or a claim
+    // (`claim`). It lives as long as its call, so no two calls that run at
+    // the same time have the same one.
+    private CallState* _innermost;
+    // The records of the claims, reused: the first `_claimCount` are in use,
+    // in the order that the calls made them.
+    private CallState*[] _claims;
+    private size_t _claimCount;
     // The frame of the running call, whose fault slot names the full
     // expression the call runs. Every call sets it, and gives back the frame
     // of its caller when it returns. An exception that leaves a call without
@@ -745,12 +750,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // The accessor whose load or store runs, or null: the access is one
     // instruction, so a fault in it is the accessor's, not its caller's.
     package AccessSite* _access;
-    // The guard of the call that `_type`, `_facts`, `_frameBase`,
+    // The guard or claim of the call that `_type`, `_facts`, `_frameBase`,
     // `_closureBase`, `_layout`, `_activeClosurePlan`, `_pendingLoopLabel`,
     // `_controlFlow`, `_returned` and `ctfeBlockDepth` (the function's
     // fields) describe. A call whose tree nodes run none of the original
     // evaluator leaves them to an outer call (`syncTree`).
-    private CallStateGuard* _fieldsOwner;
+    private CallState* _fieldsOwner;
     // A control transfer carries DMD's resolved statement destination. The
     // state also records when a function is being resumed at that statement,
     // so every enclosing visitor can continue its normal statement sequence.
@@ -1468,6 +1473,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (callee is null)
             return null;
         const layout = callee.layout;
+        if (decision.route == CallSelection.Route.guest)
+            callee.root = treeRootFor(function_, function_.fbody, layout);
         callee.slots = layout.parameters;
         callee.declared = layout.parameters.length;
         if (variadic) {
@@ -1649,10 +1656,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     //
     // `caller` and `callerFrame` are the function and the frame of the node
     // that calls, which the running call has again when the callee returns.
-    // A call whose tree never hands control to the evaluator
-    // (`TreeRoot.lean`) has no guard: an exception that leaves it skips
-    // that, and what catches the exception puts its own state back
-    // (`RunningCall`).
+    // The call has no guard: a node of the callee that needs the original
+    // evaluator claims the call's state (`claim`), and the claim ends when
+    // the call returns. An exception that leaves the call skips both, and
+    // what catches the exception puts its own state back (`RunningCall`).
     package void runTreeCallee(
         TreeCallee* callee, ubyte* calleeFrame, void* place,
         FuncDeclaration caller, ubyte* callerFrame,
@@ -1661,33 +1668,30 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             "a call node runs in the call of its own tree");
         ubyte here;
         if (cast(size_t) &here < _stack.limit) {
-            runTreeCalleeOnNewPiece(
-                callee, calleeFrame, place, caller, callerFrame);
+            runTreeCalleeOnNewPiece(callee, calleeFrame, place);
             return;
         }
 
         *placeSlotOf(calleeFrame) = place;
         auto root = callee.root;
-        if (root !is null && root.lean) {
-            _function = callee.function_;
-            _faultFrame = calleeFrame;
-            root.execute(calleeFrame);
-            _function = caller;
-            _faultFrame = callerFrame;
-            return;
-        }
-
-        runGuardedCallee(callee, calleeFrame, place);
+        _function = callee.function_;
+        _faultFrame = calleeFrame;
+        const flow = root.execute(calleeFrame);
+        if (_innermost._frame is calleeFrame)
+            endClaimedCall(callee, calleeFrame, flow);
+        _function = caller;
+        _faultFrame = callerFrame;
     }
 
+    // Ends a call whose node claimed its state: a `goto` that the tree met
+    // runs in the original evaluator first.
     pragma(inline, false)
-    private void runGuardedCallee(
-        TreeCallee* callee, ubyte* calleeFrame, void* place,
+    private void endClaimedCall(
+        TreeCallee* callee, ubyte* calleeFrame, in TreeFlow flow,
     ) {
-        auto guard = CallStateGuard(this, calleeFrame);
-        _place = place;
-        _function = callee.function_;
-        executeTreeCallee(callee, calleeFrame);
+        if (flow == TreeFlow.generic && _controlFlow.hasGoto)
+            resumeAtGoto(callee, calleeFrame);
+        releaseClaim;
     }
 
     // Runs the body of a callee that is one `return`, whose frame at
@@ -1702,29 +1706,17 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             "a call node runs in the call of its own tree");
         ubyte here;
         if (cast(size_t) &here < _stack.limit)
-            return runTreeValueOnNewPiece!T(
-                root, function_, calleeFrame, caller, callerFrame);
+            return runTreeValueOnNewPiece!T(root, function_, calleeFrame);
 
         debug *placeSlotOf(calleeFrame) = placeNotRead;
-        if (root.lean) {
-            _function = function_;
-            _faultFrame = calleeFrame;
-            const value = returnValueOf!T(root, calleeFrame);
-            _function = caller;
-            _faultFrame = callerFrame;
-            return value;
-        }
-
-        return runGuardedValue!T(root, function_, calleeFrame);
-    }
-
-    pragma(inline, false)
-    private T runGuardedValue(T)(
-        TreeRoot* root, FuncDeclaration function_, ubyte* calleeFrame,
-    ) {
-        auto guard = CallStateGuard(this, calleeFrame);
         _function = function_;
-        return returnValueOf!T(root, calleeFrame);
+        _faultFrame = calleeFrame;
+        const value = returnValueOf!T(root, calleeFrame);
+        if (_innermost._frame is calleeFrame)
+            releaseClaim;
+        _function = caller;
+        _faultFrame = callerFrame;
+        return value;
     }
 
     private static T returnValueOf(T)(TreeRoot* root, ubyte* calleeFrame) {
@@ -1734,30 +1726,35 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return root.returnDouble(calleeFrame);
     }
 
-    // The closure of the continuation sits in a frame of its own, so the
-    // frame of `runTreeValue` carries none.
+    // A call past the stack limit continues on a new piece of the native
+    // stack, with a guard: the closure of the continuation sits in a frame
+    // of its own, so the frame of `runTreeValue` carries none.
     pragma(inline, false)
     private T runTreeValueOnNewPiece(T)(
         TreeRoot* root, FuncDeclaration function_, ubyte* calleeFrame,
-        FuncDeclaration caller, ubyte* callerFrame,
     ) {
         T value;
         _stack.continueOnNewPiece({
-            value = runTreeValue!T(
-                root, function_, calleeFrame, caller, callerFrame);
+            auto guard = CallStateGuard(this, calleeFrame);
+            _function = function_;
+            value = returnValueOf!T(root, calleeFrame);
         });
         return value;
     }
 
-    // The closure of the continuation sits in a frame of its own, so the
-    // frame of `runTreeCallee` carries none.
+    // As `runTreeValueOnNewPiece`, for `runTreeCallee`.
     pragma(inline, false)
     private void runTreeCalleeOnNewPiece(
         TreeCallee* callee, ubyte* calleeFrame, void* place,
-        FuncDeclaration caller, ubyte* callerFrame,
     ) {
         _stack.continueOnNewPiece({
-            runTreeCallee(callee, calleeFrame, place, caller, callerFrame);
+            *placeSlotOf(calleeFrame) = place;
+            auto guard = CallStateGuard(this, calleeFrame);
+            _place = place;
+            _function = callee.function_;
+            const flow = callee.root.execute(calleeFrame);
+            if (flow == TreeFlow.generic && _controlFlow.hasGoto)
+                resumeAtGoto(callee, calleeFrame);
         });
     }
 
@@ -1768,13 +1765,40 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // the running call's, except between a throw in a call without a guard
     // and the `try` that catches it (`RunningCall`).
     //
-    // A call whose node synced gives the fields back when it ends, as the
-    // original evaluator's calls do, so the fields never describe a call
-    // that has ended.
+    // A call that has no state of its own yet claims it here. A call whose
+    // node synced gives the fields back when it ends, as the original
+    // evaluator's calls do, so the fields never describe a call that has
+    // ended.
     package void syncTree(TreeRoot* root, ubyte* frame) {
+        if (_innermost._frame !is frame) {
+            claim(root, frame);
+            return;
+        }
         if (_fieldsOwner is _innermost)
             return;
         setFunctionFields(root, frame);
+    }
+
+    // Gives the running call, whose frame is `frame`, a state of its own,
+    // which lasts until the call returns (`runTreeCallee`) or an exception
+    // that leaves it is caught (`RunningCall`). Its result place is the one
+    // in its frame.
+    pragma(inline, false)
+    private void claim(TreeRoot* root, ubyte* frame) {
+        if (_claimCount == _claims.length)
+            _claims ~= new CallState;
+        auto state = _claims[_claimCount++];
+        state.begin(this, frame);
+        _place = *placeSlotOf(frame);
+        setFunctionFields(root, frame);
+    }
+
+    // Ends the innermost claim, which is the innermost state of a call.
+    private void releaseClaim() {
+        assert(_claimCount != 0 && _innermost is _claims[_claimCount - 1],
+            "the innermost state of a call is the last claim");
+        --_claimCount;
+        _innermost.end;
     }
 
     pragma(inline, false)
@@ -1812,49 +1836,19 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     // Hands one operation to the original evaluator for a node that the
     // tree builds with its own fallback (a call that the tree cannot run, a
-    // failed check), and that the call can reach whether or not its tree
-    // has a node for the evaluator. A call with a guard has the state the
-    // evaluator reads; a lean call has none, so the operation gets a guard
-    // that lasts as long as it does.
+    // failed check).
     extern(D) package void handOver(
         TreeRoot* root, ubyte* frame, scope void delegate() operation,
     ) {
-        if (_innermost._frame is frame) {
-            syncTree(root, frame);
-            operation();
-            return;
-        }
-        handOverLean(root, frame, operation);
-    }
-
-    pragma(inline, false)
-    extern(D) private void handOverLean(
-        TreeRoot* root, ubyte* frame, scope void delegate() operation,
-    ) {
-        auto guard = CallStateGuard(this, frame);
         syncTree(root, frame);
         operation();
-    }
-
-    private void executeTreeCallee(TreeCallee* callee, ubyte* calleeFrame) {
-        auto root = callee.root;
-        if (root is null) {
-            root = treeRootFor(callee.function_, callee.function_.fbody,
-                callee.layout);
-            callee.root = root;
-        }
-        const flow = root.execute(calleeFrame);
-        if (flow == TreeFlow.generic && _controlFlow.hasGoto)
-            resumeAtGoto(callee, root, calleeFrame);
     }
 
     // The tree met a `goto` that it does not run: the original evaluator
     // takes the body from there.
     pragma(inline, false)
-    private void resumeAtGoto(
-        TreeCallee* callee, TreeRoot* root, ubyte* calleeFrame,
-    ) {
-        syncTree(root, calleeFrame);
+    private void resumeAtGoto(TreeCallee* callee, ubyte* calleeFrame) {
+        syncTree(callee.root, calleeFrame);
         _controlFlow.resume;
         while (true) {
             callee.function_.fbody.accept(this);
@@ -2329,38 +2323,45 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     // The state of the running call as a `try` or a full expression finds
-    // it. A call without a guard gives its caller the state back when it
-    // returns, not when an exception leaves it (`runTreeCallee`), so what
-    // catches puts this back before guest code of its own call runs again.
+    // it. A call gives its caller the state back when it returns, not when
+    // an exception leaves it (`runTreeCallee`), so what catches puts this
+    // back before guest code of its own call runs again: it releases the
+    // claims of the calls that the exception left, then names its own call.
     // A call with a guard puts its caller's state back as the exception
     // leaves it.
     private static struct RunningCall {
         private FuncDeclaration _function;
         private ubyte* _faultFrame;
+        private CallState* _innermost;
 
         private this(Evaluator evaluator) {
             _function = evaluator._function;
             _faultFrame = evaluator._faultFrame;
+            _innermost = evaluator._innermost;
         }
 
+        // A claim that the running call made after this was made is its
+        // own and stays: it lasts until the call returns.
         private void restore(Evaluator evaluator) {
+            while (evaluator._innermost !is _innermost
+                    && evaluator._innermost._frame !is _faultFrame)
+                evaluator.releaseClaim;
             evaluator._function = _function;
             evaluator._faultFrame = _faultFrame;
         }
     }
 
-    // RAII restore of the per-call evaluator state `execute` repoints at
-    // the callee: constructed before the fields change, and the
-    // destructor puts every one back when the call unwinds, normally or
-    // by throw. One field list in one place, instead of a saved variable
-    // plus a `scope(exit)` line per field growing at the call site.
+    // The per-call evaluator state that a call repoints at itself, and what
+    // it was before. `begin` saves it, `end` puts every field back. A guard
+    // (`CallStateGuard`) ends it when its call unwinds; a claim ends it when
+    // its call returns (`releaseClaim`).
     //
     // The function's fields (`_fieldsOwner`) are saved when the call first
     // takes them (`spill`), not when it starts: a call between tree nodes
     // often never does.
-    private static struct CallStateGuard {
+    private static struct CallState {
         private Evaluator _evaluator;
-        private CallStateGuard* _outer;
+        private CallState* _outer;
         private void* _place;
         private FuncDeclaration _function;
         // The frame of the call, whose fault slot names the full expression
@@ -2369,10 +2370,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         private ubyte* _outerFrame;
         private size_t _activationMark;
 
-        @disable this();
-        @disable this(this);
-
-        private this(Evaluator evaluator, ubyte* frame) {
+        private void begin(Evaluator evaluator, ubyte* frame) {
             _evaluator = evaluator;
             _frame = frame;
             _outer = evaluator._innermost;
@@ -2384,7 +2382,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             evaluator._faultFrame = frame;
         }
 
-        ~this() {
+        private void end() {
             _evaluator._place = _place;
             _evaluator._function = _function;
             if (_evaluator._fieldsOwner is &this)
@@ -2428,11 +2426,34 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         }
     }
 
+    // RAII form of `CallState` for the calls that the original evaluator
+    // runs and for the entry of host code: constructed before the fields
+    // change, and the destructor puts every one back when the call unwinds,
+    // normally or by throw. The claims of the calls that an exception left
+    // above it end first.
+    private static struct CallStateGuard {
+        private CallState _state;
+
+        @disable this();
+        @disable this(this);
+
+        private this(Evaluator evaluator, ubyte* frame) {
+            _state.begin(evaluator, frame);
+        }
+
+        ~this() {
+            auto evaluator = _state._evaluator;
+            while (evaluator._innermost !is &_state)
+                evaluator.releaseClaim;
+            _state.end;
+        }
+    }
+
     // The previous owner's values of the function's fields, kept while a
     // later call owns them. Guards spill and unspill in the order they end,
     // so the last record is always the one of the guard that ends.
     private static struct Spill {
-        private CallStateGuard* outerFieldsOwner;
+        private CallState* outerFieldsOwner;
         private Type type;
         private TypeFacts facts;
         private ubyte* frameBase;
