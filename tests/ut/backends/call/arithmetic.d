@@ -769,7 +769,9 @@ static foreach (backend; Matrix!()) {
 // DMD promotes a mixed-width floating target before the operation and reads
 // that promoted value before evaluating the right side. The target is still
 // evaluated once, and both the stored value and expression result are
-// rounded back to the target's type.
+// rounded back to the target's type. ldc reads the target after the right
+// side, so a right side that changes the target gives another result with
+// ldc. snakebite follows dmd, the host compiler of `bin/ut`.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.diverges,
         "CTFE reads the promoted target after the right side"),

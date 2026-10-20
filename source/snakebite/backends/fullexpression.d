@@ -79,6 +79,15 @@ public struct FullExpressionScope {
     // resolves the address inside the full expression and reads the value
     // after it ends. The answer is false inside the destructors that end a
     // full expression, and for a position that is part of the active one.
+    //
+    // dmd and ldc disagree for some of these, and this follows dmd, the
+    // host compiler of `bin/ut`. With a destructor that zeroes `value`,
+    // `return make(3).value` gives 0 with dmd and 3 with ldc, which reads
+    // the value before the destructor. A `return` or an `if` condition
+    // through a same-width cast, the message of an `assert`, a bit field
+    // and a thread-local variable differ the same way. An `if` condition
+    // that names a field, an element or a dereference, a `switch` operand
+    // and a `throw` operand read after the destructors with both.
     public bool readsResultAfterEnd(
         in Position position,
         imported!"dmd.expression".Expression result,

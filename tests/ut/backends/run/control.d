@@ -2863,7 +2863,14 @@ static foreach (backend; Matrix!(
 }
 
 
-// A `case` inside an `if (__ctfe)` block is a jump target at run time, so
+// Every `Omit!(Native, ...)` below this line that names dmd bug 23996: dmd
+// crashes on a `case` in an `if (__ctfe)` block, so there is no dmd result.
+// ldc compiles a heap `new` (its program gives 3) and an array cast, but
+// crashes or reports an internal error for an append, a string switch, a
+// length assignment and an array construction in the block. The guests throw
+// an `Error` for the constructs dmd leaves unlowered, which no compiler does.
+//
+// A `case` in an `if (__ctfe)` block is a jump target at run time, so
 // the block compiles even though it never runs through its `if`. dmd leaves
 // the statements of that block unlowered: a heap `new` has no
 // `_d_newitemT` call there.

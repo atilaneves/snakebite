@@ -8187,6 +8187,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `destructorsFollow`, the consumer reads the operands after destructors
     // of temporaries ran, and such a destructor could write the place: the
     // operand is then copied to a temporary whatever `later` is.
+    //
+    // The copy also keeps the value of the left operand from before `later`
+    // ran. In a comparison dmd and ldc disagree: with `int x = 1`, both
+    // `x < (x = 10)` and `x < incr(&x)` (`incr` is `++*p`) are true with dmd,
+    // which reads `x` first, and false with ldc, which reads it last; `==` and
+    // `!=` differ the same way. Arithmetic (`x + (x = 5)`) agrees. snakebite
+    // follows dmd, the host compiler of `bin/ut`.
     private size_t operandInto(
         Expression operand, Expression later,
         in imported!"snakebite.nativelayout".TypeFacts facts,

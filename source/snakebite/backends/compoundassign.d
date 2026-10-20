@@ -60,7 +60,11 @@ package CompoundConversion compoundConversion(
 
 // dmd reads a promoted floating or complex target before its right operand;
 // an integral target keeps the ordinary right-operand-first order. A target
-// that crosses kind is always promoted.
+// that crosses kind is always promoted. ldc reads the target after the right
+// operand in every case: for `float x = 2; x += cast(double) f(&x)`, where
+// `f` stores 10 in `x` and returns 1, dmd gives 3 and ldc gives 11, and
+// `int += double` differs the same way. snakebite follows dmd, the host
+// compiler of `bin/ut`.
 package bool readsTargetFirst(
     in ArithmeticPlan.Kind operationKind, in bool crossesKind,
     in size_t targetSize, in size_t operationSize,

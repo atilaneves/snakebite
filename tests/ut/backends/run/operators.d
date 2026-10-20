@@ -1482,6 +1482,9 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `value` is 20 when the step starts: dmd reads the target first and gives
+// 22 (20 + 2.5); ldc reads it after the step, 5, and gives 7. snakebite
+// follows dmd, the host compiler of `bin/ut`.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.diverges,
         "dmd's CTFE converts the step to the integral target and reads the " ~

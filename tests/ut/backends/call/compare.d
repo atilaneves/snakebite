@@ -860,7 +860,8 @@ static foreach (backend; Matrix!()) {
 // them once the element types are memcmp-compatible, without checking
 // that the lengths match, so compiled D reads past the shorter operand.
 // snakebite treats differing lengths as unequal instead, without reading
-// past either operand's storage.
+// past either operand's storage. dmd gives `a() == b()` true; ldc gives it
+// false.
 static foreach (backend; Matrix!(
     Omit!(Native, Because.diverges,
         "dmd and ldc2 read past the shorter static array and disagree " ~

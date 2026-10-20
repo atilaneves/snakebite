@@ -153,7 +153,9 @@ static foreach (backend; Matrix!()) {
 
 // The store goes to the field of the pointer that `p.f` named before the
 // value ran. Only dmd differs: it evaluates the value first and then loads
-// `p`, so the store lands in `b`; ldc2 agrees with the guests.
+// `p`, so the store lands in `b` (151); ldc2 loads `p` first, so the store
+// lands in `a` (521). The guests give what ldc2 gives, not what the host
+// compiler gives, even when that compiler is dmd.
 private enum pointerChangedByValue = q{
     struct S { int f; }
 
@@ -396,7 +398,8 @@ static foreach (backend; Matrix!()) {
 
 // D evaluates the operands of an index expression from left to right, so
 // `p` is read before `idx` changes it: the element comes from the old array.
-// ldc reads the index first and gives 200; dmd follows the specification.
+// dmd reads `p` first and gives 2; ldc reads the index first and gives 200.
+// snakebite follows dmd, the host compiler of `bin/ut`, and the specification.
 static foreach (backend; Matrix!()) {
     @("places.order.pointerIndexReadsPointerFirst." ~ backend.stringof)
     @Tags(backend.stringof)
