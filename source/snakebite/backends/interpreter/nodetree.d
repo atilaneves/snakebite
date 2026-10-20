@@ -7161,6 +7161,8 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
         return built.node is null ? null : endingAt(ev, built, expression, where);
     }
 
+    if (runsNothing(statement))
+        return new Jump!(TreeFlow.normal);
     switch (statement.stmt) with (STMT) {
         case Compound, CompoundDeclaration: {
             import dmd.statement: CompoundStatement;
@@ -7191,8 +7193,6 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
             import dmd.statement: ExpStatement;
 
             auto expression = (cast(ExpStatement) statement).exp;
-            if (expression is null)
-                return new Jump!(TreeFlow.normal);
             enum where = FullExpressionScope.Position.expressionStatement;
             if (auto declaration = expression.isDeclarationExp) {
                 auto node = effect(expression, where,
@@ -7258,12 +7258,6 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
             node._body = Statements(children(loop._body));
             return node;
         }
-        case Import:
-            return new Jump!(TreeFlow.normal);
-        // dmd rewrites a scope guard in a block into a `try` statement. One
-        // that is a whole `catch` handler stays, and runs nothing.
-        case ScopeGuard:
-            return new Jump!(TreeFlow.normal);
         case TryCatch: {
             auto tried = statement.isTryCatchStatement;
             auto node = new Catching!E(ev, tried);
@@ -7326,7 +7320,36 @@ private Statement[] statementsOf(Statement statement) {
             return inner;
         }
         default:
-            return [statement];
+            return runsNothing(statement) ? null : [statement];
+    }
+}
+
+// Whether `statement` has nothing to run: an import, an empty expression
+// statement, or a declaration of no runtime variable (an alias, a type, a
+// template, a manifest constant). dmd rewrites a scope guard in a block
+// into a `try` statement; one that is a whole `catch` handler stays, and
+// runs nothing.
+private bool runsNothing(Statement statement) {
+    import dmd.astenums: STMT;
+    import dmd.statement: ExpStatement;
+    import snakebite.backends.declaration: forEachRuntimeVariable;
+
+    switch (statement.stmt) with (STMT) {
+        case Import, ScopeGuard:
+            return true;
+        case Exp: {
+            auto expression = (cast(ExpStatement) statement).exp;
+            if (expression is null)
+                return true;
+            auto declaration = expression.isDeclarationExp;
+            if (declaration is null)
+                return false;
+            bool any;
+            forEachRuntimeVariable(declaration.declaration, (variable) { any = true; });
+            return !any;
+        }
+        default:
+            return false;
     }
 }
 
