@@ -3358,3 +3358,387 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// A switch selects the case of its value whether the case values are close
+// together or far apart, and at the ends of the range of the type of its
+// operand. A value between, below or above the case values takes `default`.
+static foreach (backend; Matrix!()) {
+    @("switchSelectsAmongCloseAndDistantCaseValues." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int close(int value) {
+                switch (value) {
+                    case -2: return 1;
+                    case 0: return 2;
+                    case 1: return 3;
+                    case 3: return 4;
+                    case 4: return 5;
+                    case 6: return 6;
+                    default: return 0;
+                }
+            }
+
+            int distant(long value) {
+                switch (value) {
+                    case long.min: return 1;
+                    case -1_000_000: return 2;
+                    case 7: return 3;
+                    case 1L << 40: return 4;
+                    case long.max: return 5;
+                    default: return 0;
+                }
+            }
+
+            int unsigned(ulong value) {
+                switch (value) {
+                    case 0: return 1;
+                    case 1UL << 63: return 2;
+                    case ulong.max: return 3;
+                    default: return 0;
+                }
+            }
+
+            void main() {
+                assert(close(-3) == 0);
+                assert(close(-2) == 1);
+                assert(close(-1) == 0);
+                assert(close(0) == 2);
+                assert(close(1) == 3);
+                assert(close(2) == 0);
+                assert(close(4) == 5);
+                assert(close(6) == 6);
+                assert(close(7) == 0);
+                assert(close(int.min) == 0);
+
+                assert(distant(long.min) == 1);
+                assert(distant(long.min + 1) == 0);
+                assert(distant(-1_000_000) == 2);
+                assert(distant(7) == 3);
+                assert(distant(8) == 0);
+                assert(distant(1L << 40) == 4);
+                assert(distant(long.max) == 5);
+                assert(distant(long.max - 1) == 0);
+
+                assert(unsigned(0) == 1);
+                assert(unsigned(1UL << 63) == 2);
+                assert(unsigned(ulong.max) == 3);
+                assert(unsigned(ulong.max - 1) == 0);
+            }
+        });
+    }
+}
+
+// A switch on a character selects the case of its code unit or code point.
+static foreach (backend; Matrix!()) {
+    @("switchOnCharactersSelectsTheCase." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int narrow(char c) {
+                switch (c) {
+                    case 'a': .. case 'z': return 1;
+                    case '0': .. case '9': return 2;
+                    case '\xff': return 3;
+                    default: return 0;
+                }
+            }
+
+            int wide(dchar c) {
+                switch (c) {
+                    case 'é': return 1;
+                    case '€': return 2;
+                    case '\U0010FFFF': return 3;
+                    default: return 0;
+                }
+            }
+
+            void main() {
+                assert(narrow('q') == 1);
+                assert(narrow('7') == 2);
+                assert(narrow('\xff') == 3);
+                assert(narrow(' ') == 0);
+                assert(wide('é') == 1);
+                assert(wide('€') == 2);
+                assert(wide('\U0010FFFF') == 3);
+                assert(wide('e') == 0);
+            }
+        });
+    }
+}
+
+// `goto case;` with no value enters the statements of the next case.
+static foreach (backend; Matrix!()) {
+    @("gotoCaseWithNoValueEntersTheNextCase." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run(int value) {
+                int result;
+                switch (value) {
+                    case 0:
+                        result += 1;
+                        goto case;
+                    case 1:
+                        result += 10;
+                        break;
+                    default:
+                        result += 100;
+                }
+                return result;
+            }
+
+            void main() {
+                assert(run(0) == 11);
+                assert(run(1) == 10);
+                assert(run(2) == 100);
+            }
+        });
+    }
+}
+
+// A `goto case` in the `else` branch of an `if` leaves the branch and the
+// case for the target case.
+static foreach (backend; Matrix!()) {
+    @("gotoCaseFromElseBranch." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run(int value, bool first) {
+                int result;
+                switch (value) {
+                    case 0:
+                        if (first)
+                            result += 1;
+                        else
+                            goto case 2;
+                        result += 10;
+                        break;
+                    case 1:
+                        result += 100;
+                        break;
+                    case 2:
+                        result += 1000;
+                        break;
+                    default:
+                }
+                return result;
+            }
+
+            void main() {
+                assert(run(0, true) == 11);
+                assert(run(0, false) == 1000);
+            }
+        });
+    }
+}
+
+// A `goto case` in a `catch` handler leaves the handler for the target
+// case.
+static foreach (backend; Matrix!()) {
+    @("gotoCaseFromCatchHandler." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void fail(bool really) {
+                if (really)
+                    throw new Exception("fail");
+            }
+
+            int run(bool really) {
+                int result;
+                switch (0) {
+                    case 0:
+                        try {
+                            fail(really);
+                            result += 1;
+                        } catch (Exception) {
+                            result += 10;
+                            goto case 1;
+                        }
+                        break;
+                    case 1:
+                        result += 100;
+                        break;
+                    default:
+                }
+                return result;
+            }
+
+            void main() {
+                assert(run(false) == 1);
+                assert(run(true) == 110);
+            }
+        });
+    }
+}
+
+// A `goto case` in a loop in a case leaves the loop for the target case.
+static foreach (backend; Matrix!()) {
+    @("gotoCaseFromLoopInCase." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run() {
+                int result;
+                switch (0) {
+                    case 0:
+                        for (int i = 0; i < 10; ++i) {
+                            result += 1;
+                            if (i == 2)
+                                goto case 1;
+                        }
+                        result += 1000;
+                        break;
+                    case 1:
+                        result += 100;
+                        break;
+                    default:
+                }
+                return result;
+            }
+
+            void main() {
+                assert(run() == 103);
+            }
+        });
+    }
+}
+
+// A `goto case` as the last statement of a switch enters an earlier case:
+// the switch runs on until a case leaves it.
+static foreach (backend; Matrix!()) {
+    @("gotoCaseAsLastStatementEntersAnEarlierCase." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run(int value) {
+                int steps;
+                int visits;
+                switch (value) {
+                    case 0:
+                        ++steps;
+                        if (steps == 3)
+                            break;
+                        goto case 1;
+                    case 1:
+                        visits += 10;
+                        goto case 0;
+                    default:
+                        goto case 0;
+                }
+                return steps + visits;
+            }
+
+            void main() {
+                assert(run(0) == 23);
+                assert(run(1) == 33);
+                assert(run(5) == 23);
+            }
+        });
+    }
+}
+
+// A `continue` with the label of a loop, in a case of a switch in the loop,
+// leaves the switch and starts the next iteration of the loop.
+static foreach (backend; Matrix!()) {
+    @("labelledContinueFromCaseStartsNextIteration." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run() {
+                int result;
+                outer: for (int i = 0; i < 4; ++i) {
+                    for (int j = 0; j < 4; ++j) {
+                        switch (j) {
+                            case 1:
+                                continue outer;
+                            default:
+                                result += 1;
+                        }
+                        result += 10;
+                    }
+                    result += 1000;
+                }
+                return result;
+            }
+
+            void main() {
+                assert(run() == 44);
+            }
+        });
+    }
+}
+
+// A `break` with the label of a loop, in a case of a switch in the loop,
+// leaves the switch and the loop.
+static foreach (backend; Matrix!()) {
+    @("labelledBreakFromCaseLeavesTheLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run() {
+                int result;
+                outer: foreach (i; 0 .. 4) {
+                    foreach (j; 0 .. 4) {
+                        switch (i + j) {
+                            case 4:
+                                break outer;
+                            default:
+                                result += 1;
+                        }
+                        result += 10;
+                    }
+                }
+                return result;
+            }
+
+            void main() {
+                assert(run() == 77);
+            }
+        });
+    }
+}
+
+// The variables that a case declares are destroyed when the statements of
+// the case end, whether the case leaves the switch or falls through, and a
+// `scope(exit)` in the case runs then too.
+static foreach (backend; Matrix!()) {
+    @("caseLocalsAndScopeExitEndWithTheCase." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Logged {
+                string* log;
+                char name;
+                ~this() { *log ~= name; }
+            }
+
+            string run(int value) {
+                string log;
+                switch (value) {
+                    case 0:
+                        auto a = Logged(&log, 'a');
+                        scope (exit) log ~= 'x';
+                        log ~= '0';
+                        break;
+                    case 1:
+                        auto b = Logged(&log, 'b');
+                        log ~= '1';
+                        goto case;
+                    case 2:
+                        log ~= '2';
+                        break;
+                    default:
+                }
+                return log;
+            }
+
+            void main() {
+                assert(run(0) == "0xa");
+                assert(run(1) == "1b2");
+                assert(run(2) == "2");
+            }
+        });
+    }
+}

@@ -48,6 +48,12 @@ public struct ControlFlowState {
         _target = target;
     }
 
+    // The pending `goto` reached its target.
+    public void reachTarget() @safe @nogc nothrow pure scope {
+        assert(hasGoto);
+        clearTransfer;
+    }
+
     private void clearTransfer() @safe @nogc nothrow pure scope {
         _kind = Kind.none;
         _label = null;

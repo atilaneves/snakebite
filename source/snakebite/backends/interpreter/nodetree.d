@@ -31,9 +31,9 @@ import snakebite.nativevalue: BitfieldAccess, CastLayout;
 import std.meta: AliasSeq;
 import std.traits: Select, isFloatingPoint;
 
-// How a statement node ended. `generic` means the evaluator ran the
-// statement and left a control transfer pending for the enclosing node to
-// resolve.
+// How a statement node ended. `generic` means that a control transfer is
+// pending in the evaluator's `ControlFlowState` for the enclosing node to
+// resolve: a `goto`, or a `break` or `continue` with a label.
 package enum TreeFlow : ubyte { normal, break_, continue_, return_, generic }
 
 // A function's tree, with what the evaluator's per-function fields hold while
@@ -53,6 +53,16 @@ package struct TreeRoot {
     package TypeFacts returnFacts;
     // The full expression that the builder is building.
     private Region* _region;
+    // The label of each labelled loop, by the loop statement: the loop takes
+    // a `continue` to its label.
+    private imported!"dmd.identifier".Identifier[const(void)*] _loopLabels;
+
+    package imported!"dmd.identifier".Identifier loopLabelOf(
+        Statement loop,
+    ) {
+        auto found = cast(const(void)*) loop in _loopLabels;
+        return found is null ? null : *found;
+    }
 
     package const(imported!"snakebite.backends.layout".FrameLayout)* layout()
         const {
@@ -2224,6 +2234,25 @@ private final class ScopedTruth(E) : BoolNode {
     }
 }
 
+// An integral value whose full expression ends by reading it after the
+// destructors of its temporaries ran (`readsLvalueAfterEnd`): the
+// expression finds the address of the value, and the value there is read
+// after the expression ends.
+private final class ScopedIntegral(E) : LongNode {
+    private Scoped!E _scope;
+    private TypeFacts _facts;
+    public this(Scoped!E scope_, in TypeFacts facts) {
+        _scope = scope_; _facts = facts;
+    }
+    public override long executeLong(ubyte* frame) {
+        import snakebite.nativelayout: loadIntegral;
+
+        ubyte* address;
+        _scope.run(frame, { address = _scope._inner.executeAddr(frame); });
+        return loadIntegral(address, _facts.size, !_facts.isUnsigned);
+    }
+}
+
 // A return statement whose full expression ends by reading its result after
 // the destructors of its temporaries ran (`readsLvalueAfterEnd`): the
 // expression finds the address of the result, and the value there is
@@ -2615,6 +2644,7 @@ private struct NodeCondition {
 // A loop holds the statements of its body, not a node that runs them.
 private abstract class Loop : Node {
     protected Statements _body;
+    protected imported!"dmd.identifier".Identifier _label;
 }
 
 private final class ForLoop(C) : Loop {
@@ -2638,7 +2668,7 @@ private final class ForLoop(C) : Loop {
             const flow = _body.run(frame);
             if (flow != TreeFlow.normal) {
                 bool exit;
-                const result = afterBody(flow, _controlFlow, exit);
+                const result = afterBody(flow, _controlFlow, _label, exit);
                 if (exit)
                     return result;
             }
@@ -2652,7 +2682,8 @@ private final class ForLoop(C) : Loop {
 // What a loop does after its body ends with `flow`: `exit` is set when the
 // loop ends, and the result is the flow that leaves it.
 private TreeFlow afterBody(
-    in TreeFlow flow, ControlFlowState* controlFlow, out bool exit,
+    in TreeFlow flow, ControlFlowState* controlFlow,
+    imported!"dmd.identifier".Identifier label, out bool exit,
 ) {
     exit = false;
     if (flow == TreeFlow.break_) {
@@ -2663,7 +2694,7 @@ private TreeFlow afterBody(
         exit = true;
         return flow;
     }
-    if (flow == TreeFlow.generic && controlFlow.leavesLoop(null)) {
+    if (flow == TreeFlow.generic && controlFlow.leavesLoop(label)) {
         exit = true;
         return controlFlow.hasTransfer ? TreeFlow.generic : TreeFlow.normal;
     }
@@ -2685,7 +2716,7 @@ private final class DoLoop(C) : Loop {
             const flow = _body.run(frame);
             if (flow != TreeFlow.normal) {
                 bool exit;
-                const result = afterBody(flow, _controlFlow, exit);
+                const result = afterBody(flow, _controlFlow, _label, exit);
                 if (exit)
                     return result;
             }
@@ -2831,18 +2862,183 @@ private final class Throw(E) : Node {
     }
 }
 
+// A `switch` statement. Its body runs as one list of statements, in which
+// each `case` and `default` is the index where its statements start, so a
+// case falls through to the statements of the next one. `D` selects the
+// index for the value of the operand. A `goto case` or a `goto default`
+// leaves a pending transfer to its target, and the list runs again from
+// there.
+private final class Switch(D) : Node {
+    private ControlFlowState* _controlFlow;
+    private Node _operand;
+    private D _dispatch;
+    private Node[] _body;
+    // The index of each `case` and `default`, by its statement.
+    private size_t[const(void)*] _entries;
+    private Position _position;
+    public this(
+        ControlFlowState* controlFlow, Node operand, D dispatch,
+        size_t[const(void)*] entries, Position position,
+    ) {
+        _controlFlow = controlFlow; _operand = operand; _dispatch = dispatch;
+        _entries = entries; _position = position;
+    }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        _position.note(frame);
+        auto start = _dispatch.select(frame, _operand.executeLong(frame));
+        for (;;) {
+            const flow = runFrom(frame, start);
+            final switch (flow) with (TreeFlow) {
+                case normal, break_:
+                    return TreeFlow.normal;
+                case continue_, return_:
+                    return flow;
+                case generic:
+                    break;
+            }
+            if (!_controlFlow.hasGoto) {
+                _controlFlow.leavesSwitch;
+                return _controlFlow.hasTransfer
+                    ? TreeFlow.generic : TreeFlow.normal;
+            }
+            auto entry = _controlFlow.target in _entries;
+            if (entry is null)
+                return TreeFlow.generic;
+            _controlFlow.reachTarget;
+            start = *entry;
+        }
+    }
+    private TreeFlow runFrom(ubyte* frame, in size_t start) {
+        foreach (node; _body[start .. $]) {
+            const flow = node.executeStmt(frame);
+            if (flow != TreeFlow.normal)
+                return flow;
+        }
+        return TreeFlow.normal;
+    }
+}
+
+// The index in the body of a switch where the statements of the case of
+// `value` start: `noMatch` when no case has the value. A table, indexed by
+// the value less the least case value, when the case values are dense.
+private struct TableDispatch {
+    public long first;
+    public size_t[] entries;
+    public size_t noMatch;
+
+    public size_t select(ubyte*, in long value) const {
+        const index = cast(ulong) value - cast(ulong) first;
+        return index < entries.length ? entries[index] : noMatch;
+    }
+}
+
+// A binary search of the case values, in ascending order.
+private struct SortedDispatch {
+    public long[] values;
+    public size_t[] entries;
+    public size_t noMatch;
+
+    public size_t select(ubyte*, in long value) const {
+        size_t low = 0;
+        size_t high = values.length;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            if (values[middle] < value)
+                low = middle + 1;
+            else
+                high = middle;
+        }
+        return low < values.length && values[low] == value
+            ? entries[low] : noMatch;
+    }
+}
+
+// The case values that are variables, tested in the order of the cases.
+private struct VariableDispatch {
+    public Node[] values;
+    public size_t[] entries;
+    public size_t noMatch;
+
+    public size_t select(ubyte* frame, in long value) {
+        foreach (i, one; values)
+            if (one.executeLong(frame) == value)
+                return entries[i];
+        return noMatch;
+    }
+}
+
+// A `goto case` or a `goto default`: a transfer to the `case` or `default`
+// statement, which its switch takes.
+private final class GotoEntry : Node {
+    private ControlFlowState* _controlFlow;
+    private const(void)* _target;
+    public this(ControlFlowState* controlFlow, const(void)* target) {
+        _controlFlow = controlFlow; _target = target;
+    }
+    public override TreeFlow executeStmt(ubyte*) {
+        _controlFlow.transfer(_target);
+        return TreeFlow.generic;
+    }
+}
+
+// A `break` or a `continue` with a label: the statement with the label
+// takes the transfer.
+private final class LabelledJump(bool continues) : Node {
+    private ControlFlowState* _controlFlow;
+    private imported!"dmd.identifier".Identifier _label;
+    public this(
+        ControlFlowState* controlFlow,
+        imported!"dmd.identifier".Identifier label,
+    ) {
+        _controlFlow = controlFlow; _label = label;
+    }
+    public override TreeFlow executeStmt(ubyte*) {
+        static if (continues)
+            _controlFlow.continueTo(_label);
+        else
+            _controlFlow.breakTo(_label);
+        return TreeFlow.generic;
+    }
+}
+
+// A statement with a label, which ends a `break` to the label. The loop
+// that the label names takes a `continue` to it (`TreeRoot.loopLabelOf`).
+private final class Labelled : Node {
+    private ControlFlowState* _controlFlow;
+    private imported!"dmd.identifier".Identifier _label;
+    private Node _inner;
+    public this(
+        ControlFlowState* controlFlow,
+        imported!"dmd.identifier".Identifier label,
+    ) {
+        _controlFlow = controlFlow; _label = label;
+    }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        const flow = _inner.executeStmt(frame);
+        if (flow != TreeFlow.generic)
+            return flow;
+        _controlFlow.finishLabel(_label);
+        return _controlFlow.hasTransfer ? TreeFlow.generic : TreeFlow.normal;
+    }
+}
+
 private final class GenericStatement(E) : Node {
     private E _ev;
     private Statement _statement;
     private TreeRoot* _root;
+    // The label of the statement when it is a labelled loop.
+    private imported!"dmd.identifier".Identifier _label;
     public this(E ev, Statement statement) {
         _ev = ev; _statement = statement; _root = ev._treeRoot;
+        _label = _root.loopLabelOf(statement);
     }
     public override TreeFlow executeStmt(ubyte* frame) {
         _ev.syncTree(_root, frame);
         // The evaluator runs the statement as it runs one outside the tree:
-        // with no expression named until the statement opens one.
+        // with no expression named until the statement opens one, and with
+        // the label that the statement has.
         *faultSlotOf(frame) = null;
+        _ev._pendingLoopLabel = _label;
         _statement.accept(_ev);
         return _ev._controlFlow.hasTransfer ? TreeFlow.generic : TreeFlow.normal;
     }
@@ -7441,6 +7637,7 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
     import dmd.astenums: STMT;
     import dmd.tokens: EXP;
     import snakebite.backends.ifplan: IfPlan, ifPlan;
+    import snakebite.backends.switchplan: gotoCaseTarget, gotoDefaultTarget;
 
     Node generic() {
         return new GenericStatement!E(ev, statement);
@@ -7512,6 +7709,15 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
                 return new Jump!(TreeFlow.normal);
             return buildStatement(ev, scoped.statement, slot);
         }
+        // A `with` of a type, an enum or a module runs only its body.
+        case With: {
+            auto with_ = statement.isWithStatement;
+            if (with_.wthis !is null)
+                return generic();
+            if (with_._body is null)
+                return new Jump!(TreeFlow.normal);
+            return buildStatement(ev, with_._body, slot);
+        }
         // dmd makes a destructor call that a scope ends a `DtorExp`
         // statement, which runs as the expression statement it is.
         case Exp, DtorExp: {
@@ -7574,6 +7780,7 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
                 : test.forLoop(&ev._controlFlow, step,
                     positionOf(ev, loop.condition));
             node._body = Statements(children(loop._body));
+            node._label = ev._treeRoot.loopLabelOf(statement);
             return node;
         }
         case Do: {
@@ -7581,6 +7788,7 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
             auto node = condition(loop.condition).doLoop(
                 &ev._controlFlow, positionOf(ev, loop.condition));
             node._body = Statements(children(loop._body));
+            node._label = ev._treeRoot.loopLabelOf(statement);
             return node;
         }
         case TryCatch: {
@@ -7610,12 +7818,48 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
             node._finally = optionalChild(tried.finalbody, &node._finally);
             return node;
         }
-        case Break:
-            return statement.isBreakStatement.ident is null
-                ? new Jump!(TreeFlow.break_) : generic();
-        case Continue:
-            return statement.isContinueStatement.ident is null
-                ? new Jump!(TreeFlow.continue_) : generic();
+        case Break: {
+            auto label = statement.isBreakStatement.ident;
+            return label is null ? new Jump!(TreeFlow.break_)
+                : new LabelledJump!false(&ev._controlFlow, label);
+        }
+        case Continue: {
+            auto label = statement.isContinueStatement.ident;
+            return label is null ? new Jump!(TreeFlow.continue_)
+                : new LabelledJump!true(&ev._controlFlow, label);
+        }
+        case Label: {
+            auto labelled = statement.isLabelStatement;
+            if (labelled.statement is null)
+                return new Jump!(TreeFlow.normal);
+            auto loop = labelledLoop(labelled.statement);
+            if (loop !is null)
+                ev._treeRoot._loopLabels[cast(const(void)*) loop] =
+                    labelled.ident;
+            auto node = new Labelled(&ev._controlFlow, labelled.ident);
+            node._inner = child(labelled.statement, &node._inner);
+            return node;
+        }
+        case Switch: {
+            auto node = buildSwitch(ev, statement.isSwitchStatement);
+            return node is null ? generic() : node;
+        }
+        case GotoCase:
+            return new GotoEntry(&ev._controlFlow, cast(const(void)*)
+                gotoCaseTarget(statement.isGotoCaseStatement));
+        case GotoDefault:
+            return new GotoEntry(&ev._controlFlow, cast(const(void)*)
+                gotoDefaultTarget(statement.isGotoDefaultStatement));
+        case SwitchError: {
+            auto failing = statement.isSwitchErrorStatement;
+            auto node = effect(failing.exp,
+                FullExpressionScope.Position.switchError, () {
+                    auto value = buildEffect(ev, failing.exp);
+                    return value is null ? null
+                        : statementOf(value, positionOf(ev, failing.exp));
+                });
+            return node is null ? generic() : node;
+        }
         case Return:
             return buildReturn(ev, statement.isReturnStatement);
         case Throw: {
@@ -7627,10 +7871,185 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
     }
 }
 
+// The loop that the label of `statement` names, which takes a `continue` to
+// the label; null when it names a statement that is not a loop. dmd moves
+// the initialiser of a `for` and the declarations of a `foreach` in front of
+// the loop, and puts the loop in a `try` when one of them has a destructor.
+private Statement labelledLoop(Statement statement) {
+    import dmd.astenums: STMT;
+
+    foreach (one; statementsOf(statement))
+        switch (one.stmt) with (STMT) {
+            case Exp, DtorExp:
+                continue;
+            case For, Do, UnrolledLoop:
+                return one;
+            case TryFinally:
+                return labelledLoop(one.isTryFinallyStatement._body);
+            default:
+                return null;
+        }
+    return null;
+}
+
+// The node of a `switch`, or null when the tree does not cover it: an
+// operand or a case value that the tree does not build, or a `case` inside
+// a statement of the body that the list cannot start at.
+private Node buildSwitch(E)(
+    E ev, imported!"dmd.statement".SwitchStatement statement,
+) {
+    import snakebite.backends.switchplan: SwitchPlan, caseTableOf, switchPlan;
+
+    enum where = FullExpressionScope.Position.switchOperand;
+    auto operand = buildIntegral(ev, statement.condition, where);
+    if (operand is null)
+        return null;
+    auto plan = switchPlan(statement);
+    Statement[] statements;
+    size_t[const(void)*] entries;
+    switchBody(statement._body, statements, entries);
+
+    auto caseEntries = new size_t[plan.cases.length];
+    foreach (i, case_; plan.cases) {
+        auto entry = cast(const(void)*) case_ in entries;
+        if (entry is null)
+            return null;
+        caseEntries[i] = *entry;
+    }
+    size_t noMatch;
+    final switch (plan.noMatch) with (SwitchPlan.NoMatch) {
+        case defaultTarget: {
+            auto entry = cast(const(void)*) plan.defaultTarget in entries;
+            if (entry is null)
+                return null;
+            noMatch = *entry;
+            break;
+        }
+        case exit:
+            noMatch = statements.length;
+            break;
+    }
+
+    Node make(D)(D dispatch) {
+        auto node = new Switch!D(&ev._controlFlow, operand, dispatch, entries,
+            positionOf(ev, statement.condition));
+        node._body = new Node[statements.length];
+        foreach (i, one; statements)
+            node._body[i] = new Uninitialised!E(
+                ev, one, &node._body[i], ev._treeRoot);
+        return node;
+    }
+
+    if (plan.caseVariables) {
+        auto values = new Node[plan.cases.length];
+        foreach (i, case_; plan.cases) {
+            values[i] = buildIntegral(ev, case_.exp, where);
+            if (values[i] is null)
+                return null;
+        }
+        return make(VariableDispatch(values, caseEntries, noMatch));
+    }
+
+    const table = caseTableOf(plan);
+    auto sortedEntries = new size_t[table.cases.length];
+    foreach (i, case_; table.cases)
+        sortedEntries[i] = caseEntries[case_];
+    // A table when at least one slot in `slotsPerCase` holds a case.
+    enum slotsPerCase = 4;
+    const count = table.values.length;
+    if (count != 0) {
+        const span = cast(ulong) table.values[$ - 1]
+            - cast(ulong) table.values[0];
+        if (span < count * slotsPerCase) {
+            auto slots = new size_t[cast(size_t) span + 1];
+            slots[] = noMatch;
+            foreach (i, value; table.values)
+                slots[cast(size_t) (cast(ulong) value
+                    - cast(ulong) table.values[0])] = sortedEntries[i];
+            return make(TableDispatch(table.values[0], slots, noMatch));
+        }
+    }
+    return make(SortedDispatch(table.values.dup, sortedEntries, noMatch));
+}
+
+// The statements of the body of a switch in the order that they run, with
+// the index in them where the statements of each `case` and `default`
+// start. A `case` inside a statement of the list, such as a loop or an
+// `if`, gets no index.
+private void switchBody(
+    Statement statement, ref Statement[] statements,
+    ref size_t[const(void)*] entries,
+) {
+    import dmd.astenums: STMT;
+    import dmd.statement: CompoundStatement;
+
+    if (statement is null)
+        return;
+    switch (statement.stmt) with (STMT) {
+        case Scope:
+            switchBody(statement.isScopeStatement.statement, statements,
+                entries);
+            return;
+        case Compound, CompoundDeclaration: {
+            auto compound = cast(CompoundStatement) statement;
+            if (compound.statements !is null)
+                foreach (one; *compound.statements)
+                    switchBody(one, statements, entries);
+            return;
+        }
+        case Case:
+            entries[cast(const(void)*) statement] = statements.length;
+            switchBody(statement.isCaseStatement.statement, statements,
+                entries);
+            return;
+        case Default:
+            entries[cast(const(void)*) statement] = statements.length;
+            switchBody(statement.isDefaultStatement.statement, statements,
+                entries);
+            return;
+        case With:
+            if (statement.isWithStatement.wthis is null) {
+                switchBody(statement.isWithStatement._body, statements,
+                    entries);
+                return;
+            }
+            statements ~= statement;
+            return;
+        default:
+            if (!runsNothing(statement))
+                statements ~= statement;
+            return;
+    }
+}
+
+// The node of the integral value of `expression`, a full expression of its
+// own at `where`; null when the tree does not cover it.
+private Node buildIntegral(E)(
+    E ev, Expression expression, in FullExpressionScope.Position where,
+) {
+    const scalar = scalarOf(ev, expression.type);
+    if (scalar.kind != Scalar.Kind.integral)
+        return null;
+    auto built = buildRegion(
+        ev, Region.Nesting.outermost, () => buildValue(ev, expression));
+    if (built.node is null)
+        return null;
+    if (!readsAfterEnd(built, where, expression))
+        return endingAt(ev, built, expression, where);
+    auto lvalue = FullExpressionScope.lvalueOf(expression);
+    auto address = buildRegion(
+        ev, Region.Nesting.outermost, () => buildAddress(ev, lvalue));
+    if (address.node is null || !address.scoped)
+        return null;
+    return new ScopedIntegral!E(new Scoped!E(ev, address.node, expression,
+        where, positionOf(ev, expression)), scalar.facts);
+}
+
 // The statements that `statement` runs in order: those of a block, with the
 // statements of the blocks and scopes inside it in place, or the statement
 // itself. A block or scope has no cleanup of its own: what a destructor or
-// `scope(exit)` runs is a statement that stays whole in the list.
+// `scope(exit)` runs is a statement that stays whole in the list. A `with`
+// of a type, an enum or a module is only its body.
 private Statement[] statementsOf(Statement statement) {
     import dmd.astenums: STMT;
     import dmd.statement: CompoundStatement;
@@ -7640,6 +8059,9 @@ private Statement[] statementsOf(Statement statement) {
     switch (statement.stmt) with (STMT) {
         case Scope:
             return statementsOf(statement.isScopeStatement.statement);
+        case With:
+            return statement.isWithStatement.wthis is null
+                ? statementsOf(statement.isWithStatement._body) : [statement];
         case Compound, CompoundDeclaration: {
             Statement[] inner;
             auto compound = cast(CompoundStatement) statement;
