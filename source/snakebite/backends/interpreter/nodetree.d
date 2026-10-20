@@ -4190,7 +4190,9 @@ private Node buildIntrinsicCall(E)(E ev, CallExp call, FuncDeclaration function_
     if (!isVoid && result.kind == Scalar.Kind.none)
         return null;
     SiteArguments arguments;
-    if (!buildArguments(ev, typeFunctionOf(function_), call.arguments, arguments))
+    // A builtin is host code, which takes each argument in a slot of its own.
+    if (!buildArguments(ev, typeFunctionOf(function_), call.arguments,
+            arguments, Extras.separate))
         return null;
     foreach (mode; arguments.modes)
         if (mode == Argument.address || mode == Argument.pair
@@ -4795,7 +4797,7 @@ private Node buildCalleeContext(E)(E ev, CallExp call, FuncDeclaration callee) {
 // A call through a function pointer or a delegate: null when the value of
 // the callee is outside what the tree reads.
 private Node buildIndirectCall(E)(E ev, CallExp call) {
-    import dmd.astenums: TY, VarArg;
+    import dmd.astenums: TY;
     import dmd.typesem: nextOf, toBasetype;
     import snakebite.backends.calls: isIndirectDelegateCall;
 
