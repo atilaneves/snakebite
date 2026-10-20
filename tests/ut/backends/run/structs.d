@@ -6508,6 +6508,65 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// The storage of an rvalue lasts until its full expression ends, also when
+// the rvalue is made inside the argument of a call, whose callee frame ends
+// before the next argument runs.
+static foreach (backend; Matrix!()) {
+    @("structValues.rvalueInCallArgumentLivesToEndOfFullExpression." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S {
+                int x;
+                S* self() return { return &this; }
+            }
+            S make(int x) { return S(x); }
+            S* id(S* p) { return p; }
+            int pair(S* first, S* second) { return first.x * 10 + second.x; }
+            int run(int i) {
+                int r = pair(id(make(i).self()), id(make(i + 1).self()));
+                return r;
+            }
+            void main() {
+                int total;
+                foreach (i; 0 .. 5)
+                    total += run(1);
+                assert(total == 60);
+            }
+        });
+    }
+}
+
+// The same for the rvalues of an assignment to a struct inside an argument:
+// the value that the assignment writes is made in storage of its own.
+static foreach (backend; Matrix!()) {
+    @("structValues.rvalueInAssignmentArgumentLivesToEndOfFullExpression." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S {
+                int x;
+                S* self() return { return &this; }
+            }
+            struct H { S* p; long pad; long pad2; }
+            S make(int x) { return S(x); }
+            int pair(S* first, S* second) { return first.x * 10 + second.x; }
+            int run(int i) {
+                H h, k;
+                int r = pair((h = H(make(i).self())).p,
+                    (k = H(make(i + 1).self())).p);
+                return r;
+            }
+            void main() {
+                int total;
+                foreach (i; 0 .. 5)
+                    total += run(1);
+                assert(total == 60);
+            }
+        });
+    }
+}
+
 // The temporaries that the calls of an expression statement make are
 // destroyed when the statement ends, the last one first.
 static foreach (backend; Matrix!(
