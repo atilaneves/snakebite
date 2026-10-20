@@ -3369,11 +3369,16 @@ private final class ReferenceCall(E) : Node {
 // constructed: the address of a struct (`executeAddr`), or the class
 // reference or the pointer that `new` gives (`executeLong`). As every
 // constructor call does (`constructTemporary`), it suspends the destructor
-// of a temporary that it constructs until the constructor returns. The
-// callee is a call of its own for the temporaries, as the original path
-// runs it, so that a constructor that the callee calls on the same storage
-// (another constructor of the struct, the constructor of a field at offset
-// 0) does not take over the record of this one.
+// of a temporary that it constructs until the constructor returns.
+//
+// A record of the temporaries names a struct temporary, which a constructor
+// reaches only through the address of its receiver. The callee of such a
+// call is a call of its own for the temporaries, as the original path runs
+// every callee, so that a constructor that the callee calls on the same
+// storage (another constructor of the struct, the constructor of a field at
+// offset 0) does not take over the record of this one. A class object and
+// the allocation of `new` are never a temporary, so their callee runs as
+// other tree callees do.
 private final class ConstructorCall(E) : Node {
     mixin CalleeEntry!E;
     mixin Dispatch!E;
@@ -3427,7 +3432,10 @@ private final class ConstructorCall(E) : Node {
                 ulong[2] result = void;
                 auto calleeFrame = FrameGuard(&ev._frames);
                 auto base = placeArguments(selected.callee, receiver, frame);
-                runRetaining(selected, base, result.ptr);
+                if (_receiverIsAddress)
+                    runRetaining(selected, base, result.ptr);
+                else
+                    run(selected, base, result.ptr);
             },
             { ev._temporaries.armConstructor(object); });
         return receiver;
