@@ -2428,6 +2428,34 @@ FAULTS = [
      "    return load(none, 1);\n"
      "}\n",
      -signal.SIGSEGV, "fatal: null pointer dereference", "main.load"),
+    ("fault in the body of a try statement",
+     "module main;\n"
+     "int load(int* pointer) {\n"
+     "    try {\n"
+     "        return *pointer;\n"
+     "    } finally { pointer = null; }\n"
+     "}\n"
+     "int main() { int* pointer; return load(pointer); }\n",
+     -signal.SIGSEGV, "fatal: null pointer dereference", "main.load"),
+    ("fault in a catch handler",
+     "module main;\n"
+     "int load(int* pointer) {\n"
+     "    try throw new Exception(\"caught\"); catch (Exception) {\n"
+     "        return *pointer;\n"
+     "    }\n"
+     "}\n"
+     "int main() { int* pointer; return load(pointer); }\n",
+     -signal.SIGSEGV, "fatal: null pointer dereference", "main.load"),
+    ("fault in a finally body",
+     "module main;\n"
+     "int load(int* pointer) {\n"
+     "    int value; try value = 1; finally {\n"
+     "        value += *pointer;\n"
+     "    }\n"
+     "    return value;\n"
+     "}\n"
+     "int main() { int* pointer; return load(pointer); }\n",
+     -signal.SIGSEGV, "fatal: null pointer dereference", "main.load"),
 ]
 
 
