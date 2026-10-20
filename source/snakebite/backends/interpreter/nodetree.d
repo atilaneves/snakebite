@@ -535,7 +535,8 @@ private alias FailBounds = void delegate(
     TreeRoot*, ubyte*, in BoundsCheck, in Loc, scope const(void*)[],
 );
 
-private final class IndexDynamic(A, I) : Node {
+// `baseFirst` reads the array before the index (`readsIndexAfterBase`).
+private final class IndexDynamic(A, I, bool baseFirst = false) : Node {
     private FailBounds _fail;
     private TreeRoot* _root;
     private IndexExp _expression;
@@ -548,8 +549,13 @@ private final class IndexDynamic(A, I) : Node {
         _index = index; _stride = stride;
     }
     public override ubyte* executeAddr(ubyte* frame) {
-        const index = cast(size_t) _index.value(frame);
-        auto array = _array.address(frame);
+        static if (baseFirst) {
+            auto array = _array.address(frame);
+            const index = cast(size_t) _index.value(frame);
+        } else {
+            const index = cast(size_t) _index.value(frame);
+            auto array = _array.address(frame);
+        }
         const length = *cast(size_t*) array;
         if (index >= length)
             fail(frame, index, length);
@@ -563,7 +569,7 @@ private final class IndexDynamic(A, I) : Node {
     }
 }
 
-private final class IndexStatic(A, I) : Node {
+private final class IndexStatic(A, I, bool baseFirst = false) : Node {
     private FailBounds _fail;
     private TreeRoot* _root;
     private IndexExp _expression;
@@ -577,10 +583,18 @@ private final class IndexStatic(A, I) : Node {
         _index = index; _stride = stride; _length = length;
     }
     public override ubyte* executeAddr(ubyte* frame) {
-        const index = cast(size_t) _index.value(frame);
-        if (index >= _length)
-            fail(frame, index);
-        return _array.address(frame) + index * _stride;
+        static if (baseFirst) {
+            auto array = _array.address(frame);
+            const index = cast(size_t) _index.value(frame);
+            if (index >= _length)
+                fail(frame, index);
+            return array + index * _stride;
+        } else {
+            const index = cast(size_t) _index.value(frame);
+            if (index >= _length)
+                fail(frame, index);
+            return _array.address(frame) + index * _stride;
+        }
     }
     pragma(inline, false)
     private void fail(ubyte* frame, size_t index) {
@@ -4365,6 +4379,7 @@ private bool returnsReference(CallExp call) {
 
 private Node buildIndexAddress(E)(E ev, IndexExp indexed) {
     import dmd.astenums: TY;
+    import snakebite.frontend.storage: readsIndexAfterBase;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: nextOf, toBasetype;
 
@@ -4389,18 +4404,21 @@ private Node buildIndexAddress(E)(E ev, IndexExp indexed) {
             auto array = buildAddress(ev, indexed.e1);
             if (array is null)
                 return null;
-            static Node make(A, I)(
-                A array, I position, FailBounds fail, TreeRoot* root,
-                IndexExp indexed, size_t stride, size_t length,
-            ) {
-                return new IndexStatic!(A, I)(
-                    fail, root, indexed, array, position, stride, length);
-            }
-            return fuse!(make, long, addressKinds, staticIndexKinds)(
+            const length = cast(size_t) indexed.e1.type.toBasetype
+                .isTypeSArray.dim.toInteger;
+            // An array that is read first has calls or effects, so its
+            // address is a node.
+            if (readsIndexAfterBase(indexed))
+                return fuse!(MakeIndex!(IndexStatic, true).make, long,
+                    [Kind.childAddress], staticIndexKinds)(
+                    Operand.throughAddress(array), operandOf(position),
+                    &ev.failTreeBounds, ev._treeRoot, indexed, element.size,
+                    length);
+            return fuse!(MakeIndex!(IndexStatic, false).make, long,
+                addressKinds, staticIndexKinds)(
                 addressOperandOf(array), operandOf(position),
                 &ev.failTreeBounds, ev._treeRoot, indexed, element.size,
-                cast(size_t) indexed.e1.type.toBasetype.isTypeSArray
-                    .dim.toInteger);
+                length);
         }
         case Tpointer: {
             static if (E.nullCheckedEvaluator)
@@ -4416,16 +4434,27 @@ private Node buildIndexAddress(E)(E ev, IndexExp indexed) {
     }
 }
 
+// The factory of an index node for `fuse`.
+private template MakeIndex(alias Index, bool baseFirst) {
+    public Node make(A, I, Args...)(A array, I index, Args args) {
+        return new Index!(A, I, baseFirst)(args[0], args[1], args[2], array,
+            index, args[3 .. $]);
+    }
+}
+
 private Node indexOfArray(E)(E ev, IndexExp indexed, Node array,
         Node position, size_t stride) {
-    static Node make(A, I)(
-        A array, I index, FailBounds fail, TreeRoot* root, IndexExp indexed,
-        size_t stride,
-    ) {
-        return new IndexDynamic!(A, I)(
-            fail, root, indexed, array, index, stride);
-    }
-    return fuse!(make, long, addressKinds, indexKinds)(
+    import snakebite.frontend.storage: readsIndexAfterBase;
+
+    // An array that is read first has calls or effects, so its address is
+    // a node.
+    if (readsIndexAfterBase(indexed))
+        return fuse!(MakeIndex!(IndexDynamic, true).make, long,
+            [Kind.childAddress], indexKinds)(
+            Operand.throughAddress(array), operandOf(position),
+            &ev.failTreeBounds, ev._treeRoot, indexed, stride);
+    return fuse!(MakeIndex!(IndexDynamic, false).make, long, addressKinds,
+        indexKinds)(
         addressOperandOf(array), operandOf(position), &ev.failTreeBounds,
         ev._treeRoot, indexed, stride);
 }
