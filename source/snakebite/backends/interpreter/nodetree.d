@@ -401,6 +401,26 @@ private final class OuterAddress : Node {
     }
 }
 
+// A variable in static storage, or a field of one. The address is resolved
+// when the node is built; a thread-local variable's is the copy of the
+// thread whose evaluator owns the tree.
+private final class GlobalAddress : Node {
+    private ubyte* _address;
+    public this(ubyte* address) { _address = address; }
+    public override ubyte* executeAddr(ubyte*) { return _address; }
+}
+
+private final class LoadGlobal(T) : Typed!T {
+    private T* _address;
+    public this(ubyte* address) { _address = cast(T*) address; }
+    static if (isFloatingPoint!T)
+        public override double executeDouble(ubyte*) { return *_address; }
+    else {
+        public override long executeLong(ubyte*) { return *_address; }
+        mixin BoolFromLong;
+    }
+}
+
 // `&lvalue`: the address as a pointer value.
 private final class AddressValue : LongNode {
     private Node _address;
@@ -550,8 +570,8 @@ private final class LoadSlice : SliceNode {
     }
 }
 
-// A string literal: its length and the address of its code units, which
-// stay put for the life of the program.
+// Two words that stay the same for the life of the program: a string
+// literal, an aggregate's initializer image, a delegate with no context.
 private final class ConstantSlice : SliceNode {
     private SliceValue _value;
     public this(SliceValue value) { _value = value; }
@@ -1703,24 +1723,8 @@ private final class Comma : Node {
     }
 }
 
-// A leaf the evaluator evaluates, for a value whose making is not the tree's
-// to decide: a function address, a delegate literal.
-private final class EvaluatedWord(E) : LongNode {
-    private E _ev;
-    private Expression _expression;
-    private TreeRoot* _root;
-    public this(E ev, Expression expression) {
-        _ev = ev; _expression = expression; _root = ev._treeRoot;
-        _root.handsOver;
-    }
-    public override long executeLong(ubyte* frame) {
-        size_t value;
-        _ev.evaluateTreeValue(_root, frame, _expression, &value);
-        return value;
-    }
-    mixin BoolFromLong;
-}
-
+// A value the evaluator makes, for a delegate whose making is not the
+// tree's to decide: one with a receiver or with a pair of contexts.
 private final class EvaluatedPair(E) : SliceNode {
     private E _ev;
     private Expression _expression;
@@ -1731,6 +1735,35 @@ private final class EvaluatedPair(E) : SliceNode {
     }
     public override void executeInto(ubyte* frame, ubyte* dest) {
         _ev.evaluateTreeValue(_root, frame, _expression, dest);
+    }
+}
+
+// A delegate to a nested function or a literal: the context of the function
+// it is nested in, reached from the running frame through the static chain,
+// and a function word resolved when the node is built. A context that a hop
+// finds null stays null: such a delegate does not capture, so its context is
+// never read.
+private final class FrameDelegate : SliceNode {
+    private const(imported!"snakebite.backends.closureplan".Hop)[] _hops;
+    private void* _function;
+    public this(
+        const(imported!"snakebite.backends.closureplan".Hop)[] hops,
+        void* function_,
+    ) {
+        _hops = hops; _function = function_;
+    }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        import snakebite.nativelayout:
+            delegateContextOffset, delegateFunctionOffset;
+
+        auto context = frame;
+        foreach (hop; _hops) {
+            if (context is null)
+                break;
+            context = *cast(ubyte**) (context + hop.offset);
+        }
+        *cast(ubyte**) (dest + delegateContextOffset) = context;
+        *cast(void**) (dest + delegateFunctionOffset) = _function;
     }
 }
 
@@ -3365,10 +3398,23 @@ private VarDeclaration thisVariable(E)(E ev, ThisExp expression) {
     return variable;
 }
 
+// The address of a variable that is not in the running frame: one in static
+// storage, or one of an enclosing function. Null when the tree does not
+// reach it.
+private Node buildNonFrameAddress(E)(E ev, VarDeclaration variable) {
+    import snakebite.frontend.dmd.delegates: isCtfeVariable;
+
+    // `__ctfe` has no parent, and asking dmd where it lives reports that as
+    // an error.
+    if (variable !is null && !isCtfeVariable(variable) && variable.isDataseg)
+        return new GlobalAddress(ev.staticAddressOf(variable));
+    return buildOuterAddress(ev, variable);
+}
+
 private Node buildVariableAddress(E)(E ev, VarDeclaration variable) {
     const slot = slotOf(ev, variable);
     if (!slot.ok)
-        return buildOuterAddress(ev, variable);
+        return buildNonFrameAddress(ev, variable);
     return slot.indirect
         ? new PointerAddress(slot.offset, 0)
         : new LocalAddress(slot.offset);
@@ -3504,6 +3550,8 @@ private Node fieldOfAddress(Node base, size_t offset) {
         return new LocalAddress(frame._offset + offset);
     if (auto indirect = cast(PointerAddress) base)
         return new PointerAddress(indirect._slot, indirect._offset + offset);
+    if (auto global = cast(GlobalAddress) base)
+        return new GlobalAddress(global._address + offset);
     return new FieldOfAddress(base, offset);
 }
 
@@ -3521,6 +3569,8 @@ private Node loadOf(Node address, in Scalar scalar) {
             return new Local!T(frame._offset);
         if (auto indirect = cast(PointerAddress) address)
             return new LoadField!T(indirect._slot, indirect._offset);
+        if (auto global = cast(GlobalAddress) address)
+            return new LoadGlobal!T(global._address);
         return new Load!T(address);
     }
     if (scalar.kind == Scalar.Kind.floating)
@@ -3733,9 +3783,7 @@ package bool isDelegate(Type type) {
 }
 
 // The node that yields the delegate `expression` as two words, or null when
-// the tree does not cover the expression. A delegate literal, `&nested` and
-// `&object.method` are made by the evaluator: it decides the context and the
-// callback address of the function.
+// the tree does not cover the expression.
 private Node buildDelegate(E)(E ev, Expression expression) {
     import dmd.tokens: EXP;
 
@@ -3746,7 +3794,7 @@ private Node buildDelegate(E)(E ev, Expression expression) {
             auto declaration = expression.isVarExp.var.isVarDeclaration;
             const slot = slotOf(ev, declaration);
             if (!slot.ok) {
-                auto outer = buildOuterAddress(ev, declaration);
+                auto outer = buildNonFrameAddress(ev, declaration);
                 return outer is null ? null : new LoadSlice(outer);
             }
             return slot.indirect
@@ -3759,14 +3807,66 @@ private Node buildDelegate(E)(E ev, Expression expression) {
         }
         case null_:
             return new NullSlice;
-        case function_, delegate_:
-            return new EvaluatedPair!E(ev, expression);
+        case assign, construct, blit:
+            return buildSliceStore(ev, cast(AssignExp) expression);
+        case function_: {
+            import snakebite.frontend.dmd.delegates: delegateTargetOf;
+
+            return buildMadeDelegate(ev, expression, delegateTargetOf(
+                expression.isFuncExp.fd, expression.type));
+        }
+        case delegate_: {
+            import snakebite.frontend.dmd.delegates: delegateTargetOf;
+
+            auto made = expression.isDelegateExp;
+            return buildMadeDelegate(ev, expression, delegateTargetOf(
+                made.func, expression.type, made.e1, made.vthis2));
+        }
         case question:
             return buildConditional!(buildDelegate!E, ConditionalInto)(
                 ev, expression.isCondExp);
         default:
             return null;
     }
+}
+
+// A delegate literal or `&nested`: the context of the function that the
+// target is nested in, as the evaluator's `storeDelegateValue` finds it, and
+// the target's function word. A delegate with a receiver or with a pair of
+// contexts is made by the evaluator.
+private Node buildMadeDelegate(E)(
+    E ev, Expression expression,
+    imported!"snakebite.frontend.dmd.delegates".DelegateTarget target,
+) {
+    import snakebite.frontend.dmd.delegates: isDualContext;
+    import snakebite.internalfailure: internalFailure;
+
+    if (target.function_ is null)
+        internalFailure("a delegate expression names a function and has a "
+            ~ "delegate type");
+    if (target.receiver !is null || isDualContext(target.function_))
+        return new EvaluatedPair!E(ev, expression);
+    auto function_ = ev.functionAddressOf(target.function_);
+    if (!target.needsContext)
+        return constantDelegate(null, function_);
+    // A function that runs as a tree has no closure (`runNodeTree`), so its
+    // own context is its frame: no hops.
+    if (target.contextOwner is ev._function)
+        return new FrameDelegate(null, function_);
+    const hops = ev.staticChainTo(target.contextOwner);
+    return hops is null
+        ? constantDelegate(null, function_) : new FrameDelegate(hops, function_);
+}
+
+private Node constantDelegate(void* context, void* function_) {
+    import snakebite.nativelayout:
+        delegateContextOffset, delegateFunctionOffset;
+
+    SliceValue value;
+    auto bytes = cast(ubyte*) &value;
+    *cast(void**) (bytes + delegateContextOffset) = context;
+    *cast(void**) (bytes + delegateFunctionOffset) = function_;
+    return new ConstantSlice(value);
 }
 
 // The node that yields the dynamic array `expression`, or null when the
@@ -3778,10 +3878,18 @@ private Node buildSlice(E)(E ev, Expression expression) {
         return null;
     switch (expression.op) with (EXP) {
         case variable: {
+            // `__traits(initSymbol, T)`: the image of the aggregate's
+            // initializer, which stays put for the life of the program.
+            if (auto symbol = expression.isVarExp.var.isSymbolDeclaration) {
+                const initial = ev._runtimeTypes.initializer(
+                    symbol.dsym.isAggregateDeclaration);
+                return new ConstantSlice(SliceValue(
+                    initial.length, cast(ubyte*) initial.ptr));
+            }
             auto declaration = expression.isVarExp.var.isVarDeclaration;
             const slot = slotOf(ev, declaration);
             if (!slot.ok) {
-                auto outer = buildOuterAddress(ev, declaration);
+                auto outer = buildNonFrameAddress(ev, declaration);
                 return outer is null ? null : new LoadSlice(outer);
             }
             return slot.indirect
@@ -3824,22 +3932,28 @@ private Node buildSliceStore(E)(E ev, AssignExp e) {
     if (bindsReference(ev, e)
             || (e.isConstructExp !is null && e.isConstructExp.lowering !is null)
             || e.e1.isDotVarExp is null && e.e1.isVarExp is null
-                && e.e1.isIndexExp is null && e.e1.isPtrExp is null
-            || !isSlice(e.e1.type))
+                && e.e1.isIndexExp is null && e.e1.isPtrExp is null)
         return null;
-    auto value = buildSlice(ev, e.e2);
+    auto value = buildPair(ev, e.e1.type, e.e2);
     if (value is null)
         return null;
     if (auto variable = e.e1.isVarExp) {
         const slot = slotOf(ev, variable.var.isVarDeclaration);
-        if (!slot.ok)
-            return null;
-        if (!slot.indirect)
+        if (slot.ok && !slot.indirect)
             return storeSlice(frameSlot(slot.offset), value);
     }
     auto address = buildAddress(ev, e.e1);
     return address is null
         ? null : storeSlice(addressOperandOf(address), value);
+}
+
+// A value of two words, a dynamic array or a delegate, of type `target`.
+private Node buildPair(E)(E ev, Type target, Expression value) {
+    if (isSlice(target))
+        return isSlice(value.type) ? buildSlice(ev, value) : null;
+    if (isDelegate(target))
+        return isDelegate(value.type) ? buildDelegate(ev, value) : null;
+    return null;
 }
 
 // `first, second`: `second` is built by `buildSecond`.
@@ -4016,6 +4130,8 @@ private Node buildEffect(E)(E ev, Expression expression) {
         return buildDeclaration(ev, declaration);
     if (isSlice(expression.type))
         return buildSlice(ev, expression);
+    if (isDelegate(expression.type))
+        return buildDelegate(ev, expression);
     if (expression.type !is null && expression.type.toBasetype.ty == TY.Tvoid) {
         if (expression.op == EXP.question)
             return buildConditional!(buildEffect!E, ConditionalVoid)(
@@ -4133,7 +4249,7 @@ private Node buildValue(E)(E ev, Expression expression) {
             const slot = slotOf(ev, declaration);
             if (!slot.ok)
                 return buildLoad(ev, expression,
-                    buildOuterAddress(ev, declaration));
+                    buildNonFrameAddress(ev, declaration));
             if (slot.indirect)
                 return buildLoad(ev, expression,
                     new PointerAddress(slot.offset, 0));
@@ -4235,21 +4351,27 @@ private Node buildValue(E)(E ev, Expression expression) {
         case new_:
             return buildNew(ev, expression.isNewExp);
         case function_:
-            return scalar.kind == Scalar.Kind.integral
-                ? new EvaluatedWord!E(ev, expression) : null;
+            return new Constant!long(cast(long) cast(size_t)
+                ev.functionAddressOf(expression.isFuncExp.fd));
         case symbolOffset: {
-            // `&variable`. A function or a variable in static storage has
-            // an address that symbol resolution decides.
+            // `&variable`, `&function` or the address of a `TypeInfo`.
+            import snakebite.frontend.storage: typeInfoObjectOf;
+
             if (scalar.kind != Scalar.Kind.integral)
                 return null;
             auto symbol = expression.isSymOffExp;
-            auto variable = symbol.var.isVarDeclaration;
-            auto place = variable is null
-                ? null : buildVariableAddress(ev, variable);
+            if (auto function_ = symbol.var.isFuncDeclaration)
+                return new Constant!long(cast(long) (cast(size_t)
+                    ev.functionAddressOf(function_) + symbol.offset));
+            if (auto typeInfo = symbol.var.isTypeInfoDeclaration)
+                return new Constant!long(cast(long) (cast(size_t) cast(void*)
+                    typeInfoObjectOf(typeInfo, *ev._runtimeTypes)
+                    + symbol.offset));
+            auto place = buildVariableAddress(ev, symbol.var.isVarDeclaration);
             if (place is null)
-                return new EvaluatedWord!E(ev, expression);
+                return null;
             return new AddressValue(symbol.offset == 0
-                ? place : new FieldOfAddress(place, cast(size_t) symbol.offset));
+                ? place : fieldOfAddress(place, cast(size_t) symbol.offset));
         }
         case address: {
             // The address of a static struct literal or of a type's
@@ -4689,9 +4811,7 @@ private Node buildStore(E)(E ev, AssignExp e, in Scalar scalar) {
         return null;
     if (auto variable = e.e1.isVarExp) {
         const slot = slotOf(ev, variable.var.isVarDeclaration);
-        if (!slot.ok)
-            return null;
-        if (!slot.indirect)
+        if (slot.ok && !slot.indirect)
             return storeTo(target, frameSlot(slot.offset), value);
     }
     auto address = buildAddress(ev, e.e1);
@@ -4787,8 +4907,10 @@ private Node buildVariable(E)(
     E ev, VarDeclaration variable, DeclarationExp declaration) {
     import snakebite.nativelayout: initializerRunsForEffect, initializerValueOf;
 
+    // A variable in static storage is initialised once, before the program
+    // reaches its declaration.
     if (variable.isDataseg)
-        return null;
+        return new Jump!(TreeFlow.normal);
     if (variable._init is null || variable._init.isVoidInitializer !is null)
         return new Jump!(TreeFlow.normal);
     auto initializer = variable._init.isExpInitializer;
@@ -4800,8 +4922,8 @@ private Node buildVariable(E)(
             ev, variable, initializerValueOf(initializer),
             positionOf(ev, declaration));
     const scalar = scalarOf(ev, variable.type);
-    const variableIsSlice = isSlice(variable.type);
-    if (scalar.kind == Scalar.Kind.none && !variableIsSlice)
+    const variableIsPair = isSlice(variable.type) || isDelegate(variable.type);
+    if (scalar.kind == Scalar.Kind.none && !variableIsPair)
         return null;
     if (initializerRunsForEffect(initializer, variable)) {
         auto effect = buildEffect(ev, initializer.exp);
@@ -4812,10 +4934,8 @@ private Node buildVariable(E)(
     const slot = slotOf(ev, variable);
     if (!slot.ok || slot.indirect || ev.isRefStorage(variable))
         return null;
-    if (variableIsSlice) {
-        if (!isSlice(value.type))
-            return null;
-        auto node = buildSlice(ev, value);
+    if (variableIsPair) {
+        auto node = buildPair(ev, variable.type, value);
         return node is null ? null : statementOf(
             storeSlice(frameSlot(slot.offset), node),
             positionOf(ev, declaration));
