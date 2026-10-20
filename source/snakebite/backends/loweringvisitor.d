@@ -208,7 +208,9 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     // With `readsAfterEnd` the operand is an lvalue that dmd reads after the
     // destructors of its temporaries ran: the backend resolves its address
     // here and moves the value in `visitReturnTransfer`. A `ref` return
-    // yields the address either way.
+    // yields the address either way. ldc reads the value before the
+    // destructors, so `return make(3).value` gives 3 with ldc and 0 with
+    // dmd; snakebite follows dmd (see `readsResultAfterEnd`).
     protected abstract void visitReturnOperand(
         ReturnStatement statement, bool readsAfterEnd);
     protected abstract void visitReturnTransfer(ReturnStatement statement);

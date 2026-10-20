@@ -5304,6 +5304,9 @@ private Node buildArrayOperand(E)(E ev, Expression operand) {
         address, cast(size_t) type.isTypeSArray.dim.toInteger);
 }
 
+// The left operand is read before the right one runs. dmd does this and ldc
+// reads the left operand last: `x < (x = 10)` with `int x = 1` is true with
+// dmd and false with ldc. snakebite follows dmd, the host compiler of `bin/ut`.
 private Node buildCompare(string op, E)(E ev, BinExp e) {
     import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
 

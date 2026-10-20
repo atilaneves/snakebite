@@ -1388,6 +1388,7 @@ unittest {
     });
 }
 
+// dmd keeps only the low 8 bits of `c`; ldc keeps all 16, as the layout says.
 static foreach (backend; Matrix!(
     Omit!(Native, Because.diverges,
         "dmd reads and writes only the low 8 bits of `c`"),
@@ -1421,6 +1422,7 @@ unittest {
     });
 }
 
+// dmd keeps only the low 16 bits of `c` and `d`; ldc keeps all the bits.
 static foreach (backend; Matrix!(
     Omit!(Native, Because.diverges,
         "dmd reads and writes only the low 16 bits of `c` and of `d`"),
@@ -1476,7 +1478,8 @@ unittest {
 // A bit field that does not fill its type, after narrower ones, still
 // starts in the aligned unit of its own type: `c` has the offset 2 and the
 // bit offset 16, and 20 bits do not fit the 16 bits left in the unit that
-// starts at the offset. The value needs all 20 bits.
+// starts at the offset. The value needs all 20 bits. dmd keeps the low 16
+// bits of `c`; ldc keeps all 20.
 static foreach (backend; Matrix!(
     Omit!(Native, Because.diverges,
         "dmd reads and writes only the low 16 bits of `c`"),
@@ -1508,6 +1511,8 @@ unittest {
     });
 }
 
+// dmd reads the bits of `b` as the high half of `c` (`c` is -131072 for
+// `c = -3`); ldc gives -3.
 static foreach (backend; Matrix!(
     Omit!(Native, Because.diverges,
         "dmd reads the bits of `b` as the high half of `c`"),
@@ -1593,7 +1598,8 @@ static foreach (backend; Matrix!()) {
 
 // dmd drops a compound assignment to a bit field narrower than `int`:
 // the first test states what a bit field must hold after one, and the
-// `Native` test next to it pins what dmd gives.
+// `Native` test next to it pins what dmd gives. ldc applies the operation:
+// `a ^= 1` leaves 5 where dmd leaves 4.
 static foreach (backend; Matrix!(
     Omit!(Native, Because.diverges,
         "dmd drops a compound assignment to a bit field narrower than int"),
@@ -1633,7 +1639,8 @@ unittest {
 
 // dmd builds a wrong struct literal when a `short` bit field follows a
 // `long` one, and the field holds another value each time; the `Native`
-// test next to the first pins that it is not the value stored.
+// test next to the first pins that it is not the value stored. With `c` set
+// to -7, dmd gives 15 and ldc gives -7.
 static foreach (backend; Matrix!(
     Omit!(Native, Because.diverges,
         "dmd builds a wrong literal when a short bit field follows a long one"),
@@ -5717,7 +5724,11 @@ static foreach (backend; Matrix!(
 
 // dmd ends the full expression of an `if` condition that names a field of a
 // temporary by taking the field's address, running the destructor, and only
-// then reading the field.
+// then reading the field. ldc does the same for the plain field, but reads
+// the field before the destructor through a same-width integral cast:
+// `if (cast(uint) mz(2).v)` is false with dmd and true with ldc, and the
+// cast in a conditional branch differs the same way. snakebite follows dmd,
+// the host compiler of `bin/ut`.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "dmd's CTFE reads the field before the destructor of the temporary runs"),
@@ -5935,7 +5946,9 @@ static foreach (backend; Matrix!(
 }
 
 // A bit field is read through a shift and a mask, not as an lvalue: it is read
-// before the destructors.
+// before the destructors. That is dmd; ldc reads the bit field after them, so
+// `taken` is false with ldc. snakebite follows dmd, the host compiler of
+// `bin/ut`.
 static foreach (backend; Matrix!()) {
     @("fullExpression.bitFieldResultReadsBeforeDestructor." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -5954,7 +5967,9 @@ static foreach (backend; Matrix!()) {
 }
 
 // A thread-local variable is not an lvalue result of the glue code: it is
-// read before the destructors.
+// read before the destructors. That is dmd; ldc reads it after them, so
+// `taken` is false with ldc. snakebite follows dmd, the host compiler of
+// `bin/ut`.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "dmd's CTFE stops with: static variable `tl` cannot be read at compile time"),
@@ -6002,7 +6017,10 @@ static foreach (backend; Matrix!(
 }
 
 // The operand of `return` is a full expression: an lvalue result is read after
-// the destructors.
+// the destructors. That is dmd: `f()` is 0. ldc reads the value before the
+// destructor for a field of the temporary, so `f()` is 2, and for the pointer
+// and class casts below; it agrees with dmd for a returned local variable.
+// snakebite follows dmd, the host compiler of `bin/ut`.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "dmd's CTFE reads the result before the destructor of the temporary runs"),
@@ -6075,7 +6093,9 @@ static foreach (backend; Matrix!(
 }
 
 // The message of an `assert` is a full expression: an lvalue result is read
-// after the destructors.
+// after the destructors. That is dmd: the message is "after". ldc reads the
+// message before the destructor and gives "before". snakebite follows dmd,
+// the host compiler of `bin/ut`.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "dmd's CTFE reads the result before the destructor of the temporary runs"),
