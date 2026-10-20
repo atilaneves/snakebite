@@ -1557,6 +1557,42 @@ unittest {
     });
 }
 
+// The same order for a `float` target under a `double` step: `x` is 2 when
+// the step starts, so dmd reads it first and gives 3; ldc reads it after the
+// step, 10, and gives 11. snakebite follows dmd, the host compiler of
+// `bin/ut`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "dmd's CTFE reads the target after the step: pinned by " ~
+        "`addAssignFloatReadsTheTargetBeforeTheStep.Ctfe.diverges`"),
+)) {
+    @("addAssignFloatReadsTheTargetBeforeTheStep." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            double step(ref float value) { value = 10; return 1; }
+            int main() {
+                float value = 2;
+                value += step(value);
+                return value == 3 ? 0 : 1;
+            }
+        });
+    }
+}
+
+@("addAssignFloatReadsTheTargetBeforeTheStep.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    0.shouldBeStatusOf!(Ctfe, q{
+        double step(ref float value) { value = 10; return 1; }
+        int main() {
+            float value = 2;
+            value += step(value);
+            return value == 11 ? 0 : 1;
+        }
+    });
+}
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.diverges,
         "dmd's CTFE divides in 64 bits: pinned by `divAssignIntByUintDividesUnsigned.Ctfe.diverges`"),

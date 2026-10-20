@@ -6666,9 +6666,9 @@ private Node buildOpAssign(string op, E)(E ev, BinAssignExp e, in Scalar scalar)
             else
                 assert(0, "dmd rejects bitwise and shift operators on "
                     ~ "floating operands");
-        // The tree holds no complex or vector value.
         case complex, vector:
-            return null;
+            assert(0, "`buildValue` drops non-scalar targets and dmd rejects "
+                ~ "a complex result for a scalar target");
         case pointerDifference:
             assert(0, "`-=` cannot store a pointer difference in a pointer");
     }
@@ -6714,6 +6714,8 @@ private Node buildFloatingOpAssign(string op, E)(
     }
 }
 
+// `target++` and `target--` on an integral target of any width: the value is
+// the old one, and the new one wraps in the target's own type.
 private Node buildPost(long delta, E)(E ev, PostExp e, in Scalar scalar) {
     import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
 
@@ -6725,7 +6727,7 @@ private Node buildPost(long delta, E)(E ev, PostExp e, in Scalar scalar) {
     if (!targetOf(ev, e.e1, target))
         return null;
     static Node make(T)(Target t) { return new PostStep!(T, delta)(t); }
-    return byWide!make(scalar.facts, target);
+    return byIntegral!make(scalar.facts, target);
 }
 
 private Node buildStore(E)(E ev, AssignExp e, in Scalar scalar) {
