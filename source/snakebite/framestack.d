@@ -268,6 +268,21 @@ public struct FrameStack {
         return _base + alignedUsed;
     }
 
+    // `reserve` with an alignment of 16, for a caller that checked once
+    // that `size` is not 0. The bump is one compare when the bytes are
+    // committed; every other case takes `reserve`.
+    pragma(inline, true)
+    public ubyte* reserveAligned16(in size_t size) @system {
+        enum uint alignment = 16;
+        const alignedUsed = (_used + alignment - 1) & ~size_t(alignment - 1);
+        // A frame size never comes near `size_t.max`, so the sum cannot wrap.
+        const end = alignedUsed + size;
+        if (end > _fastEnd)
+            return reserve(size, alignment);
+        _used = end;
+        return _base + alignedUsed;
+    }
+
     // The first byte above everything reserved.
     public ubyte* top() @system {
         return _base + _used;

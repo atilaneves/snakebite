@@ -1663,6 +1663,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // evaluator claims the call's state (`claim`), and the claim ends when
     // the call returns. An exception that leaves the call skips both, and
     // what catches the exception puts its own state back (`RunningCall`).
+    pragma(inline, true)
     package void runTreeCallee(
         TreeCallee* callee, ubyte* calleeFrame, void* place,
         FuncDeclaration caller, ubyte* callerFrame,
@@ -1701,6 +1702,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // `calleeFrame` the caller has filled, and gives its value back in a
     // register. `T` is `long` for an integral or `double` for a floating
     // result. `caller` and `callerFrame` are as `runTreeCallee` says.
+    pragma(inline, true)
     package T runTreeValue(T)(
         TreeRoot* root, FuncDeclaration function_, ubyte* calleeFrame,
         FuncDeclaration caller, ubyte* callerFrame,
