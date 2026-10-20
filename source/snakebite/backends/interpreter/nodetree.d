@@ -1804,6 +1804,58 @@ private final class Scoped(E) : BoolNode {
     }
 }
 
+// A condition whose full expression ends by reading its result after the
+// destructors of its temporaries ran (`readsLvalueAfterEnd`): the
+// expression finds the address of the result, and the truth of the value
+// there is tested after the expression ends.
+private final class ScopedTruth(E) : BoolNode {
+    private Scoped!E _scope;
+    private imported!"snakebite.nativelayout".TypeFacts.Truth _truth;
+    public this(Scoped!E scope_, Type type) {
+        import snakebite.nativelayout: truthFacts;
+
+        _scope = scope_; _truth = truthFacts(type);
+    }
+    public override bool executeBool(ubyte* frame) {
+        import snakebite.nativelayout: isTrueAt;
+
+        ubyte* address;
+        _scope.run(frame, { address = _scope._inner.executeAddr(frame); });
+        return isTrueAt(address, _truth);
+    }
+}
+
+// A return statement whose full expression ends by reading its result after
+// the destructors of its temporaries ran (`readsLvalueAfterEnd`): the
+// expression finds the address of the result, and the value there is
+// copied to the place of the result after the expression ends. A caller
+// that discards the result still has the value read, because the read can
+// fault.
+private final class ScopedReturn(E) : Node {
+    private E _ev;
+    private Scoped!E _scope;
+    private size_t _size;
+    private uint _alignment;
+    public this(E ev, Scoped!E scope_, in TypeFacts facts) {
+        _ev = ev; _scope = scope_;
+        _size = facts.size; _alignment = facts.alignment;
+    }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        import core.stdc.string: memcpy;
+
+        _scope._position.note(frame);
+        ubyte* address;
+        _scope.run(frame, { address = _scope._inner.executeAddr(frame); });
+        auto scratch = FrameGuard(&_ev._frames);
+        auto place = cast(ubyte*) _ev._place;
+        if (place is null)
+            place = _ev._frames.reserve(_size, _alignment);
+        if (place !is address)
+            memcpy(place, address, _size);
+        return TreeFlow.return_;
+    }
+}
+
 // The initialisation of a variable whose lifetime the evaluator's
 // temporaries decide: a temporary that dmd gives a destructor, or a
 // variable that can point into the temporaries of its initialiser, whose
@@ -4710,12 +4762,30 @@ private Node buildLogicalOperand(E)(
 ) {
     enum where = FullExpressionScope.Position.logicalOperand;
     auto built = buildRegion(ev, true, build);
-    if (built.node is null || readsAfterEnd(built, where, operand))
+    if (built.node is null)
         return null;
+    if (readsAfterEnd(built, where, operand))
+        return buildTruthAfterEnd(ev, operand, where, true);
     if (built.scoped)
         return new Scoped!E(
             ev, built.node, operand, where, positionOf(ev, operand));
     return built.node;
+}
+
+// The truth of the condition `expression` at `where`, whose full expression
+// reads its result after the destructors of its temporaries ran
+// (`readsLvalueAfterEnd`). The node runs the expression itself, so the
+// statement does not wrap it.
+private Node buildTruthAfterEnd(E)(
+    E ev, Expression expression, in FullExpressionScope.Position where,
+    in bool nested,
+) {
+    auto lvalue = FullExpressionScope.lvalueOf(expression);
+    auto built = buildRegion(ev, nested, () => buildAddress(ev, lvalue));
+    if (built.node is null)
+        return null;
+    return new ScopedTruth!E(new Scoped!E(ev, built.node, expression, where,
+        positionOf(ev, expression)), expression.type);
 }
 
 private Node logicalOf(in bool andAnd, Node left, Node right) {
@@ -5801,7 +5871,9 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
     Node condition(Expression expression) {
         enum where = FullExpressionScope.Position.condition;
         auto built = buildRegion(ev, false, () => buildTruth(ev, expression));
-        if (built.node is null || readsAfterEnd(built, where, expression))
+        if (built.node !is null && readsAfterEnd(built, where, expression))
+            built.node = buildTruthAfterEnd(ev, expression, where, false);
+        if (built.node is null)
             return new GenericCondition!E(ev, expression);
         return endingAt(ev, built, expression, where);
     }
@@ -5986,6 +6058,8 @@ private Statement[] statementsOf(Statement statement) {
 }
 
 private Node buildReturn(E)(E ev, imported!"dmd.statement".ReturnStatement returned) {
+    import snakebite.frontend.dmd.functions: typeFunctionOf;
+
     Node generic() {
         return new GenericStatement!E(ev, returned);
     }
@@ -5998,8 +6072,13 @@ private Node buildReturn(E)(E ev, imported!"dmd.statement".ReturnStatement retur
     Node value;
     auto built = buildRegion(ev, false,
         () => buildReturnOperand(ev, returned, value));
-    if (built.node is null || readsAfterEnd(built, where, returned.exp))
+    if (built.node is null)
         return generic();
+    if (readsAfterEnd(built, where, returned.exp)
+            && !typeFunctionOf(ev._function).isRef) {
+        auto after = buildReturnAfterEnd(ev, returned.exp);
+        return after is null ? generic() : after;
+    }
     auto node = endingAt(ev, built, returned.exp, where);
     const only = statementsOf(ev._function.fbody);
     if (node is value && only.length == 1 && only[0] is returned)
@@ -6070,6 +6149,18 @@ private Node buildReturnOperand(E)(
         ? byFloating!make(scalar.facts, &ev._place, operand, position)
         : byIntegral!make(scalar.facts, &ev._place, operand, position);
     return value;
+}
+
+// The return of `operand`, whose full expression reads its result after
+// the destructors of its temporaries ran (`readsLvalueAfterEnd`).
+private Node buildReturnAfterEnd(E)(E ev, Expression operand) {
+    enum where = FullExpressionScope.Position.returnOperand;
+    auto built = buildRegion(ev, false,
+        () => buildAddress(ev, FullExpressionScope.lvalueOf(operand)));
+    if (built.node is null)
+        return null;
+    return new ScopedReturn!E(ev, new Scoped!E(ev, built.node, operand,
+        where, positionOf(ev, operand)), ev.factsOf(ev._type));
 }
 
 // Whether the full expression `built` at `where` reads its result

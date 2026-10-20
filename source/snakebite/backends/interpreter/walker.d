@@ -3238,27 +3238,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     private bool truthOfStored(in void* value, Type type) {
-        import snakebite.nativelayout: TypeFacts, loadIntegral;
-        import snakebite.nativevalue: loadFloating;
+        import snakebite.nativelayout: isTrueAt;
 
-        const truth = truthFacts(type);
-        const buffer = cast(const(ubyte)*) value;
-
-        if (truth.isFloat) {
-            if (loadFloating(buffer + truth.offset, truth.size) != 0)
-                return true;
-            if (truth.secondOffset == TypeFacts.Truth.noSecondWord)
-                return false;
-            return loadFloating(
-                buffer + truth.secondOffset, truth.size) != 0;
-        }
-
-        if (loadIntegral(buffer + truth.offset, truth.size, false) != 0)
-            return true;
-        if (truth.secondOffset == TypeFacts.Truth.noSecondWord)
-            return false;
-        return loadIntegral(
-            buffer + truth.secondOffset, size_t.sizeof, false) != 0;
+        return isTrueAt(value, truthFacts(type));
     }
 
     // A dynamic array's two fields, for a caller that reads them rather

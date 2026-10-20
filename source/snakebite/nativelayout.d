@@ -299,6 +299,28 @@ private void forceResolved(imported!"dmd.mtype".Type type) {
 // One rule shared by every backend that compiles or interprets a
 // condition, so neither special-cases an associative array or a
 // delegate on its own.
+// Whether the value stored at `value` is true, as a condition tests it, for
+// a type whose `truthFacts` are `truth`.
+public bool isTrueAt(in void* value, in TypeFacts.Truth truth) {
+    import snakebite.nativevalue: loadFloating;
+
+    const buffer = cast(const(ubyte)*) value;
+    if (truth.isFloat) {
+        if (loadFloating(buffer + truth.offset, truth.size) != 0)
+            return true;
+        if (truth.secondOffset == TypeFacts.Truth.noSecondWord)
+            return false;
+        return loadFloating(buffer + truth.secondOffset, truth.size) != 0;
+    }
+
+    if (loadIntegral(buffer + truth.offset, truth.size, false) != 0)
+        return true;
+    if (truth.secondOffset == TypeFacts.Truth.noSecondWord)
+        return false;
+    return loadIntegral(
+        buffer + truth.secondOffset, size_t.sizeof, false) != 0;
+}
+
 public TypeFacts.Truth truthFacts(imported!"dmd.mtype".Type type) {
     alias Truth = TypeFacts.Truth;
     import dmd.astenums: TY;
