@@ -1665,6 +1665,23 @@ private struct NotTest {
     public bool test(ubyte* frame) { return !operand.executeBool(frame); }
 }
 
+// `left && right` or `left || right` whose right operand has no value
+// (`LogicalPlan.Right.effect`): it runs for its effect when the left
+// operand does not decide, and the value is the left operand's. A
+// `noreturn` right operand never completes, so the left operand decided
+// whenever there is a value.
+private final class LogicalEffect(bool andAnd) : BoolNode {
+    private Node _left;
+    private Node _right;
+    public this(Node left, Node right) { _left = left; _right = right; }
+    public override bool executeBool(ubyte* frame) {
+        const left = _left.executeBool(frame);
+        if (left == andAnd)
+            _right.executeVoid(frame);
+        return left;
+    }
+}
+
 // The node that evaluates a test, which a loop or an `if` can hold in its
 // place.
 private final class Tested(T) : BoolNode {
@@ -2320,6 +2337,9 @@ private final class Scoped(E) : BoolNode {
         ubyte* result;
         run(frame, { result = _inner.executeAddr(frame); });
         return result;
+    }
+    public override void executeVoid(ubyte* frame) {
+        run(frame, { _inner.executeVoid(frame); });
     }
     private void run(ubyte* frame, scope void delegate() evaluate) {
         auto ev = _ev;
@@ -7009,6 +7029,8 @@ private Node buildEffect(E)(E ev, Expression expression) {
         if (expression.op == EXP.question)
             return buildConditional!(buildEffect!E, ConditionalVoid)(
                 ev, expression.isCondExp);
+        if (expression.op == EXP.andAnd || expression.op == EXP.orOr)
+            return buildLogical(ev, expression.isLogicalExp);
         return expression.op == EXP.call
             ? buildCall(ev, expression.isCallExp) : null;
     }
@@ -7125,6 +7147,33 @@ private Node buildTruthAfterEnd(E)(
         positionOf(ev, expression)), expression.type);
 }
 
+// `&&` or `||` as its plan says (`logicalPlan`): a right operand with a
+// value is a test, and one without runs for its effect.
+private Node buildLogical(E)(E ev, imported!"dmd.expression".LogicalExp logical) {
+    import snakebite.backends.logical: LogicalPlan, logicalPlan;
+
+    const plan = logicalPlan(logical);
+    auto left = buildTruth(ev, logical.e1);
+    final switch (plan.right) with (LogicalPlan.Right) {
+        case value: {
+            auto right = buildLogicalOperand(
+                ev, logical.e2, () => buildTruth(ev, logical.e2));
+            if (left is null || right is null)
+                return null;
+            return logicalOf(plan.andAnd, left, right);
+        }
+        case effect: {
+            auto right = buildLogicalOperand(
+                ev, logical.e2, () => buildEffect(ev, logical.e2));
+            if (left is null || right is null)
+                return null;
+            return plan.andAnd
+                ? new LogicalEffect!true(left, right)
+                : new LogicalEffect!false(left, right);
+        }
+    }
+}
+
 private Node logicalOf(in bool andAnd, Node left, Node right) {
     if (!andAnd)
         return new Tested!OrTest(OrTest(left, right));
@@ -7136,7 +7185,6 @@ private Node logicalOf(in bool andAnd, Node left, Node right) {
 // The node that yields `expression`'s scalar value.
 private Node buildValue(E)(E ev, Expression expression) {
     import dmd.tokens: EXP;
-    import snakebite.backends.logical: LogicalPlan, logicalPlan;
     import snakebite.frontend.storage: typeInfoAddressedBy;
     import snakebite.nativelayout: isStaticStructAddress, loadIntegral;
     import snakebite.nativevalue: loadFloating;
@@ -7256,18 +7304,8 @@ private Node buildValue(E)(E ev, Expression expression) {
             return buildEquality!false(ev, expression.isEqualExp);
         case notEqual:
             return buildEquality!true(ev, expression.isEqualExp);
-        case andAnd, orOr: {
-            auto logical = expression.isLogicalExp;
-            const plan = logicalPlan(logical);
-            if (plan.right != LogicalPlan.Right.value || !plan.hasValue)
-                return null;
-            auto left = buildTruth(ev, logical.e1);
-            auto right = buildLogicalOperand(
-                ev, logical.e2, () => buildTruth(ev, logical.e2));
-            if (left is null || right is null)
-                return null;
-            return logicalOf(plan.andAnd, left, right);
-        }
+        case andAnd, orOr:
+            return buildLogical(ev, expression.isLogicalExp);
         case not: {
             auto operand = buildTruth(ev, expression.isNotExp.e1);
             return operand is null ? null : new Tested!NotTest(NotTest(operand));

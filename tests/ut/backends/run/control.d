@@ -1685,6 +1685,107 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// The right operand of `&&` or `||` can be a `void` call. The whole
+// expression is then `void`, and the call runs for its effect when the left
+// operand does not decide.
+static foreach (backend; Matrix!()) {
+    @("logicalVoidRightOperand." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void bump(ref int x, int by) { x = x * 10 + by; }
+
+            int main() {
+                int x;
+                bool yes = true, no = false;
+                yes && bump(x, 1);
+                no && bump(x, 2);
+                no || bump(x, 3);
+                yes || bump(x, 4);
+                return x == 13 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A `void` right operand of `&&` or `||` is a full expression of its own:
+// the destructor of its temporary runs when the operand ends.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "DMD CTFE does not run these short-circuit temporary destructors"),
+)) {
+    @("logicalVoidRightOperandTemporary." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Guard {
+                int* events;
+                int id;
+                ~this() { *events = *events * 10 + id; }
+                void touch() { *events = *events * 10 + 5; }
+            }
+
+            int main() {
+                int events;
+                bool yes = true, no = false;
+                yes && Guard(&events, 1).touch();
+                no && Guard(&events, 2).touch();
+                no || Guard(&events, 3).touch();
+                return events == 5153 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// dmd types `a || f()` as `bool` when `f` is `noreturn`. The value is the
+// left operand's, because the right operand never completes.
+static foreach (backend; Matrix!()) {
+    @("logicalNoreturnRightOperandValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            noreturn fail() { throw new Exception("fail"); }
+
+            int main() {
+                bool yes = true, no = false;
+                bool a = yes || fail();
+                bool b = no && fail();
+                int caught;
+                try {
+                    bool c = no || fail();
+                } catch (Exception exception)
+                    caught = 1;
+                return a && !b && caught == 1 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A `noreturn` right operand of `&&` or `||` in a condition: the left
+// operand decides the branch, or the right operand leaves the statement.
+static foreach (backend; Matrix!()) {
+    @("logicalNoreturnRightOperandCondition." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            noreturn fail() { throw new Exception("fail"); }
+
+            int main() {
+                bool yes = true;
+                int x;
+                if (yes || fail())
+                    x += 1;
+                try {
+                    if (yes && fail())
+                        x += 10;
+                } catch (Exception exception)
+                    x += 100;
+                return x == 101 ? 0 : 1;
+            }
+        });
+    }
+}
+
 // A `case` label in an `if (__ctfe)` block is a run-time jump target: the
 // `switch` enters the block at the label, although the `if` itself never
 // does at run time. dmd rejects only a `goto` into the block.
