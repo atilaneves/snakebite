@@ -6,7 +6,7 @@ private:
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.backends.interpreter.nodetree:
     AccessSite, CalleeResult, OuterVariable, TreeCallee, TreeFlow, TreeRoot,
-    isAggregate, isScalar, isSlice, rootOf;
+    isAggregate, isScalar, isSlice, resultWordFor, rootOf;
 import snakebite.nativelayout: tryTypeFacts, truthFacts;
 
 
@@ -569,8 +569,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     import dmd.dstruct: StructDeclaration;
     import snakebite.framestack: FrameStack, defaultFrameCapacity;
     import snakebite.backends.interpreter.faultslot:
-        faultSlotOf, fastFrameLead, frameLead, placeNotRead, placeSlotOf,
-        pushCallFrame;
+        ResultWord, faultSlotOf, fastFrameLead, frameLead, pushCallFrame,
+        resultPlaceOf, resultWordOf;
     import snakebite.backends.interpreter.stackpieces: StackPieces;
     import snakebite.backends.druntimehooks: DruntimeHook;
     import snakebite.ffi:
@@ -1298,6 +1298,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         size_t argumentCount,
         bool callbackEntry = false,
     ) {
+        import snakebite.ffi.load: WordPair, storeWordResult;
         import std.conv: text;
 
         // A template instance used only by interpreted guest code has no
@@ -1379,8 +1380,25 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         _type = function_.type.nextOf;
         _facts = factsOf(_type);
-        _place = returnPlace;
-        *placeSlotOf(frameBase) = returnPlace;
+        // A `value` result is in the word of the frame until the call ends.
+        const resultWord = resultWordFor(this, function_);
+        auto word = resultWordOf(frameBase);
+        final switch (resultWord) with (ResultWord) {
+            case value:
+                _place = word;
+                break;
+            case place:
+                _place = returnPlace;
+                *resultPlaceOf(frameBase) = returnPlace;
+                break;
+            case none:
+                _place = null;
+                break;
+        }
+        const resultSize = _facts.size;
+        scope (success)
+            if (resultWord == ResultWord.value && returnPlace !is null)
+                storeWordResult(WordPair(*word), resultSize, returnPlace);
         _frameBase = frameBase;
         _layout = layout;
         _function = function_;
@@ -1656,9 +1674,36 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     // Runs the body of `callee`, whose frame at `calleeFrame` the caller has
-    // filled, leaving a scalar result at `place`. This is `executeRaw`'s
-    // guest case without the steps a direct call to a guest function with a
-    // scalar result has no use for.
+    // filled, with its result at `place`, or nowhere when `place` is null.
+    // The general entry of a call node, for any result.
+    package void runTreeCallee(
+        TreeCallee* callee, ubyte* calleeFrame, void* place,
+        FuncDeclaration caller, ubyte* callerFrame,
+    ) {
+        import snakebite.ffi.load: WordPair, storeWordResult;
+
+        auto root = callee.root;
+        final switch (root.resultWord) {
+            case ResultWord.value:
+                runTree(callee, calleeFrame, caller, callerFrame);
+                if (place !is null)
+                    storeWordResult(WordPair(*resultWordOf(calleeFrame)),
+                        root.returnFacts.size, place);
+                break;
+            case ResultWord.place:
+                *resultPlaceOf(calleeFrame) = place;
+                runTree(callee, calleeFrame, caller, callerFrame);
+                break;
+            case ResultWord.none:
+                runTree(callee, calleeFrame, caller, callerFrame);
+                break;
+        }
+    }
+
+    // Runs the body of `callee`, whose frame at `calleeFrame` the caller has
+    // filled, with what its result word needs in it (`ResultWord`). This is
+    // `executeRaw`'s guest case without the steps a direct call to a guest
+    // function has no use for. Every call that a node makes runs here.
     //
     // `caller` and `callerFrame` are the function and the frame of the node
     // that calls, which the running call has again when the callee returns.
@@ -1667,23 +1712,21 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // the call returns. An exception that leaves the call skips both, and
     // what catches the exception puts its own state back (`RunningCall`).
     pragma(inline, true)
-    package void runTreeCallee(
-        TreeCallee* callee, ubyte* calleeFrame, void* place,
-        FuncDeclaration caller, ubyte* callerFrame,
+    package void runTree(
+        TreeCallee* callee, ubyte* calleeFrame, FuncDeclaration caller,
+        ubyte* callerFrame,
     ) {
         assert(_function is caller && _faultFrame is callerFrame,
             "a call node runs in the call of its own tree");
         ubyte here;
         if (cast(size_t) &here < _stack.limit) {
-            runTreeCalleeOnNewPiece(callee, calleeFrame, place);
+            runTreeOnNewPiece(callee, calleeFrame);
             return;
         }
 
-        *placeSlotOf(calleeFrame) = place;
-        auto root = callee.root;
         _function = callee.function_;
         _faultFrame = calleeFrame;
-        const flow = root.execute(calleeFrame);
+        const flow = callee.root.execute(calleeFrame);
         if (_innermostFrame is calleeFrame)
             endClaimedCall(callee, calleeFrame, flow);
         _function = caller;
@@ -1691,7 +1734,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     // Ends a call whose node claimed its state: a `goto` that the tree met
-    // runs in the original evaluator first.
+    // runs in the original evaluator first. A result that the original
+    // evaluator wrote in the word gets its extension.
     pragma(inline, false)
     private void endClaimedCall(
         TreeCallee* callee, ubyte* calleeFrame, in TreeFlow flow,
@@ -1699,71 +1743,24 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (flow == TreeFlow.generic && _controlFlow.hasGoto)
             resumeAtGoto(callee, calleeFrame);
         releaseClaim;
-    }
-
-    // Runs the body of a callee that is one `return`, whose frame at
-    // `calleeFrame` the caller has filled, and gives its value back in a
-    // register. `T` is `long` for an integral or `double` for a floating
-    // result. `caller` and `callerFrame` are as `runTreeCallee` says.
-    pragma(inline, true)
-    package T runTreeValue(T)(
-        TreeRoot* root, FuncDeclaration function_, ubyte* calleeFrame,
-        FuncDeclaration caller, ubyte* callerFrame,
-    ) {
-        assert(_function is caller && _faultFrame is callerFrame,
-            "a call node runs in the call of its own tree");
-        ubyte here;
-        if (cast(size_t) &here < _stack.limit)
-            return runTreeValueOnNewPiece!T(root, function_, calleeFrame);
-
-        debug *placeSlotOf(calleeFrame) = placeNotRead;
-        _function = function_;
-        _faultFrame = calleeFrame;
-        const value = returnValueOf!T(root, calleeFrame);
-        if (_innermostFrame is calleeFrame)
-            releaseClaim;
-        _function = caller;
-        _faultFrame = callerFrame;
-        return value;
-    }
-
-    private static T returnValueOf(T)(TreeRoot* root, ubyte* calleeFrame) {
-        static if (is(T == long))
-            return root.returnLong(calleeFrame);
-        else
-            return root.returnDouble(calleeFrame);
+        callee.root.extendResult(calleeFrame);
     }
 
     // A call past the stack limit continues on a new piece of the native
     // stack, with a guard: the closure of the continuation sits in a frame
-    // of its own, so the frame of `runTreeValue` carries none.
+    // of its own, so the frame of `runTree` carries none.
     pragma(inline, false)
-    private T runTreeValueOnNewPiece(T)(
-        TreeRoot* root, FuncDeclaration function_, ubyte* calleeFrame,
-    ) {
-        T value;
+    private void runTreeOnNewPiece(TreeCallee* callee, ubyte* calleeFrame) {
+        auto root = callee.root;
         _stack.continueOnNewPiece({
             auto guard = CallStateGuard(this, calleeFrame);
-            _function = function_;
-            value = returnValueOf!T(root, calleeFrame);
-        });
-        return value;
-    }
-
-    // As `runTreeValueOnNewPiece`, for `runTreeCallee`.
-    pragma(inline, false)
-    private void runTreeCalleeOnNewPiece(
-        TreeCallee* callee, ubyte* calleeFrame, void* place,
-    ) {
-        _stack.continueOnNewPiece({
-            *placeSlotOf(calleeFrame) = place;
-            auto guard = CallStateGuard(this, calleeFrame);
-            _place = place;
+            _place = root.resultPlace(calleeFrame);
             _function = callee.function_;
-            const flow = callee.root.execute(calleeFrame);
+            const flow = root.execute(calleeFrame);
             if (flow == TreeFlow.generic && _controlFlow.hasGoto)
                 resumeAtGoto(callee, calleeFrame);
         });
+        root.extendResult(calleeFrame);
     }
 
     // The original evaluator reads the function's fields; a tree node reads
@@ -1788,22 +1785,20 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     // Gives the running call, whose frame is `frame`, a state of its own,
-    // which lasts until the call returns (`runTreeCallee`) or an exception
-    // that leaves it is caught (`RunningCall`).
+    // which lasts until the call returns (`runTree`) or an exception that
+    // leaves it is caught (`RunningCall`).
     //
-    // `_place` becomes the word in the frame, which is where the call's
-    // result goes when the call writes one (`runTreeCallee`). A call that
-    // returns in a register (`runTreeValue`) has no place, and the word
-    // holds a debug-only poison: the copy is never used as a place, because
-    // only a return statement run by the original evaluator writes through
-    // `_place`, and the body of such a call is one return that the tree runs.
+    // `_place` becomes where the call's result goes by the rule of its
+    // result word (`ResultWord`): the word itself for a `value` result, the
+    // address in the word for a `place` result, and null for none, whose
+    // word is no pointer.
     pragma(inline, false)
     private void claim(TreeRoot* root, ubyte* frame) {
         if (_claimCount == _claims.length)
             _claims ~= new CallState;
         auto state = _claims[_claimCount++];
         state.begin(this, frame);
-        _place = *placeSlotOf(frame);
+        _place = root.resultPlace(frame);
         setFunctionFields(root, frame);
     }
 
@@ -2338,7 +2333,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     // The state of the running call as a `try` or a full expression finds
     // it. A call gives its caller the state back when it returns, not when
-    // an exception leaves it (`runTreeCallee`), so what catches puts this
+    // an exception leaves it (`runTree`), so what catches puts this
     // back before guest code of its own call runs again: it releases the
     // claims of the calls that the exception left, then names its own call.
     // A call with a guard puts its caller's state back as the exception
@@ -3046,7 +3041,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // temporaries run before a `try` catches it, and they run guest code of
     // the evaluator, which reads the state of the running call. The calls
     // that the exception left without a guard still have their claims
-    // (`runTreeCallee`), so those end first and the state of the running
+    // (`runTree`), so those end first and the state of the running
     // call is the innermost again.
     extern(D) package void withExpressionOf(
         ubyte* frame,

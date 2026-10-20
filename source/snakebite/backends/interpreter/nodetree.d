@@ -22,7 +22,7 @@ import snakebite.backends.checkplan: BoundsCheck;
 import snakebite.backends.controlflow: ControlFlowState;
 import snakebite.backends.fullexpression: FullExpressionScope;
 import snakebite.backends.interpreter.faultslot:
-    fastFrameLead, faultSlotOf, placeSlotOf;
+    ResultWord, fastFrameLead, faultSlotOf, resultPlaceOf, resultWordOf;
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.ffi.load: callDirectWordsPair, extendWord, storeWordResult, WordPair;
 import snakebite.backends.sliceplan: SlicePlan;
@@ -44,13 +44,13 @@ package struct TreeRoot {
     // The statements of the body: one node, a short sequence whose
     // children are fields, or a sequence.
     private Node _body;
-    // The return statement of a function whose body is only that statement,
-    // once it has run: a call that takes the value in a register runs it.
-    private Node _soleReturn;
     package const(imported!"snakebite.backends.closureplan".ClosurePlan)*
         closurePlan;
     package Type returnType;
     package TypeFacts returnFacts;
+    package ResultWord resultWord;
+    // How a `value` result fills its word from the bytes of its type.
+    private ResultExtension _extension;
     // The full expression that the builder is building.
     private Region* _region;
 
@@ -69,17 +69,52 @@ package struct TreeRoot {
         return _body.executeStmt(frame);
     }
 
-    package bool hasSoleReturn() const {
-        return _soleReturn !is null;
+    // Where the original evaluator writes the result of the call whose
+    // frame is `frame` (`_place`).
+    package void* resultPlace(ubyte* frame) {
+        final switch (resultWord) with (ResultWord) {
+            case value:
+                return resultWordOf(frame);
+            case place:
+                return *resultPlaceOf(frame);
+            case none:
+                return null;
+        }
     }
 
-    package long returnLong(ubyte* frame) {
-        return _soleReturn.returnLong(frame);
+    // Extends the `value` result that the original evaluator wrote in the
+    // word of the call whose frame is `frame`.
+    package void extendResult(ubyte* frame) {
+        if (resultWord == ResultWord.value) {
+            auto word = resultWordOf(frame);
+            *word = _extension.of(*word);
+        }
     }
+}
 
-    package double returnDouble(ubyte* frame) {
-        return _soleReturn.returnDouble(frame);
-    }
+// What the result word of a call of `function_` holds.
+package ResultWord resultWordFor(E)(E ev, FuncDeclaration function_) {
+    import dmd.astenums: TY;
+    import dmd.typesem: nextOf, toBasetype;
+    import snakebite.frontend.dmd.functions: typeFunctionOf;
+
+    if (typeFunctionOf(function_).isRef)
+        return ResultWord.place;
+    auto type = function_.type.nextOf;
+    if (type.toBasetype.ty == TY.Tvoid)
+        return ResultWord.none;
+    return scalarOf(ev, type).kind == Scalar.Kind.none
+        ? ResultWord.place : ResultWord.value;
+}
+
+// The 64 bits of the word of a `value` result.
+private ulong resultBits(T)(in T value) {
+    static if (is(T == float))
+        return *cast(const(uint)*) &value;
+    else static if (is(T == double))
+        return *cast(const(ulong)*) &value;
+    else
+        return cast(long) value;
 }
 
 package TreeRoot* rootOf(E)(
@@ -93,6 +128,13 @@ package TreeRoot* rootOf(E)(
     root.closurePlan = ev.closurePlanOf(function_);
     root.returnType = function_.type.nextOf;
     root.returnFacts = ev.factsOf(root.returnType);
+    root.resultWord = resultWordFor(ev, function_);
+    if (root.resultWord == ResultWord.value) {
+        // The bits of a floating result are zero-extended.
+        const scalar = scalarOf(ev, root.returnType);
+        root._extension = ResultExtension(scalar.facts.size,
+            scalar.kind == Scalar.Kind.floating || scalar.facts.isUnsigned);
+    }
     auto statements = statementsOf(body_);
     Node uninitialised(Statement one, Node* slot) {
         return new Uninitialised!E(ev, one, slot, root);
@@ -230,10 +272,10 @@ package struct TreeCallee {
     package DirectWordCall direct;
 }
 
-// The body of a function when it is a getter (`return this.field;`), a
-// setter (`this.field = parameter;`), or only a `return`.
+// The body of a function when it is a getter (`return this.field;`) or a
+// setter (`this.field = parameter;`).
 package struct CalleeShape {
-    package enum Kind : ubyte { unexamined, other, soleReturn, getter, setter }
+    package enum Kind : ubyte { unexamined, other, getter, setter }
 
     package Kind kind;
     // The field of an accessor: where it is in the receiver and how wide.
@@ -289,9 +331,6 @@ private abstract class Node {
     public long executeLong(ubyte* frame) { assert(0); }
     public double executeDouble(ubyte* frame) { assert(0); }
     public bool executeBool(ubyte* frame) { return executeLong(frame) != 0; }
-    // A return statement gives its value to the caller in a register.
-    public long returnLong(ubyte* frame) { assert(0); }
-    public double returnDouble(ubyte* frame) { assert(0); }
     public ubyte* executeAddr(ubyte* frame) { assert(0); }
     public void executeVoid(ubyte* frame) { assert(0); }
     // Writes a dynamic array value (length, then pointer) to `dest`.
@@ -2187,16 +2226,17 @@ private final class ScopedTruth(E) : BoolNode {
 // A return statement whose full expression ends by reading its result after
 // the destructors of its temporaries ran (`readsLvalueAfterEnd`): the
 // expression finds the address of the result, and the value there is
-// copied to the place of the result after the expression ends. A caller
-// that discards the result still has the value read, because the read can
-// fault.
+// copied to the result word or the place of the result after the
+// expression ends. A caller that discards the result still has the value
+// read, because the read can fault.
 private final class ScopedReturn(E) : Node {
     private E _ev;
     private Scoped!E _scope;
+    private TreeRoot* _root;
     private size_t _size;
     private uint _alignment;
     public this(E ev, Scoped!E scope_, in TypeFacts facts) {
-        _ev = ev; _scope = scope_;
+        _ev = ev; _scope = scope_; _root = ev._treeRoot;
         _size = facts.size; _alignment = facts.alignment;
     }
     public override TreeFlow executeStmt(ubyte* frame) {
@@ -2205,8 +2245,15 @@ private final class ScopedReturn(E) : Node {
         _scope._position.note(frame);
         ubyte* address;
         _scope.run(frame, { address = _scope._inner.executeAddr(frame); });
+        if (_root.resultWord == ResultWord.value) {
+            auto word = resultWordOf(frame);
+            *word = 0;
+            memcpy(word, address, _size);
+            _root.extendResult(frame);
+            return TreeFlow.return_;
+        }
         auto scratch = FrameGuard(&_ev._frames);
-        auto place = cast(ubyte*) *placeSlotOf(frame);
+        auto place = cast(ubyte*) *resultPlaceOf(frame);
         if (place is null)
             place = _ev._frames.reserve(_size, _alignment);
         if (place !is address)
@@ -2324,7 +2371,7 @@ private final class ReturnReference : Node {
     }
     public override TreeFlow executeStmt(ubyte* frame) {
         _position.note(frame);
-        *cast(ubyte**) *placeSlotOf(frame) = _address.executeAddr(frame);
+        *cast(ubyte**) *resultPlaceOf(frame) = _address.executeAddr(frame);
         return TreeFlow.return_;
     }
 }
@@ -2343,7 +2390,7 @@ private final class ReturnAggregate(E) : Node {
     }
     public override TreeFlow executeStmt(ubyte* frame) {
         _position.note(frame);
-        if (auto place = *placeSlotOf(frame))
+        if (auto place = *resultPlaceOf(frame))
             _value.executeInto(frame, cast(ubyte*) place);
         else {
             // The caller discarded the result, but the operand still runs.
@@ -2664,22 +2711,8 @@ private final class ReturnValue(T, V) : Node {
     }
     public override TreeFlow executeStmt(ubyte* frame) {
         _position.note(frame);
-        const T value = cast(T) _value.value(frame);
-        if (auto place = *placeSlotOf(frame))
-            *cast(T*) place = value;
+        *resultWordOf(frame) = resultBits(cast(T) _value.value(frame));
         return TreeFlow.return_;
-    }
-
-    static if (isFloatingPoint!T) {
-        public override double returnDouble(ubyte* frame) {
-            _position.note(frame);
-            return cast(T) _value.value(frame);
-        }
-    } else {
-        public override long returnLong(ubyte* frame) {
-            _position.note(frame);
-            return cast(T) _value.value(frame);
-        }
     }
 }
 
@@ -2691,7 +2724,7 @@ private final class ReturnSlice : Node {
     }
     public override TreeFlow executeStmt(ubyte* frame) {
         _position.note(frame);
-        if (auto place = *placeSlotOf(frame))
+        if (auto place = *resultPlaceOf(frame))
             _value.executeInto(frame, cast(ubyte*) place);
         else
             _value.executeVoid(frame);
@@ -3031,12 +3064,11 @@ private struct Selection {
 }
 
 // What a call node does for one callee in place of a general call: the
-// field access of a getter or a setter, or the run of a body that is one
-// `return`, whose value comes back in a register. It belongs to the node
-// and the callee together. The node makes it once; the one field that
-// changes afterwards is `root`, which is found when the callee has run.
+// field access of a getter or a setter, or the run of the body with the
+// arguments in the slots of `steps`. It belongs to the node and the callee
+// together, and the node makes it once.
 private struct FastCallee {
-    public enum Kind : ubyte { getter, setter, soleReturn, plain }
+    public enum Kind : ubyte { getter, setter, plain }
 
     public Kind kind;
     public TreeCallee* callee;
@@ -3049,10 +3081,6 @@ private struct FastCallee {
     public bool isFloating;
     public AccessSite site;
     public Argument mode;
-    // For a body that is one `return`, the tree whose value comes back in
-    // a register. The tree of the callee does not exist until the callee
-    // has run once, so `root` is found then.
-    public TreeRoot* root;
 }
 
 // How a call evaluates one argument into its parameter slot in the frame of
@@ -3243,8 +3271,12 @@ private mixin template CalleeEntry(E) {
     }
 
     private double floatingResult(in ulong[2] buffer) const {
+        return floatingOf(buffer[0]);
+    }
+
+    private double floatingOf(in ulong word) const {
         return _resultSize == 4
-            ? *cast(const(float)*) buffer.ptr : *cast(const(double)*) buffer.ptr;
+            ? *cast(const(float)*) &word : *cast(const(double)*) &word;
     }
 }
 
@@ -3443,7 +3475,7 @@ private final class Call(E) : Node {
                 return byScalarOf!makeGetter(fast, this);
             case setter:
                 return byScalarOf!makeSetter(fast, this);
-            case soleReturn, plain:
+            case plain:
                 return null;
         }
     }
@@ -3477,7 +3509,7 @@ private final class Call(E) : Node {
             case unexamined:
                 assert(0, "examine leaves no callee unexamined");
             case other:
-                return bodyOf(fast, callee, BodyKind.plain);
+                return bodyOf(fast, callee);
             case getter, setter:
                 fast.kind = shape.kind == getter
                     ? FastCallee.Kind.getter : FastCallee.Kind.setter;
@@ -3489,26 +3521,17 @@ private final class Call(E) : Node {
                 if (_modes.length != 0)
                     fast.mode = _modes[0];
                 return fast;
-            case soleReturn:
-                return bodyOf(fast, callee, BodyKind.soleReturn);
         }
     }
 
     // A callee with the plain kind of frame runs with its arguments in the
-    // slots of `fast`. When it is only a `return` with a result that fits a
-    // register, the value can come back in a register.
-    private FastCallee* bodyOf(
-        FastCallee* fast, TreeCallee* callee, BodyKind bodyKind,
-    ) {
+    // slots of `fast`.
+    private FastCallee* bodyOf(FastCallee* fast, TreeCallee* callee) {
         if (!callee.reservesFast || callee.layout.retainsTemporaries)
             return null;
-        fast.kind = bodyKind == BodyKind.soleReturn && _resultSize != 0
-                && _resultSize <= size_t.sizeof
-            ? FastCallee.Kind.soleReturn : FastCallee.Kind.plain;
+        fast.kind = FastCallee.Kind.plain;
         return fast;
     }
-
-    private enum BodyKind : bool { plain, soleReturn }
 
     // The general call once `resolve` has run: the callee in `_selected`, or
     // the original path when `resolve` found none.
@@ -3529,9 +3552,9 @@ private final class Call(E) : Node {
     // The forms of a call: the fast form of the callee when it has one,
     // the general call otherwise. Nothing between the choice of the callee
     // and its run evaluates user code except the arguments, which only read
-    // `fast` and `callee`. A getter whose receiver is null, a setter in a
-    // form that has no store, and a sole return whose tree has not run yet
-    // take the general call or the run of the body.
+    // `fast` and `callee`. A getter whose receiver is null and a setter in a
+    // form that has no store take the general call. The run of the body
+    // takes a scalar result from the word of the callee's frame.
     public override long executeLong(ubyte* frame) {
         const receiver = runReceiver(frame);
         const resolved = resolve(receiver);
@@ -3544,12 +3567,8 @@ private final class Call(E) : Node {
                     break;
                 case setter:
                     break;
-                case soleReturn:
-                    if (returnsInRegister(fast))
-                        return enterLong(fast, receiver, frame);
-                    goto case plain;
                 case plain:
-                    return runLong(fast, receiver, frame);
+                    return cast(long) runWord(fast, receiver, frame);
             }
         }
         return generalLong(resolved, receiver, frame);
@@ -3567,12 +3586,8 @@ private final class Call(E) : Node {
                     break;
                 case setter:
                     break;
-                case soleReturn:
-                    if (returnsInRegister(fast))
-                        return enterDouble(fast, receiver, frame);
-                    goto case plain;
                 case plain:
-                    return runDouble(fast, receiver, frame);
+                    return floatingOf(runWord(fast, receiver, frame));
             }
         }
         return generalDouble(resolved, receiver, frame);
@@ -3592,8 +3607,8 @@ private final class Call(E) : Node {
                         return;
                     }
                     break;
-                case soleReturn, plain:
-                    runVoid(fast, receiver, frame);
+                case plain:
+                    runPlace(fast, receiver, frame, null);
                     return;
             }
         }
@@ -3609,8 +3624,8 @@ private final class Call(E) : Node {
             final switch (fast.kind) with (FastCallee.Kind) {
                 case getter, setter:
                     break;
-                case soleReturn, plain:
-                    runPlain(fast, receiver, frame, &buffer);
+                case plain:
+                    runPlace(fast, receiver, frame, &buffer);
                     *cast(SliceValue*) dest = buffer;
                     return;
             }
@@ -3709,67 +3724,32 @@ private final class Call(E) : Node {
         }
     }
 
-    // Whether the tree of the callee has its return statement: the callee
-    // has run once.
-    private bool returnsInRegister(FastCallee* fast) {
-        if (fast.root is null) {
-            auto root = fast.callee.root;
-            if (root is null || !root.hasSoleReturn)
-                return false;
-            fast.root = root;
-        }
-        return true;
+    // Runs the callee of `fast` with its result in the word of its frame,
+    // which this gives back.
+    pragma(inline, true)
+    private ulong runWord(FastCallee* fast, size_t receiver, ubyte* frame) {
+        auto ev = _ev;
+        auto callee = fast.callee;
+        assert(callee.root.resultWord == ResultWord.value,
+            "a call that takes a value calls a callee that gives one");
+        auto calleeFrame = FrameGuard(&ev._frames);
+        auto base = placeIn!true(callee, fast.steps, receiver, frame);
+        ev.runTree(callee, base, _caller, frame);
+        return *resultWordOf(base);
     }
 
-    // Runs a callee that the register form does not cover: the frame, the
-    // arguments, and the callee's tree, with the result in `result`. No
-    // selection is copied and no route is chosen.
+    // Runs the callee of `fast` with `place` in the word of its frame: the
+    // place of a result that is not a value, or null to discard it.
     pragma(inline, true)
-    private void runPlain(
-        FastCallee* fast, size_t receiver, ubyte* frame, void* result,
+    private void runPlace(
+        FastCallee* fast, size_t receiver, ubyte* frame, void* place,
     ) {
         auto ev = _ev;
+        auto callee = fast.callee;
         auto calleeFrame = FrameGuard(&ev._frames);
-        auto base = placeIn!true(fast.callee, fast.steps, receiver, frame);
-        ev.runTreeCallee(fast.callee, base, result, _caller, frame);
-    }
-
-    pragma(inline, true)
-    private long runLong(FastCallee* fast, size_t receiver, ubyte* frame) {
-        ulong[2] buffer = void;
-        runPlain(fast, receiver, frame, buffer.ptr);
-        return _extension.of(buffer[0]);
-    }
-
-    pragma(inline, true)
-    private double runDouble(FastCallee* fast, size_t receiver, ubyte* frame) {
-        ulong[2] buffer = void;
-        runPlain(fast, receiver, frame, buffer.ptr);
-        return floatingResult(buffer);
-    }
-
-    pragma(inline, true)
-    private void runVoid(FastCallee* fast, size_t receiver, ubyte* frame) {
-        ulong[2] buffer = void;
-        runPlain(fast, receiver, frame, buffer.ptr);
-    }
-
-    pragma(inline, true)
-    private long enterLong(FastCallee* fast, size_t receiver, ubyte* frame) {
-        auto ev = _ev;
-        auto calleeFrame = FrameGuard(&ev._frames);
-        auto base = placeIn!true(fast.callee, fast.steps, receiver, frame);
-        return ev.runTreeValue!long(
-            fast.root, fast.callee.function_, base, _caller, frame);
-    }
-
-    pragma(inline, true)
-    private double enterDouble(FastCallee* fast, size_t receiver, ubyte* frame) {
-        auto ev = _ev;
-        auto calleeFrame = FrameGuard(&ev._frames);
-        auto base = placeIn!true(fast.callee, fast.steps, receiver, frame);
-        return ev.runTreeValue!double(
-            fast.root, fast.callee.function_, base, _caller, frame);
+        auto base = placeIn!true(callee, fast.steps, receiver, frame);
+        *resultPlaceOf(base) = place;
+        ev.runTree(callee, base, _caller, frame);
     }
 }
 
@@ -4159,7 +4139,6 @@ private void examine(E)(E ev, TreeCallee* callee) {
         if (returned.exp is null || returned.fesFunc !is null
                 || returned.caseDim != 0)
             return;
-        callee.shape.kind = CalleeShape.Kind.soleReturn;
         static if (!E.nullCheckedEvaluator) {
             // The access of a getter runs no arguments.
             auto field = receiverField(returned.exp);
@@ -7555,9 +7534,8 @@ private Node buildReturn(E)(E ev, imported!"dmd.statement".ReturnStatement retur
     if (returned.exp is null)
         return new Jump!(TreeFlow.return_);
     enum where = FullExpressionScope.Position.returnOperand;
-    Node value;
     auto built = buildRegion(ev, Region.Nesting.outermost,
-        () => buildReturnOperand(ev, returned, value));
+        () => buildReturnOperand(ev, returned));
     if (built.node is null)
         return generic();
     if (readsAfterEnd(built, where, returned.exp)
@@ -7565,18 +7543,13 @@ private Node buildReturn(E)(E ev, imported!"dmd.statement".ReturnStatement retur
         auto after = buildReturnAfterEnd(ev, returned.exp);
         return after is null ? generic() : after;
     }
-    auto node = endingAt(ev, built, returned.exp, where);
-    const only = statementsOf(ev._function.fbody);
-    if (node is value && only.length == 1 && only[0] is returned)
-        ev._treeRoot._soleReturn = node;
-    return node;
+    return endingAt(ev, built, returned.exp, where);
 }
 
 // The return statement of `returned.exp`, or null when the tree does not
-// cover it. `value` is set to the node when it is one that can give a
-// scalar result in a register.
+// cover it.
 private Node buildReturnOperand(E)(
-    E ev, imported!"dmd.statement".ReturnStatement returned, out Node value,
+    E ev, imported!"dmd.statement".ReturnStatement returned,
 ) {
     import dmd.astenums: TY;
     import dmd.typesem: toBasetype;
@@ -7631,10 +7604,9 @@ private Node buildReturnOperand(E)(
         return fuseStep!(returning, V, valueKinds!T)(operandOf(v), p);
     }
     auto position = positionOf(ev, returned.exp);
-    value = scalar.kind == Scalar.Kind.floating
+    return scalar.kind == Scalar.Kind.floating
         ? byFloating!make(scalar.facts, operand, position)
         : byIntegral!make(scalar.facts, operand, position);
-    return value;
 }
 
 // The return of `operand`, whose full expression reads its result after

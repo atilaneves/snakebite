@@ -5,7 +5,7 @@ module snakebite.backends.interpreter.faultslot;
 // A tree node stores into it at a fixed offset from the frame pointer it
 // already holds, and the fault handler reads the word of the running call.
 // Each call has its own word, so threads and nested calls never share one.
-// The word in front of it holds where the call's result goes.
+// The word in front of it is the result word of the call (`resultWordOf`).
 
 private:
 
@@ -18,20 +18,34 @@ public const(void)** faultSlotOf(ubyte* frame) @system @nogc nothrow pure {
     return cast(const(void)**) (frame - faultSlotBytes);
 }
 
-// Where the result of the call whose frame starts at `frame` goes, or null
-// when its caller discards it. A call that gives its result in a register
-// (`runTreeValue`) never writes the word: its body is one return statement
-// that hands the value back, and nothing else reads the word of a frame.
-// Every other call writes it before its body runs, and a return statement
-// writes through it. A debug build writes `placeNotRead` in the word of a
-// call that never writes it, so a store through it faults. Copying the word
-// is allowed (`Evaluator.claim` does); using the copy as a place is not.
-public void** placeSlotOf(ubyte* frame) @system @nogc nothrow pure {
-    return cast(void**) (frame - 2 * faultSlotBytes);
+// What the result word of a call holds. It is decided once for each
+// function, by the type of its result (`resultWordFor`), and every entry
+// of a call keeps the same rule:
+// - `value`: a scalar result by value. The callee writes the value in the
+//   word before it returns, extended to 64 bits: an integer by its
+//   signedness, a `float` or a `double` as its bits with zeros above them.
+//   The original evaluator writes only the bytes of the type, through
+//   `_place`, which is then the address of the word, and the call extends
+//   the word when it ends (`TreeRoot.extendResult`). The caller loads the
+//   word when the call has returned.
+// - `place`: any other result: a slice, a struct, a static array, a `ref`
+//   result, a delegate. Before the body runs, the caller writes in the word
+//   the address where the callee writes the result, or null when the caller
+//   discards it. The callee reads the word.
+// - `none`: no result. The callee neither reads nor writes the word.
+// A caller can write an address or null in the word of any call: only the
+// callee of a `place` call reads it.
+public enum ResultWord : ubyte { none, value, place }
+
+// The result word of the call whose frame starts at `frame`.
+public ulong* resultWordOf(ubyte* frame) @system @nogc nothrow pure {
+    return cast(ulong*) (frame - 2 * faultSlotBytes);
 }
 
-// The word of a call that gives its result in a register, in a debug build.
-public enum placeNotRead = cast(void*) 1;
+// The address that the result word of a `place` call holds.
+public void** resultPlaceOf(ubyte* frame) @system @nogc nothrow pure {
+    return cast(void**) resultWordOf(frame);
+}
 
 // The lead of every frame whose alignment is no more than this: a call
 // node reserves such a frame with no computation.

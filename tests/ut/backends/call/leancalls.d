@@ -632,3 +632,189 @@ static foreach (backend; Matrix!(
         );
     }
 }
+
+
+// A `return` that the evaluator runs (one in a `case`) writes only the bytes
+// of the result type. The caller reads the whole value: a negative `byte`, a
+// large `ushort`, a `bool` and a `float` keep their values, whatever the call
+// before them left at the same place on the frame stack.
+static foreach (backend; Matrix!()) {
+    @("leancalls.evaluatedReturnOfNarrowResults." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                long ones() { return -1; }
+                long zeros() { return 0; }
+
+                byte narrowByte(int x) {
+                    switch (x) {
+                        case 0: return cast(byte) -3;
+                        default: return cast(byte) 5;
+                    }
+                }
+
+                ushort narrowUshort(int x) {
+                    switch (x) {
+                        case 0: return cast(ushort) 0xFFFE;
+                        default: return cast(ushort) 7;
+                    }
+                }
+
+                bool narrowBool(int x) {
+                    switch (x) {
+                        case 0: return true;
+                        default: return false;
+                    }
+                }
+
+                float narrowFloat(int x) {
+                    switch (x) {
+                        case 0: return 1.5f;
+                        default: return -2.25f;
+                    }
+                }
+
+                long round() {
+                    long total;
+                    total += zeros();
+                    total += narrowByte(0);
+                    total += ones();
+                    total += narrowByte(1);
+                    total += zeros();
+                    total += narrowUshort(0);
+                    total += ones();
+                    total += narrowUshort(1);
+                    total += ones();
+                    total += narrowBool(0);
+                    total += ones();
+                    total += narrowBool(1);
+                    total += ones();
+                    total += cast(long) (narrowFloat(0) * 4);
+                    total += ones();
+                    total += cast(long) (narrowFloat(1) * 4);
+                    return total;
+                }
+
+                int answer() {
+                    long sum;
+                    foreach (i; 0 .. 3)
+                        sum += round();
+                    // Each round: -3 + 5 + 65534 + 7 + 1 + 0 + 6 - 9, and six
+                    // calls of `ones`.
+                    return sum == 3 * 65535 ? 42 : cast(int) sum;
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// The same narrow results from calls deep enough that some of them run past
+// the limit of the native stack, on a new piece of it.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops at a fixed recursion limit far below this depth"),
+)) {
+    @("leancalls.evaluatedReturnOfNarrowResultsAtDepth." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                byte narrowByte(int x) {
+                    switch (x) {
+                        case 0: return cast(byte) -3;
+                        default: return cast(byte) 5;
+                    }
+                }
+
+                ushort narrowUshort(int x) {
+                    switch (x) {
+                        case 0: return cast(ushort) 0xFFFE;
+                        default: return cast(ushort) 7;
+                    }
+                }
+
+                bool narrowBool(int x) {
+                    switch (x) {
+                        case 0: return true;
+                        default: return false;
+                    }
+                }
+
+                float narrowFloat(int x) {
+                    switch (x) {
+                        case 0: return 1.5f;
+                        default: return -2.25f;
+                    }
+                }
+
+                long walk(int n) {
+                    if (n == 0)
+                        return 0;
+                    const parity = n % 2;
+                    long here = narrowByte(parity);
+                    here += narrowUshort(parity);
+                    here += narrowBool(parity);
+                    here += cast(long) (narrowFloat(parity) * 4);
+                    return walk(n - 1) + here;
+                }
+
+                int answer() {
+                    // 5,000 odd levels give 5 + 7 + 0 - 9 and 5,000 even
+                    // levels give -3 + 65534 + 1 + 6.
+                    const sum = walk(10_000);
+                    return sum == 5_000L * 3 + 5_000L * 65_538 ? 42 : 1;
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// A `char` result that a `return` in a `try` statement gives, with a
+// `finally` that runs after it, is the whole unsigned value at the caller:
+// for the `return` that the evaluator runs in a `case` and for the one that
+// the tree runs.
+static foreach (backend; Matrix!()) {
+    @("leancalls.charReturnedFromTryFinally." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                long ones() { return -1; }
+
+                char pick(int x, ref int cleanups) {
+                    try {
+                        switch (x) {
+                            case 0: return cast(char) 0xE9;
+                            default: break;
+                        }
+                        return cast(char) 0xF0;
+                    } finally {
+                        cleanups += 1;
+                    }
+                }
+
+                int answer() {
+                    int cleanups;
+                    long total;
+                    foreach (i; 0 .. 3) {
+                        total += ones();
+                        total += pick(0, cleanups);
+                        total += ones();
+                        total += pick(1, cleanups);
+                    }
+                    return total == 3 * (0xE9 + 0xF0 - 2) && cleanups == 6
+                        ? 42 : cast(int) total;
+                }
+            },
+            "answer",
+        );
+    }
+}
