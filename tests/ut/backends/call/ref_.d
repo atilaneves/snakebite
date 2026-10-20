@@ -419,3 +419,74 @@ static foreach (backend; Matrix!()) {
         }, "kindaMain");
     }
 }
+
+// A statement that calls a function returning `ref` runs the call and reads
+// nothing through the returned address, so a null address is harmless.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE reads the discarded result and reports the null dereference"),
+)) {
+    @("ref.discardedScalarResultIsNotRead." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(backend, q{
+            ref int at(int* p) { return *p; }
+            int kindaMain() {
+                at(null);
+                return 7;
+            }
+        }, "kindaMain");
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE reads the discarded result and reports the null dereference"),
+)) {
+    @("ref.discardedStructResultIsNotCopied." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(backend, q{
+            struct S { int a; }
+            ref S sat(S* p) { return *p; }
+            int kindaMain() {
+                sat(null);
+                return 7;
+            }
+        }, "kindaMain");
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE reads the discarded result and reports the null dereference"),
+)) {
+    @("ref.discardedSliceResultIsNotRead." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(backend, q{
+            ref int[] arr(int[]* p) { return *p; }
+            int kindaMain() {
+                arr(null);
+                return 7;
+            }
+        }, "kindaMain");
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE reads the discarded result and reports the null dereference"),
+)) {
+    @("ref.discardedDelegateResultIsNotRead." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(backend, q{
+            ref int delegate() dg(int delegate()* p) { return *p; }
+            int kindaMain() {
+                dg(null);
+                return 7;
+            }
+        }, "kindaMain");
+    }
+}

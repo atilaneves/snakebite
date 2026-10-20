@@ -2708,10 +2708,7 @@ private mixin template CalleeEntry(E) {
         auto callee = selection.callee;
         auto calleeFrame = FrameGuard(&ev._frames);
         auto base = placeArguments(callee, hidden, frame);
-        if (callee.layout.retainsTemporaries)
-            runRetaining(selection, base, result);
-        else
-            run(selection, base, result);
+        runCall(selection, base, result, /* nested */ false);
     }
 
     // Runs `callee` as `enter` does, with the result written at `dest`. A
@@ -2728,10 +2725,19 @@ private mixin template CalleeEntry(E) {
         // A callee whose variable aliases the place of the result arms the
         // record of the caller for that place, unless the call is nested.
         const aliased = callee.layout.returnPlace.offset != size_t.max;
-        if (callee.layout.retainsTemporaries || aliased)
-            runRetaining(selection, base, place);
+        runCall(selection, base, place, aliased);
+    }
+
+    // Runs the callee as a call of its own for the temporaries when the
+    // caller says so (`nested`) or when a variable of the callee keeps
+    // temporaries.
+    private void runCall(
+        in Selection selection, ubyte* base, void* result, in bool nested,
+    ) {
+        if (nested || selection.callee.layout.retainsTemporaries)
+            runRetaining(selection, base, result);
         else
-            run(selection, base, place);
+            run(selection, base, result);
     }
 
     // Runs `callee` as a call of its own for the temporaries
@@ -3377,8 +3383,8 @@ private final class ReferenceCall(E) : Node {
 // every callee, so that a constructor that the callee calls on the same
 // storage (another constructor of the struct, the constructor of a field at
 // offset 0) does not take over the record of this one. A class object and
-// the allocation of `new` are never a temporary, so their callee runs as
-// other tree callees do.
+// the allocation of `new` are never a temporary, so their callee is a call
+// of its own only when a variable of it keeps temporaries.
 private final class ConstructorCall(E) : Node {
     mixin CalleeEntry!E;
     mixin Dispatch!E;
@@ -3432,10 +3438,7 @@ private final class ConstructorCall(E) : Node {
                 ulong[2] result = void;
                 auto calleeFrame = FrameGuard(&ev._frames);
                 auto base = placeArguments(selected.callee, receiver, frame);
-                if (_receiverIsAddress)
-                    runRetaining(selected, base, result.ptr);
-                else
-                    run(selected, base, result.ptr);
+                runCall(selected, base, result.ptr, _receiverIsAddress);
             },
             { ev._temporaries.armConstructor(object); });
         return receiver;
@@ -4938,6 +4941,10 @@ private Node buildEffect(E)(E ev, Expression expression) {
 
     if (auto declaration = expression.isDeclarationExp)
         return buildDeclaration(ev, declaration);
+    // A discarded `ref` result is an address that nothing reads, as in
+    // compiled code, whatever the type of the result.
+    if (expression.op == EXP.call && returnsReference(expression.isCallExp))
+        return buildCall(ev, expression.isCallExp);
     if (isSlice(expression.type))
         return buildSlice(ev, expression);
     if (isDelegate(expression.type))
@@ -5964,10 +5971,6 @@ private Node buildAggregateEffect(E)(E ev, Expression expression) {
 
     switch (expression.op) with (EXP) {
         case call:
-            // A discarded `ref` result is still read, as the original path
-            // reads it.
-            if (returnsReference(expression.isCallExp))
-                goto default;
             return buildCall(ev, expression.isCallExp);
         case assign, construct, blit:
             return buildAggregateStore(ev, cast(AssignExp) expression);

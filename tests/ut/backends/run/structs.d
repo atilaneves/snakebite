@@ -6819,3 +6819,27 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// A constructor that a class constructor calls through `new` keeps its
+// temporaries in slots of its own for each activation, so a recursive
+// construction does not share them.
+static foreach (backend; Matrix!()) {
+    @("classConstructorRecursionKeepsTemporaries." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[4] values; }
+            S make(int base) { S s; s.values[] = base; return s; }
+            class C {
+                int total; C child;
+                this(int depth) {
+                    auto slice = make(depth).values[];
+                    if (depth > 0) child = new C(depth - 1);
+                    total = slice[0] + slice[3]
+                        + (child is null ? 0 : child.total);
+                }
+            }
+            void main() { assert(new C(3).total == 12); }
+        });
+    }
+}
