@@ -307,6 +307,9 @@ private abstract class Node {
     // Writes a dynamic array value (length, then pointer) to `dest`.
     public void executeInto(ubyte* frame, ubyte* dest) { assert(0); }
     public TreeFlow executeStmt(ubyte* frame) { assert(0); }
+    // Runs the statement from `label`, a `case` or `default` of the
+    // enclosing switch that is in the statement: the switch jumps there.
+    public TreeFlow enterAt(ubyte* frame, const(void)* label) { assert(0); }
     public bool runsAsStatement() { return false; }
     public void positionAt(Position position) { assert(0); }
 
@@ -2582,19 +2585,87 @@ private struct Statements {
         }
         return TreeFlow.normal;
     }
+
+    // Runs the statements from `entry`.
+    public TreeFlow runFrom(ubyte* frame, in ListEntry entry) {
+        auto rest = nodes[entry.index .. $];
+        if (entry.inside !is null) {
+            const flow = rest[0].enterAt(frame, entry.inside);
+            if (flow != TreeFlow.normal)
+                return flow;
+            rest = rest[1 .. $];
+        }
+        foreach (node; rest) {
+            const flow = node.executeStmt(frame);
+            if (flow != TreeFlow.normal)
+                return flow;
+        }
+        return TreeFlow.normal;
+    }
+}
+
+// Where a list of statements starts when a switch jumps to one of its
+// labels: at the statement `index`, which runs from the label `inside` when
+// the label is in it, and from its start when `inside` is null.
+private struct ListEntry {
+    public size_t index;
+    public const(void)* inside;
+}
+
+// The entry of a list of statements at each label of the enclosing switch,
+// found when the list is first entered there. `source` is the statement
+// whose statements (`statementsOf`) the list holds.
+private struct Entrances {
+    public Statement source;
+    private ListEntry[const(void)*] _known;
+
+    public ListEntry at(const(void)* label) {
+        if (auto found = label in _known)
+            return *found;
+        Labels starts;
+        const statements = statementsOf(source, starts);
+        return _known[label] = entryOf(statements, starts, label);
+    }
+}
+
+// Which of the statements of a node holds each label of the enclosing switch
+// that the node is entered at, found when it is first entered there.
+private struct Holders {
+    private size_t[const(void)*] _known;
+
+    public size_t of(
+        const(void)* label, scope const(Statement)[] delegate() statements,
+    ) {
+        if (auto found = label in _known)
+            return *found;
+        foreach (i, one; statements())
+            if (holdsLabel(one, label))
+                return _known[label] = i;
+        assert(0, "a node is entered only at a label that it holds");
+    }
 }
 
 private final class Sequence : Node {
     private Statements _statements;
-    public this(Node[] children) { _statements = Statements(children); }
+    // A sequence of the variables of one declaration has no source
+    // statement: no switch enters it.
+    private Entrances _entrances;
+    public this(Node[] children, Statement source = null) {
+        _statements = Statements(children);
+        _entrances.source = source;
+    }
     public override TreeFlow executeStmt(ubyte* frame) {
         return _statements.run(frame);
+    }
+    public override TreeFlow enterAt(ubyte* frame, const(void)* label) {
+        return _statements.runFrom(frame, _entrances.at(label));
     }
 }
 
 // A sequence of a few statements, whose children are fields.
 private final class ShortSequence(size_t length) : Node {
     private Node[length] _children;
+    private Entrances _entrances;
     public override TreeFlow executeStmt(ubyte* frame) {
         static foreach (i; 0 .. length - 1) {{
             const flow = _children[i].executeStmt(frame);
@@ -2603,11 +2674,22 @@ private final class ShortSequence(size_t length) : Node {
         }}
         return _children[length - 1].executeStmt(frame);
     }
+    public override TreeFlow enterAt(ubyte* frame, const(void)* label) {
+        return Statements(_children[]).runFrom(frame, _entrances.at(label));
+    }
 }
 
 private abstract class Branches : Node {
     protected Node _then;
     protected Node _else;
+    protected imported!"dmd.statement".IfStatement _source;
+    private Holders _holders;
+
+    public override TreeFlow enterAt(ubyte* frame, const(void)* label) {
+        const branch = _holders.of(
+            label, () => [_source.ifbody, _source.elsebody]);
+        return (branch == 0 ? _then : _else).enterAt(frame, label);
+    }
 }
 
 private final class IfThenElse(C) : Branches {
@@ -2645,6 +2727,7 @@ private struct NodeCondition {
 private abstract class Loop : Node {
     protected Statements _body;
     protected imported!"dmd.identifier".Identifier _label;
+    protected Entrances _entrances;
 }
 
 private final class ForLoop(C) : Loop {
@@ -2676,6 +2759,19 @@ private final class ForLoop(C) : Loop {
                 _increment.executeStmt(frame);
         }
         return TreeFlow.normal;
+    }
+    // The body runs from the label, and the loop goes on from its end.
+    public override TreeFlow enterAt(ubyte* frame, const(void)* label) {
+        const flow = _body.runFrom(frame, _entrances.at(label));
+        if (flow != TreeFlow.normal) {
+            bool exit;
+            const result = afterBody(flow, _controlFlow, _label, exit);
+            if (exit)
+                return result;
+        }
+        if (_increment !is null)
+            _increment.executeStmt(frame);
+        return executeStmt(frame);
     }
 }
 
@@ -2724,6 +2820,21 @@ private final class DoLoop(C) : Loop {
                 _position.note(frame);
         } while (_condition.test(frame));
         return TreeFlow.normal;
+    }
+    // The body runs from the label, and the loop goes on from its end.
+    public override TreeFlow enterAt(ubyte* frame, const(void)* label) {
+        const flow = _body.runFrom(frame, _entrances.at(label));
+        if (flow != TreeFlow.normal) {
+            bool exit;
+            const result = afterBody(flow, _controlFlow, _label, exit);
+            if (exit)
+                return result;
+        }
+        static if (C.mayFault)
+            _position.note(frame);
+        if (!_condition.test(frame))
+            return TreeFlow.normal;
+        return executeStmt(frame);
     }
 }
 
@@ -2782,6 +2893,7 @@ private final class Catching(E) : Node {
     // Where each clause's variable is in the frame, or `noVariable`.
     private size_t[] _variables;
     public enum noVariable = size_t.max;
+    private Holders _holders;
 
     public this(E ev, imported!"dmd.statement".TryCatchStatement statement) {
         _ev = ev; _statement = statement;
@@ -2800,6 +2912,19 @@ private final class Catching(E) : Node {
                 return _handlers[i].executeStmt(frame);
             }
         assert(0, "the evaluator selects a clause of the statement");
+    }
+    // dmd rejects a `case` in the body, which is not at the `try` level of
+    // its switch, and in a handler that has a variable, whose declaration
+    // the jump skips. The handler runs outside the `try`, as it does after
+    // a catch.
+    public override TreeFlow enterAt(ubyte* frame, const(void)* label) {
+        const handler = _holders.of(label, () {
+            const(Statement)[] handlers;
+            foreach (clause; *_statement.catches)
+                handlers ~= clause.handler;
+            return handlers;
+        });
+        return _handlers[handler].enterAt(frame, label);
     }
 }
 
@@ -2863,31 +2988,32 @@ private final class Throw(E) : Node {
 }
 
 // A `switch` statement. Its body runs as one list of statements, in which
-// each `case` and `default` is the index where its statements start, so a
-// case falls through to the statements of the next one. `D` selects the
-// index for the value of the operand. A `goto case` or a `goto default`
-// leaves a pending transfer to its target, and the list runs again from
-// there.
+// each `case` and `default` is an entry (`ListEntry`): the index where its
+// statements start, or the statement of the list that holds it, which runs
+// from it. A case falls through to the statements of the next one. `D`
+// selects the entry for the value of the operand. A `goto case` or a `goto
+// default` leaves a pending transfer to its target, and the list runs again
+// from there.
 private final class Switch(D) : Node {
     private ControlFlowState* _controlFlow;
     private Node _operand;
     private D _dispatch;
-    private Node[] _body;
-    // The index of each `case` and `default`, by its statement.
-    private size_t[const(void)*] _entries;
+    private Statements _body;
+    // The entry of each `case` and `default`, by its statement.
+    private ListEntry[const(void)*] _entries;
     private Position _position;
     public this(
         ControlFlowState* controlFlow, Node operand, D dispatch,
-        size_t[const(void)*] entries, Position position,
+        ListEntry[const(void)*] entries, Position position,
     ) {
         _controlFlow = controlFlow; _operand = operand; _dispatch = dispatch;
         _entries = entries; _position = position;
     }
     public override TreeFlow executeStmt(ubyte* frame) {
         _position.note(frame);
-        auto start = _dispatch.select(frame, _operand.executeLong(frame));
+        auto entry = _dispatch.select(frame, _operand.executeLong(frame));
         for (;;) {
-            const flow = runFrom(frame, start);
+            const flow = _body.runFrom(frame, entry);
             final switch (flow) with (TreeFlow) {
                 case normal, break_:
                     return TreeFlow.normal;
@@ -2901,32 +3027,24 @@ private final class Switch(D) : Node {
                 return _controlFlow.hasTransfer
                     ? TreeFlow.generic : TreeFlow.normal;
             }
-            auto entry = _controlFlow.target in _entries;
-            if (entry is null)
+            auto target = _controlFlow.target in _entries;
+            if (target is null)
                 return TreeFlow.generic;
             _controlFlow.reachTarget;
-            start = *entry;
+            entry = *target;
         }
-    }
-    private TreeFlow runFrom(ubyte* frame, in size_t start) {
-        foreach (node; _body[start .. $]) {
-            const flow = node.executeStmt(frame);
-            if (flow != TreeFlow.normal)
-                return flow;
-        }
-        return TreeFlow.normal;
     }
 }
 
-// The index in the body of a switch where the statements of the case of
-// `value` start: `noMatch` when no case has the value. A table, indexed by
-// the value less the least case value, when the case values are dense.
+// The entry in the body of a switch of the case of `value`: `noMatch` when
+// no case has the value. A table, indexed by the value less the least case
+// value, when the case values are dense.
 private struct TableDispatch {
     public long first;
-    public size_t[] entries;
-    public size_t noMatch;
+    public ListEntry[] entries;
+    public ListEntry noMatch;
 
-    public size_t select(ubyte*, in long value) const {
+    public ListEntry select(ubyte*, in long value) const {
         const index = cast(ulong) value - cast(ulong) first;
         return index < entries.length ? entries[index] : noMatch;
     }
@@ -2935,10 +3053,10 @@ private struct TableDispatch {
 // A binary search of the case values, in ascending order.
 private struct SortedDispatch {
     public long[] values;
-    public size_t[] entries;
-    public size_t noMatch;
+    public ListEntry[] entries;
+    public ListEntry noMatch;
 
-    public size_t select(ubyte*, in long value) const {
+    public ListEntry select(ubyte*, in long value) const {
         size_t low = 0;
         size_t high = values.length;
         while (low < high) {
@@ -2956,10 +3074,10 @@ private struct SortedDispatch {
 // The case values that are variables, tested in the order of the cases.
 private struct VariableDispatch {
     public Node[] values;
-    public size_t[] entries;
-    public size_t noMatch;
+    public ListEntry[] entries;
+    public ListEntry noMatch;
 
-    public size_t select(ubyte* frame, in long value) {
+    public ListEntry select(ubyte* frame, in long value) {
         foreach (i, one; values)
             if (one.executeLong(frame) == value)
                 return entries[i];
@@ -3014,7 +3132,12 @@ private final class Labelled : Node {
         _controlFlow = controlFlow; _label = label;
     }
     public override TreeFlow executeStmt(ubyte* frame) {
-        const flow = _inner.executeStmt(frame);
+        return after(_inner.executeStmt(frame));
+    }
+    public override TreeFlow enterAt(ubyte* frame, const(void)* label) {
+        return after(_inner.enterAt(frame, label));
+    }
+    private TreeFlow after(in TreeFlow flow) {
         if (flow != TreeFlow.generic)
             return flow;
         _controlFlow.finishLabel(_label);
@@ -3041,6 +3164,33 @@ private final class GenericStatement(E) : Node {
         _ev._pendingLoopLabel = _label;
         _statement.accept(_ev);
         return _ev._controlFlow.hasTransfer ? TreeFlow.generic : TreeFlow.normal;
+    }
+    // The evaluator seeks the label as it seeks the target of a `goto`.
+    public override TreeFlow enterAt(ubyte* frame, const(void)* label) {
+        _ev.syncTree(_root, frame);
+        _ev._controlFlow.seek(label);
+        const flow = executeStmt(frame);
+        assert(!_ev._controlFlow.seeking, "the statement holds the label");
+        return flow;
+    }
+}
+
+// An `if (__ctfe)` block whose body holds a label of the enclosing switch.
+// At run time the `if` runs only its `else` body. The switch enters the
+// block at the label, and the evaluator runs the body from there by its
+// rules for the statements that dmd left without their lowerings
+// (`inCtfeBlock`).
+private final class CtfeBlock(E) : Node {
+    private Node _else;
+    private GenericStatement!E _entered;
+    public this(E ev, imported!"dmd.statement".IfStatement statement) {
+        _entered = new GenericStatement!E(ev, statement);
+    }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        return _else.executeStmt(frame);
+    }
+    public override TreeFlow enterAt(ubyte* frame, const(void)* label) {
+        return _entered.enterAt(frame, label);
     }
 }
 
@@ -3074,6 +3224,12 @@ private final class Uninitialised(E) : Node {
         _ev = ev; _statement = statement; _slot = slot; _root = root;
     }
     public override TreeFlow executeStmt(ubyte* frame) {
+        return run(frame, null);
+    }
+    public override TreeFlow enterAt(ubyte* frame, const(void)* label) {
+        return run(frame, label);
+    }
+    private TreeFlow run(ubyte* frame, const(void)* label) {
         // Building reads the function's layout and return type from the
         // evaluator, and the nodes it makes name this tree.
         _ev.syncTree(_root, frame);
@@ -3082,7 +3238,8 @@ private final class Uninitialised(E) : Node {
         scope(exit) _ev._treeRoot = outer;
         auto node = buildStatement(_ev, _statement, _slot);
         *_slot = node;
-        return node.executeStmt(frame);
+        return label is null
+            ? node.executeStmt(frame) : node.enterAt(frame, label);
     }
 }
 
@@ -7660,6 +7817,29 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
         return nodes;
     }
 
+    // The node of the statements that `statement` runs in order. A list
+    // that holds a label of the enclosing switch at the start of one of its
+    // statements stays a list, which the switch enters there.
+    Node list() {
+        Labels starts;
+        auto inner = statementsOf(statement, starts);
+        if (starts.length == 0) {
+            if (inner.length == 0)
+                return new Jump!(TreeFlow.normal);
+            if (inner.length == 1)
+                return buildStatement(ev, inner[0], slot);
+        }
+        static foreach (count; AliasSeq!(2, 3))
+            if (inner.length == count) {
+                auto sequence = new ShortSequence!count;
+                sequence._entrances.source = statement;
+                foreach (i, one; inner)
+                    sequence._children[i] = child(one, &sequence._children[i]);
+                return sequence;
+            }
+        return new Sequence(children(statement), statement);
+    }
+
     // A condition is a full expression of its own on each evaluation.
     Node condition(Expression expression) {
         enum where = FullExpressionScope.Position.condition;
@@ -7686,38 +7866,12 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
     if (runsNothing(statement))
         return new Jump!(TreeFlow.normal);
     switch (statement.stmt) with (STMT) {
-        case Compound, CompoundDeclaration: {
-            import dmd.statement: CompoundStatement;
-
-            auto inner = statementsOf(statement);
-            if (inner.length == 0)
-                return new Jump!(TreeFlow.normal);
-            if (inner.length == 1)
-                return buildStatement(ev, inner[0], slot);
-            static foreach (count; AliasSeq!(2, 3))
-                if (inner.length == count) {
-                    auto sequence = new ShortSequence!count;
-                    foreach (i, one; inner)
-                        sequence._children[i] = child(one, &sequence._children[i]);
-                    return sequence;
-                }
-            return new Sequence(children(statement));
-        }
-        case Scope: {
-            auto scoped = statement.isScopeStatement;
-            if (scoped.statement is null)
-                return new Jump!(TreeFlow.normal);
-            return buildStatement(ev, scoped.statement, slot);
-        }
+        case Compound, CompoundDeclaration, Scope, Case, Default:
+            return list();
         // A `with` of a type, an enum or a module runs only its body.
-        case With: {
-            auto with_ = statement.isWithStatement;
-            if (with_.wthis !is null)
-                return generic();
-            if (with_._body is null)
-                return new Jump!(TreeFlow.normal);
-            return buildStatement(ev, with_._body, slot);
-        }
+        case With:
+            return statement.isWithStatement.wthis is null
+                ? list() : generic();
         // dmd makes a destructor call that a scope ends a `DtorExp`
         // statement, which runs as the expression statement it is.
         case Exp, DtorExp: {
@@ -7739,12 +7893,21 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
         }
         case If: {
             auto conditional = statement.isIfStatement;
-            final switch (ifPlan(conditional).kind) with (IfPlan.Kind) {
-                case ctfeBlock:
+            const plan = ifPlan(conditional);
+            final switch (plan.kind) with (IfPlan.Kind) {
+                case ctfeBlock: {
                     // `__ctfe` is false at run time.
-                    return conditional.elsebody is null
-                        ? new Jump!(TreeFlow.normal)
-                        : buildStatement(ev, conditional.elsebody, slot);
+                    Node otherwise() {
+                        return conditional.elsebody is null
+                            ? new Jump!(TreeFlow.normal)
+                            : buildStatement(ev, conditional.elsebody, slot);
+                    }
+                    if (!plan.bodyHasLabels)
+                        return otherwise();
+                    auto node = new CtfeBlock!E(ev, conditional);
+                    node._else = otherwise();
+                    return node;
+                }
                 case condition:
                     break;
             }
@@ -7752,6 +7915,7 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
                 return generic();
             auto node = condition(conditional.condition).ifThenElse(
                 positionOf(ev, conditional.condition));
+            node._source = conditional;
             node._then = child(conditional.ifbody, &node._then);
             if (conditional.elsebody !is null)
                 node._else = child(conditional.elsebody, &node._else);
@@ -7780,6 +7944,7 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
                 : test.forLoop(&ev._controlFlow, step,
                     positionOf(ev, loop.condition));
             node._body = Statements(children(loop._body));
+            node._entrances.source = loop._body;
             node._label = ev._treeRoot.loopLabelOf(statement);
             return node;
         }
@@ -7788,6 +7953,7 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
             auto node = condition(loop.condition).doLoop(
                 &ev._controlFlow, positionOf(ev, loop.condition));
             node._body = Statements(children(loop._body));
+            node._entrances.source = loop._body;
             node._label = ev._treeRoot.loopLabelOf(statement);
             return node;
         }
@@ -7905,38 +8071,34 @@ private Node buildSwitch(E)(
     if (operand is null)
         return null;
     auto plan = switchPlan(statement);
-    Statement[] statements;
-    size_t[const(void)*] entries;
-    switchBody(statement._body, statements, entries);
-
-    auto caseEntries = new size_t[plan.cases.length];
-    foreach (i, case_; plan.cases) {
-        auto entry = cast(const(void)*) case_ in entries;
-        if (entry is null)
-            return null;
-        caseEntries[i] = *entry;
+    Labels starts;
+    const statements = statementsOf(statement._body, starts);
+    ListEntry[const(void)*] entries;
+    ListEntry enter(Statement target) {
+        const label = cast(const(void)*) target;
+        return entries[label] = entryOf(statements, starts, label);
     }
-    size_t noMatch;
+
+    auto caseEntries = new ListEntry[plan.cases.length];
+    foreach (i, case_; plan.cases)
+        caseEntries[i] = enter(case_);
+    ListEntry noMatch;
     final switch (plan.noMatch) with (SwitchPlan.NoMatch) {
-        case defaultTarget: {
-            auto entry = cast(const(void)*) plan.defaultTarget in entries;
-            if (entry is null)
-                return null;
-            noMatch = *entry;
+        case defaultTarget:
+            noMatch = enter(plan.defaultTarget);
             break;
-        }
         case exit:
-            noMatch = statements.length;
+            noMatch = ListEntry(statements.length, null);
             break;
     }
 
     Node make(D)(D dispatch) {
         auto node = new Switch!D(&ev._controlFlow, operand, dispatch, entries,
             positionOf(ev, statement.condition));
-        node._body = new Node[statements.length];
+        node._body.nodes = new Node[statements.length];
         foreach (i, one; statements)
-            node._body[i] = new Uninitialised!E(
-                ev, one, &node._body[i], ev._treeRoot);
+            node._body.nodes[i] = new Uninitialised!E(
+                ev, cast() one, &node._body.nodes[i], ev._treeRoot);
         return node;
     }
 
@@ -7951,7 +8113,7 @@ private Node buildSwitch(E)(
     }
 
     const table = caseTableOf(plan);
-    auto sortedEntries = new size_t[table.cases.length];
+    auto sortedEntries = new ListEntry[table.cases.length];
     foreach (i, case_; table.cases)
         sortedEntries[i] = caseEntries[case_];
     // A table when at least one slot in `slotsPerCase` holds a case.
@@ -7961,7 +8123,7 @@ private Node buildSwitch(E)(
         const span = cast(ulong) table.values[$ - 1]
             - cast(ulong) table.values[0];
         if (span < count * slotsPerCase) {
-            auto slots = new size_t[cast(size_t) span + 1];
+            auto slots = new ListEntry[cast(size_t) span + 1];
             slots[] = noMatch;
             foreach (i, value; table.values)
                 slots[cast(size_t) (cast(ulong) value
@@ -7970,56 +8132,6 @@ private Node buildSwitch(E)(
         }
     }
     return make(SortedDispatch(table.values.dup, sortedEntries, noMatch));
-}
-
-// The statements of the body of a switch in the order that they run, with
-// the index in them where the statements of each `case` and `default`
-// start. A `case` inside a statement of the list, such as a loop or an
-// `if`, gets no index.
-private void switchBody(
-    Statement statement, ref Statement[] statements,
-    ref size_t[const(void)*] entries,
-) {
-    import dmd.astenums: STMT;
-    import dmd.statement: CompoundStatement;
-
-    if (statement is null)
-        return;
-    switch (statement.stmt) with (STMT) {
-        case Scope:
-            switchBody(statement.isScopeStatement.statement, statements,
-                entries);
-            return;
-        case Compound, CompoundDeclaration: {
-            auto compound = cast(CompoundStatement) statement;
-            if (compound.statements !is null)
-                foreach (one; *compound.statements)
-                    switchBody(one, statements, entries);
-            return;
-        }
-        case Case:
-            entries[cast(const(void)*) statement] = statements.length;
-            switchBody(statement.isCaseStatement.statement, statements,
-                entries);
-            return;
-        case Default:
-            entries[cast(const(void)*) statement] = statements.length;
-            switchBody(statement.isDefaultStatement.statement, statements,
-                entries);
-            return;
-        case With:
-            if (statement.isWithStatement.wthis is null) {
-                switchBody(statement.isWithStatement._body, statements,
-                    entries);
-                return;
-            }
-            statements ~= statement;
-            return;
-        default:
-            if (!runsNothing(statement))
-                statements ~= statement;
-            return;
-    }
 }
 
 // The node of the integral value of `expression`, a full expression of its
@@ -8045,34 +8157,107 @@ private Node buildIntegral(E)(
         where, positionOf(ev, expression)), scalar.facts);
 }
 
+// The index in a list of statements where the statements of each `case`
+// and `default` label in the list start, by the label.
+private alias Labels = size_t[const(void)*];
+
 // The statements that `statement` runs in order: those of a block, with the
 // statements of the blocks and scopes inside it in place, or the statement
 // itself. A block or scope has no cleanup of its own: what a destructor or
 // `scope(exit)` runs is a statement that stays whole in the list. A `with`
-// of a type, an enum or a module is only its body.
+// of a type, an enum or a module is only its body, and a `case` or a
+// `default` is only the statements of its body, which start at its index in
+// `labels`.
 private Statement[] statementsOf(Statement statement) {
+    Labels labels;
+    return statementsOf(statement, labels);
+}
+
+private Statement[] statementsOf(Statement statement, out Labels labels) {
+    Statement[] statements;
+    appendStatements(statement, statements, labels);
+    return statements;
+}
+
+private void appendStatements(
+    Statement statement, ref Statement[] statements, ref Labels labels,
+) {
     import dmd.astenums: STMT;
     import dmd.statement: CompoundStatement;
 
     if (statement is null)
-        return null;
+        return;
     switch (statement.stmt) with (STMT) {
         case Scope:
-            return statementsOf(statement.isScopeStatement.statement);
+            appendStatements(statement.isScopeStatement.statement, statements,
+                labels);
+            return;
         case With:
-            return statement.isWithStatement.wthis is null
-                ? statementsOf(statement.isWithStatement._body) : [statement];
+            if (statement.isWithStatement.wthis is null)
+                appendStatements(statement.isWithStatement._body, statements,
+                    labels);
+            else
+                statements ~= statement;
+            return;
         case Compound, CompoundDeclaration: {
-            Statement[] inner;
             auto compound = cast(CompoundStatement) statement;
             if (compound.statements !is null)
-                foreach (candidate; *compound.statements)
-                    inner ~= statementsOf(candidate);
-            return inner;
+                foreach (one; *compound.statements)
+                    appendStatements(one, statements, labels);
+            return;
         }
+        case Case:
+            labels[cast(const(void)*) statement] = statements.length;
+            appendStatements(statement.isCaseStatement.statement, statements,
+                labels);
+            return;
+        case Default:
+            labels[cast(const(void)*) statement] = statements.length;
+            appendStatements(statement.isDefaultStatement.statement,
+                statements, labels);
+            return;
         default:
-            return runsNothing(statement) ? null : [statement];
+            if (!runsNothing(statement))
+                statements ~= statement;
+            return;
     }
+}
+
+// Where the list `statements` starts for a jump to `label`, a `case` or
+// `default` of the enclosing switch in it, whose start in it `starts` gives
+// when it is not in one of the statements.
+private ListEntry entryOf(
+    in Statement[] statements, Labels starts, const(void)* label,
+) {
+    if (auto start = label in starts)
+        return ListEntry(*start, null);
+    foreach (i, one; statements)
+        if (holdsLabel(one, label))
+            return ListEntry(i, label);
+    assert(0, "the list holds each label of its switch that is in it");
+}
+
+// Whether `label` is in `statement`.
+private bool holdsLabel(in Statement statement, const(void)* label) {
+    import dmd.visitor: StoppableVisitor;
+    import dmd.visitor.postorder: walkPostorder;
+
+    extern(C++) static final class Finder : StoppableVisitor {
+        alias visit = StoppableVisitor.visit;
+
+        const(void)* label;
+        extern(D) this(const(void)* label) { this.label = label; }
+
+        override void visit(Statement statement) {
+            if (cast(const(void)*) statement is label)
+                stop = true;
+        }
+    }
+
+    if (statement is null)
+        return false;
+    scope finder = new Finder(label);
+    return walkPostorder(cast() statement, finder);
 }
 
 // Whether `statement` has nothing to run: an import, an empty expression
