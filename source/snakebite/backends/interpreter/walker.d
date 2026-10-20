@@ -738,6 +738,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // (`claim`). It lives as long as its call, so no two calls that run at
     // the same time have the same one.
     private CallState* _innermost;
+    // The frame of `_innermost`, in the evaluator so that the end of a call
+    // tests for its claim with one load.
+    private ubyte* _innermostFrame;
     // The records of the claims, reused: the first `_claimCount` are in use,
     // in the order that the calls made them.
     private CallState*[] _claims;
@@ -1677,7 +1680,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _function = callee.function_;
         _faultFrame = calleeFrame;
         const flow = root.execute(calleeFrame);
-        if (_innermost._frame is calleeFrame)
+        if (_innermostFrame is calleeFrame)
             endClaimedCall(callee, calleeFrame, flow);
         _function = caller;
         _faultFrame = callerFrame;
@@ -1712,7 +1715,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _function = function_;
         _faultFrame = calleeFrame;
         const value = returnValueOf!T(root, calleeFrame);
-        if (_innermost._frame is calleeFrame)
+        if (_innermostFrame is calleeFrame)
             releaseClaim;
         _function = caller;
         _faultFrame = callerFrame;
@@ -1770,7 +1773,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // evaluator's calls do, so the fields never describe a call that has
     // ended.
     package void syncTree(TreeRoot* root, ubyte* frame) {
-        if (_innermost._frame !is frame) {
+        if (_innermostFrame !is frame) {
             claim(root, frame);
             return;
         }
@@ -2379,6 +2382,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             _outerFrame = evaluator._faultFrame;
             _activationMark = evaluator._activationAllocations.length;
             evaluator._innermost = &this;
+            evaluator._innermostFrame = frame;
             evaluator._faultFrame = frame;
         }
 
@@ -2388,6 +2392,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             if (_evaluator._fieldsOwner is &this)
                 unspill;
             _evaluator._innermost = _outer;
+            _evaluator._innermostFrame = _outer is null ? null : _outer._frame;
             _evaluator._faultFrame = _outerFrame;
             if (_evaluator._activationAllocations.length > _activationMark)
                 _evaluator.releaseActivationAllocations(_activationMark);
