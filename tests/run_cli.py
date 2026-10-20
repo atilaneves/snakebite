@@ -2464,6 +2464,22 @@ FAULTS = [
      "}\n"
      "int main() { int* pointer; return load(pointer); }\n",
      -signal.SIGSEGV, "fatal: null pointer dereference", "main.load"),
+    ("fault after a catch of a throw through calls",
+     "module main;\n"
+     "int thrower(int x) { if (x) throw new Exception(\"x\"); return x; }\n"
+     "int through(int x) { int below = thrower(x); return below + 1; }\n"
+     "int load(int* p) { int v = through(0); try v = through(1);"
+     " catch (Exception) {} return v + *p; }\n"
+     "int main() { int* pointer; return load(pointer); }\n",
+     -signal.SIGSEGV, "fatal: null pointer dereference", "main.load"),
+    ("fault in a finally body after a throw through calls",
+     "module main;\n"
+     "int thrower(int x) { if (x) throw new Exception(\"x\"); return x; }\n"
+     "int through(int x) { int below = thrower(x); return below + 1; }\n"
+     "int load(int* p) { int v = through(0); try v = through(1);"
+     " finally { v += *p; } return v; }\n"
+     "int main() { int* pointer; return load(pointer); }\n",
+     -signal.SIGSEGV, "fatal: null pointer dereference", "main.load"),
 ]
 
 
