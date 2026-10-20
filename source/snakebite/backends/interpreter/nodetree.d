@@ -4359,10 +4359,19 @@ static assert(DelegateValue.context.offsetof
         == imported!"snakebite.nativelayout".delegateFunctionOffset
     && DelegateValue.sizeof == imported!"snakebite.nativelayout".delegateValueSize);
 
+// What the word of a function pointer or a delegate names: the adjustment
+// of the context, and the callee when the tree runs the function.
+private struct Decoded {
+    private const(void)* word;
+    private ptrdiff_t adjustment;
+    private Selection selected;
+}
+
 // A call through a function pointer or a delegate, with the same parameter
 // and result kinds as `Call`. The target is a callback address, which the
 // shared decode (`guestFunctionOf`) turns into the guest function and the
-// adjustment of its context. A host target, a null one, and a guest callee
+// adjustment of its context, once for each word that the site has not
+// called lately. A host target, a null one, and a guest callee
 // that `Call` could not run stay with the evaluator, which has the fault for
 // the null one and the foreign-function barrier for the others.
 // `result` is what the callee writes: a value of at most two words, a
@@ -4375,10 +4384,13 @@ private final class IndirectCall(E, CalleeResult result) : Node {
     private Node _target;
     private bool _viaDelegate;
     private size_t _declared;
-    // The function that this site last called, and its callee when the tree
-    // runs it.
-    private FuncDeclaration _function;
-    private Selection _selected;
+    // The last words that this site called, each with what it decodes to. A
+    // word names the same function for as long as the program runs, so the
+    // site decodes a word only when it is not one of these. A site often
+    // calls a few words in turn, as a scheduler calls the handler of each
+    // task.
+    private Decoded[4] _decoded;
+    private uint _oldest;
     static if (result == CalleeResult.aggregate)
         private uint _alignment;
 
@@ -4405,15 +4417,16 @@ private final class IndirectCall(E, CalleeResult result) : Node {
             target.context = 0;
             target.function_ = _target.executeLong(frame);
         }
-        ptrdiff_t adjustment;
-        auto function_ = ev.guestFunctionOf(
-            cast(const(void)*) target.function_, adjustment);
-        if (function_ !is _function) {
-            _selected = function_ is null
-                ? Selection.init : selectionFor(function_);
-            _function = function_;
-        }
-        const selected = _selected;
+        const word = cast(const(void)*) target.function_;
+        const(Decoded)* decoded;
+        foreach (ref one; _decoded)
+            if (one.word is word) {
+                decoded = &one;
+                break;
+            }
+        if (decoded is null)
+            decoded = decode(word);
+        const selected = decoded.selected;
         if (selected.callee is null) {
             ev.handOver(_root, frame, {
                 // The original path gives the address of a `ref` result
@@ -4430,10 +4443,22 @@ private final class IndirectCall(E, CalleeResult result) : Node {
             return;
         }
         static if (result == CalleeResult.aggregate)
-            enterInto(selected, target.context + adjustment, frame,
+            enterInto(selected, target.context + decoded.adjustment, frame,
                 cast(ubyte*) place);
         else
-            enter(selected, target.context + adjustment, frame, place);
+            enter(selected, target.context + decoded.adjustment, frame, place);
+    }
+
+    // The decode of `word`, which takes the place of the oldest one.
+    pragma(inline, false)
+    private const(Decoded)* decode(const(void)* word) {
+        auto decoded = &_decoded[_oldest];
+        _oldest = (_oldest + 1) % _decoded.length;
+        decoded.word = word;
+        auto function_ = _ev.guestFunctionOf(word, decoded.adjustment);
+        decoded.selected = function_ is null
+            ? Selection.init : selectionFor(function_);
+        return decoded;
     }
 
     // The callee for `function_` that this tree runs, null when it runs
