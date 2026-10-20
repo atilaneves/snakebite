@@ -3317,7 +3317,6 @@ private final class Call(E) : Node {
 
     // The fast form of each callee this site has met, null for none.
     private FastCallee*[TreeCallee*] _fasts;
-    private bool _hasFast;
     // The fast form of the callee in `_selected`. The two change together,
     // with no code between that could run this site again.
     private FastCallee* _fast;
@@ -3369,9 +3368,6 @@ private final class Call(E) : Node {
             fast = fastOf(callee, selected);
             _fasts[callee] = fast;
         }
-        // A site that has met a callee with a fast form takes the checks of
-        // the fast forms on every run; the others keep the general call.
-        _hasFast |= fast !is null;
         return fast;
     }
 
@@ -3432,12 +3428,6 @@ private final class Call(E) : Node {
 
     private enum BodyKind : bool { plain, soleReturn }
 
-    // The general call.
-    private void invoke(ubyte* frame, void* result) {
-        const receiver = runReceiver(frame);
-        finishCall(resolve(receiver), receiver, frame, result);
-    }
-
     // The general call once `resolve` has run: the callee in `_selected`, or
     // the original path when `resolve` found none.
     pragma(inline, true)
@@ -3454,49 +3444,13 @@ private final class Call(E) : Node {
         enter(selected, receiver, frame, result);
     }
 
+    // The forms of a call: the fast form of the callee when it has one,
+    // the general call otherwise. Nothing between the choice of the callee
+    // and its run evaluates user code except the arguments, which only read
+    // `fast` and `callee`. A getter whose receiver is null, a setter in a
+    // form that has no store, and a sole return whose tree has not run yet
+    // take the general call or the run of the body.
     public override long executeLong(ubyte* frame) {
-        if (_hasFast)
-            return executeLongOfFastSite(frame);
-        ulong[2] buffer;
-        invoke(frame, buffer.ptr);
-        return extendResult(buffer[0], _resultSize, _resultUnsigned);
-    }
-
-    public override double executeDouble(ubyte* frame) {
-        if (_hasFast)
-            return executeDoubleOfFastSite(frame);
-        ulong[2] buffer;
-        invoke(frame, buffer.ptr);
-        return floatingResult(buffer);
-    }
-
-    public override void executeInto(ubyte* frame, ubyte* dest) {
-        if (_hasFast) {
-            executeIntoOfFastSite(frame, dest);
-            return;
-        }
-        SliceValue buffer = void;
-        invoke(frame, &buffer);
-        *cast(SliceValue*) dest = buffer;
-    }
-
-    public override void executeVoid(ubyte* frame) {
-        if (_hasFast) {
-            executeVoidOfFastSite(frame);
-            return;
-        }
-        ulong[2] buffer;
-        invoke(frame, buffer.ptr);
-    }
-
-    // The three forms of a call at a site where a callee has a fast form.
-    // Nothing between the choice of the callee and its run evaluates user
-    // code except the arguments, which only read `fast` and `callee`.
-    // A getter whose receiver is null, a setter in a form that has no
-    // store, and a sole return whose tree has not run yet take the general
-    // call or the run of the body.
-    pragma(inline, false)
-    private long executeLongOfFastSite(ubyte* frame) {
         const receiver = runReceiver(frame);
         const resolved = resolve(receiver);
         auto fast = _fast;
@@ -3519,8 +3473,7 @@ private final class Call(E) : Node {
         return generalLong(resolved, receiver, frame);
     }
 
-    pragma(inline, false)
-    private double executeDoubleOfFastSite(ubyte* frame) {
+    public override double executeDouble(ubyte* frame) {
         const receiver = runReceiver(frame);
         const resolved = resolve(receiver);
         auto fast = _fast;
@@ -3543,8 +3496,7 @@ private final class Call(E) : Node {
         return generalDouble(resolved, receiver, frame);
     }
 
-    pragma(inline, false)
-    private void executeVoidOfFastSite(ubyte* frame) {
+    public override void executeVoid(ubyte* frame) {
         const receiver = runReceiver(frame);
         const resolved = resolve(receiver);
         auto fast = _fast;
@@ -3566,8 +3518,7 @@ private final class Call(E) : Node {
         generalVoid(resolved, receiver, frame);
     }
 
-    pragma(inline, false)
-    private void executeIntoOfFastSite(ubyte* frame, ubyte* dest) {
+    public override void executeInto(ubyte* frame, ubyte* dest) {
         const receiver = runReceiver(frame);
         SliceValue buffer = void;
         const resolved = resolve(receiver);
