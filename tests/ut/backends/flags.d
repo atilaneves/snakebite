@@ -142,6 +142,7 @@ static foreach (backend; Compiled) {
         foreach (row; [
             Row([], failing, Expect.raised(assertError, "unittest failure")),
             Row(["-check=assert=off"], failing, Expect.returned),
+            Row(haltFlags, failing, Expect.halted, Expect.raised),
         ])
             shouldRun!backend(row);
     }

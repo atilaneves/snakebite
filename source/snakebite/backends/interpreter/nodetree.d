@@ -10,9 +10,9 @@ module snakebite.backends.interpreter.nodetree;
 private:
 
 import dmd.declaration: VarDeclaration;
-import dmd.expression: AssignExp, BinAssignExp, BinExp, CallExp, CastExp,
-    CatAssignExp, DeclarationExp, EqualExp, Expression, IdentityExp, IndexExp,
-    NewExp, PostExp, SliceExp, ThisExp;
+import dmd.expression: AssertExp, AssignExp, BinAssignExp, BinExp, CallExp,
+    CastExp, CatAssignExp, DeclarationExp, EqualExp, Expression, IdentityExp,
+    IndexExp, NewExp, PostExp, SliceExp, ThisExp;
 import dmd.func: FuncDeclaration;
 import dmd.location: Loc;
 import dmd.mtype: Type;
@@ -2562,6 +2562,48 @@ private final class VariadicExtras : LongNode {
         foreach (i, ref arg; _args)
             _writers[i](arg, frame, storage + layout.offsets[i]);
         return cast(long) storage;
+    }
+}
+
+// `assert(e1)` with assertions on: the test runs in the tree, and the
+// evaluator runs what a failure does.
+private final class Assertion(E) : Node {
+    private E _ev;
+    private Node _test;
+    private AssertExp _expression;
+    private TreeRoot* _root;
+    public this(E ev, Node test, AssertExp expression) {
+        _ev = ev; _test = test; _expression = expression; _root = ev._treeRoot;
+    }
+    public override void executeVoid(ubyte* frame) {
+        if (!_test.executeBool(frame))
+            _ev.failTreeAssertion(_root, frame, _expression);
+    }
+}
+
+// `assert(object)` for a class reference or a struct pointer whose type has
+// an invariant: the object is read once, and a null one fails before the
+// invariant runs, as dmd's glue layer has it.
+private final class InvariantAssertion(E) : Node {
+    import snakebite.backends.exceptions: AssertInvariantPlan;
+
+    private E _ev;
+    private Node _object;
+    private AssertExp _expression;
+    private AssertInvariantPlan _plan;
+    private TreeRoot* _root;
+    public this(
+        E ev, Node object, AssertExp expression, AssertInvariantPlan plan,
+    ) {
+        _ev = ev; _object = object; _expression = expression; _plan = plan;
+        _root = ev._treeRoot;
+    }
+    public override void executeVoid(ubyte* frame) {
+        auto object = cast(void*) _object.executeLong(frame);
+        if (object is null)
+            _ev.failTreeAssertion(_root, frame, _expression);
+        else
+            _ev.runTreeAssertInvariant(_root, frame, _plan, object);
     }
 }
 
@@ -6187,6 +6229,9 @@ private Node buildEffect(E)(E ev, Expression expression) {
         return buildDeclaration(ev, declaration);
     if (auto thrown = expression.isThrowExp)
         return buildThrow(ev, thrown.e1);
+    // dmd types `assert(0)` `noreturn`, and every other assertion `void`.
+    if (auto assertion = expression.isAssertExp)
+        return buildAssertion(ev, assertion);
     // A discarded `ref` result is an address that nothing reads, as in
     // compiled code, whatever the type of the result.
     if (expression.op == EXP.call && returnsReference(expression.isCallExp))
@@ -6205,6 +6250,33 @@ private Node buildEffect(E)(E ev, Expression expression) {
             ? buildCall(ev, expression.isCallExp) : null;
     }
     return buildValue(ev, expression);
+}
+
+private Node buildAssertion(E)(E ev, AssertExp expression) {
+    import snakebite.backends.checkplan: assertPlanOf, FailurePlan;
+    import snakebite.backends.exceptions:
+        AssertInvariantPlan, assertInvariantPlanOf;
+
+    final switch (assertPlanOf(ev._program.checks).kind) with (FailurePlan.Kind) {
+        case ignore:
+            return new Jump!(TreeFlow.normal);
+        case raise, halt, cAssert:
+            break;
+    }
+    // `auto`: the node keeps the plan's `FuncDeclaration`, which dmd's
+    // nodes give as mutable.
+    auto plan = assertInvariantPlanOf(expression, ev._program.checks);
+    final switch (plan.kind) with (AssertInvariantPlan.Kind) {
+        case none: {
+            auto test = buildTruth(ev, expression.e1);
+            return test is null ? null : new Assertion!E(ev, test, expression);
+        }
+        case class_, struct_: {
+            auto object = buildValue(ev, expression.e1);
+            return object is null ? null
+                : new InvariantAssertion!E(ev, object, expression, plan);
+        }
+    }
 }
 
 // The node that tests the truth of `expression`, as a condition does.

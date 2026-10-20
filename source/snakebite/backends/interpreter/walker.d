@@ -2058,6 +2058,13 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 failNullDeref(loc);
         }
 
+        // A tree node read a null reference.
+        extern(D) package void failTreeNullDeref(
+            TreeRoot* root, ubyte* frame, in Loc loc,
+        ) {
+            handOver(root, frame, { failNullDeref(loc); });
+        }
+
         private void failNullDeref(in Loc loc) {
             import snakebite.backends.checkplan:
                 nullDerefCMessage, nullDerefPlanOf;
@@ -6105,10 +6112,42 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return;
         }
 
-        if (plan.kind == AssertInvariantPlan.Kind.class_)
-            callClassInvariant(object);
-        else
-            callStructInvariant(plan.structInvariant, object);
+        runAssertInvariant(plan, object);
+    }
+
+    // The invariant of the object of a passing `assert(object)`.
+    private void runAssertInvariant(
+        in imported!"snakebite.backends.exceptions".AssertInvariantPlan plan,
+        void* object,
+    ) {
+        import snakebite.backends.exceptions: AssertInvariantPlan;
+
+        final switch (plan.kind) with (AssertInvariantPlan.Kind) {
+            case none:
+                internalFailure("an assertion with no invariant runs none");
+            case class_:
+                callClassInvariant(object);
+                break;
+            case struct_:
+                callStructInvariant(cast() plan.structInvariant, object);
+                break;
+        }
+    }
+
+    // A tree node's assertion failed.
+    extern(D) package void failTreeAssertion(
+        TreeRoot* root, ubyte* frame, AssertExp expression,
+    ) {
+        handOver(root, frame, { failAssertion(expression); });
+    }
+
+    // The invariant of the object of an assertion that a tree node passed.
+    extern(D) package void runTreeAssertInvariant(
+        TreeRoot* root, ubyte* frame,
+        in imported!"snakebite.backends.exceptions".AssertInvariantPlan plan,
+        void* object,
+    ) {
+        handOver(root, frame, { runAssertInvariant(plan, object); });
     }
 
     // What a failed `assert` does, shared by every path through
