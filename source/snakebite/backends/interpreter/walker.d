@@ -6225,7 +6225,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     // The fault is here and not at the transfer when the operand is
     // evaluated inside its full expression: only that has a guest line.
-    private size_t thrownObject(in void* reference, in size_t size) {
+    extern(D) package size_t thrownObject(in void* reference, in size_t size) {
         import snakebite.nativelayout: loadIntegral;
 
         auto guest = cast(Throwable) cast(void*) loadIntegral(
@@ -6248,6 +6248,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 thrown = thrownObject(cast(void*) thrown, size_t.sizeof);
             });
 
+        throwGuest(thrown);
+    }
+
+    // The throw of the object that `thrownObject` gave.
+    extern(D) package noreturn throwGuest(in size_t thrown) {
         throw GuestException.make(cast(Throwable) cast(void*) thrown);
     }
 

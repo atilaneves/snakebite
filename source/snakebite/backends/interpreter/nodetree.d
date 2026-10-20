@@ -2118,6 +2118,10 @@ private final class FrameRelease : BoolNode {
         auto storage = Area(_frames, _area, _size, _alignment);
         return _inner.executeBool(frame);
     }
+    public override long executeLong(ubyte* frame) {
+        auto storage = Area(_frames, _area, _size, _alignment);
+        return _inner.executeLong(frame);
+    }
 }
 
 // The storage of the rvalues of one full expression, which ends with it.
@@ -2173,6 +2177,16 @@ private final class Scoped(E) : BoolNode {
     public override bool executeBool(ubyte* frame) {
         bool result;
         run(frame, { result = _inner.executeBool(frame); });
+        return result;
+    }
+    public override long executeLong(ubyte* frame) {
+        long result;
+        run(frame, { result = _inner.executeLong(frame); });
+        return result;
+    }
+    public override ubyte* executeAddr(ubyte* frame) {
+        ubyte* result;
+        run(frame, { result = _inner.executeAddr(frame); });
         return result;
     }
     private void run(ubyte* frame, scope void delegate() evaluate) {
@@ -2779,6 +2793,39 @@ private final class Finally(E) : Node {
         if (flow == TreeFlow.generic && _ev._controlFlow.hasGoto)
             return _ev.resumeCleanup(_root, frame, _statement.finalbody);
         return flow;
+    }
+}
+
+// The object that a `throw` throws: the class reference `_reference`
+// gives, which faults when it is null, as compiled D faults in druntime.
+private final class ThrownObject(E) : LongNode {
+    private E _ev;
+    private Node _reference;
+    public this(E ev, Node reference) { _ev = ev; _reference = reference; }
+    public override long executeLong(ubyte* frame) {
+        const long reference = _reference.executeLong(frame);
+        return _ev.thrownObject(&reference, size_t.sizeof);
+    }
+}
+
+// `throw`, as a statement or as an expression, which never has a value:
+// `_object` runs the full expression of the operand and gives the object.
+private final class Throw(E) : Node {
+    private E _ev;
+    private Node _object;
+    private Position _position;
+    public this(E ev, Node object, Position position) {
+        _ev = ev; _object = object; _position = position;
+    }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        fire(frame);
+    }
+    public override void executeVoid(ubyte* frame) {
+        fire(frame);
+    }
+    private noreturn fire(ubyte* frame) {
+        _position.note(frame);
+        _ev.throwGuest(cast(size_t) _object.executeLong(frame));
     }
 }
 
@@ -6108,6 +6155,40 @@ private Node buildConstructorCall(E)(E ev, NewExp expression, Node allocation) {
         allocation, /* receiverIsAddress */ false, arguments));
 }
 
+// `throw operand`. The operand is a full expression of its own, which dmd
+// ends before the throw starts: a destructor of an operand temporary that
+// throws replaces the object that the operand made. A `throw` inside an
+// expression is nested in the full expression around it.
+private Node buildThrow(E)(E ev, Expression operand) {
+    enum where = FullExpressionScope.Position.throwOperand;
+    const nesting = ev._treeRoot._region is null
+        ? Region.Nesting.outermost : Region.Nesting.nested;
+    const position = positionOf(ev, operand);
+    auto built = buildRegion(ev, nesting, () {
+        auto reference = buildValue(ev, operand);
+        return reference is null ? null : new ThrownObject!E(ev, reference);
+    });
+    if (built.node is null)
+        return null;
+    Node object;
+    if (readsAfterEnd(built, where, operand)) {
+        auto lvalue = buildRegion(ev, nesting, () => buildAddress(
+            ev, FullExpressionScope.lvalueOf(operand)));
+        if (lvalue.node is null || !lvalue.scoped)
+            return null;
+        object = new ThrownObject!E(ev, new Load!size_t(new Scoped!E(
+            ev, lvalue.node, operand, where, position)));
+    } else if (built.scoped)
+        object = new Scoped!E(ev, built.node, operand, where, position);
+    else if (nesting == Region.Nesting.outermost
+            && built.materialised.length != 0)
+        object = new FrameRelease(
+            ev, built.node, cast(Materialise[]) built.materialised);
+    else
+        object = built.node;
+    return new Throw!E(ev, object, position);
+}
+
 // The effect of `expression`, whatever its type, or null.
 private Node buildEffect(E)(E ev, Expression expression) {
     import dmd.astenums: TY;
@@ -6116,6 +6197,8 @@ private Node buildEffect(E)(E ev, Expression expression) {
 
     if (auto declaration = expression.isDeclarationExp)
         return buildDeclaration(ev, declaration);
+    if (auto thrown = expression.isThrowExp)
+        return buildThrow(ev, thrown.e1);
     // A discarded `ref` result is an address that nothing reads, as in
     // compiled code, whatever the type of the result.
     if (expression.op == EXP.call && returnsReference(expression.isCallExp))
@@ -7535,6 +7618,10 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
                 ? new Jump!(TreeFlow.continue_) : generic();
         case Return:
             return buildReturn(ev, statement.isReturnStatement);
+        case Throw: {
+            auto node = buildThrow(ev, statement.isThrowStatement.exp);
+            return node is null ? generic() : node;
+        }
         default:
             return generic();
     }
