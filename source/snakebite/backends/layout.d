@@ -710,9 +710,8 @@ extern(C++) private final class LocalsCollector:
         collectDollar(expression.lengthVar);
     }
 
-    // A `$` whose length dmd knows at compile time (a static array, a
-    // literal) is a constant that dmd folds into every use, so it needs no
-    // slot.
+    // A `$` whose length dmd knows at compile time (a static array) is a
+    // constant that dmd folds into every use, so it needs no slot.
     private void collectDollar(VarDeclaration dollar) {
         import dmd.astenums: STC;
 

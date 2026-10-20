@@ -6201,9 +6201,13 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // read once, before the index or the bounds. A `$` whose length dmd
     // knows at compile time has no slot: dmd folds it into every use.
     private void bindDollar(VarDeclaration dollar, in size_t length) {
+        import dmd.astenums: STC;
+
         if (dollar is null)
             return;
-        if (auto slot = _layout.slotOf(dollar))
+        auto slot = _layout.slotOf(dollar);
+        assert(slot !is null || (dollar.storage_class & STC.manifest) != 0);
+        if (slot !is null)
             *cast(size_t*) (_frameBase + slot.offset) = length;
     }
 

@@ -1111,16 +1111,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t _destination;
     private size_t _width;
     private Type _valueType;
-    // The `$` currently in scope, if any: the `VarDeclaration` dmd hands
-    // out for it (`IndexExp.lengthVar`) and where its value - the
-    // enclosing array's own length, already evaluated - sits in this
-    // frame. The shared storage resolver binds this around compiling an
-    // index's own expression and restores whatever was there before once
-    // it is done, the same way a nested `$` inside that index (a call's
-    // own argument, say) must see its own array's length rather than this
-    // one's.
-    private VarDeclaration _dollarVariable;
-    private size_t _dollarOffset;
 
     public this(
         Bytecode bytecode,
@@ -5953,16 +5943,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        // `$` inside an index has no frame slot of its own - dmd hands out
-        // a fresh `VarDeclaration` for it that no statement declares
-        // (`FrameLayout` never reserves it a slot for exactly that reason),
-        // and the shared storage resolver binds `_dollar` to the length it
-        // stands for around evaluating the index expression it appears in.
-        if (variable is _dollarVariable) {
-            emit(&opCopy, _destination, _dollarOffset, _width);
-            return;
-        }
-
         if (!_layout.hasSlot(variable) || isClosureVariable(variable)) {
             const address = addressOfVariable(variable);
             emit(&opLoadIndirect, _destination, address, _width);
@@ -6358,6 +6338,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCopy, _destination, arrayOffset + arrayLengthOffset, _width);
     }
 
+    // The `$` of an index or a slice is a local of the frame
+    // (`LocalsCollector`) that holds the length of the array: copy that
+    // length into it before the index or the bounds are evaluated. A `$`
+    // whose length dmd knows at compile time has no slot: dmd folds it into
+    // every use.
+    private void bindDollar(VarDeclaration dollar, in size_t length) {
+        import dmd.astenums: STC;
+
+        if (dollar is null)
+            return;
+        assert(_layout.hasSlot(dollar)
+            || (dollar.storage_class & STC.manifest) != 0);
+        if (_layout.hasSlot(dollar))
+            emit(&opCopy, _layout.offsetOf(dollar), length, size_t.sizeof);
+    }
+
     private void compileBoundedSlice(
             SliceExp expression,
             size_t sourceLengthOffset,
@@ -6365,16 +6361,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset;
 
-        auto outerDollarVariable = _dollarVariable;
-        auto outerDollarOffset = _dollarOffset;
-        scope (exit) {
-            _dollarVariable = outerDollarVariable;
-            _dollarOffset = outerDollarOffset;
-        }
-        if (expression.lengthVar !is null) {
-            _dollarVariable = expression.lengthVar;
-            _dollarOffset = sourceLengthOffset;
-        }
+        bindDollar(expression.lengthVar, sourceLengthOffset);
 
         const lowOffset = reserveTemp(pointerFacts);
         if (expression.lwr is null)
@@ -7563,7 +7550,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto variable = read.var.isVarDeclaration;
         if (variable is null || read.var.isSymbolDeclaration !is null
                 || isCtfeVariable(read.var) || variable.isDataseg
-                || isThisField(variable) || variable is _dollarVariable
+                || isThisField(variable)
                 || !_layout.hasSlot(variable) || isClosureVariable(variable)
                 || _layout.isRef(variable) || _layout.isReturnPlace(variable)
                 || (variable.storage_class & (STC.lazy_ | STC.ref_ | STC.out_)))
@@ -7669,7 +7656,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto variable = read.var.isVarDeclaration;
         if (variable is null || read.var.isSymbolDeclaration !is null
                 || isCtfeVariable(read.var) || variable.isDataseg
-                || variable is _dollarVariable
                 || variable.isBitFieldDeclaration !is null)
             return size_t.max;
         if (isThisField(variable))
@@ -8111,16 +8097,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import dmd.sideeffect: hasSideEffect;
 
-        auto savedDollarVariable = _dollarVariable;
-        auto savedDollarOffset = _dollarOffset;
-        scope (exit) {
-            _dollarVariable = savedDollarVariable;
-            _dollarOffset = savedDollarOffset;
-        }
-        if (expression.lengthVar !is null) {
-            _dollarVariable = expression.lengthVar;
-            _dollarOffset = length;
-        }
+        bindDollar(expression.lengthVar, length);
 
         const place = operandPlace(expression.e2, size_t.sizeof, false,
             later is null || !hasSideEffect(later));
@@ -11160,16 +11137,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         public size_t storageIndexValue(
             IndexExp expression, size_t length,
         ) {
-            auto savedDollarVariable = compiler._dollarVariable;
-            auto savedDollarOffset = compiler._dollarOffset;
-            scope (exit) {
-                compiler._dollarVariable = savedDollarVariable;
-                compiler._dollarOffset = savedDollarOffset;
-            }
-            if (expression.lengthVar !is null) {
-                compiler._dollarVariable = expression.lengthVar;
-                compiler._dollarOffset = length;
-            }
+            compiler.bindDollar(expression.lengthVar, length);
 
             const index = compiler.reserveTemp(compiler.pointerFacts);
             compiler.evalOperandInto(expression.e2, index, size_t.sizeof);
