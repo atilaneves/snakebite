@@ -152,6 +152,28 @@ private extern(D) long snakebite_ut_dWordThree(
 }
 
 
+public extern(C) long snakebite_ut_word_or_throw(long value) {
+    if (value < 0)
+        throw new Exception("negative word");
+    return value;
+}
+
+
+public extern(C) long snakebite_ut_word_narrow(uint unsigned, short signed) {
+    return cast(long) unsigned * 100_000 + signed;
+}
+
+
+public extern(C) uint snakebite_ut_word_same_uint(uint value) {
+    return value;
+}
+
+
+public extern(C) short snakebite_ut_word_same_short(short value) {
+    return value;
+}
+
+
 public extern(C) short snakebite_ut_narrow(byte left, ushort right) {
     return cast(short) (left + right);
 }
@@ -4668,3 +4690,100 @@ static foreach (backend; Matrix!(
 }
 
 
+// A native function that throws: the guest catches the exception right
+// at the call, and below a recursion deep enough that the walker of the
+// Interpreter runs it on more native stack than the thread's own.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("directWordCall.throws." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_word_or_throw")
+                extern(C) long wordOrThrow(long value);
+
+                long thrownDeep(long depth) {
+                    if (depth == 0)
+                        return wordOrThrow(-1);
+                    return thrownDeep(depth - 1) + 1;
+                }
+
+                long caughtDeep(long depth) {
+                    if (depth == 0) {
+                        try
+                            return wordOrThrow(-1);
+                        catch (Exception exception)
+                            return exception.msg == "negative word" ? 7 : 8;
+                    }
+                    return caughtDeep(depth - 1);
+                }
+
+                int answer() {
+                    enum depth = 10_000;
+                    foreach (round; 0 .. 3) {
+                        try {
+                            wordOrThrow(-1);
+                            return 1;
+                        } catch (Exception exception) {
+                            if (exception.msg != "negative word") return 2;
+                        }
+                        if (wordOrThrow(5) != 5) return 3;
+                        try {
+                            thrownDeep(depth);
+                            return 4;
+                        } catch (Exception exception) {
+                            if (exception.msg != "negative word") return 5;
+                        }
+                        if (caughtDeep(depth) != 7) return 6;
+                    }
+                    return 0;
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// Locals of a narrow type at their extreme values, passed to native
+// functions and given back by them.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("directWordCall.narrowLocals." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_word_narrow")
+                extern(C) long narrow(uint unsigned, short signed);
+                pragma(mangle, "snakebite_ut_word_same_uint")
+                extern(C) uint sameUint(uint value);
+                pragma(mangle, "snakebite_ut_word_same_short")
+                extern(C) short sameShort(short value);
+
+                int answer() {
+                    uint unsigned = uint.max;
+                    short signed = short.min;
+                    foreach (round; 0 .. 3) {
+                        if (narrow(unsigned, signed)
+                                != 4_294_967_295L * 100_000 - 32_768)
+                            return 1;
+                        if (sameUint(unsigned) != uint.max) return 2;
+                        if (sameShort(signed) != short.min) return 3;
+                        const long wide = sameUint(unsigned);
+                        if (wide != 4_294_967_295L) return 4;
+                        const long negative = sameShort(signed);
+                        if (negative != -32_768) return 5;
+                    }
+                    return 0;
+                }
+            },
+            "answer",
+        );
+    }
+}
