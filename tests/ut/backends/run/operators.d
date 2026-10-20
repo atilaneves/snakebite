@@ -1417,6 +1417,45 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// The `size_t` length promotes a narrower target: dmd runs the operation in
+// `ulong` and converts the result back.
+static foreach (backend; Matrix!()) {
+    @("compoundAssignByArrayLength." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder { int[] slice; int[4] fixed; }
+            int[] made(size_t n) { return new int[n]; }
+            int main() {
+                int[] dynamic = [1, 2, 3];
+                int[5] fixed;
+                Holder holder;
+                holder.slice = dynamic;
+                int sum;
+                uint unsigned = 100;
+                long wide = -1;
+                short narrow = 7;
+                foreach (round; 0 .. 4) {
+                    sum += dynamic.length;
+                    sum += fixed.length;
+                    sum += holder.slice.length;
+                    sum += holder.fixed.length;
+                    sum += made(round).length;
+                    unsigned -= dynamic.length;
+                    wide *= fixed.length;
+                    narrow ^= holder.fixed.length;
+                }
+                sum *= dynamic.length;
+                sum /= holder.slice.length;
+                sum %= 7 * fixed.length;
+                sum <<= dynamic.length;
+                return sum == 248 && unsigned == 88 && wide == -625
+                    && narrow == 7 ? 0 : 1;
+            }
+        });
+    }
+}
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.diverges,
         "CTFE converts a floating step to the integral target before the "
