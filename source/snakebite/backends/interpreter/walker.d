@@ -569,7 +569,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     import dmd.dstruct: StructDeclaration;
     import snakebite.framestack: FrameStack, defaultFrameCapacity;
     import snakebite.backends.interpreter.faultslot:
-        faultSlotOf, fastFrameLead, frameLead, pushCallFrame;
+        faultSlotOf, fastFrameLead, frameLead, placeNotRead, placeSlotOf,
+        pushCallFrame;
     import snakebite.backends.interpreter.stackpieces: StackPieces;
     import snakebite.backends.druntimehooks: DruntimeHook;
     import snakebite.ffi:
@@ -737,8 +738,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // no two calls that run at the same time have the same one.
     private CallStateGuard* _innermost;
     // The frame of the running call, whose fault slot names the full
-    // expression the call runs. A call with a guard and a lean call both
-    // set it, and both give back the frame of their caller.
+    // expression the call runs. Every call sets it, and gives back the frame
+    // of its caller when it returns. An exception that leaves a call without
+    // a guard skips that: what catches puts it back (`RunningCall`).
     private ubyte* _faultFrame;
     // The accessor whose load or store runs, or null: the access is one
     // instruction, so a fault in it is the accessor's, not its caller's.
@@ -1370,6 +1372,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _type = function_.type.nextOf;
         _facts = factsOf(_type);
         _place = returnPlace;
+        *placeSlotOf(frameBase) = returnPlace;
         _frameBase = frameBase;
         _layout = layout;
         _function = function_;
@@ -1643,20 +1646,34 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // filled, leaving a scalar result at `place`. This is `executeRaw`'s
     // guest case without the steps a direct call to a guest function with a
     // scalar result has no use for.
+    //
+    // `caller` and `callerFrame` are the function and the frame of the node
+    // that calls, which the running call has again when the callee returns.
+    // A call whose tree never hands control to the evaluator
+    // (`TreeRoot.lean`) has no guard: an exception that leaves it skips
+    // that, and what catches the exception puts its own state back
+    // (`RunningCall`).
     package void runTreeCallee(
         TreeCallee* callee, ubyte* calleeFrame, void* place,
+        FuncDeclaration caller, ubyte* callerFrame,
     ) {
+        assert(_function is caller && _faultFrame is callerFrame,
+            "a call node runs in the call of its own tree");
         ubyte here;
         if (cast(size_t) &here < _stack.limit) {
-            runTreeCalleeOnNewPiece(callee, calleeFrame, place);
+            runTreeCalleeOnNewPiece(
+                callee, calleeFrame, place, caller, callerFrame);
             return;
         }
 
+        *placeSlotOf(calleeFrame) = place;
         auto root = callee.root;
         if (root !is null && root.lean) {
-            auto lean = LeanCall!(LeanPlace.placed)(
-                this, calleeFrame, callee.function_, place);
+            _function = callee.function_;
+            _faultFrame = calleeFrame;
             root.execute(calleeFrame);
+            _function = caller;
+            _faultFrame = callerFrame;
             return;
         }
 
@@ -1676,18 +1693,26 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // Runs the body of a callee that is one `return`, whose frame at
     // `calleeFrame` the caller has filled, and gives its value back in a
     // register. `T` is `long` for an integral or `double` for a floating
-    // result.
+    // result. `caller` and `callerFrame` are as `runTreeCallee` says.
     package T runTreeValue(T)(
         TreeRoot* root, FuncDeclaration function_, ubyte* calleeFrame,
+        FuncDeclaration caller, ubyte* callerFrame,
     ) {
+        assert(_function is caller && _faultFrame is callerFrame,
+            "a call node runs in the call of its own tree");
         ubyte here;
         if (cast(size_t) &here < _stack.limit)
-            return runTreeValueOnNewPiece!T(root, function_, calleeFrame);
+            return runTreeValueOnNewPiece!T(
+                root, function_, calleeFrame, caller, callerFrame);
 
+        debug *placeSlotOf(calleeFrame) = placeNotRead;
         if (root.lean) {
-            auto lean = LeanCall!(LeanPlace.unplaced)(
-                this, calleeFrame, function_, null);
-            return returnValueOf!T(root, calleeFrame);
+            _function = function_;
+            _faultFrame = calleeFrame;
+            const value = returnValueOf!T(root, calleeFrame);
+            _function = caller;
+            _faultFrame = callerFrame;
+            return value;
         }
 
         return runGuardedValue!T(root, function_, calleeFrame);
@@ -1714,10 +1739,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     pragma(inline, false)
     private T runTreeValueOnNewPiece(T)(
         TreeRoot* root, FuncDeclaration function_, ubyte* calleeFrame,
+        FuncDeclaration caller, ubyte* callerFrame,
     ) {
         T value;
         _stack.continueOnNewPiece({
-            value = runTreeValue!T(root, function_, calleeFrame);
+            value = runTreeValue!T(
+                root, function_, calleeFrame, caller, callerFrame);
         });
         return value;
     }
@@ -1727,19 +1754,19 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     pragma(inline, false)
     private void runTreeCalleeOnNewPiece(
         TreeCallee* callee, ubyte* calleeFrame, void* place,
+        FuncDeclaration caller, ubyte* callerFrame,
     ) {
         _stack.continueOnNewPiece({
-            runTreeCallee(callee, calleeFrame, place);
+            runTreeCallee(callee, calleeFrame, place, caller, callerFrame);
         });
     }
 
     // The original evaluator reads the function's fields; a tree node reads
     // none of them. A call between tree nodes therefore leaves them alone,
     // and each node that hands control to the original evaluator calls
-    // `syncTree` first, with the tree and frame it runs for. `_place` and
-    // `_function` are always the running call's: the return nodes write
-    // through `_place`, and the fault handler reads `_function` whatever
-    // runs.
+    // `syncTree` first, with the tree and frame it runs for. `_function` is
+    // the running call's, except between a throw in a call without a guard
+    // and the `try` that catches it (`RunningCall`).
     //
     // A call whose node synced gives the fields back when it ends, as the
     // original evaluator's calls do, so the fields never describe a call
@@ -2301,44 +2328,24 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         return plan;
     }
 
-    // The state of a call whose tree never hands control to the original
-    // evaluator (`TreeRoot.lean`): only what the tree and the fault handler
-    // read. The function's fields stay with the call that owns them, no
-    // guard is on the chain, and no `alloca` of this call can exist, because
-    // an `alloca` is run by a node that hands control over. Its end gives
-    // the caller its state back, normally or by throw.
-    private enum LeanPlace : bool { unplaced, placed }
-
-    private static struct LeanCall(LeanPlace placement) {
-        private Evaluator _evaluator;
-        static if (placement == LeanPlace.placed)
-            private void* _place;
+    // The state of the running call as a `try` or a full expression finds
+    // it. A call without a guard gives its caller the state back when it
+    // returns, not when an exception leaves it (`runTreeCallee`), so what
+    // catches puts this back before guest code of its own call runs again.
+    // A call with a guard puts its caller's state back as the exception
+    // leaves it.
+    private static struct RunningCall {
         private FuncDeclaration _function;
         private ubyte* _faultFrame;
 
-        @disable this();
-        @disable this(this);
-
-        private this(
-            Evaluator evaluator, ubyte* frame, FuncDeclaration function_,
-            void* place,
-        ) {
-            _evaluator = evaluator;
-            static if (placement == LeanPlace.placed) {
-                _place = evaluator._place;
-                evaluator._place = place;
-            }
+        private this(Evaluator evaluator) {
             _function = evaluator._function;
             _faultFrame = evaluator._faultFrame;
-            evaluator._function = function_;
-            evaluator._faultFrame = frame;
         }
 
-        ~this() {
-            static if (placement == LeanPlace.placed)
-                _evaluator._place = _place;
-            _evaluator._function = _function;
-            _evaluator._faultFrame = _faultFrame;
+        private void restore(Evaluator evaluator) {
+            evaluator._function = _function;
+            evaluator._faultFrame = _faultFrame;
         }
     }
 
@@ -2514,9 +2521,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             if (scopeActive)
                 _activeExceptionScopes.pop;
 
+        auto running = RunningCall(this);
         try
             return body_();
         catch (GuestException exception) {
+            running.restore(this);
             const plan = exceptionPlan(exception._guest.classinfo);
             // Binding and visiting the handler mutate dmd's Catch node.
             auto catch_ = selectedCatch(plan, statement);
@@ -2723,6 +2732,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         TreeFlow flow;
         Throwable pendingException;
         bool runFinalizer;
+        auto running = RunningCall(this);
         try
             flow = body_();
         catch (GuestException exception) {
@@ -2736,12 +2746,14 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             scopeActive = false;
             if (pendingException is null)
                 runFinalizer = runsFinally(statement, plan, flow);
-            if (runFinalizer && !_halted)
+            if (runFinalizer && !_halted) {
+                running.restore(this);
                 _controlFlow.withCleanup({
                     const own = runFinallyBody(cleanup, pendingException);
                     if (own != TreeFlow.normal)
                         flow = own;
                 });
+            }
         }
         return flow;
     }

@@ -218,3 +218,139 @@ static foreach (backend; Matrix!(
         );
     }
 }
+
+
+// A temporary with a destructor in a full expression whose later call throws
+// is destroyed while the exception leaves that expression. Its destructor
+// runs before the `try` of an outer function catches.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd CTFE does not destroy a temporary that a throw leaves"),
+)) {
+    @("leancalls.temporaryDestroyedByThrowThroughCalls." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                struct Counted {
+                    int* count;
+                    int value;
+                    ~this() {
+                        if (count !is null)
+                            ++*count;
+                    }
+                }
+
+                Counted make(int* count, int value) {
+                    return Counted(count, value);
+                }
+
+                int thrower(int x) {
+                    if (x > 0)
+                        throw new Exception("thrown");
+                    return x;
+                }
+
+                int through(int x) {
+                    int below = thrower(x);
+                    return below + 1;
+                }
+
+                int use(int* count, int x) {
+                    return make(count, 5).value + through(x);
+                }
+
+                int catcher(int* count, int x) {
+                    int result;
+                    try
+                        result = use(count, x);
+                    catch (Exception)
+                        result = -1;
+                    return result;
+                }
+
+                int answer() {
+                    int count;
+                    int sum;
+                    foreach (round; 0 .. 3) {
+                        sum += catcher(&count, 0);
+                        sum += catcher(&count, 1);
+                    }
+                    return sum == 15 && count == 6 ? 42 : sum * 100 + count;
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// A fiber that yields inside nested calls resumes in the callee that
+// yielded, also once the callee has run before. The main fiber runs calls of
+// its own between, and the fiber then catches an exception thrown through
+// calls.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call native functions such as "
+        ~ "`core.thread.fiber.Fiber`'s constructor"),
+)) {
+    @("leancalls.fiberYieldsInCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.thread.fiber: Fiber;
+
+            int inner(int x) {
+                int before = x + 1;
+                Fiber.yield;
+                return before;
+            }
+
+            int middle(int x) {
+                int below = inner(x);
+                return below * 2;
+            }
+
+            int twice(int x) {
+                int below = x + 1;
+                return below * 2;
+            }
+
+            int thrower(int x) {
+                if (x > 0)
+                    throw new Exception("thrown");
+                return x;
+            }
+
+            int caught(int x) {
+                int result;
+                try
+                    result = thrower(x);
+                catch (Exception)
+                    result = -1;
+                return result;
+            }
+
+            void main() {
+                int result;
+                int afterThrow;
+                auto fiber = new Fiber({
+                    foreach (round; 0 .. 3)
+                        result += middle(20 + round);
+                    afterThrow = caught(1);
+                });
+                int between;
+                foreach (round; 0 .. 3) {
+                    fiber.call;
+                    between += twice(round) + caught(1);
+                }
+                fiber.call;
+                assert(fiber.state == Fiber.State.TERM);
+                assert(between == 9);
+                assert(result == 132);
+                assert(afterThrow == -1);
+            }
+        });
+    }
+}
