@@ -24,6 +24,7 @@ import snakebite.backends.fullexpression: FullExpressionScope;
 import snakebite.backends.interpreter.faultslot:
     fastFrameLead, faultSlotOf;
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
+import snakebite.ffi.load: callDirectWordsPair, extendWord, storeWordResult, WordPair;
 import snakebite.backends.sliceplan: SlicePlan;
 import snakebite.nativelayout: TypeFacts;
 import snakebite.nativevalue: BitfieldAccess, CastLayout;
@@ -2539,15 +2540,11 @@ private struct DirectWordCall {
     // bytes extended as the plan says, or as the bytes of an aggregate.
     public enum Read : ubyte { word, extended, aggregate }
 
-    public static struct Pair { ulong low, high; }
-    private alias Direct = extern(C) Pair function(ulong, ulong, ulong);
-
     public State state;
     private const(void)* _target;
     private ubyte[3] _order;
-    // The shift that extends the low bytes of a parameter's word to 64 bits.
-    private ubyte[3] _shift;
-    private bool[3] _signed;
+    // How the low bytes of a parameter's word extend to 64 bits.
+    private imported!"snakebite.ffi.load".Load[3] _loads;
     private size_t _resultWidth;
 
     // Examines the call of `callee` through `plan`. A receiver, a `ref`
@@ -2577,9 +2574,7 @@ private struct DirectWordCall {
             const width = loadWidth(loads[i]);
             if (parameter.isRef || parameter.facts.size != width)
                 return;
-            _shift[i] = cast(ubyte) (64 - 8 * width);
-            _signed[i] = loads[i] == Load.sign8 || loads[i] == Load.sign16
-                || loads[i] == Load.sign32;
+            _loads[i] = loads[i];
         }
         _target = target;
         _resultWidth = resultWidth;
@@ -2610,11 +2605,7 @@ private struct DirectWordCall {
             case word:
                 return arg.readLong(frame);
             case extended:
-                const shift = _shift[parameter];
-                const value = arg.readLong(frame);
-                return _signed[parameter]
-                    ? cast(ulong) ((value << shift) >> shift)
-                    : (cast(ulong) value << shift) >>> shift;
+                return extendWord(arg.readLong(frame), _loads[parameter]);
             case aggregate:
                 ulong bytes;
                 arg.node.executeInto(frame, cast(ubyte*) &bytes);
@@ -2630,7 +2621,7 @@ private struct DirectWordCall {
     // Calls the target with the words of the parameters, on the base of
     // the native stack, as every call of native code is.
     pragma(inline, true)
-    public Pair call(bool inOrder, E)(E ev, ref const ulong[3] words) const {
+    public WordPair call(bool inOrder, E)(E ev, ref const ulong[3] words) const {
         if (!ev.onBaseStack)
             return callOnBase(ev, words);
         static if (inOrder) {
@@ -2640,28 +2631,20 @@ private struct DirectWordCall {
                 third = words[_order[2]];
         }
         try
-            return (cast(Direct) _target)(first, second, third);
+            return callDirectWordsPair(_target, first, second, third);
         catch (Throwable thrown)
             ev.rethrowFromNative(thrown);
     }
 
     pragma(inline, false)
-    private Pair callOnBase(E)(E ev, ref const ulong[3] words) const {
-        Pair result;
+    private WordPair callOnBase(E)(E ev, ref const ulong[3] words) const {
+        WordPair result;
         ev.crossNative({
-            result = (cast(Direct) _target)(
-                words[_order[0]], words[_order[1]], words[_order[2]]);
+            result = callDirectWordsPair(
+                _target, words[_order[0]], words[_order[1]],
+                words[_order[2]]);
         });
         return result;
-    }
-
-    // Stores `result` at `place` as a result of `resultWidth` bytes.
-    public void store(in Pair result, void* place) const {
-        if (_resultWidth == 2 * ulong.sizeof) {
-            *cast(Pair*) place = result;
-            return;
-        }
-        *cast(ulong*) place = result.low;
     }
 }
 
@@ -3128,26 +3111,7 @@ private final class Call(E) : Node {
         // A copy: the arguments can run this site again and select another
         // callee.
         auto selected = _selected;
-        if (selected.direct !is null) {
-            runDirect(selected.direct, frame, result);
-            return;
-        }
         enter(selected, receiver, frame, result);
-    }
-
-    // A direct word call: the words come straight from the operands, and
-    // the callee has no frame.
-    pragma(inline, false)
-    private void runDirect(
-        const(DirectWordCall)* direct, ubyte* frame, void* result,
-    ) {
-        ulong[3] words = 0;
-        foreach (i, ref arg; _args)
-            words[i] = direct.wordOf(
-                arg, DirectWordCall.readOf(_modes[i]), i, frame);
-        const pair = direct.call!false(_ev, words);
-        if (result !is null)
-            direct.store(pair, result);
     }
 
     public override long executeLong(ubyte* frame) {
@@ -3431,7 +3395,7 @@ private final class NativeWordCall(E, size_t count, bool inOrder) : Node {
     }
 
     pragma(inline, true)
-    private DirectWordCall.Pair invoke(ubyte* frame) {
+    private WordPair invoke(ubyte* frame) {
         ulong[3] words = 0;
         static foreach (i; 0 .. count)
             words[i] = _direct.wordOf(_operands[i], _reads[i], i, frame);
@@ -3447,7 +3411,7 @@ private final class NativeWordCall(E, size_t count, bool inOrder) : Node {
     }
 
     public override void executeInto(ubyte* frame, ubyte* dest) {
-        *cast(DirectWordCall.Pair*) dest = invoke(frame);
+        storeWordResult(invoke(frame), _resultSize, dest);
     }
 }
 

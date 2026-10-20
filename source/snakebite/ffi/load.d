@@ -27,18 +27,18 @@ size_t loadWidth(Load load) {
     }
 }
 
-// One argument of a direct word call, read from `place` as `load` says. Only
-// the loads that `directWordCallTarget` yields take part.
+// The word of a `Load` from the `value` of a register: its low bytes, extended
+// as `load` says. Only the loads that `directWordCallTarget` yields take part.
 pragma(inline, true)
-ulong loadWord(const(ubyte)* place, Load load) @system pure nothrow @nogc {
+ulong extendWord(ulong value, Load load) @safe pure nothrow @nogc {
     final switch (load) with (Load) {
-    case word64: return *cast(const(ulong)*) place;
-    case zero32: return *cast(const(uint)*) place;
-    case sign32: return cast(ulong) cast(long) *cast(const(int)*) place;
-    case zero8: return *place;
-    case zero16: return *cast(const(ushort)*) place;
-    case sign8: return cast(ulong) cast(long) *cast(const(byte)*) place;
-    case sign16: return cast(ulong) cast(long) *cast(const(short)*) place;
+    case word64: return value;
+    case zero32: return cast(uint) value;
+    case sign32: return cast(ulong) cast(long) cast(int) value;
+    case zero8: return cast(ubyte) value;
+    case zero16: return cast(ushort) value;
+    case sign8: return cast(ulong) cast(long) cast(byte) value;
+    case sign16: return cast(ulong) cast(long) cast(short) value;
     case copy:
     case copy16:
     case address:
@@ -46,17 +46,40 @@ ulong loadWord(const(ubyte)* place, Load load) @system pure nothrow @nogc {
     }
 }
 
-// Calls the `target` of `directWordCallTarget` with the words of the
-// registers, and stores the result of `resultWidth` bytes at `place`.
+// One argument of a direct word call, read from `place` as `load` says.
 pragma(inline, true)
-void callDirectWords(
-    const(void)* target, ulong first, ulong second, ulong third,
-    size_t resultWidth, void* place,
-) @system {
-    static struct Pair { ulong low, high; }
-    alias Direct = extern(C) Pair function(ulong, ulong, ulong);
+ulong loadWord(const(ubyte)* place, Load load) @system pure nothrow @nogc {
+    final switch (load) with (Load) {
+    case word64: return *cast(const(ulong)*) place;
+    case zero32: case sign32:
+        return extendWord(*cast(const(uint)*) place, load);
+    case zero8: case sign8: return extendWord(*place, load);
+    case zero16: case sign16:
+        return extendWord(*cast(const(ushort)*) place, load);
+    case copy:
+    case copy16:
+    case address:
+        assert(false, "directWordCallTarget yields only word loads");
+    }
+}
 
-    const result = (cast(Direct) target)(first, second, third);
+// The two words that a direct word call returns in the integer registers.
+struct WordPair { ulong low, high; }
+
+// Calls the `target` of `directWordCallTarget` with the words of the
+// registers.
+pragma(inline, true)
+WordPair callDirectWordsPair(
+    const(void)* target, ulong first, ulong second, ulong third,
+) @system {
+    alias Direct = extern(C) WordPair function(ulong, ulong, ulong);
+    return (cast(Direct) target)(first, second, third);
+}
+
+// Stores `result` at `place` as a result of `resultWidth` bytes.
+pragma(inline, true)
+void storeWordResult(in WordPair result, size_t resultWidth, void* place)
+        @system pure nothrow @nogc {
     switch (resultWidth) {
     case 1: *cast(ubyte*) place = cast(ubyte) result.low; break;
     case 2: *cast(ushort*) place = cast(ushort) result.low; break;
@@ -67,4 +90,15 @@ void callDirectWords(
         break;
     default: *cast(ulong*) place = result.low; break;
     }
+}
+
+// Calls the `target` of `directWordCallTarget` with the words of the
+// registers, and stores the result of `resultWidth` bytes at `place`.
+pragma(inline, true)
+void callDirectWords(
+    const(void)* target, ulong first, ulong second, ulong third,
+    size_t resultWidth, void* place,
+) @system {
+    storeWordResult(
+        callDirectWordsPair(target, first, second, third), resultWidth, place);
 }
