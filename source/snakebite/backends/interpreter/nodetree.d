@@ -49,39 +49,8 @@ package struct TreeRoot {
         closurePlan;
     package Type returnType;
     package TypeFacts returnFacts;
-    // Whether a call of this tree runs without a `CallStateGuard`. It holds
-    // when every statement has its node and no node hands control to the
-    // original evaluator for the rest of the call: the evaluator then never
-    // reads a field that the call would have to own. A statement that has
-    // not run has no node yet, and its node may be one that hands control
-    // over, so the flag waits for the last statement. Once set it stays set,
-    // because nothing more is built.
-    package bool lean;
-    private uint _unbuilt;
-    private uint _handingOver;
     // The full expression that the builder is building.
     private Region* _region;
-
-    // A statement whose node is not built yet.
-    package void expectBuild() {
-        ++_unbuilt;
-    }
-
-    package void built() {
-        --_unbuilt;
-        settle;
-    }
-
-    // A node that runs through the evaluator for the rest of the call: it
-    // needs the call's state to last from one node to the next. A node with
-    // its own fallback for one operation (`handOver`) is not one of these.
-    package void handsOver() {
-        ++_handingOver;
-    }
-
-    private void settle() {
-        lean = _unbuilt == 0 && _handingOver == 0;
-    }
 
     package const(imported!"snakebite.backends.layout".FrameLayout)* layout()
         const {
@@ -2013,7 +1982,6 @@ private final class ContextStore(E) : Node {
     private TreeRoot* _root;
     public this(E ev, InitStep step) {
         _ev = ev; _step = step; _root = ev._treeRoot;
-        _root.handsOver;
     }
     public override void executeInto(ubyte* frame, ubyte* dest) {
         _ev.syncTree(_root, frame);
@@ -2162,7 +2130,7 @@ private final class Scoped(E) : BoolNode {
         // the running call.
         ev.handOver(_root, frame, {
             ev._temporaries.withNestedCall(false, {
-                ev._temporaries.withExpression(_where, _expression, evaluate);
+                ev.withExpressionOf(frame, _where, _expression, evaluate);
             });
         });
     }
@@ -2399,7 +2367,6 @@ private final class EvaluatedPair(E) : SliceNode {
     private TreeRoot* _root;
     public this(E ev, Expression expression) {
         _ev = ev; _expression = expression; _root = ev._treeRoot;
-        _root.handsOver;
     }
     public override void executeInto(ubyte* frame, ubyte* dest) {
         _ev.evaluateTreeValue(_root, frame, _expression, dest);
@@ -2770,7 +2737,6 @@ private final class GenericStatement(E) : Node {
     private TreeRoot* _root;
     public this(E ev, Statement statement) {
         _ev = ev; _statement = statement; _root = ev._treeRoot;
-        _root.handsOver;
     }
     public override TreeFlow executeStmt(ubyte* frame) {
         _ev.syncTree(_root, frame);
@@ -2794,7 +2760,6 @@ private final class GenericCondition(E) : BoolNode {
     ) {
         _ev = ev; _condition = condition; _position = position;
         _root = ev._treeRoot;
-        _root.handsOver;
     }
     public override bool executeBool(ubyte* frame) {
         _ev.syncTree(_root, frame);
@@ -2811,7 +2776,6 @@ private final class Uninitialised(E) : Node {
     private TreeRoot* _root;
     public this(E ev, Statement statement, Node* slot, TreeRoot* root) {
         _ev = ev; _statement = statement; _slot = slot; _root = root;
-        root.expectBuild;
     }
     public override TreeFlow executeStmt(ubyte* frame) {
         // Building reads the function's layout and return type from the
@@ -2822,7 +2786,6 @@ private final class Uninitialised(E) : Node {
         scope(exit) _ev._treeRoot = outer;
         auto node = buildStatement(_ev, _statement, _slot);
         *_slot = node;
-        _root.built;
         return node.executeStmt(frame);
     }
 }

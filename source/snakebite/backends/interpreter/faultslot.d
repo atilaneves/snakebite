@@ -24,7 +24,8 @@ public const(void)** faultSlotOf(ubyte* frame) @system @nogc nothrow pure {
 // that hands the value back, and nothing else reads the word of a frame.
 // Every other call writes it before its body runs, and a return statement
 // writes through it. A debug build writes `placeNotRead` in the word of a
-// call that never writes it, so a read of it faults.
+// call that never writes it, so a store through it faults. Copying the word
+// is allowed (`Evaluator.claim` does); using the copy as a place is not.
 public void** placeSlotOf(ubyte* frame) @system @nogc nothrow pure {
     return cast(void**) (frame - 2 * faultSlotBytes);
 }
