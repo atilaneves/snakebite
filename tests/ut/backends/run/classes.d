@@ -886,6 +886,31 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A class or a struct declared in a function, made by a function nested in
+// it, has the frame of the declaring function as its context.
+static foreach (backend; Matrix!()) {
+    @("nestedAggregateMadeInNestedFunctionReadsOuterLocal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int value = 7;
+                final class Reader {
+                    int get() { return value; }
+                }
+                struct Writer {
+                    void set(int v) { value = v; }
+                }
+                Reader makeReader() { return new Reader; }
+                Writer* makeWriter() { return new Writer; }
+
+                makeWriter().set(9);
+                assert(makeReader().get() == 9);
+            }
+        });
+    }
+}
+
 // `scope` on the variable, not the class, still runs the destructor at
 // scope exit and allocates off the GC heap. `resource`'s type is inferred
 // (dmd's dsymbolsem.d runs a full expressionSemantic on the initialiser

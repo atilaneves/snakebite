@@ -143,6 +143,48 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// A cast of a `typeof(null)` value to a class reference or a delegate is
+// null, and an operand with an effect still runs.
+static foreach (backend; Matrix!()) {
+    @("cast.nullValueToClassAndDelegate." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C {}
+
+            typeof(null) value(ref int calls) {
+                ++calls;
+                return null;
+            }
+
+            C toClass(typeof(null) source) {
+                return cast(C) source;
+            }
+
+            bool delegateIsNull(typeof(null) source) {
+                void delegate() result = cast(void delegate()) source;
+                return result is null;
+            }
+
+            void main() {
+                int calls;
+                assert(toClass(null) is null);
+                assert(delegateIsNull(null));
+                C object = new C;
+                object = cast(C) value(calls);
+                assert(calls == 1);
+                assert(object is null);
+                int local = 3;
+                void delegate() dg = () { ++local; };
+                dg = cast(void delegate()) value(calls);
+                assert(calls == 2);
+                assert(dg is null);
+            }
+        });
+    }
+}
+
+
 static foreach (backend; Matrix!()) {
     @("cast.staticArrayToSliceAliasesStorage." ~ backend.stringof)
     @Tags(backend.stringof)
