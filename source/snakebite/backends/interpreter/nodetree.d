@@ -4728,12 +4728,21 @@ private Node buildSlice(E)(E ev, Expression expression) {
     }
 }
 
+// Whether a store of a scalar or of two words writes to `target`: a
+// variable, a field, an element, the target of a pointer, or the result of
+// a call that returns `ref`.
+private bool isStoreTarget(Expression target) {
+    if (auto call = target.isCallExp)
+        return returnsReference(call);
+    return target.isDotVarExp !is null || target.isVarExp !is null
+        || target.isIndexExp !is null || target.isPtrExp !is null;
+}
+
 // A store of a dynamic array or a delegate.
 private Node buildPairStore(E)(E ev, AssignExp e) {
     if (bindsReference(ev, e)
             || (e.isConstructExp !is null && e.isConstructExp.lowering !is null)
-            || e.e1.isDotVarExp is null && e.e1.isVarExp is null
-                && e.e1.isIndexExp is null && e.e1.isPtrExp is null)
+            || !isStoreTarget(e.e1))
         return null;
     auto value = buildPair(ev, e.e1.type, e.e2);
     if (value is null)
@@ -5636,9 +5645,7 @@ private Node buildPost(long delta, E)(E ev, PostExp e, in Scalar scalar) {
 
 private Node buildStore(E)(E ev, AssignExp e, in Scalar scalar) {
     if ((e.isConstructExp !is null && e.isConstructExp.lowering !is null)
-            || e.e1.isDotVarExp is null
-            && e.e1.isVarExp is null && e.e1.isIndexExp is null
-            && e.e1.isPtrExp is null)
+            || !isStoreTarget(e.e1))
         return null;
     if (bindsReference(ev, e))
         return null;
