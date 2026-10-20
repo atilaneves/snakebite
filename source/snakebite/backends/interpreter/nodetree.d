@@ -22,7 +22,7 @@ import snakebite.backends.checkplan: BoundsCheck;
 import snakebite.backends.controlflow: ControlFlowState;
 import snakebite.backends.fullexpression: FullExpressionScope;
 import snakebite.backends.interpreter.faultslot:
-    fastFrameLead, faultSlotOf;
+    fastFrameLead, faultSlotOf, placeSlotOf;
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.ffi.load: callDirectWordsPair, extendWord, storeWordResult, WordPair;
 import snakebite.backends.sliceplan: SlicePlan;
@@ -2118,7 +2118,7 @@ private final class Scoped(E) : BoolNode {
         // the running call.
         ev.handOver(_root, frame, {
             ev._temporaries.withNestedCall(false, {
-                ev._temporaries.withExpression(_where, _expression, evaluate);
+                ev.withExpressionTemporaries(_where, _expression, evaluate);
             });
         });
     }
@@ -2167,7 +2167,7 @@ private final class ScopedReturn(E) : Node {
         ubyte* address;
         _scope.run(frame, { address = _scope._inner.executeAddr(frame); });
         auto scratch = FrameGuard(&_ev._frames);
-        auto place = cast(ubyte*) _ev._place;
+        auto place = cast(ubyte*) *placeSlotOf(frame);
         if (place is null)
             place = _ev._frames.reserve(_size, _alignment);
         if (place !is address)
@@ -2278,22 +2278,20 @@ private final class DiscardedAggregate : Node {
 
 // The result of a function that returns `ref` is the address of the operand.
 private final class ReturnReference : Node {
-    private void** _place;
     private Node _address;
     private Position _position;
-    public this(void** place, Node address, Position position) {
-        _place = place; _address = address; _position = position;
+    public this(Node address, Position position) {
+        _address = address; _position = position;
     }
     public override TreeFlow executeStmt(ubyte* frame) {
         _position.note(frame);
-        *cast(ubyte**) *_place = _address.executeAddr(frame);
+        *cast(ubyte**) *placeSlotOf(frame) = _address.executeAddr(frame);
         return TreeFlow.return_;
     }
 }
 
 private final class ReturnAggregate(E) : Node {
     private E _ev;
-    private void** _place;
     private Node _value;
     private Position _position;
     private size_t _size;
@@ -2301,13 +2299,13 @@ private final class ReturnAggregate(E) : Node {
     public this(
         E ev, Node value, Position position, in TypeFacts facts,
     ) {
-        _ev = ev; _place = &ev._place; _value = value; _position = position;
+        _ev = ev; _value = value; _position = position;
         _size = facts.size; _alignment = facts.alignment;
     }
     public override TreeFlow executeStmt(ubyte* frame) {
         _position.note(frame);
-        if (*_place !is null)
-            _value.executeInto(frame, cast(ubyte*) *_place);
+        if (auto place = *placeSlotOf(frame))
+            _value.executeInto(frame, cast(ubyte*) place);
         else {
             // The caller discarded the result, but the operand still runs.
             auto scratch = _ev._frames.push(_size, _alignment);
@@ -2621,17 +2619,16 @@ private final class DoLoop(C) : Loop {
 }
 
 private final class ReturnValue(T, V) : Node {
-    private void** _place;
     private V _value;
     private Position _position;
-    public this(void** place, V value, Position position) {
-        _place = place; _value = value; _position = position;
+    public this(V value, Position position) {
+        _value = value; _position = position;
     }
     public override TreeFlow executeStmt(ubyte* frame) {
         _position.note(frame);
         const T value = cast(T) _value.value(frame);
-        if (*_place !is null)
-            *cast(T*) (*_place) = value;
+        if (auto place = *placeSlotOf(frame))
+            *cast(T*) place = value;
         return TreeFlow.return_;
     }
 
@@ -2649,16 +2646,15 @@ private final class ReturnValue(T, V) : Node {
 }
 
 private final class ReturnSlice : Node {
-    private void** _place;
     private Node _value;
     private Position _position;
-    public this(void** place, Node value, Position position) {
-        _place = place; _value = value; _position = position;
+    public this(Node value, Position position) {
+        _value = value; _position = position;
     }
     public override TreeFlow executeStmt(ubyte* frame) {
         _position.note(frame);
-        if (*_place !is null)
-            _value.executeInto(frame, cast(ubyte*) *_place);
+        if (auto place = *placeSlotOf(frame))
+            _value.executeInto(frame, cast(ubyte*) place);
         else
             _value.executeVoid(frame);
         return TreeFlow.return_;
@@ -3042,11 +3038,15 @@ private mixin template CalleeEntry(E) {
     // What the callee writes at the place that the site gives it.
     private CalleeResult _result;
     private TreeRoot* _root;
+    // The function whose tree holds this site: the running function again
+    // when the callee returns.
+    private FuncDeclaration _caller;
 
     private void takeArguments(SiteArguments arguments) {
         _args = argumentOperands(arguments.nodes, arguments.modes);
         _modes = arguments.modes;
         _sizes = arguments.sizes;
+        _caller = _ev._function;
     }
 
     // Whether `callee` takes the arguments of this site and gives its result.
@@ -3113,7 +3113,7 @@ private mixin template CalleeEntry(E) {
         auto callee = selection.callee;
         auto calleeFrame = FrameGuard(&ev._frames);
         auto base = placeArguments(callee, hidden, frame);
-        runCall(selection, base, result, /* nested */ false);
+        runCall(selection, base, result, /* nested */ false, frame);
     }
 
     // Runs `callee` as `enter` does, with the result written at `dest`. A
@@ -3130,19 +3130,20 @@ private mixin template CalleeEntry(E) {
         // A callee whose variable aliases the place of the result arms the
         // record of the caller for that place, unless the call is nested.
         const aliased = callee.layout.returnPlace.offset != size_t.max;
-        runCall(selection, base, place, aliased);
+        runCall(selection, base, place, aliased, frame);
     }
 
     // Runs the callee as a call of its own for the temporaries when the
     // caller says so (`nested`) or when a variable of the callee keeps
-    // temporaries.
+    // temporaries. `frame` is the frame of the caller.
     private void runCall(
         in Selection selection, ubyte* base, void* result, in bool nested,
+        ubyte* frame,
     ) {
         if (nested || selection.callee.layout.retainsTemporaries)
-            runRetaining(selection, base, result);
+            runRetaining(selection, base, result, frame);
         else
-            run(selection, base, result);
+            run(selection, base, result, frame);
     }
 
     // Runs `callee` as a call of its own for the temporaries
@@ -3151,21 +3152,23 @@ private mixin template CalleeEntry(E) {
     // the frame of `enter` carries none.
     pragma(inline, false)
     private void runRetaining(
-        in Selection selection, ubyte* base, void* result,
+        in Selection selection, ubyte* base, void* result, ubyte* frame,
     ) {
         _ev._temporaries.withNestedCall(
             selection.callee.layout.retainsTemporaries, {
-                run(selection, base, result);
+                run(selection, base, result, frame);
             });
     }
 
-    private void run(in Selection selection, ubyte* base, void* result) {
+    private void run(
+        in Selection selection, ubyte* base, void* result, ubyte* frame,
+    ) {
         import snakebite.backends.calls: CallSelection;
 
         auto callee = cast(TreeCallee*) selection.callee;
         final switch (selection.route) with (CallSelection.Route) {
             case guest:
-                _ev.runTreeCallee(callee, base, result);
+                _ev.runTreeCallee(callee, base, result, _caller, frame);
                 break;
             case native, builtin:
                 _ev.runHostCallee(callee, selection.plan, base, result);
@@ -3692,7 +3695,7 @@ private final class Call(E) : Node {
         auto ev = _ev;
         auto calleeFrame = FrameGuard(&ev._frames);
         auto base = placeArguments(fast.callee, receiver, frame);
-        ev.runTreeCallee(fast.callee, base, result);
+        ev.runTreeCallee(fast.callee, base, result, _caller, frame);
     }
 
     private long runLong(FastCallee* fast, size_t receiver, ubyte* frame) {
@@ -3716,14 +3719,16 @@ private final class Call(E) : Node {
         auto ev = _ev;
         auto calleeFrame = FrameGuard(&ev._frames);
         auto base = placeArguments(fast.callee, receiver, frame);
-        return ev.runTreeValue!long(fast.root, fast.callee.function_, base);
+        return ev.runTreeValue!long(
+            fast.root, fast.callee.function_, base, _caller, frame);
     }
 
     private double enterDouble(FastCallee* fast, size_t receiver, ubyte* frame) {
         auto ev = _ev;
         auto calleeFrame = FrameGuard(&ev._frames);
         auto base = placeArguments(fast.callee, receiver, frame);
-        return ev.runTreeValue!double(fast.root, fast.callee.function_, base);
+        return ev.runTreeValue!double(
+            fast.root, fast.callee.function_, base, _caller, frame);
     }
 }
 
@@ -3946,7 +3951,7 @@ private final class ConstructorCall(E) : Node {
                 ulong[2] result = void;
                 auto calleeFrame = FrameGuard(&ev._frames);
                 auto base = placeArguments(selected.callee, receiver, frame);
-                runCall(selected, base, result.ptr, _receiverIsAddress);
+                runCall(selected, base, result.ptr, _receiverIsAddress, frame);
             },
             { ev._temporaries.armConstructor(object); });
         return receiver;
@@ -7372,7 +7377,7 @@ private Node buildReturnOperand(E)(
     if (typeFunctionOf(ev._function).isRef) {
         auto address = buildAddress(ev, returned.exp);
         return address is null ? null : new ReturnReference(
-            &ev._place, address, positionOf(ev, returned.exp));
+            address, positionOf(ev, returned.exp));
     }
     if (ev._type.toBasetype.ty == TY.Tvoid) {
         // `return f();` in a function without a result: `f` runs, then the
@@ -7390,7 +7395,7 @@ private Node buildReturnOperand(E)(
             return null;
         auto slice = buildSlice(ev, returned.exp);
         return slice is null ? null : new ReturnSlice(
-            &ev._place, slice, positionOf(ev, returned.exp));
+            slice, positionOf(ev, returned.exp));
     }
     if (isAggregate(ev._type)) {
         if (!isAggregate(returned.exp.type))
@@ -7407,20 +7412,20 @@ private Node buildReturnOperand(E)(
     auto operand = buildValue(ev, returned.exp);
     if (operand is null)
         return null;
-    static Node make(T)(void** place, Node v, Position p) {
-        static Node returning(S)(S value, void** place, Position p) {
-            return new ReturnValue!(T, S)(place, value, p);
+    static Node make(T)(Node v, Position p) {
+        static Node returning(S)(S value, Position p) {
+            return new ReturnValue!(T, S)(value, p);
         }
         static if (isFloatingPoint!T)
             alias V = double;
         else
             alias V = long;
-        return fuseStep!(returning, V, valueKinds!T)(operandOf(v), place, p);
+        return fuseStep!(returning, V, valueKinds!T)(operandOf(v), p);
     }
     auto position = positionOf(ev, returned.exp);
     value = scalar.kind == Scalar.Kind.floating
-        ? byFloating!make(scalar.facts, &ev._place, operand, position)
-        : byIntegral!make(scalar.facts, &ev._place, operand, position);
+        ? byFloating!make(scalar.facts, operand, position)
+        : byIntegral!make(scalar.facts, operand, position);
     return value;
 }
 
