@@ -5509,6 +5509,16 @@ private Node buildInitializer(E)(
     if (!slot.ok || ev.isRefStorage(variable))
         return null;
     if (variableIsAggregate) {
+        import dmd.astenums: TY;
+        import dmd.typesem: toBasetype;
+
+        // A copy with a postblit is `(variable = value).__postblit()`, which
+        // constructs the variable for its effect.
+        if (value.type.toBasetype.ty == TY.Tvoid) {
+            auto effect = buildEffect(ev, value);
+            return effect is null
+                ? null : statementOf(effect, positionOf(ev, declaration));
+        }
         // The storage of a variable that is the result of its function is
         // the place of the result, whose address the slot holds.
         const facts = ev.factsOf(variable.type);
