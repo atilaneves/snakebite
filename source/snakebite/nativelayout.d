@@ -277,28 +277,6 @@ private void forceResolved(imported!"dmd.mtype".Type type) {
         forceResolved(arrayType.next);
 }
 
-// Which native bytes of a value of `type` decide whether it is true
-// as a condition (`if`, `assert`, `!`, `&&`, `||`, `?:`) - dmd's own
-// `toBoolean` (`dmd.expressionsem`) leaves such a condition's type
-// unchanged for every case here, so the real test is the one native
-// codegen makes of the value's bytes, not any `bool` conversion:
-//
-// * A floating value is true when nonzero, compared as a float, at
-//   `size` bytes from the value's own start.
-// * A dynamic array is true when either of its two words (`ptr`,
-//   `length`) is nonzero: a zero-length slice over real storage is
-//   true, and so is a null pointer with a nonzero length (dmd
-//   compiles both so; `ldc2` tests the pointer alone).
-// * A delegate is true when either of its two words (`ptr`,
-//   `funcptr`) is nonzero.
-// * A pointer, a class reference, an associative array's one
-//   pointer-sized handle, and every integral (`bool`, `char`, an
-//   enum with an integral base, ...) are already exactly one native
-//   word: `offset` alone, `size` bytes, decides it.
-//
-// One rule shared by every backend that compiles or interprets a
-// condition, so neither special-cases an associative array or a
-// delegate on its own.
 // Whether the value stored at `value` is true, as a condition tests it, for
 // a type whose `truthFacts` are `truth`.
 public bool isTrueAt(in void* value, in TypeFacts.Truth truth) {
@@ -321,6 +299,28 @@ public bool isTrueAt(in void* value, in TypeFacts.Truth truth) {
         buffer + truth.secondOffset, size_t.sizeof, false) != 0;
 }
 
+// Which native bytes of a value of `type` decide whether it is true
+// as a condition (`if`, `assert`, `!`, `&&`, `||`, `?:`) - dmd's own
+// `toBoolean` (`dmd.expressionsem`) leaves such a condition's type
+// unchanged for every case here, so the real test is the one native
+// codegen makes of the value's bytes, not any `bool` conversion:
+//
+// * A floating value is true when nonzero, compared as a float, at
+//   `size` bytes from the value's own start.
+// * A dynamic array is true when either of its two words (`ptr`,
+//   `length`) is nonzero: a zero-length slice over real storage is
+//   true, and so is a null pointer with a nonzero length (dmd
+//   compiles both so; `ldc2` tests the pointer alone).
+// * A delegate is true when either of its two words (`ptr`,
+//   `funcptr`) is nonzero.
+// * A pointer, a class reference, an associative array's one
+//   pointer-sized handle, and every integral (`bool`, `char`, an
+//   enum with an integral base, ...) are already exactly one native
+//   word: `offset` alone, `size` bytes, decides it.
+//
+// One rule shared by every backend that compiles or interprets a
+// condition, so neither special-cases an associative array or a
+// delegate on its own.
 public TypeFacts.Truth truthFacts(imported!"dmd.mtype".Type type) {
     alias Truth = TypeFacts.Truth;
     import dmd.astenums: TY;

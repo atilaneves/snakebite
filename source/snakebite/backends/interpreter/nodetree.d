@@ -132,6 +132,9 @@ package TreeRoot* rootOf(E)(
 // The nodes of the full expression that the builder is building whose work
 // depends on how the expression ends.
 private struct Region {
+    // Whether the expression is a part of the expression around it.
+    public enum Nesting { outermost, nested }
+
     public Region* outer;
     public Materialise[] materialised;
     // The expression has temporaries that the evaluator's lifetime owns.
@@ -142,14 +145,17 @@ private struct Region {
 private struct Built {
     public Node node;
     public bool scoped;
-    public bool materialises;
+    public Materialise[] materialised;
 }
 
 // Builds a full expression with `build`. The `Materialise` nodes of an
 // expression whose temporaries the evaluator's lifetime owns take their
 // storage from it. Those of a `nested` expression that the lifetime does not
 // own last as long as the enclosing expression.
-private Built buildRegion(E)(E ev, in bool nested, scope Node delegate() build) {
+private Built buildRegion(E)(
+    E ev, in Region.Nesting nesting, scope Node delegate() build,
+) {
+    const nested = nesting == Region.Nesting.nested;
     auto root = ev._treeRoot;
     Region region;
     region.outer = nested ? root._region : null;
@@ -164,7 +170,7 @@ private Built buildRegion(E)(E ev, in bool nested, scope Node delegate() build) 
             one._scoped = true;
     else if (nested)
         region.outer.materialised ~= region.materialised;
-    return Built(node, region.scoped, region.materialised.length != 0);
+    return Built(node, region.scoped, region.materialised);
 }
 
 // The node of a statement or a condition whose full expression `built` is:
@@ -177,8 +183,9 @@ private Node endingAt(E)(
     if (built.scoped)
         return new Scoped!E(ev, cast() built.node, expression, where,
             positionOf(ev, expression));
-    if (built.materialises)
-        return new FrameRelease(&ev._frames, cast() built.node);
+    if (built.materialised.length != 0)
+        return new FrameRelease(
+            ev, cast() built.node, cast(Materialise[]) built.materialised);
     return cast() built.node;
 }
 
@@ -1720,44 +1727,86 @@ private final class StructLiteral : Node {
 // full expression whose temporaries the evaluator's lifetime owns
 // (`Scoped`), the lifetime gives the storage, as it does to the evaluator's
 // own rvalues; otherwise the frame stack does, and the statement or the
-// condition that holds the node gives it back (`FrameRelease`).
+// condition that holds the node gives it back (`FrameRelease`). That node
+// reserves the storage of all the rvalues of the expression before the
+// expression runs, so that no frame of a call in the expression ends below
+// the storage of a later rvalue: the node has a fixed `_offset` in the area.
 private final class Materialise : Node {
-    private imported!"snakebite.framestack".FrameStack* _frames;
+    private ubyte** _area;
     private imported!"snakebite.backends.interpreter.temporarylifetime"
         .TemporaryLifetime* _temporaries;
     private Node _value;
     private size_t _size;
     private uint _alignment;
+    private size_t _offset;
     private bool _scoped;
     public this(E)(E ev, Node value, in TypeFacts facts) {
-        _frames = &ev._frames; _temporaries = &ev._temporaries;
+        _area = &ev._rvalueArea; _temporaries = &ev._temporaries;
         _value = value; _size = facts.size; _alignment = facts.alignment;
     }
     public override ubyte* executeAddr(ubyte* frame) {
         auto place = _scoped
             ? _temporaries.reserveValue(_size, _alignment)
-            : _frames.reserve(_size, _alignment);
+            : *_area + _offset;
         _value.executeInto(frame, place);
         return place;
     }
 }
 
 // A statement or a condition whose full expression holds a `Materialise`
-// node: the frame stack goes back to its height before the expression
-// when the expression ends.
+// node: it reserves the storage of the rvalues of the expression when the
+// expression starts, and the frame stack goes back to its height before the
+// expression when the expression ends. The area of the enclosing expression
+// of a caller comes back too, since a callee runs its own expressions
+// inside the expression of the caller.
 private final class FrameRelease : BoolNode {
     private imported!"snakebite.framestack".FrameStack* _frames;
+    private ubyte** _area;
     private Node _inner;
-    public this(imported!"snakebite.framestack".FrameStack* frames, Node inner) {
-        _frames = frames; _inner = inner;
+    private size_t _size;
+    private uint _alignment = 1;
+    public this(E)(E ev, Node inner, Materialise[] rvalues) {
+        _frames = &ev._frames; _area = &ev._rvalueArea; _inner = inner;
+        foreach (one; rvalues) {
+            _size = (_size + one._alignment - 1) / one._alignment
+                * one._alignment;
+            one._offset = _size;
+            _size += one._size;
+            if (one._alignment > _alignment)
+                _alignment = one._alignment;
+        }
     }
     public override TreeFlow executeStmt(ubyte* frame) {
-        auto storage = FrameGuard(_frames);
+        auto storage = Area(_frames, _area, _size, _alignment);
         return _inner.executeStmt(frame);
     }
     public override bool executeBool(ubyte* frame) {
-        auto storage = FrameGuard(_frames);
+        auto storage = Area(_frames, _area, _size, _alignment);
         return _inner.executeBool(frame);
+    }
+}
+
+// The storage of the rvalues of one full expression, which ends with it.
+private struct Area {
+    private imported!"snakebite.framestack".FrameStack* _frames;
+    private ubyte** _area;
+    private ubyte* _outer;
+    private imported!"snakebite.framestack".FrameStack.Mark _mark;
+
+    @disable this();
+    @disable this(this);
+
+    public this(
+        imported!"snakebite.framestack".FrameStack* frames, ubyte** area,
+        in size_t size, in uint alignment,
+    ) {
+        _frames = frames; _area = area; _outer = *area; _mark = frames.mark;
+        *area = frames.reserve(size, alignment);
+    }
+
+    ~this() {
+        *_area = _outer;
+        _frames.release(_mark);
     }
 }
 
@@ -4762,11 +4811,11 @@ private Node buildLogicalOperand(E)(
     E ev, Expression operand, scope Node delegate() build,
 ) {
     enum where = FullExpressionScope.Position.logicalOperand;
-    auto built = buildRegion(ev, true, build);
+    auto built = buildRegion(ev, Region.Nesting.nested, build);
     if (built.node is null)
         return null;
     if (readsAfterEnd(built, where, operand))
-        return buildTruthAfterEnd(ev, operand, where, true);
+        return buildTruthAfterEnd(ev, operand, where, Region.Nesting.nested);
     if (built.scoped)
         return new Scoped!E(
             ev, built.node, operand, where, positionOf(ev, operand));
@@ -4779,10 +4828,10 @@ private Node buildLogicalOperand(E)(
 // statement does not wrap it.
 private Node buildTruthAfterEnd(E)(
     E ev, Expression expression, in FullExpressionScope.Position where,
-    in bool nested,
+    in Region.Nesting nesting,
 ) {
     auto lvalue = FullExpressionScope.lvalueOf(expression);
-    auto built = buildRegion(ev, nested, () => buildAddress(ev, lvalue));
+    auto built = buildRegion(ev, nesting, () => buildAddress(ev, lvalue));
     if (built.node is null || !built.scoped)
         return null;
     return new ScopedTruth!E(new Scoped!E(ev, built.node, expression, where,
@@ -5871,10 +5920,12 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
     // A condition is a full expression of its own on each evaluation.
     Node condition(Expression expression) {
         enum where = FullExpressionScope.Position.condition;
-        auto built = buildRegion(ev, false, () => buildTruth(ev, expression));
+        auto built = buildRegion(
+            ev, Region.Nesting.outermost, () => buildTruth(ev, expression));
         auto node = built.node is null ? null
             : readsAfterEnd(built, where, expression)
-                ? buildTruthAfterEnd(ev, expression, where, false)
+                ? buildTruthAfterEnd(
+                    ev, expression, where, Region.Nesting.outermost)
                 : endingAt(ev, built, expression, where);
         return node is null ? new GenericCondition!E(ev, expression) : node;
     }
@@ -5885,7 +5936,7 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
         Expression expression, in FullExpressionScope.Position where,
         scope Node delegate() build,
     ) {
-        auto built = buildRegion(ev, false, build);
+        auto built = buildRegion(ev, Region.Nesting.outermost, build);
         return built.node is null ? null : endingAt(ev, built, expression, where);
     }
 
@@ -6071,7 +6122,7 @@ private Node buildReturn(E)(E ev, imported!"dmd.statement".ReturnStatement retur
         return new Jump!(TreeFlow.return_);
     enum where = FullExpressionScope.Position.returnOperand;
     Node value;
-    auto built = buildRegion(ev, false,
+    auto built = buildRegion(ev, Region.Nesting.outermost,
         () => buildReturnOperand(ev, returned, value));
     if (built.node is null)
         return generic();
@@ -6156,7 +6207,7 @@ private Node buildReturnOperand(E)(
 // the destructors of its temporaries ran (`readsLvalueAfterEnd`).
 private Node buildReturnAfterEnd(E)(E ev, Expression operand) {
     enum where = FullExpressionScope.Position.returnOperand;
-    auto built = buildRegion(ev, false,
+    auto built = buildRegion(ev, Region.Nesting.outermost,
         () => buildAddress(ev, FullExpressionScope.lvalueOf(operand)));
     if (built.node is null || !built.scoped)
         return null;

@@ -616,6 +616,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // bump-allocated on call and popped on return. Frames never move;
     // overflow throws loudly.
     package FrameStack _frames;
+    // The storage of the rvalues of the full expression that this thread
+    // runs (`FrameRelease`).
+    package ubyte* _rvalueArea;
     private StackPieces _stack;
     package NativeData* _nativeData;
     // This thread's reads of the shared tables, counted.
