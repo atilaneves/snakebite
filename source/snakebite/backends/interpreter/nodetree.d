@@ -198,10 +198,28 @@ package enum CalleeResult : ubyte { value, aggregate, reference }
 // What a call node needs to know about its callee, decided once per
 // function.
 package struct TreeCallee {
+    import snakebite.backends.calls: CallSelection;
+    import snakebite.backends.layout: FrameLayout;
+    import snakebite.ffi.plan: CallPlan;
+
     package FuncDeclaration function_;
-    package imported!"snakebite.backends.calls".CallSelection.Decision decision;
-    package const(imported!"snakebite.backends.layout".FrameLayout)* layout;
+    package CallSelection.Decision decision;
+    package const(FrameLayout)* layout;
     package TreeRoot* root;
+    // The slots that a call fills in the frame, in the order that it fills
+    // them, and the bytes that it reserves for the frame. They are the
+    // parameters of the layout, and more for a variadic callee: the cursor
+    // of the extra arguments and the `TypeInfo` tuple of a guest callee; the
+    // tuple, the parameters and each extra argument of one call site for a
+    // host callee, after the frame of its layout.
+    package const(FrameLayout.Parameter)[] slots;
+    // How many of the slots are declared parameters, which come first. The
+    // call site of an indirect call agrees on it with the callee.
+    package size_t declared;
+    package size_t frameSize;
+    // The plan of a native callee, made for one call site when the callee is
+    // variadic. Null when the call site makes it.
+    package const(CallPlan)* plan;
     package TypeFacts returnFacts;
     package CalleeResult result;
     // The bytes in front of the frame base, for its fault slot
@@ -535,7 +553,8 @@ private alias FailBounds = void delegate(
     TreeRoot*, ubyte*, in BoundsCheck, in Loc, scope const(void*)[],
 );
 
-private final class IndexDynamic(A, I) : Node {
+// `baseFirst` reads the array before the index (`readsIndexAfterBase`).
+private final class IndexDynamic(A, I, bool baseFirst = false) : Node {
     private FailBounds _fail;
     private TreeRoot* _root;
     private IndexExp _expression;
@@ -548,8 +567,13 @@ private final class IndexDynamic(A, I) : Node {
         _index = index; _stride = stride;
     }
     public override ubyte* executeAddr(ubyte* frame) {
-        const index = cast(size_t) _index.value(frame);
-        auto array = _array.address(frame);
+        static if (baseFirst) {
+            auto array = _array.address(frame);
+            const index = cast(size_t) _index.value(frame);
+        } else {
+            const index = cast(size_t) _index.value(frame);
+            auto array = _array.address(frame);
+        }
         const length = *cast(size_t*) array;
         if (index >= length)
             fail(frame, index, length);
@@ -563,7 +587,7 @@ private final class IndexDynamic(A, I) : Node {
     }
 }
 
-private final class IndexStatic(A, I) : Node {
+private final class IndexStatic(A, I, bool baseFirst = false) : Node {
     private FailBounds _fail;
     private TreeRoot* _root;
     private IndexExp _expression;
@@ -577,10 +601,18 @@ private final class IndexStatic(A, I) : Node {
         _index = index; _stride = stride; _length = length;
     }
     public override ubyte* executeAddr(ubyte* frame) {
-        const index = cast(size_t) _index.value(frame);
-        if (index >= _length)
-            fail(frame, index);
-        return _array.address(frame) + index * _stride;
+        static if (baseFirst) {
+            auto array = _array.address(frame);
+            const index = cast(size_t) _index.value(frame);
+            if (index >= _length)
+                fail(frame, index);
+            return array + index * _stride;
+        } else {
+            const index = cast(size_t) _index.value(frame);
+            if (index >= _length)
+                fail(frame, index);
+            return _array.address(frame) + index * _stride;
+        }
     }
     pragma(inline, false)
     private void fail(ubyte* frame, size_t index) {
@@ -2289,6 +2321,51 @@ private final class FrameDelegate : SliceNode {
     }
 }
 
+// The address at `start`, then for each offset the word loaded at the address
+// plus that offset: the `this` of a function, read through its slot and the
+// pair of a function with two contexts.
+private final class LoadChain : Node {
+    private Node _start;
+    private const(size_t)[] _loads;
+    public this(Node start, const(size_t)[] loads) {
+        _start = start; _loads = loads;
+    }
+    public override ubyte* executeAddr(ubyte* frame) {
+        auto address = _start.executeAddr(frame);
+        foreach (offset; _loads)
+            address = *cast(ubyte**) (address + offset);
+        return address;
+    }
+}
+
+// The extra arguments of a call of a guest variadic callee, in storage laid
+// out as its cursor reads them (`VariadicLayout`). The call evaluates this
+// node into the callee's frame, so the storage sits on the frame stack above
+// that frame and the call gives both back together. The value is the address
+// of the storage, which the cursor of the callee holds.
+private final class VariadicExtras : LongNode {
+    import snakebite.backends.interpreter.walker: VariadicCallPlan;
+    import snakebite.framestack: FrameStack;
+
+    private FrameStack* _frames;
+    private const(VariadicCallPlan)* _plan;
+    private Operand[] _args;
+    private Argument[] _modes;
+    public this(E)(E ev, SiteArguments extras, typeof(_plan) plan) {
+        _frames = &ev._frames; _plan = plan;
+        _args = argumentOperands(extras.nodes, extras.modes);
+        _modes = extras.modes;
+    }
+    public override long executeLong(ubyte* frame) {
+        const layout = &_plan.layout;
+        auto storage = _frames.reserve(layout.size, layout.alignment);
+        layout.initialize(storage);
+        foreach (i, ref arg; _args)
+            storeArgument(arg, _modes[i], frame, storage + layout.offsets[i]);
+        return cast(long) storage;
+    }
+}
+
 // --- statements -------------------------------------------------------
 
 private final class ExpressionStatement : Node {
@@ -2655,9 +2732,35 @@ private enum Argument : ubyte {
 // The arguments of a call site: the node of each one, how it is passed, and
 // the bytes that it fills in its parameter slot.
 private struct SiteArguments {
+    import dmd.astenums: StorageClass;
+
     public Node[] nodes;
     public Argument[] modes;
     public size_t[] sizes;
+    // How many of the arguments fill declared parameters, which come first.
+    public size_t declared;
+
+    public void append(Node node, Argument mode, size_t size) {
+        nodes ~= node;
+        modes ~= mode;
+        sizes ~= size;
+    }
+
+    // Appends the node of `argument` for a parameter of `parameterType` with
+    // `storageClass`; false when the tree does not build it.
+    public bool build(E)(
+        E ev, Type parameterType, StorageClass storageClass,
+        Expression argument,
+    ) {
+        Node node;
+        Argument mode;
+        size_t size;
+        if (!buildArgument(ev, parameterType, storageClass, argument, node,
+                mode, size))
+            return false;
+        append(node, mode, size);
+        return true;
+    }
 }
 
 // Gives the frame stack back to the position it had when this was made.
@@ -2717,10 +2820,10 @@ private struct DirectWordCall {
         Load[3] loads;
         const target = directWordCallTarget(
             plan, _order, loads, resultWidth, count);
-        if (target is null || count != layout.parameters.length
+        if (target is null || count != callee.slots.length
                 || callee.returnFacts.size != resultWidth)
             return;
-        foreach (i, parameter; layout.parameters) {
+        foreach (i, parameter; callee.slots) {
             const width = loadWidth(loads[i]);
             if (parameter.isRef || parameter.facts.size != width)
                 return;
@@ -2874,11 +2977,9 @@ private mixin template CalleeEntry(E) {
 
     // Whether `callee` takes the arguments of this site and gives its result.
     private bool takesArguments(in TreeCallee* callee) const {
-        auto layout = callee.layout;
-        if (layout.parameters.length != _modes.length
-                || callee.result != _result)
+        if (callee.slots.length != _modes.length || callee.result != _result)
             return false;
-        foreach (i, parameter; layout.parameters)
+        foreach (i, parameter; callee.slots)
             if (parameter.isRef != (_modes[i] == Argument.address)
                     || parameter.facts.size != _sizes[i])
                 return false;
@@ -2889,9 +2990,10 @@ private mixin template CalleeEntry(E) {
         import snakebite.backends.calls: CallSelection;
 
         const decision = CallSelection.atCallSite(callee.decision, _site);
-        return Selection(callee, decision.route,
-            decision.route == CallSelection.Route.native
-                ? _ev._plans.of(callee.function_) : null);
+        if (decision.route != CallSelection.Route.native)
+            return Selection(callee, decision.route, null);
+        return Selection(callee, decision.route, callee.plan !is null
+            ? callee.plan : _ev._plans.of(callee.function_));
     }
 
     // Reserves the frame of `callee`, which the caller's guard gives back,
@@ -2903,13 +3005,14 @@ private mixin template CalleeEntry(E) {
     ) {
         auto ev = _ev;
         const layout = callee.layout;
+        const size = callee.frameSize;
         // A frame of small alignment has the same lead whatever it is.
         size_t lead = fastFrameLead;
         auto base = callee.reservesFast
-            ? ev._frames.reserveFast(layout.size + lead, fastFrameLead) : null;
+            ? ev._frames.reserveFast(size + lead, fastFrameLead) : null;
         if (base is null) {
             lead = callee.lead;
-            base = ev._frames.reserve(layout.size + lead, cast(uint) lead);
+            base = ev._frames.reserve(size + lead, cast(uint) lead);
         }
         base += lead;
         *faultSlotOf(base) = null;
@@ -2917,7 +3020,7 @@ private mixin template CalleeEntry(E) {
             *cast(size_t*) (base + layout.hiddenThis.parameter.offset)
                 = hidden;
         // `takesArguments` made the three lengths equal.
-        auto parameters = layout.parameters.ptr;
+        auto parameters = callee.slots.ptr;
         auto modes = _modes.ptr;
         foreach (i, ref arg; _args)
             storeArgument(arg, modes[i], frame, base + parameters[i].offset);
@@ -3898,8 +4001,9 @@ private void examine(E)(E ev, TreeCallee* callee) {
             return;
         callee.shape.kind = CalleeShape.Kind.soleReturn;
         static if (!E.nullCheckedEvaluator) {
+            // The access of a getter runs no arguments.
             auto field = receiverField(returned.exp);
-            if (field is null)
+            if (field is null || callee.slots.length != 0)
                 return;
             const scalar = scalarOf(ev, field.type);
             const result = scalarOf(ev, function_.type.nextOf);
@@ -3921,8 +4025,7 @@ private void examine(E)(E ev, TreeCallee* callee) {
                 || function_.type.nextOf.toBasetype.ty != TY.Tvoid
                 || function_.parameters is null
                 || function_.parameters.length != 1
-                || callee.layout.parameters.length != 1
-                || callee.layout.parameters[0].isRef)
+                || callee.slots.length != 1 || callee.slots[0].isRef)
             return;
         auto assignment = effect.exp.isAssignExp;
         auto field = receiverField(assignment.e1);
@@ -3935,7 +4038,7 @@ private void examine(E)(E ev, TreeCallee* callee) {
         const given = scalarOf(ev, parameter.type);
         if (scalar.kind == Scalar.Kind.none || scalar.kind != given.kind
                 || scalar.facts.size != given.facts.size
-                || scalar.facts.size != callee.layout.parameters[0].facts.size)
+                || scalar.facts.size != callee.slots[0].facts.size)
             return;
         callee.shape = CalleeShape(CalleeShape.Kind.setter, field.offset,
             scalar.facts.size, scalar.facts.isUnsigned,
@@ -3971,6 +4074,7 @@ private final class IndirectCall(E, CalleeResult result) : Node {
 
     private Node _target;
     private bool _viaDelegate;
+    private size_t _declared;
     // The function that this site last called, and its callee when the tree
     // runs it.
     private FuncDeclaration _function;
@@ -3983,6 +4087,7 @@ private final class IndirectCall(E, CalleeResult result) : Node {
             bool resultUnsigned) {
         _ev = ev; _site = site; _target = target; _viaDelegate = viaDelegate;
         takeArguments(arguments);
+        _declared = arguments.declared;
         _resultSize = facts.size;
         _resultUnsigned = resultUnsigned;
         static if (result == CalleeResult.aggregate)
@@ -4037,7 +4142,10 @@ private final class IndirectCall(E, CalleeResult result) : Node {
         auto definition = _ev._callSelection.definitionOf(
             function_, (declaration) => _ev._program.linkedFunctionOf(declaration));
         auto callee = _ev.treeCalleeOf(definition);
-        if (callee is null || !takesArguments(callee))
+        // The slots of a variadic shape are not declared parameters, so a
+        // callee and a site agree on which slots are declared.
+        if (callee is null || callee.declared != _declared
+                || !takesArguments(callee))
             return Selection.init;
         return selectionOf(callee);
     }
@@ -4493,14 +4601,16 @@ private Node buildAddress(E)(E ev, Expression expression) {
 // The address of the rvalue that `value` writes, for the full expression
 // that the builder builds.
 private Node materialise(E)(E ev, Node value, Type type) {
+    return value is null ? null : materialiseFacts(ev, value, ev.factsOf(type));
+}
+
+private Node materialiseFacts(E)(E ev, Node value, in TypeFacts facts) {
     import snakebite.internalfailure: internalFailure;
 
-    if (value is null)
-        return null;
     auto region = ev._treeRoot._region;
     if (region is null)
         internalFailure("an rvalue needs an address outside a full expression");
-    auto node = new Materialise(ev, value, ev.factsOf(type));
+    auto node = new Materialise(ev, value, facts);
     region.materialised ~= node;
     return node;
 }
@@ -4516,6 +4626,7 @@ private bool returnsReference(CallExp call) {
 
 private Node buildIndexAddress(E)(E ev, IndexExp indexed) {
     import dmd.astenums: TY;
+    import snakebite.frontend.storage: readsIndexAfterBase;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: nextOf, toBasetype;
 
@@ -4540,18 +4651,21 @@ private Node buildIndexAddress(E)(E ev, IndexExp indexed) {
             auto array = buildAddress(ev, indexed.e1);
             if (array is null)
                 return null;
-            static Node make(A, I)(
-                A array, I position, FailBounds fail, TreeRoot* root,
-                IndexExp indexed, size_t stride, size_t length,
-            ) {
-                return new IndexStatic!(A, I)(
-                    fail, root, indexed, array, position, stride, length);
-            }
-            return fuse!(make, long, addressKinds, staticIndexKinds)(
+            const length = cast(size_t) indexed.e1.type.toBasetype
+                .isTypeSArray.dim.toInteger;
+            // An array that is read first has calls or effects, so its
+            // address is a node.
+            if (readsIndexAfterBase(indexed))
+                return fuse!(MakeIndex!(IndexStatic, true).make, long,
+                    [Kind.childAddress], staticIndexKinds)(
+                    Operand.throughAddress(array), operandOf(position),
+                    &ev.failTreeBounds, ev._treeRoot, indexed, element.size,
+                    length);
+            return fuse!(MakeIndex!(IndexStatic, false).make, long,
+                addressKinds, staticIndexKinds)(
                 addressOperandOf(array), operandOf(position),
                 &ev.failTreeBounds, ev._treeRoot, indexed, element.size,
-                cast(size_t) indexed.e1.type.toBasetype.isTypeSArray
-                    .dim.toInteger);
+                length);
         }
         case Tpointer: {
             static if (E.nullCheckedEvaluator)
@@ -4567,16 +4681,28 @@ private Node buildIndexAddress(E)(E ev, IndexExp indexed) {
     }
 }
 
+// The factory of an index node for `fuse`.
+private template MakeIndex(alias Index, bool baseFirst) {
+    public Node make(A, I, Args...)(A array, I index, Args args) {
+        return new Index!(A, I, baseFirst)(args[0], args[1], args[2], array,
+            index, args[3 .. $]);
+    }
+}
+
 private Node indexOfArray(E)(E ev, IndexExp indexed, Node array,
         Node position, size_t stride) {
-    static Node make(A, I)(
-        A array, I index, FailBounds fail, TreeRoot* root, IndexExp indexed,
-        size_t stride,
-    ) {
-        return new IndexDynamic!(A, I)(
-            fail, root, indexed, array, index, stride);
-    }
-    return fuse!(make, long, addressKinds, indexKinds)(
+    import snakebite.frontend.storage: readsIndexAfterBase;
+
+    // An array that is read first has calls or effects, so its address is
+    // a node.
+    if (readsIndexAfterBase(indexed))
+        return fuse!(MakeIndex!(IndexDynamic, true).make, long,
+            [Kind.childAddress], indexKinds)(
+            Operand.throughAddress(array), operandOf(position),
+            &ev.failTreeBounds,
+            ev._treeRoot, indexed, stride);
+    return fuse!(MakeIndex!(IndexDynamic, false).make, long, addressKinds,
+        indexKinds)(
         addressOperandOf(array), operandOf(position), &ev.failTreeBounds,
         ev._treeRoot, indexed, stride);
 }
@@ -4681,11 +4807,12 @@ private Node buildCall(E)(E ev, CallExp call) {
             && result.kind == Scalar.Kind.none)
         return null;
 
+    // The receiver of a member function, which is its hidden argument.
     Node receiver;
     bool receiverIsAddress, virtual;
     if (function_.isThis !is null) {
         auto found = receiverOf(call, function_);
-        switch (found.kind) with (CallReceiver.Kind) {
+        final switch (found.kind) with (CallReceiver.Kind) {
             case classValue:
                 receiver = buildValue(ev, found.expression);
                 virtual = call.readsVtable(function_);
@@ -4694,37 +4821,58 @@ private Node buildCall(E)(E ev, CallExp call) {
                 receiver = buildAddress(ev, found.expression);
                 receiverIsAddress = true;
                 break;
-            default:
-                return null;
+            case implicitThis:
+                receiver = buildThisValue(ev, ev._function.vthis);
+                receiverIsAddress = true;
+                break;
+            case enclosing:
+                assert(0, "a member function has a receiver");
         }
         if (receiver is null)
             return null;
     }
 
+    // A virtual call meets its callee when it runs.
+    TreeCallee* callee;
+    if (!virtual) {
+        callee = ev.treeCalleeAt(function_, call, call.arguments);
+        if (callee is null)
+            return null;
+        // The hidden argument of a nested function is the context of the
+        // function that it is nested in.
+        if (function_.isThis is null
+                && callee.layout.hiddenThis.variable !is null) {
+            receiver = buildCalleeContext(ev, call, function_);
+            receiverIsAddress = true;
+            if (receiver is null)
+                return null;
+        }
+    }
     SiteArguments arguments;
-    if (!buildArguments(ev, type, call.arguments, arguments))
+    // A virtual call meets only guest callees (`Dispatch.matches`).
+    if (!buildArguments(ev, type, call.arguments, arguments,
+            callee is null ? Extras.packed : extrasFor(callee)))
         return null;
 
     if (isConstructor)
-        return bound(ev, function_, new ConstructorCall!E(ev, call, function_,
+        return bound(callee, new ConstructorCall!E(ev, call, function_,
             receiver, receiverIsAddress, arguments));
     if (type.isRef) {
         auto node = new ReferenceCall!E(ev, call, function_, receiver,
             receiverIsAddress, virtual, arguments);
-        return virtual ? node : bound(ev, function_, node);
+        return virtual ? node : bound(callee, node);
     }
     if (resultIsAggregate) {
         auto node = new AggregateCall!E(ev, call, function_, receiver,
             receiverIsAddress, virtual, arguments, ev.factsOf(call.type));
-        return virtual ? node : bound(ev, function_, node);
+        return virtual ? node : bound(callee, node);
     }
     auto node = new Call!E(ev, call, function_, receiver, receiverIsAddress,
         virtual, arguments,
         isVoid ? 0 : resultIsSlice ? SliceValue.sizeof : result.facts.size,
         result.facts.isUnsigned);
     if (!virtual) {
-        auto callee = ev.treeCalleeOf(function_);
-        if (callee is null || !node.matches(callee))
+        if (!node.matches(callee))
             return null;
         node.bind(callee);
         if (auto accessor = node.accessor)
@@ -4735,20 +4883,86 @@ private Node buildCall(E)(E ev, CallExp call) {
     return node;
 }
 
-// `node`, a call of `function_` that is not virtual, bound to its callee;
-// null when the tree does not run the callee at this site.
-private Node bound(E, N)(E ev, FuncDeclaration function_, N node) {
-    auto callee = ev.treeCalleeOf(function_);
-    if (callee is null || !node.matches(callee))
+// `node`, a call that is not virtual, bound to `callee`; null when the tree
+// does not run the callee at this site.
+private Node bound(N)(TreeCallee* callee, N node) {
+    if (!node.matches(callee))
         return null;
     node.bind(callee);
     return node;
 }
 
+// The `this` of the function whose hidden `this` is `variable`, as the
+// evaluator reads it (`thisValueOf`): the address of a struct or the class
+// reference, which the node yields as an address. A function with two
+// contexts reaches it through its pair.
+private Node buildThisValue(E)(E ev, VarDeclaration variable) {
+    import dmd.astenums: TY;
+    import dmd.typesem: toBasetype;
+    import snakebite.backends.closureplan: ClosurePlan;
+    import snakebite.frontend.dmd.delegates: outerFunctionOf;
+
+    auto slot = buildVariableAddress(ev, variable);
+    if (slot is null)
+        return null;
+    auto owner = outerFunctionOf(variable);
+    const hops = owner is null ? null : ClosurePlan.receiverHops(owner);
+    if (hops.length == 0)
+        return variable.type.toBasetype.ty == TY.Tclass
+            ? new LoadChain(slot, [0]) : slot;
+    size_t[] loads = [0];
+    foreach (hop; hops)
+        loads ~= hop.offset;
+    return new LoadChain(slot, loads);
+}
+
+// The context that a call of the nested function `callee` hands over, as
+// the evaluator finds it (`contextValueOf`), which the node yields as an
+// address. Null when the tree does not reach it.
+private Node buildCalleeContext(E)(E ev, CallExp call, FuncDeclaration callee) {
+    import snakebite.backends.dualcontext: ContextSource;
+    import snakebite.internalfailure: internalFailure;
+
+    const source = *ev.calleeContextPlanOf(call, callee);
+    final switch (source.kind) with (ContextSource.Kind) {
+        case none:
+            return new GlobalAddress(null);
+        case frame: {
+            auto owner = cast() source.function_;
+            // A function that runs as a tree has no closure (`runNodeTree`),
+            // so its own context is its frame.
+            if (owner is ev._function)
+                return new LocalAddress(0);
+            const hops = ev.staticChainTo(owner);
+            if (hops is null)
+                internalFailure("a direct call's enclosing function is on "
+                    ~ "the static chain");
+            return new OuterAddress(OuterVariable(true, hops, 0, false));
+        }
+        case receiver:
+            assert(0, "a nested callee's context is the frame of a function "
+                ~ "(`nestedContextOwnerOf`)");
+        case overrider: {
+            // The word that holds the receiver in the view of the overridden
+            // function's class lives as long as the full expression of the
+            // call, and the context is the address that finds it at
+            // `slotOffset`.
+            auto receiver = buildThisValue(ev, ev._function.vthis);
+            if (receiver is null)
+                return null;
+            auto word = materialiseFacts(ev,
+                new FieldStore!size_t(0, new AddressValue(
+                    fieldOfAddress(receiver, source.receiverAdjustment))),
+                TypeFacts.pointer);
+            return fieldOfAddress(word, -source.slotOffset);
+        }
+    }
+}
+
 // A call through a function pointer or a delegate: null when the value of
-// the callee is outside what the tree reads, or the call is variadic.
+// the callee is outside what the tree reads.
 private Node buildIndirectCall(E)(E ev, CallExp call) {
-    import dmd.astenums: TY, VarArg;
+    import dmd.astenums: TY;
     import dmd.typesem: nextOf, toBasetype;
     import snakebite.backends.calls: isIndirectDelegateCall;
 
@@ -4767,8 +4981,7 @@ private Node buildIndirectCall(E)(E ev, CallExp call) {
         type = dereference.type.isTypeFunction;
         target = buildValue(ev, dereference.e1);
     }
-    if (target is null || type is null
-            || type.parameterList.varargs != VarArg.none)
+    if (target is null || type is null)
         return null;
 
     if (type.isRef) {
@@ -4801,72 +5014,146 @@ private Node buildIndirectCall(E)(E ev, CallExp call) {
         viaDelegate, arguments, facts, result.facts.isUnsigned);
 }
 
-// The nodes of the arguments of a call of `type`, one for each parameter,
-// and how each one is passed. False when one is outside the supported kinds.
+// How a variadic call passes its extra arguments: in storage whose address
+// is the cursor of a guest callee (`VariadicExtras`), or each in a slot of
+// its own for a callee that host code runs.
+private enum Extras : ubyte { packed, separate }
+
+// How a call of `callee` passes its extra arguments.
+private Extras extrasFor(in TreeCallee* callee) {
+    import snakebite.backends.calls: CallSelection;
+
+    return callee.decision.route == CallSelection.Route.guest
+        ? Extras.packed : Extras.separate;
+}
+
+// The nodes of the arguments of a call of `type`, in the order of the slots
+// that the callee takes them in (`TreeCallee.slots`), and how each one is
+// passed. False when one is outside the supported kinds.
 private bool buildArguments(E)(
     E ev, imported!"dmd.mtype".TypeFunction type,
     imported!"dmd.arraytypes".Expressions* arguments, out SiteArguments site,
+    in Extras extras = Extras.packed,
+) {
+    import dmd.astenums: VarArg;
+    import snakebite.ffi: CallAdapter;
+    import snakebite.internalfailure: internalFailure;
+
+    auto parameters = type.parameterList;
+    const variadic = parameters.varargs == VarArg.variadic;
+    // dmd gives a D variadic call the `TypeInfo` tuple of its extra
+    // arguments as its first argument.
+    const typesIndex = type.isDstyleVariadic ? 0 : size_t.max;
+    const firstDeclared = typesIndex == 0 ? 1 : 0;
+    const firstExtra = firstDeclared + parameters.length;
+    // A call of a K&R function type can pass more arguments than the type
+    // declares: the original call path runs it.
+    if (parameters.varargs == VarArg.KRvariadic)
+        return false;
+    if (variadic ? arguments.length < firstExtra
+            : arguments.length != parameters.length)
+        internalFailure("dmd checks the arity of a call");
+
+    if (variadic && extras == Extras.separate && typesIndex == 0) {
+        auto hidden = CallAdapter.Arguments.of(type, arguments).hiddenArgument;
+        auto tuple = buildValue(ev, hidden.expression);
+        if (tuple is null)
+            return false;
+        if (hidden.readsField)
+            site.append(new LoadSlice(
+                    new FieldOfPointer(tuple, hidden.fieldOffset)),
+                Argument.pair, hidden.fieldFacts.size);
+        else
+            site.append(tuple, Argument.i64, size_t.sizeof);
+    }
+    foreach (i; 0 .. parameters.length) {
+        auto parameter = parameters[i];
+        if (!site.build(ev, parameter.type, parameter.storageClass,
+                (*arguments)[firstDeclared + i]))
+            return false;
+    }
+    site.declared = parameters.length;
+    if (!variadic)
+        return true;
+
+    final switch (extras) with (Extras) {
+        case packed: {
+            SiteArguments packed;
+            foreach (extra; (*arguments)[firstExtra .. $])
+                if (!packed.build(ev, extra.type, 0, extra))
+                    return false;
+            site.append(new VariadicExtras(ev, packed,
+                    ev.variadicCallPlanOf(arguments, firstExtra)),
+                Argument.i64, size_t.sizeof);
+            if (typesIndex == 0) {
+                auto tuple = buildValue(ev, (*arguments)[typesIndex]);
+                if (tuple is null)
+                    return false;
+                site.append(tuple, Argument.i64, size_t.sizeof);
+            }
+            return true;
+        }
+        case separate:
+            foreach (extra; (*arguments)[firstExtra .. $])
+                if (!site.build(ev, extra.type, 0, extra))
+                    return false;
+            return true;
+    }
+}
+
+// The node of `argument` for a parameter of `parameterType` with
+// `storageClass`, and how it is passed. False when it is outside the
+// supported kinds.
+private bool buildArgument(E)(
+    E ev, Type parameterType, imported!"dmd.astenums".StorageClass storageClass,
+    Expression argument, out Node node, out Argument mode, out size_t size,
 ) {
     import dmd.astenums: STC;
 
-    auto parameters = type.parameterList;
-    if (arguments.length != parameters.length)
+    if ((storageClass & STC.lazy_) != 0)
         return false;
-    auto args = site.nodes = new Node[parameters.length];
-    auto modes = site.modes = new Argument[parameters.length];
-    auto sizes = site.sizes = new size_t[parameters.length];
-    foreach (i; 0 .. parameters.length) {
-        auto parameter = parameters[i];
-        auto argument = (*arguments)[i];
-        if ((parameter.storageClass & STC.lazy_) != 0)
+    if ((storageClass & (STC.ref_ | STC.out_)) != 0) {
+        mode = Argument.address;
+        size = size_t.sizeof;
+        node = buildAddress(ev, argument);
+    } else if (isSlice(parameterType)) {
+        if (!isSlice(argument.type))
             return false;
-        if ((parameter.storageClass & (STC.ref_ | STC.out_)) != 0) {
-            modes[i] = Argument.address;
-            sizes[i] = size_t.sizeof;
-            args[i] = buildAddress(ev, argument);
-        } else if (isSlice(parameter.type)) {
-            if (!isSlice(argument.type))
-                return false;
-            modes[i] = Argument.pair;
-            sizes[i] = SliceValue.sizeof;
-            args[i] = buildSlice(ev, argument);
-        } else if (isDelegate(parameter.type)) {
-            if (!isDelegate(argument.type))
-                return false;
-            modes[i] = Argument.pair;
-            sizes[i] = SliceValue.sizeof;
-            args[i] = buildDelegate(ev, argument);
-        } else if (isAggregate(parameter.type)) {
-            const size = ev.factsOf(parameter.type).size;
-            if (!isAggregate(argument.type)
-                    || ev.factsOf(argument.type).size != size)
-                return false;
-            modes[i] = Argument.aggregate;
-            sizes[i] = size;
-            args[i] = buildAggregate(ev, argument);
-        } else {
-            const declared = scalarOf(ev, parameter.type);
-            const given = scalarOf(ev, argument.type);
-            if (declared.kind == Scalar.Kind.none
-                    || given.kind != declared.kind
-                    || given.facts.size != declared.facts.size)
-                return false;
-            if (declared.kind == Scalar.Kind.floating)
-                modes[i] = declared.facts.size == 4 ? Argument.f32 : Argument.f64;
-            else switch (declared.facts.size) {
-                case 1: modes[i] = Argument.i8; break;
-                case 2: modes[i] = Argument.i16; break;
-                case 4: modes[i] = Argument.i32; break;
-                case 8: modes[i] = Argument.i64; break;
-                default: assert(0, "an integral scalar is 1, 2, 4 or 8 bytes");
-            }
-            sizes[i] = declared.facts.size;
-            args[i] = buildValue(ev, argument);
+        mode = Argument.pair;
+        size = SliceValue.sizeof;
+        node = buildSlice(ev, argument);
+    } else if (isDelegate(parameterType)) {
+        if (!isDelegate(argument.type))
+            return false;
+        mode = Argument.pair;
+        size = SliceValue.sizeof;
+        node = buildDelegate(ev, argument);
+    } else if (isAggregate(parameterType)) {
+        size = ev.factsOf(parameterType).size;
+        if (!isAggregate(argument.type) || ev.factsOf(argument.type).size != size)
+            return false;
+        mode = Argument.aggregate;
+        node = buildAggregate(ev, argument);
+    } else {
+        const declared = scalarOf(ev, parameterType);
+        const given = scalarOf(ev, argument.type);
+        if (declared.kind == Scalar.Kind.none
+                || given.kind != declared.kind
+                || given.facts.size != declared.facts.size)
+            return false;
+        if (declared.kind == Scalar.Kind.floating)
+            mode = declared.facts.size == 4 ? Argument.f32 : Argument.f64;
+        else switch (declared.facts.size) {
+            case 1: mode = Argument.i8; break;
+            case 2: mode = Argument.i16; break;
+            case 4: mode = Argument.i32; break;
+            case 8: mode = Argument.i64; break;
+            default: assert(0, "an integral scalar is 1, 2, 4 or 8 bytes");
         }
-        if (args[i] is null)
-            return false;
+        size = declared.facts.size;
+        node = buildValue(ev, argument);
     }
-    return true;
+    return node !is null;
 }
 
 package bool isDelegate(Type type) {
@@ -5418,19 +5705,22 @@ private Node buildVthisStep(E)(E ev, InitStep step) {
 
 // The constructor of `new`, called on the allocation.
 private Node buildConstructorCall(E)(E ev, NewExp expression, Node allocation) {
-    import dmd.astenums: VarArg;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
 
     auto constructor = ev._callSelection.definitionOf(
         expression.member,
         (declaration) => ev._program.linkedFunctionOf(declaration));
     auto type = typeFunctionOf(constructor);
-    if (expression.arguments is null || type.parameterList.varargs != VarArg.none)
+    if (expression.arguments is null)
+        return null;
+    auto callee = ev.treeCalleeAt(constructor, expression, expression.arguments);
+    if (callee is null)
         return null;
     SiteArguments arguments;
-    if (!buildArguments(ev, type, expression.arguments, arguments))
+    if (!buildArguments(ev, type, expression.arguments, arguments,
+            extrasFor(callee)))
         return null;
-    return bound(ev, constructor, new ConstructorCall!E(ev, null, constructor,
+    return bound(callee, new ConstructorCall!E(ev, null, constructor,
         allocation, /* receiverIsAddress */ false, arguments));
 }
 

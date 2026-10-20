@@ -1596,6 +1596,53 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A fixed function through a C-variadic pointer type with the same number
+// of slots. The extra argument of the call is the second parameter.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine does not implement C-style variadic functions"),
+)) {
+    @("callFixedFunctionThroughVariadicPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C) long second(int a, long b) { return b; }
+            alias Variadic = extern(C) long function(int, ...);
+            int main() {
+                auto pointer = cast(Variadic) &second;
+                return pointer(1, 7L) == 7 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A C-variadic function through a fixed pointer type with the same number
+// of slots. The second parameter is the first variadic argument.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine does not implement C-style variadic functions"),
+)) {
+    @("callVariadicFunctionThroughFixedPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.stdarg;
+            extern(C) long sum(int a, ...) {
+                va_list list;
+                va_start(list, a);
+                const b = va_arg!long(list);
+                va_end(list);
+                return a + b;
+            }
+            alias Fixed = extern(C) long function(int, long);
+            int main() {
+                auto pointer = cast(Fixed) &sum;
+                return pointer(4, 5L) == 9 ? 0 : 1;
+            }
+        });
+    }
+}
+
 // A function literal that needs no context, passed to a delegate
 // parameter and called through a delegate type with one more parameter.
 // The callee does not read its parameter.

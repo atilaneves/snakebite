@@ -507,7 +507,7 @@ private struct FinallyKey {
     Exit exit;
 }
 
-private struct VariadicCallPlan {
+package struct VariadicCallPlan {
     import snakebite.backends.variadic: VariadicLayout;
     import snakebite.nativelayout: TypeFacts;
 
@@ -1404,6 +1404,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     private TreeRoot*[FuncDeclaration] _trees;
     private TreeCallee*[FuncDeclaration] _treeCallees;
+    private TreeCallee*[CallSiteKey] _variadicHostCallees;
     package enum bool nullCheckedEvaluator = nullChecks;
 
     private TreeRoot* treeRootFor(
@@ -1451,29 +1452,81 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     private TreeCallee* makeTreeCallee(FuncDeclaration function_) {
-        import core.memory: pageSize;
-        import dmd.astenums: TY, VarArg;
-        import dmd.typesem: toBasetype;
+        import dmd.astenums: VarArg;
 
-        auto type = typeFunctionOf(function_);
-        if (type.parameterList.varargs != VarArg.none)
-            return null;
-        const decision = _callSelection.decisionOf(
-            function_,
-            (callee) => _program.isInterpreted(callee),
-            hasNativeSymbol(function_),
-            hasIndependentNativeSymbol(function_),
-        );
-        auto layout = callLayoutOf(function_);
-        const(ClosurePlan)* closurePlan;
+        const decision = decisionFor(function_);
+        const variadic = typeFunctionOf(function_).parameterList.varargs
+            == VarArg.variadic;
         final switch (decision.route) with (CallSelection.Route) {
             case guest:
-                if (function_.fbody is null)
-                    return null;
-                closurePlan = closurePlanOf(function_);
-                if (closurePlan.needsClosure)
+                if (function_.fbody is null
+                        || closurePlanOf(function_).needsClosure)
                     return null;
                 break;
+            case native, builtin:
+                // The slots and the plan of a variadic callee that host code
+                // runs depend on the extra arguments of each call site
+                // (`variadicHostCalleeAt`).
+                if (variadic)
+                    return null;
+                break;
+            case vaStart, vaCopy, alloca:
+                return null;
+        }
+        auto callee = newTreeCallee(function_, decision);
+        if (callee is null)
+            return null;
+        const layout = callee.layout;
+        callee.slots = layout.parameters;
+        callee.declared = layout.parameters.length;
+        if (variadic) {
+            // The cursor of the extra arguments, then the `TypeInfo` tuple of
+            // a D variadic callee, as the original call fills them.
+            callee.slots ~= FrameLayout.Parameter(
+                layout.variadicCursor, TypeFacts.pointer, false);
+            if (layout.variadicTypes != size_t.max)
+                callee.slots ~= FrameLayout.Parameter(
+                    layout.variadicTypes, TypeFacts.pointer, false);
+        }
+        reserveFrame(callee, layout.size, layout.alignment);
+        return callee;
+    }
+
+    // The callee of a call of `function_` that is not virtual at `site`.
+    package TreeCallee* treeCalleeAt(
+        FuncDeclaration function_, Expression site, Expressions* arguments,
+    ) {
+        import dmd.astenums: VarArg;
+
+        if (typeFunctionOf(function_).parameterList.varargs != VarArg.variadic
+                || decisionFor(function_).route == CallSelection.Route.guest)
+            return treeCalleeOf(function_);
+        return variadicHostCalleeAt(function_, site, arguments);
+    }
+
+    // A variadic callee that host code runs, for one call site: its plan and
+    // the slots of its arguments depend on the types of the extra arguments
+    // there. Null when the call node cannot place its frame itself.
+    package TreeCallee* variadicHostCalleeAt(
+        FuncDeclaration function_, Expression site, Expressions* arguments,
+    ) {
+        const key = CallSiteKey(
+            cast(const(void)*) site, cast(const(void)*) function_);
+        if (auto found = key in _variadicHostCallees)
+            return *found;
+        auto callee = makeVariadicHostCallee(function_, site, arguments);
+        _variadicHostCallees[key] = callee;
+        return callee;
+    }
+
+    private TreeCallee* makeVariadicHostCallee(
+        FuncDeclaration function_, Expression site, Expressions* arguments,
+    ) {
+        import std.algorithm: max;
+        import snakebite.nativelayout: alignUp;
+
+        const decision = decisionFor(function_);
+        final switch (decision.route) with (CallSelection.Route) {
             case native:
                 break;
             case builtin:
@@ -1482,7 +1535,63 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 break;
             case vaStart, vaCopy, alloca:
                 return null;
+            case guest:
+                assert(0, "a guest variadic callee is the same at every site");
         }
+        auto callee = newTreeCallee(function_, decision);
+        if (callee is null)
+            return null;
+        auto type = typeFunctionOf(function_);
+        auto preparation = CallAdapter.Arguments.of(type, arguments);
+        // A builtin runs as a native call at some sites.
+        if (CallSelection.atCallSite(decision, site).route
+                == CallSelection.Route.native)
+            callee.plan = cachedCallPlan(site, function_,
+                () => preparation.prepare(*_plans, function_));
+
+        // The slots in the order that the native callee takes them
+        // (`CallAdapter.Arguments.nativeOrder`): the `TypeInfo` tuple of a
+        // D variadic callee, the parameters, then the extra arguments, each
+        // of these after the frame of the layout.
+        const layout = callee.layout;
+        FrameLayout.Parameter[] slots;
+        size_t size = layout.size;
+        uint alignment = layout.alignment;
+        void append(in TypeFacts facts) {
+            const offset = alignUp(size, facts.alignment);
+            slots ~= FrameLayout.Parameter(offset, facts, false);
+            size = offset + facts.size;
+            alignment = max(alignment, facts.alignment);
+        }
+        if (type.isDstyleVariadic) {
+            const hidden = preparation.hiddenArgument;
+            append(hidden.readsField ? hidden.fieldFacts : hidden.facts);
+        }
+        slots ~= layout.parameters;
+        preparation.eachExtra((value) { append(value.facts); });
+        callee.slots = slots;
+        reserveFrame(callee, size, alignment);
+        return callee;
+    }
+
+    private CallSelection.Decision decisionFor(FuncDeclaration function_) {
+        return _callSelection.decisionOf(
+            function_,
+            (callee) => _program.isInterpreted(callee),
+            hasNativeSymbol(function_),
+            hasIndependentNativeSymbol(function_),
+        );
+    }
+
+    // The callee of `decision` with what its result is, or null when the call
+    // node does not take its result.
+    private TreeCallee* newTreeCallee(
+        FuncDeclaration function_, in CallSelection.Decision decision,
+    ) {
+        import dmd.astenums: TY;
+        import dmd.typesem: toBasetype;
+
+        auto type = typeFunctionOf(function_);
         auto returnType = function_.type.nextOf;
         // A function that returns `ref` writes an address, whatever the
         // type of its result. A constructor's result is its receiver.
@@ -1496,15 +1605,23 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto callee = new TreeCallee;
         callee.function_ = function_;
         callee.decision = decision;
-        callee.layout = layout;
+        callee.layout = callLayoutOf(function_);
         callee.returnFacts = result == CalleeResult.reference
             ? TypeFacts.pointer : factsOf(returnType);
         callee.result = result;
-        callee.lead = frameLead(layout.alignment);
-        callee.reservesFast = layout.alignment != 0
-            && (layout.alignment & (layout.alignment - 1)) == 0
-            && layout.alignment <= fastFrameLead;
         return callee;
+    }
+
+    // The frame of `size` bytes aligned to `alignment` that a call of
+    // `callee` reserves.
+    private static void reserveFrame(
+        TreeCallee* callee, in size_t size, in uint alignment,
+    ) {
+        callee.frameSize = size;
+        callee.lead = frameLead(alignment);
+        callee.reservesFast = alignment != 0
+            && (alignment & (alignment - 1)) == 0
+            && alignment <= fastFrameLead;
     }
 
     // Evaluates `expression` into `place` for a tree node whose value the
@@ -1522,7 +1639,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         TreeCallee* callee, const(CallPlan)* plan, ubyte* calleeFrame,
         void* place,
     ) {
-        auto arguments = argumentSlots(calleeFrame, callee.layout);
+        auto arguments = argumentSlots(
+            calleeFrame, callee.layout, callee.slots);
         const slots = arguments.values;
         if (plan is null)
             callee.decision.builtinEntry(place, slots.ptr, slots.length);
@@ -2338,13 +2456,22 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         ubyte* frameBase,
         const(FrameLayout)* layout,
     ) {
-        auto arguments = CallArguments(layout.parameters.length
+        return argumentSlots(frameBase, layout, layout.parameters);
+    }
+
+    // The hidden argument of `layout`, then `parameters`.
+    extern(D) private CallArguments argumentSlots(
+        ubyte* frameBase,
+        const(FrameLayout)* layout,
+        const(FrameLayout.Parameter)[] parameters,
+    ) {
+        auto arguments = CallArguments(parameters.length
             + (layout.hiddenThis.variable !is null));
         auto values = arguments.values; // The address slots must stay mutable.
         size_t count;
         if (layout.hiddenThis.variable !is null)
             values[count++] = frameBase + layout.hiddenThis.parameter.offset;
-        foreach (parameter; layout.parameters)
+        foreach (parameter; parameters)
             values[count++] = frameBase + parameter.offset;
         return arguments;
     }
@@ -7038,7 +7165,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // Where the extra arguments of one call site go, which depends on
     // their types alone: built once for the site, by the first evaluator
     // that reaches it or by the preparation of a callback.
-    private const(VariadicCallPlan)* variadicCallPlanOf(
+    package const(VariadicCallPlan)* variadicCallPlanOf(
         Expressions* arguments, in size_t firstExtra,
     ) {
         import snakebite.backends.variadic: VariadicLayout;
@@ -7407,7 +7534,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         }
     }
 
-    extern(D) private const(ContextSource)* calleeContextPlanOf(
+    extern(D) package const(ContextSource)* calleeContextPlanOf(
         CallExp expression,
         FuncDeclaration callee,
     ) {

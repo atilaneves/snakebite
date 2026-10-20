@@ -1844,6 +1844,23 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// As above, with the base's call a function that is not nested.
+static foreach (backend; Matrix!()) {
+    @("indexAfterBaseCallStoreStaticNotNested." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int moveI(int* pi) { *pi = 2; return 1; }
+            int main() {
+                int[3][2] arrs = [[10, 20, 30], [1, 2, 3]];
+                int i;
+                arrs[moveI(&i)][i] = 55;
+                return arrs[1] == [1, 2, 55] ? 0 : 1;
+            }
+        });
+    }
+}
+
 static foreach (backend; Matrix!()) {
     @("indexAfterBaseCallCompoundStatic." ~ backend.stringof)
     @Tags(backend.stringof)
