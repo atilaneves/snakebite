@@ -1200,6 +1200,41 @@ static foreach (backend; Matrix!(
     }
 }
 
+// `$` is the length of the array that is indexed or sliced: the array
+// expression runs once, and a `$` nested in the index is the length of its
+// own array.
+static foreach (backend; Matrix!()) {
+    @("dollar.arrayEvaluatedOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int[] a = [10, 20, 30, 40];
+                int calls;
+                ref int[] place() { ++calls; return a; }
+                int[] value() { ++calls; return a; }
+
+                const last = place()[$ - 1];
+                const tail = place()[1 .. $];
+                place()[$ - 2] = 7;
+                const valueLast = value()[$ - 1];
+                const valueTail = value()[$ - 2 .. $];
+                int[][] nested = [[1, 2], [3, 4, 5]];
+                const inner = nested[$ - 1][$ - 1];
+                const mixed = a[nested[1][$ - 3] + $ - 5];
+
+                if (last != 40 || tail != [20, 7, 40] || a[2] != 7)
+                    return 1;
+                if (valueLast != 40 || valueTail != [7, 40])
+                    return 2;
+                if (inner != 5 || mixed != 7)
+                    return 3;
+                return calls == 5 ? 0 : 4;
+            }
+        });
+    }
+}
+
 // An index is converted to `size_t`, so a negative one wraps to a huge
 // value - still a `RangeError`, never a read before the array.
 static foreach (backend; Matrix!(

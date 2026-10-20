@@ -550,7 +550,8 @@ import dmd.visitor: SemanticTimeTransitiveVisitor;
 extern(C++) private final class LocalsCollector:
     SemanticTimeTransitiveVisitor {
     import dmd.declaration: VarDeclaration;
-    import dmd.expression: ArrayLiteralExp, DeclarationExp, Expression, NewExp;
+    import dmd.expression: ArrayLiteralExp, DeclarationExp, Expression,
+        IndexExp, NewExp, SliceExp;
     import dmd.func: FuncDeclaration;
     import snakebite.backends.loweringvisitor: LoweredExpressionTypes;
     import dmd.statement:
@@ -694,6 +695,30 @@ extern(C++) private final class LocalsCollector:
         forEachRuntimeVariable(expression.declaration, (variable) {
             collectVariable(variable);
         });
+    }
+
+    // dmd declares the `$` of `a[... $ ...]` (`lengthVar`) with no
+    // statement. As in compiled D, it is a local that holds the length of
+    // `a`, evaluated once before the index or the bounds.
+    override void visit(IndexExp expression) {
+        super.visit(expression);
+        collectDollar(expression.lengthVar);
+    }
+
+    override void visit(SliceExp expression) {
+        super.visit(expression);
+        collectDollar(expression.lengthVar);
+    }
+
+    // A `$` whose length dmd knows at compile time (a static array) is a
+    // constant that dmd folds into every use, so it needs no slot.
+    private void collectDollar(VarDeclaration dollar) {
+        import dmd.astenums: STC;
+
+        if (dollar is null || (dollar.storage_class & STC.manifest) != 0
+                || _layout.hasSlot(dollar))
+            return;
+        collectVariable(dollar);
     }
 
     // Every node `LoweringVisitor` follows into its own `lowering` shares
