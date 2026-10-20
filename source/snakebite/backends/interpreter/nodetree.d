@@ -58,6 +58,8 @@ package struct TreeRoot {
     package bool lean;
     private uint _unbuilt;
     private uint _handingOver;
+    // The full expression that the builder is building.
+    private Region* _region;
 
     // A statement whose node is not built yet.
     package void expectBuild() {
@@ -127,6 +129,59 @@ package TreeRoot* rootOf(E)(
     return root;
 }
 
+// The nodes of the full expression that the builder is building whose work
+// depends on how the expression ends.
+private struct Region {
+    public Region* outer;
+    public Materialise[] materialised;
+    // The expression has temporaries that the evaluator's lifetime owns.
+    public bool scoped;
+}
+
+// A full expression that the builder built, and what it needs when it runs.
+private struct Built {
+    public Node node;
+    public bool scoped;
+    public bool materialises;
+}
+
+// Builds a full expression with `build`. The `Materialise` nodes of an
+// expression whose temporaries the evaluator's lifetime owns take their
+// storage from it. Those of a `nested` expression that the lifetime does not
+// own last as long as the enclosing expression.
+private Built buildRegion(E)(E ev, in bool nested, scope Node delegate() build) {
+    auto root = ev._treeRoot;
+    Region region;
+    region.outer = nested ? root._region : null;
+    auto saved = root._region;
+    root._region = &region;
+    scope (exit) root._region = saved;
+    auto node = build();
+    if (node is null)
+        return Built.init;
+    if (region.scoped)
+        foreach (one; region.materialised)
+            one._scoped = true;
+    else if (nested)
+        region.outer.materialised ~= region.materialised;
+    return Built(node, region.scoped, region.materialised.length != 0);
+}
+
+// The node of a statement or a condition whose full expression `built` is:
+// it gives back the storage of the expression's rvalues, or runs it in the
+// evaluator's lifetime, when the expression ends.
+private Node endingAt(E)(
+    E ev, in Built built, Expression expression,
+    in FullExpressionScope.Position where,
+) {
+    if (built.scoped)
+        return new Scoped!E(ev, cast() built.node, expression, where,
+            positionOf(ev, expression));
+    if (built.materialises)
+        return new FrameRelease(&ev._frames, cast() built.node);
+    return cast() built.node;
+}
+
 // What a call node needs to know about its callee, decided once per
 // function.
 package struct TreeCallee {
@@ -135,6 +190,9 @@ package struct TreeCallee {
     package const(imported!"snakebite.backends.layout".FrameLayout)* layout;
     package TreeRoot* root;
     package TypeFacts returnFacts;
+    // The result is a struct or a static array, which the callee writes at
+    // the place that the call gives it.
+    package bool returnsAggregate;
     // The bytes in front of the frame base, for its fault slot
     // (`frameLead`), and whether the reservation meets the contract of
     // `FrameStack.reserveFast` with `fastFrameLead` bytes in front.
@@ -1656,6 +1714,196 @@ private final class StructLiteral : Node {
     }
 }
 
+// A struct or static array rvalue whose address the parent needs: the
+// receiver of a call (`a.plus(h).minus(v)`), the struct of a field that is
+// read (`f().x`). Its storage lasts until the full expression ends. In a
+// full expression whose temporaries the evaluator's lifetime owns
+// (`Scoped`), the lifetime gives the storage, as it does to the evaluator's
+// own rvalues; otherwise the frame stack does, and the statement or the
+// condition that holds the node gives it back (`FrameRelease`).
+private final class Materialise : Node {
+    private imported!"snakebite.framestack".FrameStack* _frames;
+    private imported!"snakebite.backends.interpreter.temporarylifetime"
+        .TemporaryLifetime* _temporaries;
+    private Node _value;
+    private size_t _size;
+    private uint _alignment;
+    private bool _scoped;
+    public this(E)(E ev, Node value, in TypeFacts facts) {
+        _frames = &ev._frames; _temporaries = &ev._temporaries;
+        _value = value; _size = facts.size; _alignment = facts.alignment;
+    }
+    public override ubyte* executeAddr(ubyte* frame) {
+        auto place = _scoped
+            ? _temporaries.reserveValue(_size, _alignment)
+            : _frames.reserve(_size, _alignment);
+        _value.executeInto(frame, place);
+        return place;
+    }
+}
+
+// A statement or a condition whose full expression holds a `Materialise`
+// node: the frame stack goes back to its height before the expression
+// when the expression ends.
+private final class FrameRelease : BoolNode {
+    private imported!"snakebite.framestack".FrameStack* _frames;
+    private Node _inner;
+    public this(imported!"snakebite.framestack".FrameStack* frames, Node inner) {
+        _frames = frames; _inner = inner;
+    }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        auto storage = FrameGuard(_frames);
+        return _inner.executeStmt(frame);
+    }
+    public override bool executeBool(ubyte* frame) {
+        auto storage = FrameGuard(_frames);
+        return _inner.executeBool(frame);
+    }
+}
+
+// A full expression with temporaries that the evaluator's lifetime owns: a
+// temporary whose destructor runs when the expression ends, or one that a
+// variable that the expression declares keeps (`Initialization`). It runs
+// as the evaluator runs a full expression, with the destructors that dmd
+// gives, and as the first one of a call: an expression of the caller that
+// is still running does not own its temporaries.
+private final class Scoped(E) : BoolNode {
+    private E _ev;
+    private TreeRoot* _root;
+    private Node _inner;
+    private Expression _expression;
+    private FullExpressionScope.Position _where;
+    private Position _position;
+    public this(
+        E ev, Node inner, Expression expression,
+        in FullExpressionScope.Position where, Position position,
+    ) {
+        _ev = ev; _root = ev._treeRoot; _inner = inner;
+        _expression = expression; _where = where; _position = position;
+    }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        _position.note(frame);
+        TreeFlow flow;
+        run(frame, { flow = _inner.executeStmt(frame); });
+        return flow;
+    }
+    public override bool executeBool(ubyte* frame) {
+        bool result;
+        run(frame, { result = _inner.executeBool(frame); });
+        return result;
+    }
+    private void run(ubyte* frame, scope void delegate() evaluate) {
+        auto ev = _ev;
+        // A destructor runs through the evaluator, which reads the fields of
+        // the running call.
+        ev.handOver(_root, frame, {
+            ev._temporaries.withNestedCall(false, {
+                ev._temporaries.withExpression(_where, _expression, evaluate);
+            });
+        });
+    }
+}
+
+// The initialisation of a variable whose lifetime the evaluator's
+// temporaries decide: a temporary that dmd gives a destructor, or a
+// variable that can point into the temporaries of its initialiser, whose
+// storage it keeps until the call ends. `store` writes the value into the
+// variable.
+private final class Initialization(E) : Node {
+    private E _ev;
+    private VarDeclaration _variable;
+    private DeclarationExp _declaration;
+    private Node _address;
+    private Node _store;
+    private bool _retains;
+    public this(
+        E ev, VarDeclaration variable, DeclarationExp declaration,
+        Node address, Node store, bool retains,
+    ) {
+        _ev = ev; _variable = variable; _declaration = declaration;
+        _address = address; _store = store; _retains = retains;
+    }
+    public override void executeVoid(ubyte* frame) {
+        auto base = _address.executeAddr(frame);
+        auto temporaries = &_ev._temporaries;
+        if (_retains)
+            temporaries.initializeRetaining(_variable, _declaration, base, {
+                _store.executeVoid(frame);
+            });
+        else
+            temporaries.initialize(_variable, _declaration, base, {
+                _store.executeVoid(frame);
+            });
+    }
+}
+
+// `target = value` for a struct or a static array. A construction writes
+// the value at the target; an assignment writes it to storage of its own
+// first, because the value can read the target (`v = v.swapped`), as
+// `executeAssignment` decides for every backend. The target is resolved
+// before the value runs, as `StorageResolver` does.
+private final class AggregateStore : Node {
+    private imported!"snakebite.framestack".FrameStack* _frames;
+    private Node _target;
+    private Node _value;
+    private size_t _size;
+    private uint _alignment;
+    private bool _construction;
+    public this(
+        imported!"snakebite.framestack".FrameStack* frames, Node target,
+        Node value, in TypeFacts facts, bool construction,
+    ) {
+        _frames = frames; _target = target; _value = value;
+        _size = facts.size; _alignment = facts.alignment;
+        _construction = construction;
+    }
+    public override ubyte* executeAddr(ubyte* frame) {
+        return store(frame);
+    }
+    public override void executeVoid(ubyte* frame) {
+        store(frame);
+    }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        import core.stdc.string: memmove;
+
+        auto target = store(frame);
+        if (target !is dest)
+            memmove(dest, target, _size);
+    }
+    private ubyte* store(ubyte* frame) {
+        import core.stdc.string: memcpy;
+        import snakebite.backends.assignment: executeAssignment;
+
+        auto target = _target.executeAddr(frame);
+        auto storage = FrameGuard(_frames);
+        executeAssignment!(ubyte*)(_construction, target, _size, _alignment,
+            (size, alignment) => _frames.reserve(size, cast(uint) alignment),
+            (value) { _value.executeInto(frame, value); },
+            (value) { memcpy(target, value, _size); });
+        return target;
+    }
+}
+
+// A struct or static array value whose result nobody reads, which still has
+// a place to be written to.
+private final class DiscardedAggregate : Node {
+    private imported!"snakebite.framestack".FrameStack* _frames;
+    private Node _value;
+    private size_t _size;
+    private uint _alignment;
+    public this(
+        imported!"snakebite.framestack".FrameStack* frames, Node value,
+        in TypeFacts facts,
+    ) {
+        _frames = frames; _value = value;
+        _size = facts.size; _alignment = facts.alignment;
+    }
+    public override void executeVoid(ubyte* frame) {
+        auto storage = FrameGuard(_frames);
+        _value.executeInto(frame, _frames.reserve(_size, _alignment));
+    }
+}
+
 // The result of a function that returns `ref` is the address of the operand.
 private final class ReturnReference : Node {
     private void** _place;
@@ -1718,6 +1966,10 @@ private final class Comma : Node {
     public override void executeInto(ubyte* frame, ubyte* dest) {
         _first.executeVoid(frame);
         _second.executeInto(frame, dest);
+    }
+    public override ubyte* executeAddr(ubyte* frame) {
+        _first.executeVoid(frame);
+        return _second.executeAddr(frame);
     }
     public override void executeVoid(ubyte* frame) {
         _first.executeVoid(frame);
@@ -2126,16 +2378,17 @@ private final class Uninitialised(E) : Node {
 // --- calls ------------------------------------------------------------
 
 // `pair` is a value of two words: a dynamic array or a delegate.
-private enum Argument : ubyte { i8, i16, i32, i64, f32, f64, address, pair }
+// `aggregate` is a struct or a static array, whose bytes fill the slot.
+private enum Argument : ubyte {
+    i8, i16, i32, i64, f32, f64, address, pair, aggregate,
+}
 
-private size_t sizeOf(Argument mode) {
-    final switch (mode) with (Argument) {
-        case i8: return 1;
-        case i16: return 2;
-        case f32, i32: return 4;
-        case f64, i64, address: return 8;
-        case pair: return SliceValue.sizeof;
-    }
+// The arguments of a call site: the node of each one, how it is passed, and
+// the bytes that it fills in its parameter slot.
+private struct SiteArguments {
+    public Node[] nodes;
+    public Argument[] modes;
+    public size_t[] sizes;
 }
 
 // Gives the frame stack back to the position it had when this was made.
@@ -2265,18 +2518,29 @@ private mixin template CalleeEntry(E) {
     private CallExp _site;
     private Operand[] _args;
     private Argument[] _modes;
+    private size_t[] _sizes;
     private size_t _resultSize;
     private bool _resultUnsigned;
+    // The result is a struct or a static array, which the callee writes to
+    // the place that the site gives it.
+    private bool _aggregateResult;
     private TreeRoot* _root;
+
+    private void takeArguments(SiteArguments arguments) {
+        _args = argumentOperands(arguments.nodes, arguments.modes);
+        _modes = arguments.modes;
+        _sizes = arguments.sizes;
+    }
 
     // Whether `callee` takes the arguments of this site and gives its result.
     private bool takesArguments(in TreeCallee* callee) const {
         auto layout = callee.layout;
-        if (layout.parameters.length != _modes.length)
+        if (layout.parameters.length != _modes.length
+                || callee.returnsAggregate != _aggregateResult)
             return false;
         foreach (i, parameter; layout.parameters)
             if (parameter.isRef != (_modes[i] == Argument.address)
-                    || parameter.facts.size != sizeOf(_modes[i]))
+                    || parameter.facts.size != _sizes[i])
                 return false;
         return _resultSize == 0 || callee.returnFacts.size == _resultSize;
     }
@@ -2336,6 +2600,26 @@ private mixin template CalleeEntry(E) {
             run(selection, base, result);
     }
 
+    // Runs `callee` as `enter` does, with the result written at `dest`. A
+    // callee whose result has a slot for its place in the frame takes
+    // `dest` there, as `executeRaw` gives it.
+    private void enterInto(
+        in Selection selection, size_t hidden, ubyte* frame, ubyte* dest,
+    ) {
+        auto ev = _ev;
+        auto callee = selection.callee;
+        auto calleeFrame = FrameGuard(&ev._frames);
+        auto base = placeArguments(callee, hidden, frame);
+        auto place = callee.layout.returnPlace.bind(&ev._frames, base, dest);
+        // A callee whose variable aliases the place of the result arms the
+        // record of the caller for that place, unless the call is nested.
+        const aliased = callee.layout.returnPlace.offset != size_t.max;
+        if (callee.layout.retainsTemporaries || aliased)
+            runRetaining(selection, base, place);
+        else
+            run(selection, base, place);
+    }
+
     // The closure sits in a frame of its own, so the frame of `enter`
     // carries none.
     pragma(inline, false)
@@ -2381,39 +2665,30 @@ private mixin template CalleeEntry(E) {
 // a native function or a builtin. It pushes the callee frame, evaluates each
 // argument into its parameter slot, and runs the callee: a guest callee's
 // node tree, or the native call through its plan.
-private final class Call(E) : Node {
-    mixin CalleeEntry!E;
-
+// What a direct or virtual call node does to choose its callee: the
+// receiver, which is the context word of the callee, the callee of the last
+// vtable that the site met, and the original path for a call that the tree
+// does not run. The node has `chose`, which `meet` calls with the callee
+// that a new vtable gives.
+private mixin template Dispatch(E) {
     private FuncDeclaration _method;
     private Operand _receiver;
     private bool _hasReceiver;
     private bool _virtual;
     private bool _receiverIsAddress;
-    // A constructor call yields the object it constructed.
-    private bool _yieldsReceiver;
     private Selection _selected;
-    private DirectWordCall _direct;
     private const(void)* _vtable;
-    // The fast form of each callee this site has met, null for none.
-    private FastCallee*[TreeCallee*] _fasts;
-    private bool _hasFast;
-    // The fast form of the callee in `_selected`. The two change together,
-    // with no code between that could run this site again.
-    private FastCallee* _fast;
 
-    public this(E ev, CallExp site, FuncDeclaration method, Node receiver,
-            bool receiverIsAddress, bool virtual, Node[] args,
-            Argument[] modes, size_t resultSize, bool resultUnsigned,
-            bool yieldsReceiver) {
-        _ev = ev; _site = site; _method = method;
+    private void takeReceiver(
+        FuncDeclaration method, Node receiver, bool receiverIsAddress,
+        bool virtual,
+    ) {
+        _method = method;
         _hasReceiver = receiver !is null;
         if (_hasReceiver)
             _receiver = receiverIsAddress
                 ? addressOperandOf(receiver) : operandOf(receiver);
         _receiverIsAddress = receiverIsAddress; _virtual = virtual;
-        _args = argumentOperands(args, modes); _modes = modes; _resultSize = resultSize;
-        _resultUnsigned = resultUnsigned; _yieldsReceiver = yieldsReceiver;
-        _root = ev._treeRoot;
     }
 
     public final bool matches(TreeCallee* callee) {
@@ -2425,6 +2700,80 @@ private final class Call(E) : Node {
         return takesArguments(callee);
     }
 
+    // Runs the receiver, which is the word the callee takes as its context.
+    private size_t runReceiver(ubyte* frame) {
+        if (!_hasReceiver)
+            return 0;
+        return _receiverIsAddress
+            ? cast(size_t) _receiver.readAddress(frame)
+            : cast(size_t) _receiver.readLong(frame);
+    }
+
+    // A virtual site met a vtable that it has no callee for: false when
+    // the original path must run the call.
+    pragma(inline, false)
+    private bool meet(
+        const(void)* vtable, size_t receiver, ref Selection selected,
+    ) {
+        auto callee = _ev.virtualTreeCalleeOf(_method, cast(void*) receiver);
+        if (callee is null || !matches(callee))
+            return false;
+        selected = selectionOf(callee);
+        _selected = selected;
+        chose(callee, selected);
+        _vtable = vtable;
+        return true;
+    }
+
+    pragma(inline, false)
+    private void originalPath(ubyte* frame, void* result, size_t receiver) {
+        auto ev = _ev;
+        ev.handOver(_root, frame, {
+            ev._executeMethodCall(_site, result, _method, cast(void*) receiver);
+        });
+    }
+
+    // The callee of this run once the receiver ran, in `_selected`. False
+    // when the original path must run the call.
+    pragma(inline, true)
+    private bool resolve(size_t receiver) {
+        if (!_virtual)
+            return true;
+        if (receiver == 0)
+            return false;
+        const vtable = *cast(const(void)**) receiver;
+        if (vtable is _vtable)
+            return true;
+        auto selected = _selected;
+        return meet(vtable, receiver, selected);
+    }
+}
+
+private final class Call(E) : Node {
+    mixin CalleeEntry!E;
+    mixin Dispatch!E;
+
+    // A constructor call yields the object it constructed.
+    private bool _yieldsReceiver;
+    private DirectWordCall _direct;
+    // The fast form of each callee this site has met, null for none.
+    private FastCallee*[TreeCallee*] _fasts;
+    private bool _hasFast;
+    // The fast form of the callee in `_selected`. The two change together,
+    // with no code between that could run this site again.
+    private FastCallee* _fast;
+
+    public this(E ev, CallExp site, FuncDeclaration method, Node receiver,
+            bool receiverIsAddress, bool virtual, SiteArguments arguments,
+            size_t resultSize, bool resultUnsigned, bool yieldsReceiver) {
+        _ev = ev; _site = site;
+        takeReceiver(method, receiver, receiverIsAddress, virtual);
+        takeArguments(arguments);
+        _resultSize = resultSize;
+        _resultUnsigned = resultUnsigned; _yieldsReceiver = yieldsReceiver;
+        _root = ev._treeRoot;
+    }
+
     public final void bind(TreeCallee* callee) {
         import snakebite.backends.calls: CallSelection;
 
@@ -2433,6 +2782,10 @@ private final class Call(E) : Node {
                 && _direct.decide(_selected.plan, callee))
             _selected.direct = &_direct;
         _fast = fastFormOf(callee, _selected);
+    }
+
+    private void chose(TreeCallee* callee, in Selection selected) {
+        _fast = fastFormOf(callee, selected);
     }
 
     // The node that does the work of this site when its one callee is an
@@ -2517,15 +2870,6 @@ private final class Call(E) : Node {
 
     private enum BodyKind : bool { plain, soleReturn }
 
-    // Runs the receiver, which is the word the callee takes as its context.
-    private size_t runReceiver(ubyte* frame) {
-        if (!_hasReceiver)
-            return 0;
-        return _receiverIsAddress
-            ? cast(size_t) _receiver.readAddress(frame)
-            : cast(size_t) _receiver.readLong(frame);
-    }
-
     // Returns the receiver of the call, 0 when there is none.
     private size_t invoke(ubyte* frame, void* result) {
         const receiver = runReceiver(frame);
@@ -2552,45 +2896,6 @@ private final class Call(E) : Node {
         // callee.
         auto selected = _selected;
         enter(selected, receiver, frame, result);
-    }
-
-    // A virtual site met a vtable that it has no callee for: false when
-    // the original path must run the call.
-    pragma(inline, false)
-    private bool meet(
-        const(void)* vtable, size_t receiver, ref Selection selected,
-    ) {
-        auto callee = _ev.virtualTreeCalleeOf(_method, cast(void*) receiver);
-        if (callee is null || !matches(callee))
-            return false;
-        selected = selectionOf(callee);
-        _selected = selected;
-        _fast = fastFormOf(callee, selected);
-        _vtable = vtable;
-        return true;
-    }
-
-    pragma(inline, false)
-    private void originalPath(ubyte* frame, void* result, size_t receiver) {
-        auto ev = _ev;
-        ev.handOver(_root, frame, {
-            ev._executeMethodCall(_site, result, _method, cast(void*) receiver);
-        });
-    }
-
-    // The callee of this run once the receiver ran, in `_selected`. False
-    // when the original path must run the call.
-    pragma(inline, true)
-    private bool resolve(size_t receiver) {
-        if (!_virtual)
-            return true;
-        if (receiver == 0)
-            return false;
-        const vtable = *cast(const(void)**) receiver;
-        if (vtable is _vtable)
-            return true;
-        auto selected = _selected;
-        return meet(vtable, receiver, selected);
     }
 
     public override long executeLong(ubyte* frame) {
@@ -2778,7 +3083,7 @@ private final class Call(E) : Node {
                 bits = *cast(const(ulong)*) &value;
                 break;
             }
-            case address, pair:
+            case address, pair, aggregate:
                 assert(0, "a setter takes a scalar by value");
         }
         const place = receiver + fast.offset;
@@ -2852,6 +3157,51 @@ private final class Call(E) : Node {
         auto calleeFrame = FrameGuard(&ev._frames);
         auto base = placeArguments(fast.callee, receiver, frame);
         return ev.runTreeValue!double(fast.root, fast.callee.function_, base);
+    }
+}
+
+// A direct or virtual call whose result is a struct or a static array. The
+// callee writes the result at the place that the parent gives it
+// (`executeInto`); the call has no form that gives a value in a register.
+private final class AggregateCall(E) : Node {
+    mixin CalleeEntry!E;
+    mixin Dispatch!E;
+
+    private uint _alignment;
+
+    public this(E ev, CallExp site, FuncDeclaration method, Node receiver,
+            bool receiverIsAddress, bool virtual, SiteArguments arguments,
+            in TypeFacts result) {
+        _ev = ev; _site = site;
+        takeReceiver(method, receiver, receiverIsAddress, virtual);
+        takeArguments(arguments);
+        _resultSize = result.size; _alignment = result.alignment;
+        _aggregateResult = true;
+        _root = ev._treeRoot;
+    }
+
+    public final void bind(TreeCallee* callee) {
+        _selected = selectionOf(callee);
+    }
+
+    private void chose(TreeCallee*, in Selection) {}
+
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        const receiver = runReceiver(frame);
+        if (!resolve(receiver)) {
+            originalPath(frame, dest, receiver);
+            return;
+        }
+        // A copy: the arguments can run this site again and select another
+        // callee.
+        auto selected = _selected;
+        enterInto(selected, receiver, frame, dest);
+    }
+
+    // A discarded result still has a place, as compiled D gives it one.
+    public override void executeVoid(ubyte* frame) {
+        auto scratch = FrameGuard(&_ev._frames);
+        executeInto(frame, _ev._frames.reserve(_resultSize, _alignment));
     }
 }
 
@@ -3079,7 +3429,10 @@ static assert(DelegateValue.context.offsetof
 // adjustment of its context. A host target, a null one, and a guest callee
 // that `Call` could not run stay with the evaluator, which has the fault for
 // the null one and the foreign-function barrier for the others.
-private final class IndirectCall(E) : Node {
+// `aggregate` is set for a call whose result is a struct or a static array,
+// which the callee writes at the place that the parent gives
+// (`executeInto`).
+private final class IndirectCall(E, bool aggregate) : Node {
     mixin CalleeEntry!E;
 
     private Node _target;
@@ -3088,13 +3441,20 @@ private final class IndirectCall(E) : Node {
     // runs it.
     private FuncDeclaration _function;
     private Selection _selected;
+    static if (aggregate)
+        private uint _alignment;
 
     public this(E ev, CallExp site, Node target, bool viaDelegate,
-            Node[] args, Argument[] modes, size_t resultSize,
+            SiteArguments arguments, in TypeFacts result,
             bool resultUnsigned) {
         _ev = ev; _site = site; _target = target; _viaDelegate = viaDelegate;
-        _args = argumentOperands(args, modes); _modes = modes; _resultSize = resultSize;
+        takeArguments(arguments);
+        _resultSize = result.size;
         _resultUnsigned = resultUnsigned;
+        static if (aggregate) {
+            _alignment = result.alignment;
+            _aggregateResult = true;
+        }
         _root = ev._treeRoot;
     }
 
@@ -3124,7 +3484,11 @@ private final class IndirectCall(E) : Node {
             });
             return;
         }
-        enter(selected, target.context + adjustment, frame, result);
+        static if (aggregate)
+            enterInto(selected, target.context + adjustment, frame,
+                cast(ubyte*) result);
+        else
+            enter(selected, target.context + adjustment, frame, result);
     }
 
     // The callee for `function_` that this tree runs, null when it runs
@@ -3138,27 +3502,39 @@ private final class IndirectCall(E) : Node {
         return selectionOf(callee);
     }
 
-    public override long executeLong(ubyte* frame) {
-        ulong[2] buffer;
-        invoke(frame, buffer.ptr);
-        return extendResult(buffer[0], _resultSize, _resultUnsigned);
-    }
+    static if (aggregate) {
+        public override void executeInto(ubyte* frame, ubyte* dest) {
+            invoke(frame, dest);
+        }
 
-    public override double executeDouble(ubyte* frame) {
-        ulong[2] buffer;
-        invoke(frame, buffer.ptr);
-        return floatingResult(buffer);
-    }
+        // A discarded result still has a place, as compiled D gives it one.
+        public override void executeVoid(ubyte* frame) {
+            auto scratch = FrameGuard(&_ev._frames);
+            invoke(frame, _ev._frames.reserve(_resultSize, _alignment));
+        }
+    } else {
+        public override long executeLong(ubyte* frame) {
+            ulong[2] buffer;
+            invoke(frame, buffer.ptr);
+            return extendResult(buffer[0], _resultSize, _resultUnsigned);
+        }
 
-    public override void executeInto(ubyte* frame, ubyte* dest) {
-        SliceValue buffer = void;
-        invoke(frame, &buffer);
-        *cast(SliceValue*) dest = buffer;
-    }
+        public override double executeDouble(ubyte* frame) {
+            ulong[2] buffer;
+            invoke(frame, buffer.ptr);
+            return floatingResult(buffer);
+        }
 
-    public override void executeVoid(ubyte* frame) {
-        ulong[2] buffer;
-        invoke(frame, buffer.ptr);
+        public override void executeInto(ubyte* frame, ubyte* dest) {
+            SliceValue buffer = void;
+            invoke(frame, &buffer);
+            *cast(SliceValue*) dest = buffer;
+        }
+
+        public override void executeVoid(ubyte* frame) {
+            ulong[2] buffer;
+            invoke(frame, buffer.ptr);
+        }
     }
 }
 
@@ -3170,7 +3546,7 @@ private Operand[] argumentOperands(Node[] args, Argument[] modes) {
             case address:
                 operands[i] = addressOperandOf(arg);
                 break;
-            case pair:
+            case pair, aggregate:
                 operands[i] = Operand.through(arg);
                 break;
             case i8, i16, i32, i64, f32, f64:
@@ -3190,7 +3566,7 @@ private void storeArgument(ref Operand arg, Argument mode, ubyte* frame, ubyte* 
         case f32: *cast(float*) place = arg.readDouble(frame); break;
         case f64: *cast(double*) place = arg.readDouble(frame); break;
         case address: *cast(ubyte**) place = arg.readAddress(frame); break;
-        case pair: arg.node.executeInto(frame, place); break;
+        case pair, aggregate: arg.node.executeInto(frame, place); break;
     }
 }
 
@@ -3231,10 +3607,12 @@ private final class BuiltinOp : Node {
     private bool _resultUnsigned;
 
     public this(
-        typeof(_entry) entry, Node[] args, Argument[] modes,
+        typeof(_entry) entry, SiteArguments arguments,
         size_t resultSize, bool resultUnsigned,
     ) {
-        _entry = entry; _args = argumentOperands(args, modes); _modes = modes;
+        _entry = entry;
+        _args = argumentOperands(arguments.nodes, arguments.modes);
+        _modes = arguments.modes;
         _resultSize = resultSize; _resultUnsigned = resultUnsigned;
     }
 
@@ -3316,14 +3694,14 @@ private Node buildIntrinsicCall(E)(E ev, CallExp call, FuncDeclaration function_
     const result = isVoid ? Scalar() : scalarOf(ev, call.type);
     if (!isVoid && result.kind == Scalar.Kind.none)
         return null;
-    Node[] args;
-    Argument[] modes;
-    if (!buildArguments(ev, typeFunctionOf(function_), call.arguments, args, modes))
+    SiteArguments arguments;
+    if (!buildArguments(ev, typeFunctionOf(function_), call.arguments, arguments))
         return null;
-    foreach (mode; modes)
-        if (mode == Argument.address || mode == Argument.pair)
+    foreach (mode; arguments.modes)
+        if (mode == Argument.address || mode == Argument.pair
+                || mode == Argument.aggregate)
             return null;
-    return new BuiltinOp(decision.builtinEntry, args, modes,
+    return new BuiltinOp(decision.builtinEntry, arguments,
         isVoid ? 0 : result.facts.size, result.facts.isUnsigned);
 }
 
@@ -3529,9 +3907,49 @@ private Node buildAddress(E)(E ev, Expression expression) {
         case question:
             return buildConditional!(buildAddress!E, ConditionalAddress)(
                 ev, expression.isCondExp);
+        case comma: {
+            auto comma = expression.isCommaExp;
+            auto first = buildEffect(ev, comma.e1);
+            auto second = buildAddress(ev, comma.e2);
+            return first is null || second is null
+                ? null : new Comma(first, second);
+        }
+        case call: {
+            import snakebite.frontend.dmd.functions: typeFunctionOf;
+
+            // A call that returns `ref` gives an address of its own.
+            auto call = expression.isCallExp;
+            auto type = typeFunctionOf(call);
+            if (!isAggregate(expression.type) || type is null || type.isRef)
+                return null;
+            return materialise(ev, buildCall(ev, call), expression.type);
+        }
+        case structLiteral:
+            return materialise(ev,
+                buildStructLiteral(ev, expression.isStructLiteralExp),
+                expression.type);
+        case assign, construct, blit:
+            // The assignment gives the address of its target.
+            return isAggregate(expression.type)
+                ? buildAggregateStore(ev, cast(AssignExp) expression) : null;
         default:
             return null;
     }
+}
+
+// The address of the rvalue that `value` writes, for the full expression
+// that the builder builds.
+private Node materialise(E)(E ev, Node value, Type type) {
+    import snakebite.internalfailure: internalFailure;
+
+    if (value is null)
+        return null;
+    auto region = ev._treeRoot._region;
+    if (region is null)
+        internalFailure("an rvalue needs an address outside a full expression");
+    auto node = new Materialise(ev, value, ev.factsOf(type));
+    region.materialised ~= node;
+    return node;
 }
 
 private Node buildIndexAddress(E)(E ev, IndexExp indexed) {
@@ -3693,8 +4111,11 @@ private Node buildCall(E)(E ev, CallExp call) {
 
     const isVoid = call.type.toBasetype.ty == TY.Tvoid;
     const resultIsSlice = isSlice(call.type);
-    const result = isVoid || resultIsSlice ? Scalar() : scalarOf(ev, call.type);
-    if (!isVoid && !resultIsSlice && result.kind == Scalar.Kind.none)
+    const resultIsAggregate = isAggregate(call.type);
+    const result = isVoid || resultIsSlice || resultIsAggregate
+        ? Scalar() : scalarOf(ev, call.type);
+    if (!isVoid && !resultIsSlice && !resultIsAggregate
+            && result.kind == Scalar.Kind.none)
         return null;
 
     Node receiver;
@@ -3717,13 +4138,23 @@ private Node buildCall(E)(E ev, CallExp call) {
             return null;
     }
 
-    Node[] args;
-    Argument[] modes;
-    if (!buildArguments(ev, type, call.arguments, args, modes))
+    SiteArguments arguments;
+    if (!buildArguments(ev, type, call.arguments, arguments))
         return null;
 
+    if (resultIsAggregate) {
+        auto node = new AggregateCall!E(ev, call, function_, receiver,
+            receiverIsAddress, virtual, arguments, ev.factsOf(call.type));
+        if (!virtual) {
+            auto callee = ev.treeCalleeOf(function_);
+            if (callee is null || !node.matches(callee))
+                return null;
+            node.bind(callee);
+        }
+        return node;
+    }
     auto node = new Call!E(ev, call, function_, receiver, receiverIsAddress,
-        virtual, args, modes,
+        virtual, arguments,
         isVoid ? 0 : resultIsSlice ? SliceValue.sizeof : result.facts.size,
         result.facts.isUnsigned,
         ev.resultIsReceiver(function_));
@@ -3766,33 +4197,39 @@ private Node buildIndirectCall(E)(E ev, CallExp call) {
 
     const isVoid = call.type.toBasetype.ty == TY.Tvoid;
     const resultIsSlice = isSlice(call.type);
-    const result = isVoid || resultIsSlice ? Scalar() : scalarOf(ev, call.type);
-    if (!isVoid && !resultIsSlice && result.kind == Scalar.Kind.none)
+    const resultIsAggregate = isAggregate(call.type);
+    const result = isVoid || resultIsSlice || resultIsAggregate
+        ? Scalar() : scalarOf(ev, call.type);
+    if (!isVoid && !resultIsSlice && !resultIsAggregate
+            && result.kind == Scalar.Kind.none)
         return null;
 
-    Node[] args;
-    Argument[] modes;
-    if (!buildArguments(ev, type, call.arguments, args, modes))
+    SiteArguments arguments;
+    if (!buildArguments(ev, type, call.arguments, arguments))
         return null;
-    return new IndirectCall!E(ev, call, target, viaDelegate, args, modes,
-        isVoid ? 0 : resultIsSlice ? SliceValue.sizeof : result.facts.size,
-        result.facts.isUnsigned);
+    if (resultIsAggregate)
+        return new IndirectCall!(E, true)(ev, call, target, viaDelegate,
+            arguments, ev.factsOf(call.type), false);
+    TypeFacts facts;
+    facts.size = isVoid ? 0 : resultIsSlice ? SliceValue.sizeof : result.facts.size;
+    return new IndirectCall!(E, false)(ev, call, target, viaDelegate,
+        arguments, facts, result.facts.isUnsigned);
 }
 
 // The nodes of the arguments of a call of `type`, one for each parameter,
 // and how each one is passed. False when one is outside the supported kinds.
 private bool buildArguments(E)(
     E ev, imported!"dmd.mtype".TypeFunction type,
-    imported!"dmd.arraytypes".Expressions* arguments, out Node[] args,
-    out Argument[] modes,
+    imported!"dmd.arraytypes".Expressions* arguments, out SiteArguments site,
 ) {
     import dmd.astenums: STC;
 
     auto parameters = type.parameterList;
     if (arguments.length != parameters.length)
         return false;
-    args = new Node[parameters.length];
-    modes = new Argument[parameters.length];
+    auto args = site.nodes = new Node[parameters.length];
+    auto modes = site.modes = new Argument[parameters.length];
+    auto sizes = site.sizes = new size_t[parameters.length];
     foreach (i; 0 .. parameters.length) {
         auto parameter = parameters[i];
         auto argument = (*arguments)[i];
@@ -3800,17 +4237,28 @@ private bool buildArguments(E)(
             return false;
         if ((parameter.storageClass & (STC.ref_ | STC.out_)) != 0) {
             modes[i] = Argument.address;
+            sizes[i] = size_t.sizeof;
             args[i] = buildAddress(ev, argument);
         } else if (isSlice(parameter.type)) {
             if (!isSlice(argument.type))
                 return false;
             modes[i] = Argument.pair;
+            sizes[i] = SliceValue.sizeof;
             args[i] = buildSlice(ev, argument);
         } else if (isDelegate(parameter.type)) {
             if (!isDelegate(argument.type))
                 return false;
             modes[i] = Argument.pair;
+            sizes[i] = SliceValue.sizeof;
             args[i] = buildDelegate(ev, argument);
+        } else if (isAggregate(parameter.type)) {
+            const size = ev.factsOf(parameter.type).size;
+            if (!isAggregate(argument.type)
+                    || ev.factsOf(argument.type).size != size)
+                return false;
+            modes[i] = Argument.aggregate;
+            sizes[i] = size;
+            args[i] = buildAggregate(ev, argument);
         } else {
             const declared = scalarOf(ev, parameter.type);
             const given = scalarOf(ev, argument.type);
@@ -3827,6 +4275,7 @@ private bool buildArguments(E)(
                 case 8: modes[i] = Argument.i64; break;
                 default: assert(0, "an integral scalar is 1, 2, 4 or 8 bytes");
             }
+            sizes[i] = declared.facts.size;
             args[i] = buildValue(ev, argument);
         }
         if (args[i] is null)
@@ -4166,12 +4615,11 @@ private Node buildConstructorCall(E)(E ev, NewExp expression, Node allocation) {
     auto type = typeFunctionOf(constructor);
     if (expression.arguments is null || type.parameterList.varargs != VarArg.none)
         return null;
-    Node[] args;
-    Argument[] modes;
-    if (!buildArguments(ev, type, expression.arguments, args, modes))
+    SiteArguments arguments;
+    if (!buildArguments(ev, type, expression.arguments, arguments))
         return null;
     auto node = new Call!E(ev, null, constructor, allocation,
-        /* receiverIsAddress */ false, /* virtual */ false, args, modes,
+        /* receiverIsAddress */ false, /* virtual */ false, arguments,
         /* resultSize */ 0, /* resultUnsigned */ false,
         ev.resultIsReceiver(constructor));
     auto callee = ev.treeCalleeOf(constructor);
@@ -4193,6 +4641,8 @@ private Node buildEffect(E)(E ev, Expression expression) {
         return buildSlice(ev, expression);
     if (isDelegate(expression.type))
         return buildDelegate(ev, expression);
+    if (isAggregate(expression.type))
+        return buildAggregateEffect(ev, expression);
     if (expression.type !is null && expression.type.toBasetype.ty == TY.Tvoid) {
         if (expression.op == EXP.question)
             return buildConditional!(buildEffect!E, ConditionalVoid)(
@@ -4231,11 +4681,15 @@ private Node buildBranches(E)(
     import dmd.tokens: EXP;
 
     Node operand(Expression one, in FullExpressionScope.Position where) {
-        const splits = one.op == EXP.andAnd || one.op == EXP.orOr
-            || one.op == EXP.not;
-        if (splits)
-            return buildBranches(ev, one, where);
-        auto node = buildTruth(ev, one);
+        Node build() {
+            const splits = one.op == EXP.andAnd || one.op == EXP.orOr
+                || one.op == EXP.not;
+            if (splits)
+                return buildBranches(ev, one, where);
+            return buildTruth(ev, one);
+        }
+        auto node = where == FullExpressionScope.Position.logicalOperand
+            ? buildLogicalOperand(ev, one, &build) : build();
         return node is null ? new GenericCondition!E(ev, one, where) : node;
     }
 
@@ -4247,6 +4701,21 @@ private Node buildBranches(E)(
         expression.op == EXP.andAnd,
         operand(logical.e1, position),
         operand(logical.e2, FullExpressionScope.Position.logicalOperand));
+}
+
+// The right operand of `&&` or `||`, which is a full expression of its own
+// (`FullExpressionScope.Position.logicalOperand`), built by `build`.
+private Node buildLogicalOperand(E)(
+    E ev, Expression operand, scope Node delegate() build,
+) {
+    enum where = FullExpressionScope.Position.logicalOperand;
+    auto built = buildRegion(ev, true, build);
+    if (built.node is null || readsAfterEnd(built, where, operand))
+        return null;
+    if (built.scoped)
+        return new Scoped!E(
+            ev, built.node, operand, where, positionOf(ev, operand));
+    return built.node;
 }
 
 private Node logicalOf(in bool andAnd, Node left, Node right) {
@@ -4265,8 +4734,11 @@ private Node buildValue(E)(E ev, Expression expression) {
     import snakebite.nativelayout: isStaticStructAddress, loadIntegral;
     import snakebite.nativevalue: loadFloating;
 
+    // A call whose result is a struct or a static array has no value in a
+    // register.
     if (expression.op == EXP.call)
-        return buildCall(ev, expression.isCallExp);
+        return isAggregate(expression.type)
+            ? null : buildCall(ev, expression.isCallExp);
 
     const scalar = scalarOf(ev, expression.type);
     if (scalar.kind == Scalar.Kind.none)
@@ -4360,7 +4832,8 @@ private Node buildValue(E)(E ev, Expression expression) {
             if (plan.right != LogicalPlan.Right.value || !plan.hasValue)
                 return null;
             auto left = buildTruth(ev, logical.e1);
-            auto right = buildTruth(ev, logical.e2);
+            auto right = buildLogicalOperand(
+                ev, logical.e2, () => buildTruth(ev, logical.e2));
             if (left is null || right is null)
                 return null;
             return logicalOf(plan.andAnd, left, right);
@@ -4966,8 +5439,6 @@ private Node buildDeclaration(E)(E ev, DeclarationExp declaration) {
 
 private Node buildVariable(E)(
     E ev, VarDeclaration variable, DeclarationExp declaration) {
-    import snakebite.nativelayout: initializerRunsForEffect, initializerValueOf;
-
     // A variable in static storage is initialised once, before the program
     // reaches its declaration.
     if (variable.isDataseg)
@@ -4977,6 +5448,46 @@ private Node buildVariable(E)(
     auto initializer = variable._init.isExpInitializer;
     if (initializer is null)
         return null;
+    const materialised = ev._treeRoot._region.materialised.length;
+    auto node = buildInitializer(ev, variable, declaration, initializer);
+    return node is null ? null
+        : initializationOf(ev, variable, declaration, node, materialised);
+}
+
+// The initialisation `store` of `variable`, which the evaluator's
+// temporaries run when they decide its lifetime: dmd gave the temporary a
+// destructor, or the variable can point into rvalues of its initialiser
+// that have storage, which the variable keeps (`canRetainTemporaries`).
+// `materialised` is the number of such rvalues before the initialiser.
+private Node initializationOf(E)(
+    E ev, VarDeclaration variable, DeclarationExp declaration, Node store,
+    in size_t materialised,
+) {
+    import snakebite.backends.temporary: hasTemporaryDestructor;
+
+    auto region = ev._treeRoot._region;
+    const slot = ev._layout.slotOf(variable);
+    const retains = slot !is null && slot.retainsTemporaries
+        && region.materialised.length > materialised;
+    if (!retains && !hasTemporaryDestructor(variable))
+        return store;
+    if (ev.isRefStorage(variable))
+        return null;
+    auto address = buildVariableAddress(ev, variable);
+    if (address is null)
+        return null;
+    region.scoped = true;
+    return statementOf(
+        new Initialization!E(ev, variable, declaration, address, store, retains),
+        positionOf(ev, declaration));
+}
+
+private Node buildInitializer(E)(
+    E ev, VarDeclaration variable, DeclarationExp declaration,
+    imported!"dmd.init".ExpInitializer initializer,
+) {
+    import snakebite.nativelayout: initializerRunsForEffect, initializerValueOf;
+
     if (ev.isRefStorage(variable)
             && !initializerRunsForEffect(initializer, variable))
         return buildReferenceBinding(
@@ -4984,7 +5495,9 @@ private Node buildVariable(E)(
             positionOf(ev, declaration));
     const scalar = scalarOf(ev, variable.type);
     const variableIsPair = isSlice(variable.type) || isDelegate(variable.type);
-    if (scalar.kind == Scalar.Kind.none && !variableIsPair)
+    const variableIsAggregate = isAggregate(variable.type);
+    if (scalar.kind == Scalar.Kind.none && !variableIsPair
+            && !variableIsAggregate)
         return null;
     if (initializerRunsForEffect(initializer, variable)) {
         auto effect = buildEffect(ev, initializer.exp);
@@ -4993,7 +5506,25 @@ private Node buildVariable(E)(
     }
     auto value = initializerValueOf(initializer);
     const slot = slotOf(ev, variable);
-    if (!slot.ok || slot.indirect || ev.isRefStorage(variable))
+    if (!slot.ok || ev.isRefStorage(variable))
+        return null;
+    if (variableIsAggregate) {
+        // The storage of a variable that is the result of its function is
+        // the place of the result, whose address the slot holds.
+        const facts = ev.factsOf(variable.type);
+        if (!isAggregate(value.type) || ev.factsOf(value.type).size != facts.size)
+            return null;
+        auto node = buildAggregate(ev, value);
+        if (node is null)
+            return null;
+        Node target = slot.indirect
+            ? new PointerAddress(slot.offset, 0) : new LocalAddress(slot.offset);
+        return statementOf(
+            new AggregateStore(&ev._frames, target, node, facts,
+                /* construction */ true),
+            positionOf(ev, declaration));
+    }
+    if (slot.indirect)
         return null;
     if (variableIsPair) {
         auto node = buildPair(ev, variable.type, value);
@@ -5013,7 +5544,7 @@ private Node buildVariable(E)(
 
 // A struct or a static array: a value of its own bytes, which is not a
 // register scalar or a slice.
-private bool isAggregate(Type type) {
+package bool isAggregate(Type type) {
     import dmd.astenums: TY;
     import dmd.typesem: toBasetype;
 
@@ -5041,13 +5572,65 @@ private Node buildAggregate(E)(E ev, Expression expression) {
                 ev, expression.isCondExp);
         case comma:
             return buildComma(ev, expression.isCommaExp, &buildAggregate!E);
-        case variable, this_, dotVariable, star, index: {
+        case call:
+            return buildCall(ev, expression.isCallExp);
+        case assign, construct, blit:
+            return buildAggregateStore(ev, cast(AssignExp) expression);
+        case variable:
+            // `S.init`: the bytes of the type's initial value.
+            if (auto symbol = expression.isVarExp.var.isSymbolDeclaration) {
+                if (symbol.type.isTypeStruct is null)
+                    return null;
+                return new ImageInto((cast(const(ubyte)[]) ev._nativeData
+                    .initialValue(expression.type, expression.loc)).idup);
+            }
+            goto case this_;
+        case this_, dotVariable, star, index: {
             auto address = buildAddress(ev, expression);
             return address is null ? null : new AggregateCopy(
                 address, ev.factsOf(expression.type).size);
         }
         default:
             return null;
+    }
+}
+
+// `target = value` for a struct or a static array of the same size.
+private Node buildAggregateStore(E)(E ev, AssignExp e) {
+    if (bindsReference(ev, e)
+            || (e.isConstructExp !is null && e.isConstructExp.lowering !is null)
+            || !isAggregate(e.e1.type) || !isAggregate(e.e2.type))
+        return null;
+    const facts = ev.factsOf(e.e1.type);
+    if (ev.factsOf(e.e2.type).size != facts.size)
+        return null;
+    auto target = buildAddress(ev, e.e1);
+    auto value = buildAggregate(ev, e.e2);
+    if (target is null || value is null)
+        return null;
+    return new AggregateStore(
+        &ev._frames, target, value, facts, e.isConstructExp !is null);
+}
+
+// The effect of the struct or static array `expression`.
+private Node buildAggregateEffect(E)(E ev, Expression expression) {
+    import dmd.tokens: EXP;
+
+    switch (expression.op) with (EXP) {
+        case call:
+            return buildCall(ev, expression.isCallExp);
+        case assign, construct, blit:
+            return buildAggregateStore(ev, cast(AssignExp) expression);
+        case comma:
+            return buildComma(ev, expression.isCommaExp, &buildEffect!E);
+        case question:
+            return buildConditional!(buildEffect!E, ConditionalVoid)(
+                ev, expression.isCondExp);
+        default: {
+            auto value = buildAggregate(ev, expression);
+            return value is null ? null : new DiscardedAggregate(
+                &ev._frames, value, ev.factsOf(expression.type));
+        }
     }
 }
 
@@ -5204,9 +5787,23 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
         return nodes;
     }
 
+    // A condition is a full expression of its own on each evaluation.
     Node condition(Expression expression) {
-        auto node = buildTruth(ev, expression);
-        return node is null ? new GenericCondition!E(ev, expression) : node;
+        enum where = FullExpressionScope.Position.condition;
+        auto built = buildRegion(ev, false, () => buildTruth(ev, expression));
+        if (built.node is null || readsAfterEnd(built, where, expression))
+            return new GenericCondition!E(ev, expression);
+        return endingAt(ev, built, expression, where);
+    }
+
+    // The node of the full expression `expression`, which runs as a
+    // statement.
+    Node effect(
+        Expression expression, in FullExpressionScope.Position where,
+        scope Node delegate() build,
+    ) {
+        auto built = buildRegion(ev, false, build);
+        return built.node is null ? null : endingAt(ev, built, expression, where);
     }
 
     switch (statement.stmt) with (STMT) {
@@ -5241,13 +5838,18 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
             auto expression = (cast(ExpStatement) statement).exp;
             if (expression is null)
                 return new Jump!(TreeFlow.normal);
+            enum where = FullExpressionScope.Position.expressionStatement;
             if (auto declaration = expression.isDeclarationExp) {
-                auto node = buildDeclaration(ev, declaration);
+                auto node = effect(expression, where,
+                    () => buildDeclaration(ev, declaration));
                 return node is null ? generic() : node;
             }
-            auto node = buildEffect(ev, expression);
-            return node is null
-                ? generic() : statementOf(node, positionOf(ev, expression));
+            auto node = effect(expression, where, () {
+                auto value = buildEffect(ev, expression);
+                return value is null
+                    ? null : statementOf(value, positionOf(ev, expression));
+            });
+            return node is null ? generic() : node;
         }
         case If: {
             auto conditional = statement.isIfStatement;
@@ -5276,10 +5878,14 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
                 test = condition(loop.condition);
             Node step;
             if (loop.increment !is null) {
-                step = buildValue(ev, loop.increment);
+                step = effect(loop.increment,
+                    FullExpressionScope.Position.loopIncrement, () {
+                        auto value = buildEffect(ev, loop.increment);
+                        return value is null ? null
+                            : statementOf(value, positionOf(ev, loop.increment));
+                    });
                 if (step is null)
                     return generic();
-                step = statementOf(step, positionOf(ev, loop.increment));
             }
             // dmd moves the initialiser out of every `for` before it runs.
             assert(loop._init is null);
@@ -5370,10 +5976,6 @@ private Statement[] statementsOf(Statement statement) {
 }
 
 private Node buildReturn(E)(E ev, imported!"dmd.statement".ReturnStatement returned) {
-    import dmd.astenums: TY;
-    import dmd.typesem: toBasetype;
-    import snakebite.frontend.dmd.functions: typeFunctionOf;
-
     Node generic() {
         return new GenericStatement!E(ev, returned);
     }
@@ -5382,9 +5984,32 @@ private Node buildReturn(E)(E ev, imported!"dmd.statement".ReturnStatement retur
         return generic();
     if (returned.exp is null)
         return new Jump!(TreeFlow.return_);
+    enum where = FullExpressionScope.Position.returnOperand;
+    Node value;
+    auto built = buildRegion(ev, false,
+        () => buildReturnOperand(ev, returned, value));
+    if (built.node is null || readsAfterEnd(built, where, returned.exp))
+        return generic();
+    auto node = endingAt(ev, built, returned.exp, where);
+    const only = statementsOf(ev._function.fbody);
+    if (node is value && only.length == 1 && only[0] is returned)
+        ev._treeRoot._soleReturn = node;
+    return node;
+}
+
+// The return statement of `returned.exp`, or null when the tree does not
+// cover it. `value` is set to the node when it is one that can give a
+// scalar result in a register.
+private Node buildReturnOperand(E)(
+    E ev, imported!"dmd.statement".ReturnStatement returned, out Node value,
+) {
+    import dmd.astenums: TY;
+    import dmd.typesem: toBasetype;
+    import snakebite.frontend.dmd.functions: typeFunctionOf;
+
     if (typeFunctionOf(ev._function).isRef) {
         auto address = buildAddress(ev, returned.exp);
-        return address is null ? generic() : new ReturnReference(
+        return address is null ? null : new ReturnReference(
             &ev._place, address, positionOf(ev, returned.exp));
     }
     if (ev._type.toBasetype.ty == TY.Tvoid) {
@@ -5392,7 +6017,7 @@ private Node buildReturn(E)(E ev, imported!"dmd.statement".ReturnStatement retur
         // function ends.
         auto effect = buildEffect(ev, returned.exp);
         if (effect is null)
-            return generic();
+            return null;
         auto sequence = new ShortSequence!2;
         sequence._children[0] = statementOf(effect, positionOf(ev, returned.exp));
         sequence._children[1] = new Jump!(TreeFlow.return_);
@@ -5400,27 +6025,26 @@ private Node buildReturn(E)(E ev, imported!"dmd.statement".ReturnStatement retur
     }
     if (isSlice(ev._type)) {
         if (!isSlice(returned.exp.type))
-            return generic();
+            return null;
         auto slice = buildSlice(ev, returned.exp);
-        return slice is null
-            ? generic() : new ReturnSlice(
-                &ev._place, slice, positionOf(ev, returned.exp));
+        return slice is null ? null : new ReturnSlice(
+            &ev._place, slice, positionOf(ev, returned.exp));
     }
     if (isAggregate(ev._type)) {
         if (!isAggregate(returned.exp.type))
-            return generic();
-        auto value = buildAggregate(ev, returned.exp);
-        return value is null ? generic() : new ReturnAggregate!E(
-            ev, value, positionOf(ev, returned.exp), ev.factsOf(ev._type));
+            return null;
+        auto aggregate = buildAggregate(ev, returned.exp);
+        return aggregate is null ? null : new ReturnAggregate!E(
+            ev, aggregate, positionOf(ev, returned.exp), ev.factsOf(ev._type));
     }
     const scalar = scalarOf(ev, ev._type);
     if (scalar.kind == Scalar.Kind.none
             || scalarOf(ev, returned.exp.type).kind != scalar.kind
             || ev.factsOf(returned.exp.type).size != scalar.facts.size)
-        return generic();
-    auto value = buildValue(ev, returned.exp);
-    if (value is null)
-        return generic();
+        return null;
+    auto operand = buildValue(ev, returned.exp);
+    if (operand is null)
+        return null;
     static Node make(T)(void** place, Node v, Position p) {
         static Node returning(S)(S value, void** place, Position p) {
             return new ReturnValue!(T, S)(place, value, p);
@@ -5432,11 +6056,18 @@ private Node buildReturn(E)(E ev, imported!"dmd.statement".ReturnStatement retur
         return fuseStep!(returning, V, valueKinds!T)(operandOf(v), place, p);
     }
     auto position = positionOf(ev, returned.exp);
-    auto node = scalar.kind == Scalar.Kind.floating
-        ? byFloating!make(scalar.facts, &ev._place, value, position)
-        : byIntegral!make(scalar.facts, &ev._place, value, position);
-    const only = statementsOf(ev._function.fbody);
-    if (only.length == 1 && only[0] is returned)
-        ev._treeRoot._soleReturn = node;
-    return node;
+    value = scalar.kind == Scalar.Kind.floating
+        ? byFloating!make(scalar.facts, &ev._place, operand, position)
+        : byIntegral!make(scalar.facts, &ev._place, operand, position);
+    return value;
+}
+
+// Whether the full expression `built` at `where` reads its result
+// `expression` after its destructors ran: the evaluator runs it.
+private bool readsAfterEnd(
+    in Built built, in FullExpressionScope.Position where,
+    Expression expression,
+) {
+    return built.scoped
+        && FullExpressionScope.readsLvalueAfterEnd(where, expression);
 }

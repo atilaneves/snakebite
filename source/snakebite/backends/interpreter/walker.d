@@ -5,8 +5,8 @@ private:
 
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.backends.interpreter.nodetree:
-    AccessSite, OuterVariable, TreeCallee, TreeFlow, TreeRoot, isScalar,
-    isSlice, rootOf;
+    AccessSite, OuterVariable, TreeCallee, TreeFlow, TreeRoot, isAggregate,
+    isScalar, isSlice, rootOf;
 import snakebite.nativelayout: tryTypeFacts, truthFacts;
 
 
@@ -1484,19 +1484,20 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             case vaStart, vaCopy, alloca:
                 return null;
         }
-        if (layout.returnPlace.offset != size_t.max)
-            return null;
         auto returnType = function_.type.nextOf;
+        const returnsAggregate = isAggregate(returnType);
         // A constructor's result is its receiver.
         if (function_.isCtorDeclaration is null
                 && returnType.toBasetype.ty != TY.Tvoid
-                && !isScalar(this, returnType) && !isSlice(returnType))
+                && !isScalar(this, returnType) && !isSlice(returnType)
+                && !returnsAggregate)
             return null;
         auto callee = new TreeCallee;
         callee.function_ = function_;
         callee.decision = decision;
         callee.layout = layout;
         callee.returnFacts = factsOf(returnType);
+        callee.returnsAggregate = returnsAggregate;
         callee.lead = frameLead(layout.alignment);
         callee.reservesFast = layout.alignment != 0
             && (layout.alignment & (layout.alignment - 1)) == 0
