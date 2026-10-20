@@ -1783,7 +1783,9 @@ private final class EffectStep : Node {
 private final class PlacedObject : LongNode {
     private Node _place;
     private const(void)[] _image;
-    public this(Node place, const(void)[] image) { _place = place; _image = image; }
+    public this(Node place, const(void)[] image) {
+        _place = place; _image = image;
+    }
     public override long executeLong(ubyte* frame) {
         import core.stdc.string: memcpy;
 
@@ -1835,16 +1837,26 @@ private final class FrameContextStore : Node {
 
     private size_t _offset;
     private const(Hop)[] _hops;
-    public this(size_t offset, const(Hop)[] hops) { _offset = offset; _hops = hops; }
-    public override void executeInto(ubyte* frame, ubyte* dest) {
-        auto context = frame;
-        foreach (hop; _hops) {
-            if (context is null)
-                break;
-            context = *cast(ubyte**) (context + hop.offset);
-        }
-        *cast(ubyte**) (dest + _offset) = context;
+    public this(size_t offset, const(Hop)[] hops) {
+        _offset = offset; _hops = hops;
     }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        *cast(ubyte**) (dest + _offset) = contextAlong(frame, _hops);
+    }
+}
+
+// The context that `hops` reach from `frame` along the static chain. A
+// context that a hop finds null stays null.
+private ubyte* contextAlong(
+    ubyte* frame, const(imported!"snakebite.backends.closureplan".Hop)[] hops,
+) {
+    auto context = frame;
+    foreach (hop; hops) {
+        if (context is null)
+            break;
+        context = *cast(ubyte**) (context + hop.offset);
+    }
+    return context;
 }
 
 // The hidden context field of a nested aggregate whose context the
@@ -2267,13 +2279,8 @@ private final class FrameDelegate : SliceNode {
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset;
 
-        auto context = frame;
-        foreach (hop; _hops) {
-            if (context is null)
-                break;
-            context = *cast(ubyte**) (context + hop.offset);
-        }
-        *cast(ubyte**) (dest + delegateContextOffset) = context;
+        *cast(ubyte**) (dest + delegateContextOffset)
+            = contextAlong(frame, _hops);
         *cast(void**) (dest + delegateFunctionOffset) = _function;
     }
 }
@@ -4920,7 +4927,9 @@ private bool isStoreTarget(Expression target) {
 // An assignment to a slice. A slice that dmd typed as a static array is the
 // place of its elements, and `a[] = v` fills; both stay with the evaluator.
 // Every other one copies the elements of the array on the right side.
-private Node buildSliceAssignment(E)(E ev, AssignExp assignment, SliceExp target) {
+private Node buildSliceAssignment(E)(
+    E ev, AssignExp assignment, SliceExp target,
+) {
     import dmd.expression: MemorySet;
     import dmd.typesem: nextOf, toBasetype;
     import snakebite.backends.sliceplan: planSlice;
