@@ -6384,3 +6384,339 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// A struct argument is a copy: the callee changes its own. A struct result
+// of 16 bytes comes back in registers and one of 24 bytes in memory that
+// the caller gives. The callee of a virtual call changes with the object.
+static foreach (backend; Matrix!()) {
+    @("structValues.virtualCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Small { double x; double y; }
+            struct Wide { long a; long b; long c; }
+            class Shape {
+                Small move(Small by) { by.x += 1; return Small(by.x, by.y); }
+                Wide widen(Wide w, int k) { w.a += k; return w; }
+            }
+            class Square : Shape {
+                override Small move(Small by) {
+                    by.y += 10;
+                    return Small(by.x * 2, by.y);
+                }
+                override Wide widen(Wide w, int k) {
+                    return Wide(w.c, w.b, w.a + k);
+                }
+            }
+            void main() {
+                Shape[2] shapes = [new Shape, new Square];
+                Small s = Small(1, 2);
+                Wide w = Wide(1, 2, 3);
+                double moves = 0;
+                long widths = 0;
+                foreach (i; 0 .. 4) {
+                    auto shape = shapes[i % 2];
+                    auto moved = shape.move(s);
+                    moves = moves * 100 + moved.x * 10 + moved.y;
+                    auto widened = shape.widen(w, i);
+                    widths = widths * 1000
+                        + widened.a * 100 + widened.b * 10 + widened.c;
+                }
+                assert(s.x == 1 && s.y == 2);
+                assert(w.a == 1 && w.b == 2 && w.c == 3);
+                assert(moves == 22_32_22_32);
+                assert(widths == 123_322_323_324);
+            }
+        });
+    }
+}
+
+// A struct passes by value through a function pointer, both ways.
+static foreach (backend; Matrix!()) {
+    @("structValues.functionPointerCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Small { int x; int y; }
+            struct Wide { long a; long b; long c; }
+            Small flip(Small s) { s.x += 100; return Small(s.y, s.x); }
+            Wide rotate(Wide w) { w.a *= 2; return Wide(w.b, w.c, w.a); }
+            void main() {
+                Small function(Small) toSmall = &flip;
+                Wide function(Wide) toWide = &rotate;
+                Small s = Small(1, 2);
+                Wide w = Wide(1, 2, 3);
+                const flipped = toSmall(s);
+                const rotated = toWide(w);
+                assert(s.x == 1 && w.a == 1);
+                assert(flipped.x == 2 && flipped.y == 101);
+                assert(rotated.a == 2 && rotated.b == 3 && rotated.c == 2);
+            }
+        });
+    }
+}
+
+// A struct passes by value through a delegate, both ways.
+static foreach (backend; Matrix!()) {
+    @("structValues.delegateCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Wide { long a; long b; long c; }
+            void main() {
+                long calls;
+                Wide delegate(Wide) rotate = (Wide w) {
+                    ++calls;
+                    w.a *= 2;
+                    return Wide(w.c, w.a, w.b + calls);
+                };
+                Wide w = Wide(1, 2, 3);
+                const once = rotate(w);
+                const twice = rotate(once);
+                assert(w.a == 1 && calls == 2);
+                assert(once.a == 3 && once.b == 2 && once.c == 3);
+                assert(twice.a == 3 && twice.b == 6 && twice.c == 4);
+            }
+        });
+    }
+}
+
+// The rvalue that a method call has as its receiver lives until its full
+// expression ends: the address that the method gives stays valid while the
+// other arguments of the call run, which make rvalues of their own.
+static foreach (backend; Matrix!()) {
+    @("structValues.rvalueReceiverLivesToEndOfFullExpression." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S {
+                int x;
+                S* self() return { return &this; }
+                S plus(S other) const { return S(x + other.x); }
+            }
+            S make(int x) { return S(x); }
+            int pair(S* first, S* second) { return first.x * 10 + second.x; }
+            void main() {
+                assert(pair(make(1).self(), make(2).self()) == 12);
+                int total;
+                foreach (i; 0 .. 1000)
+                    total += pair(make(i).plus(make(1)).self(),
+                        make(2).plus(make(i)).self());
+                assert(total == 11 * (999 * 1000 / 2) + 1000 * 12);
+            }
+        });
+    }
+}
+
+// The storage of an rvalue lasts until its full expression ends, also when
+// the rvalue is made inside the argument of a call, whose callee frame ends
+// before the next argument runs.
+static foreach (backend; Matrix!()) {
+    @("structValues.rvalueInCallArgumentLivesToEndOfFullExpression." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S {
+                int x;
+                S* self() return { return &this; }
+            }
+            S make(int x) { return S(x); }
+            S* id(S* p) { return p; }
+            int pair(S* first, S* second) { return first.x * 10 + second.x; }
+            int run(int i) {
+                int r = pair(id(make(i).self()), id(make(i + 1).self()));
+                return r;
+            }
+            void main() {
+                int total;
+                foreach (i; 0 .. 5)
+                    total += run(1);
+                assert(total == 60);
+            }
+        });
+    }
+}
+
+// The same for the rvalues of an assignment to a struct inside an argument:
+// the value that the assignment writes is made in storage of its own.
+static foreach (backend; Matrix!()) {
+    @("structValues.rvalueInAssignmentArgumentLivesToEndOfFullExpression." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S {
+                int x;
+                S* self() return { return &this; }
+            }
+            struct H { S* p; long pad; long pad2; }
+            S make(int x) { return S(x); }
+            int pair(S* first, S* second) { return first.x * 10 + second.x; }
+            int run(int i) {
+                H h, k;
+                int r = pair((h = H(make(i).self())).p,
+                    (k = H(make(i + 1).self())).p);
+                return r;
+            }
+            void main() {
+                int total;
+                foreach (i; 0 .. 5)
+                    total += run(1);
+                assert(total == 60);
+            }
+        });
+    }
+}
+
+// The temporaries that the calls of an expression statement make are
+// destroyed when the statement ends, the last one first.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "DMD CTFE does not run these call-argument temporary destructors"),
+)) {
+    @("structValues.callTemporariesDestroyedAtStatementEnd." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Tracked {
+                int* events;
+                int value;
+                ~this() { *events = *events * 10 + value + 2; }
+                int get() const { return value; }
+            }
+            Tracked make(int* events, int value) {
+                *events = *events * 10 + value;
+                return Tracked(events, value);
+            }
+            int consume(int* events, int first, int second) {
+                *events = *events * 10 + 9;
+                return first + second;
+            }
+            void main() {
+                int events;
+                consume(&events, make(&events, 1).get(), make(&events, 2).get());
+                assert(events == 12943);
+            }
+        });
+    }
+}
+
+// The temporary of an `if` condition is destroyed before the body runs.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "DMD CTFE does not run these condition temporary destructors"),
+)) {
+    @("structValues.conditionTemporaryDestroyedBeforeBody." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Tracked {
+                int* events;
+                int value;
+                ~this() { *events = *events * 10 + value + 2; }
+                int get() const { return value; }
+            }
+            Tracked make(int* events, int value) {
+                *events = *events * 10 + value;
+                return Tracked(events, value);
+            }
+            void main() {
+                int events;
+                if (make(&events, 3).get() == 3)
+                    events = events * 10 + 9;
+                assert(events == 359);
+            }
+        });
+    }
+}
+
+// The right operand of `&&` is a full expression of its own: its temporary
+// is destroyed before the next operand runs, and the one of the left
+// operand when the whole expression ends.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "DMD CTFE does not run these short-circuit temporary destructors"),
+)) {
+    @("structValues.logicalOperandTemporaryDestroyedFirst." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Tracked {
+                int* events;
+                int value;
+                ~this() { *events = *events * 10 + value + 2; }
+                int get() const { return value; }
+            }
+            Tracked make(int* events, int value) {
+                *events = *events * 10 + value;
+                return Tracked(events, value);
+            }
+            bool note(int* events) {
+                *events = *events * 10 + 9;
+                return true;
+            }
+            void main() {
+                int events;
+                const both = make(&events, 1).get() == 1
+                    && make(&events, 2).get() == 2 && note(&events);
+                assert(both);
+                assert(events == 12493);
+            }
+        });
+    }
+}
+
+// The condition and the increment of a loop are full expressions of their
+// own on each run: each temporary is destroyed before the next part of the
+// loop runs.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "DMD CTFE does not run these loop temporary destructors"),
+)) {
+    @("structValues.loopTemporariesDestroyedEachRun." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Tracked {
+                long* events;
+                int value;
+                ~this() { *events = *events * 10 + value + 2; }
+                int get() const { return value; }
+            }
+            Tracked make(long* events, int value) {
+                *events = *events * 10 + value;
+                return Tracked(events, value);
+            }
+            void main() {
+                long events;
+                for (int i = 1; make(&events, i).get() < 3;
+                        i = make(&events, i + 1).get())
+                    events = events * 10 + 9;
+                assert(events == 1_3_9_2_4_2_4_9_3_5_3_5);
+            }
+        });
+    }
+}
+
+// A pointer into an rvalue that initialises a variable stays valid while
+// the variable lives: compiled D gives the rvalue storage for as long as
+// the function runs.
+static foreach (backend; Matrix!()) {
+    @("structValues.rvalueKeptByVariablePointingIntoIt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Pair { int[2] values; }
+            Pair pair(int x) { return Pair([x, -x]); }
+            void main() {
+                int* first = &pair(7).values[1];
+                int* second = &pair(9).values[1];
+                int sum;
+                foreach (i; 0 .. 3) {
+                    int* each = &pair(i).values[1];
+                    sum += *each;
+                }
+                assert(*first == -7 && *second == -9 && sum == -3);
+            }
+        });
+    }
+}

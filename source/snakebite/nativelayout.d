@@ -277,6 +277,28 @@ private void forceResolved(imported!"dmd.mtype".Type type) {
         forceResolved(arrayType.next);
 }
 
+// Whether the value stored at `value` is true, as a condition tests it, for
+// a type whose `truthFacts` are `truth`.
+public bool isTrueAt(in void* value, in TypeFacts.Truth truth) {
+    import snakebite.nativevalue: loadFloating;
+
+    const buffer = cast(const(ubyte)*) value;
+    if (truth.isFloat) {
+        if (loadFloating(buffer + truth.offset, truth.size) != 0)
+            return true;
+        if (truth.secondOffset == TypeFacts.Truth.noSecondWord)
+            return false;
+        return loadFloating(buffer + truth.secondOffset, truth.size) != 0;
+    }
+
+    if (loadIntegral(buffer + truth.offset, truth.size, false) != 0)
+        return true;
+    if (truth.secondOffset == TypeFacts.Truth.noSecondWord)
+        return false;
+    return loadIntegral(
+        buffer + truth.secondOffset, size_t.sizeof, false) != 0;
+}
+
 // Which native bytes of a value of `type` decide whether it is true
 // as a condition (`if`, `assert`, `!`, `&&`, `||`, `?:`) - dmd's own
 // `toBoolean` (`dmd.expressionsem`) leaves such a condition's type

@@ -84,8 +84,24 @@ public struct FullExpressionScope {
         imported!"dmd.expression".Expression result,
     ) const {
         return kindOf(position) == FullExpressionKind.value
-            && opens(position) && !_ending
-            && isLvalueResult(result) && hasOperandDestructors(result);
+            && opens(position) && !_ending && readsLvalue(result);
+    }
+
+    // Whether a full expression at `position` with the value `result` reads
+    // its result after its destructors ran, when it opens a full expression
+    // of its own.
+    public static bool readsLvalueAfterEnd(
+        in Position position,
+        imported!"dmd.expression".Expression result,
+    ) {
+        return kindOf(position) == FullExpressionKind.value
+            && readsLvalue(result);
+    }
+
+    private static bool readsLvalue(
+        imported!"dmd.expression".Expression result,
+    ) {
+        return isLvalueResult(result) && hasOperandDestructors(result);
     }
 
     // `appendDtors` leaves the result unchanged when `varsInScope` has no

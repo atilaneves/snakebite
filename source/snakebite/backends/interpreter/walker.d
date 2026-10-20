@@ -5,8 +5,8 @@ private:
 
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.backends.interpreter.nodetree:
-    AccessSite, OuterVariable, TreeCallee, TreeFlow, TreeRoot, isScalar,
-    isSlice, rootOf;
+    AccessSite, OuterVariable, TreeCallee, TreeFlow, TreeRoot, isAggregate,
+    isScalar, isSlice, rootOf;
 import snakebite.nativelayout: tryTypeFacts, truthFacts;
 
 
@@ -616,6 +616,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // bump-allocated on call and popped on return. Frames never move;
     // overflow throws loudly.
     package FrameStack _frames;
+    // The storage of the rvalues of the full expression that this thread
+    // runs (`FrameRelease`).
+    package ubyte* _rvalueArea;
     private StackPieces _stack;
     package NativeData* _nativeData;
     // This thread's reads of the shared tables, counted.
@@ -1484,19 +1487,20 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             case vaStart, vaCopy, alloca:
                 return null;
         }
-        if (layout.returnPlace.offset != size_t.max)
-            return null;
         auto returnType = function_.type.nextOf;
+        const returnsAggregate = isAggregate(returnType);
         // A constructor's result is its receiver.
         if (function_.isCtorDeclaration is null
                 && returnType.toBasetype.ty != TY.Tvoid
-                && !isScalar(this, returnType) && !isSlice(returnType))
+                && !isScalar(this, returnType) && !isSlice(returnType)
+                && !returnsAggregate)
             return null;
         auto callee = new TreeCallee;
         callee.function_ = function_;
         callee.decision = decision;
         callee.layout = layout;
         callee.returnFacts = factsOf(returnType);
+        callee.returnsAggregate = returnsAggregate;
         callee.lead = frameLead(layout.alignment);
         callee.reservesFast = layout.alignment != 0
             && (layout.alignment & (layout.alignment - 1)) == 0
@@ -3237,27 +3241,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     private bool truthOfStored(in void* value, Type type) {
-        import snakebite.nativelayout: TypeFacts, loadIntegral;
-        import snakebite.nativevalue: loadFloating;
+        import snakebite.nativelayout: isTrueAt;
 
-        const truth = truthFacts(type);
-        const buffer = cast(const(ubyte)*) value;
-
-        if (truth.isFloat) {
-            if (loadFloating(buffer + truth.offset, truth.size) != 0)
-                return true;
-            if (truth.secondOffset == TypeFacts.Truth.noSecondWord)
-                return false;
-            return loadFloating(
-                buffer + truth.secondOffset, truth.size) != 0;
-        }
-
-        if (loadIntegral(buffer + truth.offset, truth.size, false) != 0)
-            return true;
-        if (truth.secondOffset == TypeFacts.Truth.noSecondWord)
-            return false;
-        return loadIntegral(
-            buffer + truth.secondOffset, size_t.sizeof, false) != 0;
+        return isTrueAt(value, truthFacts(type));
     }
 
     // A dynamic array's two fields, for a caller that reads them rather

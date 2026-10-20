@@ -16,7 +16,15 @@ private bool ownsTemporaryDestructor(
     bool rootOwns = false,
 ) {
     return root !is null && (rootOwns || declaration !is root)
-        && (variable.storage_class & STC.temp)
+        && hasTemporaryDestructor(variable);
+}
+
+// Whether `variable` is a temporary that dmd gives a destructor, which runs
+// when the full expression that owns it ends.
+public bool hasTemporaryDestructor(
+    imported!"dmd.declaration".VarDeclaration variable,
+) {
+    return (variable.storage_class & STC.temp)
         && variable.edtor !is null
         && !(variable.storage_class & STC.nodtor);
 }
