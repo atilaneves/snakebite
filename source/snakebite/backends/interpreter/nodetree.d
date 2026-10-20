@@ -2414,18 +2414,18 @@ private final class VariadicExtras : LongNode {
     private FrameStack* _frames;
     private const(VariadicCallPlan)* _plan;
     private Operand[] _args;
-    private Argument[] _modes;
+    private ArgumentWriter[] _writers;
     public this(E)(E ev, SiteArguments extras, typeof(_plan) plan) {
         _frames = &ev._frames; _plan = plan;
         _args = argumentOperands(extras.nodes, extras.modes);
-        _modes = extras.modes;
+        _writers = writersOf(_args, extras.modes);
     }
     public override long executeLong(ubyte* frame) {
         const layout = &_plan.layout;
         auto storage = _frames.reserve(layout.size, layout.alignment);
         layout.initialize(storage);
         foreach (i, ref arg; _args)
-            storeArgument(arg, _modes[i], frame, storage + layout.offsets[i]);
+            _writers[i](arg, frame, storage + layout.offsets[i]);
         return cast(long) storage;
     }
 }
@@ -3041,12 +3041,14 @@ private mixin template CalleeEntry(E) {
     // The function whose tree holds this site: the running function again
     // when the callee returns.
     private FuncDeclaration _caller;
+    private ArgumentWriter[] _writers;
 
     private void takeArguments(SiteArguments arguments) {
         _args = argumentOperands(arguments.nodes, arguments.modes);
         _modes = arguments.modes;
         _sizes = arguments.sizes;
         _caller = _ev._function;
+        _writers = writersOf(_args, _modes);
     }
 
     // Whether `callee` takes the arguments of this site and gives its result.
@@ -3097,9 +3099,9 @@ private mixin template CalleeEntry(E) {
                 = hidden;
         // `takesArguments` made the three lengths equal.
         auto parameters = callee.slots.ptr;
-        auto modes = _modes.ptr;
+        auto writers = _writers.ptr;
         foreach (i, ref arg; _args)
-            storeArgument(arg, modes[i], frame, base + parameters[i].offset);
+            writers[i](arg, frame, base + parameters[i].offset);
         return base;
     }
 
@@ -4331,17 +4333,81 @@ private Operand[] argumentOperands(Node[] args, Argument[] modes) {
     return operands;
 }
 
-// Evaluates `arg` into the parameter slot `place` as `mode` says.
-private void storeArgument(ref Operand arg, Argument mode, ubyte* frame, ubyte* place) {
-    final switch (mode) with (Argument) {
-        case i8: *cast(ubyte*) place = cast(ubyte) arg.readLong(frame); break;
-        case i16: *cast(ushort*) place = cast(ushort) arg.readLong(frame); break;
-        case i32: *cast(uint*) place = cast(uint) arg.readLong(frame); break;
-        case i64: *cast(ulong*) place = arg.readLong(frame); break;
-        case f32: *cast(float*) place = arg.readDouble(frame); break;
-        case f64: *cast(double*) place = arg.readDouble(frame); break;
-        case address: *cast(ubyte**) place = arg.readAddress(frame); break;
-        case pair, aggregate: arg.node.executeInto(frame, place); break;
+// Evaluates an argument into its parameter slot at `place`. Each argument
+// of a site has its own, chosen once by how the argument is passed and how
+// its operand reads.
+private alias ArgumentWriter = void function(
+    ref Operand argument, ubyte* frame, ubyte* place);
+
+private ArgumentWriter[] writersOf(in Operand[] args, in Argument[] modes) {
+    auto writers = new ArgumentWriter[args.length];
+    foreach (i, ref arg; args)
+        writers[i] = writerOf(modes[i], arg.kind);
+    return writers;
+}
+
+private ArgumentWriter writerOf(in Argument mode, in Kind kind) {
+    import std.traits: EnumMembers;
+
+    final switch (mode) {
+        static foreach (m; EnumMembers!Argument) {
+            case m:
+                final switch (kind) {
+                    static foreach (k; EnumMembers!Kind) {
+                        case k:
+                            static if (has(argumentKinds!m, k))
+                                return &writeArgument!(m, k);
+                            else
+                                assert(0, "argumentOperands gives no "
+                                    ~ "operand of this kind for this mode");
+                    }
+                }
+        }
+    }
+}
+
+// The operand kinds that `argumentOperands` gives for an argument passed as
+// `mode`.
+private template argumentKinds(Argument mode) {
+    static if (mode == Argument.address)
+        public enum Kind[] argumentKinds = addressKinds;
+    else static if (mode == Argument.pair || mode == Argument.aggregate)
+        public enum Kind[] argumentKinds = onlyChild;
+    else static if (mode == Argument.f32 || mode == Argument.f64)
+        public enum Kind[] argumentKinds = valueKinds!double;
+    else
+        public enum Kind[] argumentKinds = valueKinds!long;
+}
+
+private void writeArgument(Argument mode, Kind kind)(
+    ref Operand argument, ubyte* frame, ubyte* place,
+) {
+    with (Argument) {
+        static if (mode == pair || mode == aggregate)
+            argument.node.executeInto(frame, place);
+        else static if (mode == address)
+            *cast(ubyte**) place = makeOperand!(OperandType!(kind, long))(
+                argument).address(frame);
+        else {
+            static if (mode == i8)
+                alias T = ubyte;
+            else static if (mode == i16)
+                alias T = ushort;
+            else static if (mode == i32)
+                alias T = uint;
+            else static if (mode == i64)
+                alias T = ulong;
+            else static if (mode == f32)
+                alias T = float;
+            else
+                alias T = double;
+            static if (isFloatingPoint!T)
+                alias V = double;
+            else
+                alias V = long;
+            *cast(T*) place = cast(T) makeOperand!(OperandType!(kind, V))(
+                argument).value(frame);
+        }
     }
 }
 
@@ -4377,7 +4443,7 @@ private final class BuiltinOp : Node {
 
     private imported!"snakebite.backends.builtins".BuiltinCall _entry;
     private Operand[] _args;
-    private Argument[] _modes;
+    private ArgumentWriter[] _writers;
     private size_t _resultSize;
     private bool _resultUnsigned;
 
@@ -4387,7 +4453,7 @@ private final class BuiltinOp : Node {
     ) {
         _entry = entry;
         _args = argumentOperands(arguments.nodes, arguments.modes);
-        _modes = arguments.modes;
+        _writers = writersOf(_args, arguments.modes);
         _resultSize = resultSize; _resultUnsigned = resultUnsigned;
     }
 
@@ -4397,7 +4463,7 @@ private final class BuiltinOp : Node {
         foreach (i, ref arg; _args) {
             // `buildIntrinsicCall` takes only value arguments.
             auto place = cast(ubyte*) &values[i];
-            storeArgument(arg, _modes[i], frame, place);
+            _writers[i](arg, frame, place);
             pointers[i] = place;
         }
         _entry(result, pointers.ptr, _args.length);
