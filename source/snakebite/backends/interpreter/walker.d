@@ -2992,27 +2992,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // comes back when it ends.
         auto slot = faultSlot;
         if (slot is null || !_temporaries.opens(position))
-            return withExpressionTemporaries(position, root, evaluate);
+            return _temporaries.withExpression(position, root, evaluate);
         const interrupted = *slot;
         *slot = cast(const(void)*) root;
         scope (exit) *slot = interrupted;
-        withExpressionTemporaries(position, root, evaluate);
-    }
-
-    // Runs `evaluate` as the full expression `root`, whose temporaries the
-    // lifetime destroys when it ends. When an exception ends it, their
-    // destructors run before a `try` catches it, so the running call's
-    // state goes back first (`RunningCall`).
-    extern(D) package void withExpressionTemporaries(
-        in FullExpressionScope.Position position,
-        Expression root,
-        scope void delegate() evaluate,
-    ) {
-        auto running = RunningCall(this);
-        _temporaries.withExpression(position, root, {
-            scope (failure) running.restore(this);
-            evaluate();
-        });
+        _temporaries.withExpression(position, root, evaluate);
     }
 
     protected override void visitReturnTransfer(ReturnStatement statement) {

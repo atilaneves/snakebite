@@ -2118,7 +2118,7 @@ private final class Scoped(E) : BoolNode {
         // the running call.
         ev.handOver(_root, frame, {
             ev._temporaries.withNestedCall(false, {
-                ev.withExpressionTemporaries(_where, _expression, evaluate);
+                ev._temporaries.withExpression(_where, _expression, evaluate);
             });
         });
     }
