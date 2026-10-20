@@ -117,7 +117,7 @@ package ResultWord resultWordFor(E)(E ev, FuncDeclaration function_) {
     if (typeFunctionOf(function_).isRef)
         return ResultWord.place;
     auto type = function_.type.nextOf;
-    if (type.toBasetype.ty == TY.Tvoid)
+    if (hasNoResult(type))
         return ResultWord.none;
     return scalarOf(ev, type).kind == Scalar.Kind.none
         ? ResultWord.place : ResultWord.value;
@@ -372,6 +372,18 @@ package bool isSlice(Type type) {
     import dmd.typesem: toBasetype;
 
     return type !is null && type.toBasetype.ty == TY.Tarray;
+}
+
+// A call of a `void` function gives no value, and a call of a `noreturn`
+// function never returns to give one: neither result has bytes.
+package bool hasNoResult(Type type) {
+    import dmd.astenums: TY;
+    import dmd.typesem: toBasetype;
+
+    if (type is null)
+        return false;
+    const ty = type.toBasetype.ty;
+    return ty == TY.Tvoid || ty == TY.Tnoreturn;
 }
 
 private abstract class Node {
@@ -4383,13 +4395,15 @@ private abstract class Call(E) : Node {
     )(FastCallee* fast, size_t receiver, ubyte* frame) {
         auto ev = _ev;
         auto callee = fast.callee;
-        assert(callee.root.resultWord == ResultWord.value,
+        const word = callee.root.resultWord;
+        assert(word == ResultWord.value || word == ResultWord.none,
             "a call that takes a value calls a callee that gives one");
         auto calleeFrame = FrameGuard(&ev._frames);
         auto base = placeIn!(true, context, arity)(
             callee, fast.steps, receiver, frame);
         ev.runTree(callee, base, frame);
-        return *resultWordOf(base);
+        // A `noreturn` callee has no result word, and it never returns here.
+        return word == ResultWord.none ? 0 : *resultWordOf(base);
     }
 
     // Runs the callee of `fast` with `place` in the word of its frame: the
@@ -5374,9 +5388,9 @@ private Node buildIntrinsicCall(E)(E ev, CallExp call, FuncDeclaration function_
             || decision.destinationParameter != size_t.max
             || call.arguments.length > BuiltinOp.maxArguments)
         return null;
-    const isVoid = call.type.toBasetype.ty == TY.Tvoid;
-    const result = isVoid ? Scalar() : scalarOf(ev, call.type);
-    if (!isVoid && result.kind == Scalar.Kind.none)
+    const noResult = hasNoResult(call.type);
+    const result = noResult ? Scalar() : scalarOf(ev, call.type);
+    if (!noResult && result.kind == Scalar.Kind.none)
         return null;
     SiteArguments arguments;
     if (!buildArguments(ev, typeFunctionOf(function_), call.arguments, arguments))
@@ -5386,7 +5400,7 @@ private Node buildIntrinsicCall(E)(E ev, CallExp call, FuncDeclaration function_
                 || mode == Argument.aggregate)
             return null;
     return new BuiltinOp(decision.builtinEntry, arguments,
-        isVoid ? 0 : result.facts.size, result.facts.isUnsigned);
+        noResult ? 0 : result.facts.size, result.facts.isUnsigned);
 }
 
 // --- the builder ------------------------------------------------------
@@ -5856,13 +5870,13 @@ private Node buildCall(E)(E ev, CallExp call) {
     // its result; a constructor gives its receiver.
     const isConstructor = function_.isCtorDeclaration !is null;
     const resultIsAddress = type.isRef || isConstructor;
-    const isVoid = call.type.toBasetype.ty == TY.Tvoid;
+    const noResult = hasNoResult(call.type);
     const resultIsPair = isPair(call.type);
     const resultIsAggregate = isAggregate(call.type);
-    const result = resultIsAddress || isVoid || resultIsPair
+    const result = resultIsAddress || noResult || resultIsPair
             || resultIsAggregate
         ? Scalar() : scalarOf(ev, call.type);
-    if (!resultIsAddress && !isVoid && !resultIsPair && !resultIsAggregate
+    if (!resultIsAddress && !noResult && !resultIsPair && !resultIsAggregate
             && result.kind == Scalar.Kind.none)
         return null;
 
@@ -5946,7 +5960,7 @@ private Node buildCall(E)(E ev, CallExp call) {
     }
     auto node = callOf!E(ev, call, function_, receiver, receiverIsAddress,
         virtual, arguments,
-        isVoid ? 0 : resultIsPair ? SliceValue.sizeof : result.facts.size,
+        noResult ? 0 : resultIsPair ? SliceValue.sizeof : result.facts.size,
         result.facts.isUnsigned);
     if (!virtual) {
         if (!node.matches(callee))
@@ -6087,12 +6101,12 @@ private Node buildIndirectCall(E)(E ev, CallExp call) {
             viaDelegate, arguments, TypeFacts.pointer,
             /* resultUnsigned */ true);
     }
-    const isVoid = call.type.toBasetype.ty == TY.Tvoid;
+    const noResult = hasNoResult(call.type);
     const resultIsPair = isPair(call.type);
     const resultIsAggregate = isAggregate(call.type);
-    const result = isVoid || resultIsPair || resultIsAggregate
+    const result = noResult || resultIsPair || resultIsAggregate
         ? Scalar() : scalarOf(ev, call.type);
-    if (!isVoid && !resultIsPair && !resultIsAggregate
+    if (!noResult && !resultIsPair && !resultIsAggregate
             && result.kind == Scalar.Kind.none)
         return null;
 
@@ -6104,7 +6118,7 @@ private Node buildIndirectCall(E)(E ev, CallExp call) {
             viaDelegate, arguments, ev.factsOf(call.type),
             /* resultUnsigned */ false);
     TypeFacts facts;
-    facts.size = isVoid ? 0 : resultIsPair ? SliceValue.sizeof : result.facts.size;
+    facts.size = noResult ? 0 : resultIsPair ? SliceValue.sizeof : result.facts.size;
     return new IndirectCall!(E, CalleeResult.value)(ev, call, target,
         viaDelegate, arguments, facts, result.facts.isUnsigned);
 }
@@ -6991,7 +7005,7 @@ private Node buildEffect(E)(E ev, Expression expression) {
         return buildDelegate(ev, expression);
     if (isAggregate(expression.type))
         return buildAggregateEffect(ev, expression);
-    if (expression.type !is null && expression.type.toBasetype.ty == TY.Tvoid) {
+    if (hasNoResult(expression.type)) {
         if (expression.op == EXP.question)
             return buildConditional!(buildEffect!E, ConditionalVoid)(
                 ev, expression.isCondExp);
@@ -8848,7 +8862,7 @@ private Node buildReturnOperand(E)(
         return address is null ? null : new ReturnReference(
             address, positionOf(ev, returned.exp));
     }
-    if (ev._type.toBasetype.ty == TY.Tvoid) {
+    if (hasNoResult(ev._type)) {
         // `return f();` in a function without a result: `f` runs, then the
         // function ends.
         auto effect = buildEffect(ev, returned.exp);

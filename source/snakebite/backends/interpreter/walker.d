@@ -6,7 +6,7 @@ private:
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.backends.interpreter.nodetree:
     AccessSite, CalleeResult, OuterVariable, TreeCallee, TreeFlow, TreeRoot,
-    isAggregate, isPair, isScalar, isSlice, resultWordFor, rootOf;
+    hasNoResult, isAggregate, isPair, isScalar, resultWordFor, rootOf;
 import snakebite.nativelayout: tryTypeFacts, truthFacts;
 
 
@@ -1643,9 +1643,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private TreeCallee* newTreeCallee(
         FuncDeclaration function_, in CallSelection.Decision decision,
     ) {
-        import dmd.astenums: TY;
-        import dmd.typesem: toBasetype;
-
         auto type = typeFunctionOf(function_);
         auto returnType = function_.type.nextOf;
         // A function that returns `ref` writes an address, whatever the
@@ -1654,18 +1651,16 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             : isAggregate(returnType)
                 ? CalleeResult.aggregate : CalleeResult.value;
         if (result == CalleeResult.value && function_.isCtorDeclaration is null
-                && returnType.toBasetype.ty != TY.Tvoid
+                && !hasNoResult(returnType)
                 && !isScalar(this, returnType) && !isPair(returnType))
             return null;
         auto callee = new TreeCallee;
         callee.function_ = function_;
         callee.decision = decision;
         callee.layout = callLayoutOf(function_);
-        // A `void` result has no bytes.
         callee.returnFacts = result == CalleeResult.reference
             ? TypeFacts.pointer
-            : returnType.toBasetype.ty == TY.Tvoid
-                ? TypeFacts.init : factsOf(returnType);
+            : hasNoResult(returnType) ? TypeFacts.init : factsOf(returnType);
         callee.result = result;
         return callee;
     }

@@ -1605,6 +1605,86 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// A call of a `noreturn` function has no result. Through a function
+// pointer, the call leaves by the callee's throw.
+static foreach (backend; Matrix!()) {
+    @("noreturnCallThroughPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            noreturn fail(int code) { throw new Exception("pointer"); }
+
+            int main() {
+                noreturn function(int) callee = &fail;
+                try {
+                    callee(1);
+                } catch (Exception exception)
+                    return exception.msg == "pointer" ? 0 : 2;
+                return 1;
+            }
+        });
+    }
+}
+
+// A lambda whose body is a `throw` expression returns `noreturn`.
+static foreach (backend; Matrix!()) {
+    @("noreturnLambdaCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                auto raise = (string message) => throw new Exception(message);
+                try {
+                    raise("lambda");
+                } catch (Exception exception)
+                    return exception.msg == "lambda" ? 0 : 2;
+                return 1;
+            }
+        });
+    }
+}
+
+// druntime's `onRangeError` is a native `noreturn` function that throws.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("noreturnNativeCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: onRangeError, RangeError;
+
+            int main() {
+                try {
+                    onRangeError("file", 7);
+                } catch (RangeError error)
+                    return error.line == 7 ? 0 : 2;
+                return 1;
+            }
+        });
+    }
+}
+
+// `return f();` in a `noreturn` function, where `f` is `noreturn` too.
+static foreach (backend; Matrix!()) {
+    @("noreturnCallAsReturnOperand." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            noreturn fail(int code) { throw new Exception("relayed"); }
+            noreturn relay(int code) { return fail(code); }
+
+            int main() {
+                try {
+                    relay(3);
+                } catch (Exception exception)
+                    return exception.msg == "relayed" ? 0 : 2;
+                return 1;
+            }
+        });
+    }
+}
+
 // A `case` label in an `if (__ctfe)` block is a run-time jump target: the
 // `switch` enters the block at the label, although the `if` itself never
 // does at run time. dmd rejects only a `goto` into the block.
