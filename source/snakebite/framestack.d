@@ -51,7 +51,7 @@ public struct FrameStack {
     private ubyte* _base;
     private size_t _committed;
     private size_t _limit;
-    // The end of the bytes `reserveFast` can hand out: committed, and
+    // The end of the bytes `reserveAligned16` can hand out: committed, and
     // inside the limit.
     private ubyte* _fastEnd;
     private size_t _reservation;
@@ -245,38 +245,6 @@ public struct FrameStack {
         return _base + alignedUsed;
     }
 
-    // `reserve` for a power-of-two `alignment` that is no more than the
-    // page size, where the bytes are already committed: the bump alone.
-    // Every other case takes `reserve`, with the same result and errors.
-    pragma(inline, true)
-    public ubyte* reserveCommitted(in size_t size, in uint alignment) @system {
-        import core.memory: pageSize;
-
-        const alignedUsed = (used + alignment - 1) & ~(size_t(alignment) - 1);
-        if (size != 0 && alignment - 1 < pageSize
-                && alignedUsed <= _limit && size <= _limit - alignedUsed
-                && alignedUsed <= _committed
-                && size <= _committed - alignedUsed) {
-            _top = _base + alignedUsed + size;
-            return _base + alignedUsed;
-        }
-        return reserve(size, alignment);
-    }
-
-    // As `reserveCommitted`, for a caller that checked once that `size` is
-    // not 0 and that `alignment` is a power of two below the page size.
-    // `null` when the bytes are not committed: the caller takes `reserve`.
-    pragma(inline, true)
-    public ubyte* reserveFast(in size_t size, in uint alignment) @system {
-        // The base is page aligned, so an aligned address is an aligned
-        // offset.
-        auto aligned = alignedUp(_top, alignment);
-        if (aligned > _fastEnd || size > _fastEnd - aligned)
-            return null;
-        _top = aligned + size;
-        return aligned;
-    }
-
     // `reserve` with an alignment of 16, for a caller that checked once
     // that `size` is not 0. The bump is one compare when the bytes are
     // committed; every other case takes `reserve`.
@@ -316,8 +284,8 @@ public struct FrameStack {
     public void claim(ubyte* end, ubyte* reach) @system {
         import std.conv: text;
 
-        const used = end - _base;
-        const needed = reach > end ? reach - _base : used;
+        const endOffset = end - _base;
+        const needed = reach > end ? reach - _base : endOffset;
         if (needed > _limit)
             throw new Exception(
                 text("frame stack overflow: need offset ", needed, " of ",

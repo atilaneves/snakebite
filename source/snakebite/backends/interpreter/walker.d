@@ -1621,8 +1621,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private static void reserveFrame(
         TreeCallee* callee, in size_t size, in uint alignment,
     ) {
-        callee.frameSize = size;
         callee.lead = frameLead(alignment);
+        callee.reservation = size + callee.lead;
+        const hiddenThis = callee.layout.hiddenThis;
+        callee.contextOffset = hiddenThis.variable is null
+            ? size_t.max : hiddenThis.parameter.offset;
         callee.reservesFast = alignment != 0
             && (alignment & (alignment - 1)) == 0
             && alignment <= fastFrameLead;
