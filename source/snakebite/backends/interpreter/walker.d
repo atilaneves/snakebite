@@ -345,7 +345,7 @@ private struct Shared {
     // it or by the preparation of a callback, and read without a lock
     // after that: a destructor that the GC finalizer runs cannot allocate.
     SharedTable!(TryCatchStatement, TryCatchPlan) tryCatchPlans;
-    SharedTable!(TryFinallyStatement, ExceptionCandidate[]) finallyCandidates;
+    SharedTable!(TryFinallyStatement, FinallyPlan) finallyPlans;
     SharedTable!(FinallyKey, bool) finallyRuns;
     SharedTable!(FuncDeclaration, ScopePaths) scopePaths;
     SharedTable!(CallSiteKey, const(CallPlan)*) callSitePlans;
@@ -485,6 +485,15 @@ private struct Shared {
 private struct TryCatchPlan {
     ExceptionCandidate[] candidates;
     CatchPlan catches;
+}
+
+// What a `try`/`finally` statement does whatever its body runs: the scope a
+// throw reaches, and whether the `finally` body runs when the body falls
+// through or leaves with a jump other than a `goto`.
+package struct FinallyPlan {
+    private ExceptionCandidate[] candidates;
+    private bool fallThroughRuns;
+    private bool transferRuns;
 }
 
 // Whether a `finally` body runs depends on the statement, how control
@@ -2007,14 +2016,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 enqueue(definition);
             }),
             (statement) => attempt({ tryCatchPlanOf(statement); }),
-            (statement) => attempt({
-                finallyCandidatesOf(statement);
-                foreach (exit; [FinallyKey.Exit.fallThrough,
-                        FinallyKey.Exit.transfer])
-                    runsFinally(
-                        FinallyKey(cast(const(void)*) statement, null, exit),
-                        statement);
-            }),
+            (statement) => attempt({ finallyPlanOf(statement); }),
             (statement, destination) => attempt({
                 runsFinally(
                     FinallyKey(cast(const(void)*) statement,
@@ -2346,6 +2348,32 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     override void visit(TryCatchStatement statement) {
+        const seeking = _controlFlow.seeking;
+        runTryCatch(statement, {
+            if (statement._body !is null)
+                statement._body.accept(this);
+            return TreeFlow.normal;
+        }, (catch_, guest) {
+            bindCatchVariable(catch_, guest);
+            if (catch_.handler !is null)
+                catch_.handler.accept(this);
+            return TreeFlow.normal;
+        });
+        // A label that the body does not hold can be in a handler.
+        if (seeking && _controlFlow.seeking)
+            foreach (catch_; *statement.catches)
+                if (catch_.handler !is null)
+                    catch_.handler.accept(this);
+    }
+
+    // Runs the body of `statement`. A guest exception that one of its
+    // clauses catches runs that clause's `handler`, with the exception.
+    // The evaluator and the node tree run a `try`/`catch` through this.
+    extern(D) package TreeFlow runTryCatch(
+        TryCatchStatement statement,
+        scope TreeFlow delegate() body_,
+        scope TreeFlow delegate(Catch, Throwable) handler,
+    ) {
         _activeExceptionScopes.push(ActiveExceptionScope(
             tryCatchPlanOf(statement).candidates));
         auto scopeActive = true; // Cleared after the scope is removed explicitly.
@@ -2353,50 +2381,17 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             if (scopeActive)
                 _activeExceptionScopes.pop;
 
-        if (_controlFlow.seeking) {
-            try {
-                if (statement._body !is null)
-                    statement._body.accept(this);
-            } catch (GuestException exception) {
-                const plan = exceptionPlan(exception._guest.classinfo);
-                // Binding and visiting the handler mutate dmd's Catch node.
-                auto catch_ = selectedCatch(plan, statement);
-                _activeExceptionScopes.pop;
-                scopeActive = false;
-                if (catch_ !is null) {
-                    bindCatchVariable(catch_, exception.take);
-                    if (catch_.handler !is null)
-                        catch_.handler.accept(this);
-                    return;
-                }
-
-                throw exception;
-            }
-            _activeExceptionScopes.pop;
-            scopeActive = false;
-            if (_controlFlow.seeking)
-                foreach (catch_; *statement.catches)
-                    if (catch_.handler !is null)
-                        catch_.handler.accept(this);
-            return;
-        }
-
-        try {
-            statement._body.accept(this);
-        } catch (GuestException exception) {
+        try
+            return body_();
+        catch (GuestException exception) {
             const plan = exceptionPlan(exception._guest.classinfo);
             // Binding and visiting the handler mutate dmd's Catch node.
             auto catch_ = selectedCatch(plan, statement);
             _activeExceptionScopes.pop;
             scopeActive = false;
-            if (catch_ !is null) {
-                bindCatchVariable(catch_, exception.take);
-                if (catch_.handler !is null)
-                    catch_.handler.accept(this);
-                return;
-            }
-
-            throw exception;
+            if (catch_ is null)
+                throw exception;
+            return handler(catch_, exception.take);
         }
     }
 
@@ -2421,20 +2416,29 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         return _shared.tryCatchPlans.insert(statement, plan);
     }
 
-    extern(D) private ExceptionCandidate[] finallyCandidatesOf(
+    extern(D) package FinallyPlan* finallyPlanOf(
         TryFinallyStatement statement,
     ) {
-        if (auto cached = statement in _shared.finallyCandidates)
-            return *cached;
+        if (auto cached = statement in _shared.finallyPlans)
+            return cached;
 
-        return *_shared.finallyCandidates.insert(statement, [
+        FinallyPlan plan;
+        plan.candidates = [
             ExceptionCandidate(
                 cast(const(void)*) statement,
                 ExceptionCandidate.Kind.finally_,
                 null,
                 cast(const(void)*) statement.finalbody,
             ),
-        ]);
+        ];
+        const statementKey = cast(const(void)*) statement;
+        plan.fallThroughRuns = runsFinally(
+            FinallyKey(statementKey, null, FinallyKey.Exit.fallThrough),
+            statement);
+        plan.transferRuns = runsFinally(
+            FinallyKey(statementKey, null, FinallyKey.Exit.transfer),
+            statement);
+        return _shared.finallyPlans.insert(statement, plan);
     }
 
     // The result lasts until the next call: it lives on the C heap, because
@@ -2531,17 +2535,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     override void visit(TryFinallyStatement statement) {
-        _activeExceptionScopes.push(
-            ActiveExceptionScope(finallyCandidatesOf(statement)));
-        auto scopeActive = true; // Cleared after the scope is removed explicitly.
-        scope (exit)
-            if (scopeActive)
-                _activeExceptionScopes.pop;
-
+        auto plan = finallyPlanOf(statement);
         bool bodyRan;
-        Throwable pendingException;
-        bool runFinalizer;
         if (_controlFlow.seeking) {
+            _activeExceptionScopes.push(ActiveExceptionScope(plan.candidates));
+            scope (exit)
+                _activeExceptionScopes.pop;
             if (statement._body !is null)
                 statement._body.accept(this);
             bodyRan = true;
@@ -2551,7 +2550,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 return;
         }
 
-        try {
+        runTryFinally(statement, plan, {
             if (!bodyRan && statement._body !is null)
                 statement._body.accept(this);
 
@@ -2560,39 +2559,85 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 if (statement._body !is null)
                     statement._body.accept(this);
             }
-        } catch (GuestException exception) {
+            return _controlFlow.hasTransfer ? TreeFlow.generic : TreeFlow.normal;
+        }, {
+            runCleanupBody(statement.finalbody);
+            return _controlFlow.hasTransfer ? TreeFlow.generic : TreeFlow.normal;
+        });
+    }
+
+    // Runs the body of `statement`, then its `finally` body (`cleanup`) when
+    // the way the body ended leaves the statement. A transfer that the
+    // cleanup makes takes the place of the body's. The evaluator and the
+    // node tree run a `try`/`finally` through this. A body that ends with
+    // `generic` left its transfer in `_controlFlow`.
+    extern(D) package TreeFlow runTryFinally(
+        TryFinallyStatement statement,
+        FinallyPlan* plan,
+        scope TreeFlow delegate() body_,
+        scope TreeFlow delegate() cleanup,
+    ) {
+        _activeExceptionScopes.push(ActiveExceptionScope(plan.candidates));
+        auto scopeActive = true; // Cleared after the scope is removed explicitly.
+        scope (exit)
+            if (scopeActive)
+                _activeExceptionScopes.pop;
+
+        TreeFlow flow;
+        Throwable pendingException;
+        bool runFinalizer;
+        try
+            flow = body_();
+        catch (GuestException exception) {
             pendingException = exception.take;
-            const plan = exceptionPlan(pendingException.classinfo);
-            assert(plan.finalizers.length != 0);
-            assert(plan.finalizers[0].owner == cast(const(void)*) statement);
+            const unwind = exceptionPlan(pendingException.classinfo);
+            assert(unwind.finalizers.length != 0);
+            assert(unwind.finalizers[0].owner == cast(const(void)*) statement);
             runFinalizer = true;
         } finally {
             _activeExceptionScopes.pop;
             scopeActive = false;
             if (pendingException is null)
-                runFinalizer = runsFinally(statement);
+                runFinalizer = runsFinally(statement, plan, flow);
             if (runFinalizer && !_halted)
                 _controlFlow.withCleanup({
-                    runFinallyBody(statement.finalbody, pendingException);
+                    const own = runFinallyBody(cleanup, pendingException);
+                    if (own != TreeFlow.normal)
+                        flow = own;
                 });
+        }
+        return flow;
+    }
+
+    private bool runsFinally(
+        TryFinallyStatement statement,
+        FinallyPlan* plan,
+        in TreeFlow flow,
+    ) {
+        final switch (flow) with (TreeFlow) {
+            case normal:
+                return plan.fallThroughRuns;
+            case break_, continue_, return_:
+                return plan.transferRuns;
+            case generic:
+                return runsFinally(statement);
         }
     }
 
-    private void runFinallyBody(
-        Statement finalbody,
+    extern(D) private TreeFlow runFinallyBody(
+        scope TreeFlow delegate() cleanup,
         Throwable pendingException,
     ) {
-        if (pendingException is null) {
-            runCleanupBody(finalbody);
-            return;
-        }
+        if (pendingException is null)
+            return cleanup();
 
+        TreeFlow flow;
         try {
             import snakebite.backends.exceptions: unwindFinally;
 
             unwindFinally(pendingException, {
                 try
-                    runCleanupBody(finalbody);
+                    flow = cleanup();
                 catch (GuestException exception)
                     throw exception.take;
             });
@@ -2602,6 +2647,17 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
             throw GuestException.make(exception);
         }
+        return flow;
+    }
+
+    // A `goto` in a `finally` body that the node tree ran: the original
+    // evaluator runs the body from its label.
+    package TreeFlow resumeCleanup(
+        TreeRoot* root, ubyte* frame, Statement finalbody,
+    ) {
+        syncTree(root, frame);
+        resumeInCleanup(finalbody);
+        return _controlFlow.hasTransfer ? TreeFlow.generic : TreeFlow.normal;
     }
 
     private void runCleanupBody(Statement finalbody) {
@@ -2609,6 +2665,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return;
 
         finalbody.accept(this);
+        resumeInCleanup(finalbody);
+    }
+
+    // A `goto` to a label in a `finally` body: the body runs from there.
+    private void resumeInCleanup(Statement finalbody) {
         while (_controlFlow.hasGoto) {
             _controlFlow.resume;
             finalbody.accept(this);

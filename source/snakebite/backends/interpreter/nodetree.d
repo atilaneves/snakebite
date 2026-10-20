@@ -2001,6 +2001,65 @@ private final class ReturnSlice : Node {
     }
 }
 
+// A `try` statement runs through the evaluator's own `runTryCatch` and
+// `runTryFinally`, so that the tree and the evaluator catch, unwind and
+// run cleanups by the same rules. Its body, handlers and `finally` body are
+// tree statements.
+private final class Catching(E) : Node {
+    private E _ev;
+    private imported!"dmd.statement".TryCatchStatement _statement;
+    private Node _body;
+    private Node[] _handlers;
+    // Where each clause's variable is in the frame, or `noVariable`.
+    private size_t[] _variables;
+    public enum noVariable = size_t.max;
+
+    public this(E ev, imported!"dmd.statement".TryCatchStatement statement) {
+        _ev = ev; _statement = statement;
+    }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        return _ev.runTryCatch(_statement, () => _body.executeStmt(frame),
+            (catch_, guest) => handle(frame, catch_, guest));
+    }
+    private TreeFlow handle(
+        ubyte* frame, imported!"dmd.statement".Catch catch_, Throwable guest,
+    ) {
+        foreach (i, clause; *_statement.catches)
+            if (clause is catch_) {
+                if (_variables[i] != noVariable)
+                    *cast(void**) (frame + _variables[i]) = cast(void*) guest;
+                return _handlers[i].executeStmt(frame);
+            }
+        assert(0, "the evaluator selects a clause of the statement");
+    }
+}
+
+private final class Finally(E) : Node {
+    private E _ev;
+    private imported!"dmd.statement".TryFinallyStatement _statement;
+    private typeof(E.init.finallyPlanOf(null)) _plan;
+    private TreeRoot* _root;
+    private Node _body;
+    private Node _finally;
+
+    public this(E ev, imported!"dmd.statement".TryFinallyStatement statement) {
+        _ev = ev; _statement = statement; _root = ev._treeRoot;
+        _plan = ev.finallyPlanOf(statement);
+    }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        return _ev.runTryFinally(_statement, _plan,
+            () => _body.executeStmt(frame), () => cleanup(frame));
+    }
+    private TreeFlow cleanup(ubyte* frame) {
+        const flow = _finally.executeStmt(frame);
+        // A `goto` to a label in the `finally` body: the tree cannot start
+        // a body at a label.
+        if (flow == TreeFlow.generic && _ev._controlFlow.hasGoto)
+            return _ev.resumeCleanup(_root, frame, _statement.finalbody);
+        return flow;
+    }
+}
+
 private final class GenericStatement(E) : Node {
     private E _ev;
     private Statement _statement;
@@ -5132,6 +5191,10 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
         return new Uninitialised!E(ev, inner, where, ev._treeRoot);
     }
 
+    Node optionalChild(Statement inner, Node* where) {
+        return inner is null ? new Jump!(TreeFlow.normal) : child(inner, where);
+    }
+
     // The nodes of the statements that `inner` runs in order, built on
     // first execution.
     Node[] children(Statement inner) {
@@ -5184,8 +5247,16 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
         }
         case If: {
             auto conditional = statement.isIfStatement;
-            if (ifPlan(conditional).kind != IfPlan.Kind.condition
-                    || conditional.ifbody is null)
+            final switch (ifPlan(conditional).kind) with (IfPlan.Kind) {
+                case ctfeBlock:
+                    // `__ctfe` is false at run time.
+                    return conditional.elsebody is null
+                        ? new Jump!(TreeFlow.normal)
+                        : buildStatement(ev, conditional.elsebody, slot);
+                case condition:
+                    break;
+            }
+            if (conditional.ifbody is null)
                 return generic();
             auto node = condition(conditional.condition).ifThenElse(
                 positionOf(ev, conditional.condition));
@@ -5224,6 +5295,37 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
         }
         case Import:
             return new Jump!(TreeFlow.normal);
+        // dmd rewrites a scope guard in a block into a `try` statement. One
+        // that is a whole `catch` handler stays, and runs nothing.
+        case ScopeGuard:
+            return new Jump!(TreeFlow.normal);
+        case TryCatch: {
+            auto tried = statement.isTryCatchStatement;
+            auto node = new Catching!E(ev, tried);
+            foreach (catch_; *tried.catches) {
+                auto variable = Catching!E.noVariable;
+                if (catch_.var !is null) {
+                    const where = slotOf(ev, catch_.var);
+                    if (!where.ok || where.indirect)
+                        return generic();
+                    variable = where.offset;
+                }
+                node._variables ~= variable;
+            }
+            node._body = optionalChild(tried._body, &node._body);
+            node._handlers = new Node[tried.catches.length];
+            foreach (i, catch_; *tried.catches)
+                node._handlers[i] = optionalChild(
+                    catch_.handler, &node._handlers[i]);
+            return node;
+        }
+        case TryFinally: {
+            auto tried = statement.isTryFinallyStatement;
+            auto node = new Finally!E(ev, tried);
+            node._body = optionalChild(tried._body, &node._body);
+            node._finally = optionalChild(tried.finalbody, &node._finally);
+            return node;
+        }
         case Break:
             return statement.isBreakStatement.ident is null
                 ? new Jump!(TreeFlow.break_) : generic();
