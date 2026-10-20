@@ -954,6 +954,32 @@ static foreach (backend; Matrix!(
 }
 
 
+// A member function template instantiated with a delegate literal has two
+// contexts: the receiver and the frame of the caller, whose local the
+// literal changes. dmd passes the address of a pair of them
+// (`CallExp.vthis2`).
+static foreach (backend; Matrix!()) {
+    @("nested.dualContext.callChangesLocalOfCaller." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Twice {
+                int value = 7;
+                int apply(alias f)() { return f(value) + f(value); }
+            }
+            int run(int k) {
+                auto twice = new Twice;
+                int total = twice.apply!((v) { k += 1; return v * k; })();
+                return total + k;
+            }
+            int main() {
+                return run(2) == 53 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
 // A `ref` local that a delegate captures has its slot in the closure: the
 // slot holds the address of the storage that the local names.
 static foreach (backend; Matrix!(

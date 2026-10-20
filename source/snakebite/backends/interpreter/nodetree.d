@@ -2619,6 +2619,33 @@ private final class MethodDelegate(E, MethodReceiver kind) : SliceNode {
     }
 }
 
+// The pair of contexts of a call of a function with two contexts, stored in
+// its variable (`PairPlan`): the receiver, or the first context, and the
+// outer context. The node yields the address of the pair.
+private final class ContextPair : Node {
+    private Node _storage;
+    private Node _first;
+    private bool _firstIsAddress;
+    private Node _outer;
+    private size_t _receiverOffset;
+    private size_t _outerOffset;
+    public this(
+        Node storage, Node first, bool firstIsAddress, Node outer,
+        in imported!"snakebite.backends.dualcontext".PairPlan plan,
+    ) {
+        _storage = storage; _first = first; _firstIsAddress = firstIsAddress;
+        _outer = outer; _receiverOffset = plan.receiverOffset;
+        _outerOffset = plan.outerOffset;
+    }
+    public override ubyte* executeAddr(ubyte* frame) {
+        auto pair = _storage.executeAddr(frame);
+        *cast(void**) (pair + _receiverOffset) = _firstIsAddress
+            ? _first.executeAddr(frame) : cast(void*) _first.executeLong(frame);
+        *cast(void**) (pair + _outerOffset) = _outer.executeAddr(frame);
+        return pair;
+    }
+}
+
 // The address at `start`, then for each offset the word loaded at the address
 // plus that offset: the `this` of a function, read through its slot and the
 // pair of a function with two contexts.
@@ -5460,17 +5487,8 @@ private Node buildOuterAddress(E)(E ev, VarDeclaration variable) {
 }
 
 private VarDeclaration thisVariable(E)(E ev, ThisExp expression) {
-    import snakebite.backends.closureplan: ClosurePlan;
-    import snakebite.frontend.dmd.delegates: outerFunctionOf;
-
-    auto variable = expression.var is null
+    return expression.var is null
         ? cast() ev._layout.hiddenThis.variable : expression.var;
-    if (variable is null)
-        return null;
-    auto owner = outerFunctionOf(variable);
-    if (owner !is null && ClosurePlan.receiverHops(owner).length != 0)
-        return null;
-    return variable;
 }
 
 // The address of a variable that is not in the running frame: one in static
@@ -5505,13 +5523,9 @@ private Node buildAddress(E)(E ev, Expression expression) {
             return buildVariableAddress(
                 ev, expression.isVarExp.var.isVarDeclaration);
         case this_: {
-            auto variable = thisVariable(ev, expression.isThisExp);
-            const slot = slotOf(ev, variable);
             if (expression.type.toBasetype.ty != TY.Tstruct)
                 return null;
-            if (!slot.ok)
-                return buildOuterAddress(ev, variable);
-            return new PointerAddress(slot.offset, 0);
+            return buildThisValue(ev, thisVariable(ev, expression.isThisExp));
         }
         case dotVariable: {
             auto dot = expression.isDotVarExp;
@@ -5776,12 +5790,12 @@ private Node buildCall(E)(E ev, CallExp call) {
     import dmd.astenums: TY;
     import dmd.typesem: toBasetype;
     import snakebite.backends.calls: CallSelection;
+    import snakebite.backends.dualcontext: pairPlanOf;
     import snakebite.frontend.dmd.dispatch: CallReceiver, readsVtable,
         receiverOf;
     import snakebite.frontend.dmd.functions: typeFunctionOf, unresolvedCalleeOf;
 
-    if (call.vthis2 !is null || call.e1.isCommaExp !is null
-            || call.arguments is null)
+    if (call.e1.isCommaExp !is null || call.arguments is null)
         return null;
     if (call.f is null)
         return unresolvedCalleeOf(call) is null
@@ -5849,6 +5863,18 @@ private Node buildCall(E)(E ev, CallExp call) {
             if (receiver is null)
                 return null;
         }
+    }
+    // A callee with two contexts takes the address of the pair of them.
+    const pair = pairPlanOf(ev._function, function_, call.vthis2);
+    if (pair.variable !is null) {
+        assert(!virtual, "a function with two contexts is a template");
+        auto storage = buildVariableAddress(ev, cast() pair.variable);
+        auto outer = buildContext(ev, pair.outer);
+        if (storage is null || outer is null)
+            return null;
+        receiver = new ContextPair(
+            storage, receiver, receiverIsAddress, outer, pair);
+        receiverIsAddress = true;
     }
     SiteArguments arguments;
     // A virtual call meets only guest callees (`Dispatch.matches`).
@@ -5928,10 +5954,17 @@ private Node buildThisValue(E)(E ev, VarDeclaration variable) {
 // the evaluator finds it (`contextValueOf`), which the node yields as an
 // address. Null when the tree does not reach it.
 private Node buildCalleeContext(E)(E ev, CallExp call, FuncDeclaration callee) {
+    return buildContext(ev, *ev.calleeContextPlanOf(call, callee));
+}
+
+// The context that `source` names, as an address. Null when the tree does
+// not reach it.
+private Node buildContext(E)(
+    E ev, in imported!"snakebite.backends.dualcontext".ContextSource source,
+) {
     import snakebite.backends.dualcontext: ContextSource;
     import snakebite.internalfailure: internalFailure;
 
-    const source = *ev.calleeContextPlanOf(call, callee);
     final switch (source.kind) with (ContextSource.Kind) {
         case none:
             return new GlobalAddress(null);
@@ -5941,13 +5974,26 @@ private Node buildCalleeContext(E)(E ev, CallExp call, FuncDeclaration callee) {
                 return ownContext(ev);
             const hops = ev.staticChainTo(owner);
             if (hops is null)
-                internalFailure("a direct call's enclosing function is on "
+                internalFailure("the context that a call hands over is on "
                     ~ "the static chain");
             return new OuterAddress(OuterVariable(true, hops, 0, false));
         }
-        case receiver:
-            assert(0, "a nested callee's context is the frame of a function "
-                ~ "(`nestedContextOwnerOf`)");
+        case receiver: {
+            // The `this` of `function_`, or the word of its pair, then the
+            // context fields of the objects on the way.
+            auto hidden = (cast() source.function_).vthis;
+            Node value;
+            if (source.throughPair) {
+                auto slot = buildVariableAddress(ev, hidden);
+                value = slot is null
+                    ? null : new LoadChain(slot, [0, source.pairOffset]);
+            } else
+                value = buildThisValue(ev, hidden);
+            if (value is null)
+                return null;
+            return source.fields.length == 0
+                ? value : new LoadChain(value, source.fields);
+        }
         case overrider: {
             // The word that holds the receiver in the view of the overridden
             // function's class lives as long as the full expression of the
@@ -7098,16 +7144,20 @@ private Node buildValue(E)(E ev, Expression expression) {
         case this_, super_: {
             // `super` is `this` with the type of the base class; dmd's
             // `SuperExp` is a `ThisExp`.
+            import snakebite.backends.closureplan: ClosurePlan;
+            import snakebite.frontend.dmd.delegates: outerFunctionOf;
+
             auto variable = thisVariable(ev, cast(ThisExp) expression);
-            const slot = slotOf(ev, variable);
-            if (scalar.kind != Scalar.Kind.integral)
+            if (scalar.kind != Scalar.Kind.integral || variable is null)
                 return null;
-            if (!slot.ok) {
-                // The `this` of an enclosing method, read by a nested function.
-                auto outer = buildOuterAddress(ev, variable);
-                return outer is null ? null : new Load!size_t(outer);
-            }
-            return new Local!long(slot.offset);
+            const slot = slotOf(ev, variable);
+            auto owner = outerFunctionOf(variable);
+            if (slot.ok && ClosurePlan.receiverHops(owner).length == 0)
+                return new Local!long(slot.offset);
+            // The `this` of an enclosing method, or of a function with two
+            // contexts, which reads it through its pair.
+            auto value = buildThisValue(ev, variable);
+            return value is null ? null : new AddressValue(value);
         }
         case dotVariable, star, index:
             return buildLoad(ev, expression, buildAddress(ev, expression));
