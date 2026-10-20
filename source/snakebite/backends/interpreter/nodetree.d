@@ -11,8 +11,8 @@ private:
 
 import dmd.declaration: VarDeclaration;
 import dmd.expression: AssignExp, BinAssignExp, BinExp, CallExp, CastExp,
-    DeclarationExp, EqualExp, Expression, IdentityExp, IndexExp, NewExp, PostExp,
-    SliceExp, ThisExp;
+    CatAssignExp, DeclarationExp, EqualExp, Expression, IdentityExp, IndexExp,
+    NewExp, PostExp, SliceExp, ThisExp;
 import dmd.func: FuncDeclaration;
 import dmd.location: Loc;
 import dmd.mtype: Type;
@@ -676,6 +676,30 @@ private final class LoadSlice : SliceNode {
     public override void executeInto(ubyte* frame, ubyte* dest) {
         SliceValue value = *cast(SliceValue*) _address.executeAddr(frame);
         *cast(SliceValue*) dest = value;
+    }
+}
+
+// `array ~= value` for a `dchar` value and an array of `char` or `wchar`:
+// the address of the array, after the druntime hook that encodes the value
+// appended it.
+private final class DcharAppend(E) : Node {
+    private E _ev;
+    private const(imported!"snakebite.ffi.plan".CallPlan)* _plan;
+    private Node _array;
+    private Node _value;
+    public this(
+        E ev, const(imported!"snakebite.ffi.plan".CallPlan)* plan,
+        Node array, Node value,
+    ) {
+        _ev = ev; _plan = plan; _array = array; _value = value;
+    }
+    public override ubyte* executeAddr(ubyte* frame) {
+        auto array = _array.executeAddr(frame);
+        _ev.appendDchar(_plan, array, cast(dchar) _value.executeLong(frame));
+        return array;
+    }
+    public override void executeVoid(ubyte* frame) {
+        executeAddr(frame);
     }
 }
 
@@ -4806,6 +4830,8 @@ private Node buildAddress(E)(E ev, Expression expression) {
         }
         case index:
             return buildIndexAddress(ev, expression.isIndexExp);
+        case concatenateAssign, concatenateElemAssign, concatenateDcharAssign:
+            return buildAppend(ev, cast(CatAssignExp) expression);
         case question:
             return buildConditional!(buildAddress!E, ConditionalAddress)(
                 ev, expression.isCondExp);
@@ -5485,6 +5511,8 @@ private Node buildDelegate(E)(E ev, Expression expression) {
         case question:
             return buildConditional!(buildDelegate!E, ConditionalInto)(
                 ev, expression.isCondExp);
+        case comma:
+            return buildComma(ev, expression.isCommaExp, &buildDelegate!E);
         case cast_:
             return buildDelegateCast(ev, expression.isCastExp);
         default:
@@ -5573,6 +5601,23 @@ private Node constantDelegate(void* function_) {
     return new ConstantSlice(value);
 }
 
+// `a ~= b`, as the address of `a`: dmd's lowering, which calls
+// `_d_arrayappendT` for an array, or `_d_arrayappendcTX` and then
+// constructs the new last element. dmd lowers no append of a `dchar` to a
+// `char[]` or a `wchar[]`: its glue layer calls the druntime hook that
+// encodes it, and so does the node. An append that dmd leaves without a
+// lowering in other cases needs no code, and the evaluator runs the shared
+// rule for it.
+private Node buildAppend(E)(E ev, CatAssignExp append) {
+    if (auto dchar_ = append.isCatDcharAssignExp) {
+        auto array = buildAddress(ev, dchar_.e1);
+        auto value = buildValue(ev, dchar_.e2);
+        return array is null || value is null ? null
+            : new DcharAppend!E(ev, ev.dcharAppendPlanOf(dchar_), array, value);
+    }
+    return append.lowering is null ? null : buildAddress(ev, append.lowering);
+}
+
 // The node that yields the dynamic array `expression`, or null when the
 // tree does not cover the expression.
 private Node buildSlice(E)(E ev, Expression expression) {
@@ -5626,6 +5671,15 @@ private Node buildSlice(E)(E ev, Expression expression) {
         }
         case new_:
             return buildNew(ev, expression.isNewExp);
+        case concatenateAssign, concatenateElemAssign, concatenateDcharAssign: {
+            auto address = buildAppend(ev, cast(CatAssignExp) expression);
+            return address is null ? null : new LoadSlice(address);
+        }
+        // `a ~ b` is the call of `_d_arraycatnTX` that dmd lowers it to.
+        case concatenate: {
+            auto lowered = expression.isCatExp.lowering;
+            return lowered is null ? null : buildSlice(ev, lowered);
+        }
         case cast_:
             return buildSliceCast(ev, expression.isCastExp);
         case comma:
@@ -7263,11 +7317,9 @@ private Node buildInitStep(E)(E ev, InitStep step) {
 private Node buildFieldValue(E)(
     E ev, in size_t offset, Type type, Expression source,
 ) {
-    if (isSlice(type)) {
-        if (!isSlice(source.type))
-            return null;
-        auto slice = buildSlice(ev, source);
-        return slice is null ? null : new IntoOffset(offset, slice);
+    if (isSlice(type) || isDelegate(type)) {
+        auto pair = buildPair(ev, type, source);
+        return pair is null ? null : new IntoOffset(offset, pair);
     }
     if (isAggregate(type)) {
         auto value = buildAggregate(ev, source);
