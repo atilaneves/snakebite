@@ -76,8 +76,8 @@ WordPair callDirectWordsPair(
     return (cast(Direct) target)(first, second, third);
 }
 
-// Stores `result` at `place` as a result of `resultWidth` bytes. A width of
-// `0` is no result, and stores nothing.
+// Stores `result` at `place` as a result of `resultWidth` bytes, and writes
+// exactly that many. A width of `0` is no result, and stores nothing.
 pragma(inline, true)
 void storeWordResult(in WordPair result, size_t resultWidth, void* place)
         @system pure nothrow @nogc {
@@ -90,7 +90,12 @@ void storeWordResult(in WordPair result, size_t resultWidth, void* place)
         (cast(ulong*) place)[0] = result.low;
         (cast(ulong*) place)[1] = result.high;
         break;
-    default: *cast(ulong*) place = result.low; break;
+    case 8: *cast(ulong*) place = result.low; break;
+    default:
+        // `directWordCallTarget` yields no other width: a result of 3, 5, 6 or
+        // 7 bytes is a `partial` store, which it rejects.
+        assert(false,
+            "a direct word call result is 0, 1, 2, 4, 8 or 16 bytes");
     }
 }
 
