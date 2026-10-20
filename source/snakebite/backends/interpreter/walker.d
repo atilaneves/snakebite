@@ -5,7 +5,8 @@ private:
 
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.backends.interpreter.nodetree:
-    OuterVariable, TreeCallee, TreeFlow, TreeRoot, isScalar, isSlice, rootOf;
+    AccessSite, OuterVariable, TreeCallee, TreeFlow, TreeRoot, isScalar,
+    isSlice, rootOf;
 import snakebite.nativelayout: tryTypeFacts, truthFacts;
 
 
@@ -735,6 +736,13 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // The guard of the running call. A guard lives as long as its call, so
     // no two calls that run at the same time have the same one.
     private CallStateGuard* _innermost;
+    // The frame of the running call, whose fault slot names the full
+    // expression the call runs. A call with a guard and a lean call both
+    // set it, and both give back the frame of their caller.
+    private ubyte* _faultFrame;
+    // The accessor whose load or store runs, or null: the access is one
+    // instruction, so a fault in it is the accessor's, not its caller's.
+    package AccessSite* _access;
     // The guard of the call that `_type`, `_facts`, `_frameBase`,
     // `_closureBase`, `_layout`, `_activeClosurePlan`, `_pendingLoopLabel`,
     // `_controlFlow`, `_returned` and `ctfeBlockDepth` (the function's
@@ -883,9 +891,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // The word of the running call that names its full expression: null
     // while no guest call runs.
     private const(void)** faultSlot() @system @nogc nothrow pure {
-        auto guard = _innermost;
-        return guard is null || guard._frame is null
-            ? null : faultSlotOf(guard._frame);
+        return _faultFrame is null ? null : faultSlotOf(_faultFrame);
     }
 
     // What the fault handler reads: the function that runs, and the line of
@@ -898,11 +904,18 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         auto evaluator = cast(Evaluator) context;
         auto function_ = evaluator._function;
+        const(void)* position;
+        if (auto site = evaluator._access) {
+            function_ = site.function_;
+            position = site.position;
+        } else {
+            auto slot = evaluator.faultSlot;
+            position = slot is null ? null : *slot;
+        }
         if (function_ is null)
             return GuestPosition();
         const name = function_ in evaluator._shared.names;
-        auto slot = evaluator.faultSlot;
-        const root = slot is null ? null : cast(Expression) *slot;
+        const root = cast(Expression) cast(void*) position;
         if (root is null)
             return GuestPosition(name is null ? null : *name);
         return GuestPosition(
@@ -1518,10 +1531,74 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return;
         }
 
+        auto root = callee.root;
+        if (root !is null && root.lean) {
+            auto lean = LeanCall!(LeanPlace.placed)(
+                this, calleeFrame, callee.function_, place);
+            root.execute(calleeFrame);
+            return;
+        }
+
+        runGuardedCallee(callee, calleeFrame, place);
+    }
+
+    pragma(inline, false)
+    private void runGuardedCallee(
+        TreeCallee* callee, ubyte* calleeFrame, void* place,
+    ) {
         auto guard = CallStateGuard(this, calleeFrame);
         _place = place;
         _function = callee.function_;
         executeTreeCallee(callee, calleeFrame);
+    }
+
+    // Runs the body of a callee that is one `return`, whose frame at
+    // `calleeFrame` the caller has filled, and gives its value back in a
+    // register. `T` is `long` for an integral or `double` for a floating
+    // result.
+    package T runTreeValue(T)(
+        TreeRoot* root, FuncDeclaration function_, ubyte* calleeFrame,
+    ) {
+        ubyte here;
+        if (cast(size_t) &here < _stack.limit)
+            return runTreeValueOnNewPiece!T(root, function_, calleeFrame);
+
+        if (root.lean) {
+            auto lean = LeanCall!(LeanPlace.unplaced)(
+                this, calleeFrame, function_, null);
+            return returnValueOf!T(root, calleeFrame);
+        }
+
+        return runGuardedValue!T(root, function_, calleeFrame);
+    }
+
+    pragma(inline, false)
+    private T runGuardedValue(T)(
+        TreeRoot* root, FuncDeclaration function_, ubyte* calleeFrame,
+    ) {
+        auto guard = CallStateGuard(this, calleeFrame);
+        _function = function_;
+        return returnValueOf!T(root, calleeFrame);
+    }
+
+    private static T returnValueOf(T)(TreeRoot* root, ubyte* calleeFrame) {
+        static if (is(T == long))
+            return root.returnLong(calleeFrame);
+        else
+            return root.returnDouble(calleeFrame);
+    }
+
+    // The closure of the continuation sits in a frame of its own, so the
+    // frame of `runTreeValue` carries none.
+    pragma(inline, false)
+    private T runTreeValueOnNewPiece(T)(
+        TreeRoot* root, FuncDeclaration function_, ubyte* calleeFrame,
+    ) {
+        T value;
+        _stack.continueOnNewPiece({
+            value = runTreeValue!T(root, function_, calleeFrame);
+        });
+        return value;
     }
 
     // The closure of the continuation sits in a frame of its own, so the
@@ -1566,8 +1643,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         ctfeBlockDepth = 0;
     }
 
-    // Makes the running call the owner of the function's fields, keeping
-    // the previous owner's values in its guard. Call it before writing them.
+    // Makes the innermost call the owner of the function's fields. When it
+    // is not the owner yet, `spill` pushes the previous owner's values on
+    // the spill stack, for its guard to take back when it ends. Call it
+    // before writing the fields.
     private void takeFunctionFields() {
         if (_fieldsOwner !is _innermost)
             _innermost.spill;
@@ -1578,8 +1657,35 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         TreeRoot* root, ubyte* frame,
         in BoundsCheck check, in Loc loc, scope const(void*)[] extraArguments,
     ) {
+        handOver(root, frame, {
+            failArrayBounds(check, loc, extraArguments);
+        });
+    }
+
+    // Hands one operation to the original evaluator for a node that the
+    // tree builds with its own fallback (a call that the tree cannot run, a
+    // failed check), and that the call can reach whether or not its tree
+    // has a node for the evaluator. A call with a guard has the state the
+    // evaluator reads; a lean call has none, so the operation gets a guard
+    // that lasts as long as it does.
+    extern(D) package void handOver(
+        TreeRoot* root, ubyte* frame, scope void delegate() operation,
+    ) {
+        if (_innermost._frame is frame) {
+            syncTree(root, frame);
+            operation();
+            return;
+        }
+        handOverLean(root, frame, operation);
+    }
+
+    pragma(inline, false)
+    extern(D) private void handOverLean(
+        TreeRoot* root, ubyte* frame, scope void delegate() operation,
+    ) {
+        auto guard = CallStateGuard(this, frame);
         syncTree(root, frame);
-        failArrayBounds(check, loc, extraArguments);
+        operation();
     }
 
     private void executeTreeCallee(TreeCallee* callee, ubyte* calleeFrame) {
@@ -2069,6 +2175,47 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         return plan;
     }
 
+    // The state of a call whose tree never hands control to the original
+    // evaluator (`TreeRoot.lean`): only what the tree and the fault handler
+    // read. The function's fields stay with the call that owns them, no
+    // guard is on the chain, and no `alloca` of this call can exist, because
+    // an `alloca` is run by a node that hands control over. Its end gives
+    // the caller its state back, normally or by throw.
+    private enum LeanPlace : bool { unplaced, placed }
+
+    private static struct LeanCall(LeanPlace placement) {
+        private Evaluator _evaluator;
+        static if (placement == LeanPlace.placed)
+            private void* _place;
+        private FuncDeclaration _function;
+        private ubyte* _faultFrame;
+
+        @disable this();
+        @disable this(this);
+
+        private this(
+            Evaluator evaluator, ubyte* frame, FuncDeclaration function_,
+            void* place,
+        ) {
+            _evaluator = evaluator;
+            static if (placement == LeanPlace.placed) {
+                _place = evaluator._place;
+                evaluator._place = place;
+            }
+            _function = evaluator._function;
+            _faultFrame = evaluator._faultFrame;
+            evaluator._function = function_;
+            evaluator._faultFrame = frame;
+        }
+
+        ~this() {
+            static if (placement == LeanPlace.placed)
+                _evaluator._place = _place;
+            _evaluator._function = _function;
+            _evaluator._faultFrame = _faultFrame;
+        }
+    }
+
     // RAII restore of the per-call evaluator state `execute` repoints at
     // the callee: constructed before the fields change, and the
     // destructor puts every one back when the call unwinds, normally or
@@ -2086,6 +2233,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // The frame of the call, whose fault slot names the full expression
         // that the call runs. Null for the entry of host code.
         private ubyte* _frame;
+        private ubyte* _outerFrame;
         private size_t _activationMark;
 
         @disable this();
@@ -2097,8 +2245,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             _outer = evaluator._innermost;
             _place = evaluator._place;
             _function = evaluator._function;
+            _outerFrame = evaluator._faultFrame;
             _activationMark = evaluator._activationAllocations.length;
             evaluator._innermost = &this;
+            evaluator._faultFrame = frame;
         }
 
         ~this() {
@@ -2107,6 +2257,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             if (_evaluator._fieldsOwner is &this)
                 unspill;
             _evaluator._innermost = _outer;
+            _evaluator._faultFrame = _outerFrame;
             if (_evaluator._activationAllocations.length > _activationMark)
                 _evaluator.releaseActivationAllocations(_activationMark);
         }

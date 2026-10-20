@@ -2372,6 +2372,62 @@ FAULTS = [
      "}\n"
      "int main() { Throwable thrown; raise(thrown); return 0; }\n",
      -signal.SIGSEGV, "fatal: null pointer dereference", "main.raise"),
+    ("getter on a null receiver",
+     "module main;\n"
+     "struct S {\n"
+     "    int field;\n"
+     "    int get() { return field; }\n"
+     "}\n"
+     "int main() { S good; good.get(); S* none; return none.get(); }\n",
+     -signal.SIGSEGV, "fatal: null pointer dereference", "main.S.get"),
+    ("setter on a null receiver",
+     "module main;\n"
+     "struct S {\n"
+     "    int field;\n"
+     "    void set(int value) { field = value; }\n"
+     "}\n"
+     "int main() { S good; good.set(1); S* none; none.set(2); return 0; }\n",
+     -signal.SIGSEGV, "fatal: null pointer dereference", "main.S.set"),
+    ("getter on an invalid receiver",
+     "module main;\n"
+     "struct S {\n"
+     "    int field;\n"
+     "    int get() { return field; }\n"
+     "}\n"
+     "int main() {\n"
+     "    S good;\n"
+     "    good.get();\n"
+     "    S* bad = cast(S*) 0x8000;\n"
+     "    return bad.get();\n"
+     "}\n",
+     -signal.SIGSEGV, "fatal: invalid memory access", "main.S.get"),
+    ("setter on an invalid receiver",
+     "module main;\n"
+     "struct S {\n"
+     "    int field;\n"
+     "    void set(int value) { field = value; }\n"
+     "}\n"
+     "int main() {\n"
+     "    S good;\n"
+     "    good.set(1);\n"
+     "    S* bad = cast(S*) 0x8000;\n"
+     "    bad.set(2);\n"
+     "    return 0;\n"
+     "}\n",
+     -signal.SIGSEGV, "fatal: invalid memory access", "main.S.set"),
+    ("fault in the body of a function that is one return",
+     "module main;\n"
+     "int load(int* pointer, int added) {\n"
+     "    // the body is one statement, so a call takes its short path\n"
+     "    return *pointer + added;\n"
+     "}\n"
+     "int main() {\n"
+     "    int value = 1;\n"
+     "    load(&value, 1);\n"
+     "    int* none;\n"
+     "    return load(none, 1);\n"
+     "}\n",
+     -signal.SIGSEGV, "fatal: null pointer dereference", "main.load"),
 ]
 
 
