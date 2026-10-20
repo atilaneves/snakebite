@@ -409,6 +409,10 @@ static foreach (row; shiftCases) {
 // and the shift runs at 64 bits on the sign-extended target. The store
 // must go to the array element under both casts and leave the adjacent
 // elements as they were.
+// dmd and ldc disagree here: for `byte b = -100; b >>>= 8L` dmd shifts the
+// sign-extended 64-bit value and stores -1, ldc shifts the unsigned byte and
+// stores 0. snakebite follows dmd, the host compiler of `bin/ut`; the rule is
+// in `shiftPlan`.
 private enum elementLongCountCode = q{
     long count() { return 8; }
     int shifted() {
