@@ -1627,6 +1627,17 @@ private final class ImageInto : Node {
     }
 }
 
+// A value whose bytes are all zero, of `size` bytes.
+private final class ZeroInto : Node {
+    private size_t _size;
+    public this(size_t size) { _size = size; }
+    public override void executeInto(ubyte*, ubyte* dest) {
+        import core.stdc.string: memset;
+
+        memset(dest, 0, _size);
+    }
+}
+
 private final class AggregateCopy : Node {
     private Node _address;
     private size_t _size;
@@ -5818,9 +5829,7 @@ private Node buildInitializer(E)(
         // The storage of a variable that is the result of its function is
         // the place of the result, whose address the slot holds.
         const facts = ev.factsOf(variable.type);
-        if (!isAggregate(value.type) || ev.factsOf(value.type).size != facts.size)
-            return null;
-        auto node = buildAggregate(ev, value);
+        auto node = buildAggregateFor(ev, variable.type, value);
         if (node is null)
             return null;
         Node target = slot.indirect
@@ -5904,17 +5913,30 @@ private Node buildAggregate(E)(E ev, Expression expression) {
     }
 }
 
-// `target = value` for a struct or a static array of the same size.
+// The struct or static array `value` of the type `target`, or null. dmd
+// writes the value of a struct whose initial value is all zero bits as the
+// integer 0 (`getInitExp`), as in `s = 0, s.this(args)`.
+private Node buildAggregateFor(E)(E ev, Type target, Expression value) {
+    import dmd.astenums: TY;
+    import dmd.typesem: toBasetype;
+
+    const size = ev.factsOf(target).size;
+    if (value.isIntegerExp !is null && target.toBasetype.ty == TY.Tstruct)
+        return new ZeroInto(size);
+    if (!isAggregate(value.type) || ev.factsOf(value.type).size != size)
+        return null;
+    return buildAggregate(ev, value);
+}
+
+// `target = value` for a struct or a static array.
 private Node buildAggregateStore(E)(E ev, AssignExp e) {
     if (bindsReference(ev, e)
             || (e.isConstructExp !is null && e.isConstructExp.lowering !is null)
-            || !isAggregate(e.e1.type) || !isAggregate(e.e2.type))
+            || !isAggregate(e.e1.type))
         return null;
     const facts = ev.factsOf(e.e1.type);
-    if (ev.factsOf(e.e2.type).size != facts.size)
-        return null;
     auto target = buildAddress(ev, e.e1);
-    auto value = buildAggregate(ev, e.e2);
+    auto value = buildAggregateFor(ev, e.e1.type, e.e2);
     if (target is null || value is null)
         return null;
     return new AggregateStore(
