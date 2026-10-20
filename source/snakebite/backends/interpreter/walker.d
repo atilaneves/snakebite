@@ -649,18 +649,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private CStack!ActiveExceptionScope _activeExceptionScopes;
     private CStack!ExceptionCandidate _candidateScratch;
     package RuntimeTypes* _runtimeTypes;
-    // dmd gives every `arr[... $ ...]` a `lengthVar` declaration for its
-    // `$`, which no statement declares and which therefore has no frame
-    // slot - and needs none, since the length is a value `visit(IndexExp)`
-    // holds by the time it evaluates the index. This pairs that
-    // declaration with that value so a `VarExp` naming it is answered
-    // with it. `var` is null while no index is being evaluated.
-    private static struct Dollar {
-        VarDeclaration var;
-        size_t length;
-    }
-
-    private Dollar _dollar;
     // The program being run: its `isInterpreted` is the one decision for
     // whether a callee is walked here or called natively, made on every
     // call this evaluator makes.
@@ -3648,11 +3636,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return;
         }
 
-        if (expression.var is _dollar.var) {
-            storeIntegral(_place, _dollar.length, _facts.size);
-            return;
-        }
-
         // initSymbol exposes the aggregate's native initializer as bytes.
         // Keep the image in the same storage used for default values and
         // class runtime information so its address remains valid.
@@ -6209,19 +6192,19 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     private long indexOf(IndexExp expression, in size_t length) {
-        auto lengthVar = expression.lengthVar;
-        if (lengthVar is null)
-            return asIntegral(expression.e2);
-
-        // An index nested in this one - or one a guest call from here
-        // reaches - binds its own `$`, so this one's is put back rather
-        // than cleared. `auto`, not `const`: a `const` copy of a struct
-        // holding a reference cannot be assigned back.
-        auto outer = _dollar;
-        scope(exit) _dollar = outer;
-        _dollar = Dollar(lengthVar, length);
-
+        bindDollar(expression.lengthVar, length);
         return asIntegral(expression.e2);
+    }
+
+    // The `$` of an index or a slice is a local of the frame
+    // (`LocalsCollector`) that holds the length of the array, which is
+    // read once, before the index or the bounds. A `$` whose length dmd
+    // knows at compile time has no slot: dmd folds it into every use.
+    private void bindDollar(VarDeclaration dollar, in size_t length) {
+        if (dollar is null)
+            return;
+        if (auto slot = _layout.slotOf(dollar))
+            *cast(size_t*) (_frameBase + slot.offset) = length;
     }
 
     // `ptr[0 .. newlength]`: a dynamic array built from a pointer and a
@@ -6304,13 +6287,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                     "`.array` and an aggregate through `opSlice`"));
         }
 
-        auto lengthVar = expression.lengthVar;
-        auto outerDollar = _dollar;
-        scope(exit) if (lengthVar !is null) _dollar = outerDollar;
-        if (lengthVar !is null) {
-            assert(knownLength);
-            _dollar = Dollar(lengthVar, sourceLength);
-        }
+        assert(knownLength || expression.lengthVar is null,
+            "semantic gives a pointer slice no `$`");
+        bindDollar(expression.lengthVar, sourceLength);
 
         const lo = expression.lwr is null ? 0 : asIntegral(expression.lwr);
         const hi = expression.upr is null

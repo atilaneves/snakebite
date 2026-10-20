@@ -553,22 +553,29 @@ private alias FailBounds = void delegate(
     TreeRoot*, ubyte*, in BoundsCheck, in Loc, scope const(void*)[],
 );
 
-// `baseFirst` reads the array before the index (`readsIndexAfterBase`).
-private final class IndexDynamic(A, I, bool baseFirst = false) : Node {
+// `baseFirst` reads the array before the index (`readsIndexAfterBase`, or a
+// `$`). `dollar` stores the length in the frame slot of `$` before the index
+// runs; the bounds check reads the length again after it.
+private final class IndexDynamic(A, I, bool baseFirst = false,
+        bool dollar = false) : Node {
+    static assert(baseFirst || !dollar, "`$` needs the array first");
     private FailBounds _fail;
     private TreeRoot* _root;
     private IndexExp _expression;
     private A _array;
     private I _index;
     private size_t _stride;
+    private size_t _dollar;
     public this(FailBounds fail, TreeRoot* root, IndexExp expression, A array,
-            I index, size_t stride) {
+            I index, size_t stride, size_t dollarOffset) {
         _fail = fail; _root = root; _expression = expression; _array = array;
-        _index = index; _stride = stride;
+        _index = index; _stride = stride; _dollar = dollarOffset;
     }
     public override ubyte* executeAddr(ubyte* frame) {
         static if (baseFirst) {
             auto array = _array.address(frame);
+            static if (dollar)
+                *cast(size_t*) (frame + _dollar) = *cast(size_t*) array;
             const index = cast(size_t) _index.value(frame);
         } else {
             const index = cast(size_t) _index.value(frame);
@@ -811,8 +818,11 @@ private final class FloatIdentity(bool negate, T, L, R) : BoolNode {
 private enum SliceSource : ubyte { slice, pointer, staticArray }
 
 // `base[lower .. upper]`. The base is read before the bounds, as the
-// evaluator does.
-private final class SliceOf(SliceSource source) : SliceNode {
+// evaluator does. `dollar` stores the length in the frame slot of `$` before
+// the bounds run.
+private final class SliceOf(SliceSource source, bool dollar) : SliceNode {
+    static assert(source != SliceSource.pointer || !dollar,
+        "a pointer has no length for `$`");
     private FailBounds _fail;
     private TreeRoot* _root;
     private SliceExp _expression;
@@ -824,13 +834,14 @@ private final class SliceOf(SliceSource source) : SliceNode {
     private bool _checkOrder;
     private bool _checkUpper;
     private bool _reportsLength;
+    private size_t _dollar;
     public this(FailBounds fail, TreeRoot* root, SliceExp expression,
             Node base, Node lower, Node upper, size_t stride,
-            size_t staticLength, in SlicePlan plan) {
+            size_t staticLength, in SlicePlan plan, size_t dollarOffset) {
         _fail = fail; _root = root; _expression = expression; _base = base; _lower = lower;
         _upper = upper; _stride = stride; _staticLength = staticLength;
         _checkOrder = plan.checkOrder; _checkUpper = plan.checkUpper;
-        _reportsLength = plan.reportsSourceLength;
+        _reportsLength = plan.reportsSourceLength; _dollar = dollarOffset;
     }
     public override void executeInto(ubyte* frame, ubyte* dest) {
         ubyte* base;
@@ -846,6 +857,8 @@ private final class SliceOf(SliceSource source) : SliceNode {
             base = _base.executeAddr(frame);
             length = _staticLength;
         }
+        static if (dollar)
+            *cast(size_t*) (frame + _dollar) = length;
         const lower = _lower is null ? size_t(0) : cast(size_t) _lower.executeLong(frame);
         const upper = _upper is null ? length : cast(size_t) _upper.executeLong(frame);
         if (_checkOrder && upper < lower || _checkUpper && upper > length)
@@ -922,22 +935,26 @@ private final class StaticArrayToSlice : SliceNode {
     }
 }
 
-// The element of a dynamic array that is not an lvalue.
-private final class IndexValue : Node {
+// The element of a dynamic array that is not an lvalue. `dollar` stores the
+// length in the frame slot of `$` before the index runs.
+private final class IndexValue(bool dollar) : Node {
     private FailBounds _fail;
     private TreeRoot* _root;
     private IndexExp _expression;
     private Node _array;
     private Node _index;
     private size_t _stride;
+    private size_t _dollar;
     public this(FailBounds fail, TreeRoot* root, IndexExp expression,
-            Node array, Node index, size_t stride) {
+            Node array, Node index, size_t stride, size_t dollarOffset) {
         _fail = fail; _root = root; _expression = expression; _array = array; _index = index;
-        _stride = stride;
+        _stride = stride; _dollar = dollarOffset;
     }
     public override ubyte* executeAddr(ubyte* frame) {
         SliceValue value = void;
         _array.executeInto(frame, cast(ubyte*) &value);
+        static if (dollar)
+            *cast(size_t*) (frame + _dollar) = value.length;
         const index = cast(size_t) _index.executeLong(frame);
         if (index >= value.length)
             fail(frame, index, value.length);
@@ -4630,24 +4647,31 @@ private Node buildIndexAddress(E)(E ev, IndexExp indexed) {
     import dmd.expressionsem: toInteger;
     import dmd.typesem: nextOf, toBasetype;
 
-    if (indexed.lengthVar !is null)
-        return null;
     auto element = ev.factsOf(indexed.e1.type.toBasetype.nextOf);
     auto position = buildValue(ev, indexed.e2);
     if (position is null)
         return null;
+    const dollar = dollarSlot(ev, indexed.lengthVar);
     switch (indexed.e1.type.toBasetype.ty) with (TY) {
         case Tarray: {
             auto array = buildAddress(ev, indexed.e1);
             if (array is null) {
                 auto value = buildSlice(ev, indexed.e1);
-                return value is null ? null : new IndexValue(
-                    &ev.failTreeBounds, ev._treeRoot, indexed, value, position,
-                    element.size);
+                if (value is null)
+                    return null;
+                if (dollar.ok)
+                    return new IndexValue!true(&ev.failTreeBounds,
+                        ev._treeRoot, indexed, value, position, element.size,
+                        dollar.offset);
+                return new IndexValue!false(&ev.failTreeBounds, ev._treeRoot,
+                    indexed, value, position, element.size, noDollar);
             }
-            return indexOfArray(ev, indexed, array, position, element.size);
+            return indexOfArray(ev, indexed, array, position, element.size,
+                dollar);
         }
+        // dmd folds the `$` of a static array into its length.
         case Tsarray: {
+            assert(!dollar.ok, "the `$` of a static array is a constant");
             auto array = buildAddress(ev, indexed.e1);
             if (array is null)
                 return null;
@@ -4668,6 +4692,7 @@ private Node buildIndexAddress(E)(E ev, IndexExp indexed) {
                 length);
         }
         case Tpointer: {
+            assert(indexed.lengthVar is null, "a pointer has no `$`");
             static if (E.nullCheckedEvaluator)
                 return null;
             else {
@@ -4682,29 +4707,46 @@ private Node buildIndexAddress(E)(E ev, IndexExp indexed) {
 }
 
 // The factory of an index node for `fuse`.
-private template MakeIndex(alias Index, bool baseFirst) {
+private template MakeIndex(alias Index, Flags...) {
     public Node make(A, I, Args...)(A array, I index, Args args) {
-        return new Index!(A, I, baseFirst)(args[0], args[1], args[2], array,
+        return new Index!(A, I, Flags)(args[0], args[1], args[2], array,
             index, args[3 .. $]);
     }
 }
 
+// The `$` offset of a node that stores no `$`: the node never reads it.
+private enum size_t noDollar = 0;
+
+// The frame slot of the `$` of an index or a slice (`LocalsCollector`). It is
+// not `ok` when there is no `$`, or when dmd folds `$` into a constant.
+private Slot dollarSlot(E)(E ev, VarDeclaration dollar) {
+    const slot = slotOf(ev, dollar);
+    assert(!slot.ok || !slot.indirect, "`$` is a value local");
+    return slot;
+}
+
+// The array of an index with `$` is read first, as the shared storage
+// resolver does.
 private Node indexOfArray(E)(E ev, IndexExp indexed, Node array,
-        Node position, size_t stride) {
+        Node position, size_t stride, in Slot dollar) {
     import snakebite.frontend.storage: readsIndexAfterBase;
 
+    if (dollar.ok)
+        return fuse!(MakeIndex!(IndexDynamic, true, true).make, long,
+            [Kind.childAddress], indexKinds)(
+            Operand.throughAddress(array), operandOf(position),
+            &ev.failTreeBounds, ev._treeRoot, indexed, stride, dollar.offset);
     // An array that is read first has calls or effects, so its address is
     // a node.
-    if (readsIndexAfterBase(indexed))
+    if (indexed.lengthVar !is null || readsIndexAfterBase(indexed))
         return fuse!(MakeIndex!(IndexDynamic, true).make, long,
             [Kind.childAddress], indexKinds)(
             Operand.throughAddress(array), operandOf(position),
-            &ev.failTreeBounds,
-            ev._treeRoot, indexed, stride);
+            &ev.failTreeBounds, ev._treeRoot, indexed, stride, noDollar);
     return fuse!(MakeIndex!(IndexDynamic, false).make, long, addressKinds,
         indexKinds)(
         addressOperandOf(array), operandOf(position), &ev.failTreeBounds,
-        ev._treeRoot, indexed, stride);
+        ev._treeRoot, indexed, stride, noDollar);
 }
 
 // The address of a field of the storage at `base`, the address of the field
@@ -5448,7 +5490,7 @@ private Node buildSliceOf(E)(E ev, SliceExp expression) {
     import snakebite.backends.sliceplan: planSlice;
 
     const plan = planSlice(expression);
-    if (plan.yieldsStaticArray || expression.lengthVar !is null)
+    if (plan.yieldsStaticArray)
         return null;
     Node lower, upper;
     if (expression.lwr !is null) {
@@ -5463,13 +5505,19 @@ private Node buildSliceOf(E)(E ev, SliceExp expression) {
     }
     auto sourceType = expression.e1.type.toBasetype;
     const stride = ev.factsOf(sourceType.nextOf).size;
-    static Node make(SliceSource source)(
+    const dollar = dollarSlot(ev, expression.lengthVar);
+    Node make(SliceSource source)(
         FailBounds fail, TreeRoot* root, SliceExp expression, Node base,
         Node lower, Node upper, size_t stride, size_t staticLength,
         in SlicePlan plan,
     ) {
-        return new SliceOf!source(fail, root, expression, base, lower, upper,
-            stride, staticLength, plan);
+        static if (source != SliceSource.pointer)
+            if (dollar.ok)
+                return new SliceOf!(source, true)(fail, root, expression,
+                    base, lower, upper, stride, staticLength, plan,
+                    dollar.offset);
+        return new SliceOf!(source, false)(fail, root, expression, base,
+            lower, upper, stride, staticLength, plan, noDollar);
     }
     switch (sourceType.ty) with (TY) {
         case Tarray: {
@@ -5479,6 +5527,7 @@ private Node buildSliceOf(E)(E ev, SliceExp expression) {
                 0, plan);
         }
         case Tpointer: {
+            assert(expression.lengthVar is null, "a pointer has no `$`");
             static if (E.nullCheckedEvaluator)
                 return null;
             else {
