@@ -1417,6 +1417,45 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// The `size_t` length promotes a narrower target: dmd runs the operation in
+// `ulong` and converts the result back.
+static foreach (backend; Matrix!()) {
+    @("compoundAssignByArrayLength." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder { int[] slice; int[4] fixed; }
+            int[] made(size_t n) { return new int[n]; }
+            int main() {
+                int[] dynamic = [1, 2, 3];
+                int[5] fixed;
+                Holder holder;
+                holder.slice = dynamic;
+                int sum;
+                uint unsigned = 100;
+                long wide = -1;
+                short narrow = 7;
+                foreach (round; 0 .. 4) {
+                    sum += dynamic.length;
+                    sum += fixed.length;
+                    sum += holder.slice.length;
+                    sum += holder.fixed.length;
+                    sum += made(round).length;
+                    unsigned -= dynamic.length;
+                    wide *= fixed.length;
+                    narrow ^= holder.fixed.length;
+                }
+                sum *= dynamic.length;
+                sum /= holder.slice.length;
+                sum %= 7 * fixed.length;
+                sum <<= dynamic.length;
+                return sum == 248 && unsigned == 88 && wide == -625
+                    && narrow == 7 ? 0 : 1;
+            }
+        });
+    }
+}
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.diverges,
         "CTFE converts a floating step to the integral target before the "
@@ -1514,6 +1553,42 @@ unittest {
             int value = 20;
             value += step(value);
             return value == 7 ? 0 : 1;
+        }
+    });
+}
+
+// The same order for a `float` target under a `double` step: `x` is 2 when
+// the step starts, so dmd reads it first and gives 3; ldc reads it after the
+// step, 10, and gives 11. snakebite follows dmd, the host compiler of
+// `bin/ut`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "dmd's CTFE reads the target after the step: pinned by " ~
+        "`addAssignFloatReadsTheTargetBeforeTheStep.Ctfe.diverges`"),
+)) {
+    @("addAssignFloatReadsTheTargetBeforeTheStep." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            double step(ref float value) { value = 10; return 1; }
+            int main() {
+                float value = 2;
+                value += step(value);
+                return value == 3 ? 0 : 1;
+            }
+        });
+    }
+}
+
+@("addAssignFloatReadsTheTargetBeforeTheStep.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    0.shouldBeStatusOf!(Ctfe, q{
+        double step(ref float value) { value = 10; return 1; }
+        int main() {
+            float value = 2;
+            value += step(value);
+            return value == 11 ? 0 : 1;
         }
     });
 }

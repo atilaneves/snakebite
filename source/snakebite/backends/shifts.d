@@ -51,6 +51,10 @@ package ShiftPlan shiftPlan(
 
     // On x86-64 a shift whose operation type is `int`-wide runs at the
     // width of a narrower target, so `>>>=` sees its unsigned bit pattern.
+    // An operation type wider than `int` (`byte >>>= long`) sees the sign
+    // extended target instead. ldc disagrees: it shifts the unsigned byte,
+    // so `byte b = -100; b >>>= 8L` stores -1 in dmd and 0 in ldc.
+    // snakebite follows dmd, the host compiler of `bin/ut`.
     const narrowLogical = direction == ShiftPlan.Direction.rightLogical
         && targetFacts.size < width && width == int.sizeof;
 
