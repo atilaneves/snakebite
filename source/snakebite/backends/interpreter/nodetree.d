@@ -5233,8 +5233,12 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
                 return new Jump!(TreeFlow.normal);
             return buildStatement(ev, scoped.statement, slot);
         }
-        case Exp: {
-            auto expression = statement.isExpStatement.exp;
+        // dmd makes a destructor call that a scope ends a `DtorExp`
+        // statement, which runs as the expression statement it is.
+        case Exp, DtorExp: {
+            import dmd.statement: ExpStatement;
+
+            auto expression = (cast(ExpStatement) statement).exp;
             if (expression is null)
                 return new Jump!(TreeFlow.normal);
             if (auto declaration = expression.isDeclarationExp) {
