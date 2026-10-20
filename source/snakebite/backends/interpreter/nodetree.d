@@ -189,6 +189,11 @@ private Node endingAt(E)(
     return cast() built.node;
 }
 
+// What a callee writes at the place that its call gives it: a value of at
+// most two words, a struct or a static array, or the address of the result
+// of a function that returns `ref`.
+package enum CalleeResult : ubyte { value, aggregate, reference }
+
 // What a call node needs to know about its callee, decided once per
 // function.
 package struct TreeCallee {
@@ -197,9 +202,7 @@ package struct TreeCallee {
     package const(imported!"snakebite.backends.layout".FrameLayout)* layout;
     package TreeRoot* root;
     package TypeFacts returnFacts;
-    // The result is a struct or a static array, which the callee writes at
-    // the place that the call gives it.
-    package bool returnsAggregate;
+    package CalleeResult result;
     // The bytes in front of the frame base, for its fault slot
     // (`frameLead`), and whether the reservation meets the contract of
     // `FrameStack.reserveFast` with `fastFrameLead` bytes in front.
@@ -1624,6 +1627,17 @@ private final class ImageInto : Node {
     }
 }
 
+// A value whose bytes are all zero, of `size` bytes.
+private final class ZeroInto : Node {
+    private size_t _size;
+    public this(size_t size) { _size = size; }
+    public override void executeInto(ubyte*, ubyte* dest) {
+        import core.stdc.string: memset;
+
+        memset(dest, 0, _size);
+    }
+}
+
 private final class AggregateCopy : Node {
     private Node _address;
     private size_t _size;
@@ -2622,9 +2636,8 @@ private mixin template CalleeEntry(E) {
     private size_t[] _sizes;
     private size_t _resultSize;
     private bool _resultUnsigned;
-    // The result is a struct or a static array, which the callee writes to
-    // the place that the site gives it.
-    private bool _aggregateResult;
+    // What the callee writes at the place that the site gives it.
+    private CalleeResult _result;
     private TreeRoot* _root;
 
     private void takeArguments(SiteArguments arguments) {
@@ -2637,7 +2650,7 @@ private mixin template CalleeEntry(E) {
     private bool takesArguments(in TreeCallee* callee) const {
         auto layout = callee.layout;
         if (layout.parameters.length != _modes.length
-                || callee.returnsAggregate != _aggregateResult)
+                || callee.result != _result)
             return false;
         foreach (i, parameter; layout.parameters)
             if (parameter.isRef != (_modes[i] == Argument.address)
@@ -2695,10 +2708,7 @@ private mixin template CalleeEntry(E) {
         auto callee = selection.callee;
         auto calleeFrame = FrameGuard(&ev._frames);
         auto base = placeArguments(callee, hidden, frame);
-        if (callee.layout.retainsTemporaries)
-            runRetaining(selection, base, result);
-        else
-            run(selection, base, result);
+        runCall(selection, base, result, /* nested */ false);
     }
 
     // Runs `callee` as `enter` does, with the result written at `dest`. A
@@ -2715,14 +2725,25 @@ private mixin template CalleeEntry(E) {
         // A callee whose variable aliases the place of the result arms the
         // record of the caller for that place, unless the call is nested.
         const aliased = callee.layout.returnPlace.offset != size_t.max;
-        if (callee.layout.retainsTemporaries || aliased)
-            runRetaining(selection, base, place);
-        else
-            run(selection, base, place);
+        runCall(selection, base, place, aliased);
     }
 
-    // The closure sits in a frame of its own, so the frame of `enter`
-    // carries none.
+    // Runs the callee as a call of its own for the temporaries when the
+    // caller says so (`nested`) or when a variable of the callee keeps
+    // temporaries.
+    private void runCall(
+        in Selection selection, ubyte* base, void* result, in bool nested,
+    ) {
+        if (nested || selection.callee.layout.retainsTemporaries)
+            runRetaining(selection, base, result);
+        else
+            run(selection, base, result);
+    }
+
+    // Runs `callee` as a call of its own for the temporaries
+    // (`withNestedCall`), with slots of its own when a variable of the
+    // callee keeps temporaries. The closure sits in a frame of its own, so
+    // the frame of `enter` carries none.
     pragma(inline, false)
     private void runRetaining(
         in Selection selection, ubyte* base, void* result,
@@ -2855,8 +2876,6 @@ private final class Call(E) : Node {
     mixin CalleeEntry!E;
     mixin Dispatch!E;
 
-    // A constructor call yields the object it constructed.
-    private bool _yieldsReceiver;
     private DirectWordCall _direct;
     // The fast form of each callee this site has met, null for none.
     private FastCallee*[TreeCallee*] _fasts;
@@ -2867,12 +2886,12 @@ private final class Call(E) : Node {
 
     public this(E ev, CallExp site, FuncDeclaration method, Node receiver,
             bool receiverIsAddress, bool virtual, SiteArguments arguments,
-            size_t resultSize, bool resultUnsigned, bool yieldsReceiver) {
+            size_t resultSize, bool resultUnsigned) {
         _ev = ev; _site = site;
         takeReceiver(method, receiver, receiverIsAddress, virtual);
         takeArguments(arguments);
         _resultSize = resultSize;
-        _resultUnsigned = resultUnsigned; _yieldsReceiver = yieldsReceiver;
+        _resultUnsigned = resultUnsigned;
         _root = ev._treeRoot;
     }
 
@@ -2927,7 +2946,7 @@ private final class Call(E) : Node {
     private FastCallee* fastOf(TreeCallee* callee, in Selection selected) {
         import snakebite.backends.calls: CallSelection;
 
-        if (selected.route != CallSelection.Route.guest || _yieldsReceiver)
+        if (selected.route != CallSelection.Route.guest)
             return null;
         auto ev = _ev;
         if (callee.shape.kind == CalleeShape.Kind.unexamined)
@@ -2972,15 +2991,9 @@ private final class Call(E) : Node {
 
     private enum BodyKind : bool { plain, soleReturn }
 
-    // Returns the receiver of the call, 0 when there is none.
-    private size_t invoke(ubyte* frame, void* result) {
+    // The general call.
+    private void invoke(ubyte* frame, void* result) {
         const receiver = runReceiver(frame);
-        invokeOn(receiver, frame, result);
-        return receiver;
-    }
-
-    // The general call, once the receiver has run.
-    private void invokeOn(size_t receiver, ubyte* frame, void* result) {
         finishCall(resolve(receiver), receiver, frame, result);
     }
 
@@ -3004,9 +3017,8 @@ private final class Call(E) : Node {
         if (_hasFast)
             return executeLongOfFastSite(frame);
         ulong[2] buffer;
-        const receiver = invoke(frame, _yieldsReceiver ? null : buffer.ptr);
-        return _yieldsReceiver
-            ? receiver : extendResult(buffer[0], _resultSize, _resultUnsigned);
+        invoke(frame, buffer.ptr);
+        return extendResult(buffer[0], _resultSize, _resultUnsigned);
     }
 
     public override double executeDouble(ubyte* frame) {
@@ -3130,10 +3142,8 @@ private final class Call(E) : Node {
     pragma(inline, false)
     private long generalLong(bool resolved, size_t receiver, ubyte* frame) {
         ulong[2] buffer;
-        finishCall(resolved, receiver, frame,
-            _yieldsReceiver ? null : buffer.ptr);
-        return _yieldsReceiver
-            ? receiver : extendResult(buffer[0], _resultSize, _resultUnsigned);
+        finishCall(resolved, receiver, frame, buffer.ptr);
+        return extendResult(buffer[0], _resultSize, _resultUnsigned);
     }
 
     // The access of a getter: one load at the receiver plus the offset of
@@ -3278,7 +3288,7 @@ private final class AggregateCall(E) : Node {
         takeReceiver(method, receiver, receiverIsAddress, virtual);
         takeArguments(arguments);
         _resultSize = result.size; _alignment = result.alignment;
-        _aggregateResult = true;
+        _result = CalleeResult.aggregate;
         _root = ev._treeRoot;
     }
 
@@ -3304,6 +3314,134 @@ private final class AggregateCall(E) : Node {
     public override void executeVoid(ubyte* frame) {
         auto scratch = FrameGuard(&_ev._frames);
         executeInto(frame, _ev._frames.reserve(_resultSize, _alignment));
+    }
+}
+
+// A direct or virtual call of a function that returns `ref`. The callee
+// writes the address of its result, which the node yields (`executeAddr`);
+// a parent that needs the value reads it there.
+private final class ReferenceCall(E) : Node {
+    mixin CalleeEntry!E;
+    mixin Dispatch!E;
+
+    public this(E ev, CallExp site, FuncDeclaration method, Node receiver,
+            bool receiverIsAddress, bool virtual, SiteArguments arguments) {
+        _ev = ev; _site = site;
+        takeReceiver(method, receiver, receiverIsAddress, virtual);
+        takeArguments(arguments);
+        _resultSize = size_t.sizeof;
+        _result = CalleeResult.reference;
+        _root = ev._treeRoot;
+    }
+
+    public final void bind(TreeCallee* callee) {
+        _selected = selectionOf(callee);
+    }
+
+    private void chose(TreeCallee*, in Selection) {}
+
+    public override ubyte* executeAddr(ubyte* frame) {
+        const receiver = runReceiver(frame);
+        if (!resolve(receiver))
+            return originalAddress(frame, receiver);
+        // A copy: the arguments can run this site again and select another
+        // callee.
+        auto selected = _selected;
+        ubyte* address;
+        enter(selected, receiver, frame, &address);
+        return address;
+    }
+
+    public override void executeVoid(ubyte* frame) {
+        executeAddr(frame);
+    }
+
+    // The original path, which gives the address of the result.
+    pragma(inline, false)
+    private ubyte* originalAddress(ubyte* frame, size_t receiver) {
+        auto ev = _ev;
+        ubyte* address;
+        ev.handOver(_root, frame, {
+            address = cast(ubyte*) ev._executeMethodCall(
+                _site, null, _method, cast(void*) receiver).address;
+        });
+        return address;
+    }
+}
+
+// The call of a constructor: on a struct lvalue (`field.this(args)`), on
+// the struct literal of `S(args)`, on a class object (`super.this(args)`),
+// or on the allocation of `new`. It yields its receiver, the object that it
+// constructed: the address of a struct (`executeAddr`), or the class
+// reference or the pointer that `new` gives (`executeLong`). As every
+// constructor call does (`constructTemporary`), it suspends the destructor
+// of a temporary that it constructs until the constructor returns.
+//
+// A record of the temporaries names a struct temporary, which a constructor
+// reaches only through the address of its receiver. The callee of such a
+// call is a call of its own for the temporaries, as the original path runs
+// every callee, so that a constructor that the callee calls on the same
+// storage (another constructor of the struct, the constructor of a field at
+// offset 0) does not take over the record of this one. A class object and
+// the allocation of `new` are never a temporary, so their callee is a call
+// of its own only when a variable of it keeps temporaries.
+private final class ConstructorCall(E) : Node {
+    mixin CalleeEntry!E;
+    mixin Dispatch!E;
+
+    public this(E ev, CallExp site, FuncDeclaration constructor,
+            Node receiver, bool receiverIsAddress, SiteArguments arguments) {
+        import snakebite.frontend.dmd.functions: typeFunctionOf;
+
+        _ev = ev; _site = site;
+        takeReceiver(constructor, receiver, receiverIsAddress,
+            /* virtual */ false);
+        takeArguments(arguments);
+        // A struct constructor returns `ref this`, a class constructor
+        // `this`.
+        _result = typeFunctionOf(constructor).isRef
+            ? CalleeResult.reference : CalleeResult.value;
+        _root = ev._treeRoot;
+    }
+
+    public final void bind(TreeCallee* callee) {
+        _selected = selectionOf(callee);
+    }
+
+    private void chose(TreeCallee*, in Selection) {}
+
+    public override long executeLong(ubyte* frame) {
+        return construct(frame);
+    }
+
+    public override ubyte* executeAddr(ubyte* frame) {
+        return cast(ubyte*) construct(frame);
+    }
+
+    public override void executeVoid(ubyte* frame) {
+        construct(frame);
+    }
+
+    // Runs the constructor and returns its receiver.
+    private size_t construct(ubyte* frame) {
+        import snakebite.backends.temporary: constructTemporary;
+
+        auto ev = _ev;
+        const receiver = runReceiver(frame);
+        auto object = cast(void*) receiver;
+        // A copy: the arguments can run this site again.
+        auto selected = _selected;
+        constructTemporary(_method,
+            { ev._temporaries.suspendConstructor(object); },
+            {
+                // The callee writes its receiver, which is the result.
+                ulong[2] result = void;
+                auto calleeFrame = FrameGuard(&ev._frames);
+                auto base = placeArguments(selected.callee, receiver, frame);
+                runCall(selected, base, result.ptr, _receiverIsAddress);
+            },
+            { ev._temporaries.armConstructor(object); });
+        return receiver;
     }
 }
 
@@ -3531,10 +3669,11 @@ static assert(DelegateValue.context.offsetof
 // adjustment of its context. A host target, a null one, and a guest callee
 // that `Call` could not run stay with the evaluator, which has the fault for
 // the null one and the foreign-function barrier for the others.
-// `aggregate` is set for a call whose result is a struct or a static array,
-// which the callee writes at the place that the parent gives
-// (`executeInto`).
-private final class IndirectCall(E, bool aggregate) : Node {
+// `result` is what the callee writes: a value of at most two words, a
+// struct or a static array at the place that the parent gives
+// (`executeInto`), or the address of the result of a function that returns
+// `ref`, which the node yields (`executeAddr`).
+private final class IndirectCall(E, CalleeResult result) : Node {
     mixin CalleeEntry!E;
 
     private Node _target;
@@ -3543,24 +3682,23 @@ private final class IndirectCall(E, bool aggregate) : Node {
     // runs it.
     private FuncDeclaration _function;
     private Selection _selected;
-    static if (aggregate)
+    static if (result == CalleeResult.aggregate)
         private uint _alignment;
 
     public this(E ev, CallExp site, Node target, bool viaDelegate,
-            SiteArguments arguments, in TypeFacts result,
+            SiteArguments arguments, in TypeFacts facts,
             bool resultUnsigned) {
         _ev = ev; _site = site; _target = target; _viaDelegate = viaDelegate;
         takeArguments(arguments);
-        _resultSize = result.size;
+        _resultSize = facts.size;
         _resultUnsigned = resultUnsigned;
-        static if (aggregate) {
-            _alignment = result.alignment;
-            _aggregateResult = true;
-        }
+        static if (result == CalleeResult.aggregate)
+            _alignment = facts.alignment;
+        _result = result;
         _root = ev._treeRoot;
     }
 
-    private void invoke(ubyte* frame, void* result) {
+    private void invoke(ubyte* frame, void* place) {
         auto ev = _ev;
         DelegateValue target = void;
         if (_viaDelegate) {
@@ -3580,17 +3718,24 @@ private final class IndirectCall(E, bool aggregate) : Node {
         const selected = _selected;
         if (selected.callee is null) {
             ev.handOver(_root, frame, {
-                ev._executeCallThroughValue(_site, result,
-                    cast(void*) target.function_, cast(void*) target.context,
-                    _viaDelegate);
+                // The original path gives the address of a `ref` result
+                // apart from the place.
+                static if (result == CalleeResult.reference)
+                    *cast(void**) place = ev._executeCallThroughValue(_site,
+                        null, cast(void*) target.function_,
+                        cast(void*) target.context, _viaDelegate).address;
+                else
+                    ev._executeCallThroughValue(_site, place,
+                        cast(void*) target.function_,
+                        cast(void*) target.context, _viaDelegate);
             });
             return;
         }
-        static if (aggregate)
+        static if (result == CalleeResult.aggregate)
             enterInto(selected, target.context + adjustment, frame,
-                cast(ubyte*) result);
+                cast(ubyte*) place);
         else
-            enter(selected, target.context + adjustment, frame, result);
+            enter(selected, target.context + adjustment, frame, place);
     }
 
     // The callee for `function_` that this tree runs, null when it runs
@@ -3604,7 +3749,7 @@ private final class IndirectCall(E, bool aggregate) : Node {
         return selectionOf(callee);
     }
 
-    static if (aggregate) {
+    static if (result == CalleeResult.aggregate) {
         public override void executeInto(ubyte* frame, ubyte* dest) {
             invoke(frame, dest);
         }
@@ -3613,6 +3758,16 @@ private final class IndirectCall(E, bool aggregate) : Node {
         public override void executeVoid(ubyte* frame) {
             auto scratch = FrameGuard(&_ev._frames);
             invoke(frame, _ev._frames.reserve(_resultSize, _alignment));
+        }
+    } else static if (result == CalleeResult.reference) {
+        public override ubyte* executeAddr(ubyte* frame) {
+            ubyte* address;
+            invoke(frame, &address);
+            return address;
+        }
+
+        public override void executeVoid(ubyte* frame) {
+            executeAddr(frame);
         }
     } else {
         public override long executeLong(ubyte* frame) {
@@ -3781,8 +3936,11 @@ private Node buildIntrinsicCall(E)(E ev, CallExp call, FuncDeclaration function_
         }
     }
 
+    // `BuiltinOp` gives a value; a builtin that returns `ref` gives an
+    // address.
     if (function_.fbody !is null || function_.isThis !is null
-            || call.e1.isCommaExp !is null)
+            || call.e1.isCommaExp !is null
+            || typeFunctionOf(function_).isRef)
         return null;
     auto callee = ev.treeCalleeOf(function_);
     if (callee is null)
@@ -4017,12 +4175,11 @@ private Node buildAddress(E)(E ev, Expression expression) {
                 ? null : new Comma(first, second);
         }
         case call: {
-            import snakebite.frontend.dmd.functions: typeFunctionOf;
-
             // A call that returns `ref` gives an address of its own.
             auto call = expression.isCallExp;
-            auto type = typeFunctionOf(call);
-            if (!isAggregate(expression.type) || type is null || type.isRef)
+            if (returnsReference(call))
+                return buildCall(ev, call);
+            if (!isAggregate(expression.type))
                 return null;
             return materialise(ev, buildCall(ev, call), expression.type);
         }
@@ -4052,6 +4209,15 @@ private Node materialise(E)(E ev, Node value, Type type) {
     auto node = new Materialise(ev, value, ev.factsOf(type));
     region.materialised ~= node;
     return node;
+}
+
+// Whether `call` returns `ref`, so that its node gives the address of the
+// result (`executeAddr`), as a struct constructor does.
+private bool returnsReference(CallExp call) {
+    import snakebite.frontend.dmd.functions: typeFunctionOf;
+
+    auto type = typeFunctionOf(call);
+    return type !is null && type.isRef;
 }
 
 private Node buildIndexAddress(E)(E ev, IndexExp indexed) {
@@ -4205,18 +4371,19 @@ private Node buildCall(E)(E ev, CallExp call) {
         call.f, (declaration) => ev._program.linkedFunctionOf(declaration));
     if (auto intrinsic = buildIntrinsicCall(ev, call, function_))
         return intrinsic;
-    // A constructor call keeps the lifetime handling of the original path,
-    // except where `new` makes it (`buildConstructorCall`).
-    if (function_.isCtorDeclaration !is null)
-        return null;
     auto type = typeFunctionOf(function_);
 
+    // A function that returns `ref` gives an address, whatever the type of
+    // its result; a constructor gives its receiver.
+    const isConstructor = function_.isCtorDeclaration !is null;
+    const resultIsAddress = type.isRef || isConstructor;
     const isVoid = call.type.toBasetype.ty == TY.Tvoid;
     const resultIsSlice = isSlice(call.type);
     const resultIsAggregate = isAggregate(call.type);
-    const result = isVoid || resultIsSlice || resultIsAggregate
+    const result = resultIsAddress || isVoid || resultIsSlice
+            || resultIsAggregate
         ? Scalar() : scalarOf(ev, call.type);
-    if (!isVoid && !resultIsSlice && !resultIsAggregate
+    if (!resultIsAddress && !isVoid && !resultIsSlice && !resultIsAggregate
             && result.kind == Scalar.Kind.none)
         return null;
 
@@ -4244,22 +4411,23 @@ private Node buildCall(E)(E ev, CallExp call) {
     if (!buildArguments(ev, type, call.arguments, arguments))
         return null;
 
+    if (isConstructor)
+        return bound(ev, function_, new ConstructorCall!E(ev, call, function_,
+            receiver, receiverIsAddress, arguments));
+    if (type.isRef) {
+        auto node = new ReferenceCall!E(ev, call, function_, receiver,
+            receiverIsAddress, virtual, arguments);
+        return virtual ? node : bound(ev, function_, node);
+    }
     if (resultIsAggregate) {
         auto node = new AggregateCall!E(ev, call, function_, receiver,
             receiverIsAddress, virtual, arguments, ev.factsOf(call.type));
-        if (!virtual) {
-            auto callee = ev.treeCalleeOf(function_);
-            if (callee is null || !node.matches(callee))
-                return null;
-            node.bind(callee);
-        }
-        return node;
+        return virtual ? node : bound(ev, function_, node);
     }
     auto node = new Call!E(ev, call, function_, receiver, receiverIsAddress,
         virtual, arguments,
         isVoid ? 0 : resultIsSlice ? SliceValue.sizeof : result.facts.size,
-        result.facts.isUnsigned,
-        ev.resultIsReceiver(function_));
+        result.facts.isUnsigned);
     if (!virtual) {
         auto callee = ev.treeCalleeOf(function_);
         if (callee is null || !node.matches(callee))
@@ -4268,6 +4436,16 @@ private Node buildCall(E)(E ev, CallExp call) {
         if (auto accessor = node.accessor)
             return accessor;
     }
+    return node;
+}
+
+// `node`, a call of `function_` that is not virtual, bound to its callee;
+// null when the tree does not run the callee at this site.
+private Node bound(E, N)(E ev, FuncDeclaration function_, N node) {
+    auto callee = ev.treeCalleeOf(function_);
+    if (callee is null || !node.matches(callee))
+        return null;
+    node.bind(callee);
     return node;
 }
 
@@ -4297,6 +4475,14 @@ private Node buildIndirectCall(E)(E ev, CallExp call) {
             || type.parameterList.varargs != VarArg.none)
         return null;
 
+    if (type.isRef) {
+        SiteArguments arguments;
+        if (!buildArguments(ev, type, call.arguments, arguments))
+            return null;
+        return new IndirectCall!(E, CalleeResult.reference)(ev, call, target,
+            viaDelegate, arguments, TypeFacts.pointer,
+            /* resultUnsigned */ true);
+    }
     const isVoid = call.type.toBasetype.ty == TY.Tvoid;
     const resultIsSlice = isSlice(call.type);
     const resultIsAggregate = isAggregate(call.type);
@@ -4310,12 +4496,13 @@ private Node buildIndirectCall(E)(E ev, CallExp call) {
     if (!buildArguments(ev, type, call.arguments, arguments))
         return null;
     if (resultIsAggregate)
-        return new IndirectCall!(E, true)(ev, call, target, viaDelegate,
-            arguments, ev.factsOf(call.type), /* resultUnsigned */ false);
+        return new IndirectCall!(E, CalleeResult.aggregate)(ev, call, target,
+            viaDelegate, arguments, ev.factsOf(call.type),
+            /* resultUnsigned */ false);
     TypeFacts facts;
     facts.size = isVoid ? 0 : resultIsSlice ? SliceValue.sizeof : result.facts.size;
-    return new IndirectCall!(E, false)(ev, call, target, viaDelegate,
-        arguments, facts, result.facts.isUnsigned);
+    return new IndirectCall!(E, CalleeResult.value)(ev, call, target,
+        viaDelegate, arguments, facts, result.facts.isUnsigned);
 }
 
 // The nodes of the arguments of a call of `type`, one for each parameter,
@@ -4414,6 +4601,14 @@ private Node buildDelegate(E)(E ev, Expression expression) {
         }
         case dotVariable, star, index: {
             auto address = buildAddress(ev, expression);
+            return address is null ? null : loadSlice(address);
+        }
+        case call: {
+            // The value of a `ref` result, read at its address.
+            auto call = expression.isCallExp;
+            if (!returnsReference(call))
+                return null;
+            auto address = buildCall(ev, call);
             return address is null ? null : loadSlice(address);
         }
         case null_:
@@ -4524,8 +4719,13 @@ private Node buildSlice(E)(E ev, Expression expression) {
         }
         case slice:
             return buildSliceOf(ev, expression.isSliceExp);
-        case call:
-            return buildCall(ev, expression.isCallExp);
+        case call: {
+            auto call = expression.isCallExp;
+            if (!returnsReference(call))
+                return buildCall(ev, call);
+            auto address = buildCall(ev, call);
+            return address is null ? null : new LoadSlice(address);
+        }
         case new_:
             return buildNew(ev, expression.isNewExp);
         case cast_:
@@ -4539,12 +4739,21 @@ private Node buildSlice(E)(E ev, Expression expression) {
     }
 }
 
+// Whether a store of a scalar or of two words writes to `target`: a
+// variable, a field, an element, the target of a pointer, or the result of
+// a call that returns `ref`.
+private bool isStoreTarget(Expression target) {
+    if (auto call = target.isCallExp)
+        return returnsReference(call);
+    return target.isDotVarExp !is null || target.isVarExp !is null
+        || target.isIndexExp !is null || target.isPtrExp !is null;
+}
+
 // A store of a dynamic array or a delegate.
 private Node buildPairStore(E)(E ev, AssignExp e) {
     if (bindsReference(ev, e)
             || (e.isConstructExp !is null && e.isConstructExp.lowering !is null)
-            || e.e1.isDotVarExp is null && e.e1.isVarExp is null
-                && e.e1.isIndexExp is null && e.e1.isPtrExp is null)
+            || !isStoreTarget(e.e1))
         return null;
     auto value = buildPair(ev, e.e1.type, e.e2);
     if (value is null)
@@ -4720,15 +4929,8 @@ private Node buildConstructorCall(E)(E ev, NewExp expression, Node allocation) {
     SiteArguments arguments;
     if (!buildArguments(ev, type, expression.arguments, arguments))
         return null;
-    auto node = new Call!E(ev, null, constructor, allocation,
-        /* receiverIsAddress */ false, /* virtual */ false, arguments,
-        /* resultSize */ 0, /* resultUnsigned */ false,
-        ev.resultIsReceiver(constructor));
-    auto callee = ev.treeCalleeOf(constructor);
-    if (callee is null || !node.matches(callee))
-        return null;
-    node.bind(callee);
-    return node;
+    return bound(ev, constructor, new ConstructorCall!E(ev, null, constructor,
+        allocation, /* receiverIsAddress */ false, arguments));
 }
 
 // The effect of `expression`, whatever its type, or null.
@@ -4739,6 +4941,10 @@ private Node buildEffect(E)(E ev, Expression expression) {
 
     if (auto declaration = expression.isDeclarationExp)
         return buildDeclaration(ev, declaration);
+    // A discarded `ref` result is an address that nothing reads, as in
+    // compiled code, whatever the type of the result.
+    if (expression.op == EXP.call && returnsReference(expression.isCallExp))
+        return buildCall(ev, expression.isCallExp);
     if (isSlice(expression.type))
         return buildSlice(ev, expression);
     if (isDelegate(expression.type))
@@ -4855,10 +5061,13 @@ private Node buildValue(E)(E ev, Expression expression) {
     import snakebite.nativevalue: loadFloating;
 
     // A call whose result is a struct or a static array has no value in a
-    // register.
-    if (expression.op == EXP.call)
-        return isAggregate(expression.type)
-            ? null : buildCall(ev, expression.isCallExp);
+    // register. The value of a `ref` result is read at its address.
+    if (expression.op == EXP.call) {
+        auto call = expression.isCallExp;
+        if (returnsReference(call))
+            return buildLoad(ev, expression, buildCall(ev, call));
+        return isAggregate(expression.type) ? null : buildCall(ev, call);
+    }
 
     const scalar = scalarOf(ev, expression.type);
     if (scalar.kind == Scalar.Kind.none)
@@ -4910,8 +5119,10 @@ private Node buildValue(E)(E ev, Expression expression) {
                 ? byFloating!(New!Local)(scalar.facts, slot.offset)
                 : byIntegral!(New!Local)(scalar.facts, slot.offset);
         }
-        case this_: {
-            auto variable = thisVariable(ev, expression.isThisExp);
+        case this_, super_: {
+            // `super` is `this` with the type of the base class; dmd's
+            // `SuperExp` is a `ThisExp`.
+            auto variable = thisVariable(ev, cast(ThisExp) expression);
             const slot = slotOf(ev, variable);
             if (scalar.kind != Scalar.Kind.integral)
                 return null;
@@ -5452,9 +5663,7 @@ private Node buildPost(long delta, E)(E ev, PostExp e, in Scalar scalar) {
 
 private Node buildStore(E)(E ev, AssignExp e, in Scalar scalar) {
     if ((e.isConstructExp !is null && e.isConstructExp.lowering !is null)
-            || e.e1.isDotVarExp is null
-            && e.e1.isVarExp is null && e.e1.isIndexExp is null
-            && e.e1.isPtrExp is null)
+            || !isStoreTarget(e.e1))
         return null;
     if (bindsReference(ev, e))
         return null;
@@ -5645,9 +5854,7 @@ private Node buildInitializer(E)(
         // The storage of a variable that is the result of its function is
         // the place of the result, whose address the slot holds.
         const facts = ev.factsOf(variable.type);
-        if (!isAggregate(value.type) || ev.factsOf(value.type).size != facts.size)
-            return null;
-        auto node = buildAggregate(ev, value);
+        auto node = buildAggregateFor(ev, variable.type, value);
         if (node is null)
             return null;
         Node target = slot.indirect
@@ -5706,6 +5913,9 @@ private Node buildAggregate(E)(E ev, Expression expression) {
         case comma:
             return buildComma(ev, expression.isCommaExp, &buildAggregate!E);
         case call:
+            // The value of a `ref` result is copied from its address.
+            if (returnsReference(expression.isCallExp))
+                goto case this_;
             return buildCall(ev, expression.isCallExp);
         case assign, construct, blit:
             return buildAggregateStore(ev, cast(AssignExp) expression);
@@ -5728,17 +5938,30 @@ private Node buildAggregate(E)(E ev, Expression expression) {
     }
 }
 
-// `target = value` for a struct or a static array of the same size.
+// The struct or static array `value` of the type `target`, or null. dmd
+// writes the value of a struct whose initial value is all zero bits as the
+// integer 0 (`getInitExp`), as in `s = 0, s.this(args)`.
+private Node buildAggregateFor(E)(E ev, Type target, Expression value) {
+    import dmd.astenums: TY;
+    import dmd.typesem: toBasetype;
+
+    const size = ev.factsOf(target).size;
+    if (value.isIntegerExp !is null && target.toBasetype.ty == TY.Tstruct)
+        return new ZeroInto(size);
+    if (!isAggregate(value.type) || ev.factsOf(value.type).size != size)
+        return null;
+    return buildAggregate(ev, value);
+}
+
+// `target = value` for a struct or a static array.
 private Node buildAggregateStore(E)(E ev, AssignExp e) {
     if (bindsReference(ev, e)
             || (e.isConstructExp !is null && e.isConstructExp.lowering !is null)
-            || !isAggregate(e.e1.type) || !isAggregate(e.e2.type))
+            || !isAggregate(e.e1.type))
         return null;
     const facts = ev.factsOf(e.e1.type);
-    if (ev.factsOf(e.e2.type).size != facts.size)
-        return null;
     auto target = buildAddress(ev, e.e1);
-    auto value = buildAggregate(ev, e.e2);
+    auto value = buildAggregateFor(ev, e.e1.type, e.e2);
     if (target is null || value is null)
         return null;
     return new AggregateStore(

@@ -61,10 +61,18 @@ public bool isRootOwned(
 
 // Arena lifetime does not make parent links immutable. scopeCreateGlobal
 // temporarily reparents a shared top-level package during semantic work.
+// A thread inside the frontend already holds the lock, and a query would
+// leave it: the answer would be kept in the GC, and a walk over thousands
+// of declarations would grow that cache of the thread, outside the arena.
+// It asks dmd, as the rest of the walk does.
 public imported!"dmd.dmodule".Module moduleOf(
     imported!"dmd.dsymbol".Dsymbol declaration,
 ) {
     import snakebite.frontend.compiler: withCompilerQuery;
+    import snakebite.gc: insideFrontend;
+
+    if (insideFrontend)
+        return declaration.getModule;
 
     if (auto found = declaration in metadata.modules)
         return *found;

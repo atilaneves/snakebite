@@ -5,8 +5,8 @@ private:
 
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.backends.interpreter.nodetree:
-    AccessSite, OuterVariable, TreeCallee, TreeFlow, TreeRoot, isAggregate,
-    isScalar, isSlice, rootOf;
+    AccessSite, CalleeResult, OuterVariable, TreeCallee, TreeFlow, TreeRoot,
+    isAggregate, isScalar, isSlice, rootOf;
 import snakebite.nativelayout: tryTypeFacts, truthFacts;
 
 
@@ -1140,10 +1140,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         return call;
     }
 
-    package bool resultIsReceiver(FuncDeclaration function_) {
-        return callShapeOf(function_).adapter.resultIsReceiver;
-    }
-
     private const(CallShape)* callShapeOf(FuncDeclaration function_) {
         if (auto cached = function_ in _calls)
             return cached;
@@ -1460,7 +1456,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import dmd.typesem: toBasetype;
 
         auto type = typeFunctionOf(function_);
-        if (type.isRef || type.parameterList.varargs != VarArg.none)
+        if (type.parameterList.varargs != VarArg.none)
             return null;
         const decision = _callSelection.decisionOf(
             function_,
@@ -1488,19 +1484,22 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 return null;
         }
         auto returnType = function_.type.nextOf;
-        const returnsAggregate = isAggregate(returnType);
-        // A constructor's result is its receiver.
-        if (function_.isCtorDeclaration is null
+        // A function that returns `ref` writes an address, whatever the
+        // type of its result. A constructor's result is its receiver.
+        const result = type.isRef ? CalleeResult.reference
+            : isAggregate(returnType)
+                ? CalleeResult.aggregate : CalleeResult.value;
+        if (result == CalleeResult.value && function_.isCtorDeclaration is null
                 && returnType.toBasetype.ty != TY.Tvoid
-                && !isScalar(this, returnType) && !isSlice(returnType)
-                && !returnsAggregate)
+                && !isScalar(this, returnType) && !isSlice(returnType))
             return null;
         auto callee = new TreeCallee;
         callee.function_ = function_;
         callee.decision = decision;
         callee.layout = layout;
-        callee.returnFacts = factsOf(returnType);
-        callee.returnsAggregate = returnsAggregate;
+        callee.returnFacts = result == CalleeResult.reference
+            ? TypeFacts.pointer : factsOf(returnType);
+        callee.result = result;
         callee.lead = frameLead(layout.alignment);
         callee.reservesFast = layout.alignment != 0
             && (layout.alignment & (layout.alignment - 1)) == 0

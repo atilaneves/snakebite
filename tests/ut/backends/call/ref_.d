@@ -326,3 +326,167 @@ static foreach (backend; Matrix!(
         }
     }
 }
+
+// A call through a function pointer to a function that returns `ref` gives
+// the caller's own storage: a write through the call lands there.
+static foreach (backend; Matrix!()) {
+    @("ref.return.throughFunctionPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        14.shouldBeRetOf!(backend, q{
+            ref int cell(ref int[2] pair) { return pair[1]; }
+
+            int kindaMain() {
+                int[2] pair;
+                auto get = &cell;
+                get(pair) = 5;
+                get(pair) += 2;
+                return pair[1] + get(pair);
+            }
+        }, "kindaMain");
+    }
+}
+
+// A dynamic array that a call returns by `ref` is read as a value, and is
+// the caller's own variable.
+static foreach (backend; Matrix!()) {
+    @("ref.return.sliceReadAsValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        22.shouldBeRetOf!(backend, q{
+            struct Box { int[] items; }
+
+            ref int[] items(ref Box box) { return box.items; }
+
+            int kindaMain() {
+                Box box;
+                box.items = [1, 2];
+                int[] before = items(box);
+                items(box) = [3];
+                return cast(int) (before.length * 10 + items(box)[0] - 1);
+            }
+        }, "kindaMain");
+    }
+}
+
+// A struct that a call returns by `ref` is copied when it is read as a
+// value: a later write through the call does not change the copy.
+static foreach (backend; Matrix!()) {
+    @("ref.return.structCopiedAsValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        39.shouldBeRetOf!(backend, q{
+            struct Point { int x; int y; }
+
+            ref Point first(ref Point[2] points) { return points[0]; }
+
+            int kindaMain() {
+                Point[2] points;
+                points[0] = Point(3, 4);
+                Point copy = first(points);
+                first(points).x = 9;
+                return copy.x * 10 + first(points).x;
+            }
+        }, "kindaMain");
+    }
+}
+
+// A delegate that a call returns by `ref` is read, then called.
+static foreach (backend; Matrix!()) {
+    @("ref.return.delegateCalled." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        6.shouldBeRetOf!(backend, q{
+            struct Counter {
+                int count;
+                int next() { return ++count; }
+            }
+
+            struct Holder { int delegate() action; }
+
+            ref int delegate() action(ref Holder holder) {
+                return holder.action;
+            }
+
+            int kindaMain() {
+                Counter counter;
+                Holder holder;
+                holder.action = &counter.next;
+                action(holder)();
+                action(holder)();
+                return action(holder)() * 2;
+            }
+        }, "kindaMain");
+    }
+}
+
+// A statement that calls a function returning `ref` runs the call and reads
+// nothing through the returned address, so a null address is harmless.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE reads the discarded result and reports the null dereference"),
+)) {
+    @("ref.discardedScalarResultIsNotRead." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(backend, q{
+            ref int at(int* p) { return *p; }
+            int kindaMain() {
+                at(null);
+                return 7;
+            }
+        }, "kindaMain");
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE reads the discarded result and reports the null dereference"),
+)) {
+    @("ref.discardedStructResultIsNotCopied." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(backend, q{
+            struct S { int a; }
+            ref S sat(S* p) { return *p; }
+            int kindaMain() {
+                sat(null);
+                return 7;
+            }
+        }, "kindaMain");
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE reads the discarded result and reports the null dereference"),
+)) {
+    @("ref.discardedSliceResultIsNotRead." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(backend, q{
+            ref int[] arr(int[]* p) { return *p; }
+            int kindaMain() {
+                arr(null);
+                return 7;
+            }
+        }, "kindaMain");
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE reads the discarded result and reports the null dereference"),
+)) {
+    @("ref.discardedDelegateResultIsNotRead." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(backend, q{
+            ref int delegate() dg(int delegate()* p) { return *p; }
+            int kindaMain() {
+                dg(null);
+                return 7;
+            }
+        }, "kindaMain");
+    }
+}

@@ -90,6 +90,13 @@ public void enterFrontend() nothrow @nogc {
 debug private __gshared bool _frontendStarted;
 
 
+// Whether dmd code, entered by `snakebite.frontend.compiler`, is running
+// on this thread: it holds the frontend lock and sees the state settled.
+public bool insideFrontend() @trusted nothrow @nogc {
+    return _frontendDepth != 0;
+}
+
+
 public void leaveFrontend() nothrow @nogc {
     assert(_frontendDepth != 0);
     --_frontendDepth;

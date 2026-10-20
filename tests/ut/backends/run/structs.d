@@ -3181,6 +3181,105 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A constructor that calls another constructor of its struct
+// (`this.__ctor(d)`) on the temporary that it constructs, then throws: the
+// temporary was never constructed, and the call of the other constructor
+// does not complete its construction, so native D runs no destructor.
+static foreach (backend; Matrix!()) {
+    @("temporaryWithDelegatingThrowingConstructorRunsNoDestructor." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct T {
+                int* dtors;
+
+                this(int* d) {
+                    dtors = d;
+                }
+
+                this(int* d, bool doThrow) {
+                    this(d);
+                    if (doThrow) throw new Exception("ctor");
+                }
+
+                ~this() {
+                    if (dtors) ++*dtors;
+                }
+
+                int get() {
+                    return 5;
+                }
+            }
+
+            void main() {
+                int dtors = 0;
+                bool caught;
+                try
+                    T(&dtors, true).get();
+                catch (Exception e)
+                    caught = true;
+                assert(caught);
+                assert(dtors == 0);
+            }
+        });
+    }
+}
+
+// A constructor that constructs its first field, at the address of the
+// temporary that it constructs, then throws: native D destroys the field
+// and runs no destructor of the temporary.
+static foreach (backend; Matrix!()) {
+    @("temporaryWithThrowingConstructorDestroysOnlyItsFirstField." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Inner {
+                int* dtors;
+
+                this(int* d) {
+                    dtors = d;
+                }
+
+                ~this() {
+                    if (dtors) *dtors += 10;
+                }
+            }
+
+            struct Outer {
+                Inner inner;
+                int* own;
+
+                this(int* d, bool doThrow) {
+                    inner = Inner(d);
+                    own = d;
+                    if (doThrow) throw new Exception("ctor");
+                }
+
+                ~this() {
+                    if (own) *own += 100;
+                }
+
+                int get() {
+                    return 5;
+                }
+            }
+
+            void main() {
+                int dtors = 0;
+                bool caught;
+                try
+                    Outer(&dtors, true).get();
+                catch (Exception e)
+                    caught = true;
+                assert(caught);
+                assert(dtors == 10);
+            }
+        });
+    }
+}
+
 // The result of the temporary's method feeds a declaration
 // (`int r = T(&dtors).get();`), so the constructor-call receiver is
 // evaluated for its address rather than as a statement of its own. The
@@ -6737,6 +6836,30 @@ static foreach (backend; Matrix!()) {
                 }
                 assert(*first == -7 && *second == -9 && sum == -3);
             }
+        });
+    }
+}
+
+// A constructor that a class constructor calls through `new` keeps its
+// temporaries in slots of its own for each activation, so a recursive
+// construction does not share them.
+static foreach (backend; Matrix!()) {
+    @("classConstructorRecursionKeepsTemporaries." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[4] values; }
+            S make(int base) { S s; s.values[] = base; return s; }
+            class C {
+                int total; C child;
+                this(int depth) {
+                    auto slice = make(depth).values[];
+                    if (depth > 0) child = new C(depth - 1);
+                    total = slice[0] + slice[3]
+                        + (child is null ? 0 : child.total);
+                }
+            }
+            void main() { assert(new C(3).total == 12); }
         });
     }
 }
