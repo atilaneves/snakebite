@@ -2510,6 +2510,12 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         final switch (key.exit) with (FinallyKey.Exit) {
             case gotoScope:
                 destination = scopes.enclosing(cast(Statement) key.destination);
+                // A target in the body stays inside the statement: the
+                // jump leaves nothing, and the planner only takes a
+                // destination that is a suffix of the source.
+                foreach (frame; destination)
+                    if (frame.owner == cast(const(void)*) statement)
+                        return false;
                 break;
             case fallThrough:
                 if (source.length > 0)
@@ -2535,24 +2541,18 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     override void visit(TryFinallyStatement statement) {
-        auto plan = finallyPlanOf(statement);
-        bool bodyRan;
-        if (_controlFlow.seeking) {
-            _activeExceptionScopes.push(ActiveExceptionScope(plan.candidates));
-            scope (exit)
-                _activeExceptionScopes.pop;
+        const seeking = _controlFlow.seeking;
+        // A label can only be in the body: D rejects a `goto` into a
+        // `finally` body. The pass that seeks it runs the code after the
+        // label, so it runs inside `runTryFinally` like any other body.
+        bool labelOutside;
+        runTryFinally(statement, finallyPlanOf(statement), {
             if (statement._body !is null)
                 statement._body.accept(this);
-            bodyRan = true;
-            if (_controlFlow.seeking && statement.finalbody !is null)
-                statement.finalbody.accept(this);
-            if (_controlFlow.seeking)
-                return;
-        }
-
-        runTryFinally(statement, plan, {
-            if (!bodyRan && statement._body !is null)
-                statement._body.accept(this);
+            if (seeking && _controlFlow.seeking) {
+                labelOutside = true;
+                return TreeFlow.normal;
+            }
 
             while (_controlFlow.hasGoto && !runsFinally(statement)) {
                 _controlFlow.resume;
@@ -2561,6 +2561,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             }
             return _controlFlow.hasTransfer ? TreeFlow.generic : TreeFlow.normal;
         }, {
+            // The body did not hold the label, so it did not run.
+            if (labelOutside)
+                return TreeFlow.normal;
+
             runCleanupBody(statement.finalbody);
             return _controlFlow.hasTransfer ? TreeFlow.generic : TreeFlow.normal;
         });

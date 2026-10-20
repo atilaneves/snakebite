@@ -944,7 +944,7 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
+    Omit!(Ctfe, Because.diverges,
         "DMD CTFE runs the statements that a goto in a finally body skips"),
 )) {
     @("tryJumps.finally.gotoInIfElse." ~ backend.stringof)
@@ -983,7 +983,7 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
+    Omit!(Ctfe, Because.diverges,
         "DMD CTFE runs the statements that a goto in a finally body skips"),
 )) {
     @("tryJumps.finally.gotoInCase." ~ backend.stringof)
@@ -1087,6 +1087,223 @@ static foreach (backend; Matrix!()) {
                     assert(caught.bypassedException.msg == "first");
                 }
                 assert(order == 0);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("tryJumps.seek.backwardGotoThenThrow." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f(int n, ref int finallyRuns) {
+                int count;
+                try {
+                L:
+                    count++;
+                    if (count < n) goto L;
+                    throw new Exception("x");
+                } finally { finallyRuns++; }
+            }
+
+            void main() {
+                int finallyRuns;
+                try f(2, finallyRuns); catch (Exception) {}
+                assert(finallyRuns == 1);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("tryJumps.seek.labelInHandlerThenThrow." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void f(ref int finallyRuns) {
+                int c;
+                try {
+                    try throw new Exception("x");
+                    catch (Exception) {
+                    L:
+                        c++;
+                        if (c < 2) goto L;
+                        throw new Exception("y");
+                    }
+                } finally { finallyRuns++; }
+            }
+
+            void main() {
+                int finallyRuns;
+                try f(finallyRuns); catch (Exception e) { assert(e.msg == "y"); }
+                assert(finallyRuns == 1);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("tryJumps.seek.labelInLoopThenThrow." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void f(ref int finallyRuns) {
+                int c;
+                try {
+                    while (true) {
+                    L:
+                        c++;
+                        if (c < 3) goto L;
+                        throw new Exception("x");
+                    }
+                } finally { finallyRuns++; }
+            }
+
+            void main() {
+                int finallyRuns;
+                try f(finallyRuns); catch (Exception) {}
+                assert(finallyRuns == 1);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("tryJumps.seek.labelInCaseThenThrow." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void f(int k, ref int finallyRuns) {
+                int c;
+                try {
+                    switch (k) {
+                        case 1:
+                        L:
+                            c++;
+                            if (c < 3) goto L;
+                            throw new Exception("x");
+                        default:
+                            break;
+                    }
+                } finally { finallyRuns++; }
+            }
+
+            void main() {
+                int finallyRuns;
+                try f(1, finallyRuns); catch (Exception) {}
+                assert(finallyRuns == 1);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("tryJumps.seek.labelInNestedFinallyThenThrow." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void f(ref int inner, ref int outer) {
+                int c;
+                try {
+                    try {
+                    L:
+                        c++;
+                        if (c < 2) goto L;
+                        throw new Exception("x");
+                    } finally { inner++; }
+                } finally { outer++; }
+            }
+
+            void main() {
+                int inner, outer;
+                try f(inner, outer); catch (Exception) {}
+                assert(inner == 1);
+                assert(outer == 1);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "DMD CTFE does not run the scope(failure) guard after a goto back in the function"),
+)) {
+    @("tryJumps.seek.labelUnderScopeGuardThenThrow." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void f(ref int exits, ref int failures) {
+                int c;
+                scope (exit) exits++;
+                scope (failure) failures++;
+            L:
+                c++;
+                if (c < 2) goto L;
+                throw new Exception("x");
+            }
+
+            void main() {
+                int exits, failures;
+                try f(exits, failures); catch (Exception) {}
+                assert(exits == 1);
+                assert(failures == 1);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("tryJumps.seek.labelInScopeGuardRegionThenThrow." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void f(ref int exits) {
+                int c;
+                {
+                    scope (exit) exits++;
+                L:
+                    c++;
+                    if (c < 2) goto L;
+                    throw new Exception("x");
+                }
+            }
+
+            void main() {
+                int exits;
+                try f(exits); catch (Exception) {}
+                assert(exits == 1);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "DMD CTFE does not catch the exception after a goto back inside the try body"),
+)) {
+    @("tryJumps.seek.labelInCatchBodyThenThrowCaught." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f(ref int finallyRuns) {
+                int c;
+                try {
+                    try {
+                    L:
+                        c++;
+                        if (c < 2) goto L;
+                        throw new Exception("x");
+                    } catch (Exception) {
+                        return c;
+                    }
+                } finally { finallyRuns++; }
+            }
+
+            void main() {
+                int finallyRuns;
+                assert(f(finallyRuns) == 2);
+                assert(finallyRuns == 1);
             }
         });
     }
