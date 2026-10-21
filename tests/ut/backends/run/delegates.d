@@ -1729,3 +1729,110 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// `&object.method` of a final method binds the method's own body to the
+// object, which the delegate then calls with that object as `this`.
+static foreach (backend; Matrix!()) {
+    @("methodDelegate.finalMethodCallsWithItsReceiver." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Counter {
+                int total;
+                final int add(int amount) { total += amount; return total; }
+            }
+            int run(Counter counter) {
+                auto add = &counter.add;
+                add(3);
+                return add(4);
+            }
+            void main() {
+                auto counter = new Counter;
+                assert(run(counter) == 7);
+                assert(counter.total == 7);
+            }
+        });
+    }
+}
+
+
+// `&object.method` of a virtual method reads the method from the vtable of
+// the object that it binds: one expression binds the override of each
+// object's own class.
+static foreach (backend; Matrix!()) {
+    @("methodDelegate.virtualMethodBindsEachObjectsOverride." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base { int value() { return 1; } }
+            class Derived: Base { override int value() { return 20; } }
+            int sum(Base[] objects) {
+                int total;
+                foreach (object; objects) {
+                    auto value = &object.value;
+                    total += value();
+                }
+                return total;
+            }
+            void main() {
+                assert(sum([new Base, new Derived, new Base]) == 22);
+            }
+        });
+    }
+}
+
+
+// `&method` in a method binds `this`, the object that the method runs on.
+static foreach (backend; Matrix!()) {
+    @("methodDelegate.ofThisBindsTheRunningObject." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Box {
+                int value;
+                int read() { return value; }
+                int delegate() reader() return { return &read; }
+            }
+            class Task {
+                int id;
+                this(int id) { this.id = id; }
+                int run() { return id; }
+                int delegate() handler() { return &run; }
+            }
+            void main() {
+                auto box = Box(5);
+                assert(box.reader()() == 5);
+                assert(new Task(9).handler()() == 9);
+            }
+        });
+    }
+}
+
+
+// A delegate to a method that guest code makes, and that compiled druntime
+// calls on a thread of its own.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot start a thread"),
+)) {
+    @("methodDelegate.calledByNativeThread." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.thread: Thread;
+            class Worker {
+                int result;
+                void run() { result = 42; }
+            }
+            int start(Worker worker) {
+                auto thread = new Thread(&worker.run);
+                thread.start;
+                thread.join;
+                return worker.result;
+            }
+            void main() {
+                assert(start(new Worker) == 42);
+            }
+        });
+    }
+}

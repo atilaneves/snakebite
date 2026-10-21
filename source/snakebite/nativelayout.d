@@ -24,6 +24,13 @@ public alias arrayPointerOffset = nativeArrayPointerOffset;
 public alias arrayValueSize = nativeArrayValueSize;
 public alias delegateContextOffset = nativeDelegateContextOffset;
 public alias delegateFunctionOffset = nativeDelegateFunctionOffset;
+
+// The function word at `index` in the vtable of the class object at
+// `receiver`: the one rule of a virtual call.
+public void* virtualFunctionWord(in void* receiver, size_t index) {
+    auto table = *cast(void***) receiver;
+    return table[index];
+}
 public alias delegateValueSize = nativeDelegateValueSize;
 
 // `snakebite.backends.interpreter.walker` calls this on every integral

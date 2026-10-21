@@ -6,7 +6,7 @@ private:
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.backends.interpreter.nodetree:
     AccessSite, CalleeResult, OuterVariable, TreeCallee, TreeFlow, TreeRoot,
-    isAggregate, isScalar, isSlice, resultWordFor, rootOf;
+    isAggregate, isPair, isScalar, isSlice, resultWordFor, rootOf;
 import snakebite.nativelayout: tryTypeFacts, truthFacts;
 
 
@@ -1639,7 +1639,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 ? CalleeResult.aggregate : CalleeResult.value;
         if (result == CalleeResult.value && function_.isCtorDeclaration is null
                 && returnType.toBasetype.ty != TY.Tvoid
-                && !isScalar(this, returnType) && !isSlice(returnType))
+                && !isScalar(this, returnType) && !isPair(returnType))
             return null;
         auto callee = new TreeCallee;
         callee.function_ = function_;
@@ -2058,6 +2058,13 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         private void checkNotNull(in void* pointer, in Loc loc) {
             if (pointer is null)
                 failNullDeref(loc);
+        }
+
+        // A tree node read a null reference.
+        extern(D) package void failTreeNullDeref(
+            TreeRoot* root, ubyte* frame, in Loc loc,
+        ) {
+            handOver(root, frame, { failNullDeref(loc); });
         }
 
         private void failNullDeref(in Loc loc) {
@@ -6107,10 +6114,42 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return;
         }
 
-        if (plan.kind == AssertInvariantPlan.Kind.class_)
-            callClassInvariant(object);
-        else
-            callStructInvariant(plan.structInvariant, object);
+        runAssertInvariant(plan, object);
+    }
+
+    // The invariant of the object of a passing `assert(object)`.
+    private void runAssertInvariant(
+        in imported!"snakebite.backends.exceptions".AssertInvariantPlan plan,
+        void* object,
+    ) {
+        import snakebite.backends.exceptions: AssertInvariantPlan;
+
+        final switch (plan.kind) with (AssertInvariantPlan.Kind) {
+            case none:
+                internalFailure("an assertion with no invariant runs none");
+            case class_:
+                callClassInvariant(object);
+                break;
+            case struct_:
+                callStructInvariant(cast() plan.structInvariant, object);
+                break;
+        }
+    }
+
+    // A tree node's assertion failed.
+    extern(D) package void failTreeAssertion(
+        TreeRoot* root, ubyte* frame, AssertExp expression,
+    ) {
+        handOver(root, frame, { failAssertion(expression); });
+    }
+
+    // The invariant of the object of an assertion that a tree node passed.
+    extern(D) package void runTreeAssertInvariant(
+        TreeRoot* root, ubyte* frame,
+        in imported!"snakebite.backends.exceptions".AssertInvariantPlan plan,
+        void* object,
+    ) {
+        handOver(root, frame, { runAssertInvariant(plan, object); });
     }
 
     // What a failed `assert` does, shared by every path through
@@ -7368,8 +7407,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private void* _virtualAddress(
         FuncDeclaration method, void* receiver,
     ) {
-        auto table = *cast(void***) receiver;
-        return table[method.vtblIndex];
+        import snakebite.nativelayout: virtualFunctionWord;
+
+        return virtualFunctionWord(receiver, method.vtblIndex);
     }
 
     private CallResult _callIndirect(
