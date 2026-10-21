@@ -27,7 +27,7 @@ public alias delegateFunctionOffset = nativeDelegateFunctionOffset;
 
 // The function word at `index` in the vtable of the class object at
 // `receiver`: the one rule of a virtual call.
-void* virtualFunctionWord(in void* receiver, size_t index) {
+public void* virtualFunctionWord(in void* receiver, size_t index) {
     auto table = *cast(void***) receiver;
     return table[index];
 }
