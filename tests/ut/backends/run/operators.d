@@ -2093,6 +2093,147 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A variable in static storage is an lvalue like a local: a module-level
+// variable (thread-local or `__gshared`), a static field and a static local
+// of a function, each of a template instance.
+private enum staticStoragePrelude = q{
+    template Globals(T) { T tls; __gshared T gshared; }
+    struct Holder(T) { static T field; }
+    class Owner(T) { static T field; }
+    ref T staticLocal(T)() { static T value; return value; }
+    enum places = ["Globals!T.tls", "Globals!T.gshared", "Holder!T.field",
+        "Owner!T.field", "staticLocal!T()"];
+};
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a mutable variable in static storage"),
+)) {
+    @("narrowCompoundAssignmentOnStaticStorage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, compoundPrelude ~ staticStoragePrelude ~ q{
+            void cell(T, string op)(int start, int rhs) {
+                const expected = expectedAfter!(T, op)(start, rhs);
+                static foreach (place; places) {{
+                    mixin(place) = cast(T) start;
+                    T result = mixin(place ~ " " ~ op ~ "= rhs");
+                    assert(result == expected);
+                    assert(mixin(place) == expected);
+                }}
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a mutable variable in static storage"),
+)) {
+    @("narrowIncrementOnStaticStorage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, stepPrelude ~ staticStoragePrelude ~ q{
+            void step(T, string pre, string post)(int start, int delta, bool givesOld) {
+                static foreach (place; places) {{
+                    mixin(place) = cast(T) start;
+                    T result = mixin(pre ~ place ~ post);
+                    assert(mixin(place) == moved!T(start, delta));
+                    assert(result == (givesOld ? cast(T) start : moved!T(start, delta)));
+                }}
+            }
+        });
+    }
+}
+
+// dmd runs `target op= step` in the common type of both operands, also when
+// the target is in static storage: an integral target under a floating step
+// converts the result back to its own type.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a mutable variable in static storage"),
+)) {
+    @("compoundAssignmentOnStaticStorageOfEveryWidth." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, staticStoragePrelude ~ q{
+            void check(T, S)(T start, S step, T sum, T product) {
+                static foreach (place; places) {{
+                    mixin(place) = start;
+                    mixin(place) += step;
+                    assert(mixin(place) == sum);
+                    mixin(place) = start;
+                    mixin(place) *= step;
+                    assert(mixin(place) == product);
+                }}
+            }
+
+            void main() {
+                check!(int, int)(int.max, 1, int.min, int.max);
+                check!(uint, uint)(uint.max, 2, 1, uint.max - 1);
+                check!(long, long)(long.max, 1, long.min, long.max);
+                check!(ulong, ulong)(3, ulong.max, 2, ulong.max - 2);
+                check!(float, float)(1.5f, 2.0f, 3.5f, 3.0f);
+                check!(double, double)(1.5, 2.0, 3.5, 3.0);
+                check!(double, int)(1.5, 2, 3.5, 3.0);
+                check!(int, double)(7, 0.75, 7, 5);
+                check!(long, float)(-3, 1.5f, -1, -4);
+            }
+        });
+    }
+}
+
+// Each thread has its own copy of a thread-local variable in static storage,
+// and a compound assignment or an increment in a function that both threads
+// run changes only the copy of the thread that runs it.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a mutable variable in static storage"),
+)) {
+    @("compoundAssignmentOnStaticStorageChangesTheThreadsCopy." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.thread: Thread;
+
+            int counter;
+            struct Holder { static long field; }
+            template Box(T) { T value; }
+
+            void bump(int amount) {
+                counter += amount;
+                ++counter;
+                Holder.field -= amount;
+                Holder.field--;
+                Box!short.value *= 2;
+                Box!short.value++;
+            }
+
+            void main() {
+                bump(3);
+                bump(3);
+                int otherCounter;
+                long otherField;
+                short otherBox;
+                auto thread = new Thread({
+                    bump(10);
+                    otherCounter = counter;
+                    otherField = Holder.field;
+                    otherBox = Box!short.value;
+                });
+                thread.start;
+                thread.join;
+                assert(otherCounter == 11);
+                assert(otherField == -11);
+                assert(otherBox == 1);
+                assert(counter == 8);
+                assert(Holder.field == -8);
+                assert(Box!short.value == 3);
+            }
+        });
+    }
+}
+
 
 // A conditional expression runs the branch its condition selects and no
 // other, whatever the type of its result.

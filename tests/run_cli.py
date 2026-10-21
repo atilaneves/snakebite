@@ -2468,6 +2468,14 @@ FAULTS = [
      "}\n"
      "int main() { int* pointer; return load(pointer); }\n",
      -signal.SIGSEGV, "fatal: null pointer dereference", "main.load"),
+    ("throw of a null object",
+     "module main;\n"
+     "void fail(Exception e) {\n"
+     "    int unused = 1;\n"
+     "    throw e;\n"
+     "}\n"
+     "int main() { fail(null); return 0; }\n",
+     -signal.SIGSEGV, "fatal: null pointer dereference", "main.fail"),
     ("fault in a finally body",
      "module main;\n"
      "int load(int* pointer) {\n"

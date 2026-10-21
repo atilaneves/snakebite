@@ -6247,7 +6247,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     // The fault is here and not at the transfer when the operand is
     // evaluated inside its full expression: only that has a guest line.
-    private size_t thrownObject(in void* reference, in size_t size) {
+    extern(D) package size_t thrownObject(in void* reference, in size_t size) {
         import snakebite.nativelayout: loadIntegral;
 
         auto guest = cast(Throwable) cast(void*) loadIntegral(
@@ -6270,6 +6270,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 thrown = thrownObject(cast(void*) thrown, size_t.sizeof);
             });
 
+        throwGuest(thrown);
+    }
+
+    // The throw of the object that `thrownObject` gave.
+    extern(D) package noreturn throwGuest(in size_t thrown) {
         throw GuestException.make(cast(Throwable) cast(void*) thrown);
     }
 
@@ -7028,6 +7033,14 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // own storage instead.
     override void visitUnloweredCatDcharAssign(CatDcharAssignExp expression) {
         import core.stdc.string: memcpy;
+
+        auto plan = dcharAppendPlanOf(expression);
+        auto array = addressOf(expression.e1);
+        appendDchar(plan, array, cast(dchar) asIntegral(expression.e2));
+        memcpy(_place, array, _facts.size);
+    }
+
+    extern(D) package const(CallPlan)* dcharAppendPlanOf(CatDcharAssignExp expression) {
         import snakebite.backends.druntimehooks: planOf;
 
         auto elementType = expression.e1.type.nextOf;
@@ -7038,16 +7051,14 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             ? DruntimeHook.arrayAppendChar : DruntimeHook.arrayAppendWchar;
 
         countForeignNameLookup;
-        auto plan = planOf(*_plans, hook);
+        return planOf(*_plans, hook);
+    }
 
-        auto array = addressOf(expression.e1);
-        const value = cast(dchar) asIntegral(expression.e2);
+    extern(D) package void appendDchar(const(CallPlan)* plan, void* array, dchar value) {
         const(void*)[2] arguments = [
             cast(const(void)*) &array, cast(const(void)*) &value,
         ];
         callPlan(plan, null, arguments[]);
-
-        memcpy(_place, array, _facts.size);
     }
 
     // An associative-array literal has no glue-layer codegen of its own to

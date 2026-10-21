@@ -658,3 +658,71 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// dmd ends the full expression of a `throw` operand before the throw
+// starts. A destructor of an operand temporary that throws then throws in
+// its place: the object that the operand made is never thrown.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd CTFE throws the object of the operand, not the one that the destructor of its temporary throws"),
+)) {
+    @("throwOperandTemporaryDestructorThrowReplacesObject." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class First : Exception { this() { super("first"); } }
+            class Second : Exception { this() { super("second"); } }
+            struct T {
+                int v;
+                ~this() { if (v) throw new Second; }
+            }
+            T make() { return T(1); }
+            void fail() { throw make().v ? new First : null; }
+            void main() {
+                try
+                    fail();
+                catch (Exception e) {
+                    assert(cast(Second) e !is null);
+                    assert(e.next is null);
+                    return;
+                }
+                assert(0);
+            }
+        });
+    }
+}
+
+// A `throw` operand that names a variable in memory, in a full expression
+// with a temporary that has a destructor: dmd's glue code reads the
+// variable after the destructor ran, so the throw sees what the destructor
+// wrote.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE stops with: static variable `saved` cannot be read at compile time"),
+)) {
+    @("throwReadsOperandAfterTemporaryDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared Exception saved;
+            __gshared Exception replacement;
+            struct T {
+                int v;
+                ~this() { saved = replacement; }
+            }
+            void fail() { throw T(1).v ? saved : saved; }
+            void main() {
+                saved = new Exception("before");
+                replacement = new Exception("after");
+                try
+                    fail();
+                catch (Exception e) {
+                    assert(e is replacement);
+                    return;
+                }
+                assert(0);
+            }
+        });
+    }
+}
