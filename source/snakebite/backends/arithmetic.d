@@ -82,6 +82,15 @@ package ArithmeticPlan arithmeticPlan(
     return planOf(type, kind);
 }
 
+// The bytes that a postfix `++` or `--` moves a pointer by: the size of the
+// pointee. dmd scales the step `e2` only when the type of `e1` is itself a
+// pointer, and leaves it 1 for an enum of a pointer.
+package size_t pointerPostStep(imported!"dmd.expression".PostExp expression) {
+    import dmd.typesem: nextOf, toBasetype;
+
+    return typeFacts(expression.e1.type.toBasetype.nextOf).size;
+}
+
 private ArithmeticPlan planOf(
     imported!"dmd.mtype".Type type, in ArithmeticPlan.Kind kind,
 ) {

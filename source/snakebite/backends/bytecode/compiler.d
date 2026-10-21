@@ -5725,7 +5725,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // an expression - goes, captured before the target changes;
     // `discardResult` when a caller at statement level does not want it.
     private void compilePost(PostExp expression, in size_t destOffset) {
-        import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
+        import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan,
+            pointerPostStep;
         import std.conv: text;
 
         if (compileDirectPost(expression, destOffset))
@@ -5754,14 +5755,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 handler = increment ? &opFloatAdd : &opFloatSubtract;
                 break;
 
-            // dmd's own AST does not scale a postfix `++`/`--` step for an
-            // enum of a pointer, so the step comes from the pointee size,
-            // not from `e2`.
             case pointerOffset: {
-                const elementFacts =
-                    typeFacts(expression.e1.type.toBasetype.nextOf);
                 emit(&opConstant, stepOffset,
-                    addConstant(cast(long) elementFacts.size),
+                    addConstant(cast(long) pointerPostStep(expression)),
                     storage.facts.size);
                 handler = increment ? &opAdd : &opSubtract;
                 break;

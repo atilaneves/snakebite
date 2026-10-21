@@ -117,7 +117,7 @@ package ResultWord resultWordFor(E)(E ev, FuncDeclaration function_) {
     if (typeFunctionOf(function_).isRef)
         return ResultWord.place;
     auto type = function_.type.nextOf;
-    if (type.toBasetype.ty == TY.Tvoid)
+    if (hasNoResult(type))
         return ResultWord.none;
     return scalarOf(ev, type).kind == Scalar.Kind.none
         ? ResultWord.place : ResultWord.value;
@@ -372,6 +372,18 @@ package bool isSlice(Type type) {
     import dmd.typesem: toBasetype;
 
     return type !is null && type.toBasetype.ty == TY.Tarray;
+}
+
+// A call of a `void` function gives no value, and a call of a `noreturn`
+// function never returns to give one: neither result has bytes.
+package bool hasNoResult(Type type) {
+    import dmd.astenums: TY;
+    import dmd.typesem: toBasetype;
+
+    if (type is null)
+        return false;
+    const ty = type.toBasetype.ty;
+    return ty == TY.Tvoid || ty == TY.Tnoreturn;
 }
 
 private abstract class Node {
@@ -1653,6 +1665,23 @@ private struct NotTest {
     public bool test(ubyte* frame) { return !operand.executeBool(frame); }
 }
 
+// `left && right` or `left || right` whose right operand has no value
+// (`LogicalPlan.Right.effect`): it runs for its effect when the left
+// operand does not decide, and the value is the left operand's. A
+// `noreturn` right operand never completes, so the left operand decided
+// whenever there is a value.
+private final class LogicalEffect(bool andAnd) : BoolNode {
+    private Node _left;
+    private Node _right;
+    public this(Node left, Node right) { _left = left; _right = right; }
+    public override bool executeBool(ubyte* frame) {
+        const left = _left.executeBool(frame);
+        if (left == andAnd)
+            _right.executeVoid(frame);
+        return left;
+    }
+}
+
 // The node that evaluates a test, which a loop or an `if` can hold in its
 // place.
 private final class Tested(T) : BoolNode {
@@ -1813,6 +1842,22 @@ private final class PostStep(T, long delta) : LongNode {
         auto target = cast(T*) _target.address(frame);
         const T old = *target;
         *target = cast(T) (old + delta);
+        return old;
+    }
+    mixin StatementForm!"executeLong";
+}
+
+// `p++` or `p--`: `step` is the signed byte count that the pointer moves by.
+private final class PointerPostStep : LongNode {
+    private Target _target;
+    private long _step;
+    public this(Target target, in long step) {
+        _target = target; _step = step;
+    }
+    public override long executeLong(ubyte* frame) {
+        auto target = cast(long*) _target.address(frame);
+        const old = *target;
+        *target = old + _step;
         return old;
     }
     mixin StatementForm!"executeLong";
@@ -2308,6 +2353,9 @@ private final class Scoped(E) : BoolNode {
         ubyte* result;
         run(frame, { result = _inner.executeAddr(frame); });
         return result;
+    }
+    public override void executeVoid(ubyte* frame) {
+        run(frame, { _inner.executeVoid(frame); });
     }
     private void run(ubyte* frame, scope void delegate() evaluate) {
         auto ev = _ev;
@@ -3021,6 +3069,42 @@ private TreeFlow afterBody(
     return TreeFlow.normal;
 }
 
+// A tuple `foreach`, which dmd unrolls into one body for each element: the
+// bodies run in turn, and `break` and `continue` apply to it as to any
+// loop.
+private final class Unrolled : Node {
+    private ControlFlowState* _controlFlow;
+    private imported!"dmd.identifier".Identifier _label;
+    private Node[] _bodies;
+    private Statement[] _sources;
+    private Holders _holders;
+    public this(ControlFlowState* controlFlow) { _controlFlow = controlFlow; }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        return runFrom(frame, 0);
+    }
+    // The body that holds the label runs from it, and the loop goes on with
+    // the bodies after it.
+    public override TreeFlow enterAt(ubyte* frame, const(void)* label) {
+        const holder = _holders.of(label, () => _sources);
+        bool exit;
+        const result = after(_bodies[holder].enterAt(frame, label), exit);
+        return exit ? result : runFrom(frame, holder + 1);
+    }
+    private TreeFlow runFrom(ubyte* frame, in size_t start) {
+        foreach (one; _bodies[start .. $]) {
+            bool exit;
+            const result = after(one.executeStmt(frame), exit);
+            if (exit)
+                return result;
+        }
+        return TreeFlow.normal;
+    }
+    private TreeFlow after(in TreeFlow flow, out bool exit) {
+        return flow == TreeFlow.normal
+            ? TreeFlow.normal : afterBody(flow, _controlFlow, _label, exit);
+    }
+}
+
 private final class DoLoop(C) : Loop {
     private ControlFlowState* _controlFlow;
     private C _condition;
@@ -3374,7 +3458,9 @@ private final class GenericStatement(E) : Node {
         // with no expression named until the statement opens one, and with
         // the label that the statement has.
         *faultSlotOf(frame) = null;
+        auto previousLabel = _ev._pendingLoopLabel;
         _ev._pendingLoopLabel = _label;
+        scope(exit) _ev._pendingLoopLabel = previousLabel;
         _statement.accept(_ev);
         return _ev._controlFlow.hasTransfer ? TreeFlow.generic : TreeFlow.normal;
     }
@@ -4383,13 +4469,15 @@ private abstract class Call(E) : Node {
     )(FastCallee* fast, size_t receiver, ubyte* frame) {
         auto ev = _ev;
         auto callee = fast.callee;
-        assert(callee.root.resultWord == ResultWord.value,
+        const word = callee.root.resultWord;
+        assert(word == ResultWord.value || word == ResultWord.none,
             "a call that takes a value calls a callee that gives one");
         auto calleeFrame = FrameGuard(&ev._frames);
         auto base = placeIn!(true, context, arity)(
             callee, fast.steps, receiver, frame);
         ev.runTree(callee, base, frame);
-        return *resultWordOf(base);
+        // A `noreturn` callee has no result word, and it never returns here.
+        return word == ResultWord.none ? 0 : *resultWordOf(base);
     }
 
     // Runs the callee of `fast` with `place` in the word of its frame: the
@@ -5374,9 +5462,9 @@ private Node buildIntrinsicCall(E)(E ev, CallExp call, FuncDeclaration function_
             || decision.destinationParameter != size_t.max
             || call.arguments.length > BuiltinOp.maxArguments)
         return null;
-    const isVoid = call.type.toBasetype.ty == TY.Tvoid;
-    const result = isVoid ? Scalar() : scalarOf(ev, call.type);
-    if (!isVoid && result.kind == Scalar.Kind.none)
+    const noResult = hasNoResult(call.type);
+    const result = noResult ? Scalar() : scalarOf(ev, call.type);
+    if (!noResult && result.kind == Scalar.Kind.none)
         return null;
     SiteArguments arguments;
     if (!buildArguments(ev, typeFunctionOf(function_), call.arguments, arguments))
@@ -5386,7 +5474,7 @@ private Node buildIntrinsicCall(E)(E ev, CallExp call, FuncDeclaration function_
                 || mode == Argument.aggregate)
             return null;
     return new BuiltinOp(decision.builtinEntry, arguments,
-        isVoid ? 0 : result.facts.size, result.facts.isUnsigned);
+        noResult ? 0 : result.facts.size, result.facts.isUnsigned);
 }
 
 // --- the builder ------------------------------------------------------
@@ -5856,13 +5944,13 @@ private Node buildCall(E)(E ev, CallExp call) {
     // its result; a constructor gives its receiver.
     const isConstructor = function_.isCtorDeclaration !is null;
     const resultIsAddress = type.isRef || isConstructor;
-    const isVoid = call.type.toBasetype.ty == TY.Tvoid;
+    const noResult = hasNoResult(call.type);
     const resultIsPair = isPair(call.type);
     const resultIsAggregate = isAggregate(call.type);
-    const result = resultIsAddress || isVoid || resultIsPair
+    const result = resultIsAddress || noResult || resultIsPair
             || resultIsAggregate
         ? Scalar() : scalarOf(ev, call.type);
-    if (!resultIsAddress && !isVoid && !resultIsPair && !resultIsAggregate
+    if (!resultIsAddress && !noResult && !resultIsPair && !resultIsAggregate
             && result.kind == Scalar.Kind.none)
         return null;
 
@@ -5946,7 +6034,7 @@ private Node buildCall(E)(E ev, CallExp call) {
     }
     auto node = callOf!E(ev, call, function_, receiver, receiverIsAddress,
         virtual, arguments,
-        isVoid ? 0 : resultIsPair ? SliceValue.sizeof : result.facts.size,
+        noResult ? 0 : resultIsPair ? SliceValue.sizeof : result.facts.size,
         result.facts.isUnsigned);
     if (!virtual) {
         if (!node.matches(callee))
@@ -6087,12 +6175,12 @@ private Node buildIndirectCall(E)(E ev, CallExp call) {
             viaDelegate, arguments, TypeFacts.pointer,
             /* resultUnsigned */ true);
     }
-    const isVoid = call.type.toBasetype.ty == TY.Tvoid;
+    const noResult = hasNoResult(call.type);
     const resultIsPair = isPair(call.type);
     const resultIsAggregate = isAggregate(call.type);
-    const result = isVoid || resultIsPair || resultIsAggregate
+    const result = noResult || resultIsPair || resultIsAggregate
         ? Scalar() : scalarOf(ev, call.type);
-    if (!isVoid && !resultIsPair && !resultIsAggregate
+    if (!noResult && !resultIsPair && !resultIsAggregate
             && result.kind == Scalar.Kind.none)
         return null;
 
@@ -6104,7 +6192,7 @@ private Node buildIndirectCall(E)(E ev, CallExp call) {
             viaDelegate, arguments, ev.factsOf(call.type),
             /* resultUnsigned */ false);
     TypeFacts facts;
-    facts.size = isVoid ? 0 : resultIsPair ? SliceValue.sizeof : result.facts.size;
+    facts.size = noResult ? 0 : resultIsPair ? SliceValue.sizeof : result.facts.size;
     return new IndirectCall!(E, CalleeResult.value)(ev, call, target,
         viaDelegate, arguments, facts, result.facts.isUnsigned);
 }
@@ -6991,10 +7079,12 @@ private Node buildEffect(E)(E ev, Expression expression) {
         return buildDelegate(ev, expression);
     if (isAggregate(expression.type))
         return buildAggregateEffect(ev, expression);
-    if (expression.type !is null && expression.type.toBasetype.ty == TY.Tvoid) {
+    if (hasNoResult(expression.type)) {
         if (expression.op == EXP.question)
             return buildConditional!(buildEffect!E, ConditionalVoid)(
                 ev, expression.isCondExp);
+        if (expression.op == EXP.andAnd || expression.op == EXP.orOr)
+            return buildLogical(ev, expression.isLogicalExp);
         return expression.op == EXP.call
             ? buildCall(ev, expression.isCallExp) : null;
     }
@@ -7111,6 +7201,33 @@ private Node buildTruthAfterEnd(E)(
         positionOf(ev, expression)), expression.type);
 }
 
+// `&&` or `||` as its plan says (`logicalPlan`): a right operand with a
+// value is a test, and one without runs for its effect.
+private Node buildLogical(E)(E ev, imported!"dmd.expression".LogicalExp logical) {
+    import snakebite.backends.logical: LogicalPlan, logicalPlan;
+
+    const plan = logicalPlan(logical);
+    auto left = buildTruth(ev, logical.e1);
+    final switch (plan.right) with (LogicalPlan.Right) {
+        case value: {
+            auto right = buildLogicalOperand(
+                ev, logical.e2, () => buildTruth(ev, logical.e2));
+            if (left is null || right is null)
+                return null;
+            return logicalOf(plan.andAnd, left, right);
+        }
+        case effect: {
+            auto right = buildLogicalOperand(
+                ev, logical.e2, () => buildEffect(ev, logical.e2));
+            if (left is null || right is null)
+                return null;
+            return plan.andAnd
+                ? new LogicalEffect!true(left, right)
+                : new LogicalEffect!false(left, right);
+        }
+    }
+}
+
 private Node logicalOf(in bool andAnd, Node left, Node right) {
     if (!andAnd)
         return new Tested!OrTest(OrTest(left, right));
@@ -7122,7 +7239,6 @@ private Node logicalOf(in bool andAnd, Node left, Node right) {
 // The node that yields `expression`'s scalar value.
 private Node buildValue(E)(E ev, Expression expression) {
     import dmd.tokens: EXP;
-    import snakebite.backends.logical: LogicalPlan, logicalPlan;
     import snakebite.frontend.storage: typeInfoAddressedBy;
     import snakebite.nativelayout: isStaticStructAddress, loadIntegral;
     import snakebite.nativevalue: loadFloating;
@@ -7242,18 +7358,8 @@ private Node buildValue(E)(E ev, Expression expression) {
             return buildEquality!false(ev, expression.isEqualExp);
         case notEqual:
             return buildEquality!true(ev, expression.isEqualExp);
-        case andAnd, orOr: {
-            auto logical = expression.isLogicalExp;
-            const plan = logicalPlan(logical);
-            if (plan.right != LogicalPlan.Right.value || !plan.hasValue)
-                return null;
-            auto left = buildTruth(ev, logical.e1);
-            auto right = buildLogicalOperand(
-                ev, logical.e2, () => buildTruth(ev, logical.e2));
-            if (left is null || right is null)
-                return null;
-            return logicalOf(plan.andAnd, left, right);
-        }
+        case andAnd, orOr:
+            return buildLogical(ev, expression.isLogicalExp);
         case not: {
             auto operand = buildTruth(ev, expression.isNotExp.e1);
             return operand is null ? null : new Tested!NotTest(NotTest(operand));
@@ -7535,38 +7641,45 @@ private template binaryOf(string op) {
 private Node buildBinary(string op, E)(E ev, BinExp e, in Scalar scalar) {
     import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
 
-    const plan = arithmeticPlan(e);
-    if (plan.kind == ArithmeticPlan.Kind.integral
-            && scalar.kind == Scalar.Kind.integral) {
-        auto left = buildValue(ev, e.e1);
-        auto right = buildValue(ev, e.e2);
-        if (left is null || right is null)
-            return null;
-        return byWide!(binaryOf!op)(
-            scalar.facts, left, right, operationOf!op(ev, e));
-    }
-    static if (op == "+" || op == "-" || op == "*" || op == "/") {
-        if (plan.kind == ArithmeticPlan.Kind.floating
-                && scalar.kind == Scalar.Kind.floating) {
+    final switch (arithmeticPlan(e).kind) with (ArithmeticPlan.Kind) {
+        // dmd has scaled the offset of a pointer by the size of the pointee,
+        // and a pointer difference is a byte count until the division that
+        // dmd puts around it: both are arithmetic on words.
+        case integral, pointerOffset, pointerDifference: {
+            if (scalar.kind != Scalar.Kind.integral)
+                return null;
             auto left = buildValue(ev, e.e1);
             auto right = buildValue(ev, e.e2);
             if (left is null || right is null)
                 return null;
-            static Node make(T)(Node l, Node r) {
-                static Node build(L, R)(L a, R b) {
-                    return new FloatBinary!(op, T, L, R)(a, b);
-                }
-                static if (is(T == double))
-                    return fuse!(build, double, doubleLeft, doubleLeft)(
-                        operandOf(l), operandOf(r));
-                else
-                    return fuse!(build, double, onlyChild, onlyChild)(
-                        operandOf(l), operandOf(r));
-            }
-            return byFloating!make(scalar.facts, left, right);
+            return byWide!(binaryOf!op)(
+                scalar.facts, left, right, operationOf!op(ev, e));
         }
+        case floating:
+            static if (op == "+" || op == "-" || op == "*" || op == "/") {
+                if (scalar.kind != Scalar.Kind.floating)
+                    return null;
+                auto left = buildValue(ev, e.e1);
+                auto right = buildValue(ev, e.e2);
+                if (left is null || right is null)
+                    return null;
+                static Node make(T)(Node l, Node r) {
+                    static Node build(L, R)(L a, R b) {
+                        return new FloatBinary!(op, T, L, R)(a, b);
+                    }
+                    static if (is(T == double))
+                        return fuse!(build, double, doubleLeft, doubleLeft)(
+                            operandOf(l), operandOf(r));
+                    else
+                        return fuse!(build, double, onlyChild, onlyChild)(
+                            operandOf(l), operandOf(r));
+                }
+                return byFloating!make(scalar.facts, left, right);
+            } else
+                return null;
+        case complex, vector:
+            return null;
     }
-    return null;
 }
 
 // `==` and `!=`: dmd's lowering (a call to `__equals`) where it made one;
@@ -7788,20 +7901,33 @@ private Node buildFloatingOpAssign(string op, E)(
     }
 }
 
-// `target++` and `target--` on an integral target of any width: the value is
-// the old one, and the new one wraps in the target's own type.
+// `target++` and `target--` on an integral target of any width, or on a
+// pointer: the value is the old one, and the new one wraps in the target's
+// own type.
 private Node buildPost(long delta, E)(E ev, PostExp e, in Scalar scalar) {
-    import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
+    import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan,
+        pointerPostStep;
 
-    const plan = arithmeticPlan(e);
-    if (plan.kind != ArithmeticPlan.Kind.integral
-            || scalar.kind != Scalar.Kind.integral)
+    if (scalar.kind != Scalar.Kind.integral)
         return null;
     Target target;
-    if (!targetOf(ev, e.e1, target))
-        return null;
-    static Node make(T)(Target t) { return new PostStep!(T, delta)(t); }
-    return byIntegral!make(scalar.facts, target);
+    final switch (arithmeticPlan(e).kind) with (ArithmeticPlan.Kind) {
+        case integral: {
+            if (!targetOf(ev, e.e1, target))
+                return null;
+            static Node make(T)(Target t) { return new PostStep!(T, delta)(t); }
+            return byIntegral!make(scalar.facts, target);
+        }
+        case pointerOffset:
+            if (!targetOf(ev, e.e1, target))
+                return null;
+            return new PointerPostStep(
+                target, delta * cast(long) pointerPostStep(e));
+        case floating, complex, vector:
+            return null;
+        case pointerDifference:
+            assert(0, "a postfix `++` or `--` has the type of its operand");
+    }
 }
 
 private Node buildStore(E)(E ev, AssignExp e, in Scalar scalar) {
@@ -8492,6 +8618,18 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
             node._label = ev._treeRoot.loopLabelOf(statement);
             return node;
         }
+        case UnrolledLoop: {
+            auto node = new Unrolled(&ev._controlFlow);
+            node._label = ev._treeRoot.loopLabelOf(statement);
+            if (auto all = statement.isUnrolledLoopStatement.statements)
+                foreach (one; *all)
+                    if (one !is null)
+                        node._sources ~= one;
+            node._bodies = new Node[node._sources.length];
+            foreach (i, one; node._sources)
+                node._bodies[i] = child(one, &node._bodies[i]);
+            return node;
+        }
         case TryCatch: {
             auto tried = statement.isTryCatchStatement;
             auto node = new Catching!E(ev, tried);
@@ -8841,7 +8979,7 @@ private Node buildReturnOperand(E)(
         return address is null ? null : new ReturnReference(
             address, positionOf(ev, returned.exp));
     }
-    if (ev._type.toBasetype.ty == TY.Tvoid) {
+    if (hasNoResult(ev._type)) {
         // `return f();` in a function without a result: `f` runs, then the
         // function ends.
         auto effect = buildEffect(ev, returned.exp);

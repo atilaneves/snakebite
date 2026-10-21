@@ -491,6 +491,230 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `break` in an unrolled `foreach` ends the whole loop, not only the
+// current element.
+static foreach (backend; Matrix!()) {
+    @("breakInUnrolledForeachEndsLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            int main() {
+                int sum;
+                foreach (value; AliasSeq!(1, 2, 3)) {
+                    if (value == 2)
+                        break;
+                    else
+                        sum += value;
+                }
+                return sum == 1 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// `break` in a `try` body inside an unrolled `foreach` leaves the `try`
+// normally and ends the loop.
+static foreach (backend; Matrix!()) {
+    @("breakInTryInUnrolledForeachEndsLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            int main() {
+                int sum;
+                foreach (value; AliasSeq!(1, 2, 3)) {
+                    try {
+                        sum += value;
+                        if (value == 2)
+                            break;
+                    } catch (Exception) {
+                        sum += 100;
+                    }
+                }
+                return sum == 3 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// `break` as the last statement of an unrolled `foreach` body ends the
+// loop after the first element.
+static foreach (backend; Matrix!()) {
+    @("breakAtEndOfUnrolledForeachEndsLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            int main() {
+                int sum;
+                foreach (value; AliasSeq!(1, 2)) {
+                    sum += value;
+                    break;
+                }
+                return sum == 1 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// `continue label` in an inner loop continues the labelled unrolled
+// `foreach` with its next element.
+static foreach (backend; Matrix!()) {
+    @("labelledContinueToUnrolledForeach." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            int main() {
+                int sum;
+                outer: foreach (a; AliasSeq!(1, 2)) {
+                    foreach (b; AliasSeq!(10, 20)) {
+                        if (b == 20)
+                            continue outer;
+                        else
+                            sum += a * b;
+                    }
+                    sum += 1000;
+                }
+                return sum == 30 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// `continue label` in a `case` leaves the `switch` and continues the
+// labelled unrolled `foreach`; `break label` ends it.
+static foreach (backend; Matrix!()) {
+    @("labelledContinueInCaseToUnrolledForeach." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            int main() {
+                int sum;
+                outer: foreach (a; AliasSeq!(1, 2, 3, 4)) {
+                    switch (a) {
+                        case 2:
+                            continue outer;
+                        case 4:
+                            break outer;
+                        default:
+                            break;
+                    }
+                    sum += a;
+                }
+                return sum == 4 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// `break label` in a `try` body inside an inner unrolled `foreach` ends
+// the labelled one, and the statements after it run.
+static foreach (backend; Matrix!()) {
+    @("labelledBreakInTryOutOfUnrolledForeach." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            int main() {
+                int sum;
+                outer: foreach (a; AliasSeq!(1, 2)) {
+                    foreach (b; AliasSeq!(10, 20)) {
+                        try {
+                            sum += a * b;
+                            if (b == 20)
+                                break outer;
+                        } catch (Exception) {
+                            sum += 1000;
+                        }
+                    }
+                }
+                sum += 5;
+                return sum == 35 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A `case` in an unrolled `foreach` that is a statement of a `switch`: the
+// switch enters the body of that element, and the loop goes on with the
+// next ones.
+static foreach (backend; Matrix!()) {
+    @("switchEntersUnrolledForeach." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            int select(int n) {
+                int result;
+                switch (n) {
+                    foreach (i; AliasSeq!(0, 1, 2)) {
+                        case i:
+                            result += 10 ^^ i;
+                            continue;
+                    }
+                    result += 1000;
+                    break;
+                    default:
+                        result = -1;
+                        break;
+                }
+                return result;
+            }
+
+            int main() {
+                return select(0) == 1111 && select(1) == 1110
+                    && select(2) == 1100 && select(5) == -1 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// dmd lowers a `foreach` over a range with a destructor to a `for` in the
+// body of a `try`/`finally`. The label names that `for`.
+static foreach (backend; Matrix!()) {
+    @("labelledContinueToRangeForeachWithDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            struct Range {
+                int* events;
+                int index;
+                bool empty() const { return index >= 4; }
+                int front() const { return index; }
+                void popFront() { ++index; }
+                ~this() { *events += 1; }
+            }
+
+            int main() {
+                int sum;
+                int events;
+                outer: foreach (x; Range(&events, 0)) {
+                    foreach (T; AliasSeq!(int, long)) {
+                        if (x == 1)
+                            continue outer;
+                        if (x == 3)
+                            break outer;
+                        sum += T.sizeof;
+                    }
+                }
+                return sum == 24 && events == 1 ? 0 : 1;
+            }
+        });
+    }
+}
+
 // A label names the loop it is written on, not the first breakable
 // construct compiled inside it - here a `switch` in the `for` init.
 static foreach (backend; Matrix!()) {
@@ -1604,6 +1828,187 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+
+// A call of a `noreturn` function has no result. Through a function
+// pointer, the call leaves by the callee's throw.
+static foreach (backend; Matrix!()) {
+    @("noreturnCallThroughPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            noreturn fail(int code) { throw new Exception("pointer"); }
+
+            int main() {
+                noreturn function(int) callee = &fail;
+                try {
+                    callee(1);
+                } catch (Exception exception)
+                    return exception.msg == "pointer" ? 0 : 2;
+                return 1;
+            }
+        });
+    }
+}
+
+// A lambda whose body is a `throw` expression returns `noreturn`.
+static foreach (backend; Matrix!()) {
+    @("noreturnLambdaCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                auto raise = (string message) => throw new Exception(message);
+                try {
+                    raise("lambda");
+                } catch (Exception exception)
+                    return exception.msg == "lambda" ? 0 : 2;
+                return 1;
+            }
+        });
+    }
+}
+
+// druntime's `onRangeError` is a native `noreturn` function that throws.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("noreturnNativeCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: onRangeError, RangeError;
+
+            int main() {
+                try {
+                    onRangeError("file", 7);
+                } catch (RangeError error)
+                    return error.line == 7 ? 0 : 2;
+                return 1;
+            }
+        });
+    }
+}
+
+// `return f();` in a `noreturn` function, where `f` is `noreturn` too.
+static foreach (backend; Matrix!()) {
+    @("noreturnCallAsReturnOperand." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            noreturn fail(int code) { throw new Exception("relayed"); }
+            noreturn relay(int code) { return fail(code); }
+
+            int main() {
+                try {
+                    relay(3);
+                } catch (Exception exception)
+                    return exception.msg == "relayed" ? 0 : 2;
+                return 1;
+            }
+        });
+    }
+}
+
+// The right operand of `&&` or `||` can be a `void` call. The whole
+// expression is then `void`, and the call runs for its effect when the left
+// operand does not decide.
+static foreach (backend; Matrix!()) {
+    @("logicalVoidRightOperand." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void bump(ref int x, int by) { x = x * 10 + by; }
+
+            int main() {
+                int x;
+                bool yes = true, no = false;
+                yes && bump(x, 1);
+                no && bump(x, 2);
+                no || bump(x, 3);
+                yes || bump(x, 4);
+                return x == 13 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A `void` right operand of `&&` or `||` is a full expression of its own:
+// the destructor of its temporary runs when the operand ends.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "DMD CTFE does not run these short-circuit temporary destructors"),
+)) {
+    @("logicalVoidRightOperandTemporary." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Guard {
+                int* events;
+                int id;
+                ~this() { *events = *events * 10 + id; }
+                void touch() { *events = *events * 10 + 5; }
+            }
+
+            int main() {
+                int events;
+                bool yes = true, no = false;
+                yes && Guard(&events, 1).touch();
+                no && Guard(&events, 2).touch();
+                no || Guard(&events, 3).touch();
+                return events == 5153 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// dmd types `a || f()` as `bool` when `f` is `noreturn`. The value is the
+// left operand's, because the right operand never completes.
+static foreach (backend; Matrix!()) {
+    @("logicalNoreturnRightOperandValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            noreturn fail() { throw new Exception("fail"); }
+
+            int main() {
+                bool yes = true, no = false;
+                bool a = yes || fail();
+                bool b = no && fail();
+                int caught;
+                try {
+                    bool c = no || fail();
+                } catch (Exception exception)
+                    caught = 1;
+                return a && !b && caught == 1 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A `noreturn` right operand of `&&` or `||` in a condition: the left
+// operand decides the branch, or the right operand leaves the statement.
+static foreach (backend; Matrix!()) {
+    @("logicalNoreturnRightOperandCondition." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            noreturn fail() { throw new Exception("fail"); }
+
+            int main() {
+                bool yes = true;
+                int x;
+                if (yes || fail())
+                    x += 1;
+                try {
+                    if (yes && fail())
+                        x += 10;
+                } catch (Exception exception)
+                    x += 100;
+                return x == 101 ? 0 : 1;
+            }
+        });
+    }
+}
 
 // A `case` label in an `if (__ctfe)` block is a run-time jump target: the
 // `switch` enters the block at the label, although the `if` itself never
