@@ -1117,3 +1117,32 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// Between `GC.malloc` and the copy of its initial bytes, the block of a
+// new class instance holds anything: druntime sets its finalizer bit first.
+// Another thread can be in that window when a guest program ends, so the
+// end of the program must not read the blocks of the GC heap. Here the
+// vtable pointer of the block points at a `ClassInfo` address in the first
+// page.
+static foreach (backend; Matrix!()) {
+    @("programEndDoesNotReadAClassBlockBeforeItsInitialBytes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        import core.memory: GC;
+
+        static immutable size_t[1] classInfoInFirstPage = [0x10];
+        auto block = cast(const(void)**) GC.malloc(
+            2 * size_t.sizeof, GC.BlkAttr.FINALIZE);
+        block[0] = classInfoInFirstPage.ptr;
+        scope(exit) {
+            block[0] = null;
+            GC.free(block);
+        }
+
+        0.shouldBeStatusOf!(backend, q{
+            shared static this() {}
+            void main() {}
+        });
+    }
+}

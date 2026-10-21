@@ -72,7 +72,7 @@ Target registryImageObject() {
         Target(registryImageSource),
         [Target(
             "$project/registry_slot.so",
-            "cc -shared -fPIC -nostdlib -o $out $in",
+            "cc -shared -fPIC -nostdlib -Wl,--gc-sections -o $out $in",
             Target(registrySlotSource),
         ), Target("build/host-exports.map")],
     );
