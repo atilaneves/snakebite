@@ -389,6 +389,25 @@ unittest {
 }
 
 
+private void reserveWhereTheRoundedEndPassesTheLimit() @system {
+    auto stack = FrameStack(18, 18);
+    cast(void) stack.reserve(17, 1);
+}
+
+
+@("reserve.endRoundedPastTheLimitFailsAtOnce")
+unittest {
+    // The top rounds up to 16, so a reservation whose rounded end passes the
+    // limit fails when it is made, not on the next one.
+    reserveWhereTheRoundedEndPassesTheLimit.shouldThrowWithMessage(
+        "frame stack overflow: need 17 byte(s) at offset 0 of 18");
+
+    auto stack = FrameStack(18, 18);
+    cast(void) stack.reserve(16, 1);
+    cast(void) stack.reserve(0, 1);
+}
+
+
 @("reserveAligned16.alignedAfterOddSizedReservationOrClaim")
 unittest {
     auto stack = FrameStack(pageSize);
@@ -400,9 +419,10 @@ unittest {
     stack.claim(end, end);
     (cast(size_t) stack.reserveAligned16(16) % 16).should == 0;
 
-    end = stack.top + 7;
+    // A fast claim ends on the alignment of the top, as the caller made it.
+    end = stack.top + 2 * FrameStack.topAlignment;
     stack.claimFast(end, end).should == true;
-    (cast(size_t) stack.reserveAligned16(32) % 16).should == 0;
+    (stack.reserveAligned16(32) == end).should == true;
 }
 
 

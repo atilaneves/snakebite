@@ -3359,8 +3359,15 @@ private mixin template Dispatch(E) {
         if (!_hasReceiver)
             return 0;
         return _receiverIsAddress
-            ? cast(size_t) _receiver.readAddress(frame)
-            : cast(size_t) _receiver.readLong(frame);
+            ? readReceiver!(Receiver.address)(_receiver, frame)
+            : readReceiver!(Receiver.value)(_receiver, frame);
+    }
+
+    // Whether the receiver is an object of the vtable that the site met, which
+    // no null receiver is.
+    pragma(inline, true)
+    private bool atMetVtable(size_t receiver) const {
+        return receiver != 0 && *cast(const(void)**) receiver is _vtable;
     }
 
     // A virtual site met a vtable that it has no callee for: false when
@@ -3393,13 +3400,12 @@ private mixin template Dispatch(E) {
     private bool resolve(size_t receiver) {
         if (!_virtual)
             return true;
+        if (atMetVtable(receiver))
+            return true;
         if (receiver == 0)
             return false;
-        const vtable = *cast(const(void)**) receiver;
-        if (vtable is _vtable)
-            return true;
         auto selected = _selected;
-        return meet(vtable, receiver, selected);
+        return meet(*cast(const(void)**) receiver, receiver, selected);
     }
 
     // The node that runs this site when it is not virtual and its callee is
@@ -3810,14 +3816,28 @@ private abstract class Call(E) : Node {
 // callee: none, a class reference, or an address.
 private enum Receiver : ubyte { none, value, address }
 
+// The word that a receiver of the given kind gives as the context of its
+// callee. Every read of a receiver is this one.
+pragma(inline, true)
+private size_t readReceiver(Receiver kind)(ref Operand receiver, ubyte* frame) {
+    static assert(kind != Receiver.none, "no receiver has no word");
+    static if (kind == Receiver.address)
+        return cast(size_t) receiver.readAddress(frame);
+    else
+        return cast(size_t) receiver.readLong(frame);
+}
+
 // The node of a call site whose receiver, dispatch and arity are known at
 // build. Its run is the plain call of the guest callee in `_guest`, when
 // the site has one and, at a virtual site, the receiver's vtable is the
 // one it met; every other case takes the forms of `Call`.
 private final class CallOf(E, Receiver receiver, bool virtual, size_t arity)
         : Call!E {
-    static assert(receiver != Receiver.none || !virtual,
-        "a virtual call has a receiver");
+    // The combinations that a site has: no receiver and no dispatch, a class
+    // reference that dispatches or not, and an address, which is the
+    // receiver of a struct and so never dispatches.
+    static assert(!virtual || receiver == Receiver.value,
+        "a virtual call has a class reference as its receiver");
 
     private enum context = receiver == Receiver.none
         ? Context.none : Context.word;
@@ -3831,14 +3851,10 @@ private final class CallOf(E, Receiver receiver, bool virtual, size_t arity)
 
     pragma(inline, true)
     private size_t receiverOn(ubyte* frame) {
-        final switch (receiver) with (Receiver) {
-            case none:
-                return 0;
-            case value:
-                return cast(size_t) _receiver.readLong(frame);
-            case address:
-                return cast(size_t) _receiver.readAddress(frame);
-        }
+        static if (receiver == Receiver.none)
+            return 0;
+        else
+            return readReceiver!receiver(_receiver, frame);
     }
 
     // `_guest`, when it runs this call; null otherwise.
@@ -3846,8 +3862,7 @@ private final class CallOf(E, Receiver receiver, bool virtual, size_t arity)
     private FastCallee* guestFor(size_t receiverWord) {
         auto guest = _guest;
         static if (virtual) {
-            if (receiverWord == 0
-                    || *cast(const(void)**) receiverWord !is _vtable)
+            if (!atMetVtable(receiverWord))
                 return null;
         }
         return guest;
@@ -3906,8 +3921,8 @@ private Call!E callOf(E)(E ev, CallExp site, FuncDeclaration method,
     if (!receiverIsAddress)
         return virtual
             ? make!(Receiver.value, true) : make!(Receiver.value, false);
-    return virtual
-        ? make!(Receiver.address, true) : make!(Receiver.address, false);
+    assert(!virtual, "a virtual call has a class reference as its receiver");
+    return make!(Receiver.address, false);
 }
 
 // A non-virtual call of a native function that is a direct word call, with
@@ -4217,10 +4232,8 @@ private final class Getter(E, T, bool receiverIsAddress) : Typed!T {
     }
 
     private size_t receiverOn(ubyte* frame) {
-        static if (receiverIsAddress)
-            return cast(size_t) _receiver.readAddress(frame);
-        else
-            return cast(size_t) _receiver.readLong(frame);
+        return readReceiver!(receiverIsAddress
+            ? Receiver.address : Receiver.value)(_receiver, frame);
     }
 }
 
@@ -4245,10 +4258,8 @@ private final class Setter(E, T, bool receiverIsAddress) : Node {
     }
 
     public override void executeVoid(ubyte* frame) {
-        static if (receiverIsAddress)
-            const receiver = cast(size_t) _receiver.readAddress(frame);
-        else
-            const receiver = cast(size_t) _receiver.readLong(frame);
+        const receiver = readReceiver!(receiverIsAddress
+            ? Receiver.address : Receiver.value)(_receiver, frame);
         if (receiver == 0) {
             _call.generalVoid(nonVirtual, receiver, frame);
             return;

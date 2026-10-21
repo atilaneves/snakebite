@@ -230,7 +230,14 @@ public struct FrameStack {
             );
 
         const alignedUsed = roundUp(used, alignment);
-        if (alignedUsed > _limit || size > _limit - alignedUsed)
+        // The top moves to the end rounded up to `topAlignment`, and that
+        // end must not pass `_limit`: otherwise the next reservation fails
+        // even for no bytes. A zero-size reservation moves nothing. The
+        // sum cannot wrap when the first two tests pass.
+        const end = size == 0
+            ? alignedUsed : roundUp(alignedUsed + size, topAlignment);
+        if (alignedUsed > _limit || size > _limit - alignedUsed
+                || end > _limit)
             throw new Exception(
                 text("frame stack overflow: need ", size,
                     " byte(s) at offset ", alignedUsed, " of ",
@@ -244,9 +251,6 @@ public struct FrameStack {
         if (size == 0)
             return _base + alignedUsed;
 
-        // The padding past `_limit` that the rounding can add stays inside
-        // the page-rounded reservation, and nothing is handed out there.
-        const end = roundUp(alignedUsed + size, topAlignment);
         if (end > _committed)
             commit(end);
         _top = _base + end;
@@ -281,13 +285,15 @@ public struct FrameStack {
     // Makes every byte below `end` reserved, for a callee frame that the
     // caller laid out above the reservation already. The bytes up to
     // `reach` must also be committed, because the callee writes its own call
-    // windows there. `false` when they are not; `claim` then does the work
-    // with the checks.
+    // windows there. `end` is a multiple of `topAlignment`. `false` when the
+    // bytes are not committed; `claim` then does the work with the checks.
     pragma(inline, true)
     public bool claimFast(ubyte* end, ubyte* reach) @system {
         if (reach > _fastEnd)
             return false;
-        _top = alignedUp(end, topAlignment);
+        assert(cast(size_t) end % topAlignment == 0,
+            "a fast claim ends on the alignment of the top");
+        _top = end;
         return true;
     }
 
@@ -372,6 +378,8 @@ public struct FrameStack {
     pragma(inline, true)
     public void releaseTo(ubyte* top) {
         assert(top <= _top, "frame stack popped out of LIFO order");
+        assert(cast(size_t) top % topAlignment == 0,
+            "the top is given back as `top()` gave it, aligned");
         _top = top;
     }
 
