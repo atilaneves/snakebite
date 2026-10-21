@@ -48,6 +48,12 @@ public struct ControlFlowState {
         _target = target;
     }
 
+    // The pending `goto` reached its target.
+    public void reachTarget() @safe @nogc nothrow pure scope {
+        assert(hasGoto);
+        clearTransfer;
+    }
+
     private void clearTransfer() @safe @nogc nothrow pure scope {
         _kind = Kind.none;
         _label = null;
@@ -167,6 +173,15 @@ public struct ScopePaths {
     {
         return frameOf(statement) ~ enclosing(statement);
     }
+}
+
+// The statement that a label names: `gotoTarget` when dmd rewrote the
+// labelled statement (a `for` initialiser or `foreach` declarations move in
+// front of the loop), the labelled statement itself otherwise.
+public imported!"dmd.statement".Statement labelTargetOf(
+    imported!"dmd.statement".LabelStatement label,
+) {
+    return label.gotoTarget !is null ? label.gotoTarget : label.statement;
 }
 
 public ScopePaths scopePathsOf(imported!"dmd.statement".Statement body_)

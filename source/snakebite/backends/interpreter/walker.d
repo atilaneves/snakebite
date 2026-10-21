@@ -730,7 +730,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     package FuncDeclaration _function;
     // A label stays pending while its wrapped statement is entered. The
     // wrapped loop takes it, even when dmd put a scope block between them.
-    private Identifier _pendingLoopLabel;
+    package Identifier _pendingLoopLabel;
     // The tree whose nodes are being built (`Uninitialised`); each node that
     // syncs later names it.
     package TreeRoot* _treeRoot;

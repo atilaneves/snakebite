@@ -24,7 +24,7 @@ import snakebite.backends.switchplan:
 import snakebite.backends.fullexpression:
     FullExpressionScope;
 import snakebite.backends.controlflow:
-    ScopeFrame, ScopePaths, scopePathsOf;
+    ScopeFrame, ScopePaths, labelTargetOf, scopePathsOf;
 import snakebite.backends.exceptionplan:
     UnwindPlan, catchPlanOf, unwindPlanOf;
 import snakebite.backends.checkplan: BoundsCheck, hookOf;
@@ -3252,8 +3252,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto outerLabel = _pendingLabel; // auto: const(Identifier) will not implicitly convert back
         auto outerTarget = _pendingLabelTarget;
         _pendingLabel = statement.ident;
-        _pendingLabelTarget = statement.gotoTarget !is null
-            ? statement.gotoTarget : statement.statement;
+        _pendingLabelTarget = labelTargetOf(statement);
         compileStatement(statement.statement);
         _pendingLabel = outerLabel;
         _pendingLabelTarget = outerTarget;
@@ -3588,6 +3587,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileSwitchBody(statement.statement);
     }
 
+    // A `goto case` that leaves a `finally` body or `scope(exit)` runs it
+    // first. dmd and the spec do so; LDC 1.43 skips it (an LDC bug), and
+    // snakebite follows dmd.
     override void visit(GotoCaseStatement statement) {
         auto target = gotoCaseTarget(statement);
         assert(target !is null);
