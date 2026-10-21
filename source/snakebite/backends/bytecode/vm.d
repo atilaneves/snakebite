@@ -325,13 +325,19 @@ public struct CallSite {
             slot.frameOffset =
                 (Activation.sizeof + alignment - 1) & ~(size_t(alignment) - 1);
             slot.alignment = alignment;
-            slot.frameBytes = slot.frameOffset + function_.frameSize;
+            const frameEnd = slot.frameOffset + function_.frameSize;
+            // Where the frame stack's top lies once the call claims the
+            // frame: the activation is 16-aligned (a window is), so the
+            // rounding lands on a multiple of `FrameStack.topAlignment`
+            // with no work at the call.
+            slot.frameBytes = (frameEnd + FrameStack.topAlignment - 1)
+                & ~(size_t(FrameStack.topAlignment) - 1);
             const unusedStore = Activation.resume.offsetof - slot.frameOffset;
             slot.placeStore = function_.returnPlace.offset == size_t.max
                 ? unusedStore : function_.returnPlace.offset;
             slot.windowStore = function_.windowSlot == size_t.max
                 ? unusedStore : function_.windowSlot;
-            slot.windowBase = (slot.frameBytes + alignment - 1)
+            slot.windowBase = (frameEnd + alignment - 1)
                 & ~(size_t(alignment) - 1);
             slot.reachBytes = function_.windowSlot == size_t.max
                 ? slot.frameBytes : slot.windowBase + function_.windowBytes;
@@ -2127,6 +2133,8 @@ private const(Instruction)* enterWindow(Destination destination, bool indirect)(
     auto activation = cast(Activation*) (base + site.windowDisp);
     auto frames = state.frames;
     const mark = frames.mark;
+    assert((cast(size_t) activation) % FrameStack.topAlignment == 0,
+        "a window activation lies on the alignment of the frame stack's top");
     if (!frames.claimFast(cast(ubyte*) activation + fast.frameBytes,
             cast(ubyte*) activation + fast.reachBytes))
         return opCallSlow(pc, active, state, frame, r0, fp0);

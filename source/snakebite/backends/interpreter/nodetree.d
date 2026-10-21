@@ -3530,6 +3530,15 @@ private struct ArgumentStep {
     public Operand operand;
 }
 
+// What the placement of a call frame knows about the context word of the
+// callee: what the callee's layout says (`ofCallee`), or, for a node that
+// knows its receiver at build, none or the receiver (`word`). A site has a
+// receiver exactly when its callee has a context word (`Dispatch.matches`).
+private enum Context : ubyte { ofCallee, none, word }
+
+// The arity of a site whose placement loops over its steps.
+private enum size_t anyArity = size_t.max;
+
 // What every call node does once it has chosen its callee: the fields that
 // say how the site passes its arguments and takes its result, the callee's
 // frame, the arguments evaluated into the parameter slots, and the run.
@@ -3605,9 +3614,14 @@ private mixin template CalleeEntry(E) {
 
     // `placeArguments` for a caller that knows what `callee.reservesFast`
     // says, so the frame has a lead of `fastFrameLead` and the reservation
-    // is one bump.
+    // is one bump. A caller that knows at build whether the callee has a
+    // context word (`context`) and how many arguments the site has
+    // (`arity`) skips the test and the loop.
     pragma(inline, reservesFast)
-    private ubyte* placeIn(bool reservesFast)(
+    private ubyte* placeIn(
+        bool reservesFast, Context context = Context.ofCallee,
+        size_t arity = anyArity,
+    )(
         in TreeCallee* callee, ArgumentStep[] steps, size_t hidden,
         ubyte* frame,
     ) {
@@ -3621,10 +3635,28 @@ private mixin template CalleeEntry(E) {
         }
         base += lead;
         *faultSlotOf(base) = callee.entrySite;
-        if (callee.contextOffset != size_t.max)
-            *cast(size_t*) (base + callee.contextOffset) = hidden;
-        foreach (ref step; steps)
-            step.write(step.operand, frame, base + step.offset);
+        final switch (context) with (Context) {
+            case ofCallee:
+                if (callee.contextOffset != size_t.max)
+                    *cast(size_t*) (base + callee.contextOffset) = hidden;
+                break;
+            case none:
+                assert(callee.contextOffset == size_t.max,
+                    "a site with no receiver calls a callee with no context");
+                break;
+            case word:
+                *cast(size_t*) (base + callee.contextOffset) = hidden;
+                break;
+        }
+        static if (arity == anyArity) {
+            foreach (ref step; steps)
+                step.write(step.operand, frame, base + step.offset);
+        } else {
+            assert(steps.length == arity, "a site has one step per argument");
+            auto each = steps.ptr;
+            static foreach (i; 0 .. arity)
+                each[i].write(each[i].operand, frame, base + each[i].offset);
+        }
         return base;
     }
 
@@ -3756,8 +3788,15 @@ private mixin template Dispatch(E) {
         if (!_hasReceiver)
             return 0;
         return _receiverIsAddress
-            ? cast(size_t) _receiver.readAddress(frame)
-            : cast(size_t) _receiver.readLong(frame);
+            ? readReceiver!(Receiver.address)(_receiver, frame)
+            : readReceiver!(Receiver.value)(_receiver, frame);
+    }
+
+    // Whether the receiver is an object of the vtable that the site met, which
+    // no null receiver is.
+    pragma(inline, true)
+    private bool atMetVtable(size_t receiver) const {
+        return receiver != 0 && *cast(const(void)**) receiver is _vtable;
     }
 
     // A virtual site met a vtable that it has no callee for: false when
@@ -3790,13 +3829,12 @@ private mixin template Dispatch(E) {
     private bool resolve(size_t receiver) {
         if (!_virtual)
             return true;
+        if (atMetVtable(receiver))
+            return true;
         if (receiver == 0)
             return false;
-        const vtable = *cast(const(void)**) receiver;
-        if (vtable is _vtable)
-            return true;
         auto selected = _selected;
-        return meet(vtable, receiver, selected);
+        return meet(*cast(const(void)**) receiver, receiver, selected);
     }
 
     // The node that runs this site when it is not virtual and its callee is
@@ -3868,7 +3906,12 @@ private mixin template Dispatch(E) {
 // It pushes the callee frame, evaluates each argument into its parameter
 // slot, and runs the callee: a guest callee's node tree, or the native call
 // through its plan.
-private final class Call(E) : Node {
+//
+// A node of the site's own `CallOf` class runs the call: the class is
+// chosen at build from what the site knows of its receiver, dispatch and
+// arity, so its run tests one field (`_guest`) and places the frame with
+// no loop. Every other case takes the forms of this class, out of line.
+private abstract class Call(E) : Node {
     mixin CalleeEntry!E;
     mixin Dispatch!E;
 
@@ -3877,6 +3920,9 @@ private final class Call(E) : Node {
     // The fast form of the callee in `_selected`. The two change together,
     // with no code between that could run this site again.
     private FastCallee* _fast;
+    // `_fast` when its callee runs its body as a plain call, null otherwise.
+    // It changes with `_fast`; at a virtual site, also with `_vtable`.
+    private FastCallee* _guest;
     public this(E ev, CallExp site, FuncDeclaration method, Node receiver,
             bool receiverIsAddress, bool virtual, SiteArguments arguments,
             size_t resultSize, bool resultUnsigned) {
@@ -3890,11 +3936,13 @@ private final class Call(E) : Node {
 
     public final void bind(TreeCallee* callee) {
         _selected = selectionOf(callee);
-        _fast = fastFormOf(callee, _selected);
+        chose(callee, _selected);
     }
 
     private void chose(TreeCallee* callee, in Selection selected) {
         _fast = fastFormOf(callee, selected);
+        _guest = _fast !is null && _fast.kind == FastCallee.Kind.plain
+            ? _fast : null;
     }
 
     // The node that does the work of this site when its one callee is an
@@ -3984,14 +4032,15 @@ private final class Call(E) : Node {
         enter(selected, receiver, frame, result);
     }
 
-    // The forms of a call: the fast form of the callee when it has one,
-    // the general call otherwise. Nothing between the choice of the callee
-    // and its run evaluates user code except the arguments, which only read
-    // `fast` and `callee`. A getter whose receiver is null and a setter in a
-    // form that has no store take the general call. The run of the body
-    // takes a scalar result from the word of the callee's frame.
-    public override long executeLong(ubyte* frame) {
-        const receiver = runReceiver(frame);
+    // The forms of a call once its receiver ran: the fast form of the
+    // callee when it has one, the general call otherwise. Nothing between
+    // the choice of the callee and its run evaluates user code except the
+    // arguments, which only read `fast` and `callee`. A getter whose
+    // receiver is null and a setter in a form that has no store take the
+    // general call. The run of the body takes a scalar result from the word
+    // of the callee's frame.
+    pragma(inline, false)
+    private long slowLong(size_t receiver, ubyte* frame) {
         const resolved = resolve(receiver);
         auto fast = _fast;
         if (resolved && fast !is null) {
@@ -4009,8 +4058,8 @@ private final class Call(E) : Node {
         return generalLong(resolved, receiver, frame);
     }
 
-    public override double executeDouble(ubyte* frame) {
-        const receiver = runReceiver(frame);
+    pragma(inline, false)
+    private double slowDouble(size_t receiver, ubyte* frame) {
         const resolved = resolve(receiver);
         auto fast = _fast;
         if (resolved && fast !is null) {
@@ -4028,8 +4077,8 @@ private final class Call(E) : Node {
         return generalDouble(resolved, receiver, frame);
     }
 
-    public override void executeVoid(ubyte* frame) {
-        const receiver = runReceiver(frame);
+    pragma(inline, false)
+    private void slowVoid(size_t receiver, ubyte* frame) {
         const resolved = resolve(receiver);
         auto fast = _fast;
         if (resolved && fast !is null) {
@@ -4050,7 +4099,7 @@ private final class Call(E) : Node {
         generalVoid(resolved, receiver, frame);
     }
 
-    public override void executeInto(ubyte* frame, ubyte* dest) {
+    public final override void executeInto(ubyte* frame, ubyte* dest) {
         const receiver = runReceiver(frame);
         SliceValue buffer = void;
         const resolved = resolve(receiver);
@@ -4162,13 +4211,16 @@ private final class Call(E) : Node {
     // Runs the callee of `fast` with its result in the word of its frame,
     // which this gives back.
     pragma(inline, true)
-    private ulong runWord(FastCallee* fast, size_t receiver, ubyte* frame) {
+    private ulong runWord(
+        Context context = Context.ofCallee, size_t arity = anyArity,
+    )(FastCallee* fast, size_t receiver, ubyte* frame) {
         auto ev = _ev;
         auto callee = fast.callee;
         assert(callee.root.resultWord == ResultWord.value,
             "a call that takes a value calls a callee that gives one");
         auto calleeFrame = FrameGuard(&ev._frames);
-        auto base = placeIn!true(callee, fast.steps, receiver, frame);
+        auto base = placeIn!(true, context, arity)(
+            callee, fast.steps, receiver, frame);
         ev.runTree(callee, base, frame);
         return *resultWordOf(base);
     }
@@ -4177,15 +4229,129 @@ private final class Call(E) : Node {
     // place of a result that is not a value, or null to discard it.
     pragma(inline, true)
     private void runPlace(
-        FastCallee* fast, size_t receiver, ubyte* frame, void* place,
-    ) {
+        Context context = Context.ofCallee, size_t arity = anyArity,
+    )(FastCallee* fast, size_t receiver, ubyte* frame, void* place) {
         auto ev = _ev;
         auto callee = fast.callee;
         auto calleeFrame = FrameGuard(&ev._frames);
-        auto base = placeIn!true(callee, fast.steps, receiver, frame);
+        auto base = placeIn!(true, context, arity)(
+            callee, fast.steps, receiver, frame);
         *resultPlaceOf(base) = place;
         ev.runTree(callee, base, frame);
     }
+}
+
+// How a call site gives the receiver, which is the context word of its
+// callee: none, a class reference, or an address.
+private enum Receiver : ubyte { none, value, address }
+
+// The word that a receiver of the given kind gives as the context of its
+// callee. Every read of a receiver is this one.
+pragma(inline, true)
+private size_t readReceiver(Receiver kind)(ref Operand receiver, ubyte* frame) {
+    static assert(kind != Receiver.none, "no receiver has no word");
+    static if (kind == Receiver.address)
+        return cast(size_t) receiver.readAddress(frame);
+    else
+        return cast(size_t) receiver.readLong(frame);
+}
+
+// The node of a call site whose receiver, dispatch and arity are known at
+// build. Its run is the plain call of the guest callee in `_guest`, when
+// the site has one and, at a virtual site, the receiver's vtable is the
+// one it met; every other case takes the forms of `Call`.
+private final class CallOf(E, Receiver receiver, bool virtual, size_t arity)
+        : Call!E {
+    // The combinations that a site has: no receiver and no dispatch, a class
+    // reference that dispatches or not, and an address, which is the
+    // receiver of a struct and so never dispatches.
+    static assert(!virtual || receiver == Receiver.value,
+        "a virtual call has a class reference as its receiver");
+
+    private enum context = receiver == Receiver.none
+        ? Context.none : Context.word;
+
+    public this(E ev, CallExp site, FuncDeclaration method, Node receiverNode,
+            bool receiverIsAddress, bool isVirtual, SiteArguments arguments,
+            size_t resultSize, bool resultUnsigned) {
+        super(ev, site, method, receiverNode, receiverIsAddress, isVirtual,
+            arguments, resultSize, resultUnsigned);
+    }
+
+    pragma(inline, true)
+    private size_t receiverOn(ubyte* frame) {
+        static if (receiver == Receiver.none)
+            return 0;
+        else
+            return readReceiver!receiver(_receiver, frame);
+    }
+
+    // `_guest`, when it runs this call; null otherwise.
+    pragma(inline, true)
+    private FastCallee* guestFor(size_t receiverWord) {
+        auto guest = _guest;
+        static if (virtual) {
+            if (!atMetVtable(receiverWord))
+                return null;
+        }
+        return guest;
+    }
+
+    public override long executeLong(ubyte* frame) {
+        const receiverWord = receiverOn(frame);
+        if (auto guest = guestFor(receiverWord))
+            return cast(long) runWord!(context, arity)(
+                guest, receiverWord, frame);
+        return slowLong(receiverWord, frame);
+    }
+
+    public override double executeDouble(ubyte* frame) {
+        const receiverWord = receiverOn(frame);
+        if (auto guest = guestFor(receiverWord))
+            return floatingOf(runWord!(context, arity)(
+                guest, receiverWord, frame));
+        return slowDouble(receiverWord, frame);
+    }
+
+    public override void executeVoid(ubyte* frame) {
+        const receiverWord = receiverOn(frame);
+        if (auto guest = guestFor(receiverWord)) {
+            runPlace!(context, arity)(guest, receiverWord, frame, null);
+            return;
+        }
+        slowVoid(receiverWord, frame);
+    }
+}
+
+// The `CallOf` node of a site: the class for its receiver, its dispatch and
+// its arity, with one class for every arity above three.
+private Call!E callOf(E)(E ev, CallExp site, FuncDeclaration method,
+        Node receiver, bool receiverIsAddress, bool virtual,
+        SiteArguments arguments, size_t resultSize, bool resultUnsigned) {
+    Call!E make(Receiver given, bool dispatches)() {
+        Call!E withArity(size_t arity)() {
+            return new CallOf!(E, given, dispatches, arity)(ev, site, method,
+                receiver, receiverIsAddress, virtual, arguments, resultSize,
+                resultUnsigned);
+        }
+        switch (arguments.nodes.length) {
+            case 0: return withArity!0;
+            case 1: return withArity!1;
+            case 2: return withArity!2;
+            case 3: return withArity!3;
+            default: return withArity!anyArity;
+        }
+    }
+
+    if (receiver is null) {
+        assert(!virtual, "a virtual call has a receiver");
+        return make!(Receiver.none, false);
+    }
+    if (!receiverIsAddress)
+        return virtual
+            ? make!(Receiver.value, true) : make!(Receiver.value, false);
+    assert(!virtual, "a virtual call has a class reference as its receiver");
+    return make!(Receiver.address, false);
 }
 
 // A non-virtual call of a native function that is a direct word call, with
@@ -4495,10 +4661,8 @@ private final class Getter(E, T, bool receiverIsAddress) : Typed!T {
     }
 
     private size_t receiverOn(ubyte* frame) {
-        static if (receiverIsAddress)
-            return cast(size_t) _receiver.readAddress(frame);
-        else
-            return cast(size_t) _receiver.readLong(frame);
+        return readReceiver!(receiverIsAddress
+            ? Receiver.address : Receiver.value)(_receiver, frame);
     }
 }
 
@@ -4523,10 +4687,8 @@ private final class Setter(E, T, bool receiverIsAddress) : Node {
     }
 
     public override void executeVoid(ubyte* frame) {
-        static if (receiverIsAddress)
-            const receiver = cast(size_t) _receiver.readAddress(frame);
-        else
-            const receiver = cast(size_t) _receiver.readLong(frame);
+        const receiver = readReceiver!(receiverIsAddress
+            ? Receiver.address : Receiver.value)(_receiver, frame);
         if (receiver == 0) {
             _call.generalVoid(nonVirtual, receiver, frame);
             return;
@@ -5554,7 +5716,7 @@ private Node buildCall(E)(E ev, CallExp call) {
             receiverIsAddress, virtual, arguments, ev.factsOf(call.type));
         return virtual ? node : bound(callee, node);
     }
-    auto node = new Call!E(ev, call, function_, receiver, receiverIsAddress,
+    auto node = callOf!E(ev, call, function_, receiver, receiverIsAddress,
         virtual, arguments,
         isVoid ? 0 : resultIsSlice ? SliceValue.sizeof : result.facts.size,
         result.facts.isUnsigned);

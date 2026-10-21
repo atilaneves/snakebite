@@ -1364,8 +1364,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             break;
         }
 
-        ubyte here;
-        if (cast(size_t) &here < _stack.limit) {
+        if (_stack.pastLimit) {
             _stack.continueOnNewPiece({
                 executeRaw(function_, returnPlace, frameBase, layout,
                     callSite, arguments, argumentCount, callbackEntry);
@@ -1656,12 +1655,16 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     // The frame of `size` bytes aligned to `alignment` that a call of
-    // `callee` reserves.
+    // `callee` reserves. The reservation is a multiple of the alignment of
+    // the frame stack's top, as `FrameStack.reserveAligned16` needs.
     private static void reserveFrame(
         TreeCallee* callee, in size_t size, in uint alignment,
     ) {
+        import snakebite.framestack: FrameStack;
+
+        enum mask = size_t(FrameStack.topAlignment) - 1;
         callee.lead = frameLead(alignment);
-        callee.reservation = size + callee.lead;
+        callee.reservation = (size + callee.lead + mask) & ~mask;
         const hiddenThis = callee.layout.hiddenThis;
         callee.contextOffset = hiddenThis.variable is null
             ? size_t.max : hiddenThis.parameter.offset;
@@ -1741,8 +1744,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     ) {
         assert(_faultFrame is callerFrame,
             "a call node runs in the call of its own tree");
-        ubyte here;
-        if (cast(size_t) &here < _stack.limit) {
+        if (_stack.pastLimit) {
             runTreeOnNewPiece(callee, calleeFrame);
             return;
         }

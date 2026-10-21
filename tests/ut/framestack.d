@@ -18,8 +18,10 @@ unittest {
             inner.base[0 .. alignment] = 7;
         }
         outer.base[0 .. 3].should == [42, 42, 42];
+        // The top stays a multiple of `topAlignment` after a frame of any
+        // size, so the next frame starts at the next multiple.
         auto next = stack.push(1, 1);
-        (next.base == outer.base + 3).should == true;
+        (next.base == outer.base + FrameStack.topAlignment).should == true;
     }
 }
 
@@ -373,7 +375,7 @@ unittest {
 
 private void reserveAligned16BeyondCapacity() @system {
     auto stack = FrameStack(4, 4);
-    cast(void) stack.reserveAligned16(100);
+    cast(void) stack.reserveAligned16(112);
 }
 
 
@@ -382,8 +384,45 @@ unittest {
     // The limit, not the committed pages, bounds a reservation: the
     // stack commits whole pages, so the committed size is larger than 4.
     reserveAligned16BeyondCapacity.shouldThrowWithMessage(
-        "frame stack overflow: need 100 byte(s) at "
+        "frame stack overflow: need 112 byte(s) at "
         ~ "offset 0 of 4");
+}
+
+
+private void reserveWhereTheRoundedEndPassesTheLimit() @system {
+    auto stack = FrameStack(18, 18);
+    cast(void) stack.reserve(17, 1);
+}
+
+
+@("reserve.endRoundedPastTheLimitFailsAtOnce")
+unittest {
+    // The top rounds up to 16, so a reservation whose rounded end passes the
+    // limit fails when it is made, not on the next one.
+    reserveWhereTheRoundedEndPassesTheLimit.shouldThrowWithMessage(
+        "frame stack overflow: need 17 byte(s) at offset 0 of 18");
+
+    auto stack = FrameStack(18, 18);
+    cast(void) stack.reserve(16, 1);
+    cast(void) stack.reserve(0, 1);
+}
+
+
+@("reserveAligned16.alignedAfterOddSizedReservationOrClaim")
+unittest {
+    auto stack = FrameStack(pageSize);
+
+    cast(void) stack.reserve(5, 1);
+    (cast(size_t) stack.reserveAligned16(16) % 16).should == 0;
+
+    auto end = stack.top + 3;
+    stack.claim(end, end);
+    (cast(size_t) stack.reserveAligned16(16) % 16).should == 0;
+
+    // A fast claim ends on the alignment of the top, as the caller made it.
+    end = stack.top + 2 * FrameStack.topAlignment;
+    stack.claimFast(end, end).should == true;
+    (stack.reserveAligned16(32) == end).should == true;
 }
 
 

@@ -56,7 +56,10 @@ public struct FrameStack {
     private ubyte* _fastEnd;
     private size_t _reservation;
     // The first byte above everything reserved. A pointer, not an offset,
-    // so the bump of a call frame does not add the base.
+    // so the bump of a call frame does not add the base. Always a multiple
+    // of `topAlignment`: every reservation and claim rounds its end up, so
+    // a call frame whose size is a multiple of it needs no rounding
+    // (`reserveAligned16`).
     private ubyte* _top;
     private void[][] _allocations;
     // Every base address handed to `GC.addRange` so far: one per grown
@@ -147,6 +150,9 @@ public struct FrameStack {
         }
     }
 
+    // What `_top` is always a multiple of.
+    public enum uint topAlignment = 16;
+
     public Mark mark() const {
         return used;
     }
@@ -224,7 +230,14 @@ public struct FrameStack {
             );
 
         const alignedUsed = roundUp(used, alignment);
-        if (alignedUsed > _limit || size > _limit - alignedUsed)
+        // The top moves to the end rounded up to `topAlignment`, and that
+        // end must not pass `_limit`: otherwise the next reservation fails
+        // even for no bytes. A zero-size reservation moves nothing. The
+        // sum cannot wrap when the first two tests pass.
+        const end = size == 0
+            ? alignedUsed : roundUp(alignedUsed + size, topAlignment);
+        if (alignedUsed > _limit || size > _limit - alignedUsed
+                || end > _limit)
             throw new Exception(
                 text("frame stack overflow: need ", size,
                     " byte(s) at offset ", alignedUsed, " of ",
@@ -238,7 +251,6 @@ public struct FrameStack {
         if (size == 0)
             return _base + alignedUsed;
 
-        const end = alignedUsed + size;
         if (end > _committed)
             commit(end);
         _top = _base + end;
@@ -246,17 +258,20 @@ public struct FrameStack {
     }
 
     // `reserve` with an alignment of 16, for a caller that checked once
-    // that `size` is not 0. The bump is one compare when the bytes are
-    // committed; every other case takes `reserve`.
+    // that `size` is a multiple of 16 and not 0. The top is aligned, so
+    // the bump is one compare when the bytes are committed; every other
+    // case takes `reserve`.
     pragma(inline, true)
     public ubyte* reserveAligned16(in size_t size) @system {
-        enum uint alignment = 16;
-        auto aligned = alignedUp(_top, alignment);
+        static assert(topAlignment == 16);
+        assert(size % topAlignment == 0,
+            "a fast frame size is a multiple of 16");
+        auto aligned = _top;
         // A frame size never comes near the end of the address space, so
         // the sum cannot wrap.
         auto end = aligned + size;
         if (end > _fastEnd)
-            return reserve(size, alignment);
+            return reserve(size, topAlignment);
         _top = end;
         return aligned;
     }
@@ -270,12 +285,14 @@ public struct FrameStack {
     // Makes every byte below `end` reserved, for a callee frame that the
     // caller laid out above the reservation already. The bytes up to
     // `reach` must also be committed, because the callee writes its own call
-    // windows there. `false` when they are not; `claim` then does the work
-    // with the checks.
+    // windows there. `end` is a multiple of `topAlignment`. `false` when the
+    // bytes are not committed; `claim` then does the work with the checks.
     pragma(inline, true)
     public bool claimFast(ubyte* end, ubyte* reach) @system {
         if (reach > _fastEnd)
             return false;
+        assert(cast(size_t) end % topAlignment == 0,
+            "a fast claim ends on the alignment of the top");
         _top = end;
         return true;
     }
@@ -292,7 +309,7 @@ public struct FrameStack {
                     _limit));
         if (needed > _committed)
             commit(needed);
-        _top = end;
+        _top = alignedUp(end, topAlignment);
     }
 
     // Commits the bytes below `end` without reserving them.
@@ -361,6 +378,8 @@ public struct FrameStack {
     pragma(inline, true)
     public void releaseTo(ubyte* top) {
         assert(top <= _top, "frame stack popped out of LIFO order");
+        assert(cast(size_t) top % topAlignment == 0,
+            "the top is given back as `top()` gave it, aligned");
         _top = top;
     }
 
