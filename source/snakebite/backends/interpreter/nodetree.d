@@ -683,12 +683,14 @@ private final class LoadSlice : SliceNode {
 // the address of the array, after the druntime hook that encodes the value
 // appended it.
 private final class DcharAppend(E) : Node {
+    import snakebite.ffi.plan : CallPlan;
+
     private E _ev;
-    private const(imported!"snakebite.ffi.plan".CallPlan)* _plan;
+    private const(CallPlan)* _plan;
     private Node _array;
     private Node _value;
     public this(
-        E ev, const(imported!"snakebite.ffi.plan".CallPlan)* plan,
+        E ev, const(CallPlan)* plan,
         Node array, Node value,
     ) {
         _ev = ev; _plan = plan; _array = array; _value = value;
@@ -5652,9 +5654,10 @@ private Node constantDelegate(void* function_) {
 // `_d_arrayappendT` for an array, or `_d_arrayappendcTX` and then
 // constructs the new last element. dmd lowers no append of a `dchar` to a
 // `char[]` or a `wchar[]`: its glue layer calls the druntime hook that
-// encodes it, and so does the node. An append that dmd leaves without a
-// lowering in other cases needs no code, and the evaluator runs the shared
-// rule for it.
+// encodes it, and so does the node. dmd leaves an append without a
+// lowering only where it generates no code (betterC, or CTFE-only code).
+// There the node gives null, and the walker throws the guest an `Error` or
+// halts.
 private Node buildAppend(E)(E ev, CatAssignExp append) {
     if (auto dchar_ = append.isCatDcharAssignExp) {
         auto array = buildAddress(ev, dchar_.e1);
