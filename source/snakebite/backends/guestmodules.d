@@ -1049,12 +1049,11 @@ private struct Image {
             throw new SnakebiteException(text(
                 "cannot load the registry image: ", dlerror.fromStringz));
 
-        alias Slot = extern(C) void** function();
-        auto slot = cast(Slot) dlsym(image._handle, "snakebite_registry_slot");
-        if (slot is null)
+        image._slot = cast(void**) dlsym(
+            image._handle, "snakebite_registry_slot");
+        if (image._slot is null)
             internalFailure("the registry image exports its slot");
 
-        image._slot = slot();
         ++_images;
         return image;
     }

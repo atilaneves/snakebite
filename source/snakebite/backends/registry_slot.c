@@ -5,10 +5,12 @@
  * module, so no compiler registers a second set of records for it. The
  * build makes it with the system C compiler and links its bytes into every
  * target (`registry_image_amd64.S`), so no compiler runs at run time.
+ *
+ * The image holds no code, and the build removes the empty code section, so
+ * it has no executable segment. When druntime removes a registration, it
+ * reads the first word of every block in the GC heap that has a finalizer,
+ * once for each executable segment of the image. Another thread can then be
+ * between `GC.malloc` and the copy of the initial bytes of a class instance,
+ * and the first word of that block can hold anything.
  */
-static void *slot;
-
-void **snakebite_registry_slot(void)
-{
-    return &slot;
-}
+void *snakebite_registry_slot;
