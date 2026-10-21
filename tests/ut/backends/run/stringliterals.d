@@ -646,3 +646,25 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// A string literal passed as a C string, directly and through `.ptr`, to a
+// C variadic function.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call a C function"),
+)) {
+    @("string.literalArgumentsOfVariadicCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.stdio: snprintf;
+            import core.stdc.string: strcmp;
+
+            int main() {
+                char[32] buffer;
+                snprintf(buffer.ptr, buffer.length, "%s-%d", "word".ptr, 42);
+                return strcmp(buffer.ptr, "word-42") == 0 ? 0 : 1;
+            }
+        });
+    }
+}

@@ -63,6 +63,11 @@ package struct FrameLayout {
     package Parameter[] parameters;
     package size_t variadicTypes = size_t.max;
     package size_t variadicCursor = size_t.max;
+    // The slot that holds the address of the heap closure of a function
+    // whose captured variables dmd moves there (`ClosureLayout`): the
+    // function's own context, which its body and the delegates it makes
+    // reach from the frame. `size_t.max` for a function without one.
+    package size_t closure = size_t.max;
 
     // The parameters of the function type, shared by every layout of equal
     // parameters: a call through a value compares it with the one of the
@@ -149,6 +154,10 @@ package struct FrameLayout {
                     && !layout.hasSlot(function_.vresult))
                 collector.collectVariable(function_.vresult);
         }
+
+        if (imported!"snakebite.frontend.dmd.delegates"
+                .functionNeedsClosure(function_))
+            layout.closure = layout.reserveSlot(TypeFacts.pointer).offset;
 
         return layout;
     }

@@ -20,6 +20,20 @@ public enum DualContext {
     outerWord = 1,
 }
 
+// The offset in the pair of the object that a constructor with two contexts
+// constructs. The constructor takes the pair as its hidden argument, but
+// the object that it yields (and that its temporary is armed for) is the
+// receiver word of the pair, as in dmd's code generator.
+public enum constructedObjectOffset = DualContext.receiverWord * size_t.sizeof;
+
+// Whether the hidden argument of `function_` is a pair that holds the
+// object of a constructor.
+public bool constructsThroughPair(imported!"dmd.func".FuncDeclaration function_) {
+    import snakebite.frontend.dmd.delegates: isDualContext;
+
+    return function_.isCtorDeclaration !is null && isDualContext(function_);
+}
+
 // The byte offset in the pair of the word a lookup of `target`'s context
 // follows when it passes through `symbol`.
 public size_t wordTowards(

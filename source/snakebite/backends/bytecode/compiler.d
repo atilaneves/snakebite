@@ -861,7 +861,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.backends.compoundassign:
         CompoundConversion, compoundConversion;
     import snakebite.backends.dualcontext:
-        ContextSource, PairPlan, calleeContextSourceOf, contextSourceOf,
+        ContextSource, PairPlan, calleeContextSourceOf, constructedObjectOffset,
+        constructsThroughPair, contextSourceOf,
         pairPlanOf;
     import snakebite.backends.bytecode.relocation:
         Address, Place, Reloc, Target, recordRelocs;
@@ -1135,7 +1136,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto closurePlan = closurePlanOf(function_);
         if (closurePlan.needsClosure) {
             _closureLayout = closurePlan.layout;
-            _closureOffset = reserveStorage(pointerFacts);
+            _closureOffset = layout.closure;
         }
     }
 
@@ -9946,11 +9947,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 _windowDepth = windowEnd;
             receiverOffset = thisOffsetOf();
         }
+        // The hidden argument of a constructor with two contexts is the
+        // pair, and the object is its receiver word.
+        const objectOffset = hasThis && constructsThroughPair(callee)
+            ? loadWordAt(receiverOffset, constructedObjectOffset)
+            : receiverOffset;
         constructTemporary(callee,
-            { emit(&opTemporarySuspend, 0, receiverOffset, 0); },
-            { compileResolvedCallBody(callee, arguments, loc,
-                hasThis, receiverOffset, destOffset, site); },
-            { emit(&opTemporaryArm, 0, receiverOffset, 0); });
+            { emit(&opTemporarySuspend, 0, objectOffset, 0); },
+            {
+                compileResolvedCallBody(callee, arguments, loc,
+                    hasThis, receiverOffset, destOffset, site);
+                if (objectOffset != receiverOffset && destOffset != discardResult)
+                    emit(&opCopy, destOffset, objectOffset, size_t.sizeof);
+            },
+            { emit(&opTemporaryArm, 0, objectOffset, 0); });
     }
 
     private void compileResolvedCallBody(

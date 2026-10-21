@@ -154,33 +154,59 @@ package TreeRoot* rootOf(E)(
             scalar.kind == Scalar.Kind.floating || scalar.facts.isUnsigned);
     }
     auto statements = statementsOf(body_);
-    Node uninitialised(Statement one, Node* slot) {
-        return new Uninitialised!E(ev, one, slot, root);
+    // A function with a closure starts with the step that opens it.
+    const entries = layout.closure == size_t.max ? 0 : 1;
+    Node statement(size_t i, Node* slot) {
+        if (i < entries)
+            return new ClosureEntry!E(
+                ev, function_, &root.closurePlan.layout, layout);
+        return new Uninitialised!E(ev, statements[i - entries], slot, root);
     }
-    switch (statements.length) {
+    switch (entries + statements.length) {
         case 0:
             root._body = new Jump!(TreeFlow.normal);
             return root;
         case 1:
-            root._body = uninitialised(statements[0], &root._body);
+            root._body = statement(0, &root._body);
             return root;
         static foreach (count; 2 .. 7) {
             case count: {
                 auto sequence = new ShortSequence!count;
-                foreach (i, one; statements)
-                    sequence._children[i] = uninitialised(
-                        one, &sequence._children[i]);
+                foreach (i; 0 .. count)
+                    sequence._children[i] = statement(
+                        i, &sequence._children[i]);
                 root._body = sequence;
                 return root;
             }
         }
         default: {
-            auto nodes = new Node[statements.length];
-            foreach (i, one; statements)
-                nodes[i] = uninitialised(one, &nodes[i]);
+            auto nodes = new Node[entries + statements.length];
+            foreach (i; 0 .. nodes.length)
+                nodes[i] = statement(i, &nodes[i]);
             root._body = new Sequence(nodes);
             return root;
         }
+    }
+}
+
+// Allocates the closure of a function whose captured variables dmd moves to
+// the heap, and keeps its address in the frame (`FrameLayout.closure`).
+private final class ClosureEntry(E) : Node {
+    import snakebite.backends.layout: ClosureLayout, FrameLayout;
+
+    private E _ev;
+    private FuncDeclaration _function;
+    private const(ClosureLayout)* _closure;
+    private const(FrameLayout)* _layout;
+    public this(
+        E ev, FuncDeclaration function_, const(ClosureLayout)* closure,
+        const(FrameLayout)* layout,
+    ) {
+        _ev = ev; _function = function_; _closure = closure; _layout = layout;
+    }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        _ev.openClosure(_function, _closure, frame, _layout);
+        return TreeFlow.normal;
     }
 }
 
@@ -1793,14 +1819,14 @@ private final class PostStep(T, long delta) : LongNode {
 }
 
 // A `ref` variable bound to the address of other storage.
-private final class BindReference : Node {
-    private size_t _offset;
+private final class BindReference(S) : Node {
+    private S _slot;
     private Node _address;
-    public this(size_t offset, Node address) {
-        _offset = offset; _address = address;
+    public this(S slot, Node address) {
+        _slot = slot; _address = address;
     }
     public override void executeVoid(ubyte* frame) {
-        *cast(ubyte**) (frame + _offset) = _address.executeAddr(frame);
+        *cast(ubyte**) _slot.address(frame) = _address.executeAddr(frame);
     }
 }
 
@@ -2102,6 +2128,35 @@ private final class ContextStore(E) : Node {
     public override void executeInto(ubyte* frame, ubyte* dest) {
         _ev.syncTree(_root, frame);
         _ev.applyVthisStep(_step, dest);
+    }
+}
+
+// The address of storage, once `elements` are written there.
+private final class FilledStorage : LongNode {
+    private Node _storage;
+    private Node _elements;
+    public this(Node storage, Node elements) {
+        _storage = storage; _elements = elements;
+    }
+    public override long executeLong(ubyte* frame) {
+        const address = _storage.executeLong(frame);
+        _elements.executeInto(frame, cast(ubyte*) address);
+        return address;
+    }
+}
+
+// The dynamic array of `length` elements at the address that `storage`
+// gives.
+private final class SliceOfStorage : SliceNode {
+    private Node _storage;
+    private size_t _length;
+    public this(Node storage, size_t length) {
+        _storage = storage; _length = length;
+    }
+    public override void executeInto(ubyte* frame, ubyte* dest) {
+        const address = _storage.executeLong(frame);
+        *cast(size_t*) (dest + lengthOffset) = _length;
+        *cast(long*) (dest + pointerOffset) = address;
     }
 }
 
@@ -2593,6 +2648,35 @@ private final class MethodDelegate(E, MethodReceiver kind) : SliceNode {
     }
 }
 
+// The pair of contexts of a call of a function with two contexts, stored in
+// its variable (`PairPlan`): the receiver, or the first context, and the
+// outer context. The node yields the address of the pair.
+private final class ContextPair : Node {
+    import snakebite.backends.dualcontext: PairPlan;
+
+    private Node _storage;
+    private Node _first;
+    private bool _firstIsAddress;
+    private Node _outer;
+    private size_t _receiverOffset;
+    private size_t _outerOffset;
+    public this(
+        Node storage, Node first, bool firstIsAddress, Node outer,
+        in PairPlan plan,
+    ) {
+        _storage = storage; _first = first; _firstIsAddress = firstIsAddress;
+        _outer = outer; _receiverOffset = plan.receiverOffset;
+        _outerOffset = plan.outerOffset;
+    }
+    public override ubyte* executeAddr(ubyte* frame) {
+        auto pair = _storage.executeAddr(frame);
+        *cast(void**) (pair + _receiverOffset) = _firstIsAddress
+            ? _first.executeAddr(frame) : cast(void*) _first.executeLong(frame);
+        *cast(void**) (pair + _outerOffset) = _outer.executeAddr(frame);
+        return pair;
+    }
+}
+
 // The address at `start`, then for each offset the word loaded at the address
 // plus that offset: the `this` of a function, read through its slot and the
 // pair of a function with two contexts.
@@ -3016,9 +3100,9 @@ private final class Catching(E) : Node {
     private imported!"dmd.statement".TryCatchStatement _statement;
     private Node _body;
     private Node[] _handlers;
-    // Where each clause's variable is in the frame, or `noVariable`.
-    private size_t[] _variables;
-    public enum noVariable = size_t.max;
+    // The address of each clause's variable, or null for a clause without
+    // one.
+    private Node[] _variables;
     private Holders _holders;
 
     public this(E ev, imported!"dmd.statement".TryCatchStatement statement) {
@@ -3033,8 +3117,9 @@ private final class Catching(E) : Node {
     ) {
         foreach (i, clause; *_statement.catches)
             if (clause is catch_) {
-                if (_variables[i] != noVariable)
-                    *cast(void**) (frame + _variables[i]) = cast(void*) guest;
+                if (_variables[i] !is null)
+                    *cast(void**) _variables[i].executeAddr(frame)
+                        = cast(void*) guest;
                 return _handlers[i].executeStmt(frame);
             }
         assert(0, "the evaluator selects a clause of the statement");
@@ -4602,11 +4687,17 @@ private final class ConstructorCall(E) : Node {
     mixin CalleeEntry!E;
     mixin Dispatch!E;
 
+    // Whether the receiver is the pair of contexts of the constructor, whose
+    // receiver word is the object.
+    private bool _receiverIsPair;
+
     public this(E ev, CallExp site, FuncDeclaration constructor,
             Node receiver, bool receiverIsAddress, SiteArguments arguments) {
+        import snakebite.backends.dualcontext: constructsThroughPair;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         _ev = ev; _site = site;
+        _receiverIsPair = constructsThroughPair(constructor);
         takeReceiver(constructor, receiver, receiverIsAddress,
             /* virtual */ false);
         takeArguments(arguments);
@@ -4635,17 +4726,19 @@ private final class ConstructorCall(E) : Node {
         construct(frame);
     }
 
-    // Runs the constructor and returns its receiver.
+    // Runs the constructor and returns the object that it constructed.
     private size_t construct(ubyte* frame) {
+        import snakebite.backends.dualcontext: constructedObjectOffset;
         import snakebite.backends.temporary: constructTemporary;
 
         auto ev = _ev;
         const receiver = runReceiver(frame);
-        auto object = cast(void*) receiver;
+        const object = _receiverIsPair
+            ? *cast(size_t*) (receiver + constructedObjectOffset) : receiver;
         // A copy: the arguments can run this site again.
         auto selected = _selected;
         constructTemporary(_method,
-            { ev._temporaries.suspendConstructor(object); },
+            { ev._temporaries.suspendConstructor(cast(void*) object); },
             {
                 if (selected.direct !is null) {
                     runDirect(selected.direct, receiver, frame);
@@ -4659,8 +4752,8 @@ private final class ConstructorCall(E) : Node {
                     receiver, frame);
                 runCall(selected, base, result.ptr, _receiverIsAddress, frame);
             },
-            { ev._temporaries.armConstructor(object); });
-        return receiver;
+            { ev._temporaries.armConstructor(cast(void*) object); });
+        return object;
     }
 }
 
@@ -4791,9 +4884,13 @@ private void examine(E)(E ev, TreeCallee* callee) {
     import dmd.expression: ThisExp;
     import dmd.tokens: EXP;
     import dmd.typesem: nextOf, toBasetype;
+    import snakebite.frontend.dmd.delegates: isDualContext;
 
     callee.shape.kind = CalleeShape.Kind.other;
     auto function_ = callee.function_;
+    // The receiver of a callee with two contexts is the address of their
+    // pair, so the offset of a field does not find the field there.
+    const hasPair = isDualContext(function_);
     auto statements = statementsOf(function_.fbody);
     if (statements.length != 1)
         return;
@@ -4821,7 +4918,7 @@ private void examine(E)(E ev, TreeCallee* callee) {
         static if (!E.nullCheckedEvaluator) {
             // The access of a getter runs no arguments.
             auto field = receiverField(returned.exp);
-            if (field is null || callee.slots.length != 0)
+            if (field is null || hasPair || callee.slots.length != 0)
                 return;
             const scalar = scalarOf(ev, field.type);
             const result = scalarOf(ev, function_.type.nextOf);
@@ -4838,7 +4935,7 @@ private void examine(E)(E ev, TreeCallee* callee) {
     }
     static if (!E.nullCheckedEvaluator) {
         auto effect = only.isExpStatement;
-        if (effect is null || effect.exp is null
+        if (effect is null || effect.exp is null || hasPair
                 || effect.exp.op != EXP.assign
                 || function_.type.nextOf.toBasetype.ty != TY.Tvoid
                 || function_.parameters is null
@@ -5391,10 +5488,32 @@ private Slot slotOf(E)(E ev, VarDeclaration variable) {
             || variable.isSymbolDeclaration !is null
             || (variable.storage_class & STC.lazy_) != 0)
         return Slot();
+    // A variable that dmd moved to the running function's closure is not
+    // in its frame (`buildOuterAddress`).
     const slot = ev._layout.slotOf(variable);
-    if (slot is null)
+    if (slot is null || ev.inOwnClosure(variable))
         return Slot();
     return Slot(true, slot.offset, slot.isRef || slot.isReturnPlace);
+}
+
+// The words to load from the running frame to reach the running function's
+// own context: none when it is the frame, and the closure's slot when the
+// function has a closure.
+private const(imported!"snakebite.backends.closureplan".Hop)[]
+ownContextHops(E)(E ev) {
+    import snakebite.backends.closureplan: Hop;
+
+    const closure = ev._layout.closure;
+    return closure == size_t.max
+        ? null : [Hop(Hop.Kind.frameSlot, closure)];
+}
+
+// The context of the running function, as an address.
+private Node ownContext(E)(E ev) {
+    const hops = ownContextHops(ev);
+    return hops is null
+        ? new LocalAddress(0)
+        : new OuterAddress(OuterVariable(true, hops, 0, false));
 }
 
 // The address of a variable of an enclosing function, or null.
@@ -5411,17 +5530,8 @@ private Node buildOuterAddress(E)(E ev, VarDeclaration variable) {
 }
 
 private VarDeclaration thisVariable(E)(E ev, ThisExp expression) {
-    import snakebite.backends.closureplan: ClosurePlan;
-    import snakebite.frontend.dmd.delegates: outerFunctionOf;
-
-    auto variable = expression.var is null
+    return expression.var is null
         ? cast() ev._layout.hiddenThis.variable : expression.var;
-    if (variable is null)
-        return null;
-    auto owner = outerFunctionOf(variable);
-    if (owner !is null && ClosurePlan.receiverHops(owner).length != 0)
-        return null;
-    return variable;
 }
 
 // The address of a variable that is not in the running frame: one in static
@@ -5456,13 +5566,9 @@ private Node buildAddress(E)(E ev, Expression expression) {
             return buildVariableAddress(
                 ev, expression.isVarExp.var.isVarDeclaration);
         case this_: {
-            auto variable = thisVariable(ev, expression.isThisExp);
-            const slot = slotOf(ev, variable);
             if (expression.type.toBasetype.ty != TY.Tstruct)
                 return null;
-            if (!slot.ok)
-                return buildOuterAddress(ev, variable);
-            return new PointerAddress(slot.offset, 0);
+            return buildThisValue(ev, thisVariable(ev, expression.isThisExp));
         }
         case dotVariable: {
             auto dot = expression.isDotVarExp;
@@ -5727,12 +5833,12 @@ private Node buildCall(E)(E ev, CallExp call) {
     import dmd.astenums: TY;
     import dmd.typesem: toBasetype;
     import snakebite.backends.calls: CallSelection;
+    import snakebite.backends.dualcontext: pairPlanOf;
     import snakebite.frontend.dmd.dispatch: CallReceiver, readsVtable,
         receiverOf;
     import snakebite.frontend.dmd.functions: typeFunctionOf, unresolvedCalleeOf;
 
-    if (call.vthis2 !is null || call.e1.isCommaExp !is null
-            || call.arguments is null)
+    if (call.e1.isCommaExp !is null || call.arguments is null)
         return null;
     if (call.f is null)
         return unresolvedCalleeOf(call) is null
@@ -5800,6 +5906,18 @@ private Node buildCall(E)(E ev, CallExp call) {
             if (receiver is null)
                 return null;
         }
+    }
+    // A callee with two contexts takes the address of the pair of them.
+    const pair = pairPlanOf(ev._function, function_, call.vthis2);
+    if (pair.variable !is null) {
+        assert(!virtual, "a function with two contexts is a template");
+        auto storage = buildVariableAddress(ev, cast() pair.variable);
+        auto outer = buildContext(ev, pair.outer);
+        if (storage is null || outer is null)
+            return null;
+        receiver = new ContextPair(
+            storage, receiver, receiverIsAddress, outer, pair);
+        receiverIsAddress = true;
     }
     SiteArguments arguments;
     // A virtual call meets only guest callees (`Dispatch.matches`).
@@ -5879,28 +5997,46 @@ private Node buildThisValue(E)(E ev, VarDeclaration variable) {
 // the evaluator finds it (`contextValueOf`), which the node yields as an
 // address. Null when the tree does not reach it.
 private Node buildCalleeContext(E)(E ev, CallExp call, FuncDeclaration callee) {
+    return buildContext(ev, *ev.calleeContextPlanOf(call, callee));
+}
+
+// The context that `source` names, as an address. Null when the tree does
+// not reach it.
+private Node buildContext(E)(
+    E ev, in imported!"snakebite.backends.dualcontext".ContextSource source,
+) {
     import snakebite.backends.dualcontext: ContextSource;
     import snakebite.internalfailure: internalFailure;
 
-    const source = *ev.calleeContextPlanOf(call, callee);
     final switch (source.kind) with (ContextSource.Kind) {
         case none:
             return new GlobalAddress(null);
         case frame: {
             auto owner = cast() source.function_;
-            // A function that runs as a tree has no closure (`runNodeTree`),
-            // so its own context is its frame.
             if (owner is ev._function)
-                return new LocalAddress(0);
+                return ownContext(ev);
             const hops = ev.staticChainTo(owner);
             if (hops is null)
-                internalFailure("a direct call's enclosing function is on "
+                internalFailure("the context that a call hands over is on "
                     ~ "the static chain");
             return new OuterAddress(OuterVariable(true, hops, 0, false));
         }
-        case receiver:
-            assert(0, "a nested callee's context is the frame of a function "
-                ~ "(`nestedContextOwnerOf`)");
+        case receiver: {
+            // The `this` of `function_`, or the word of its pair, then the
+            // context fields of the objects on the way.
+            auto hidden = (cast() source.function_).vthis;
+            Node value;
+            if (source.throughPair) {
+                auto slot = buildVariableAddress(ev, hidden);
+                value = slot is null
+                    ? null : new LoadChain(slot, [0, source.pairOffset]);
+            } else
+                value = buildThisValue(ev, hidden);
+            if (value is null)
+                return null;
+            return source.fields.length == 0
+                ? value : new LoadChain(value, source.fields);
+        }
         case overrider: {
             // The word that holds the receiver in the view of the overridden
             // function's class lives as long as the full expression of the
@@ -6249,10 +6385,8 @@ private Node buildMadeDelegate(E)(
     auto function_ = ev.functionAddressOf(target.function_);
     if (!target.needsContext)
         return constantDelegate(function_);
-    // A function that runs as a tree has no closure (`runNodeTree`), so its
-    // own context is its frame: no hops.
     if (target.contextOwner is ev._function)
-        return new FrameDelegate(/* hops */ null, function_);
+        return new FrameDelegate(ownContextHops(ev), function_);
     const hops = ev.staticChainTo(target.contextOwner);
     return hops is null
         ? constantDelegate(function_) : new FrameDelegate(hops, function_);
@@ -6350,6 +6484,8 @@ private Node buildSlice(E)(E ev, Expression expression) {
                 expression, cast(ubyte*) &value);
             return new ConstantSlice(value);
         }
+        case arrayLiteral:
+            return buildArrayLiteralSlice(ev, expression.isArrayLiteralExp);
         case slice:
             return buildSliceOf(ev, expression.isSliceExp);
         case call: {
@@ -6766,7 +6902,7 @@ private Node buildVthisStep(E)(E ev, InitStep step) {
             return new FieldStore!long(step.offset, new Constant!long(0));
         case frame: {
             if (source.function_ is ev._function)
-                return new FrameContextStore(step.offset, null);
+                return new FrameContextStore(step.offset, ownContextHops(ev));
             const hops = ev.staticChainTo(cast() source.function_);
             return hops is null
                 ? new ContextStore!E(ev, step)
@@ -7026,6 +7162,20 @@ private Node buildValue(E)(E ev, Expression expression) {
         case null_:
             return scalar.kind == Scalar.Kind.integral
                 ? new Constant!long(0) : null;
+        // A string literal as a pointer: the address of its bytes.
+        case string_: {
+            void* address;
+            ev._nativeData.write(expression.type, ev.factsOf(expression.type),
+                expression, &address);
+            return new Constant!long(cast(long) address);
+        }
+        case arrayLiteral: {
+            import snakebite.backends.arrayliteral: planArrayLiteral;
+
+            auto literal = expression.isArrayLiteralExp;
+            return buildArrayLiteralStorage(
+                ev, literal, planArrayLiteral(literal, ev._function));
+        }
         case arrayLength: {
             auto array = expression.isArrayLengthExp.e1;
             if (scalar.kind != Scalar.Kind.integral
@@ -7053,16 +7203,20 @@ private Node buildValue(E)(E ev, Expression expression) {
         case this_, super_: {
             // `super` is `this` with the type of the base class; dmd's
             // `SuperExp` is a `ThisExp`.
+            import snakebite.backends.closureplan: ClosurePlan;
+            import snakebite.frontend.dmd.delegates: outerFunctionOf;
+
             auto variable = thisVariable(ev, cast(ThisExp) expression);
-            const slot = slotOf(ev, variable);
-            if (scalar.kind != Scalar.Kind.integral)
+            if (scalar.kind != Scalar.Kind.integral || variable is null)
                 return null;
-            if (!slot.ok) {
-                // The `this` of an enclosing method, read by a nested function.
-                auto outer = buildOuterAddress(ev, variable);
-                return outer is null ? null : new Load!size_t(outer);
-            }
-            return new Local!long(slot.offset);
+            const slot = slotOf(ev, variable);
+            auto owner = outerFunctionOf(variable);
+            if (slot.ok && ClosurePlan.receiverHops(owner).length == 0)
+                return new Local!long(slot.offset);
+            // The `this` of an enclosing method, or of a function with two
+            // contexts, which reads it through its pair.
+            auto value = buildThisValue(ev, variable);
+            return value is null ? null : new AddressValue(value);
         }
         case dotVariable, star, index:
             return buildLoad(ev, expression, buildAddress(ev, expression));
@@ -7826,8 +7980,13 @@ private Node buildInitializer(E)(
             ? null : statementOf(effect, positionOf(ev, declaration));
     }
     auto value = initializerValueOf(initializer);
+    if (ev.isRefStorage(variable))
+        return null;
+    // A variable that is not in the frame is in the closure of the running
+    // function.
     const slot = slotOf(ev, variable);
-    if (!slot.ok || ev.isRefStorage(variable))
+    auto closed = slot.ok ? null : buildOuterAddress(ev, variable);
+    if (!slot.ok && closed is null)
         return null;
     if (variableIsAggregate) {
         import dmd.astenums: TY;
@@ -7846,7 +8005,7 @@ private Node buildInitializer(E)(
         auto node = buildAggregateFor(ev, variable.type, value);
         if (node is null)
             return null;
-        Node target = slot.indirect
+        Node target = !slot.ok ? closed : slot.indirect
             ? new PointerAddress(slot.offset, 0) : new LocalAddress(slot.offset);
         return statementOf(
             new AggregateStore(&ev._frames, target, node, facts,
@@ -7855,11 +8014,13 @@ private Node buildInitializer(E)(
     }
     if (slot.indirect)
         return null;
+    // `auto`: the operand holds a mutable node.
+    auto where = slot.ok
+        ? frameSlot(slot.offset) : addressOperandOf(closed);
     if (variableIsPair) {
         auto node = buildPair(ev, variable.type, value);
         return node is null ? null : statementOf(
-            storeSlice(frameSlot(slot.offset), node),
-            positionOf(ev, declaration));
+            storeSlice(where, node), positionOf(ev, declaration));
     }
     if (scalarOf(ev, value.type).kind != scalar.kind
             || ev.factsOf(value.type).size != scalar.facts.size)
@@ -7867,7 +8028,7 @@ private Node buildInitializer(E)(
     auto node = buildValue(ev, value);
     if (node is null)
         return null;
-    return statementOf(storeTo(scalar, frameSlot(slot.offset), node),
+    return statementOf(storeTo(scalar, where, node),
         positionOf(ev, declaration));
 }
 
@@ -8035,6 +8196,55 @@ private Node buildArrayLiteral(E)(
     return new StructLiteral(steps, plan.bytes, false);
 }
 
+// The pointer to the elements of `[a, b, c]` as a dynamic array or a
+// pointer: the storage that the plan gives, with each element written
+// there before the result names it, as an element can read the old value
+// of the destination.
+private Node buildArrayLiteralStorage(E)(
+    E ev, imported!"dmd.expression".ArrayLiteralExp literal,
+    imported!"snakebite.backends.arrayliteral".ArrayLiteralPlan plan,
+) {
+    import snakebite.backends.arrayliteral: ArrayLiteralPlan;
+    import snakebite.frontend.compiler: arrayLiteralLowering;
+    import snakebite.frontend.dmd.functions: moduleOf;
+
+    Node storage;
+    final switch (plan.storage) with (ArrayLiteralPlan.Storage) {
+        case empty:
+            return new Constant!long(0);
+        case temporary:
+            storage = new AddressValue(
+                new LocalAddress(ev._layout.arrayLiteralOffset(literal)));
+            break;
+        case lowering:
+            storage = buildValue(ev,
+                arrayLiteralLowering(literal, moduleOf(ev._function)));
+            if (storage is null)
+                return null;
+            break;
+    }
+    Node[] steps;
+    foreach (i; 0 .. plan.count) {
+        auto node = buildFieldValue(
+            ev, i * plan.elementFacts.size, plan.elementType, literal[i]);
+        if (node is null)
+            return null;
+        steps ~= node;
+    }
+    return new FilledStorage(storage, new StructLiteral(steps, plan.bytes, false));
+}
+
+private Node buildArrayLiteralSlice(E)(
+    E ev, imported!"dmd.expression".ArrayLiteralExp literal,
+) {
+    import snakebite.backends.arrayliteral: planArrayLiteral;
+
+    // `auto`: dmd's element type stays mutable.
+    auto plan = planArrayLiteral(literal, ev._function);
+    auto storage = buildArrayLiteralStorage(ev, literal, plan);
+    return storage is null ? null : new SliceOfStorage(storage, plan.count);
+}
+
 private Node buildInitStep(E)(E ev, InitStep step) {
     final switch (step.kind) with (InitStep.Kind) {
         case vthis:
@@ -8099,12 +8309,20 @@ private Node buildFieldValue(E)(
 private Node buildReferenceBinding(E)(
     E ev, VarDeclaration variable, Expression value, Position position,
 ) {
-    const slot = slotOf(ev, variable);
-    if (!slot.ok)
-        return null;
     auto address = buildAddress(ev, value);
-    return address is null
-        ? null : statementOf(new BindReference(slot.offset, address), position);
+    if (address is null)
+        return null;
+    const slot = slotOf(ev, variable);
+    if (slot.ok)
+        return statementOf(new BindReference!FrameAddress(
+            FrameAddress(slot.offset), address), position);
+    // A reference that a delegate captures has its slot in the closure.
+    auto outer = ev.outerVariableOf(variable);
+    if (!outer.ok)
+        return null;
+    outer.indirect = false;
+    return statementOf(new BindReference!ChildAddress(
+        ChildAddress(new OuterAddress(outer)), address), position);
 }
 
 private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
@@ -8278,12 +8496,12 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
             auto tried = statement.isTryCatchStatement;
             auto node = new Catching!E(ev, tried);
             foreach (catch_; *tried.catches) {
-                auto variable = Catching!E.noVariable;
+                Node variable;
+                // A variable that a delegate captures is in the closure.
                 if (catch_.var !is null) {
-                    const where = slotOf(ev, catch_.var);
-                    if (!where.ok || where.indirect)
+                    variable = buildVariableAddress(ev, catch_.var);
+                    if (variable is null)
                         return generic();
-                    variable = where.offset;
                 }
                 node._variables ~= variable;
             }
