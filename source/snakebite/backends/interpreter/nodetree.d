@@ -3442,7 +3442,9 @@ private final class GenericStatement(E) : Node {
         // with no expression named until the statement opens one, and with
         // the label that the statement has.
         *faultSlotOf(frame) = null;
+        auto previousLabel = _ev._pendingLoopLabel;
         _ev._pendingLoopLabel = _label;
+        scope(exit) _ev._pendingLoopLabel = previousLabel;
         _statement.accept(_ev);
         return _ev._controlFlow.hasTransfer ? TreeFlow.generic : TreeFlow.normal;
     }
