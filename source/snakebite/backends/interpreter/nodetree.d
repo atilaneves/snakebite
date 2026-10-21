@@ -1847,6 +1847,22 @@ private final class PostStep(T, long delta) : LongNode {
     mixin StatementForm!"executeLong";
 }
 
+// `p++` or `p--`: `step` is the signed byte count that the pointer moves by.
+private final class PointerPostStep : LongNode {
+    private Target _target;
+    private long _step;
+    public this(Target target, in long step) {
+        _target = target; _step = step;
+    }
+    public override long executeLong(ubyte* frame) {
+        auto target = cast(long*) _target.address(frame);
+        const old = *target;
+        *target = old + _step;
+        return old;
+    }
+    mixin StatementForm!"executeLong";
+}
+
 // A `ref` variable bound to the address of other storage.
 private final class BindReference(S) : Node {
     private S _slot;
@@ -7885,20 +7901,33 @@ private Node buildFloatingOpAssign(string op, E)(
     }
 }
 
-// `target++` and `target--` on an integral target of any width: the value is
-// the old one, and the new one wraps in the target's own type.
+// `target++` and `target--` on an integral target of any width, or on a
+// pointer: the value is the old one, and the new one wraps in the target's
+// own type.
 private Node buildPost(long delta, E)(E ev, PostExp e, in Scalar scalar) {
-    import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
+    import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan,
+        pointerPostStep;
 
-    const plan = arithmeticPlan(e);
-    if (plan.kind != ArithmeticPlan.Kind.integral
-            || scalar.kind != Scalar.Kind.integral)
+    if (scalar.kind != Scalar.Kind.integral)
         return null;
     Target target;
-    if (!targetOf(ev, e.e1, target))
-        return null;
-    static Node make(T)(Target t) { return new PostStep!(T, delta)(t); }
-    return byIntegral!make(scalar.facts, target);
+    final switch (arithmeticPlan(e).kind) with (ArithmeticPlan.Kind) {
+        case integral: {
+            if (!targetOf(ev, e.e1, target))
+                return null;
+            static Node make(T)(Target t) { return new PostStep!(T, delta)(t); }
+            return byIntegral!make(scalar.facts, target);
+        }
+        case pointerOffset:
+            if (!targetOf(ev, e.e1, target))
+                return null;
+            return new PointerPostStep(
+                target, delta * cast(long) pointerPostStep(e));
+        case floating, complex, vector:
+            return null;
+        case pointerDifference:
+            assert(0, "a postfix `++` or `--` has the type of its operand");
+    }
 }
 
 private Node buildStore(E)(E ev, AssignExp e, in Scalar scalar) {

@@ -2040,6 +2040,35 @@ static foreach (backend; Matrix!(
 }
 
 
+// `p++` and `p--` move a pointer by the size of its pointee, as `++p` and
+// `--p` do, and the postfix forms give the old pointer.
+static foreach (backend; Matrix!()) {
+    @("pointers.incrementAndDecrement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        4_320_004L.shouldBeRetOf!(
+            backend,
+            q{
+                long steps() {
+                    long[4] values = [1, 2, 3, 4];
+                    long sum;
+                    long* p = &values[0];
+                    while (p != &values[0] + values.length)
+                        sum += *p++;
+                    p--;
+                    long* last = p--;
+                    --p;
+                    ++p;
+                    return sum * 1_000 + *last * 1_000_000 + *p * 100_000
+                        + (last - p) * 10_000 + *last;
+                }
+            },
+            "steps",
+        );
+    }
+}
+
+
 // `&c.get` on a class method is dmd's `DelegateExp` too, with the object
 // reference as context instead of a struct's inline storage.
 static foreach (backend; Matrix!()) {
