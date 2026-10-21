@@ -246,6 +246,240 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `~=` appends to the array that its left side names, wherever that array
+// lives: here a field of a struct and a field of a class object.
+static foreach (backend; Matrix!()) {
+    @("appendToField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[] f; }
+            class K { string[] names; }
+            void main() {
+                S s;
+                s.f ~= 1;
+                s.f ~= [2, 3];
+                assert(s.f == [1, 2, 3]);
+                auto k = new K;
+                k.names ~= "a";
+                k.names ~= ["b", "c"];
+                assert(k.names == ["a", "b", "c"]);
+            }
+        });
+    }
+}
+
+// `~=` to a thread-local and to a `__gshared` module variable, with an
+// array that appends itself.
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+        "dmd CTFE cannot read a mutable module variable"))) {
+    @("appendToGlobal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int[] g;
+            __gshared long[] everyone;
+            void main() {
+                g ~= 5;
+                g ~= [6, 7];
+                everyone ~= -1;
+                everyone ~= everyone;
+                assert(g == [5, 6, 7]);
+                assert(everyone == [-1, -1]);
+            }
+        });
+    }
+}
+
+// `~=` through a reference: the `ref` result of a call and a `ref`
+// parameter. The append grows the array that the reference names.
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+        "dmd CTFE cannot read a mutable module variable"))) {
+    @("appendThroughReference." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int[] g;
+            ref int[] storage() { return g; }
+            void add(ref int[] a, int v) { a ~= v; a ~= [v, v]; }
+            void main() {
+                storage() ~= 7;
+                storage() ~= [8];
+                int[] local;
+                add(local, 3);
+                assert(g == [7, 8]);
+                assert(local == [3, 3, 3]);
+            }
+        });
+    }
+}
+
+// `~=` to an element of a static array, of a dynamic array (with `$`) and
+// to the target of a pointer. dmd evaluates the left side once.
+static foreach (backend; Matrix!()) {
+    @("appendToElement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[][2] pair;
+                pair[1] ~= 9;
+                pair[1] ~= [10];
+                int[][] jagged = [[1], [2]];
+                jagged[0] ~= 3;
+                jagged[$ - 1] ~= [4, 5];
+                int[]* p = &pair[0];
+                *p ~= 6;
+                assert(pair[0] == [6] && pair[1] == [9, 10]);
+                assert(jagged == [[1, 3], [2, 4, 5]]);
+            }
+        });
+    }
+}
+
+// An array of delegates with a receiver: each appended delegate keeps its
+// context and its function.
+static foreach (backend; Matrix!()) {
+    @("appendDelegates." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Counter {
+                int n;
+                void one() { n += 1; }
+                void ten() { n += 10; }
+            }
+            void main() {
+                Counter c;
+                void delegate()[] actions;
+                actions ~= &c.one;
+                actions ~= [&c.ten, &c.one];
+                foreach (action; actions)
+                    action();
+                assert(actions.length == 3);
+                assert(c.n == 12);
+            }
+        });
+    }
+}
+
+// An array of class references takes the same objects, and `null`.
+static foreach (backend; Matrix!()) {
+    @("appendClassReferences." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Node { int v; this(int v) { this.v = v; } }
+            void main() {
+                Node[] nodes;
+                auto first = new Node(1);
+                nodes ~= first;
+                nodes ~= [new Node(2), null];
+                assert(nodes.length == 3);
+                assert(nodes[0] is first && nodes[1].v == 2 && nodes[2] is null);
+            }
+        });
+    }
+}
+
+// Appending an lvalue struct with a copy constructor copies it with the
+// copy constructor, once.
+static foreach (backend; Matrix!()) {
+    @("appendRunsCopyConstructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct C {
+                int v;
+                int* copies;
+                this(int v, int* copies) { this.v = v; this.copies = copies; }
+                this(ref return scope C other) {
+                    v = other.v + 100;
+                    copies = other.copies;
+                    ++*copies;
+                }
+            }
+            void main() {
+                int copies;
+                auto c = C(1, &copies);
+                C[] cs;
+                cs ~= c;
+                assert(copies == 1);
+                assert(cs[0].v == 101);
+            }
+        });
+    }
+}
+
+// An element that the right side computes: dmd keeps it in a temporary
+// before the array grows, so an element of the array itself is read before
+// the append.
+static foreach (backend; Matrix!()) {
+    @("appendComputedElements." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct P { int x; }
+            P make(int v) { return P(v); }
+            double twice(double v) { return v * 2; }
+            void main() {
+                double[] ds;
+                ds ~= twice(1.5);
+                P[] ps;
+                ps ~= make(3);
+                int[2][] ws;
+                ws ~= [7, 8];
+                long[] ls;
+                ls ~= ls.length;
+                ls ~= ls[$ - 1] - 5;
+                assert(ds == [3.0] && ps[0].x == 3 && ws == [[7, 8]]);
+                assert(ls == [0, -5]);
+            }
+        });
+    }
+}
+
+// The value of `a ~= b` is `a` itself, after the append.
+static foreach (backend; Matrix!()) {
+    @("appendValueIsTheArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] a;
+                const length = (a ~= 1).length;
+                auto b = (a ~= [2, 3]);
+                assert(length == 1);
+                assert(b is a && b == [1, 2, 3]);
+                char[] s;
+                assert((s ~= cast(dchar) 0x263A).length == 3);
+            }
+        });
+    }
+}
+
+// `~` makes a new array of its operands, arrays and elements, in order.
+static foreach (backend; Matrix!()) {
+    @("concatenationMakesNewArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] a = [1, 2];
+                int[] b = [3];
+                auto c = a ~ b;
+                auto d = 0 ~ a ~ 4 ~ b;
+                string s = "x";
+                auto t = s ~ 'y' ~ "z";
+                assert(c == [1, 2, 3]);
+                assert(d == [0, 1, 2, 4, 3]);
+                assert(c.ptr !is a.ptr);
+                assert(t == "xyz");
+            }
+        });
+    }
+}
+
 // Growing storage through the allocator keeps what was already there,
 // across both the element-at-a-time and slice-at-a-time appends.
 static foreach (backend; Matrix!(
