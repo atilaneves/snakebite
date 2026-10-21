@@ -1385,7 +1385,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         _type = function_.type.nextOf;
         _facts = factsOf(_type);
         // A `value` result is in the word of the frame until the call ends.
-        const resultWord = resultWordFor(this, function_);
+        const resultWord = resultWordOfCall(function_, body_, layout);
         auto word = resultWordOf(frameBase);
         final switch (resultWord) with (ResultWord) {
             case value:
@@ -1427,6 +1427,21 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private TreeCallee*[FuncDeclaration] _treeCallees;
     private TreeCallee*[CallSiteKey] _variadicHostCallees;
     package enum bool nullCheckedEvaluator = nullChecks;
+
+    // The result word of a call of `function_`, from its tree root. Building
+    // a root allocates, which the GC forbids in a finalizer; a function that
+    // has no root yet there gets its word from `resultWordFor`.
+    private ResultWord resultWordOfCall(
+        FuncDeclaration function_, Statement body_, const(FrameLayout)* layout,
+    ) {
+        import core.memory: GC;
+
+        if (!GC.inFinalizer)
+            return treeRootFor(function_, body_, layout).resultWord;
+        if (auto found = function_ in _trees)
+            return (*found).resultWord;
+        return resultWordFor(this, function_);
+    }
 
     private TreeRoot* treeRootFor(
         FuncDeclaration function_, Statement body_, const(FrameLayout)* layout,
@@ -1683,24 +1698,24 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // filled, with its result at `place`, or nowhere when `place` is null.
     // The general entry of a call node, for any result.
     package void runTreeCallee(
-        TreeCallee* callee, ubyte* calleeFrame, void* place,
+        TreeCallee* callee, ubyte* calleeFrame, void* resultPlace,
         ubyte* callerFrame,
     ) {
         import snakebite.ffi.load: WordPair, storeWordResult;
 
         auto root = callee.root;
-        final switch (root.resultWord) {
-            case ResultWord.value:
+        final switch (root.resultWord) with (ResultWord) {
+            case value:
                 runTree(callee, calleeFrame, callerFrame);
-                if (place !is null)
+                if (resultPlace !is null)
                     storeWordResult(WordPair(*resultWordOf(calleeFrame)),
-                        root.returnFacts.size, place);
+                        root.returnFacts.size, resultPlace);
                 break;
-            case ResultWord.place:
-                *resultPlaceOf(calleeFrame) = place;
+            case place:
+                *resultPlaceOf(calleeFrame) = resultPlace;
                 runTree(callee, calleeFrame, callerFrame);
                 break;
-            case ResultWord.none:
+            case none:
                 runTree(callee, calleeFrame, callerFrame);
                 break;
         }

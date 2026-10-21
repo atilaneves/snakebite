@@ -29,7 +29,9 @@ public const(void)** faultSlotOf(ubyte* frame) @system @nogc nothrow pure {
 
 // A function and the full expression in it that runs, or none.
 public struct FaultSite {
-    public imported!"dmd.func".FuncDeclaration function_;
+    import dmd.func: FuncDeclaration;
+
+    public FuncDeclaration function_;
     public const(void)* expression;
 }
 
