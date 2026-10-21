@@ -2652,6 +2652,8 @@ private final class MethodDelegate(E, MethodReceiver kind) : SliceNode {
 // its variable (`PairPlan`): the receiver, or the first context, and the
 // outer context. The node yields the address of the pair.
 private final class ContextPair : Node {
+    import snakebite.backends.dualcontext: PairPlan;
+
     private Node _storage;
     private Node _first;
     private bool _firstIsAddress;
@@ -2660,7 +2662,7 @@ private final class ContextPair : Node {
     private size_t _outerOffset;
     public this(
         Node storage, Node first, bool firstIsAddress, Node outer,
-        in imported!"snakebite.backends.dualcontext".PairPlan plan,
+        in PairPlan plan,
     ) {
         _storage = storage; _first = first; _firstIsAddress = firstIsAddress;
         _outer = outer; _receiverOffset = plan.receiverOffset;
@@ -4685,11 +4687,17 @@ private final class ConstructorCall(E) : Node {
     mixin CalleeEntry!E;
     mixin Dispatch!E;
 
+    // Whether the receiver is the pair of contexts of the constructor, whose
+    // receiver word is the object.
+    private bool _receiverIsPair;
+
     public this(E ev, CallExp site, FuncDeclaration constructor,
             Node receiver, bool receiverIsAddress, SiteArguments arguments) {
+        import snakebite.backends.dualcontext: constructsThroughPair;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         _ev = ev; _site = site;
+        _receiverIsPair = constructsThroughPair(constructor);
         takeReceiver(constructor, receiver, receiverIsAddress,
             /* virtual */ false);
         takeArguments(arguments);
@@ -4718,17 +4726,19 @@ private final class ConstructorCall(E) : Node {
         construct(frame);
     }
 
-    // Runs the constructor and returns its receiver.
+    // Runs the constructor and returns the object that it constructed.
     private size_t construct(ubyte* frame) {
+        import snakebite.backends.dualcontext: constructedObjectOffset;
         import snakebite.backends.temporary: constructTemporary;
 
         auto ev = _ev;
         const receiver = runReceiver(frame);
-        auto object = cast(void*) receiver;
+        const object = _receiverIsPair
+            ? *cast(size_t*) (receiver + constructedObjectOffset) : receiver;
         // A copy: the arguments can run this site again.
         auto selected = _selected;
         constructTemporary(_method,
-            { ev._temporaries.suspendConstructor(object); },
+            { ev._temporaries.suspendConstructor(cast(void*) object); },
             {
                 if (selected.direct !is null) {
                     runDirect(selected.direct, receiver, frame);
@@ -4742,8 +4752,8 @@ private final class ConstructorCall(E) : Node {
                     receiver, frame);
                 runCall(selected, base, result.ptr, _receiverIsAddress, frame);
             },
-            { ev._temporaries.armConstructor(object); });
-        return receiver;
+            { ev._temporaries.armConstructor(cast(void*) object); });
+        return object;
     }
 }
 
@@ -4874,9 +4884,13 @@ private void examine(E)(E ev, TreeCallee* callee) {
     import dmd.expression: ThisExp;
     import dmd.tokens: EXP;
     import dmd.typesem: nextOf, toBasetype;
+    import snakebite.frontend.dmd.delegates: isDualContext;
 
     callee.shape.kind = CalleeShape.Kind.other;
     auto function_ = callee.function_;
+    // The receiver of a callee with two contexts is the address of their
+    // pair, so the offset of a field does not find the field there.
+    const hasPair = isDualContext(function_);
     auto statements = statementsOf(function_.fbody);
     if (statements.length != 1)
         return;
@@ -4904,7 +4918,7 @@ private void examine(E)(E ev, TreeCallee* callee) {
         static if (!E.nullCheckedEvaluator) {
             // The access of a getter runs no arguments.
             auto field = receiverField(returned.exp);
-            if (field is null || callee.slots.length != 0)
+            if (field is null || hasPair || callee.slots.length != 0)
                 return;
             const scalar = scalarOf(ev, field.type);
             const result = scalarOf(ev, function_.type.nextOf);
@@ -4921,7 +4935,7 @@ private void examine(E)(E ev, TreeCallee* callee) {
     }
     static if (!E.nullCheckedEvaluator) {
         auto effect = only.isExpStatement;
-        if (effect is null || effect.exp is null
+        if (effect is null || effect.exp is null || hasPair
                 || effect.exp.op != EXP.assign
                 || function_.type.nextOf.toBasetype.ty != TY.Tvoid
                 || function_.parameters is null

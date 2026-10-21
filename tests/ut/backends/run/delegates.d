@@ -1756,6 +1756,26 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A getter that is a dual-context member returns the field of its receiver,
+// not a word of the pair of contexts that the call passes in its place.
+static foreach (backend; Matrix!()) {
+    @("readFieldFromDualContextGetter." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Twice {
+                int value = 7;
+                int get(alias f)() { return value; }
+            }
+            int main() {
+                int k = 6;
+                auto t = new Twice;
+                return t.get!((v) => v * k)() == 7 ? 0 : 1;
+            }
+        });
+    }
+}
+
 
 // `&object.method` of a virtual method reads the method from the vtable of
 // the object that it binds: one expression binds the override of each
@@ -1777,6 +1797,26 @@ static foreach (backend; Matrix!()) {
             }
             void main() {
                 assert(sum([new Base, new Derived, new Base]) == 22);
+            }
+        });
+    }
+}
+
+// The same for a setter: the store goes to the field of the receiver.
+static foreach (backend; Matrix!()) {
+    @("writeFieldFromDualContextSetter." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Twice {
+                int value = 7;
+                void set(alias f)(int v) { value = v; }
+            }
+            int main() {
+                int k = 6;
+                auto t = new Twice;
+                t.set!((v) => v * k)(5);
+                return t.value == 5 ? 0 : 1;
             }
         });
     }
@@ -1832,6 +1872,116 @@ static foreach (backend; Matrix!(
             }
             void main() {
                 assert(start(new Worker) == 42);
+            }
+        });
+    }
+}
+
+// A constructor yields the object that it constructed, not the pair of
+// contexts that a call of it passes as its receiver.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine does not compare the address of a struct "
+            ~ "with a pointer that a constructor call yields"),
+)) {
+    @("yieldObjectFromDualContextConstructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S {
+                int value;
+                this(alias f)(int x) { value = f(x); }
+            }
+            int main() {
+                int k = 3;
+                S s;
+                auto p = &s.__ctor!((x) => x + k)(4);
+                return p is &s && s.value == 7 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// The caller has a closure, so a node tree runs it. The context of the
+// alias is the receiver of the caller, found from its `this`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine fails with an internal error on a dual-context "
+            ~ "function whose second context is a struct `this`"),
+)) {
+    @("callDualContextMemberFromMemberWithClosure." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder {
+                int base = 2;
+                int add(alias field)() { return base + field; }
+            }
+            struct Owner {
+                int value = 38;
+                int run(ref Holder holder) {
+                    int captured = 2;
+                    auto lambda = () => captured;
+                    return holder.add!value() + lambda();
+                }
+            }
+            int main() {
+                Holder holder;
+                Owner owner;
+                return owner.run(holder) == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// As above, with the caller a dual-context member: the receiver that owns
+// the alias is word 1 of the pair of the caller.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine does not implement a read through the second "
+            ~ "context of a dual-context function that another one calls"),
+)) {
+    @("callDualContextMemberFromDualContextMemberWithClosure." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder {
+                int base = 2;
+                int add(alias field)() { return base + field; }
+                int relay(alias field)() {
+                    int captured = 2;
+                    auto lambda = () => captured;
+                    return add!field() + lambda();
+                }
+            }
+            struct Owner {
+                int value = 38;
+                int run(ref Holder holder) { return holder.relay!value(); }
+            }
+            int main() {
+                Holder holder;
+                Owner owner;
+                return owner.run(holder) == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A dual-context nested function called from a function with a closure: the
+// first word of its pair is the context of the function that declares it.
+static foreach (backend; Matrix!()) {
+    @("callDualContextNestedFunctionInFunctionWithClosure." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int delegate() keep(int delegate() d) { return d; }
+            int main() {
+                int outerLocal = 38;
+                int callee() { return outerLocal; }
+                int innerLocal = 2;
+                int add(alias other)() { return innerLocal + other(); }
+                auto d = keep(() => innerLocal);
+                return add!callee() + d() == 42 ? 0 : 1;
             }
         });
     }

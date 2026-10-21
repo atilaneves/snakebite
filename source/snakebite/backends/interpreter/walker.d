@@ -1266,6 +1266,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             });
         }
 
+        import snakebite.backends.dualcontext:
+            constructedObjectOffset, constructsThroughPair;
         import snakebite.backends.temporary: constructTemporary;
         import snakebite.nativelayout: loadIntegral;
 
@@ -1274,6 +1276,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             receiver = cast(ubyte*) loadIntegral(
                 frameBase + layout.hiddenThis.parameter.offset,
                 size_t.sizeof, false);
+            // The hidden argument of a constructor with two contexts is
+            // the pair, and the object is its receiver word.
+            if (constructsThroughPair(function_))
+                receiver = cast(ubyte*) loadIntegral(
+                    receiver + constructedObjectOffset, size_t.sizeof, false);
             _temporaries.suspendConstructor(receiver);
         }, {
             if (callSite !is null && valueCall !is null)
