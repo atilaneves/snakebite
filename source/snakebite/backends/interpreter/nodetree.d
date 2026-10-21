@@ -6689,13 +6689,10 @@ private Node buildCompare(string op, E)(E ev, BinExp e) {
 private bool targetOf(E)(E ev, Expression expression, out Target target) {
     if (auto variable = expression.isVarExp) {
         const slot = slotOf(ev, variable.var.isVarDeclaration);
-        if (!slot.ok)
-            return false;
-        if (slot.indirect)
-            target = Target(new PointerAddress(slot.offset, 0));
-        else
+        if (slot.ok && !slot.indirect) {
             target = Target(null, slot.offset);
-        return true;
+            return true;
+        }
     }
     auto address = buildAddress(ev, expression);
     if (address is null)
