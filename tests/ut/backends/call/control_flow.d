@@ -424,6 +424,63 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// A `goto case` runs the `finally` body that it leaves before the target
+// case. dmd and the spec do so; LDC 1.43 skips the body (an LDC bug: native
+// LDC gives 11), and snakebite follows dmd.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.gotoCaseRunsFinallyBeforeTarget." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1011.shouldBeRetOf!(backend, q{
+            int result() {
+                int r;
+                switch (0) {
+                    case 0:
+                        try {
+                            r = 1;
+                            goto case 1;
+                        } finally {
+                            r = r * 100 + 1;
+                        }
+                    case 1:
+                        r = r * 10 + 1;
+                        break;
+                    default:
+                }
+                return r;
+            }
+        }, "result");
+    }
+}
+
+
+// A `goto case` runs a `scope(exit)` that it leaves before the target case.
+// dmd and the spec do so; LDC 1.43 skips it (an LDC bug), and snakebite
+// follows dmd.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.gotoCaseRunsScopeExitBeforeTarget." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1021.shouldBeRetOf!(backend, q{
+            int result() {
+                int r;
+                switch (0) {
+                    case 0:
+                        scope(exit) r = r * 100 + 2;
+                        r = 1;
+                        goto case 1;
+                    case 1:
+                        r = r * 10 + 1;
+                        break;
+                    default:
+                }
+                return r;
+            }
+        }, "result");
+    }
+}
+
+
 // A `goto default` out of a `try` body runs the `finally`, from an `if` with
 // no `else`.
 static foreach (backend; Matrix!()) {

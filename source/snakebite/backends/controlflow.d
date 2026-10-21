@@ -175,6 +175,15 @@ public struct ScopePaths {
     }
 }
 
+// The statement that a label names: `gotoTarget` when dmd rewrote the
+// labelled statement (a `for` initialiser or `foreach` declarations move in
+// front of the loop), the labelled statement itself otherwise.
+public imported!"dmd.statement".Statement labelTargetOf(
+    imported!"dmd.statement".LabelStatement label,
+) {
+    return label.gotoTarget !is null ? label.gotoTarget : label.statement;
+}
+
 public ScopePaths scopePathsOf(imported!"dmd.statement".Statement body_)
     @trusted
 {

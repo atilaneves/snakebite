@@ -19,7 +19,7 @@ import dmd.mtype: Type;
 import dmd.statement: Statement;
 import snakebite.backends.aggregateinit: InitStep;
 import snakebite.backends.checkplan: BoundsCheck;
-import snakebite.backends.controlflow: ControlFlowState;
+import snakebite.backends.controlflow: ControlFlowState, labelTargetOf;
 import snakebite.backends.fullexpression: FullExpressionScope;
 import snakebite.backends.interpreter.faultslot:
     fastFrameLead, faultSlotOf, placeSlotOf;
@@ -33,7 +33,8 @@ import std.traits: Select, isFloatingPoint;
 
 // How a statement node ended. `generic` means that a control transfer is
 // pending in the evaluator's `ControlFlowState` for the enclosing node to
-// resolve: a `goto`, or a `break` or `continue` with a label.
+// resolve: any transfer that the node did not resolve itself, that is a
+// `goto`, a `return`, or a `break` or `continue` whether it has a label or not.
 package enum TreeFlow : ubyte { normal, break_, continue_, return_, generic }
 
 // A function's tree, with what the evaluator's per-function fields hold while
@@ -2993,7 +2994,9 @@ private final class Throw(E) : Node {
 // from it. A case falls through to the statements of the next one. `D`
 // selects the entry for the value of the operand. A `goto case` or a `goto
 // default` leaves a pending transfer to its target, and the list runs again
-// from there.
+// from there. The `finally` bodies and `scope(exit)` that the jump leaves run
+// first. dmd and the spec do so; LDC 1.43 skips them (an LDC bug), and
+// snakebite follows dmd.
 private final class Switch(D) : Node {
     private ControlFlowState* _controlFlow;
     private Node _operand;
@@ -7998,10 +8001,10 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
             auto labelled = statement.isLabelStatement;
             if (labelled.statement is null)
                 return new Jump!(TreeFlow.normal);
-            auto loop = labelledLoop(labelled.statement);
-            if (loop !is null)
-                ev._treeRoot._loopLabels[cast(const(void)*) loop] =
-                    labelled.ident;
+            // `labelTargetOf` is what dmd decided the label names; a `continue`
+            // with the label goes to it when it is a loop.
+            ev._treeRoot._loopLabels[cast(const(void)*) labelTargetOf(labelled)] =
+                labelled.ident;
             auto node = new Labelled(&ev._controlFlow, labelled.ident);
             node._inner = child(labelled.statement, &node._inner);
             return node;
@@ -8035,27 +8038,6 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
         default:
             return generic();
     }
-}
-
-// The loop that the label of `statement` names, which takes a `continue` to
-// the label; null when it names a statement that is not a loop. dmd moves
-// the initialiser of a `for` and the declarations of a `foreach` in front of
-// the loop, and puts the loop in a `try` when one of them has a destructor.
-private Statement labelledLoop(Statement statement) {
-    import dmd.astenums: STMT;
-
-    foreach (one; statementsOf(statement))
-        switch (one.stmt) with (STMT) {
-            case Exp, DtorExp:
-                continue;
-            case For, Do, UnrolledLoop:
-                return one;
-            case TryFinally:
-                return labelledLoop(one.isTryFinallyStatement._body);
-            default:
-                return null;
-        }
-    return null;
 }
 
 // The node of a `switch`, or null when the tree does not cover it: an
