@@ -491,6 +491,230 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `break` in an unrolled `foreach` ends the whole loop, not only the
+// current element.
+static foreach (backend; Matrix!()) {
+    @("breakInUnrolledForeachEndsLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            int main() {
+                int sum;
+                foreach (value; AliasSeq!(1, 2, 3)) {
+                    if (value == 2)
+                        break;
+                    else
+                        sum += value;
+                }
+                return sum == 1 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// `break` in a `try` body inside an unrolled `foreach` leaves the `try`
+// normally and ends the loop.
+static foreach (backend; Matrix!()) {
+    @("breakInTryInUnrolledForeachEndsLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            int main() {
+                int sum;
+                foreach (value; AliasSeq!(1, 2, 3)) {
+                    try {
+                        sum += value;
+                        if (value == 2)
+                            break;
+                    } catch (Exception) {
+                        sum += 100;
+                    }
+                }
+                return sum == 3 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// `break` as the last statement of an unrolled `foreach` body ends the
+// loop after the first element.
+static foreach (backend; Matrix!()) {
+    @("breakAtEndOfUnrolledForeachEndsLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            int main() {
+                int sum;
+                foreach (value; AliasSeq!(1, 2)) {
+                    sum += value;
+                    break;
+                }
+                return sum == 1 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// `continue label` in an inner loop continues the labelled unrolled
+// `foreach` with its next element.
+static foreach (backend; Matrix!()) {
+    @("labelledContinueToUnrolledForeach." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            int main() {
+                int sum;
+                outer: foreach (a; AliasSeq!(1, 2)) {
+                    foreach (b; AliasSeq!(10, 20)) {
+                        if (b == 20)
+                            continue outer;
+                        else
+                            sum += a * b;
+                    }
+                    sum += 1000;
+                }
+                return sum == 30 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// `continue label` in a `case` leaves the `switch` and continues the
+// labelled unrolled `foreach`; `break label` ends it.
+static foreach (backend; Matrix!()) {
+    @("labelledContinueInCaseToUnrolledForeach." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            int main() {
+                int sum;
+                outer: foreach (a; AliasSeq!(1, 2, 3, 4)) {
+                    switch (a) {
+                        case 2:
+                            continue outer;
+                        case 4:
+                            break outer;
+                        default:
+                            break;
+                    }
+                    sum += a;
+                }
+                return sum == 4 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// `break label` in a `try` body inside an inner unrolled `foreach` ends
+// the labelled one, and the statements after it run.
+static foreach (backend; Matrix!()) {
+    @("labelledBreakInTryOutOfUnrolledForeach." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            int main() {
+                int sum;
+                outer: foreach (a; AliasSeq!(1, 2)) {
+                    foreach (b; AliasSeq!(10, 20)) {
+                        try {
+                            sum += a * b;
+                            if (b == 20)
+                                break outer;
+                        } catch (Exception) {
+                            sum += 1000;
+                        }
+                    }
+                }
+                sum += 5;
+                return sum == 35 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A `case` in an unrolled `foreach` that is a statement of a `switch`: the
+// switch enters the body of that element, and the loop goes on with the
+// next ones.
+static foreach (backend; Matrix!()) {
+    @("switchEntersUnrolledForeach." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            int select(int n) {
+                int result;
+                switch (n) {
+                    foreach (i; AliasSeq!(0, 1, 2)) {
+                        case i:
+                            result += 10 ^^ i;
+                            continue;
+                    }
+                    result += 1000;
+                    break;
+                    default:
+                        result = -1;
+                        break;
+                }
+                return result;
+            }
+
+            int main() {
+                return select(0) == 1111 && select(1) == 1110
+                    && select(2) == 1100 && select(5) == -1 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// dmd lowers a `foreach` over a range with a destructor to a `for` in the
+// body of a `try`/`finally`. The label names that `for`.
+static foreach (backend; Matrix!()) {
+    @("labelledContinueToRangeForeachWithDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            struct Range {
+                int* events;
+                int index;
+                bool empty() const { return index >= 4; }
+                int front() const { return index; }
+                void popFront() { ++index; }
+                ~this() { *events += 1; }
+            }
+
+            int main() {
+                int sum;
+                int events;
+                outer: foreach (x; Range(&events, 0)) {
+                    foreach (T; AliasSeq!(int, long)) {
+                        if (x == 1)
+                            continue outer;
+                        if (x == 3)
+                            break outer;
+                        sum += T.sizeof;
+                    }
+                }
+                return sum == 24 && events == 1 ? 0 : 1;
+            }
+        });
+    }
+}
+
 // A label names the loop it is written on, not the first breakable
 // construct compiled inside it - here a `switch` in the `for` init.
 static foreach (backend; Matrix!()) {

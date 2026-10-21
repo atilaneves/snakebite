@@ -3053,6 +3053,42 @@ private TreeFlow afterBody(
     return TreeFlow.normal;
 }
 
+// A tuple `foreach`, which dmd unrolls into one body for each element: the
+// bodies run in turn, and `break` and `continue` apply to it as to any
+// loop.
+private final class Unrolled : Node {
+    private ControlFlowState* _controlFlow;
+    private imported!"dmd.identifier".Identifier _label;
+    private Node[] _bodies;
+    private Statement[] _sources;
+    private Holders _holders;
+    public this(ControlFlowState* controlFlow) { _controlFlow = controlFlow; }
+    public override TreeFlow executeStmt(ubyte* frame) {
+        return runFrom(frame, 0);
+    }
+    // The body that holds the label runs from it, and the loop goes on with
+    // the bodies after it.
+    public override TreeFlow enterAt(ubyte* frame, const(void)* label) {
+        const holder = _holders.of(label, () => _sources);
+        bool exit;
+        const result = after(_bodies[holder].enterAt(frame, label), exit);
+        return exit ? result : runFrom(frame, holder + 1);
+    }
+    private TreeFlow runFrom(ubyte* frame, in size_t start) {
+        foreach (one; _bodies[start .. $]) {
+            bool exit;
+            const result = after(one.executeStmt(frame), exit);
+            if (exit)
+                return result;
+        }
+        return TreeFlow.normal;
+    }
+    private TreeFlow after(in TreeFlow flow, out bool exit) {
+        return flow == TreeFlow.normal
+            ? TreeFlow.normal : afterBody(flow, _controlFlow, _label, exit);
+    }
+}
+
 private final class DoLoop(C) : Loop {
     private ControlFlowState* _controlFlow;
     private C _condition;
@@ -8549,6 +8585,18 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
             node._body = Statements(children(loop._body));
             node._entrances.source = loop._body;
             node._label = ev._treeRoot.loopLabelOf(statement);
+            return node;
+        }
+        case UnrolledLoop: {
+            auto node = new Unrolled(&ev._controlFlow);
+            node._label = ev._treeRoot.loopLabelOf(statement);
+            if (auto all = statement.isUnrolledLoopStatement.statements)
+                foreach (one; *all)
+                    if (one !is null)
+                        node._sources ~= one;
+            node._bodies = new Node[node._sources.length];
+            foreach (i, one; node._sources)
+                node._bodies[i] = child(one, &node._bodies[i]);
             return node;
         }
         case TryCatch: {
