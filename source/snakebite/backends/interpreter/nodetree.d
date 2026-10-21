@@ -2540,8 +2540,8 @@ private final class MethodDelegate(E, MethodReceiver kind) : SliceNode {
         _root = ev._treeRoot;
     }
     public override void executeInto(ubyte* frame, ubyte* dest) {
-        import snakebite.nativelayout:
-            delegateContextOffset, delegateFunctionOffset;
+        import snakebite.nativelayout: delegateContextOffset,
+            delegateFunctionOffset, virtualFunctionWord;
 
         static if (kind == MethodReceiver.structAddress)
             auto context = cast(void*) _receiver.executeAddr(frame);
@@ -2552,7 +2552,7 @@ private final class MethodDelegate(E, MethodReceiver kind) : SliceNode {
                     _ev.failTreeNullDeref(_root, frame, _loc);
         }
         static if (kind == MethodReceiver.virtualReference)
-            const function_ = (*cast(size_t**) context)[_function];
+            const function_ = cast(size_t) virtualFunctionWord(context, _function);
         else
             const function_ = _function;
         *cast(void**) (dest + delegateContextOffset) = context;
@@ -4453,11 +4453,14 @@ private final class IndirectCall(E, CalleeResult result) : Node {
     pragma(inline, false)
     private const(Decoded)* decode(const(void)* word) {
         auto decoded = &_decoded[_oldest];
-        _oldest = (_oldest + 1) % _decoded.length;
-        decoded.word = word;
-        auto function_ = _ev.guestFunctionOf(word, decoded.adjustment);
-        decoded.selected = function_ is null
+        // The word is written last: a throw leaves the entry as it was.
+        Decoded fresh;
+        auto function_ = _ev.guestFunctionOf(word, fresh.adjustment);
+        fresh.selected = function_ is null
             ? Selection.init : selectionFor(function_);
+        fresh.word = word;
+        *decoded = fresh;
+        _oldest = (_oldest + 1) % _decoded.length;
         return decoded;
     }
 

@@ -7405,8 +7405,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private void* _virtualAddress(
         FuncDeclaration method, void* receiver,
     ) {
-        auto table = *cast(void***) receiver;
-        return table[method.vtblIndex];
+        import snakebite.nativelayout: virtualFunctionWord;
+
+        return virtualFunctionWord(receiver, method.vtblIndex);
     }
 
     private CallResult _callIndirect(
