@@ -1546,8 +1546,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import std.meta: AliasSeq;
 
         foreach (instruction; body_.instructions) {
-            if (instruction.handler is &opColdThrow)
-                return false;
             static foreach (operation; AliasSeq!(
                 opStoreIndirect, opFrameAddress,
             ))
@@ -1861,6 +1859,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     + (i + 1 == instructions.length ? 0 : 1);
             else if (instruction.handler is &opReturnVoid)
                 next += i + 1 == instructions.length ? 0 : 1;
+            else if (instruction.handler is &opColdThrow)
+                next += bound.length + 1;
             else
                 ++next;
         }
@@ -1879,8 +1879,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     emit(&opJump, end, 0, 0);
                 continue;
             }
+            const isCold = instruction.handler is &opColdThrow;
+            // The cold entry runs the original function on the callee frame,
+            // which must hold the parameters that share caller operands.
+            if (isCold)
+                foreach (arg; bound) {
+                    emit(&opCopy, base + arg.calleeOffset, arg.callerOffset,
+                        arg.width);
+                }
             Instruction copied = instruction;
-            if (roles.destination == Operand.storage)
+            if (isCold)
+                copied.destination = base + instruction.destination;
+            else if (roles.destination == Operand.storage)
                 copied.destination = writesDirect[i]
                     ? destOffset : place(copied.destination);
             if (roles.source == Operand.storage)
@@ -9857,6 +9867,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t firstContextOffsetOf(
         CallExp expression, FuncDeclaration callee,
     ) {
+        import dmd.astenums: Tclass;
         import snakebite.frontend.dmd.dispatch: CallReceiver, receiverOf;
 
         // DMD expressions must stay mutable for backend evaluation.
@@ -9867,6 +9878,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         case enclosing:
             return contextOffsetOf(calleeContextSourceOf(_function, callee));
         case classValue:
+            // A receiver that is `this` or a plain local is read in place
+            // by an inlined callee that only writes its own frame.
+            if (dest == size_t.max) {
+                const inlinable = _bytecode.inlineBodyOf(callee);
+                if (inlinable !is null && bodyWritesOnlyItsFrame(*inlinable)) {
+                    auto this_ = receiver.expression.isThisExp;
+                    if (this_ !is null && this_.type.toBasetype.ty == Tclass)
+                        return hiddenThisOffset(this_.var);
+                    if (argumentsAreSideEffectFree(expression.arguments)) {
+                        const local = operandOf(
+                            receiver.expression, size_t.sizeof, false);
+                        if (local != size_t.max)
+                            return local;
+                    }
+                }
+            }
             const object = dest != size_t.max
                 ? dest : reserveTemp(pointerFacts);
             evalInto(receiver.expression, object, size_t.sizeof);
@@ -9884,13 +9911,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t receiverAddress(
         Expression aggregate, CallExp expression, in size_t dest = size_t.max,
     ) {
-        import dmd.sideeffect: hasSideEffect;
-
-        bool argumentsPure = true;
-        if (expression.arguments !is null)
-            foreach (argument; *expression.arguments)
-                if (argument !is null && hasSideEffect(argument))
-                    argumentsPure = false;
+        const argumentsPure = argumentsAreSideEffectFree(expression.arguments);
         with (EXP) switch (aggregate.op) {
             case variable, dotVariable, star, index: {
                 const place = placeOf(aggregate, argumentsPure);
@@ -9902,6 +9923,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 break;
         }
         return compileAddress(aggregate);
+    }
+
+    private static bool argumentsAreSideEffectFree(Expressions* arguments) {
+        import dmd.sideeffect: hasSideEffect;
+
+        if (arguments !is null)
+            foreach (argument; *arguments)
+                if (argument !is null && hasSideEffect(argument))
+                    return false;
+        return true;
     }
 
     // Compiles a call to `callee` with `arguments` already resolved -
@@ -10061,7 +10092,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 returnShape, destOffset, receiverOffset);
 
         auto preparation = CallAdapter.Arguments.of(calleeType, arguments);
-        args ~= compileGuestArguments(preparation, calleeLayout);
+        args ~= compileGuestArguments(preparation, calleeLayout,
+            inlinable !is null && bodyWritesOnlyItsFrame(*inlinable)
+                && argumentsAreSideEffectFree(arguments));
 
         if (calleeType.parameterList.varargs == VarArg.variadic)
             args ~= compileVariadicArguments(arguments, calleeLayout).guest;
@@ -10303,6 +10336,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private Arg[] compileGuestArguments(
         CallAdapter.Arguments preparation,
         in FrameLayout layout,
+        in bool readLocalsInPlace = false,
     ) {
         Arg[] args;
         preparation.eachDeclared((i, value) {
@@ -10311,6 +10345,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 const argumentOffset = compileAddress(value.expression);
                 args ~= Arg(argumentOffset, parameter.offset, size_t.sizeof);
                 return;
+            }
+            if (readLocalsInPlace) {
+                const local = operandOf(value.expression, parameter.facts.size,
+                    isRealFloatType(value.expression.type));
+                if (local != size_t.max) {
+                    args ~= Arg(local, parameter.offset, parameter.facts.size);
+                    return;
+                }
             }
 
             const argumentOffset = reserveTemp(parameter.facts);
