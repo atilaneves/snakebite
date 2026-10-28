@@ -937,7 +937,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // receiver takes it.
     private size_t _receiverDest = size_t.max;
     // Temporaries made for an operand and read by its one parent.
-    private bool[size_t] _operandTemps;
+    private size_t[] _operandTemps;
     // The offset and size of every temporary `reserveTemp` made, in
     // increasing order of offset.
     private size_t[] _tempStarts;
@@ -2073,6 +2073,30 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
+    // The arrays of `assignRegisters`, kept for the next compile on the same
+    // thread so that the pass allocates nothing once they are big enough. A
+    // compile runs on one thread and the pass does not call out, so thread
+    // local storage is enough.
+    private static uint[] _mentionsStorage;
+    private static bool[] _isTargetStorage;
+    private static bool[] _readsRegisterStorage;
+    private static bool[] _writesRegisterStorage;
+    private static bool[] _fusedStorage;
+
+    // The first `length` elements of `storage`, set to `T.init`. A short
+    // `storage` doubles at least, so a run of larger compiles allocates
+    // O(log n) times.
+    private static T[] zeroed(T)(ref T[] storage, in size_t length)
+        @safe nothrow pure
+    {
+        if (storage.length < length)
+            storage = new T[length > storage.length * 2
+                ? length : storage.length * 2];
+        else
+            storage[0 .. length] = T.init;
+        return storage[0 .. length];
+    }
+
     // Keeps the result of an arithmetic instruction in a register when the
     // next instruction is its only reader: the operand temporary is read by
     // that instruction alone, and the next instruction is not a branch
@@ -2081,22 +2105,40 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const count = _instructions.length;
         if (count < 2)
             return;
-        size_t[size_t] mentions;
-        auto isTarget = new bool[count + 1];
+        // Only operand temporaries are ever looked up, so a value that is
+        // not one is not counted. `_operandTemps` grows in increasing offset
+        // order (`_tempSize` never shrinks), so the position of an offset in
+        // it, found by binary search, is a dense index. Cost does not depend
+        // on the frame size.
+        import std.range: assumeSorted;
+
+        auto mentions = zeroed(_mentionsStorage, _operandTemps.length);
+        auto isTarget = zeroed(_isTargetStorage, count + 1);
+        size_t tempIndex(in size_t offset) {
+            const index = _operandTemps.assumeSorted.lowerBound(offset).length;
+            return index < _operandTemps.length
+                    && _operandTemps[index] == offset
+                ? index : _operandTemps.length;
+        }
+        void mention(in size_t operand) {
+            const index = tempIndex(operand);
+            if (index < mentions.length)
+                mentions[index]++;
+        }
         foreach (ref instruction; _instructions) {
-            mentions[instruction.destination]++;
+            mention(instruction.destination);
             if (instruction.source != instruction.destination)
-                mentions[instruction.source]++;
+                mention(instruction.source);
             if (instruction.sourceWidth != instruction.source
                     && instruction.sourceWidth != instruction.destination)
-                mentions[instruction.sourceWidth]++;
+                mention(instruction.sourceWidth);
             // A temp that holds an address is mentioned by every indirect
             // operand that reads through it. A field that is not an operand
             // can only add mentions, which only stops a pairing.
             static foreach (field; ["destination", "source", "sourceWidth"])
                 if (mixin("instruction." ~ field) & (1UL << 63))
-                    mentions[(mixin("instruction." ~ field) >> 32)
-                        & 0x7fff_ffffUL]++;
+                    mention((mixin("instruction." ~ field) >> 32)
+                        & 0x7fff_ffffUL);
             if (auto field = branchTargetField(instruction)) {
                 const target = cast(const(Instruction)*) *field;
                 isTarget[target - _instructions.ptr] = true;
@@ -2104,9 +2146,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
         markScopeTargets(isTarget);
 
-        auto readsRegister = new bool[count];
-        auto writesRegister = new bool[count];
-        auto fused = new bool[count];
+        auto readsRegister = zeroed(_readsRegisterStorage, count);
+        auto writesRegister = zeroed(_writesRegisterStorage, count);
+        auto fused = zeroed(_fusedStorage, count);
         foreach (index; 0 .. count - 1) {
             auto producer = &_instructions[index];
             auto consumer = &_instructions[index + 1];
@@ -2116,7 +2158,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             if (family == RegisterFamily.none)
                 continue;
             const temp = producer.destination;
-            if (temp !in _operandTemps || mentions[temp] != 2)
+            const tempSlot = tempIndex(temp);
+            if (tempSlot == mentions.length || mentions[tempSlot] != 2)
                 continue;
             if (consumer.width != producer.width)
                 continue;
@@ -8192,7 +8235,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (offset != size_t.max)
             return offset;
         const temp = reserveTemp(facts);
-        _operandTemps[temp] = true;
+        _operandTemps ~= temp;
         if (floating || isReference(operand.type)
                 || operand.op == EXP.null_)
             evalInto(operand, temp, width);
