@@ -954,6 +954,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const count = data.length;
             if (count == _storage.length) {
                 const capacity = count == 0 ? 4 : count * 2;
+                if (capacity <= count || capacity > size_t.max / T.sizeof)
+                    internalFailure("compile buffer capacity overflows");
                 auto storage = new T[capacity];
                 storage[0 .. count] = data[];
                 _storage = storage;
