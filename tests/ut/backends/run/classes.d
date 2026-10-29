@@ -1132,6 +1132,72 @@ static foreach (backend; Matrix!(
     }
 }
 
+// Reading a class's metadata from one of its virtual methods must not change
+// its identity or the initial values used to create later instances.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot dereference a class reference's classinfo"),
+)) {
+    @("classTypeInfoAfterMethodTakesFunctionAddress." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int increment(int value) { return value + 1; }
+            class Value {
+                int number = 42;
+                int read() {
+                    auto info = typeid(Value);
+                    auto pointer = &increment;
+                    return pointer(number);
+                }
+            }
+            void prepare() { auto info = typeid(Value); }
+            void main() {
+                prepare();
+                auto value = new Value;
+                assert(typeid(Value) is value.classinfo);
+                auto created = cast(Value) typeid(Value).create();
+                assert(created !is null);
+                assert(created.number == 42);
+                assert(created.read() == 43);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot dereference a class reference's classinfo"),
+)) {
+    @("classTypeInfoAfterMethodCallsDeepChain." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int increment(int value) { return value + 1; }
+            int first(int value) { return increment(value); }
+            int second(int value) { return first(value); }
+            int third(int value) { return second(value); }
+            class Value {
+                int number = 42;
+                int read() {
+                    auto info = typeid(Value);
+                    return third(number);
+                }
+            }
+            void prepare() { auto info = typeid(Value); }
+            void main() {
+                prepare();
+                auto value = new Value;
+                assert(typeid(Value) is value.classinfo);
+                auto created = cast(Value) typeid(Value).create();
+                assert(created !is null);
+                assert(created.number == 42);
+                assert(created.read() == 43);
+            }
+        });
+    }
+}
+
 // `super.classinfo` is the instance's own dynamic classinfo (dmd lowers it
 // to `**super`), not the base type's static one.
 static foreach (backend; Matrix!(
