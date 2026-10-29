@@ -425,6 +425,13 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             return _plans.addressOf(method);
         if (_callSelection.usesGuestBody(method, &isGuestFunction,
                 hasNativeSymbol, hasIndependentNativeSymbol(method))) {
+            // Metadata and callback entries need a complete callable body,
+            // even when an inlining attempt asks for their addresses. A
+            // rejection here can leave metadata cached by a recursive read
+            // of the class whose methods are still being compiled.
+            const speculating = _speculating;
+            _speculating = 0;
+            scope(exit) _speculating = speculating;
             word = compileFunction(method);
             registerGuestWord(method, cast(const(Function)*) word);
             _callbackRoots ~= cast(const(Function)*) word;
