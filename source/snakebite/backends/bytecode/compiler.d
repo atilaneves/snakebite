@@ -106,6 +106,9 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // compile runs; it never exceeds `maxSpeculationDepth`.
     private size_t _speculating;
     private bool[FuncDeclaration] _rejectedForInlining;
+    // A depth failure repeats at any greater depth until a function on
+    // its failed chain changes state. Guarded by the compiler lock.
+    private FuncDeclaration[][FuncDeclaration] _speculationBlockers;
     private size_t _cacheMisses;
     private Duration _compilationTime;
     // Complete declared-storage layouts, shared by compilation, context
@@ -542,8 +545,15 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             else if (function_ !in _compiled
                     && function_ !in _rejectedForInlining
                     && hasTinyBody(function_)) {
+                if (auto blockers = unchangedSpeculationBlockers(function_)) {
+                    // A nested hit must still discard its parent's chain,
+                    // not let that parent keep a body with an extra call.
+                    if (_speculating != 0)
+                        throw new SpeculationTooDeep(function_, blockers);
+                    return;
+                }
                 if (_speculating >= maxSpeculationDepth)
-                    throw new SpeculationTooDeep;
+                    throw new SpeculationTooDeep(function_);
                 const nested = _speculating != 0;
                 ++_speculating;
                 scope(exit) --_speculating;
@@ -556,8 +566,11 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                     // leaves its callee a normal call; that callee gets a
                     // normal compile, with its own speculation depth,
                     // when it runs.
-                    if (nested)
+                    if (nested) {
+                        tooDeep.addBlocker(function_);
                         throw tooDeep;
+                    }
+                    _speculationBlockers[function_] = tooDeep.blockers;
                     found = null;
                 }
                 catch (Exception) {
@@ -567,6 +580,18 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             }
         });
         return found is null ? null : found.inlineBody;
+    }
+
+    private FuncDeclaration[] unchangedSpeculationBlockers(FuncDeclaration function_) {
+        if (auto blockers = function_ in _speculationBlockers) {
+            foreach (blocker; *blockers)
+                if (blocker in _compiled || blocker in _rejectedForInlining) {
+                    _speculationBlockers.remove(function_);
+                    return null;
+                }
+            return *blockers;
+        }
+        return null;
     }
 
     // Limits of a callee that a caller copies in place of a call. A longer
@@ -591,8 +616,22 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     private enum maxSpeculationDepth = 3;
 
     private static class SpeculationTooDeep: Exception {
-        this() @safe pure nothrow {
+        private FuncDeclaration[] _blockers;
+
+        this(FuncDeclaration function_, FuncDeclaration[] suffix = null) @safe pure nothrow {
             super("a speculative compile reached the depth limit");
+            // A nested memo hit must not change the stored failure while
+            // callers add their own blockers during unwinding.
+            _blockers = suffix.dup;
+            addBlocker(function_);
+        }
+
+        void addBlocker(FuncDeclaration function_) @safe pure nothrow {
+            _blockers ~= function_;
+        }
+
+        FuncDeclaration[] blockers() @safe pure nothrow {
+            return _blockers;
         }
     }
 
