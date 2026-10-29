@@ -943,26 +943,46 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private enum noReturnAddress = size_t.max;
     private size_t _returnAddress = noReturnAddress;
 
-    private Instruction[] _instructions;
+    // Each active compiler owns its capacity. Published slices keep their GC
+    // allocation; no later compile can reuse it, including a nested compile.
+    private static struct CompileBuffer(T) {
+        private T[] _storage;
+        T[] data;
+        alias data this;
+
+        void opOpAssign(string op)(T value) if (op == "~") {
+            const count = data.length;
+            if (count == _storage.length) {
+                const capacity = count == 0 ? 4 : count * 2;
+                auto storage = new T[capacity];
+                storage[0 .. count] = data[];
+                _storage = storage;
+            }
+            _storage[count] = value;
+            data = _storage[0 .. count + 1];
+        }
+    }
+
+    private CompileBuffer!Instruction _instructions;
     private long[] _constants;
     // Every word of the instructions and constants that holds an address.
     private Reloc[] _relocs;
-    private CallSite[] _callSites;
+    private CompileBuffer!CallSite _callSites;
     private AssertSite[] _assertSites;
     private size_t _haltSite = size_t.max;
     private PendingExceptionHandler[] _exceptionHandlers;
     private size_t _tempSize;
     private uint _tempAlignment;
-    private InlineBody.FrameRange[] _allocations;
+    private CompileBuffer!(InlineBody.FrameRange) _allocations;
     private bool _exposesFrame;
-    private InlineBody.FrameRange[] _exposedFrames;
+    private CompileBuffer!(InlineBody.FrameRange) _exposedFrames;
     private struct DeferredBinding {
         size_t copy;
         Arg arg;
         size_t start;
         size_t end;
     }
-    private DeferredBinding[] _deferredBindings;
+    private CompileBuffer!DeferredBinding _deferredBindings;
     // The frame slot that holds where the call windows start, past the end of
     // this frame, so that nothing the callee of a call can write is a
     // temporary of this function. `size_t.max` until a call needs it.
@@ -976,11 +996,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // receiver takes it.
     private size_t _receiverDest = size_t.max;
     // Temporaries made for an operand and read by its one parent.
-    private size_t[] _operandTemps;
+    private CompileBuffer!size_t _operandTemps;
     // The offset and size of every temporary `reserveTemp` made, in
     // increasing order of offset.
-    private size_t[] _tempStarts;
-    private size_t[] _tempSizes;
+    private CompileBuffer!size_t _tempStarts;
+    private CompileBuffer!size_t _tempSizes;
     private struct Temporary {
         size_t base;
         size_t site;
@@ -2154,7 +2174,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto mentions = zeroed(_mentionsStorage, _operandTemps.length);
         auto isTarget = zeroed(_isTargetStorage, count + 1);
         size_t tempIndex(in size_t offset) {
-            const index = _operandTemps.assumeSorted.lowerBound(offset).length;
+            const index = _operandTemps.data.assumeSorted.lowerBound(offset).length;
             return index < _operandTemps.length
                     && _operandTemps[index] == offset
                 ? index : _operandTemps.length;
