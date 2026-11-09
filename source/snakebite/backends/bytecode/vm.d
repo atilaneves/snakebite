@@ -5281,3 +5281,221 @@ private const(Specialisation)* lookupSpecialisation(
     }
     return null;
 }
+
+
+// Prototype template JIT (issue #873, P1): classification of the handlers that
+// have a template. See `jit.d`.
+import snakebite.backends.bytecode.jit: JitOp, JKind, jitFunction;
+
+private struct JitEntry {
+    Instruction.Handler handler;
+    JitOp op;
+}
+
+private enum jitSlots = 16384;
+private __gshared JitEntry[jitSlots] jitTable;
+private __gshared bool jitTableBuilt;
+private __gshared bool jitEnabledFlag;
+private __gshared bool jitChecked;
+
+package bool jitEnabled() {
+    import core.stdc.stdlib: getenv;
+
+    if (!jitChecked) {
+        const value = getenv("SNAKEBITE_JIT");
+        jitEnabledFlag = chainedDispatch && value !is null && value[0] == '1';
+        jitChecked = true;
+    }
+    return jitEnabledFlag;
+}
+
+private size_t jitSlot(in Instruction.Handler handler) {
+    return ((cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL) >> 20)
+        & (jitSlots - 1);
+}
+
+private void jitPut(Instruction.Handler handler, JitOp op) {
+    if (handler is null)
+        return;
+    auto slot = jitSlot(handler);
+    while (jitTable[slot].handler !is null && jitTable[slot].handler !is handler)
+        slot = (slot + 1) & (jitSlots - 1);
+    jitTable[slot] = JitEntry(handler, op);
+}
+
+private JitOp jitGet(in Instruction.Handler handler) {
+    if (handler is null)
+        return JitOp.init;
+    auto slot = jitSlot(handler);
+    while (jitTable[slot].handler !is null) {
+        if (jitTable[slot].handler is handler)
+            return jitTable[slot].op;
+        slot = (slot + 1) & (jitSlots - 1);
+    }
+    return JitOp.init;
+}
+
+private string quotedSymbol(string text) {
+    size_t end = 1;
+    while (text[end] != '"')
+        ++end;
+    return text[1 .. end];
+}
+
+private ubyte aluCodeOf(string symbol) {
+    switch (symbol) {
+        case "+": return 0;
+        case "|": return 1;
+        case "&": return 4;
+        case "-": return 5;
+        case "^": return 6;
+        case "*": return 8;
+        default: return 255;
+    }
+}
+
+private ubyte fpCodeOf(string symbol) {
+    switch (symbol) {
+        case "+": return 0;
+        case "-": return 1;
+        case "*": return 2;
+        default: return 3;
+    }
+}
+
+private ubyte comparisonOf(string symbol) {
+    foreach (index, candidate; comparisonSymbols)
+        if (candidate == symbol)
+            return cast(ubyte) index;
+    return 255;
+}
+
+private JitOp jop(JKind kind, ubyte a = 0, ubyte b = 0, ubyte c = 0,
+    ubyte d = 0, ubyte e = 0, ubyte w = 0)
+{
+    JitOp op;
+    op.kind = kind;
+    op.a = a; op.b = b; op.c = c; op.d = d; op.e = e; op.w = w;
+    return op;
+}
+
+private void buildJitTable() {
+    jitTableBuilt = true;
+    static foreach (triple; threeAddressNames) {{
+        enum symbol = quotedSymbol(triple[2]);
+        static foreach (constant; [false, true]) {{
+            enum suffix = constant ? "K" : "";
+            auto handler = mixin("&" ~ triple[0] ~ suffix);
+            static if (triple[1] == "opInt3")
+                jitPut(handler, jop(JKind.int3, aluCodeOf(symbol), constant));
+            else static if (triple[1] == "opFloat3")
+                jitPut(handler, jop(JKind.fp3, fpCodeOf(symbol), 0, constant));
+            else static if (triple[1] == "opCompare3")
+                jitPut(handler, jop(JKind.cmp3, comparisonOf(symbol),
+                    triple[2][$ - 4 .. $] == "true", constant));
+            else static if (triple[1] == "opFloatCompare3")
+                jitPut(handler, jop(JKind.fpcmp3, comparisonOf(symbol), 0,
+                    constant));
+        }}
+    }}
+    static foreach (triple; registerNames) {{
+        enum symbol = quotedSymbol(triple[2]);
+        static foreach (constant; [false, true])
+            static foreach (from; [false, true])
+                static foreach (to; [false, true])
+                    static if (from || to) {{
+                        auto handler = registerForm(mixin("&" ~ triple[0]
+                            ~ (constant ? "K" : "")), from, to);
+                        static if (triple[1] == "opInt3R")
+                            jitPut(handler, jop(JKind.int3, aluCodeOf(symbol),
+                                constant, from, to));
+                        else
+                            jitPut(handler, jop(JKind.fp3, fpCodeOf(symbol), 0,
+                                constant, from, to));
+                    }}
+    }}
+    foreach (index, handler; fusedHandlers) {
+        const constant = index % 2;
+        const jumpWhen = (index / 2) % 2;
+        const kind = (index / 4) % 3;
+        const comparison = index / 12;
+        jitPut(handler, jop(JKind.fused, cast(ubyte) comparison,
+            cast(ubyte) kind, cast(ubyte) jumpWhen, cast(ubyte) constant, 0));
+        jitPut(fusedRegisterHandlers[index], jop(JKind.fused,
+            cast(ubyte) comparison, cast(ubyte) kind, cast(ubyte) jumpWhen,
+            cast(ubyte) constant, 1));
+    }
+    jitPut(&opAdd, jop(JKind.int3, 0, 0, 0, 0, 1));
+    jitPut(&opSubtract, jop(JKind.int3, 5, 0, 0, 0, 1));
+    jitPut(&opMultiply, jop(JKind.int3, 8, 0, 0, 0, 1));
+    jitPut(&opBitAnd, jop(JKind.int3, 4, 0, 0, 0, 1));
+    jitPut(&opBitOr, jop(JKind.int3, 1, 0, 0, 0, 1));
+    jitPut(&opBitXor, jop(JKind.int3, 6, 0, 0, 0, 1));
+    jitPut(&opLessThanSigned, jop(JKind.cmp3, 0, 1, 0, 0, 1));
+    jitPut(&opLessOrEqualSigned, jop(JKind.cmp3, 1, 1, 0, 0, 1));
+    jitPut(&opGreaterThanSigned, jop(JKind.cmp3, 2, 1, 0, 0, 1));
+    jitPut(&opGreaterOrEqualSigned, jop(JKind.cmp3, 3, 1, 0, 0, 1));
+    jitPut(&opLessThanUnsigned, jop(JKind.cmp3, 0, 0, 0, 0, 1));
+    jitPut(&opLessOrEqualUnsigned, jop(JKind.cmp3, 1, 0, 0, 0, 1));
+    jitPut(&opGreaterThanUnsigned, jop(JKind.cmp3, 2, 0, 0, 0, 1));
+    jitPut(&opGreaterOrEqualUnsigned, jop(JKind.cmp3, 3, 0, 0, 0, 1));
+    jitPut(&opEqual, jop(JKind.cmp3, 4, 0, 0, 0, 1));
+    jitPut(&opNotEqual, jop(JKind.cmp3, 5, 0, 0, 0, 1));
+
+    jitPut(&opCopy, jop(JKind.copy));
+    static foreach (width; 1 .. 17) {
+        jitPut(&opCopyFixed!(width, true), jop(JKind.copy, 1, 0, 0, 0, 0, width));
+        jitPut(&opCopyFixed!width, jop(JKind.copy, 0, 0, 0, 0, 0, width));
+    }
+    jitPut(&opConstant, jop(JKind.constant));
+    jitPut(&opZero, jop(JKind.zero));
+    jitPut(&opJump, jop(JKind.jump));
+    jitPut(&opBranchFalse, jop(JKind.branch, 0));
+    jitPut(&opBranchTrue, jop(JKind.branch, 1));
+    jitPut(&opStaticLoad, jop(JKind.staticLoad));
+    jitPut(&opStaticStore, jop(JKind.staticStore));
+    jitPut(&opStaticAddress, jop(JKind.staticAddr));
+    jitPut(&opLoadIndirect, jop(JKind.loadInd));
+    jitPut(&opStoreIndirect, jop(JKind.storeInd));
+    static foreach (width; [1, 2, 4, 8, 16, 32]) {
+        jitPut(&opLoadIndirectFixed!width, jop(JKind.loadInd, 0, 0, 0, 0, 0, width));
+        jitPut(&opStoreIndirectFixed!width, jop(JKind.storeInd, 0, 0, 0, 0, 0, width));
+        static foreach (copyWidth; [1, 2, 4, 8, 16])
+            jitPut(&opLoadThenCopy!(width, copyWidth),
+                jop(JKind.loadInd, 0, 0, 0, 0, 0, width));
+    }
+    static foreach (base; EnumMembers!IndexBase)
+        jitPut(&opIndex!base, jop(JKind.index, base));
+    foreach (instance; checkedInstances)
+        jitPut(instance.handler, jop(JKind.checked, cast(ubyte) instance.access,
+            cast(ubyte) instance.fixedLength, cast(ubyte) instance.indexWidth,
+            cast(ubyte) instance.signed, cast(ubyte) instance.constantValue,
+            cast(ubyte) instance.elementSize));
+    jitPut(&opFrameAddress, jop(JKind.frameAddr));
+    jitPut(&opLogicalNot, jop(JKind.boolOp, 0));
+    jitPut(&opCastToBool, jop(JKind.boolOp, 1));
+    jitPut(&opNegate, jop(JKind.unary, 0));
+    jitPut(&opComplement, jop(JKind.unary, 1));
+    jitPut(&opCastWidenSigned, jop(JKind.widen, 0));
+    jitPut(&opCastWidenUnsigned, jop(JKind.widen, 1));
+    static foreach (kind; AliasSeq!(CastKind.narrow, CastKind.widenSigned,
+        CastKind.widenUnsigned))
+        static foreach (destSize; [1, 2, 4, 8])
+            static foreach (sourceSize; [1, 2, 4, 8])
+                jitPut(&opCastFixedAs!(kind, destSize, sourceSize),
+                    jop(JKind.castFixed, kind == CastKind.widenUnsigned,
+                        sourceSize, 0, 0, 0, destSize));
+}
+
+// Replaces the handlers of `instructions` by JIT code. `snapshot` holds the
+// instructions as they were before `specialiseHandlers`.
+package bool jitCompile(Instruction[] instructions,
+    const(Instruction)[] snapshot, const(long)[] constants, const(char)[] name)
+{
+    if (!jitTableBuilt)
+        buildJitTable;
+    auto ops = new JitOp[snapshot.length];
+    foreach (index, ref instruction; snapshot)
+        ops[index] = jitGet(instruction.handler);
+    return jitFunction(instructions, snapshot, ops, constants, name);
+}

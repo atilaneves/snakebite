@@ -862,7 +862,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         CompareKind, Comparison, constantForm, fusedBranchHandler, fusesConstant,
         firstComparisonHandler, threeAddressConstantHandlers,
         threeAddressHandlers,
-        decodesIndirect, isFusedBranch, specialiseHandlers, RegisterFamily, registerFamily,
+        decodesIndirect, isFusedBranch, specialiseHandlers, jitEnabled, jitCompile, RegisterFamily, registerFamily,
         fusedRegisterFamily, registerForm, fusedRegisterForm,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall, opCallWindowDiscard, opCallWindowFrame,
@@ -1274,7 +1274,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         fuseReturns;
         fuseLoadCopies;
         assignRegisters;
+        Instruction[] jitSnapshot;
+        const useJit = !recordRelocs && jitEnabled;
+        if (useJit)
+            jitSnapshot = _instructions.dup;
         specialiseHandlers(_instructions);
+        if (useJit) {
+            import std.string: fromStringz;
+            jitCompile(_instructions, jitSnapshot, _constants,
+                _function.toChars().fromStringz);
+        }
 
         foreach (ref site; _callSites)
             if (site.cleanupStartIndex != size_t.max) {
