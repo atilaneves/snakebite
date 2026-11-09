@@ -1102,6 +1102,12 @@ public struct Function {
     // `callee` and `state`.
     package CallSite.FastCall windowFacts;
 
+    // Tier-up (issue #873, P1d). Both are zero when the function is made.
+    // `jitHeat` wraps around after `jitThreshold` events; `jitState` is a
+    // `JitTier`.
+    package uint jitHeat;
+    package uint jitState;
+
     package void fixWindowFacts() {
         activationAlignment = frameAlignment > uint(Activation.alignof)
             ? frameAlignment : uint(Activation.alignof);
@@ -1278,6 +1284,7 @@ public struct Vm {
             &_frames, frame.base, returnPlace);
         initializeClosure(&function_, frame.base, &_frames);
         initializeWindow(&function_, frame.base, &_frames);
+        countCall(&function_);
         auto pc = function_.instructions.ptr;
         dispatch(pc, frame.base, returnPlace, &function_, &_frames, &this);
     }
@@ -2168,6 +2175,7 @@ private const(Instruction)* enterWindow(Destination destination, bool indirect)(
     *cast(void**) (calleeFrame + fast.placeStore) = place;
     *cast(ubyte**) (calleeFrame + fast.windowStore) =
         cast(ubyte*) activation + fast.windowBase;
+    countCall(callee);
     activation.pc = callee.instructions.ptr;
     activation.function_ = callee;
     activation.cleanupMark = frames.cleanupMark;
@@ -2392,6 +2400,7 @@ private const(Instruction)* opCallPlain(
     *cast(void**) (calleeFrame + fast.placeStore) = place;
     *cast(ubyte**) (calleeFrame + fast.windowStore) =
         cast(ubyte*) activation + fast.windowBase;
+    countCall(fast.callee);
     activation.pc = fast.callee.instructions.ptr;
     activation.function_ = fast.callee;
     activation.cleanupMark = frames.cleanupMark;
@@ -2617,6 +2626,7 @@ private const(Instruction)* callFunction(bool redirected = false, Decoded)(
         execution.frames, activation.frame,
         site.returnWidth == 0 ? null : execution.destination);
     initializeWindow(callee, activation.frame, execution.frames);
+    countCall(callee);
     activation.pc = callee.instructions.ptr;
     activation.function_ = callee;
     activation.cleanupMark = execution.frames.cleanupMark;
@@ -5298,12 +5308,36 @@ private shared bool jitTableReady;
 private __gshared bool jitEnabledFlag;
 private __gshared bool jitChecked;
 
+// The step added to `Function.jitHeat` for each event: 2^32 / threshold, so
+// that the sum carries out after `threshold` events. Zero while the JIT is
+// off, so that nothing ever carries.
+package __gshared uint jitStep;
+// The step of a guest call: `jitStep` times SNAKEBITE_JIT_CALL_WEIGHT.
+package __gshared uint jitCallStep;
+private __gshared uint jitThreshold = 256;
+
 package bool jitEnabled() {
-    import core.stdc.stdlib: getenv;
+    import core.stdc.stdlib: getenv, atoi;
 
     if (!jitChecked) {
         const value = getenv("SNAKEBITE_JIT");
         jitEnabledFlag = chainedDispatch && value !is null && value[0] == '1';
+        if (jitEnabledFlag) {
+            const threshold = getenv("SNAKEBITE_JIT_THRESHOLD");
+            if (threshold !is null)
+                jitThreshold = atoi(threshold);
+            if (jitThreshold < 2)
+                jitThreshold = 2;
+            ensureJitTable;
+            jitStep = cast(uint) (((1UL << 32) + jitThreshold - 1)
+                / jitThreshold);
+            jitCallStep = jitStep;
+            const weight = getenv("SNAKEBITE_JIT_CALL_WEIGHT");
+            if (weight !is null && atoi(weight) > 1) {
+                const product = cast(ulong) jitStep * atoi(weight);
+                jitCallStep = product > uint.max ? uint.max : cast(uint) product;
+            }
+        }
         jitChecked = true;
     }
     return jitEnabledFlag;
@@ -5495,7 +5529,7 @@ private void buildJitTable() {
 
 private shared int jitTableLock;
 
-// Builds the table once, even when several threads compile.
+// Builds the tables once, even when several threads compile.
 private void ensureJitTable() {
     import core.atomic: atomicLoad, atomicStore, cas, MemoryOrder;
     if (atomicLoad!(MemoryOrder.acq)(jitTableReady))
@@ -5503,6 +5537,8 @@ private void ensureJitTable() {
     while (!cas(&jitTableLock, 0, 1)) {}
     if (!jitTableReady) {
         buildJitTable;
+        buildCountedTables;
+        buildUnspecialiseTable;
         atomicStore!(MemoryOrder.rel)(jitTableReady, true);
     }
     atomicStore(jitTableLock, 0);
@@ -5510,24 +5546,266 @@ private void ensureJitTable() {
 
 private Scratch!JitOp jitOpScratch;
 private Scratch!Instruction jitSnapshotScratch;
+private Scratch!(Instruction.Handler) jitOriginalScratch;
 
-// A copy of `instructions` in a thread-local buffer, valid until the next
-// call on this thread.
-package const(Instruction)[] jitSnapshotOf(in Instruction[] instructions) {
-    auto copy = jitSnapshotScratch.reserve(instructions.length)[
-        0 .. instructions.length];
-    copy[] = instructions[];
-    return copy;
+// Tier-up (issue #873, P1d). An event is a guest call of a function, or an
+// execution of one of its backward branches. Each adds `jitStep` to
+// `Function.jitHeat`; the carry out of the 32-bit sum, after `jitThreshold`
+// events, makes `jitTierUp` compile the function. Nothing is made for a
+// function when it is compiled to bytecode, except that the compiler swaps
+// the handler of each backward branch for its counting twin (`countedHandler`,
+// found in `countedOf`). The snapshot and the original handlers the JIT needs
+// are rebuilt from the instructions at tier-up.
+private enum JitTier : uint { interpreted, compiling, compiled, failed }
+
+private struct HandlerPair {
+    Instruction.Handler key;
+    Instruction.Handler value;
 }
 
-// Replaces the handlers of `instructions` by JIT code. `snapshot` holds the
-// instructions as they were before `specialiseHandlers`.
-package bool jitCompile(Instruction[] instructions,
-    const(Instruction)[] snapshot, const(long)[] constants, const(char)[] name)
+private enum pairSlots = 1024;
+private __gshared HandlerPair[pairSlots] countedOf;
+private __gshared HandlerPair[pairSlots] uncountedOf;
+
+private size_t pairSlot(in Instruction.Handler handler) {
+    return ((cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL) >> 20)
+        & (pairSlots - 1);
+}
+
+private void pairPut(ref HandlerPair[pairSlots] table,
+    Instruction.Handler key, Instruction.Handler value)
 {
-    ensureJitTable;
-    auto ops = jitOpScratch.reserve(snapshot.length)[0 .. snapshot.length];
-    foreach (index, ref instruction; snapshot)
-        ops[index] = jitGet(instruction.handler);
-    return jitFunction(instructions, snapshot, ops, constants, name);
+    auto slot = pairSlot(key);
+    while (table[slot].key !is null && table[slot].key !is key)
+        slot = (slot + 1) & (pairSlots - 1);
+    table[slot] = HandlerPair(key, value);
+}
+
+private Instruction.Handler pairGet(ref const HandlerPair[pairSlots] table,
+    in Instruction.Handler key)
+{
+    auto slot = pairSlot(key);
+    while (table[slot].key !is null) {
+        if (table[slot].key is key)
+            return table[slot].value;
+        slot = (slot + 1) & (pairSlots - 1);
+    }
+    return null;
+}
+
+pragma(inline, true)
+private bool addHeat(Function* function_, uint step) {
+    import core.checkedint: addu;
+
+    bool overflow;
+    function_.jitHeat = addu(function_.jitHeat, step, overflow);
+    return overflow;
+}
+
+pragma(inline, true)
+private void countCall(const(Function)* callee) {
+    auto function_ = cast(Function*) callee;
+    if (addHeat(function_, jitCallStep))
+        jitTierUp(function_);
+}
+
+// `original` with a count of the event in front of it.
+private const(Instruction)* countedHandler(alias original)(
+    const(Instruction)* pc,
+    Activation* active,
+    DispatchState* state,
+    ubyte* frame,
+    ulong r0,
+    double fp0,
+) {
+    if (addHeat(cast(Function*) active.function_, jitStep)
+            && jitTierUp(cast(Function*) active.function_)) {
+        // The word of this instruction now holds JIT code.
+        import core.atomic: atomicLoad, MemoryOrder;
+        const compiled = cast(Instruction.Handler) atomicLoad!(MemoryOrder.acq)(
+            *cast(shared(size_t)*) &pc.handler);
+        return compiled(pc, active, state, frame, r0, fp0);
+    }
+    return original(pc, active, state, frame, r0, fp0);
+}
+
+private void addCounted(Instruction.Handler original,
+    Instruction.Handler counted)
+{
+    pairPut(countedOf, original, counted);
+    pairPut(uncountedOf, counted, original);
+}
+
+private void buildCountedTables() {
+    addCounted(&opJump, &countedHandler!opJump);
+    addCounted(&opBranchFalse, &countedHandler!opBranchFalse);
+    addCounted(&opBranchTrue, &countedHandler!opBranchTrue);
+    static foreach (comparison; EnumMembers!Comparison)
+        static foreach (kind; EnumMembers!CompareKind)
+            static foreach (jumpWhen; [false, true])
+                static foreach (constant; [false, true]) {
+                    addCounted(fusedBranchHandler(comparison, kind, jumpWhen,
+                            constant),
+                        &countedHandler!(opFusedBranch!(comparison, kind,
+                            jumpWhen, constant)));
+                    addCounted(fusedRegisterHandlers[fusedIndex(comparison,
+                            kind, jumpWhen, constant)],
+                        &countedHandler!(opFusedBranchR!(comparison, kind,
+                            jumpWhen, constant)));
+                }
+}
+
+// Backward branches seen at tier-up, by whether they had a counting twin.
+// Printed with the JIT stats.
+package __gshared size_t jitBackEdgesCounted, jitBackEdgesMissed;
+package __gshared Instruction.Handler[8] jitMissedHandlers;
+
+// Replaces the handler of each of `instructions[indices]` by its counting
+// twin. A handler with no twin stays: that branch is not counted.
+package void jitCountBackEdges(Instruction[] instructions,
+    const(size_t)[] indices)
+{
+    foreach (index; indices) {
+        auto counted = pairGet(countedOf, instructions[index].handler);
+        if (counted !is null) {
+            instructions[index].handler = counted;
+            ++jitBackEdgesCounted;
+        } else {
+            if (jitBackEdgesMissed < jitMissedHandlers.length)
+                jitMissedHandlers[jitBackEdgesMissed] =
+                    instructions[index].handler;
+            ++jitBackEdgesMissed;
+        }
+    }
+}
+
+// How `specialiseHandlers` made a handler: the general handler, and the
+// indirect operands whose bit it cleared (`mask`: 1 destination, 2 source,
+// 4 right operand).
+private struct Unspecialised {
+    Instruction.Handler handler;
+    Instruction.Handler general;
+    ubyte mask;
+    bool ambiguous;
+}
+
+private __gshared Unspecialised[] unspecialised;
+package __gshared size_t jitAmbiguous;
+
+private void buildUnspecialiseTable() {
+    import core.stdc.stdlib: calloc;
+
+    size_t count;
+    foreach (ref entry; specialisations)
+        if (entry.general !is null) {
+            count += 2 * widthSlots;
+            if (entry.masked !is null)
+                count += 7 * widthSlots;
+        }
+    size_t capacity = 1024;
+    while (capacity < 2 * count)
+        capacity *= 2;
+    auto table = (cast(Unspecialised*) calloc(capacity,
+        Unspecialised.sizeof))[0 .. capacity];
+
+    void put(Instruction.Handler handler, Instruction.Handler general,
+        ubyte mask)
+    {
+        if (handler is null)
+            return;
+        auto slot = ((cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL) >> 20)
+            & (capacity - 1);
+        while (table[slot].handler !is null && table[slot].handler !is handler)
+            slot = (slot + 1) & (capacity - 1);
+        if (table[slot].handler is handler) {
+            if (table[slot].general !is general || table[slot].mask != mask) {
+                table[slot].ambiguous = true;
+                ++jitAmbiguous;
+            }
+            return;
+        }
+        table[slot] = Unspecialised(handler, general, mask, false);
+    }
+
+    foreach (ref entry; specialisations) {
+        if (entry.general is null)
+            continue;
+        foreach (frame; entry.handlers)
+            foreach (handler; frame)
+                put(handler, entry.general, 0);
+        if (entry.masked !is null)
+            foreach (mask, frame; *entry.masked)
+                foreach (handler; frame)
+                    put(handler, entry.general, cast(ubyte) (mask + 1));
+    }
+    unspecialised = table;
+}
+
+// The instruction as it was before `specialiseHandlers`.
+private bool unspecialise(ref Instruction instruction) {
+    const capacity = unspecialised.length;
+    auto slot = ((cast(size_t) instruction.handler * 0x9E37_79B9_7F4A_7C15UL)
+        >> 20) & (capacity - 1);
+    while (unspecialised[slot].handler !is null) {
+        if (unspecialised[slot].handler is instruction.handler) {
+            const entry = &unspecialised[slot];
+            if (entry.ambiguous)
+                return false;
+            instruction.handler = entry.general;
+            if (entry.mask & 1)
+                instruction.destination |= indirectBit;
+            if (entry.mask & 2)
+                instruction.source |= indirectBit;
+            if (entry.mask & 4)
+                instruction.sourceWidth |= indirectBit;
+            return true;
+        }
+        slot = (slot + 1) & (capacity - 1);
+    }
+    return true;
+}
+
+// Compiles `function_` once; returns true when it has JIT code. Only one
+// thread compiles: a thread that loses runs the interpreter.
+pragma(inline, false)
+private bool jitTierUp(Function* function_) {
+    import core.atomic: atomicLoad, atomicStore, cas, MemoryOrder;
+
+    auto state = cast(shared(uint)*) &function_.jitState;
+    const seen = atomicLoad!(MemoryOrder.acq)(*state);
+    if (seen != JitTier.interpreted)
+        return seen == JitTier.compiled;
+    if (!cas(state, cast(uint) JitTier.interpreted,
+            cast(uint) JitTier.compiling))
+        return false;
+
+    auto instructions = function_.instructions;
+    const n = instructions.length;
+    auto snapshot = jitSnapshotScratch.reserve(n)[0 .. n];
+    auto ops = jitOpScratch.reserve(n)[0 .. n];
+    auto originals = jitOriginalScratch.reserve(n)[0 .. n];
+    bool ok = true;
+    foreach (index; 0 .. n) {
+        auto handler = instructions[index].handler;
+        if (handler !is null) {
+            if (auto original = pairGet(uncountedOf, handler))
+                handler = original;
+        }
+        originals[index] = handler;
+        snapshot[index] = instructions[index];
+        snapshot[index].handler = handler;
+        if (handler is null) {
+            ops[index] = JitOp.init;
+            continue;
+        }
+        if (!unspecialise(snapshot[index]))
+            ok = false;
+        ops[index] = jitGet(snapshot[index].handler);
+    }
+    if (ok)
+        ok = jitFunction(instructions, snapshot, ops, originals,
+            function_.constants, "jit");
+    atomicStore!(MemoryOrder.rel)(*state,
+        cast(uint) (ok ? JitTier.compiled : JitTier.failed));
+    return ok;
 }

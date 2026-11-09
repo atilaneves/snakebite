@@ -13,6 +13,7 @@ module snakebite.backends.bytecode.jit;
 // An instruction without a template gets a stub that sets `pc` and jumps to
 // its real handler.
 
+import core.atomic: atomicStore, MemoryOrder;
 import core.stdc.stdio: FILE, fopen, fprintf, fflush, stderr;
 import core.stdc.stdlib: malloc, realloc, free, getenv, atexit;
 import core.stdc.string: strcmp;
@@ -72,6 +73,11 @@ private extern(C) void dumpStats() {
         ~ "declined=%llu bytes=%llu region=%llu emit_ms=%.3f memory_ms=%.3f\n",
         statFunctions, statInstructions, statTemplated, statDeclined,
         statBytes, cast(ulong) regionCursor, statEmitNs / 1e6, statProtectNs / 1e6);
+    import snakebite.backends.bytecode.vm: jitBackEdgesCounted,
+        jitBackEdgesMissed, jitAmbiguous;
+    fprintf(stderr, "JIT backedges counted=%llu missed=%llu ambiguous=%llu\n",
+        cast(ulong) jitBackEdgesCounted, cast(ulong) jitBackEdgesMissed,
+        cast(ulong) jitAmbiguous);
 }
 
 // The code region. A memfd file is mapped twice: `writeBase` is read+write,
@@ -190,6 +196,8 @@ package struct Scratch(T) {
         return ptr;
     }
 }
+
+private static immutable int[4] chunkSizes = [8, 4, 2, 1];
 
 private struct Fixup {
     size_t position;
@@ -538,7 +546,7 @@ private struct Gen {
             a.sse(0, 0x11, 1, dd);
             off += 16;
         }
-        foreach (c; [8, 4, 2, 1]) {
+        foreach (c; chunkSizes) {
             if (size - off >= c) {
                 auto ss = s; ss.disp += cast(int) off;
                 auto dd = d; dd.disp += cast(int) off;
@@ -644,7 +652,7 @@ private struct Gen {
             if (!opnd(ins.destination, R9, d))
                 return false;
             size_t off = 0;
-            foreach (c; [8, 4, 2, 1]) {
+            foreach (c; chunkSizes) {
                 while (size - off >= c) {
                     auto dd = d;
                     dd.disp += cast(int) off;
@@ -1213,6 +1221,7 @@ private struct Gen {
 // Returns true when the function got JIT code.
 package bool jitFunction(Instruction[] instructions,
     const(Instruction)[] snapshot, const(JitOp)[] ops,
+    const(Instruction.Handler)[] originals,
     const(long)[] constants, const(char)[] name)
 {
     if (instructions.length == 0 || !ensureRegion())
@@ -1236,9 +1245,6 @@ package bool jitFunction(Instruction[] instructions,
         0 .. instructions.length + 1];
     g.fixups = fixupScratch.ptr;
     g.fixupCap = fixupScratch.cap;
-    auto originals = originalScratch.reserve(instructions.length);
-    foreach (i, ref instruction; instructions)
-        originals[i] = instruction.handler;
 
     size_t templated;
     foreach (i; 0 .. instructions.length) {
@@ -1278,8 +1284,13 @@ package bool jitFunction(Instruction[] instructions,
         populateChunk;
 
     auto code = execBase + start;
+    // One aligned 8-byte store with release order for each word, after the
+    // code is complete. A thread that runs the function moves to JIT code at
+    // its next dispatch.
     foreach (i, ref instruction; instructions)
-        instruction.handler = cast(Instruction.Handler) (code + g.labels[i]);
+        atomicStore!(MemoryOrder.rel)(
+            *cast(shared(size_t)*) &instruction.handler,
+            cast(size_t) (code + g.labels[i]));
 
     ++statFunctions;
     statInstructions += instructions.length;

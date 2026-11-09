@@ -862,7 +862,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         CompareKind, Comparison, constantForm, fusedBranchHandler, fusesConstant,
         firstComparisonHandler, threeAddressConstantHandlers,
         threeAddressHandlers,
-        decodesIndirect, isFusedBranch, specialiseHandlers, jitEnabled, jitCompile, jitSnapshotOf, RegisterFamily, registerFamily,
+        decodesIndirect, isFusedBranch, specialiseHandlers, jitEnabled, jitCountBackEdges, RegisterFamily, registerFamily,
         fusedRegisterFamily, registerForm, fusedRegisterForm,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall, opCallWindowDiscard, opCallWindowFrame,
@@ -1274,16 +1274,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         fuseReturns;
         fuseLoadCopies;
         assignRegisters;
-        const(Instruction)[] jitSnapshot;
-        const useJit = !recordRelocs && jitEnabled;
-        if (useJit)
-            jitSnapshot = jitSnapshotOf(_instructions);
         specialiseHandlers(_instructions);
-        if (useJit) {
-            import std.string: fromStringz;
-            jitCompile(_instructions, jitSnapshot, _constants,
-                _function.toChars().fromStringz);
-        }
+        if (!recordRelocs && jitEnabled)
+            jitCountBackEdges(_instructions, _backEdges);
 
         foreach (ref site; _callSites)
             if (site.cleanupStartIndex != size_t.max) {
@@ -3184,13 +3177,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // cannot execute memory outside the function. A cleanup may branch
     // to its exclusive end, even one past the last instruction: the VM
     // stops at that address before it reads an instruction.
+    // The indices of the backward branches, when the JIT counts them.
+    private size_t[] _backEdges;
+
     private void resolveBranches() {
         import std.conv: text;
 
+        const counting = !recordRelocs && jitEnabled;
         foreach (index, ref instruction; _instructions) {
             auto target = branchTargetField(instruction);
             if (target is null)
                 continue;
+            if (counting && *target <= index)
+                _backEdges ~= index;
 
             if (!(*target < _instructions.length
                     || (*target == _instructions.length
