@@ -1084,6 +1084,8 @@ public struct Function {
     // Every word of this function that holds a process address, except the
     // handler of each instruction.
     package Reloc[] relocs;
+    package const(imported!"snakebite.nativeimage".NativeImageData)* imageData;
+    package ubyte[][] imageRoots;
     // `size_t.max` unless this function lays out call windows. Otherwise
     // this frame slot holds the address where they start, and `windowBytes`
     // is how far they reach from it.
@@ -1119,8 +1121,8 @@ private void recordAddress(
     ref Reloc[] relocs, in Place.Section section, in size_t index,
     in Place.Field field, in Target.Kind kind, in size_t address,
 ) {
-    if (address != 0)
-        relocs ~= Reloc(Place(section, field, index), Target(kind, address));
+    import snakebite.relocation: recordRelocation;
+    recordRelocation(relocs, Place(section, field, index), Target(kind, address));
 }
 
 package void recordCallSiteRelocs(
@@ -4723,6 +4725,42 @@ private struct RoleEntry {
     Roles roles;
 }
 
+private Instruction.Handler[] imageHandlers;
+private size_t[Instruction.Handler] imageIds;
+private bool buildingImageHandlers;
+public long diagnosticImageHandlerNs;
+
+private void ensureImageHandlers() {
+    if (imageHandlers.length != 0)
+        return;
+    import std.datetime.stopwatch: StopWatch;
+    StopWatch diagnosticWatch;
+    diagnosticWatch.start;
+    scope(exit) diagnosticImageHandlerNs += diagnosticWatch.peek.total!"nsecs";
+    buildingImageHandlers = true;
+    scope(exit) buildingImageHandlers = false;
+    initializeHandlers;
+}
+
+private void addImageHandler(in Instruction.Handler handler) {
+    if (buildingImageHandlers && handler !is null && handler !in imageIds) {
+        imageIds[handler] = imageHandlers.length;
+        imageHandlers ~= handler;
+    }
+}
+
+package size_t imageHandlerId(in Instruction.Handler handler) {
+    ensureImageHandlers;
+    if (const id = handler in imageIds)
+        return *id;
+    return size_t.max;
+}
+
+package Instruction.Handler imageHandler(in size_t id) {
+    ensureImageHandlers;
+    return id < imageHandlers.length ? imageHandlers[id] : null;
+}
+
 private __gshared RoleEntry[] roleEntries;
 private __gshared size_t roleCount;
 private __gshared size_t roleShift;
@@ -4732,6 +4770,10 @@ private size_t roleSlot(in Instruction.Handler handler) {
 }
 
 private void addRoles(Instruction.Handler handler, in Roles roles) {
+    if (buildingImageHandlers) {
+        addImageHandler(handler);
+        return;
+    }
     if ((roleCount + 1) * 2 > roleEntries.length) {
         auto old = roleEntries;
         const capacity = old.length == 0 ? 2048 : old.length * 2;
@@ -4901,6 +4943,16 @@ private size_t specialisationSlot(in Instruction.Handler handler) {
 
 private void addSpecialisation(Specialisation entry, in Roles roles) {
     entry.roles = roles;
+    if (buildingImageHandlers) {
+        foreach (frame; entry.handlers)
+            foreach (handler; frame)
+                addImageHandler(handler);
+        if (entry.masked !is null)
+            foreach (frame; *entry.masked)
+                foreach (handler; frame)
+                    addImageHandler(handler);
+        return;
+    }
     // The table keeps only the handlers that hold an address or an
     // instruction address. It is searched for every instruction of a
     // function, so it stays small.
@@ -5031,8 +5083,32 @@ private void specialiseIndirect(size_t width)() {
 }
 
 shared static this() {
+    initializeHandlers;
+}
+
+private void initializeHandlers() {
     enum S = OperandKind.storage;
     enum I = OperandKind.immediate;
+    addImageHandler(&opReturnVoid);
+    addImageHandler(&opCall);
+    addImageHandler(&opCallWindowFrame);
+    addImageHandler(&opCallWindowIndirect);
+    addImageHandler(&opCallWindowDiscard);
+    static foreach (operation; AliasSeq!(
+        opConstant, opCopy, opLoadIndirect, opFrameAddress,
+        opCopyFixed!1, opCopyFixed!2, opCopyFixed!4,
+        opCopyFixed!8, opCopyFixed!16,
+    ))
+        addImageHandler(&opThenReturn!operation);
+    static foreach (kind; EnumMembers!CastKind)
+        static if (kind != CastKind.copy && kind != CastKind.classReference
+                && kind != CastKind.zero && kind != CastKind.truth)
+            addImageHandler(&opCastAs!kind);
+    static foreach (kind; AliasSeq!(CastKind.narrow, CastKind.widenSigned,
+            CastKind.widenUnsigned))
+        static foreach (destination; integralWidths)
+            static foreach (source; integralWidths)
+                addImageHandler(&opCastFixedAs!(kind, destination, source));
     // Handlers that no specialisation covers.
     addRoles(&opJump, rolesOfOperation!(runJump, I));
     addRoles(&opStaticStore, rolesOfOperation!(runStaticStore, S));
@@ -5112,6 +5188,7 @@ shared static this() {
                             ? noWidths : integralWidths,
                         false, comparisonSymbols[comparison], kind, jumpWhen)();
     static foreach (width; [1, 2, 4, 8, 16, 32]) {
+        addImageHandler(&opThenReturn!(opLoadIndirectFixed!width));
         specialiseIndirect!width;
         static foreach (copyWidth; [1, 2, 4, 8, 16]) {{
             Specialisation entry;

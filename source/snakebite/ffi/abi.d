@@ -52,6 +52,7 @@ public enum reversedDParameters = () {
 // parameter-list nesting makes the *first* argument register, ahead of
 // `this` (verified against dmd's own `callfunc`, the comment "ehidden
 // goes last on Linux/OSX C++" marking exactly this branch).
+version (SbcRuntimeOnly) {} else
 public bool contextPrecedesHiddenReturnPointer(
     in imported!"dmd.astenums".LINK linkage,
 ) {
@@ -132,7 +133,8 @@ public struct Register {
 // A hidden-pointer return (`needsHiddenReturnPointer`) still bypasses this
 // entirely and never builds a MEMORY `ArgumentPlan` for the return value.
 public struct ArgumentPlan {
-    private import dmd.mtype: Type;
+    version (SbcRuntimeOnly) {} else
+        private import dmd.mtype: Type;
 
     private enum ValueClass {
         none,
@@ -174,6 +176,7 @@ public struct ArgumentPlan {
     // a parameter's own question and a return's alike (issue #336
     // review, finding 12: a parameter-only `ofParameter` wrapper stayed
     // behind after that unification with nothing left to add).
+    version (SbcRuntimeOnly) {} else {
     public static ArgumentPlan of(Type type) {
         return aggregatePlan(type);
     }
@@ -213,6 +216,7 @@ public struct ArgumentPlan {
             );
         return of(type);
     }
+    }
 }
 
 // The SysV ABI classifies a MEMORY result as a hidden return pointer, and
@@ -225,6 +229,7 @@ public struct ArgumentPlan {
 // explicit parameter, it never becomes an `ArgumentPlan` `buildMoves`
 // places on the stack, so `ArgumentPlan.of`'s alignment limit does not
 // apply to it.
+version (SbcRuntimeOnly) {} else {
 public bool needsHiddenReturnPointer(imported!"dmd.mtype".Type unbasedType) {
     import dmd.astenums: Tcomplex80;
     import dmd.typesem: toBasetype;
@@ -698,4 +703,5 @@ private void merge(
             classes[i] = ArgumentPlan.ValueClass.sse;
         }
     }
+}
 }

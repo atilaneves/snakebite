@@ -130,6 +130,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             (name) => _plans.resolve(name), &callableAddress,
             &classRuntimeInfo,
             (type, loc) => _nativeData.initialValue(type, loc));
+        _runtimeTypes.imageData = &_nativeData.imageData;
         _vms = ExecutionStates!(Vm*)(() {
             return heapNew!Vm(defaultFrameCapacity, _nativeData.tlsSlots);
         }, () => _nativeData.release);
@@ -191,6 +192,16 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     ) {
         const compiled = compileFunction(function_);
         runHostToGuest(compiled, function_, returnPlace, args);
+    }
+
+    public const(Function)* compileImageFunction(FuncDeclaration function_,
+        in bool forImage = true) {
+        import snakebite.backends.bytecode.relocation: recordRelocs;
+        const previous = recordRelocs;
+        recordRelocs = forImage;
+        _nativeData.imageData.enabled = forImage;
+        scope(exit) recordRelocs = previous;
+        return compileFunction(function_);
     }
 
     public override void[] staticStorage(
@@ -911,7 +922,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         constructsThroughPair, contextSourceOf,
         pairPlanOf;
     import snakebite.backends.bytecode.relocation:
-        Address, Place, Reloc, Target, recordRelocs;
+        Address, Place, Reloc, Target, recordRelocs, recordRelocation;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.backends.temporary: TemporaryPlan, constructTemporary;
     import snakebite.exception: SnakebiteException;
@@ -1328,6 +1339,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         );
         result.inlineBody = inlineBody;
         result.relocs = _relocs;
+        result.imageData = &_bytecode._nativeData.imageData;
         result.windowSlot = _windowSlot;
         result.windowBytes = _windowReach;
         result.windowCallable = windowFits(_function, _layout);
@@ -2000,6 +2012,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 case constant:
                     reloc.place.index += constantBase;
                     break;
+                case data:
+                    break;
                 case callSite, assertSite, exceptionHandler:
                     internalFailure("a copied body has no call, assertion or "
                         ~ "catch site");
@@ -2111,10 +2125,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (!known || role != Role.address)
             internalFailure(text("this handler holds no address in `", field,
                 "`"));
-        if (!address.isNull)
-            _relocs ~= Reloc(
-                Place(Place.Section.instruction, field, _instructions.length),
-                address.target);
+        recordRelocation(_relocs,
+            Place(Place.Section.instruction, field, _instructions.length),
+            address.target);
     }
 
     private size_t addConstant(in long value) {
@@ -2123,11 +2136,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private size_t addConstant(in Address address) {
-        if (recordRelocs && !address.isNull)
-            _relocs ~= Reloc(
-            Place(Place.Section.constant, Place.Field.word,
-                _constants.length),
-            address.target);
+        if (recordRelocs)
+            recordRelocation(_relocs,
+                Place(Place.Section.constant, Place.Field.word, _constants.length),
+                address.target);
         return addConstant(cast(long) address.word);
     }
 

@@ -12,9 +12,72 @@ import snakebite.backends.bytecode.vm:
     specialisedHandlersWithoutRoles;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
+import snakebite.nativeimage: NativeImageData;
+import snakebite.relocation: Reloc, recordRelocation;
 import std.conv: to;
 import std.file: readText;
 import std.string: fromStringz, split, splitLines;
+
+
+@("relocation.nativeDataCopies")
+unittest {
+    auto target = new ubyte[4];
+    auto source = [target.ptr + 1, null, target.ptr + 1];
+    auto destination = source.dup;
+    auto second = source.dup;
+    void* outside;
+    NativeImageData data;
+    data.enabled = true;
+    data.block(source, source[0].alignof);
+    foreach (ref slot; source)
+        data.pointer(&slot, slot);
+    data.pointer(&outside, target.ptr);
+    data.copied(source, destination);
+    data.copied(source, second);
+
+    data.blocks.length.should == 3;
+    data.blocks[1].bytes.ptr.should == destination.ptr;
+    data.blocks[1].bytes.length.should == source.length * source[0].sizeof;
+    data.blocks[1].alignment.should == source[0].alignof;
+    data.blocks[2].bytes.ptr.should == second.ptr;
+    data.relocs.length.should == 7;
+    foreach (i, copy; [destination, second]) {
+        foreach (j, slot; [0, 2]) {
+            const reloc = data.relocs[3 + i * 2 + j];
+            reloc.place.section.should == Place.Section.data;
+            reloc.place.field.should == Place.Field.word;
+            reloc.place.index.should == cast(size_t) &copy[slot];
+            reloc.target.kind.should == Target.Kind.staticData;
+            reloc.target.address.should == cast(size_t) (target.ptr + 1);
+        }
+    }
+
+    auto partial = new ubyte[source[0].sizeof];
+    data.copied((cast(ubyte[]) source)[0 .. partial.length], partial);
+    data.blocks.length.should == 3;
+    data.relocs.length.should == 8;
+    data.relocs[$ - 1].place.index.should == cast(size_t) partial.ptr;
+    data.relocs[$ - 1].target.address.should == cast(size_t) (target.ptr + 1);
+}
+
+@("relocation.nullAddressesAndDisabledData")
+unittest {
+    Reloc[] relocs;
+    foreach (section; [Place.Section.instruction, Place.Section.constant,
+            Place.Section.data])
+        recordRelocation(relocs, Place(section, Place.Field.word, 0),
+            Target(Target.Kind.staticData, 0));
+    relocs.length.should == 0;
+
+    auto source = new ubyte[size_t.sizeof];
+    auto destination = source.dup;
+    NativeImageData data;
+    data.block(source, size_t.alignof);
+    data.pointer(source.ptr, destination.ptr);
+    data.copied(source, destination);
+    data.blocks.length.should == 0;
+    data.relocs.length.should == 0;
+}
 
 
 // Guest programs that between them put every kind of process address into

@@ -108,6 +108,7 @@ private size_t tableLength(
         case callSite: return function_.callSites.length;
         case assertSite: return function_.assertSites.length;
         case exceptionHandler: return function_.exceptionHandlers.length;
+        case data: return 0;
     }
 }
 
@@ -167,6 +168,8 @@ private bool wordAt(
 ) {
     const index = place.index;
     final switch (place.section) with (Place.Section) {
+        case data:
+            return false;
         case instruction:
             if (index >= function_.instructions.length)
                 return false;

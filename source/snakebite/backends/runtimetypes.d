@@ -38,6 +38,51 @@ public struct RuntimeTypes {
     // (ADR-0006); an entry is built once, under the compiler lock.
     private SharedTable!(Type, TypeInfo) _types;
     private SharedTable!(StructDeclaration, TypeInfo_Struct) _structs;
+    public imported!"snakebite.nativeimage".NativeImageData* imageData;
+
+    private T record(T)(T info) {
+        if (imageData is null || !imageData.enabled)
+            return info;
+        imageData.block((cast(ubyte*) info)[0 .. __traits(classInstanceSize, T)],
+            (void*).alignof);
+        imageData.binding(*cast(void**) info, "_D" ~ T.mangleof[1 .. $] ~ "6__vtblZ");
+        imageData.pointer(cast(void*) info, *cast(void**) info);
+        recordFields(info);
+        return info;
+    }
+
+    private void recordFields(T)(T info) {
+        import std.traits: BaseClassesTuple;
+        foreach (index, ref field; info.tupleof) {
+            static if (__traits(identifier, info.tupleof[index]) == "m_RTInfo") {
+                // Druntime uses 0 and 1 as flags, not addresses.
+                if (cast(size_t) field <= 1)
+                    continue;
+            }
+            recordField(field);
+        }
+        static if (BaseClassesTuple!T.length != 0) {
+            alias Base = BaseClassesTuple!T[0];
+            static if (!is(Base == Object))
+                recordFields(cast(Base) info);
+        }
+    }
+
+    private void recordField(T)(ref T field) {
+        import std.traits: isDynamicArray, isSomeFunction;
+        static if (isDynamicArray!T) {
+            if (field.ptr is null)
+                return;
+            imageData.block((cast(const(ubyte)*) field.ptr)[0 .. field.length * field[0].sizeof],
+                typeof(field[0]).alignof);
+            imageData.pointer(cast(ubyte*) &field + size_t.sizeof, field.ptr);
+            static if (is(typeof(field[0]) : TypeInfo))
+                foreach (ref element; field)
+                    recordField(element);
+        } else static if (is(T == class) || is(T == U*, U) || isSomeFunction!T) {
+            imageData.pointer(&field, cast(const(void)*) field);
+        }
+    }
 
     // `isRootOwned` is the owning `Program`'s own decision
     // (`Program.isRootOwned`), not a copy of its root module list: a
@@ -92,8 +137,11 @@ public struct RuntimeTypes {
             OutBuffer name;
             newInFrontend!mangleToBuffer(symbol, name);
             auto address = _resolve(name[]);
-            return address is null ? null
+            auto result = address is null ? null
                 : cast(immutable(void)*)(cast(ubyte*) address + offset);
+            if (imageData !is null && imageData.enabled)
+                imageData.binding(result, name[].idup, offset);
+            return result;
         }
 
         auto expression = declaration.getRTInfo;
@@ -210,7 +258,7 @@ public struct RuntimeTypes {
             if (classType.sym.isInterfaceDeclaration !is null) {
                 auto interfaceInfo = new TypeInfo_Interface;
                 interfaceInfo.info = classInfo;
-                info = interfaceInfo;
+                info = record(interfaceInfo);
             } else
                 info = classInfo;
         }
@@ -222,47 +270,47 @@ public struct RuntimeTypes {
             auto functionInfo = new TypeInfo_Function;
             functionInfo.next = get(functionType.next);
             functionInfo.deco = type.deco.toDString.idup;
-            info = functionInfo;
+            info = record(functionInfo);
         }
         else if (auto delegateType = type.isTypeDelegate) {
             auto delegateInfo = new TypeInfo_Delegate;
             delegateInfo.next = get(delegateType.next.nextOf);
             delegateInfo.deco = type.deco.toDString.idup;
-            info = delegateInfo;
+            info = record(delegateInfo);
         }
         else if (auto pointer = type.isTypePointer) {
             auto pointerInfo = new TypeInfo_Pointer;
             pointerInfo.m_next = get(pointer.next);
-            info = pointerInfo;
+            info = record(pointerInfo);
         }
         else if (auto staticArray = type.isTypeSArray) {
             auto staticArrayInfo = new TypeInfo_StaticArray;
             staticArrayInfo.value = get(staticArray.next);
             staticArrayInfo.len = staticArray.dim.isIntegerExp.getInteger;
-            info = staticArrayInfo;
+            info = record(staticArrayInfo);
         }
         else if (auto associativeArray = type.isTypeAArray) {
             auto associativeArrayInfo = new TypeInfo_AssociativeArray;
             associativeArrayInfo.key = get(associativeArray.index);
             associativeArrayInfo.value = get(associativeArray.next);
-            info = associativeArrayInfo;
+            info = record(associativeArrayInfo);
         }
         else if (auto vector = type.isTypeVector) {
             auto vectorInfo = new TypeInfo_Vector;
             vectorInfo.base = get(vector.basetype);
-            info = vectorInfo;
+            info = record(vectorInfo);
         }
         else if (auto tuple = type.isTypeTuple) {
             auto tupleInfo = new TypeInfo_Tuple;
             foreach (argument; *tuple.arguments)
                 tupleInfo.elements ~= get(argument.type);
-            info = tupleInfo;
+            info = record(tupleInfo);
         }
 
         if (info is null && type.ty == Tarray) {
             auto arrayInfo = new TypeInfo_Array;
             arrayInfo.value = get(type.nextOf);
-            info = arrayInfo;
+            info = record(arrayInfo);
         }
 
         if (info is null) {
@@ -302,6 +350,12 @@ public struct RuntimeTypes {
                     Tpointer, Tsarray, Taarray, Tvector, Ttuple, Tarray:
                     internalFailure();
             }
+            if (imageData !is null && imageData.enabled) {
+                import dmd.typinf: genTypeInfo;
+                // ABI argument types can precede the first guest typeid expression.
+                newInFrontend!genTypeInfo(null, Loc.initial, type, null);
+                imageData.binding(cast(void*) info, type.vtinfo.ident.toString.idup);
+            }
         }
         return info;
     }
@@ -335,7 +389,10 @@ public struct RuntimeTypes {
             newInFrontend!mangleToBuffer(classType.sym, mangled);
             name = text("_D", mangled[], "7__ClassZ");
         }
-        return cast(TypeInfo) _resolve(name);
+        auto info = cast(TypeInfo) _resolve(name);
+        if (imageData !is null && imageData.enabled)
+            imageData.binding(cast(void*) info, name.idup);
+        return info;
     }
 
     private TypeInfo qualified(Type type, TypeInfo base) {
@@ -351,7 +408,11 @@ public struct RuntimeTypes {
         else
             wrapper = new TypeInfo_Const;
         wrapper.base = base;
-        return wrapper;
+        // The base field belongs to TypeInfo_Const, also for its subclasses.
+        if (auto shared_ = cast(TypeInfo_Shared) wrapper) return record(shared_);
+        if (auto immutable_ = cast(TypeInfo_Invariant) wrapper) return record(immutable_);
+        if (auto inout_ = cast(TypeInfo_Inout) wrapper) return record(inout_);
+        return record(wrapper);
     }
 
     // The host's own `TypeInfo_Class` for `declaration`, if one is linked
@@ -381,12 +442,12 @@ public struct RuntimeTypes {
         import dmd.root.string: toDString;
         import snakebite.frontend.dmd.functions: prettyNameOf;
         auto info = new TypeInfo_Enum;
-        info.name = cast(string) prettyNameOf(declaration).toDString;
+        info.name = prettyNameOf(declaration).toDString.idup;
         info.base = get(declaration.memtype);
-        info.m_init = cast(byte[]) _initialValue(
+        info.m_init = initialValue(
             declaration.type, declaration.loc,
-        ).dup;
-        return info;
+        );
+        return record(info);
     }
 
     // As the compiler's glue does: no bytes for an opaque struct, and a
@@ -396,9 +457,17 @@ public struct RuntimeTypes {
             return null;
         if (declaration.zeroInit)
             return (cast(byte*) null)[0 .. declaration.structsize];
-        return cast(byte[]) _initialValue(
+        return initialValue(
             declaration.type, declaration.loc,
-        ).dup;
+        );
+    }
+
+    private byte[] initialValue(Type type, Loc loc) {
+        const source = _initialValue(type, loc);
+        auto bytes = cast(byte[]) source.dup;
+        if (imageData !is null)
+            imageData.copied(source, bytes);
+        return bytes;
     }
 
     private TypeInfo_Struct structInfo(StructDeclaration declaration) {
@@ -451,6 +520,6 @@ public struct RuntimeTypes {
             if (auto arg = declaration.argType(1))
                 info.m_arg2 = get(arg);
         }
-        return info;
+        return record(info);
     }
 }
