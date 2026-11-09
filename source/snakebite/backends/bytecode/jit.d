@@ -228,7 +228,7 @@ private enum ubyte compareOpcode = 0x2E;
 // `movsxd`.
 private enum uint signExtend32Opcode = 0x63;
 // `addsd`, `subsd`, `mulsd` and `divsd` after the prefix, by operation.
-private static immutable ubyte[4] floatOpcodes = [0x58, 0x5C, 0x59, 0x5E];
+private static immutable ubyte[4] _floatOpcodes = [0x58, 0x5C, 0x59, 0x5E];
 private enum fp0Register = 0;
 private enum XMM1 = 1;
 private enum XMM2 = 2;
@@ -348,7 +348,7 @@ private struct JitState {
     }
 }
 
-private shared JitState jitState;
+private shared JitState _jitState;
 
 // The code region. It is a memfd file that grows by chunks. Each chunk is
 // mapped twice: `writeBase` is read+write, where the JIT emits, and `execBase`
@@ -438,9 +438,9 @@ extern(C) private int memfd_create(const(char)* name, uint flags) nothrow @nogc;
 // How far the one-time set-up got: nothing, a usable JIT, or a JIT that this
 // process cannot have (no memfd). It is read without the lock.
 private enum Setup : int { pending, ready, unavailable }
-private shared Setup setup;
+private shared Setup _setup;
 
-private shared int lockWord;
+private shared int _lockWord;
 
 // The JIT lock. A thread takes it without waiting: a thread that waits for the
 // lock can wait for a thread that the GC suspended while it held the lock. The
@@ -458,7 +458,7 @@ package struct JitLock {
         import core.atomic: cas;
 
         JitLock lock;
-        lock._held = cas(&lockWord, 0, 1);
+        lock._held = cas(&_lockWord, 0, 1);
         return lock;
     }
 
@@ -466,7 +466,7 @@ package struct JitLock {
         import core.atomic: atomicStore, MemoryOrder;
 
         if (_held)
-            atomicStore!(MemoryOrder.rel)(lockWord, 0);
+            atomicStore!(MemoryOrder.rel)(_lockWord, 0);
     }
 
     package bool held() const {
@@ -496,7 +496,7 @@ package struct JitLock {
     {
         if (instructions.length == 0)
             return false;
-        ref state = owned(jitState);
+        ref state = owned(_jitState);
         auto result = state.emitFunction(instructions, snapshot, ops, originals,
             constants);
         if (result == Emitted.full) {
@@ -516,18 +516,18 @@ package struct JitLock {
 package bool jitUsable(ref JitLock lock) {
     import core.atomic: atomicLoad, atomicStore, MemoryOrder;
 
-    final switch (atomicLoad!(MemoryOrder.acq)(setup)) {
+    final switch (atomicLoad!(MemoryOrder.acq)(_setup)) {
         case Setup.ready: return true;
         case Setup.unavailable: return false;
         case Setup.pending:
             break;
     }
-    ref state = lock.owned(jitState);
+    ref state = lock.owned(_jitState);
     const ok = state.region.create;
     if (ok)
         checkCallingConvention(state.region);
     state.bmi2 = ok && cpuHasBmi2;
-    atomicStore!(MemoryOrder.rel)(setup, ok ? Setup.ready : Setup.unavailable);
+    atomicStore!(MemoryOrder.rel)(_setup, ok ? Setup.ready : Setup.unavailable);
     return ok;
 }
 
@@ -638,7 +638,7 @@ package struct Scratch(T) {
     }
 }
 
-private static immutable int[4] chunkSizes = [8, 4, 2, 1];
+private static immutable int[4] _chunkSizes = [8, 4, 2, 1];
 
 private struct Fixup {
     size_t position;
@@ -997,7 +997,7 @@ private struct Gen {
             a.sse(noPrefix, storeOpcode, XMM1, dd);
             off += 16;
         }
-        foreach (c; chunkSizes) {
+        foreach (c; _chunkSizes) {
             if (size - off >= c) {
                 auto ss = s; ss.disp += cast(int) off;
                 auto dd = d; dd.disp += cast(int) off;
@@ -1095,7 +1095,7 @@ private struct Gen {
             if (!opnd(ins.destination, R9, d))
                 return false;
             size_t off = 0;
-            foreach (c; chunkSizes) {
+            foreach (c; _chunkSizes) {
                 while (size - off >= c) {
                     auto dd = d;
                     dd.disp += cast(int) off;
@@ -1534,7 +1534,7 @@ private struct Gen {
                 a.sseRR(noPrefix, moveAlignedOpcode, acc, fp0Register);
         } else
             a.sse(prefix, loadOpcode, acc, l);
-        a.sse(prefix, floatOpcodes[p.operation], acc, r);
+        a.sse(prefix, _floatOpcodes[p.operation], acc, r);
         if (!p.resultInFp0)
             a.sse(prefix, storeOpcode, acc, d);
         return true;

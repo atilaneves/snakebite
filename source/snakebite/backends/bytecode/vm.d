@@ -5482,14 +5482,14 @@ static if (jitSupported) {
         Instruction.Handler[Instruction.Handler] uncountedOf;
     }
 
-    // `specialiseWith` adds the twins of the branches to `newTwins`, and the
+    // `specialiseWith` adds the twins of the branches to `_newTwins`, and the
     // constructor below those of the jump and the calls; then it makes them
-    // `countingTwins`, before any thread reads them.
-    private immutable CountingTwins countingTwins;
+    // `_countingTwins`, before any thread reads them.
+    private immutable CountingTwins _countingTwins;
 
     // The module constructors run on the main thread, so this is a variable of
     // that thread.
-    private CountingTwins newTwins;
+    private CountingTwins _newTwins;
 
     // The twin of each handler that `original` has, by the place of the handler
     // in `counted`, which holds the twins.
@@ -5523,15 +5523,15 @@ static if (jitSupported) {
                 &callIndirectWindow!(destination, true));
         }
         addCounted(&callGeneral!false, &callGeneral!true);
-        countingTwins = cast(immutable) newTwins;
-        newTwins = CountingTwins.init;
+        _countingTwins = cast(immutable) _newTwins;
+        _newTwins = CountingTwins.init;
     }
 
     private void addCounted(Instruction.Handler original,
         Instruction.Handler counted)
     {
-        newTwins.countedOf[original] = counted;
-        newTwins.uncountedOf[counted] = original;
+        _newTwins.countedOf[original] = counted;
+        _newTwins.uncountedOf[counted] = original;
     }
 
     // Replaces the handler of each of `instructions[indices]` by its counting
@@ -5542,7 +5542,7 @@ static if (jitSupported) {
     {
         foreach (index; indices)
             if (auto counted = instructions[index].handler
-                    in countingTwins.countedOf)
+                    in _countingTwins.countedOf)
                 instructions[index].handler =
                     cast(Instruction.Handler) *counted;
     }
@@ -5564,7 +5564,7 @@ static if (jitSupported) {
         Scratch!(Instruction.Handler) originalScratch;
     }
 
-    private shared JitTables jitTables;
+    private shared JitTables _jitTables;
 
     // How `specialiseHandlers` made a handler: the general handler, and the
     // indirect operands whose bit it cleared (`mask`: 1 destination, 2 source,
@@ -5612,7 +5612,7 @@ static if (jitSupported) {
     {
         if (!lock.jitUsable)
             return false;
-        ref tables = lock.owned(jitTables);
+        ref tables = lock.owned(_jitTables);
         tables.ensureJitTables;
         auto instructions = function_.instructions;
         const n = instructions.length;
@@ -5630,7 +5630,7 @@ static if (jitSupported) {
             // The code of a branch does not count; a call keeps its twin, which
             // counts the callee.
             if (handler !is null) {
-                if (auto original = handler in countingTwins.uncountedOf)
+                if (auto original = handler in _countingTwins.uncountedOf)
                     if (!isCountedCall(*original))
                         handler = *original;
             }
