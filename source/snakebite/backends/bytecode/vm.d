@@ -5294,7 +5294,7 @@ private struct JitEntry {
 
 private enum jitSlots = 16384;
 private __gshared JitEntry[jitSlots] jitTable;
-private __gshared bool jitTableBuilt;
+private shared bool jitTableReady;
 private __gshared bool jitEnabledFlag;
 private __gshared bool jitChecked;
 
@@ -5380,7 +5380,6 @@ private JitOp jop(JKind kind, ubyte a = 0, ubyte b = 0, ubyte c = 0,
 }
 
 private void buildJitTable() {
-    jitTableBuilt = true;
     static foreach (triple; threeAddressNames) {{
         enum symbol = quotedSymbol(triple[2]);
         static foreach (constant; [false, true]) {{
@@ -5494,6 +5493,21 @@ private void buildJitTable() {
                         sourceSize, 0, 0, 0, destSize));
 }
 
+private shared int jitTableLock;
+
+// Builds the table once, even when several threads compile.
+private void ensureJitTable() {
+    import core.atomic: atomicLoad, atomicStore, cas, MemoryOrder;
+    if (atomicLoad!(MemoryOrder.acq)(jitTableReady))
+        return;
+    while (!cas(&jitTableLock, 0, 1)) {}
+    if (!jitTableReady) {
+        buildJitTable;
+        atomicStore!(MemoryOrder.rel)(jitTableReady, true);
+    }
+    atomicStore(jitTableLock, 0);
+}
+
 private Scratch!JitOp jitOpScratch;
 private Scratch!Instruction jitSnapshotScratch;
 
@@ -5511,8 +5525,7 @@ package const(Instruction)[] jitSnapshotOf(in Instruction[] instructions) {
 package bool jitCompile(Instruction[] instructions,
     const(Instruction)[] snapshot, const(long)[] constants, const(char)[] name)
 {
-    if (!jitTableBuilt)
-        buildJitTable;
+    ensureJitTable;
     auto ops = jitOpScratch.reserve(snapshot.length)[0 .. snapshot.length];
     foreach (index, ref instruction; snapshot)
         ops[index] = jitGet(instruction.handler);
