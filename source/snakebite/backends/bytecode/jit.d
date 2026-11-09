@@ -84,7 +84,7 @@ private __gshared ubyte* execBase;
 private __gshared size_t regionCursor;
 private __gshared size_t populatedEnd;
 private enum regionSize = 1UL << 30;
-private enum chunkSize = 1UL << 20;
+private enum chunkSize = 1UL << 17;
 private enum MADV_POPULATE_READ = 22;
 private enum MADV_POPULATE_WRITE = 23;
 private shared int regionLock;
