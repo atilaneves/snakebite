@@ -20,11 +20,7 @@ private:
 // The code generator exists only where the register maps below are known.
 public enum jitSupported = jitPlatform && jitCompiler;
 
-// `bin/sb-count` counts the bytecodes that handlers run, and JIT code runs
-// none, so that build has no JIT.
-version (BytecodeCount)
-    private enum jitPlatform = false;
-else version (linux) version (X86_64)
+version (linux) version (X86_64)
     private enum jitPlatform = true;
 private static if (!is(typeof(jitPlatform)))
     private enum jitPlatform = false;
