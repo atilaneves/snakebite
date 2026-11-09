@@ -349,26 +349,16 @@ public struct ReplCliResult {
 public ReplCliResult parseReplArgs(string[] args) {
     import snakebite.backends: parseBackendName, validBackendNames;
     import snakebite.projectoptions:
-        backendOption, parseCommonOptions;
+        backendOption, CommonOptions;
     import std.getopt: GetOptException;
 
     ReplCliResult result;
     string backendName = "bytecode";
 
-    typeof(parseCommonOptions(
-        args,
-        result.options.importPaths,
-        result.options.versions,
-        result.options.lowmem,
-        result.options.noJit,
-    )) helpInfo;
+    CommonOptions common;
     try {
-        helpInfo = parseCommonOptions(
+        common = CommonOptions(
             args,
-            result.options.importPaths,
-            result.options.versions,
-            result.options.lowmem,
-            result.options.noJit,
             "c", "Run one D expression and exit.", (string _, string val) {
                 result.options.hasCommand = true;
                 result.options.command = val;
@@ -385,7 +375,9 @@ public ReplCliResult parseReplArgs(string[] args) {
         return ReplCliResult(1, exception.msg);
     }
 
-    if (helpInfo.helpWanted) {
+    common.copyTo(result.options);
+
+    if (common.getoptResult.helpWanted) {
         result.options.showHelp = true;
         result.diagnostic = helpText;
         return result;

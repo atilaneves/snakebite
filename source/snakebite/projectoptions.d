@@ -38,41 +38,51 @@ public auto parseProjectOptions(Own...)(
         args = args[0 .. separator];
     }
 
-    return parseCommonOptions(
+    auto common = CommonOptions(
         args,
-        options.importPaths,
-        options.versions,
-        options.lowmem,
-        options.noJit,
         "J|string-import-path", "Add a string import path for a bare directory.",
             &options.stringImportPaths,
         own,
     );
+    common.copyTo(options);
+
+    return common.getoptResult;
 }
 
 
-// Registers the options that `bin/sb`, `bin/sb-repl` and `bin/bench` all
-// take, together with `own`, and parses `args`.
-public auto parseCommonOptions(Own...)(
-    ref string[] args,
-    ref string[] importPaths,
-    ref string[] versions,
-    ref bool lowmem,
-    ref bool noJit,
-    Own own,
-) {
-    import snakebite.gc: lowmemHelp;
-    import std.getopt: getopt;
+// The options that `bin/sb`, `bin/sb-repl` and `bin/bench` all take.
+public struct CommonOptions {
+    import std.getopt: GetoptResult;
 
-    return getopt(
-        args,
-        "I|import-path", "Add an import path for a bare directory.",
-            &importPaths,
-        "version", "Define a version identifier (repeatable).", &versions,
-        "lowmem", lowmemHelp, &lowmem,
-        "no-jit", noJitHelp, &noJit,
-        own,
-    );
+    public string[] importPaths;
+    public string[] versions;
+    public bool lowmem;
+    public bool noJit;
+    public GetoptResult getoptResult;
+
+    // Registers the common options together with `own`, the `getopt`
+    // arguments of the calling tool, and parses `args`.
+    public this(Own...)(ref string[] args, Own own) {
+        import snakebite.gc: lowmemHelp;
+        import std.getopt: getopt;
+
+        getoptResult = getopt(
+            args,
+            "I|import-path", "Add an import path for a bare directory.",
+                &importPaths,
+            "version", "Define a version identifier (repeatable).", &versions,
+            "lowmem", lowmemHelp, &lowmem,
+            "no-jit", noJitHelp, &noJit,
+            own,
+        );
+    }
+
+    public void copyTo(Options)(ref Options options) const {
+        options.importPaths = importPaths.dup;
+        options.versions = versions.dup;
+        options.lowmem = lowmem;
+        options.noJit = noJit;
+    }
 }
 
 
