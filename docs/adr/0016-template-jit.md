@@ -120,9 +120,10 @@ The function counts another 256 events and asks again.
 
 The VM does not compile while `GC.inFinalizer` is true. A guest destructor
 that runs in a finalizer can make a function hot. The compile allocates
-nothing from the GC, but it maps memory and takes a lock, and a finalizer
-must not wait for a thread that a collection suspended. The function stays
-in its handlers, and compiles at a later event.
+from the GC, because the tables that classify handlers are associative arrays.
+It also maps memory and takes a lock. A finalizer must not allocate from the
+GC, and must not wait for a thread that a collection suspended. The function
+stays in its handlers, and compiles at a later event.
 
 The emitter allocates nothing for each instruction. It works in buffers that
 a compile reuses, and in the code region. The cost of a compile is paid at

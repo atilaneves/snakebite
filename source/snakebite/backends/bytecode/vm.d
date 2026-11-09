@@ -5364,7 +5364,6 @@ public struct JitSetting {
 static if (jitSupported) {
 
     import core.memory: GC;
-    import snakebite.backends.bytecode.handlermap: HandlerMap;
     import snakebite.backends.bytecode.jit: JitLock, JitOp, jitUsable, Scratch;
 
     // An event is a guest call of a function or an execution of one of its
@@ -5479,8 +5478,8 @@ static if (jitSupported) {
 
     // An instruction that counts its event, by its handler; and back.
     private struct CountingTwins {
-        HandlerMap!(Instruction.Handler, Instruction.Handler) countedOf;
-        HandlerMap!(Instruction.Handler, Instruction.Handler) uncountedOf;
+        Instruction.Handler[Instruction.Handler] countedOf;
+        Instruction.Handler[Instruction.Handler] uncountedOf;
     }
 
     // `specialiseWith` adds the twins of the branches to `newTwins`, and the
@@ -5531,9 +5530,8 @@ static if (jitSupported) {
     private void addCounted(Instruction.Handler original,
         Instruction.Handler counted)
     {
-        if (!newTwins.countedOf.put(original, counted)
-                || !newTwins.uncountedOf.put(counted, original))
-            internalFailure("no memory for the counting twins");
+        newTwins.countedOf[original] = counted;
+        newTwins.uncountedOf[counted] = original;
     }
 
     // Replaces the handler of each of `instructions[indices]` by its counting
@@ -5543,8 +5541,8 @@ static if (jitSupported) {
         const(size_t)[] indices)
     {
         foreach (index; indices)
-            if (auto counted = countingTwins.countedOf.find(
-                    instructions[index].handler))
+            if (auto counted = instructions[index].handler
+                    in countingTwins.countedOf)
                 instructions[index].handler =
                     cast(Instruction.Handler) *counted;
     }
@@ -5558,8 +5556,8 @@ static if (jitSupported) {
     // first thread that compiles builds the tables.
     private struct JitTables {
         // The handlers that have a template, with how to emit them.
-        HandlerMap!(Instruction.Handler, JitOp) jitTable;
-        HandlerMap!(Instruction.Handler, Unspecialised) unspecialised;
+        JitOp[Instruction.Handler] jitTable;
+        Unspecialised[Instruction.Handler] unspecialised;
         bool ready;
         Scratch!JitOp opScratch;
         Scratch!Instruction snapshotScratch;
@@ -5583,7 +5581,7 @@ static if (jitSupported) {
     // holds the lock can be one that the GC suspended. The function then counts
     // another `jitThreshold` events and tries again.
     pragma(inline, false)
-    private bool jitTierUp(Function* function_) nothrow @nogc {
+    private bool jitTierUp(Function* function_) nothrow {
         import core.atomic: atomicLoad, atomicStore, cas, MemoryOrder;
 
         auto state = cast(shared(uint)*) &function_.jitState;
@@ -5610,13 +5608,12 @@ static if (jitSupported) {
     }
 
     private bool compileUnderLock(ref JitLock lock, Function* function_)
-        nothrow @nogc
+        nothrow
     {
         if (!lock.jitUsable)
             return false;
         ref tables = lock.owned(jitTables);
-        if (!tables.ensureJitTables)
-            return false;
+        tables.ensureJitTables;
         auto instructions = function_.instructions;
         const n = instructions.length;
         auto snapshotMemory = tables.snapshotScratch.reserve(n);
@@ -5633,7 +5630,7 @@ static if (jitSupported) {
             // The code of a branch does not count; a call keeps its twin, which
             // counts the callee.
             if (handler !is null) {
-                if (auto original = countingTwins.uncountedOf.find(handler))
+                if (auto original = handler in countingTwins.uncountedOf)
                     if (!isCountedCall(*original))
                         handler = *original;
             }
@@ -5655,25 +5652,22 @@ static if (jitSupported) {
     }
 
     // Builds the tables of `tables` once.
-    private bool ensureJitTables(ref JitTables tables) nothrow @nogc {
+    private void ensureJitTables(ref JitTables tables) nothrow {
         if (!tables.ready) {
-            if (!tables.buildJitTable || !tables.buildUnspecialiseTable)
-                return false;
+            tables.buildJitTable;
+            tables.buildUnspecialiseTable;
             tables.ready = true;
         }
-        return true;
     }
 
-    // False if the memory for the table is missing.
-    private bool buildJitTable(ref JitTables tables) nothrow @nogc {
+    private void buildJitTable(ref JitTables tables) nothrow {
         alias Kind = JitOp.Kind;
         alias IntOperation = JitOp.IntOperation;
         alias ShiftKind = JitOp.ShiftKind;
 
-        bool failed;
         void put(Instruction.Handler handler, JitOp op) {
-            if (handler !is null && !tables.jitTable.put(handler, op))
-                failed = true;
+            if (handler !is null)
+                tables.jitTable[handler] = op;
         }
 
         static foreach (triple; threeAddressNames) {{
@@ -5801,7 +5795,6 @@ static if (jitSupported) {
                             JitOp.CastFixed(kind == CastKind.widenUnsigned,
                                 sourceSize),
                             destSize));
-        return !failed;
     }
 
     // The operand layouts of the handlers. `threeAddress` ones have a
@@ -5921,22 +5914,18 @@ static if (jitSupported) {
         assert(false, "a comparison operator without a template");
     }
 
-    // False if the memory for the table is missing.
-    private bool buildUnspecialiseTable(ref JitTables tables) nothrow @nogc {
-        bool failed;
+    private void buildUnspecialiseTable(ref JitTables tables) nothrow {
         void put(Instruction.Handler handler, Instruction.Handler general,
             ubyte mask)
         {
             if (handler is null)
                 return;
-            bool added;
-            auto entry = tables.unspecialised.insert(handler, added);
-            if (entry is null)
-                failed = true;
-            else if (added)
-                *entry = Unspecialised(general, mask, false);
-            else if (entry.general !is general || entry.mask != mask)
-                entry.ambiguous = true;
+            if (auto entry = handler in tables.unspecialised) {
+                if (entry.general !is general || entry.mask != mask)
+                    entry.ambiguous = true;
+            } else
+                tables.unspecialised[handler] = Unspecialised(general, mask,
+                    false);
         }
 
         foreach (ref entry; specialisations) {
@@ -5950,14 +5939,13 @@ static if (jitSupported) {
                     foreach (handler; frame)
                         put(handler, entry.general, cast(ubyte) (mask + 1));
         }
-        return !failed;
     }
 
     // The instruction as it was before `specialiseHandlers`.
     private bool unspecialise(const ref JitTables tables,
         ref Instruction instruction) nothrow @nogc
     {
-        const entry = tables.unspecialised.find(instruction.handler);
+        const entry = instruction.handler in tables.unspecialised;
         if (entry is null)
             return true;
         if (entry.ambiguous)
@@ -5975,7 +5963,7 @@ static if (jitSupported) {
     private JitOp jitGet(const ref JitTables tables,
         in Instruction.Handler handler) nothrow @nogc
     {
-        if (auto op = tables.jitTable.find(handler))
+        if (auto op = handler in tables.jitTable)
             return *op;
         return JitOp.init;
     }
