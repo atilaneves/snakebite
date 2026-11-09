@@ -77,7 +77,7 @@ unittest {
         },
     ])[0];
     auto program = Program([module_]);
-    auto backend = Owned!Bytecode(program);
+    auto backend = ownedBackend!Bytecode(program);
 
     backend.compilationStatistics.hasCompiler.should == true;
     backend.compilationStatistics.cacheMisses.should == 0;

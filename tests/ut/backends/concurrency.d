@@ -109,7 +109,7 @@ unittest {
                         long result;
 
                         if (threadIndex % 2 == 0) {
-                            auto backend = Owned!Bytecode(program);
+                            auto backend = ownedBackend!Bytecode(program);
                             backend.call(function_, &result, []);
                         } else {
                             auto backend = Owned!Interpreter(program);

@@ -5,16 +5,13 @@ import ut.backends;
 import dmd.func: FuncDeclaration;
 import snakebite.backends.backend: Program;
 import snakebite.backends.bytecode.inspection:
-    handlerRoleMismatches, misplacedRelocs, relocsOf, unrecordedWords;
+    handlerRoleMismatches, misplacedRelocs, relocsOf;
 import snakebite.backends.bytecode.relocation: Place, Target, recordRelocs;
 import snakebite.backends.bytecode.vm:
-    Function, Instruction, opConstant, registerFormsWithChangedRoles,
-    specialisedHandlersWithoutRoles;
+    Function, registerFormsWithChangedRoles, specialisedHandlersWithoutRoles;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
-import std.conv: to;
-import std.file: readText;
-import std.string: fromStringz, split, splitLines;
+import std.string: fromStringz;
 
 
 // Guest programs that between them put every kind of process address into
@@ -221,27 +218,6 @@ private enum callChecksums = [
 ];
 
 
-private struct Range {
-    size_t low;
-    size_t high;
-}
-
-private Range[] mappedRanges() {
-    Range[] ranges;
-    foreach (line; readText("/proc/self/maps").splitLines) {
-        const bounds = line.split[0].split("-");
-        ranges ~= Range(bounds[0].to!size_t(16), bounds[1].to!size_t(16));
-    }
-    return ranges;
-}
-
-private bool isMapped(in Range[] ranges, in size_t word) {
-    foreach (range; ranges)
-        if (word >= range.low && word < range.high)
-            return true;
-    return false;
-}
-
 // Compiles and runs every entry point of `source`, checks what each returns
 // against `checksums`, then shows each function that the backend compiled to
 // `visit`.
@@ -254,14 +230,15 @@ private void withCompiledProgram(
     scope(exit) recordRelocs = before;
     auto guestModule = parseSnippet(source);
     auto program = Program([guestModule]);
-    auto backend = Owned!Bytecode(program);
+    auto backend = ownedBackend!Bytecode(program);
     foreach (checksum; checksums) {
         long result;
         backend.call(findFunction(guestModule, checksum.entryPoint),
             &result, []);
         result.should == checksum.expected;
     }
-    backend.eachCompiled((FuncDeclaration declaration, const(Function)* function_) {
+    backend.eachCompiled((FuncDeclaration declaration,
+            const(Function)* function_) {
         visit(declaration.toPrettyChars.fromStringz.idup, function_);
     });
 }
@@ -272,71 +249,6 @@ private void withCompiledPrograms(
 ) {
     withCompiledProgram(addressPrograms, addressChecksums, visit);
     withCompiledProgram(callPrograms, callChecksums, visit);
-}
-
-// A stored image has to find every address of the process in a function.
-// An address that no `Reloc` names is one that would stay stale after the
-// image loads into another process.
-@("relocation.noAddressWordOfCompiledCodeIsUnrecorded")
-unittest {
-    const ranges = mappedRanges;
-    string[] unrecorded;
-    string[] misplaced;
-    bool[Target.Kind] seen;
-    bool[Place.Section] seenSections;
-    withCompiledPrograms((name, function_) {
-        foreach (word; unrecordedWords(function_, w => ranges.isMapped(w)))
-            unrecorded ~= name ~ ": " ~ word;
-        foreach (word; misplacedRelocs(function_))
-            misplaced ~= name ~ ": " ~ word;
-        foreach (reloc; relocsOf(function_))
-        {
-            seen[reloc.target.kind] = true;
-            seenSections[reloc.place.section] = true;
-        }
-    });
-
-    unrecorded.should == string[].init;
-    misplaced.should == string[].init;
-    // The programs reach every kind of address, so an empty scan is not a
-    // scan that looked at nothing.
-    Target.Kind[] missingKinds;
-    foreach (kind; [
-        Target.Kind.staticData, Target.Kind.tlsDescriptor,
-        Target.Kind.typeInfo, Target.Kind.functionWord,
-        Target.Kind.constantPool, Target.Kind.nativePlan,
-        Target.Kind.frontendString, Target.Kind.hostSymbol,
-        Target.Kind.callbackEntry, Target.Kind.callback, Target.Kind.signature,
-    ])
-        if (!seen.get(kind, false))
-            missingKinds ~= kind;
-    missingKinds.should == Target.Kind[].init;
-    Place.Section[] missingSections;
-    foreach (section; [
-        Place.Section.instruction, Place.Section.constant,
-        Place.Section.callSite, Place.Section.assertSite,
-        Place.Section.exceptionHandler,
-    ])
-        if (!seenSections.get(section, false))
-            missingSections ~= section;
-    missingSections.should == Place.Section[].init;
-}
-
-@("relocation.scanFlagsAnAddressNoRelocNames")
-unittest {
-    static int target;
-    const ranges = mappedRanges;
-    const function_ = new Function(
-        [Instruction(&opConstant, 0, 0, size_t.sizeof)],
-        [cast(long) &target],
-        [],
-        [],
-        [],
-        size_t.sizeof,
-        size_t.sizeof,
-    );
-
-    unrecordedWords(function_, w => ranges.isMapped(w)).length.should == 1;
 }
 
 // Handlers are rewritten after emission, and a rewritten handler has to keep

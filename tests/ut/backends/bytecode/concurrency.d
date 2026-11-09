@@ -107,7 +107,7 @@ unittest {
                 while (!atomicLoad(go)) {}
 
                 try {
-                    auto backend = Owned!Bytecode(program);
+                    auto backend = ownedBackend!Bytecode(program);
                     foreach (which; 0 .. 2) {
                         const index =
                             (threadIndex * 2 + which) % functionCount;
@@ -203,7 +203,7 @@ unittest {
     foreach (round; 0 .. sharedRounds) {
         auto guestModule = parseSnippet(sharedGuestSource(round));
         auto program = Program([guestModule]);
-        auto backend = Owned!Bytecode(program);
+        auto backend = ownedBackend!Bytecode(program);
 
         shared size_t ready = 0;
         shared bool go = false;
@@ -289,7 +289,7 @@ unittest {
         int caller(bool useLeaf) { return useLeaf ? leaf() : 0; }
     });
     auto program = Program([guestModule]);
-    auto backend = Owned!Bytecode(program);
+    auto backend = ownedBackend!Bytecode(program);
     auto leaf = findFunction(guestModule, "leaf");
     auto caller = findFunction(guestModule, "caller");
     auto ready = new Semaphore;

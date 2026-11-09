@@ -310,7 +310,7 @@ static foreach (backend; Matrix!(
                 }
             });
             auto function_ = findFunction(module_, "probeCell");
-            auto instance = Owned!backend(Program([module_]));
+            auto instance = ownedBackend!backend(Program([module_]));
 
             int* address;
             instance.call(function_, &address, []);

@@ -149,9 +149,49 @@ public void shouldBeStatusOf(
     } else {
         enum program_ = RegisterProgram!(module_, code).program;
         auto program = Program([parsedProgram(program_)], "snakebite");
-        auto backend = Owned!BackendType(program);
+        auto backend = ownedBackend!BackendType(program);
         asTestFailure(run(backend, program), file, line)
             .should == expected;
+    }
+}
+
+// As `shouldBeStatusOf`, and where the bytecode backend runs with the JIT on,
+// also checks that each function in `jitted` ended with JIT code. A program
+// that gives the right status on handlers only would otherwise pass.
+public void shouldBeStatusOfWithJitCode(
+    BackendType, string code, string[] jitted, string module_ = __MODULE__,
+)(
+    in int expected,
+    in string file = __FILE__,
+    in size_t line = __LINE__,
+) {
+    static if (!is(BackendType == Bytecode))
+        shouldBeStatusOf!(BackendType, code, module_)(expected, file, line);
+    else {
+        import snakebite.backends.bytecode.inspection: isJitCompiled;
+
+        enum program_ = RegisterProgram!(module_, code).program;
+        auto program = Program([parsedProgram(program_)], "snakebite");
+        auto backend = ownedBackend!BackendType(program);
+        asTestFailure(run(backend, program), file, line).should == expected;
+        if (!testJit.enabled)
+            return;
+        foreach (name; jitted) {
+            bool found;
+            bool compiled;
+            backend.eachCompiled((declaration, function_) {
+                if (declaration.ident.toString == name) {
+                    found = true;
+                    compiled = isJitCompiled(function_);
+                }
+            });
+            if (!found)
+                throw new UnitTestException(
+                    text("`", name, "` was not compiled"), file, line);
+            if (!compiled)
+                throw new UnitTestException(
+                    text("`", name, "` has no JIT code"), file, line);
+        }
     }
 }
 
@@ -294,7 +334,7 @@ public template shouldBeRetOf(
                 );
 
             T result;
-            auto backend = Owned!BackendType(program);
+            auto backend = ownedBackend!BackendType(program);
             asTestFailure(
                 backend.call(function_, &result, []),
                 file, line,
@@ -365,7 +405,7 @@ private string evaluate(
     } else {
         auto function_ = parsedFunction(snippet);
         auto program = Program([function_.getModule]);
-        auto backend = Owned!BackendType(program);
+        auto backend = ownedBackend!BackendType(program);
         return asTestFailure(backend.eval(function_), file, line);
     }
 }

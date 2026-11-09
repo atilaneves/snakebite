@@ -54,7 +54,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import snakebite.backends.backend: CompilationStatistics, Program;
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.classinfo;
-    import snakebite.backends.bytecode.vm: Function, InlineBody, Vm;
+    import snakebite.backends.bytecode.vm: Function, InlineBody, JitSetting, Vm;
     import snakebite.backends.layout: FrameLayout;
     import snakebite.frontend.checks: Checks;
     import snakebite.sharedtable: SharedTable;
@@ -71,6 +71,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     private ExecutionStates!(Vm*) _vms;
     private NativeData _nativeData;
     private PlanCache _plans;
+    // What the functions of this backend do with the JIT.
+    private JitSetting _jit;
     private CallSelection _callSelection;
     // Keyed by pointer, not by value: a call site compiled while
     // `function_` itself is still mid-compile - direct or mutual
@@ -116,8 +118,9 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // after preparation, including during GC finalization (ADR-0006).
     private SharedTable!(FuncDeclaration, FrameLayout) _layouts;
 
-    public this(const Program program) {
+    public this(const Program program, in JitSetting jit = JitSetting.init) {
         super(program);
+        _jit = jit;
         _plans = PlanCache(program.dependencyImage,
             &_program.isRootOwned);
         _callSelection.linksFunctions = program.definesLinkableFunctions;
@@ -799,7 +802,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             registerGuestWord(function_, placeholder);
 
             scope compiler = new FunctionCompiler(
-                this, function_, layout, returnFacts, isVoidReturn,
+                this, _jit, function_, layout, returnFacts, isVoidReturn,
                 isRefReturn);
             *placeholder = compiler.build(body_);
             _complete.insert(function_, placeholder);
@@ -843,7 +846,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Arg, AssertSite, CallSite, ClosureSlot, castSizeWithSignedness,
         discardResult, Field, indirectStorage,
         ExceptionHandler, Function, InlineBody,
-        Instruction, Role, Roles, addressSlotOf, branchTargetField, recordAssertSiteRelocs,
+        Instruction, JitSetting, Role, Roles, addressSlotOf, branchTargetField, recordAssertSiteRelocs,
         recordCallSiteRelocs, recordExceptionHandlerRelocs, rolesOf,
         isFrameOperand, widthHoldsIndexSlot, withAddressSlot,
         opAdd3, opSubtract3, opMultiply3, opFloatAdd3, opFloatSubtract3,
@@ -862,7 +865,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         CompareKind, Comparison, constantForm, fusedBranchHandler, fusesConstant,
         firstComparisonHandler, threeAddressConstantHandlers,
         threeAddressHandlers,
-        decodesIndirect, isFusedBranch, specialiseHandlers, RegisterFamily, registerFamily,
+        decodesIndirect, isFusedBranch, specialiseHandlers, jitCountEvents,
+        jitCounting, jitCountsEvent, jitStartHeat, RegisterFamily, registerFamily,
         fusedRegisterFamily, registerForm, fusedRegisterForm,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall, opCallWindowDiscard, opCallWindowFrame,
@@ -929,6 +933,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     extern(D):
 
     private Bytecode _bytecode;
+    private const JitSetting _jit;
     private FuncDeclaration _function;
     private const FrameLayout _layout;
     private ClosureLayout _closureLayout;
@@ -1183,6 +1188,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     public this(
         Bytecode bytecode,
+        in JitSetting jit,
         FuncDeclaration function_,
         in FrameLayout layout,
         in TypeFacts returnFacts,
@@ -1190,6 +1196,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in bool isRefReturn,
     ) {
         _bytecode = bytecode;
+        _jit = jit;
         _function = function_;
         _layout = layout;
         _returnFacts = returnFacts;
@@ -1275,6 +1282,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         fuseLoadCopies;
         assignRegisters;
         specialiseHandlers(_instructions);
+        jitCountEvents(_instructions, _countedEvents);
 
         foreach (ref site; _callSites)
             if (site.cleanupStartIndex != size_t.max) {
@@ -1332,6 +1340,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         result.windowBytes = _windowReach;
         result.windowCallable = windowFits(_function, _layout);
         result.fixWindowFacts();
+        result.jitHeat = _jit.jitStartHeat;
+        result.jitCounts = _jit.jitCounting;
         return result;
     }
 
@@ -3165,6 +3175,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return offset;
     }
 
+    // The indices of the instructions that count an event for the JIT: the
+    // backward branches and the calls. Empty when the JIT is off.
+    private size_t[] _countedEvents;
+
     // Every `opJump`/`opBranchFalse`/`opBranchTrue` this compiler emitted
     // still names its target by a plain instruction index at this point -
     // `compileIf`/`compileFor`/`compileContinue` patch
@@ -3180,6 +3194,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         foreach (index, ref instruction; _instructions) {
             auto target = branchTargetField(instruction);
+            if (_jit.jitCountsEvent(instruction, index, target))
+                _countedEvents ~= index;
             if (target is null)
                 continue;
 

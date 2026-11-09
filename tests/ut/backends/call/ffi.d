@@ -3305,7 +3305,7 @@ unittest {
     auto function_ = findFunction(module_, "answer");
     assert(function_ !is null, "No `answer` in the guest program");
 
-    auto bytecode = Owned!Bytecode(Program([module_]));
+    auto bytecode = ownedBackend!Bytecode(Program([module_]));
     size_t result;
     bytecode.call(function_, &result, []);
 
@@ -3932,7 +3932,7 @@ static foreach (backend; Matrix!(
             }
         });
         auto program = Program([module_]);
-        auto backend_ = Owned!backend(program);
+        auto backend_ = ownedBackend!backend(program);
 
         backend_.call(findFunction(module_, "main"), null, []);
     }
@@ -3946,7 +3946,7 @@ static foreach (backend; Matrix!(
 private void runMainOfModule(Backend)(string moduleName, string source) {
     auto module_ = parseSnippet("module " ~ moduleName ~ ";\n" ~ source);
     auto program = Program([module_]);
-    auto backend_ = Owned!Backend(program);
+    auto backend_ = ownedBackend!Backend(program);
 
     backend_.call(findFunction(module_, "main"), null, []);
 }

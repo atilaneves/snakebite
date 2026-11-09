@@ -152,6 +152,8 @@ public ExecutionReport executeBackend(
     in string[] hostArguments = null,
     in bool collectGarbage = true,
     in bool endsProcess = false,
+    in imported!"snakebite.backends.bytecode.vm".JitSetting jit =
+        imported!"snakebite.backends.bytecode.vm".JitSetting.init,
 ) {
     import snakebite.backends: makeBackend;
     import snakebite.backends.backend: run;
@@ -173,7 +175,7 @@ public ExecutionReport executeBackend(
     }
 
     auto stopWatch = StopWatch(AutoStart.yes);
-    auto backend = makeBackend(name, program);
+    auto backend = makeBackend(name, program, jit);
     import snakebite.backends.backend: ExecutionClock;
     const running = ExecutionClock.start(backend);
     import snakebite.backends.guestmodules: GuestModules;

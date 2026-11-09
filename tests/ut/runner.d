@@ -62,6 +62,7 @@ static import ut.backends.run.main,
     ut.backends.interpreter.classes,
     ut.backends.interpreter.concurrency,
     ut.backends.bytecode.concurrency,
+    ut.backends.bytecode.jit,
     ut.backends.concurrency,
     ut.backends.bytecode.vm,
     ut.backends.bytecode.relocation,
@@ -124,10 +125,11 @@ int run(string[] args) {
     import snakebite.frontend.compiler: Snippets, initialize;
     import ut.backends: prewarmFrontend;
     import std.file: rmdirRecurse;
-    import ut: selectFrontendMemoryFromArguments;
+    import ut: selectFrontendMemoryFromArguments, selectJitFromArguments;
 
     scope(exit) rmdirRecurse(sandboxPath);
     args = selectFrontendMemoryFromArguments(args);
+    args = selectJitFromArguments(args);
     initialize(Snippets.yes);
 
     auto options = Options(args.dup); // The finalizer pass changes its worker count.
@@ -149,6 +151,7 @@ int run(string[] args) {
         "ut.backends.run.finalizers",
         "ut.backends.run.hostfrontend",
         "ut.backends.run.inlineasm",
+        "ut.backends.run.jit",
         "ut.backends.run.nativestack",
         "ut.backends.run.operators",
         "ut.backends.run.staticarrayfromslice",
@@ -195,6 +198,7 @@ int run(string[] args) {
         "ut.backends.interpreter.classes",
         "ut.backends.interpreter.concurrency",
         "ut.backends.bytecode.concurrency",
+        "ut.backends.bytecode.jit",
         "ut.backends.concurrency",
         "ut.backends.bytecode.vm",
         "ut.backends.bytecode.relocation",

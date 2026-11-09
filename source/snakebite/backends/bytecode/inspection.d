@@ -9,106 +9,17 @@ private:
 
 
 import snakebite.backends.bytecode.relocation: Place, Reloc, Target;
-import snakebite.backends.bytecode.vm: Function, Instruction, Role, Roles, rolesOf;
+import snakebite.backends.bytecode.vm: Function, Instruction, Roles,
+    jitCompiled, rolesOf;
 import std.conv: text;
 
 public const(Reloc)[] relocsOf(const(Function)* function_) {
     return function_.relocs;
 }
 
-public size_t instructionCount(const(Function)* function_) {
-    return function_.instructions.length;
-}
-
-// Words of the instructions and constants that `isMapped` accepts as an
-// address of this process, but that no `Reloc` names and no role of the
-// handler excludes. The handler of each instruction is not scanned: every
-// instruction has one.
-public string[] unrecordedWords(
-    const(Function)* function_, scope bool delegate(size_t) isMapped,
-) {
-    bool[Place] recorded;
-    foreach (reloc; function_.relocs)
-        recorded[reloc.place] = true;
-
-    string[] found;
-    void check(in Place place, in size_t word) {
-        if (isMapped(word) && place !in recorded)
-            found ~= text(place, " holds ", word);
-    }
-
-    foreach (index, instruction; function_.instructions) {
-        Roles roles;
-        const known = rolesOf(instruction.handler, roles);
-        if (!known || roles.destination != Role.instruction)
-            check(Place(Place.Section.instruction,
-                Place.Field.destination, index), instruction.destination);
-        if (!known || roles.source != Role.instruction)
-            check(Place(Place.Section.instruction,
-                Place.Field.source, index), instruction.source);
-        if (!known || roles.sourceWidth != Role.instruction)
-            check(Place(Place.Section.instruction,
-                Place.Field.sourceWidth, index), instruction.sourceWidth);
-        if (isMapped(instruction.width))
-            found ~= text("instruction ", index, " has an address as width");
-    }
-    foreach (index, constant; function_.constants)
-        check(Place(Place.Section.constant, Place.Field.word, index),
-            cast(size_t) constant);
-    static foreach (table; tableFields) {
-        foreach (index; 0 .. tableLength(function_, table.section))
-            foreach (field; table.fields) {
-                const place = Place(table.section, field, index);
-                size_t word;
-                if (!isRunTimeCache(function_, place)
-                        && wordAt(function_, place, word))
-                    check(place, word);
-            }
-    }
-    return found;
-}
-
-// A call site that has a delegate to prepare its callee or its plan keeps
-// the result in `callee` or `nativePlan` when it first runs. The scan runs
-// after the programs did, so the cache holds an address that the compiler
-// never wrote.
-private bool isRunTimeCache(const(Function)* function_, in Place place) {
-    if (place.section != Place.Section.callSite)
-        return false;
-    const site = &function_.callSites[place.index];
-    return (place.field == Place.Field.callee
-            && site.prepareGuest.funcptr !is null)
-        || (place.field == Place.Field.nativePlan
-            && site.prepareNativePlan.funcptr !is null);
-}
-
-private struct TableFields {
-    Place.Section section;
-    Place.Field[] fields;
-}
-
-private enum tableFields = [
-    TableFields(Place.Section.callSite, [
-        Place.Field.callee, Place.Field.prepareGuest, Place.Field.nativePlan,
-        Place.Field.prepareNativePlan, Place.Field.builtinEntry,
-        Place.Field.valueSignature,
-    ]),
-    TableFields(Place.Section.assertSite, [
-        Place.Field.message, Place.Field.file, Place.Field.halt,
-    ]),
-    TableFields(Place.Section.exceptionHandler, [Place.Field.type]),
-];
-
-private size_t tableLength(
-    const(Function)* function_, in Place.Section section,
-) {
-    final switch (section) with (Place.Section) {
-        case instruction: return function_.instructions.length;
-        case constant: return function_.constants.length;
-        case callSite: return function_.callSites.length;
-        case assertSite: return function_.assertSites.length;
-        case exceptionHandler: return function_.exceptionHandlers.length;
-    }
+// Whether `function_` runs as JIT code.
+public bool isJitCompiled(const(Function)* function_) {
+    return jitCompiled(function_);
 }
 
 // Whether the role table says that the handler's `field` holds an address

@@ -72,7 +72,7 @@ static foreach (backend; Matrix!()) {
                 importedLiteralModule,
             ]);
             auto function_ = findFunction(modules[0], "answer");
-            auto backend_ = Owned!backend(Program([modules[0]]));
+            auto backend_ = ownedBackend!backend(Program([modules[0]]));
 
             int result;
             backend_.call(function_, &result, []);
@@ -123,7 +123,7 @@ static foreach (backend; Matrix!()) {
             auto function_ = findFunction(modules[0], "answer");
 
             int result;
-            auto backend_ = Owned!backend(program);
+            auto backend_ = ownedBackend!backend(program);
             backend_.call(function_, &result, []);
             result.should == 42;
         }

@@ -237,6 +237,8 @@ private BackendReport[] benchmarkAll(
                 options.runs,
                 enterWorkingDirectory,
                 options.programArguments,
+                imported!"snakebite.backends.bytecode.vm".JitSetting(
+                    !options.noJit),
             );
         }
 
@@ -272,6 +274,8 @@ public BackendReport benchmark(
     in uint runs,
     in void delegate() enterWorkingDirectory = null,
     in string[] programArguments = null,
+    in imported!"snakebite.backends.bytecode.vm".JitSetting jit =
+        imported!"snakebite.backends.bytecode.vm".JitSetting.init,
 ) {
     import bench.capture: captureStdout;
     import bench.report: timingStatistics, updateTestCounts;
@@ -308,6 +312,7 @@ public BackendReport benchmark(
                 backendName_,
                 program,
                 [program.name] ~ programArguments,
+                jit: jit,
             );
             return execution.status;
         });
@@ -427,6 +432,8 @@ private void measureMemory(ref BackendReport report, in Options options) {
         command ~= ["--version", identifier];
     if (options.lowmem)
         command ~= "--lowmem";
+    if (options.noJit)
+        command ~= "--no-jit";
     command ~= options.projectDirectory;
     command ~= "--" ~ options.programArguments;
 
