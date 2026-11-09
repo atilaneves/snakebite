@@ -802,7 +802,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             registerGuestWord(function_, placeholder);
 
             scope compiler = new FunctionCompiler(
-                this, function_, layout, returnFacts, isVoidReturn,
+                this, _jit, function_, layout, returnFacts, isVoidReturn,
                 isRefReturn);
             *placeholder = compiler.build(body_);
             _complete.insert(function_, placeholder);
@@ -846,7 +846,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Arg, AssertSite, CallSite, ClosureSlot, castSizeWithSignedness,
         discardResult, Field, indirectStorage,
         ExceptionHandler, Function, InlineBody,
-        Instruction, Role, Roles, addressSlotOf, branchTargetField, recordAssertSiteRelocs,
+        Instruction, JitSetting, Role, Roles, addressSlotOf, branchTargetField, recordAssertSiteRelocs,
         recordCallSiteRelocs, recordExceptionHandlerRelocs, rolesOf,
         isFrameOperand, widthHoldsIndexSlot, withAddressSlot,
         opAdd3, opSubtract3, opMultiply3, opFloatAdd3, opFloatSubtract3,
@@ -865,8 +865,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         CompareKind, Comparison, constantForm, fusedBranchHandler, fusesConstant,
         firstComparisonHandler, threeAddressConstantHandlers,
         threeAddressHandlers,
-        decodesIndirect, isFusedBranch, specialiseHandlers, isCountedCall, jitCountEvents,
-        jitCounting, jitStartHeat, RegisterFamily, registerFamily,
+        decodesIndirect, isFusedBranch, specialiseHandlers, jitCountEvents,
+        jitCounting, jitCountsEvent, jitStartHeat, RegisterFamily, registerFamily,
         fusedRegisterFamily, registerForm, fusedRegisterForm,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall, opCallWindowDiscard, opCallWindowFrame,
@@ -933,6 +933,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     extern(D):
 
     private Bytecode _bytecode;
+    private const JitSetting _jit;
     private FuncDeclaration _function;
     private const FrameLayout _layout;
     private ClosureLayout _closureLayout;
@@ -1187,6 +1188,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     public this(
         Bytecode bytecode,
+        in JitSetting jit,
         FuncDeclaration function_,
         in FrameLayout layout,
         in TypeFacts returnFacts,
@@ -1194,6 +1196,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in bool isRefReturn,
     ) {
         _bytecode = bytecode;
+        _jit = jit;
         _function = function_;
         _layout = layout;
         _returnFacts = returnFacts;
@@ -1337,8 +1340,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         result.windowBytes = _windowReach;
         result.windowCallable = windowFits(_function, _layout);
         result.fixWindowFacts();
-        result.jitHeat = _bytecode._jit.jitStartHeat;
-        result.jitCounts = _bytecode._jit.jitCounting;
+        result.jitHeat = _jit.jitStartHeat;
+        result.jitCounts = _jit.jitCounting;
         return result;
     }
 
@@ -3189,16 +3192,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void resolveBranches() {
         import std.conv: text;
 
-        const counting = _bytecode._jit.jitCounting;
         foreach (index, ref instruction; _instructions) {
             auto target = branchTargetField(instruction);
-            if (target is null) {
-                if (counting && isCountedCall(instruction.handler))
-                    _countedEvents ~= index;
-                continue;
-            }
-            if (counting && *target <= index)
+            if (_jit.jitCountsEvent(instruction, index, target))
                 _countedEvents ~= index;
+            if (target is null)
+                continue;
 
             if (!(*target < _instructions.length
                     || (*target == _instructions.length

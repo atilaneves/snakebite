@@ -5385,6 +5385,18 @@ package bool jitCounting(in JitSetting setting) nothrow @nogc {
     return setting.enabled;
 }
 
+// Whether `instruction`, at `index`, counts an event for the JIT: a call, or a
+// branch whose target is at or before it. `target` is the instruction index
+// that a branch jumps to, and null for an instruction that does not branch.
+package bool jitCountsEvent(in JitSetting setting, in Instruction instruction,
+    in size_t index, in size_t* target) nothrow @nogc
+{
+    if (!setting.jitCounting)
+        return false;
+    return target is null
+        ? isCountedCall(instruction.handler) : *target <= index;
+}
+
 // For the paths that cannot know at compile time whether the JIT is on.
 pragma(inline, true)
 private void countCallIfOn(const(Function)* callee) {
@@ -5399,7 +5411,7 @@ private void countCall(const(Function)* callee) {
         jitTierUp(function_);
 }
 
-package bool isCountedCall(in Instruction.Handler handler) nothrow @nogc {
+private bool isCountedCall(in Instruction.Handler handler) nothrow @nogc {
     static foreach (operation; AliasSeq!(
         opCall, opCallWindowFrame, opCallWindowIndirect, opCallWindowDiscard,
         opCallIndirectWindowFrame, opCallIndirectWindowIndirect,
@@ -5941,7 +5953,9 @@ package uint jitStartHeat(in JitSetting) pure nothrow @nogc @safe {
     return 0;
 }
 
-package bool isCountedCall(in Instruction.Handler) pure nothrow @nogc @safe {
+package bool jitCountsEvent(in JitSetting, in Instruction, in size_t,
+    in size_t*) pure nothrow @nogc @safe
+{
     return false;
 }
 
