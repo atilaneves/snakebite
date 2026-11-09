@@ -160,6 +160,37 @@ private bool ensureRegion() {
     return true;
 }
 
+// A growable buffer that lives as long as its thread; compiles reuse it.
+package struct Scratch(T) {
+    T* ptr;
+    size_t cap;
+
+    // At least `n` elements; the contents are undefined.
+    T* reserve(size_t n) {
+        if (n > cap) {
+            auto newCap = cap ? cap : 1024;
+            while (newCap < n)
+                newCap *= 2;
+            free(ptr);
+            ptr = cast(T*) malloc(newCap * T.sizeof);
+            cap = newCap;
+        }
+        return ptr;
+    }
+
+    // Keeps the contents.
+    T* grow(size_t n) {
+        if (n > cap) {
+            auto newCap = cap ? cap : 256;
+            while (newCap < n)
+                newCap *= 2;
+            ptr = cast(T*) realloc(ptr, newCap * T.sizeof);
+            cap = newCap;
+        }
+        return ptr;
+    }
+}
+
 private struct Fixup {
     size_t position;
     size_t target;
@@ -413,6 +444,11 @@ private struct Asm {
     void ud2() { b(0x0F); b(0x0B); }
 }
 
+// Thread-local, so that compiles on different threads do not share them.
+private Scratch!Fixup fixupScratch;
+private Scratch!size_t labelScratch;
+private Scratch!(Instruction.Handler) originalScratch;
+
 private struct Gen {
     Asm a;
     const(Instruction)[] instructions;
@@ -427,7 +463,8 @@ private struct Gen {
     void fix(size_t target) {
         if (fixupCount == fixupCap) {
             fixupCap = fixupCap ? fixupCap * 2 : 256;
-            fixups = cast(Fixup*) realloc(fixups, fixupCap * Fixup.sizeof);
+            fixups = fixupScratch.grow(fixupCap);
+            fixupCap = fixupScratch.cap;
         }
         fixups[fixupCount++] = Fixup(a.n, target);
         a.d32(0);
@@ -1177,7 +1214,7 @@ package bool jitFunction(Instruction[] instructions,
 {
     if (instructions.length == 0 || !ensureRegion())
         return false;
-    const t0 = nowNs();
+    const t0 = statsOn ? nowNs() : 0;
     lock();
     scope (exit)
         unlock();
@@ -1192,17 +1229,11 @@ package bool jitFunction(Instruction[] instructions,
     g.instructions = instructions;
     g.snapshot = snapshot;
     g.constants = constants;
-    auto labels = cast(size_t*) malloc((instructions.length + 1) * size_t.sizeof);
-    g.labels = labels[0 .. instructions.length + 1];
-    scope (exit) {
-        free(labels);
-        free(g.fixups);
-    }
-
-    auto originals = cast(Instruction.Handler*) malloc(
-        instructions.length * Instruction.Handler.sizeof);
-    scope (exit)
-        free(originals);
+    g.labels = labelScratch.reserve(instructions.length + 1)[
+        0 .. instructions.length + 1];
+    g.fixups = fixupScratch.ptr;
+    g.fixupCap = fixupScratch.cap;
+    auto originals = originalScratch.reserve(instructions.length);
     foreach (i, ref instruction; instructions)
         originals[i] = instruction.handler;
 
@@ -1238,7 +1269,7 @@ package bool jitFunction(Instruction[] instructions,
             g.labels[f.target] - (f.position + 4));
 
     const size = g.a.n;
-    const t1 = nowNs();
+    const t1 = statsOn ? nowNs() : 0;
     regionCursor = start + size;
     if (regionCursor + chunkSize / 4 > populatedEnd)
         populateChunk;

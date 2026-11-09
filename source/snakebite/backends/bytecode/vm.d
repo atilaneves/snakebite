@@ -5285,7 +5285,7 @@ private const(Specialisation)* lookupSpecialisation(
 
 // Prototype template JIT (issue #873, P1): classification of the handlers that
 // have a template. See `jit.d`.
-import snakebite.backends.bytecode.jit: JitOp, JKind, jitFunction;
+import snakebite.backends.bytecode.jit: JitOp, JKind, jitFunction, Scratch;
 
 private struct JitEntry {
     Instruction.Handler handler;
@@ -5494,6 +5494,18 @@ private void buildJitTable() {
                         sourceSize, 0, 0, 0, destSize));
 }
 
+private Scratch!JitOp jitOpScratch;
+private Scratch!Instruction jitSnapshotScratch;
+
+// A copy of `instructions` in a thread-local buffer, valid until the next
+// call on this thread.
+package const(Instruction)[] jitSnapshotOf(in Instruction[] instructions) {
+    auto copy = jitSnapshotScratch.reserve(instructions.length)[
+        0 .. instructions.length];
+    copy[] = instructions[];
+    return copy;
+}
+
 // Replaces the handlers of `instructions` by JIT code. `snapshot` holds the
 // instructions as they were before `specialiseHandlers`.
 package bool jitCompile(Instruction[] instructions,
@@ -5501,7 +5513,7 @@ package bool jitCompile(Instruction[] instructions,
 {
     if (!jitTableBuilt)
         buildJitTable;
-    auto ops = new JitOp[snapshot.length];
+    auto ops = jitOpScratch.reserve(snapshot.length)[0 .. snapshot.length];
     foreach (index, ref instruction; snapshot)
         ops[index] = jitGet(instruction.handler);
     return jitFunction(instructions, snapshot, ops, constants, name);
