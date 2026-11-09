@@ -502,7 +502,7 @@ static foreach (backend; Matrix!()) {
             auto module_ = parseSnippet(code);
             auto program = Program([module_]);
             imageSource(program);
-            auto instance = Owned!backend(program);
+            auto instance = ownedBackend!backend(program);
             int result;
             instance.call(findFunction(module_, "answer"), &result, []);
             result.should == 17;

@@ -530,7 +530,7 @@ unittest {
         }
     });
     auto function_ = findFunction(module_, "oob");
-    auto instance = Owned!Bytecode(Program([module_]));
+    auto instance = ownedBackend!Bytecode(Program([module_]));
 
     RangeError caught;
     int result;
@@ -567,7 +567,7 @@ unittest {
         }
     });
     auto function_ = findFunction(module_, "misattributed");
-    auto instance = Owned!Bytecode(Program([module_]));
+    auto instance = ownedBackend!Bytecode(Program([module_]));
 
     RangeError caught;
     int result;
@@ -949,7 +949,7 @@ unittest {
             return cast(int) invalid.length;
         }
     });
-    auto instance = Owned!Bytecode(Program([module_]));
+    auto instance = ownedBackend!Bytecode(Program([module_]));
 
     foreach (name; ["upperTooLarge", "reversedBounds"]) {
         auto function_ = findFunction(module_, name);

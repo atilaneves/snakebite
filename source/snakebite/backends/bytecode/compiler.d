@@ -54,7 +54,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import snakebite.backends.backend: CompilationStatistics, Program;
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.classinfo;
-    import snakebite.backends.bytecode.vm: Function, InlineBody, Vm;
+    import snakebite.backends.bytecode.vm: Function, InlineBody, JitSetting, Vm;
     import snakebite.backends.layout: FrameLayout;
     import snakebite.frontend.checks: Checks;
     import snakebite.sharedtable: SharedTable;
@@ -71,6 +71,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     private ExecutionStates!(Vm*) _vms;
     private NativeData _nativeData;
     private PlanCache _plans;
+    // What the functions of this backend do with the JIT.
+    private JitSetting _jit;
     private CallSelection _callSelection;
     // Keyed by pointer, not by value: a call site compiled while
     // `function_` itself is still mid-compile - direct or mutual
@@ -116,8 +118,9 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // after preparation, including during GC finalization (ADR-0006).
     private SharedTable!(FuncDeclaration, FrameLayout) _layouts;
 
-    public this(const Program program) {
+    public this(const Program program, in JitSetting jit = JitSetting.init) {
         super(program);
+        _jit = jit;
         _plans = PlanCache(program.dependencyImage,
             &_program.isRootOwned);
         _callSelection.linksFunctions = program.definesLinkableFunctions;
@@ -863,7 +866,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         firstComparisonHandler, threeAddressConstantHandlers,
         threeAddressHandlers,
         decodesIndirect, isFusedBranch, specialiseHandlers, isCountedCall, jitCountEvents,
-        jitEnabled, jitStartHeat, RegisterFamily, registerFamily,
+        jitCounting, jitStartHeat, RegisterFamily, registerFamily,
         fusedRegisterFamily, registerForm, fusedRegisterForm,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall, opCallWindowDiscard, opCallWindowFrame,
@@ -1334,7 +1337,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         result.windowBytes = _windowReach;
         result.windowCallable = windowFits(_function, _layout);
         result.fixWindowFacts();
-        result.jitHeat = jitStartHeat;
+        result.jitHeat = _bytecode._jit.jitStartHeat;
+        result.jitCounts = _bytecode._jit.jitCounting;
         return result;
     }
 
@@ -3185,7 +3189,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void resolveBranches() {
         import std.conv: text;
 
-        const counting = jitEnabled;
+        const counting = _bytecode._jit.jitCounting;
         foreach (index, ref instruction; _instructions) {
             auto target = branchTargetField(instruction);
             if (target is null) {

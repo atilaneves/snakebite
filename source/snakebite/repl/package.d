@@ -24,9 +24,11 @@ private alias DependencyImage =
 public struct Repl {
     import dmd.dmodule: Module;
     import snakebite.backends: Backend, BackendName;
+    import snakebite.backends.bytecode.vm: JitSetting;
     import snakebite.frontend.compiler: checksOf, FrontendFlags;
 
     private BackendName _backendName;
+    private JitSetting _jit;
     private string[] _importPaths;
     private FrontendFlags _flags;
     private const(DependencyImage)* _dependencyImage;
@@ -43,11 +45,13 @@ public struct Repl {
         in string[] stringImportPaths = [],
         in FrontendFlags flags = FrontendFlags.init,
         const(DependencyImage)* dependencyImage = null,
+        in JitSetting jit = JitSetting.init,
     ) {
         import dmd.frontend: addImport, addStringImport;
         import snakebite.frontend.compiler: newInFrontend;
 
         _backendName = backendName;
+        _jit = jit;
         _importPaths = importPaths.dup;
         _flags = FrontendFlags(flags.compilerArguments.dup);
         _dependencyImage = dependencyImage;
@@ -147,10 +151,7 @@ public struct Repl {
         auto function_ = findFunction(module_, evalName);
         auto program = programOf(module_);
         program.dependencyImage = _dependencyImage;
-        auto backend = makeBackend(
-            _backendName,
-            program,
-        );
+        auto backend = makeBackend(_backendName, program, _jit);
 
         // One expression cell runs the accumulated module as a program does:
         // its module constructors before the cell, its destructors after.
@@ -250,7 +251,7 @@ public struct Repl {
             fullSource,
             module_,
             program,
-            makeBackend(_backendName, program),
+            makeBackend(_backendName, program, _jit),
         );
 
         return SubmitResult.init;

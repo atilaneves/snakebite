@@ -28,7 +28,7 @@ public int run(string[] args) {
     import snakebite.dub: fetchProject;
     import snakebite.execution: executeBackend, prepareSources, runProject;
     import snakebite.project: EndsProcess;
-    import snakebite.backends.bytecode.vm: selectJit;
+    import snakebite.backends.bytecode.vm: JitSetting;
     import snakebite.gc: selectFrontendMemory;
     import std.file: exists, isDir;
     import std.stdio: stderr, stdout, write;
@@ -40,7 +40,6 @@ public int run(string[] args) {
     if (parsed.status != 0 || parsed.options.showHelp)
         return parsed.status;
     selectFrontendMemory(parsed.options.lowmem);
-    selectJit(!parsed.options.noJit);
 
     try {
         string projectDirectory = parsed.options.projectDirectory;
@@ -68,6 +67,7 @@ public int run(string[] args) {
                         ~ parsed.options.programArguments,
                     false,
                     true,
+                    JitSetting(!parsed.options.noJit),
                 );
                 _statistics = Statistics(true, preparation, report);
                 return report.status;

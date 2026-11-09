@@ -145,7 +145,8 @@ private __gshared size_t populatedEnd;
 private enum chunkSize = 1UL << 20;
 private enum populateSize = 1UL << 17;
 private enum codeAlignment = 16;
-// The most that one instruction can need; a function needs room for this.
+// The most that the code of one instruction can need. Emission checks this much
+// room before each instruction.
 private enum maximumBytesPerInstruction = 1024;
 private enum MADV_POPULATE_READ = 22;
 private enum MADV_POPULATE_WRITE = 23;
@@ -1353,6 +1354,11 @@ private struct Gen {
 // Gives the function JIT code. Returns false
 // when it could not: the function then keeps its handlers. The caller holds
 // the lock and has seen `jitUsable`.
+//
+// The code goes after the code in the current chunk. If the chunk has too
+// little room left, emission stops (it checks before each instruction) and
+// starts again in a new chunk, whose size no function can exceed. A function
+// does not reserve room for its worst case before it emits.
 package bool jitFunction(Instruction[] instructions,
     const(Instruction)[] snapshot, const(JitOp)[] ops,
     const(Instruction.Handler)[] originals,
@@ -1360,12 +1366,28 @@ package bool jitFunction(Instruction[] instructions,
 {
     if (instructions.length == 0)
         return false;
-    const room = instructions.length * maximumBytesPerInstruction + 4096;
-    if (chunkCapacity - chunkUsed < room && !newChunk(room))
-        return false;
+    auto result = emitFunction(instructions, snapshot, ops, originals,
+        constants);
+    if (result == Emitted.full) {
+        const worst = instructions.length * maximumBytesPerInstruction
+            + 4096;
+        if (!newChunk(worst))
+            return false;
+        result = emitFunction(instructions, snapshot, ops, originals,
+            constants);
+    }
+    return result == Emitted.done;
+}
+
+private enum Emitted { done, failed, full }
+
+private Emitted emitFunction(Instruction[] instructions,
+    const(Instruction)[] snapshot, const(JitOp)[] ops,
+    const(Instruction.Handler)[] originals,
+    const(long)[] constants)
+{
     const start = chunkUsed;
     const cap = chunkCapacity - start;
-
     Gen g;
     g.a.buf = writeBase + start;
     g.a.cap = cap;
@@ -1374,12 +1396,14 @@ package bool jitFunction(Instruction[] instructions,
     g.constants = constants;
     auto labels = labelScratch.reserve(instructions.length + 1);
     if (labels is null)
-        return false;
+        return Emitted.failed;
     g.labels = labels[0 .. instructions.length + 1];
     g.fixups = fixupScratch.ptr;
     g.fixupCap = fixupScratch.cap;
 
     foreach (i; 0 .. instructions.length) {
+        if (cap - g.a.n < maximumBytesPerInstruction)
+            return Emitted.full;
         g.labels[i] = g.a.n;
         const saved = g.a.n;
         const savedFixups = g.fixupCount;
@@ -1387,7 +1411,7 @@ package bool jitFunction(Instruction[] instructions,
         if (originals[i] !is null && ops[i].kind != JKind.none)
             done = g.emitOp(i, ops[i]);
         if (g.outOfMemory)
-            return false;
+            return Emitted.failed;
         if (!done) {
             g.a.n = saved;
             g.fixupCount = savedFixups;
@@ -1412,6 +1436,8 @@ package bool jitFunction(Instruction[] instructions,
             }
         }
     }
+    if (cap - g.a.n < codeAlignment)
+        return Emitted.full;
     g.labels[instructions.length] = g.a.n;
     g.a.ud2();
 
@@ -1432,5 +1458,5 @@ package bool jitFunction(Instruction[] instructions,
         atomicStore!(MemoryOrder.rel)(
             *cast(shared(size_t)*) &instruction.handler,
             cast(size_t) (code + g.labels[i]));
-    return true;
+    return Emitted.done;
 }

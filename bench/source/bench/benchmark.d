@@ -37,7 +37,6 @@ public int run(string[] args) {
     import std.stdio: stderr, writeln;
     import snakebite.execution: PreparationReport, prepareSources, runProject;
     import snakebite.project: EndsProcess;
-    import snakebite.backends.bytecode.vm: selectJit;
     import snakebite.gc: selectFrontendMemory;
 
     Options options;
@@ -51,7 +50,6 @@ public int run(string[] args) {
     if (options.helpWanted)
         return 0;
     selectFrontendMemory(options.lowmem);
-    selectJit(!options.noJit);
 
     if (const error = validate(options)) {
         stderr.writeln(error);
@@ -239,6 +237,8 @@ private BackendReport[] benchmarkAll(
                 options.runs,
                 enterWorkingDirectory,
                 options.programArguments,
+                imported!"snakebite.backends.bytecode.vm".JitSetting(
+                    !options.noJit),
             );
         }
 
@@ -274,6 +274,8 @@ public BackendReport benchmark(
     in uint runs,
     in void delegate() enterWorkingDirectory = null,
     in string[] programArguments = null,
+    in imported!"snakebite.backends.bytecode.vm".JitSetting jit =
+        imported!"snakebite.backends.bytecode.vm".JitSetting.init,
 ) {
     import bench.capture: captureStdout;
     import bench.report: timingStatistics, updateTestCounts;
@@ -310,6 +312,7 @@ public BackendReport benchmark(
                 backendName_,
                 program,
                 [program.name] ~ programArguments,
+                jit: jit,
             );
             return execution.status;
         });

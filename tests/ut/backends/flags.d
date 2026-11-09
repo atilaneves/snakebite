@@ -49,7 +49,7 @@ static foreach (backend; Matrix!(Omit!(Native, Because.inexpressible,
                 }
             }]);
         auto program = Program(modules);
-        auto evaluator = Owned!backend(program);
+        auto evaluator = ownedBackend!backend(program);
         int result;
         evaluator.call(findFunction(modules[0], "check"), &result, []);
         result.should == 16;
@@ -186,7 +186,7 @@ private Expect ranOn(Backend)(in string[] flags, in string code) {
     actions.halt = &endRun;
     auto program = Program(
         [module_], "flags", checksOf(frontendFlags), actions);
-    auto backend = Owned!Backend(program);
+    auto backend = ownedBackend!Backend(program);
 
     try {
         backend.call(findFunction(module_, "__run"), null, []);

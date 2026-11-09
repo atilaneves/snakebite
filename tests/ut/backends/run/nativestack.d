@@ -383,7 +383,7 @@ static foreach (backend; Matrix!(
             }
         });
         auto function_ = findFunction(guestModule, "forceCollection");
-        auto evaluator = Owned!backend(Program([guestModule]));
+        auto evaluator = ownedBackend!backend(Program([guestModule]));
 
         static class Box {
             int value;
@@ -446,7 +446,7 @@ static foreach (backend; Matrix!(
             garbage;
         } else {
             auto guestModule = parseSnippet(code);
-            auto evaluator = Owned!backend(Program([guestModule]));
+            auto evaluator = ownedBackend!backend(Program([guestModule]));
             evaluator.call(findFunction(guestModule, "garbage"), null, []);
         }
         int before;

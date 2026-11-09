@@ -149,7 +149,7 @@ public void shouldBeStatusOf(
     } else {
         enum program_ = RegisterProgram!(module_, code).program;
         auto program = Program([parsedProgram(program_)], "snakebite");
-        auto backend = Owned!BackendType(program);
+        auto backend = ownedBackend!BackendType(program);
         asTestFailure(run(backend, program), file, line)
             .should == expected;
     }
@@ -294,7 +294,7 @@ public template shouldBeRetOf(
                 );
 
             T result;
-            auto backend = Owned!BackendType(program);
+            auto backend = ownedBackend!BackendType(program);
             asTestFailure(
                 backend.call(function_, &result, []),
                 file, line,
@@ -365,7 +365,7 @@ private string evaluate(
     } else {
         auto function_ = parsedFunction(snippet);
         auto program = Program([function_.getModule]);
-        auto backend = Owned!BackendType(program);
+        auto backend = ownedBackend!BackendType(program);
         return asTestFailure(backend.eval(function_), file, line);
     }
 }

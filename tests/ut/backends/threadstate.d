@@ -169,7 +169,7 @@ private auto makeResources(Backend, Touches touches)(ref int[2] probe) {
         }
         auto module_ = parseSnippet(source);
         auto program = Program([module_]);
-        auto instance = Owned!Backend(program);
+        auto instance = ownedBackend!Backend(program);
         int* pointer = probe.ptr;
         void*[1] arguments = [cast(void*) &pointer];
         instance.call(findFunction(module_, "make"), null, arguments[]);

@@ -263,6 +263,5 @@ private int runSelectedTests(
 
 private bool runsAlone(in TestData test) {
     return test.tags.canFind("forced-finalizers")
-        || test.tags.canFind("changes-working-directory")
-        || test.tags.canFind("changes-jit");
+        || test.tags.canFind("changes-working-directory");
 }

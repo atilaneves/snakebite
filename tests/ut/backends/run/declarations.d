@@ -170,7 +170,7 @@ private int programStatus(Backend)(in Sandbox sandbox, in string code) {
         ~ " import std.file: append; traceFile.append(text); }\n"
         ~ crtTrace ~ code;
     auto program = Program([parseSnippet(source)]);
-    auto instance = Owned!Backend(program);
+    auto instance = ownedBackend!Backend(program);
     return run(instance, program);
 }
 

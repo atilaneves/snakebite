@@ -354,7 +354,7 @@ static foreach (BackendType; Matrix!()) {
                 linkedClassesModule,
             ]);
             auto function_ = findFunction(modules[0], "answer");
-            auto backend_ = Owned!BackendType(Program([modules[0]]));
+            auto backend_ = ownedBackend!BackendType(Program([modules[0]]));
             backend_.call(function_, &result, []);
         }
         result.should == 1;

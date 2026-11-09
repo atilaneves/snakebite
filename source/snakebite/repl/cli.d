@@ -31,7 +31,7 @@ public int run(string[] args) {
     import snakebite.execution: runProject;
     import snakebite.project: EndsProcess;
     import snakebite.dependencypreparation: prepareStartupDependencies;
-    import snakebite.backends.bytecode.vm: selectJit;
+    import snakebite.backends.bytecode.vm: JitSetting;
     import snakebite.gc: selectFrontendMemory;
     import snakebite.repl: Repl;
     import std.algorithm.iteration: map;
@@ -51,7 +51,6 @@ public int run(string[] args) {
     }
 
     selectFrontendMemory(parsed.options.lowmem);
-    selectJit(!parsed.options.noJit);
     // The REPL evaluates single snippets, so it is the snippet world.
     initialize(Snippets.yes);
 
@@ -69,6 +68,7 @@ public int run(string[] args) {
                 stringImportPaths,
                 flags,
                 dependencyImage,
+                JitSetting(!parsed.options.noJit),
             );
 
             foreach (file; files)

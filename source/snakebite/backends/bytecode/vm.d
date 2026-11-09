@@ -1110,6 +1110,8 @@ public struct Function {
     // is a `JitTier`.
     package uint jitHeat;
     package uint jitState;
+    // Whether calls of this function count towards `jitHeat`.
+    package bool jitCounts;
 
     package void fixWindowFacts() {
         activationAlignment = frameAlignment > uint(Activation.alignof)
@@ -5304,6 +5306,15 @@ private const(Specialisation)* lookupSpecialisation(
 }
 
 
+// What a `Bytecode` backend does with the JIT: `enabled` makes functions
+// count their events and get JIT code when hot; `eager` makes that happen at
+// the first event of every function instead of at the threshold, so that tests
+// run mostly on JIT code.
+public struct JitSetting {
+    public bool enabled = true;
+    public bool eager;
+}
+
 // The JIT: tier-up, counting and the classification of handlers. The code
 // generator is `jit.d`; docs/adr/0016-template-jit.md explains the design.
 // A build for another platform or compiler (`jitSupported`) has none of this.
@@ -5321,30 +5332,14 @@ import snakebite.backends.bytecode.jit: JitOp, JKind, jitFunction, jitUsable,
 package enum jitThreshold = 256;
 private enum jitStep = cast(uint) ((1UL << 32) / jitThreshold);
 
-// Whether new functions are made to count. Set once before the first
-// function compiles; functions that already compiled keep what they have.
-private __gshared bool jitSelected = true;
 // What `Function.jitHeat` starts with.
-private __gshared uint jitInitialHeat;
-
-// `bin/sb --no-jit`: no counting twin is installed and nothing becomes JIT
-// code.
-public void selectJit(in bool on) nothrow @nogc {
-    jitSelected = on;
+package uint jitStartHeat(in JitSetting setting) nothrow @nogc {
+    return setting.eager ? cast(uint) -jitStep : 0;
 }
 
-package bool jitEnabled() nothrow @nogc {
-    return jitSelected;
-}
-
-// A test hook: with `on`, every function that compiles from now on gets JIT
-// code at its first event, so that the tests run mostly on JIT code.
-public void jitCompileOnFirstEvent(in bool on) nothrow @nogc {
-    jitInitialHeat = on ? cast(uint) -jitStep : 0;
-}
-
-package uint jitStartHeat() nothrow @nogc {
-    return jitInitialHeat;
+// Whether the functions of a backend with `setting` count their events.
+package bool jitCounting(in JitSetting setting) nothrow @nogc {
+    return setting.enabled;
 }
 
 pragma(inline, true)
@@ -5366,7 +5361,7 @@ private void countCall(const(Function)* callee) {
 // For the paths that cannot know at compile time whether the JIT is on.
 pragma(inline, true)
 private void countCallIfOn(const(Function)* callee) {
-    if (jitSelected)
+    if (callee.jitCounts)
         countCall(callee);
 }
 
@@ -5905,15 +5900,11 @@ private bool compileUnderLock(Function* function_) nothrow @nogc {
 
 } else {
 
-package bool jitEnabled() pure nothrow @nogc @safe {
+package bool jitCounting(in JitSetting) pure nothrow @nogc @safe {
     return false;
 }
 
-public void selectJit(in bool) pure nothrow @nogc @safe {}
-
-public void jitCompileOnFirstEvent(in bool) pure nothrow @nogc @safe {}
-
-package uint jitStartHeat() pure nothrow @nogc @safe {
+package uint jitStartHeat(in JitSetting) pure nothrow @nogc @safe {
     return 0;
 }
 
