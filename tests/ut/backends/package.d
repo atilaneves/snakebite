@@ -155,6 +155,46 @@ public void shouldBeStatusOf(
     }
 }
 
+// As `shouldBeStatusOf`, and where the bytecode backend runs with the JIT on,
+// also checks that each function in `jitted` ended with JIT code. A program
+// that gives the right status on handlers only would otherwise pass.
+public void shouldBeStatusOfWithJitCode(
+    BackendType, string code, string[] jitted, string module_ = __MODULE__,
+)(
+    in int expected,
+    in string file = __FILE__,
+    in size_t line = __LINE__,
+) {
+    static if (!is(BackendType == Bytecode))
+        shouldBeStatusOf!(BackendType, code, module_)(expected, file, line);
+    else {
+        import snakebite.backends.bytecode.inspection: isJitCompiled;
+
+        enum program_ = RegisterProgram!(module_, code).program;
+        auto program = Program([parsedProgram(program_)], "snakebite");
+        auto backend = ownedBackend!BackendType(program);
+        asTestFailure(run(backend, program), file, line).should == expected;
+        if (!testJit.enabled)
+            return;
+        foreach (name; jitted) {
+            bool found;
+            bool compiled;
+            backend.eachCompiled((declaration, function_) {
+                if (declaration.ident.toString == name) {
+                    found = true;
+                    compiled = isJitCompiled(function_);
+                }
+            });
+            if (!found)
+                throw new UnitTestException(
+                    text("`", name, "` was not compiled"), file, line);
+            if (!compiled)
+                throw new UnitTestException(
+                    text("`", name, "` has no JIT code"), file, line);
+        }
+    }
+}
+
 // `main`'s exit status, run natively, mirroring the backend-side semantics
 // documented on `snakebite.backends.backend.run`: `void main` is status 0,
 // an escaping `Throwable` is status 1, and no `main` at all is status 0.

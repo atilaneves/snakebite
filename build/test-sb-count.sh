@@ -2,7 +2,8 @@
 # The method of CLAUDE.md for the bytecodes of a loop body: run the guest
 # with two iteration counts under bin/sb-count and divide the difference of
 # the totals by the difference of the iterations. The body of `work` has a
-# few bytecodes, so the answer must not be 0. Needs `ninja bin/sb-count`.
+# few bytecodes, so the answer must not be 0. JIT code counts nothing, so the
+# `bin/sb-count` build has no JIT. Needs `ninja bin/sb-count`.
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 

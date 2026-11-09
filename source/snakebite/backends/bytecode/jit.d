@@ -15,7 +15,8 @@ module snakebite.backends.bytecode.jit;
 // because the cost of a compile is paid at run time.
 
 import snakebite.backends.bytecode.vm: Instruction, indirectBit,
-    DispatchState, chainedDispatch;
+    DispatchState, chainedDispatch, Comparison, CompareKind, CheckedAccess,
+    IndexBase;
 
 private:
 
@@ -23,7 +24,11 @@ private:
 // The code generator exists only where the register maps below are known.
 public enum jitSupported = jitPlatform && jitCompiler;
 
-version (linux) version (X86_64)
+// `bin/sb-count` counts the bytecodes that handlers run, and JIT code runs
+// none, so that build has no JIT.
+version (BytecodeCount)
+    private enum jitPlatform = false;
+else version (linux) version (X86_64)
     private enum jitPlatform = true;
 private static if (!is(typeof(jitPlatform)))
     private enum jitPlatform = false;
@@ -41,21 +46,152 @@ import core.atomic: atomicLoad, atomicStore, cas, MemoryOrder;
 import core.stdc.stdlib: malloc, realloc, free;
 import core.sys.posix.sys.mman;
 import snakebite.internalfailure: internalFailure;
+import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset;
 
 @nogc nothrow:
 
-package enum JKind : ubyte {
-    none, copy, constant, zero, jump, branch, int3, cmp3, fused, fp3, fpcmp3,
-    index, checked, castFixed, widen, loadInd, storeInd, frameAddr,
-    staticLoad, staticStore, staticAddr, boolOp, unary, shift,
-}
-
-// `a` to `e` have a meaning for each kind; see `emitOp`. `w` is a fixed
-// operand width, or 0 when the instruction holds it.
+// What the JIT does for one instruction: the kind of template and its
+// parameters. Each kind that has parameters has the member of its own name in
+// the union; `width` is a fixed operand width, or 0 when the instruction holds
+// it. `emitOp` says what each kind emits.
 package struct JitOp {
-    JKind kind;
-    ubyte a, b, c, d, e;
-    ubyte w;
+    enum Kind : ubyte {
+        none, copy, constant, zero, jump, branch, int3, cmp3, fused, fp3,
+        fpcmp3, index, checked, castFixed, widen, loadInd, storeInd,
+        frameAddr, staticLoad, staticStore, staticAddr, boolOp, unary, shift,
+    }
+
+    enum IntOperation : ubyte { add, or, and, subtract, xor, multiply }
+    enum FloatOperation : ubyte { add, subtract, multiply, divide }
+    enum ShiftKind : ubyte { left, logicalRight, arithmeticRight }
+
+    // `source` is the address of a constant instead of an operand.
+    static struct Copy {
+        bool staticSource;
+    }
+
+    static struct Branch {
+        bool jumpIfNonzero;
+    }
+
+    // `leftInR0`: the left operand is in the integer register argument.
+    // `resultInR0`: the result goes there. `twoAddress`: the destination is
+    // also the left operand.
+    static struct Int3 {
+        IntOperation operation;
+        bool constantRight;
+        bool leftInR0;
+        bool resultInR0;
+        bool twoAddress;
+    }
+
+    // The byte result goes to the destination.
+    static struct Cmp3 {
+        Comparison comparison;
+        bool signed;
+        bool constantRight;
+        bool twoAddress;
+    }
+
+    // `jumpWhen`: jump when the answer of the comparison is true.
+    static struct Fused {
+        Comparison comparison;
+        CompareKind kind;
+        bool jumpWhen;
+        bool constantRight;
+        bool leftInR0;
+    }
+
+    // `leftInFp0`: the left operand is in the floating register argument.
+    // `resultInFp0`: the result goes there.
+    static struct Fp3 {
+        FloatOperation operation;
+        bool constantRight;
+        bool leftInFp0;
+        bool resultInFp0;
+    }
+
+    static struct FpCmp3 {
+        Comparison comparison;
+        bool constantRight;
+    }
+
+    static struct Index {
+        IndexBase base;
+    }
+
+    // `width` is the element size.
+    static struct Checked {
+        CheckedAccess access;
+        bool fixedLength;
+        ubyte indexWidth;
+        bool signed;
+        bool constantValue;
+    }
+
+    // `width` is the size of the destination.
+    static struct CastFixed {
+        bool zeroExtend;
+        ubyte sourceSize;
+    }
+
+    static struct Widen {
+        bool zeroExtend;
+    }
+
+    // `nonzero`: the result is whether the operand is not zero.
+    static struct BoolOp {
+        bool nonzero;
+    }
+
+    static struct Unary {
+        bool complement;
+    }
+
+    static struct Shift {
+        ShiftKind kind;
+        bool constantRight;
+        bool twoAddress;
+    }
+
+    Kind kind;
+    ubyte width;
+    union {
+        Copy copy;
+        Branch branch;
+        Int3 int3;
+        Cmp3 cmp3;
+        Fused fused;
+        Fp3 fp3;
+        FpCmp3 fpcmp3;
+        Index index;
+        Checked checked;
+        CastFixed castFixed;
+        Widen widen;
+        BoolOp boolOp;
+        Unary unary;
+        Shift shift;
+    }
+
+    // A kind that has no parameters.
+    static JitOp plain(Kind kind, ubyte width = 0) pure nothrow @nogc @safe {
+        JitOp op;
+        op.kind = kind;
+        op.width = width;
+        return op;
+    }
+
+    // A kind that has parameters, which are the member named like the kind.
+    static JitOp make(Kind kind, Parameters)(Parameters parameters,
+        ubyte width = 0) pure nothrow @nogc @trusted
+    {
+        enum member = __traits(allMembers, Kind)[cast(size_t) kind];
+        JitOp op;
+        op.kind = kind;
+        op.width = width;
+        __traits(getMember, op, member) = parameters;
+        return op;
+    }
 }
 
 private enum : ubyte {
@@ -86,10 +222,26 @@ version (LDC) {
 }
 private enum STATE = RDX;
 
-// `movsd [mem], xmm0`.
+// Prefixes and opcodes of the SSE instructions, which `Asm.sse` and
+// `Asm.sseRR` take. The second byte of the opcode is after `0x0F`.
+private enum ubyte noPrefix = 0;
 private enum ubyte doublePrefix = 0xF2;
+private enum ubyte singlePrefix = 0xF3;
+private enum ubyte operandSizePrefix = 0x66;
+private enum ubyte loadOpcode = 0x10;
 private enum ubyte storeOpcode = 0x11;
+private enum ubyte moveAlignedOpcode = 0x28;
+private enum ubyte compareOpcode = 0x2E;
+// `movsxd`.
+private enum uint signExtend32Opcode = 0x63;
+// `addsd`, `subsd`, `mulsd` and `divsd` after the prefix, by operation.
+private static immutable ubyte[4] floatOpcodes = [0x58, 0x5C, 0x59, 0x5E];
 private enum fp0Register = 0;
+private enum XMM1 = 1;
+private enum XMM2 = 2;
+
+// The operation field of the ALU instructions.
+private enum Alu : ubyte { add = 0, or = 1, and = 4, sub = 5, xor = 6, cmp = 7 }
 
 private struct Mem {
     ubyte base;
@@ -101,31 +253,6 @@ private struct Mem {
 private enum : ubyte {
     CC_B = 2, CC_AE = 3, CC_E = 4, CC_NE = 5, CC_BE = 6, CC_A = 7,
     CC_P = 0xA, CC_NP = 0xB, CC_L = 0xC, CC_GE = 0xD, CC_LE = 0xE, CC_G = 0xF,
-}
-
-
-// Whether the CPU has the BMI2 shifts (`shlx`, `shrx`, `sarx`); without them
-// the shift instructions keep their handlers. Druntime's `core.cpuid` has no
-// public accessor for BMI2, so this reads CPUID leaf 7 itself.
-private bool cpuHasBmi2() {
-    uint maximumLeaf;
-    asm pure nothrow @nogc {
-        mov EAX, 0;
-        cpuid;
-        mov maximumLeaf, EAX;
-    }
-    enum structuredExtendedFeatures = 7;
-    if (maximumLeaf < structuredExtendedFeatures)
-        return false;
-    uint features;
-    asm pure nothrow @nogc {
-        mov EAX, 7;
-        mov ECX, 0;
-        cpuid;
-        mov features, EBX;
-    }
-    enum bmi2Bit = 1U << 8;
-    return (features & bmi2Bit) != 0;
 }
 
 
@@ -192,6 +319,31 @@ package bool jitUsable() {
     return ok;
 }
 
+// Whether the CPU has the BMI2 shifts (`shlx`, `shrx`, `sarx`); without them
+// the shift instructions keep their handlers. Druntime's `core.cpuid` has no
+// public accessor for BMI2, so this reads CPUID leaf 7 itself.
+private bool cpuHasBmi2() {
+    uint maximumLeaf;
+    asm pure nothrow @nogc {
+        mov EAX, 0;
+        cpuid;
+        mov maximumLeaf, EAX;
+    }
+    enum structuredExtendedFeatures = 7;
+    if (maximumLeaf < structuredExtendedFeatures)
+        return false;
+    uint features;
+    asm pure nothrow @nogc {
+        mov EAX, 7;
+        mov ECX, 0;
+        cpuid;
+        mov features, EBX;
+    }
+    enum bmi2Bit = 1U << 8;
+    return (features & bmi2Bit) != 0;
+}
+
+
 private bool createRegion() {
     import core.sys.posix.unistd: close;
 
@@ -251,13 +403,12 @@ private void checkCallingConvention() {
     ulong[5] seen;
     Asm a;
     a.buf = writeBase;
-    a.cap = codeAlignment * 16;
     a.st(8, Mem(FRAME, 0), PCREG);
     a.st(8, Mem(FRAME, 8), ACTIVE);
     a.st(8, Mem(FRAME, 16), STATE);
     a.st(8, Mem(FRAME, 24), REG0);
     a.sse(doublePrefix, storeOpcode, fp0Register, Mem(FRAME, 32));
-    a.aluRR(6, 4, RAX, RAX);
+    a.aluRR(Alu.xor, 4, RAX, RAX);
     a.b(0xC3);
 
     alias NoGcHandler = SetFunctionAttributes!(Instruction.Handler,
@@ -332,7 +483,6 @@ private struct Asm {
 
     ubyte* buf;
     size_t n;
-    size_t cap;
 
     void b(ubyte x) { buf[n++] = x; }
     void d32(int x) { *cast(int*) (buf + n) = x; n += 4; }
@@ -429,18 +579,18 @@ private struct Asm {
         switch (w) {
             case 1: memOp(8, false, r, m, (0x0F << 8 | 0xBE)); break;
             case 2: memOp(8, false, r, m, (0x0F << 8 | 0xBF)); break;
-            case 4: memOp(8, false, r, m, 0x63); break;
+            case 4: memOp(8, false, r, m, signExtend32Opcode); break;
             default: memOp(8, false, r, m, 0x8B);
         }
     }
 
-    // ALU op (0 add, 1 or, 4 and, 5 sub, 6 xor, 7 cmp) reg, mem.
-    void alu(int op, int w, int r, in Mem m) {
+    // ALU op reg, mem.
+    void alu(Alu op, int w, int r, in Mem m) {
         memOp(w, w == 1, r, m, (op * 8 + (w == 1 ? 2 : 3)));
     }
 
     // ALU op mem, imm.
-    void aluMI(int op, int w, in Mem m, int imm) {
+    void aluMI(Alu op, int w, in Mem m, int imm) {
         if (w == 1) {
             memOp(w, false, op, m, 0x80);
             b(cast(ubyte) imm);
@@ -455,11 +605,11 @@ private struct Asm {
     }
 
     // ALU op reg, reg (reg is the destination).
-    void aluRR(int op, int w, int dst, int src) {
+    void aluRR(Alu op, int w, int dst, int src) {
         rrOp(w, w == 1, src, dst, (op * 8 + (w == 1 ? 0 : 1)));
     }
 
-    void aluRI(int op, int w, int r, int imm) {
+    void aluRI(Alu op, int w, int r, int imm) {
         if (w == 2)
             b(0x66);
         ubyte rex = 0x40;
@@ -504,7 +654,6 @@ private struct Asm {
     }
 
     void movzxRR(int w, int dst, int src) {
-        // Zero-extend the low `w` bytes of src into dst (32-bit result).
         switch (w) {
             case 1: rrOp(4, true, dst, src, (0x0F << 8 | 0xB6)); break;
             case 2: rrOp(4, false, dst, src, (0x0F << 8 | 0xB7)); break;
@@ -578,6 +727,9 @@ private struct Asm {
     }
 
     void ud2() { b(0x0F); b(0x0B); }
+
+    // `jmp rax`.
+    void jmpRax() { b(0xFF); b(0xE0); }
 }
 
 // The buffers of the label and fixup tables; compiles share them under the
@@ -673,8 +825,8 @@ private struct Gen {
         while (size - off >= 16) {
             auto ss = s; ss.disp += cast(int) off;
             auto dd = d; dd.disp += cast(int) off;
-            a.sse(0, 0x10, 1, ss);
-            a.sse(0, 0x11, 1, dd);
+            a.sse(noPrefix, loadOpcode, XMM1, ss);
+            a.sse(noPrefix, storeOpcode, XMM1, dd);
             off += 16;
         }
         foreach (c; chunkSizes) {
@@ -717,38 +869,30 @@ private struct Gen {
         return w == 1 || w == 2 || w == 4 || w == 8;
     }
 
-    static int signedCc(int cmp) {
-        // lt le gt ge eq ne
+    static int signedCc(Comparison comparison) {
         static immutable ubyte[6] t = [CC_L, CC_LE, CC_G, CC_GE, CC_E, CC_NE];
-        return t[cmp];
+        return t[comparison];
     }
 
-    static int unsignedCc(int cmp) {
+    static int unsignedCc(Comparison comparison) {
         static immutable ubyte[6] t = [CC_B, CC_BE, CC_A, CC_AE, CC_E, CC_NE];
-        return t[cmp];
-    }
-
-    // The two operands of an integer or floating compare/arith, decoded in the
-    // order the handlers decode them. `left` and `right` are raw fields.
-    struct Operands {
-        Mem dest, left, right;
-        size_t rightRaw;
+        return t[comparison];
     }
 
     bool emitOp(size_t i, in JitOp op) {
         const ins = snapshot[i];
-        final switch (op.kind) with (JKind) {
+        final switch (op.kind) with (JitOp.Kind) {
         case none:
             return false;
 
         case copy: {
-            const size = op.w ? op.w : ins.width;
+            const size = op.width ? op.width : ins.width;
             if (size > 64)
                 return false;
             Mem d, s;
             if (!opnd(ins.destination, R9, d))
                 return false;
-            if (op.a) {
+            if (op.copy.staticSource) {
                 a.movI(R10, ins.source);
                 s = Mem(R10, 0);
             } else if (!opnd(ins.source, R10, s))
@@ -803,15 +947,15 @@ private struct Gen {
         }
 
         case branch: {
-            const w = op.w ? op.w : ins.width;
+            const w = op.width ? op.width : ins.width;
             size_t t;
             if (!goodWidth(w) || !targetIndex(ins.source, t))
                 return false;
             Mem d;
             if (!opnd(ins.destination, R9, d))
                 return false;
-            a.aluMI(7, cast(int) w, d, 0);
-            jccTo(op.a ? CC_NE : CC_E, t);
+            a.aluMI(Alu.cmp, cast(int) w, d, 0);
+            jccTo(op.branch.jumpIfNonzero ? CC_NE : CC_E, t);
             return true;
         }
 
@@ -834,17 +978,22 @@ private struct Gen {
             const es = ins.width;
             if (es > int.max)
                 return false;
-            switch (op.a) {
-                case 0: a.ld(8, RAX, Mem(s.base, s.disp + 8)); break;
-                case 1: a.lea(RAX, s); break;
-                default: a.ld(8, RAX, s);
+            final switch (op.index.base) {
+                case IndexBase.slice:
+                    a.ld(8, RAX, Mem(s.base, s.disp + cast(int) arrayPointerOffset));
+                    break;
+                case IndexBase.staticArray:
+                    a.lea(RAX, s);
+                    break;
+                case IndexBase.pointer:
+                    a.ld(8, RAX, s);
             }
             a.ld(8, SC2, r);
             if (es == 1 || es == 2 || es == 4 || es == 8)
                 a.lea(RAX, Mem(RAX, 0, SC2, cast(ubyte) es));
             else {
                 a.imulRI(SC2, SC2, cast(int) es);
-                a.aluRR(0, 8, RAX, SC2);
+                a.aluRR(Alu.add, 8, RAX, SC2);
             }
             a.st(8, d, RAX);
             return true;
@@ -854,16 +1003,14 @@ private struct Gen {
             return emitChecked(ins, op);
 
         case castFixed: {
-            // a: 1 when the source is zero-extended; w: destination size;
-            // b: source size.
             Mem d, s;
             if (!opnd(ins.destination, R9, d) || !opnd(ins.source, R10, s))
                 return false;
-            if (op.a)
-                a.ldzx(op.b, RAX, s);
+            if (op.castFixed.zeroExtend)
+                a.ldzx(op.castFixed.sourceSize, RAX, s);
             else
-                a.ldsx(op.b, RAX, s);
-            a.st(op.w, d, RAX);
+                a.ldsx(op.castFixed.sourceSize, RAX, s);
+            a.st(op.width, d, RAX);
             return true;
         }
 
@@ -874,7 +1021,7 @@ private struct Gen {
             Mem d;
             if (!opnd(ins.destination, R9, d))
                 return false;
-            if (op.a)
+            if (op.widen.zeroExtend)
                 a.ldzx(cast(int) ins.source, RAX, d);
             else
                 a.ldsx(cast(int) ins.source, RAX, d);
@@ -883,7 +1030,7 @@ private struct Gen {
         }
 
         case loadInd: {
-            const size = op.w ? op.w : ins.width;
+            const size = op.width ? op.width : ins.width;
             if (size > 64)
                 return false;
             Mem d, s;
@@ -895,7 +1042,7 @@ private struct Gen {
         }
 
         case storeInd: {
-            const size = op.w ? op.w : ins.width;
+            const size = op.width ? op.width : ins.width;
             if (size > 64)
                 return false;
             Mem d, s;
@@ -960,8 +1107,8 @@ private struct Gen {
             Mem d;
             if (!opnd(ins.destination, R9, d))
                 return false;
-            a.aluMI(7, cast(int) w, d, 0);
-            a.setcc(op.a ? CC_NE : CC_E, d);
+            a.aluMI(Alu.cmp, cast(int) w, d, 0);
+            a.setcc(op.boolOp.nonzero ? CC_NE : CC_E, d);
             return true;
         }
 
@@ -972,7 +1119,7 @@ private struct Gen {
             Mem d;
             if (!opnd(ins.destination, R9, d))
                 return false;
-            a.negNot(op.a == 0, cast(int) w, d);
+            a.negNot(!op.unary.complement, cast(int) w, d);
             return true;
         }
 
@@ -1006,26 +1153,35 @@ private struct Gen {
         return true;
     }
 
-    // a: 0 add, 1 or, 4 and, 5 sub, 6 xor, 8 mul. b: constant right operand.
-    // c: left operand in r0. d: result in r0. e: two-address form.
+    static Alu aluOf(JitOp.IntOperation operation) {
+        final switch (operation) with (JitOp.IntOperation) {
+            case add: return Alu.add;
+            case or: return Alu.or;
+            case and: return Alu.and;
+            case subtract: return Alu.sub;
+            case xor: return Alu.xor;
+            case multiply: assert(false, "a multiplication is not an ALU op");
+        }
+    }
+
     bool emitInt3(in Instruction ins, in JitOp op) {
-        const w = cast(int) (op.w ? op.w : ins.width);
+        const p = op.int3;
+        const w = cast(int) (op.width ? op.width : ins.width);
         if (!goodWidth(w))
             return false;
         Mem d, l, r;
         size_t rr;
-        if (!binary(ins, op.e != 0, op.b != 0, op.c != 0, op.d != 0, d, l, r, rr))
+        if (!binary(ins, p.twoAddress, p.constantRight, p.leftInR0,
+                p.resultInR0, d, l, r, rr))
             return false;
-        const acc = op.d ? REG0 : RAX;
+        const acc = p.resultInR0 ? REG0 : RAX;
         int imm = 0;
         bool haveImm;
-        if (op.b) {
+        if (p.constantRight)
             haveImm = immOf(w, constantAt(rr, w), imm);
-        }
-        const mul = op.a == 8;
+        const mul = p.operation == JitOp.IntOperation.multiply;
         const narrowMul = mul && w < 4;
-        // Left operand into acc.
-        if (op.c) {
+        if (p.leftInR0) {
             if (acc != REG0)
                 a.movRR64(acc, REG0);
             if (narrowMul)
@@ -1036,270 +1192,283 @@ private struct Gen {
             a.ld(w, acc, l);
         if (mul) {
             const mw = w == 8 ? 8 : 4;
-            if (op.b) {
+            if (p.constantRight) {
                 if (narrowMul || !haveImm) {
                     a.movI(SC2, constantAt(rr, w));
                     a.imulRR(mw, acc, SC2);
                 } else {
-                    a.imulRI(acc, acc, imm);
-                    // imulRI is 64-bit; for 4 bytes that is still right in
+                    // `imulRI` is 64-bit; for 4 bytes that is still right in
                     // the low 32 bits.
+                    a.imulRI(acc, acc, imm);
                 }
             } else if (narrowMul) {
                 a.ldzx(w, SC2, r);
                 a.imulRR(4, acc, SC2);
             } else
                 a.imulM(mw, acc, r);
-        } else if (op.b) {
+        } else if (p.constantRight) {
             if (haveImm)
-                a.aluRI(op.a, w, acc, imm);
+                a.aluRI(aluOf(p.operation), w, acc, imm);
             else {
                 a.movI(SC2, constantAt(rr, w));
-                a.aluRR(op.a, w, acc, SC2);
+                a.aluRR(aluOf(p.operation), w, acc, SC2);
             }
         } else
-            a.alu(op.a, w, acc, r);
-        if (!op.d)
+            a.alu(aluOf(p.operation), w, acc, r);
+        if (!p.resultInR0)
             a.st(w, d, acc);
         return true;
     }
 
-    // a: comparison (lt le gt ge eq ne). b: signed. c: constant right.
-    // e: two-address form (the byte result replaces the left operand).
     bool emitCmp3(in Instruction ins, in JitOp op) {
-        const w = cast(int) (op.w ? op.w : ins.width);
+        const p = op.cmp3;
+        const w = cast(int) (op.width ? op.width : ins.width);
         if (!goodWidth(w))
             return false;
         Mem d, l, r;
         size_t rr;
-        if (!binary(ins, op.e != 0, op.c != 0, false, false, d, l, r, rr))
+        if (!binary(ins, p.twoAddress, p.constantRight, false, false, d, l, r,
+                rr))
             return false;
         a.ld(w, RAX, l);
         int imm;
-        if (op.c) {
+        if (p.constantRight) {
             if (immOf(w, constantAt(rr, w), imm))
-                a.aluRI(7, w, RAX, imm);
+                a.aluRI(Alu.cmp, w, RAX, imm);
             else {
                 a.movI(SC2, constantAt(rr, w));
-                a.aluRR(7, w, RAX, SC2);
+                a.aluRR(Alu.cmp, w, RAX, SC2);
             }
         } else
-            a.alu(7, w, RAX, r);
-        a.setcc(op.b ? signedCc(op.a) : unsignedCc(op.a), d);
+            a.alu(Alu.cmp, w, RAX, r);
+        a.setcc(p.signed ? signedCc(p.comparison) : unsignedCc(p.comparison),
+            d);
         return true;
     }
 
-    // a: comparison, b: kind (0 signed, 1 unsigned, 2 floating), c: jump when,
-    // d: constant right operand, e: left operand in a register.
     bool emitFused(in Instruction ins, in JitOp op) {
+        const p = op.fused;
         const w = cast(int) ins.width;
         size_t t;
         if (!targetIndex(ins.sourceWidth, t))
             return false;
         Mem l, r;
-        if (op.b != 2) {
+        if (p.kind != CompareKind.floating) {
             if (!goodWidth(w))
                 return false;
-            if (!op.e && !opnd(ins.destination, R9, l))
+            if (!p.leftInR0 && !opnd(ins.destination, R9, l))
                 return false;
-            if (!op.d && !opnd(ins.source, R10, r))
+            if (!p.constantRight && !opnd(ins.source, R10, r))
                 return false;
             int leftReg = REG0;
-            if (!op.e) {
+            if (!p.leftInR0) {
                 a.ld(w, RAX, l);
                 leftReg = RAX;
             }
             int imm;
-            if (op.d) {
+            if (p.constantRight) {
                 const v = constantAt(ins.source, w);
                 if (immOf(w, v, imm))
-                    a.aluRI(7, w, leftReg, imm);
+                    a.aluRI(Alu.cmp, w, leftReg, imm);
                 else {
                     a.movI(SC2, v);
-                    a.aluRR(7, w, leftReg, SC2);
+                    a.aluRR(Alu.cmp, w, leftReg, SC2);
                 }
             } else
-                a.alu(7, w, leftReg, r);
-            int cc = op.b == 0 ? signedCc(op.a) : unsignedCc(op.a);
-            if (!op.c)
+                a.alu(Alu.cmp, w, leftReg, r);
+            int cc = p.kind == CompareKind.signed
+                ? signedCc(p.comparison) : unsignedCc(p.comparison);
+            if (!p.jumpWhen)
                 cc ^= 1;
             jccTo(cc, t);
             return true;
         }
-        // Floating.
         if (w != 8 && w != 4)
             return false;
-        const prefix = cast(ubyte) (w == 8 ? 0xF2 : 0xF3);
-        const ucomi = cast(ubyte) 0x2E;
-        const ucomiPrefix = cast(ubyte) (w == 8 ? 0x66 : 0);
-        if (!op.e && !opnd(ins.destination, R9, l))
+        const prefix = w == 8 ? doublePrefix : singlePrefix;
+        const comparePrefix = w == 8 ? operandSizePrefix : noPrefix;
+        if (!p.leftInR0 && !opnd(ins.destination, R9, l))
             return false;
-        if (op.d) {
+        if (p.constantRight) {
             a.movI(R10, ins.source);
             r = Mem(R10, 0);
         } else if (!opnd(ins.source, R10, r))
             return false;
-        int leftX = 0;
-        if (!op.e) {
-            a.sse(prefix, 0x10, 1, l);
-            leftX = 1;
+        int leftX = fp0Register;
+        if (!p.leftInR0) {
+            a.sse(prefix, loadOpcode, XMM1, l);
+            leftX = XMM1;
         }
-        const cmp = op.a;
-        if (cmp == 2 || cmp == 3) { // gt, ge: ucomis left, right
-            a.sse(ucomiPrefix, ucomi, leftX, r);
-            int cc = cmp == 2 ? CC_A : CC_AE;
-            if (!op.c)
-                cc ^= 1;
-            jccTo(cc, t);
-        } else if (cmp == 0 || cmp == 1) { // lt, le: ucomis right, left
-            a.sse(prefix, 0x10, 2, r);
-            a.sseRR(ucomiPrefix, ucomi, 2, leftX);
-            int cc = cmp == 0 ? CC_A : CC_AE;
-            if (!op.c)
-                cc ^= 1;
-            jccTo(cc, t);
-        } else {
-            a.sse(ucomiPrefix, ucomi, leftX, r);
-            const eq = cmp == 4;
-            if (eq == (op.c != 0)) {
-                // Jump when ZF=1 and PF=0.
-                const skip = jccLocal(CC_P);
-                jccTo(CC_E, t);
-                patchHere(skip);
-            } else {
-                jccTo(CC_P, t);
-                jccTo(CC_NE, t);
+        final switch (p.comparison) with (Comparison) {
+            case greaterThan:
+            case greaterOrEqual: {
+                a.sse(comparePrefix, compareOpcode, leftX, r);
+                int cc = p.comparison == greaterThan ? CC_A : CC_AE;
+                if (!p.jumpWhen)
+                    cc ^= 1;
+                jccTo(cc, t);
+                break;
+            }
+            case lessThan:
+            case lessOrEqual: {
+                // Compares the right operand with the left one, so that an
+                // unordered answer sets the carry flag.
+                a.sse(prefix, loadOpcode, XMM2, r);
+                a.sseRR(comparePrefix, compareOpcode, XMM2, leftX);
+                int cc = p.comparison == lessThan ? CC_A : CC_AE;
+                if (!p.jumpWhen)
+                    cc ^= 1;
+                jccTo(cc, t);
+                break;
+            }
+            case equal:
+            case notEqual: {
+                a.sse(comparePrefix, compareOpcode, leftX, r);
+                const eq = p.comparison == equal;
+                if (eq == p.jumpWhen) {
+                    // Jump when ZF=1 and PF=0.
+                    const skip = jccLocal(CC_P);
+                    jccTo(CC_E, t);
+                    patchHere(skip);
+                } else {
+                    jccTo(CC_P, t);
+                    jccTo(CC_NE, t);
+                }
             }
         }
         return true;
     }
 
-    // a: 0 add, 1 sub, 2 mul, 3 div. c: constant right. d: left in fp0.
-    // e: result in fp0.
     bool emitFp3(in Instruction ins, in JitOp op) {
+        const p = op.fp3;
         const w = cast(int) ins.width;
         if (w != 8 && w != 4)
             return false;
-        if (op.d && w != 8)
+        if (p.leftInFp0 && w != 8)
             return false;
-        const prefix = cast(ubyte) (w == 8 ? 0xF2 : 0xF3);
+        const prefix = w == 8 ? doublePrefix : singlePrefix;
         Mem d, l, r;
-        if (!op.e && !opnd(ins.destination, R9, d))
+        if (!p.resultInFp0 && !opnd(ins.destination, R9, d))
             return false;
-        if (!op.d && !opnd(ins.source, R10, l))
+        if (!p.leftInFp0 && !opnd(ins.source, R10, l))
             return false;
-        if (op.c) {
+        if (p.constantRight) {
             a.movI(R11, ins.sourceWidth);
             r = Mem(R11, 0);
         } else if (!opnd(ins.sourceWidth, R11, r))
             return false;
-        const acc = op.e ? 0 : 1;
-        if (op.d) {
-            if (acc != 0)
-                a.sseRR(0, 0x28, acc, 0);
+        const acc = p.resultInFp0 ? fp0Register : XMM1;
+        if (p.leftInFp0) {
+            if (acc != fp0Register)
+                a.sseRR(noPrefix, moveAlignedOpcode, acc, fp0Register);
         } else
-            a.sse(prefix, 0x10, acc, l);
-        static immutable ubyte[4] codes = [0x58, 0x5C, 0x59, 0x5E];
-        a.sse(prefix, codes[op.a], acc, r);
-        if (!op.e)
-            a.sse(prefix, 0x11, acc, d);
+            a.sse(prefix, loadOpcode, acc, l);
+        a.sse(prefix, floatOpcodes[p.operation], acc, r);
+        if (!p.resultInFp0)
+            a.sse(prefix, storeOpcode, acc, d);
         return true;
     }
 
-    // a: comparison, c: constant right.
     bool emitFpCmp3(in Instruction ins, in JitOp op) {
+        const p = op.fpcmp3;
         const w = cast(int) ins.width;
         if (w != 8 && w != 4)
             return false;
-        const prefix = cast(ubyte) (w == 8 ? 0xF2 : 0xF3);
-        const ucomiPrefix = cast(ubyte) (w == 8 ? 0x66 : 0);
+        const prefix = w == 8 ? doublePrefix : singlePrefix;
+        const comparePrefix = w == 8 ? operandSizePrefix : noPrefix;
         Mem d, l, r;
         if (!opnd(ins.destination, R9, d) || !opnd(ins.source, R10, l))
             return false;
-        if (op.c) {
+        if (p.constantRight) {
             a.movI(R11, ins.sourceWidth);
             r = Mem(R11, 0);
         } else if (!opnd(ins.sourceWidth, R11, r))
             return false;
-        a.sse(prefix, 0x10, 1, l);
-        const cmp = op.a;
-        if (cmp == 2 || cmp == 3) {
-            a.sse(ucomiPrefix, 0x2E, 1, r);
-            a.setcc(cmp == 2 ? CC_A : CC_AE, d);
-        } else if (cmp == 0 || cmp == 1) {
-            a.sse(prefix, 0x10, 2, r);
-            a.sseRR(ucomiPrefix, 0x2E, 2, 1);
-            a.setcc(cmp == 0 ? CC_A : CC_AE, d);
-        } else {
-            a.sse(ucomiPrefix, 0x2E, 1, r);
-            if (cmp == 4) {
+        a.sse(prefix, loadOpcode, XMM1, l);
+        final switch (p.comparison) with (Comparison) {
+            case greaterThan:
+            case greaterOrEqual:
+                a.sse(comparePrefix, compareOpcode, XMM1, r);
+                a.setcc(p.comparison == greaterThan ? CC_A : CC_AE, d);
+                break;
+            case lessThan:
+            case lessOrEqual:
+                a.sse(prefix, loadOpcode, XMM2, r);
+                a.sseRR(comparePrefix, compareOpcode, XMM2, XMM1);
+                a.setcc(p.comparison == lessThan ? CC_A : CC_AE, d);
+                break;
+            case equal:
+                a.sse(comparePrefix, compareOpcode, XMM1, r);
                 a.setccR(CC_E, RAX);
                 a.setccR(CC_NP, SC2);
-                a.aluRR(4, 1, RAX, SC2);
-            } else {
+                a.aluRR(Alu.and, 1, RAX, SC2);
+                a.st(1, d, RAX);
+                break;
+            case notEqual:
+                a.sse(comparePrefix, compareOpcode, XMM1, r);
                 a.setccR(CC_NE, RAX);
                 a.setccR(CC_P, SC2);
-                a.aluRR(1, 1, RAX, SC2);
-            }
-            a.st(1, d, RAX);
+                a.aluRR(Alu.or, 1, RAX, SC2);
+                a.st(1, d, RAX);
         }
         return true;
     }
 
-    // a: access (0 load, 1 store, 2 check, 3 storeUnchecked), b: fixed length,
-    // c: index width, d: signed, e: constant value; w: element size.
     bool emitChecked(in Instruction ins, in JitOp op) {
+        const p = op.checked;
         const packed = ins.width;
         const idxOff = cast(uint) packed;
         const hi = packed >> 32;
-        const es = op.w;
-        const access = op.a;
+        const es = op.width;
+        const access = p.access;
         if (idxOff > 0x7fff_0000)
             return false;
         size_t target;
-        if (access != 3 && !targetIndex(ins.sourceWidth, target))
+        if (access != CheckedAccess.storeUnchecked
+                && !targetIndex(ins.sourceWidth, target))
             return false;
         Mem d, s;
-        if (access != 2 && !op.e && !opnd(ins.destination, R9, d))
+        if (access != CheckedAccess.check && !p.constantValue
+                && !opnd(ins.destination, R9, d))
             return false;
         if (!opnd(ins.source, R10, s))
             return false;
         const idx = Mem(FRAME, cast(int) idxOff);
-        const offset = op.b ? 0 : cast(int) hi;
-        if (op.c == 4) {
+        const offset = p.fixedLength ? 0 : cast(int) hi;
+        if (p.indexWidth == 4) {
             a.ld(4, RAX, idx);
             if (offset != 0)
-                a.aluRI(0, 4, RAX, offset);
-            if (op.d)
-                a.rrOp(8, false, RAX, RAX, 0x63);
+                a.aluRI(Alu.add, 4, RAX, offset);
+            if (p.signed)
+                a.rrOp(8, false, RAX, RAX, signExtend32Opcode);
         } else {
             a.ld(8, RAX, idx);
             if (offset != 0)
-                a.aluRI(0, 8, RAX, offset);
+                a.aluRI(Alu.add, 8, RAX, offset);
         }
         size_t failJump = size_t.max;
-        if (access != 3) {
-            if (op.b) {
+        if (access != CheckedAccess.storeUnchecked) {
+            if (p.fixedLength) {
                 if (hi <= int.max)
-                    a.aluRI(7, 8, RAX, cast(int) hi);
+                    a.aluRI(Alu.cmp, 8, RAX, cast(int) hi);
                 else {
                     a.movI(SC2, hi);
-                    a.aluRR(7, 8, RAX, SC2);
+                    a.aluRR(Alu.cmp, 8, RAX, SC2);
                 }
             } else
-                a.alu(7, 8, RAX, s); // arrayLengthOffset is 0
+                a.alu(Alu.cmp, 8, RAX, Mem(s.base, s.disp + cast(int) arrayLengthOffset));
             failJump = jccLocal(CC_AE);
         }
-        if (access != 2) {
-            if (op.b)
+        if (access != CheckedAccess.check) {
+            if (p.fixedLength)
                 a.lea(SC2, s);
             else
-                a.ld(8, SC2, Mem(s.base, s.disp + 8));
+                a.ld(8, SC2, Mem(s.base, s.disp + cast(int) arrayPointerOffset));
             const element = Mem(SC2, 0, RAX, cast(ubyte) es);
-            if (access == 0) {
+            if (access == CheckedAccess.load) {
                 a.ld(es, R11, element);
                 a.st(es, d, R11);
-            } else if (op.e) {
+            } else if (p.constantValue) {
                 int imm;
                 const v = constantAt(ins.destination, es);
                 if (immOf(es, v, imm))
@@ -1313,39 +1482,51 @@ private struct Gen {
                 a.st(es, element, R11);
             }
         }
-        if (access != 3)
+        if (access != CheckedAccess.storeUnchecked)
             jmpTo(target);
         if (failJump != size_t.max)
             patchHere(failJump);
         return true;
     }
 
-    // a: 0 left, 1 logical right, 2 arithmetic right.
     bool emitShift(in Instruction ins, in JitOp op) {
-        const w = cast(int) (op.w ? op.w : ins.width);
+        const p = op.shift;
+        const w = cast(int) (op.width ? op.width : ins.width);
         if (!bmi2 || !goodWidth(w))
             return false;
         Mem d, l, r;
         size_t rr;
-        if (!binary(ins, op.e != 0, op.c != 0, false, false, d, l, r, rr))
+        if (!binary(ins, p.twoAddress, p.constantRight, false, false, d, l, r,
+                rr))
             return false;
-        if (op.a == 2)
+        if (p.kind == JitOp.ShiftKind.arithmeticRight)
             a.ldsx(w, RAX, l);
         else
             a.ldzx(w, RAX, l);
-        if (op.c)
+        if (p.constantRight)
             a.movI(SC2, constantAt(rr, w));
         else
             a.ldzx(w, SC2, r);
-        a.aluRI(4, 4, SC2, w == 8 ? 63 : 31);
-        // shlx, shrx, sarx rax, rax, rdi (BMI2).
-        a.b(0xC4);
-        a.b(0xE2);
-        // W = 1, vvvv = the inverted second source (SC2), L = 0, pp.
-        a.b(cast(ubyte) (0x80 | ((~SC2 & 15) << 3)
-            | (op.a == 0 ? 1 : op.a == 1 ? 3 : 2)));
-        a.b(0xF7);
-        a.b(0xC0);
+        a.aluRI(Alu.and, 4, SC2, w == 8 ? 63 : 31);
+        // `shlx`, `shrx` or `sarx` rax, rax, SC2 (BMI2), VEX-encoded. The
+        // first byte after the escape holds W = 1, `vvvv` as the inverted
+        // second source register (SC2), L = 0 and the prefix `pp`.
+        enum ubyte vexEscape = 0xC4;
+        enum ubyte vexMap0F38 = 0xE2;
+        enum ubyte vexW = 0x80;
+        enum ubyte shiftOpcode = 0xF7;
+        enum ubyte raxRaxModrm = 0xC0;
+        ubyte pp;
+        final switch (p.kind) with (JitOp.ShiftKind) {
+            case left: pp = 1; break;
+            case logicalRight: pp = 3; break;
+            case arithmeticRight: pp = 2;
+        }
+        a.b(vexEscape);
+        a.b(vexMap0F38);
+        a.b(cast(ubyte) (vexW | ((~SC2 & 15) << 3) | pp));
+        a.b(shiftOpcode);
+        a.b(raxRaxModrm);
         a.st(w, d, RAX);
         return true;
     }
@@ -1390,7 +1571,6 @@ private Emitted emitFunction(Instruction[] instructions,
     const cap = chunkCapacity - start;
     Gen g;
     g.a.buf = writeBase + start;
-    g.a.cap = cap;
     g.instructions = instructions;
     g.snapshot = snapshot;
     g.constants = constants;
@@ -1408,7 +1588,7 @@ private Emitted emitFunction(Instruction[] instructions,
         const saved = g.a.n;
         const savedFixups = g.fixupCount;
         bool done;
-        if (originals[i] !is null && ops[i].kind != JKind.none)
+        if (originals[i] !is null && ops[i].kind != JitOp.Kind.none)
             done = g.emitOp(i, ops[i]);
         if (g.outOfMemory)
             return Emitted.failed;
@@ -1428,11 +1608,9 @@ private Emitted emitFunction(Instruction[] instructions,
                     g.a.sse(doublePrefix, storeOpcode, fp0Register,
                         Mem(STATE, cast(int) DispatchState.fp0.offsetof));
                 }
-                // mov pc, &instruction; mov rax, handler; jmp rax
                 g.a.movI(PCREG, cast(size_t) &instructions[i]);
                 g.a.movI(RAX, cast(size_t) originals[i]);
-                g.a.b(0xFF);
-                g.a.b(0xE0);
+                g.a.jmpRax;
             }
         }
     }

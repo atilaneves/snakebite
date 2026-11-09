@@ -4,6 +4,9 @@ module ut.backends.run.jit;
 // A function that is called or looped 256 times becomes hot, and the bytecode
 // backend then runs it as JIT code. These programs make functions hot in the
 // ways that change how a function is entered, and check what compiled D gives.
+// A function that the bytecode backend can copy into its caller never has
+// events of its own, so a function that the test checks for JIT code has an
+// `assert`, which keeps it a call.
 
 
 import ut.backends;
@@ -15,9 +18,10 @@ static foreach (backend; Matrix!()) {
     @("jit.handlersAndJitCodeInOneFunction." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.shouldBeStatusOf!(backend, q{
+        0.shouldBeStatusOfWithJitCode!(backend, q{
             long twice(long x) { return x * 2; }
             long mixed(long n) {
+                assert(n > 0);
                 long sum;
                 foreach (i; 1 .. n + 1)
                     sum += twice(i) + 100 / i + (i << 1);
@@ -29,15 +33,16 @@ static foreach (backend; Matrix!()) {
                     expected += i * 2 + 100 / i + (i << 1);
                 return mixed(3000) == expected ? 0 : 1;
             }
-        });
+        }, ["mixed"]);
     }
 
     // The loop is the only thing that makes `scan` hot: it is called once.
     @("jit.functionBecomesHotInsideALoop." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.shouldBeStatusOf!(backend, q{
+        0.shouldBeStatusOfWithJitCode!(backend, q{
             int scan(int[] values) {
+                assert(values.length > 0);
                 int best = int.min;
                 for (size_t i = 0; i < values.length; ++i)
                     if (values[i] > best)
@@ -50,7 +55,7 @@ static foreach (backend; Matrix!()) {
                     value = cast(int) ((i * 7919) % 10007);
                 return scan(values) == 10006 ? 0 : 1;
             }
-        });
+        }, ["scan"]);
     }
 }
 
@@ -59,7 +64,8 @@ static foreach (backend; Matrix!(
         "CTFE cannot access class destructors through TypeInfo"),
 )) {
     // The destructor runs in a GC finalizer, which must not allocate, and
-    // its loop makes `work` hot there.
+    // its loop makes `work` hot there. A function that gets hot in a finalizer
+    // keeps its handlers until a later event, so there is no JIT code to see.
     @("jit.functionBecomesHotInAFinalizer." ~ backend.stringof)
     @Tags(backend.stringof, "forced-finalizers")
     unittest {
@@ -93,9 +99,10 @@ static foreach (backend; Matrix!(
     @("jit.severalThreadsMakeTheSameFunctionHot." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.shouldBeStatusOf!(backend, q{
+        0.shouldBeStatusOfWithJitCode!(backend, q{
             import core.thread: Thread;
             long work(long n) {
+                assert(n > 0);
                 long sum;
                 foreach (i; 0 .. n)
                     sum += i % 5;
@@ -119,6 +126,6 @@ static foreach (backend; Matrix!(
                 foreach (result; results)
                     assert(result == 20 * 600 / 5 * 10);
             }
-        });
+        }, ["work"]);
     }
 }

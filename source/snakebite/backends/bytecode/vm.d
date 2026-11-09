@@ -3345,7 +3345,7 @@ package alias opFloatGreaterOrEqual = opFloatComparison!">=";
 // `source` is the array operand, `sourceWidth` the index operand (a
 // `size_t`) and `width` the element size. The compiler emits the bounds
 // check as a branch before them, so they cannot throw.
-private enum IndexBase {
+package enum IndexBase {
     // `source` holds a `{length, pointer}` slice.
     slice,
     // `source` is the storage of the elements.
@@ -3710,47 +3710,63 @@ private const(Instruction)* runFloatCompare3(string operation, bool constant,
     return execution.next;
 }
 
+// A three-address handler: its name, the template that makes it, the operator
+// that the template takes and, for some templates, a flag (`signed` for
+// comparisons and divisions, `arithmetic` for a right shift).
+private struct ThreeAddress {
+    string name;
+    string family;
+    string symbol;
+    bool hasFlag;
+    bool flag;
+
+    // The arguments of the template, as D source.
+    string arguments() const {
+        return '"' ~ symbol ~ '"' ~ (hasFlag ? (flag ? ", true" : ", false") : "");
+    }
+}
+
 private enum threeAddressNames = [
-    ["opAdd3", "opInt3", `"+"`],
-    ["opSubtract3", "opInt3", `"-"`],
-    ["opMultiply3", "opInt3", `"*"`],
-    ["opBitAnd3", "opInt3", `"&"`],
-    ["opBitOr3", "opInt3", `"|"`],
-    ["opBitXor3", "opInt3", `"^"`],
-    ["opShiftLeft3", "opShift3", `"<<", false`],
-    ["opShiftRightLogical3", "opShift3", `">>", false`],
-    ["opShiftRightArithmetic3", "opShift3", `">>", true`],
-    ["opDivideSigned3", "opDivide3", `"/", true`],
-    ["opDivideUnsigned3", "opDivide3", `"/", false`],
-    ["opModuloSigned3", "opDivide3", `"%", true`],
-    ["opModuloUnsigned3", "opDivide3", `"%", false`],
-    ["opFloatAdd3", "opFloat3", `"+"`],
-    ["opFloatSubtract3", "opFloat3", `"-"`],
-    ["opFloatMultiply3", "opFloat3", `"*"`],
-    ["opFloatDivide3", "opFloat3", `"/"`],
-    ["opLessThanSigned3", "opCompare3", `"<", true`],
-    ["opLessThanUnsigned3", "opCompare3", `"<", false`],
-    ["opLessOrEqualSigned3", "opCompare3", `"<=", true`],
-    ["opLessOrEqualUnsigned3", "opCompare3", `"<=", false`],
-    ["opGreaterThanSigned3", "opCompare3", `">", true`],
-    ["opGreaterThanUnsigned3", "opCompare3", `">", false`],
-    ["opGreaterOrEqualSigned3", "opCompare3", `">=", true`],
-    ["opGreaterOrEqualUnsigned3", "opCompare3", `">=", false`],
-    ["opEqual3", "opCompare3", `"==", false`],
-    ["opNotEqual3", "opCompare3", `"!=", false`],
-    ["opFloatEqual3", "opFloatCompare3", `"=="`],
-    ["opFloatNotEqual3", "opFloatCompare3", `"!="`],
-    ["opFloatLessThan3", "opFloatCompare3", `"<"`],
-    ["opFloatLessOrEqual3", "opFloatCompare3", `"<="`],
-    ["opFloatGreaterThan3", "opFloatCompare3", `">"`],
-    ["opFloatGreaterOrEqual3", "opFloatCompare3", `">="`],
+    ThreeAddress("opAdd3", "opInt3", "+"),
+    ThreeAddress("opSubtract3", "opInt3", "-"),
+    ThreeAddress("opMultiply3", "opInt3", "*"),
+    ThreeAddress("opBitAnd3", "opInt3", "&"),
+    ThreeAddress("opBitOr3", "opInt3", "|"),
+    ThreeAddress("opBitXor3", "opInt3", "^"),
+    ThreeAddress("opShiftLeft3", "opShift3", "<<", true, false),
+    ThreeAddress("opShiftRightLogical3", "opShift3", ">>", true, false),
+    ThreeAddress("opShiftRightArithmetic3", "opShift3", ">>", true, true),
+    ThreeAddress("opDivideSigned3", "opDivide3", "/", true, true),
+    ThreeAddress("opDivideUnsigned3", "opDivide3", "/", true, false),
+    ThreeAddress("opModuloSigned3", "opDivide3", "%", true, true),
+    ThreeAddress("opModuloUnsigned3", "opDivide3", "%", true, false),
+    ThreeAddress("opFloatAdd3", "opFloat3", "+"),
+    ThreeAddress("opFloatSubtract3", "opFloat3", "-"),
+    ThreeAddress("opFloatMultiply3", "opFloat3", "*"),
+    ThreeAddress("opFloatDivide3", "opFloat3", "/"),
+    ThreeAddress("opLessThanSigned3", "opCompare3", "<", true, true),
+    ThreeAddress("opLessThanUnsigned3", "opCompare3", "<", true, false),
+    ThreeAddress("opLessOrEqualSigned3", "opCompare3", "<=", true, true),
+    ThreeAddress("opLessOrEqualUnsigned3", "opCompare3", "<=", true, false),
+    ThreeAddress("opGreaterThanSigned3", "opCompare3", ">", true, true),
+    ThreeAddress("opGreaterThanUnsigned3", "opCompare3", ">", true, false),
+    ThreeAddress("opGreaterOrEqualSigned3", "opCompare3", ">=", true, true),
+    ThreeAddress("opGreaterOrEqualUnsigned3", "opCompare3", ">=", true, false),
+    ThreeAddress("opEqual3", "opCompare3", "==", true, false),
+    ThreeAddress("opNotEqual3", "opCompare3", "!=", true, false),
+    ThreeAddress("opFloatEqual3", "opFloatCompare3", "=="),
+    ThreeAddress("opFloatNotEqual3", "opFloatCompare3", "!="),
+    ThreeAddress("opFloatLessThan3", "opFloatCompare3", "<"),
+    ThreeAddress("opFloatLessOrEqual3", "opFloatCompare3", "<="),
+    ThreeAddress("opFloatGreaterThan3", "opFloatCompare3", ">"),
+    ThreeAddress("opFloatGreaterOrEqual3", "opFloatCompare3", ">="),
 ];
 
 static foreach (triple; threeAddressNames) {
-    mixin("package alias " ~ triple[0] ~ " = " ~ triple[1] ~ "!("
-        ~ triple[2] ~ ", false);");
-    mixin("package alias " ~ triple[0] ~ "K = " ~ triple[1] ~ "!("
-        ~ triple[2] ~ ", true);");
+    mixin("package alias " ~ triple.name ~ " = " ~ triple.family ~ "!("
+        ~ triple.arguments ~ ", false);");
+    mixin("package alias " ~ triple.name ~ "K = " ~ triple.family ~ "!("
+        ~ triple.arguments ~ ", true);");
 }
 
 // Every three-address handler, and the form of each with a constant right
@@ -3762,7 +3778,7 @@ package alias threeAddressConstantHandlers = mixin(handlerList("K"));
 // one byte whatever its operand width. Every later handler is a comparison.
 package enum firstComparisonHandler = () {
     foreach (index, triple; threeAddressNames)
-        if (triple[1] == "opCompare3")
+        if (triple.family == "opCompare3")
             return index;
     assert(false, "no comparison handler");
 }();
@@ -3770,7 +3786,7 @@ package enum firstComparisonHandler = () {
 private string handlerList(in string suffix) {
     string list = "AliasSeq!(";
     foreach (triple; threeAddressNames)
-        list ~= triple[0] ~ suffix ~ ", ";
+        list ~= triple.name ~ suffix ~ ", ";
     return list ~ ")";
 }
 
@@ -3778,8 +3794,8 @@ private string handlerList(in string suffix) {
 // null.
 package Instruction.Handler constantForm(Instruction.Handler handler) {
     static foreach (triple; threeAddressNames)
-        if (handler is mixin("&" ~ triple[0]))
-            return mixin("&" ~ triple[0] ~ "K");
+        if (handler is mixin("&" ~ triple.name))
+            return mixin("&" ~ triple.name ~ "K");
     return null;
 }
 
@@ -3854,7 +3870,7 @@ private enum fusedCount = EnumMembers!Comparison.length
 private size_t fusedIndex(
     in Comparison comparison, in CompareKind kind, in bool jumpWhen,
     in bool constant,
-) {
+) nothrow @nogc {
     return ((comparison * EnumMembers!CompareKind.length + kind) * 2
         + jumpWhen) * 2 + constant;
 }
@@ -3903,7 +3919,7 @@ shared static this() {
 package Instruction.Handler fusedBranchHandler(
     in Comparison comparison, in CompareKind kind, in bool jumpWhen,
     in bool constant,
-) {
+) nothrow @nogc {
     return fusedHandlers[fusedIndex(comparison, kind, jumpWhen, constant)];
 }
 
@@ -4058,13 +4074,13 @@ package enum RegisterFamily {
 }
 
 private enum registerNames = [
-    ["opAdd3", "opInt3R", `"+"`, "integer"],
-    ["opSubtract3", "opInt3R", `"-"`, "integer"],
-    ["opMultiply3", "opInt3R", `"*"`, "integer"],
-    ["opFloatAdd3", "opFloat3R", `"+"`, "floating"],
-    ["opFloatSubtract3", "opFloat3R", `"-"`, "floating"],
-    ["opFloatMultiply3", "opFloat3R", `"*"`, "floating"],
-    ["opFloatDivide3", "opFloat3R", `"/"`, "floating"],
+    ["opAdd3", "opInt3R", "+", "integer"],
+    ["opSubtract3", "opInt3R", "-", "integer"],
+    ["opMultiply3", "opInt3R", "*", "integer"],
+    ["opFloatAdd3", "opFloat3R", "+", "floating"],
+    ["opFloatSubtract3", "opFloat3R", "-", "floating"],
+    ["opFloatMultiply3", "opFloat3R", "*", "floating"],
+    ["opFloatDivide3", "opFloat3R", "/", "floating"],
 ];
 
 // The register family a three-address handler produces and consumes.
@@ -4108,8 +4124,8 @@ package Instruction.Handler registerForm(
                     static foreach (to; [false, true])
                         static if (from || to)
                             if (from == fromRegister && to == toRegister)
-                                return mixin("&" ~ triple[1] ~ "!("
-                                    ~ triple[2] ~ ", " ~ constant.stringof
+                                return mixin("&" ~ triple[1] ~ "!(\""
+                                    ~ triple[2] ~ "\", " ~ constant.stringof
                                     ~ ", " ~ from.stringof ~ ", "
                                     ~ to.stringof ~ ")");
     return null;
@@ -4960,17 +4976,23 @@ private void insertSpecialisation(Specialisation entry) {
     ++specialisationCount;
 }
 
-private template instance(alias executor, alias operation,
+// The instance of `executor`, or, with `counted`, its counting twin (see
+// `countedHandler`).
+private template instance(bool counted, alias executor, alias operation,
     OperandKind destinationKind, OperandKind sourceKind, size_t width,
     OperandKind rightKind, Parameters...)
 {
-    alias instance = executor!(operation, destinationKind, sourceKind,
+    alias plain = executor!(operation, destinationKind, sourceKind,
         width, rightKind, Parameters);
+    static if (counted)
+        alias instance = countedHandler!plain;
+    else
+        alias instance = plain;
 }
 
 // Fills `entry` with the instances for the operands named by `mask`, if the
 // operation has all of them.
-private void maskedInstances(alias executor, alias operation,
+private void maskedInstances(bool counted, alias executor, alias operation,
     OperandKind destinationKind,
     OperandKind sourceKind, immutable(ulong)[] widths, bool right, int mask,
     Parameters...)(ref Specialisation entry)
@@ -4989,11 +5011,11 @@ private void maskedInstances(alias executor, alias operation,
         enum r = rightIndirect ? OperandKind.split : OperandKind.frame;
         if (entry.masked is null)
             entry.masked = &(new MaskedHandlers[1])[0];
-        (*entry.masked)[mask - 1][0] = &instance!(executor, operation, d, s, 0,
-            r, Parameters);
+        (*entry.masked)[mask - 1][0] = &instance!(counted, executor, operation,
+            d, s, 0, r, Parameters);
         static foreach (width; widths)
-            (*entry.masked)[mask - 1][widthSlot(width)] = &instance!(executor,
-                operation, d, s, width, r, Parameters);
+            (*entry.masked)[mask - 1][widthSlot(width)] = &instance!(counted,
+                executor, operation, d, s, width, r, Parameters);
     }
 }
 
@@ -5009,31 +5031,51 @@ private void specialiseWith(alias executor, alias operation,
     OperandKind destinationKind, OperandKind sourceKind,
     immutable(ulong)[] widths, bool right, Parameters...)()
 {
-    alias general = instance!(executor, operation, destinationKind, sourceKind,
-        0, OperandKind.storage, Parameters);
+    auto entry = specialisationOf!(false, executor, operation, destinationKind,
+        sourceKind, widths, right, Parameters);
+    addSpecialisation(entry,
+        rolesOfOperation!(operation, sourceKind, Parameters));
+    static if (jitSupported && countsEvents!operation)
+        addCountedTwins(entry, specialisationOf!(true, executor, operation,
+            destinationKind, sourceKind, widths, right, Parameters));
+}
+
+// The branches that count an event of the function for the JIT when they jump
+// backward.
+private enum countsEvents(alias operation) =
+    __traits(isSame, operation, runBranchFalse)
+    || __traits(isSame, operation, runBranchTrue)
+    || __traits(isSame, operation, runFusedBranch)
+    || __traits(isSame, operation, runFusedBranchR);
+
+private Specialisation specialisationOf(bool counted, alias executor,
+    alias operation, OperandKind destinationKind, OperandKind sourceKind,
+    immutable(ulong)[] widths, bool right, Parameters...)()
+{
+    alias general = instance!(counted, executor, operation, destinationKind,
+        sourceKind, 0, OperandKind.storage, Parameters);
     Specialisation entry;
     entry.general = &general;
     entry.handlers[0][0] = &general;
-    entry.handlers[1][0] = &instance!(executor, operation,
+    entry.handlers[1][0] = &instance!(counted, executor, operation,
         frameKind!destinationKind, frameKind!sourceKind, 0, OperandKind.storage,
         Parameters);
     entry.destination = destinationKind == OperandKind.storage;
     entry.source = sourceKind == OperandKind.storage;
     entry.right = right;
     static foreach (width; widths) {
-        entry.handlers[0][widthSlot(width)] = &instance!(executor, operation,
-            destinationKind, sourceKind, width, OperandKind.storage,
+        entry.handlers[0][widthSlot(width)] = &instance!(counted, executor,
+            operation, destinationKind, sourceKind, width, OperandKind.storage,
             Parameters);
-        entry.handlers[1][widthSlot(width)] = &instance!(executor, operation,
-            frameKind!destinationKind, frameKind!sourceKind, width,
+        entry.handlers[1][widthSlot(width)] = &instance!(counted, executor,
+            operation, frameKind!destinationKind, frameKind!sourceKind, width,
             OperandKind.storage, Parameters);
     }
     static if (staticIndexOf!(operation, kindOperations) >= 0)
         static foreach (mask; 1 .. 8)
-            maskedInstances!(executor, operation, destinationKind, sourceKind,
-                widths, right, mask, Parameters)(entry);
-    addSpecialisation(entry,
-        rolesOfOperation!(operation, sourceKind, Parameters));
+            maskedInstances!(counted, executor, operation, destinationKind,
+                sourceKind, widths, right, mask, Parameters)(entry);
+    return entry;
 }
 
 // `opCopyFixed` takes a `size_t` width, and a handler registered with another
@@ -5075,18 +5117,18 @@ shared static this() {
         addRoles(&opThenReturn!(opCopyFixed!(width, true)),
             rolesOfOperation!(runCopyFixed, I, width, true));
     static foreach (triple; threeAddressNames) {{
-        static if (triple[1] == "opInt3" || triple[1] == "opCompare3")
+        static if (triple.family == "opInt3" || triple.family == "opCompare3")
             enum widths = integralWidths;
-        else static if (triple[1] == "opFloat3"
-                || triple[1] == "opFloatCompare3")
+        else static if (triple.family == "opFloat3"
+                || triple.family == "opFloatCompare3")
             enum widths = floatingWidths;
         else
             enum widths = noWidths;
-        enum runner = "run" ~ triple[1][2 .. $];
-        mixin("specialise!(" ~ runner ~ ", S, S, widths, true, " ~ triple[2]
-            ~ ", false)();");
-        mixin("specialise!(" ~ runner ~ ", S, S, widths, false, " ~ triple[2]
-            ~ ", true)();");
+        enum runner = "run" ~ triple.family[2 .. $];
+        mixin("specialise!(" ~ runner ~ ", S, S, widths, true, "
+            ~ triple.arguments ~ ", false)();");
+        mixin("specialise!(" ~ runner ~ ", S, S, widths, false, "
+            ~ triple.arguments ~ ", true)();");
     }}
     static foreach (comparison; EnumMembers!Comparison)
         static foreach (kind; EnumMembers!CompareKind)
@@ -5123,7 +5165,7 @@ shared static this() {
                             registerKind!to, registerKind!from,
                             triple[1] == "opInt3R"
                                 ? integralWidths : noWidths,
-                            !constant, mixin(triple[2]), constant, from, to)();
+                            !constant, triple[2], constant, from, to)();
     static foreach (comparison; EnumMembers!Comparison)
         static foreach (kind; EnumMembers!CompareKind)
             static foreach (jumpWhen; [false, true])
@@ -5322,7 +5364,8 @@ public struct JitSetting {
 static if (jitSupported) {
 
 import core.memory: GC;
-import snakebite.backends.bytecode.jit: JitOp, JKind, jitFunction, jitUsable,
+import snakebite.backends.bytecode.handlermap: HandlerMap;
+import snakebite.backends.bytecode.jit: JitOp, jitFunction, jitUsable,
     Scratch, tryLock, unlock;
 
 // An event is a guest call of a function or an execution of one of its
@@ -5342,13 +5385,11 @@ package bool jitCounting(in JitSetting setting) nothrow @nogc {
     return setting.enabled;
 }
 
+// For the paths that cannot know at compile time whether the JIT is on.
 pragma(inline, true)
-private bool addHeat(Function* function_, uint step) {
-    import core.checkedint: addu;
-
-    bool overflow;
-    function_.jitHeat = addu(function_.jitHeat, step, overflow);
-    return overflow;
+private void countCallIfOn(const(Function)* callee) {
+    if (callee.jitCounts)
+        countCall(callee);
 }
 
 pragma(inline, true)
@@ -5356,13 +5397,6 @@ private void countCall(const(Function)* callee) {
     auto function_ = cast(Function*) callee;
     if (addHeat(function_, jitStep))
         jitTierUp(function_);
-}
-
-// For the paths that cannot know at compile time whether the JIT is on.
-pragma(inline, true)
-private void countCallIfOn(const(Function)* callee) {
-    if (callee.jitCounts)
-        countCall(callee);
 }
 
 package bool isCountedCall(in Instruction.Handler handler) nothrow @nogc {
@@ -5419,85 +5453,42 @@ private const(Instruction)* countedTierUp(alias original)(
     return original(pc, active, state, frame, r0, fp0);
 }
 
-// Handler pairs, found by the address of the key.
-private struct HandlerPair {
-    Instruction.Handler key;
-    Instruction.Handler value;
+pragma(inline, true)
+private bool addHeat(Function* function_, uint step) {
+    import core.checkedint: addu;
+
+    bool overflow;
+    function_.jitHeat = addu(function_.jitHeat, step, overflow);
+    return overflow;
 }
 
-private enum pairSlots = 1024;
-// An instruction that counts its event, by its handler; and back.
-private __gshared HandlerPair[pairSlots] countedOf;
-private __gshared HandlerPair[pairSlots] uncountedOf;
+// An instruction that counts its event, by its handler; and back. `specialiseWith`
+// adds the twins of the branches, and the constructor below those of the jump
+// and the calls, so the tables are complete before any thread reads them.
+private __gshared HandlerMap!(Instruction.Handler, Instruction.Handler) countedOf;
+private __gshared HandlerMap!(Instruction.Handler, Instruction.Handler) uncountedOf;
 
-private size_t pairSlot(in Instruction.Handler handler) nothrow @nogc {
-    return ((cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL) >> 20)
-        & (pairSlots - 1);
-}
-
-private void pairPut(ref HandlerPair[pairSlots] table,
-    Instruction.Handler key, Instruction.Handler value) nothrow @nogc
+// The twin of each handler that `original` has, by the place of the handler in
+// `counted`, which holds the twins.
+private void addCountedTwins(in Specialisation original,
+    in Specialisation counted)
 {
-    auto slot = pairSlot(key);
-    while (table[slot].key !is null && table[slot].key !is key)
-        slot = (slot + 1) & (pairSlots - 1);
-    table[slot] = HandlerPair(key, value);
+    foreach (frame; 0 .. original.handlers.length)
+        foreach (slot; 0 .. widthSlots)
+            if (original.handlers[frame][slot] !is null)
+                addCounted(cast(Instruction.Handler) original.handlers[frame][slot],
+                    cast(Instruction.Handler) counted.handlers[frame][slot]);
+    if (original.masked !is null)
+        foreach (mask; 0 .. (*original.masked).length)
+            foreach (slot; 0 .. widthSlots)
+                if ((*original.masked)[mask][slot] !is null)
+                    addCounted(
+                        cast(Instruction.Handler) (*original.masked)[mask][slot],
+                        cast(Instruction.Handler) (*counted.masked)[mask][slot]);
 }
 
-private Instruction.Handler pairGet(ref const HandlerPair[pairSlots] table,
-    in Instruction.Handler key) nothrow @nogc
-{
-    auto slot = pairSlot(key);
-    while (table[slot].key !is null) {
-        if (table[slot].key is key)
-            return table[slot].value;
-        slot = (slot + 1) & (pairSlots - 1);
-    }
-    return null;
-}
-
-private void addCounted(Instruction.Handler original,
-    Instruction.Handler counted)
-{
-    pairPut(countedOf, original, counted);
-    pairPut(uncountedOf, counted, original);
-}
-
-private shared bool countedTablesReady;
-private shared int countedTablesLock;
-
-// Builds the tables of the counting twins, once, even when several threads
-// compile. A twin is made for each handler of a branch and of a call.
-private void ensureCountedTables() {
-    import core.atomic: atomicLoad, atomicStore, cas, MemoryOrder;
-
-    if (atomicLoad!(MemoryOrder.acq)(countedTablesReady))
-        return;
-    while (!cas(&countedTablesLock, 0, 1)) {}
-    if (!countedTablesReady) {
-        buildCountedTables;
-        atomicStore!(MemoryOrder.rel)(countedTablesReady, true);
-    }
-    atomicStore(countedTablesLock, 0);
-}
-
-private void buildCountedTables() {
+shared static this() {
     addCounted(&opJump, &countedHandler!opJump);
-    addCounted(&opBranchFalse, &countedHandler!opBranchFalse);
-    addCounted(&opBranchTrue, &countedHandler!opBranchTrue);
-    static foreach (comparison; EnumMembers!Comparison)
-        static foreach (kind; EnumMembers!CompareKind)
-            static foreach (jumpWhen; [false, true])
-                static foreach (constant; [false, true]) {
-                    addCounted(fusedBranchHandler(comparison, kind, jumpWhen,
-                            constant),
-                        &countedHandler!(opFusedBranch!(comparison, kind,
-                            jumpWhen, constant)));
-                    addCounted(fusedRegisterHandlers[fusedIndex(comparison,
-                            kind, jumpWhen, constant)],
-                        &countedHandler!(opFusedBranchR!(comparison, kind,
-                            jumpWhen, constant)));
-                }
     static foreach (destination; EnumMembers!Destination) {
         addCounted(&callWindow!destination,
             &callWindow!(destination, true));
@@ -5507,20 +5498,22 @@ private void buildCountedTables() {
     addCounted(&callGeneral!false, &callGeneral!true);
 }
 
+private void addCounted(Instruction.Handler original,
+    Instruction.Handler counted)
+{
+    if (!countedOf.put(original, counted) || !uncountedOf.put(counted, original))
+        internalFailure("no memory for the counting twins");
+}
+
 // Replaces the handler of each of `instructions[indices]` by its counting
 // twin. `indices` are the backward branches and the calls. A handler with no
 // twin stays: that instruction does not count.
 package void jitCountEvents(Instruction[] instructions,
     const(size_t)[] indices)
 {
-    if (indices.length == 0)
-        return;
-    ensureCountedTables;
-    foreach (index; indices) {
-        const counted = pairGet(countedOf, instructions[index].handler);
-        if (counted !is null)
-            instructions[index].handler = cast(Instruction.Handler) counted;
-    }
+    foreach (index; indices)
+        if (auto counted = countedOf.find(instructions[index].handler))
+            instructions[index].handler = cast(Instruction.Handler) *counted;
 }
 
 // What a function is in: `compiling` while one thread makes its code, and
@@ -5528,300 +5521,20 @@ package void jitCountEvents(Instruction[] instructions,
 private enum JitTier : uint { interpreted, compiling, compiled, failed }
 
 // The handlers that have a template, with how to emit them.
-private struct JitEntry {
-    Instruction.Handler handler;
-    JitOp op;
-}
-
-private enum jitSlots = 16384;
-private __gshared JitEntry[jitSlots] jitTable;
-
-private size_t jitSlot(in Instruction.Handler handler) nothrow @nogc {
-    return ((cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL) >> 20)
-        & (jitSlots - 1);
-}
-
-private void jitPut(Instruction.Handler handler, JitOp op) nothrow @nogc {
-    if (handler is null)
-        return;
-    auto slot = jitSlot(handler);
-    while (jitTable[slot].handler !is null && jitTable[slot].handler !is handler)
-        slot = (slot + 1) & (jitSlots - 1);
-    jitTable[slot] = JitEntry(handler, op);
-}
-
-private JitOp jitGet(in Instruction.Handler handler) nothrow @nogc {
-    if (handler is null)
-        return JitOp.init;
-    auto slot = jitSlot(handler);
-    while (jitTable[slot].handler !is null) {
-        if (jitTable[slot].handler is handler)
-            return jitTable[slot].op;
-        slot = (slot + 1) & (jitSlots - 1);
-    }
-    return JitOp.init;
-}
-
-private string quotedSymbol(string text) nothrow @nogc {
-    size_t end = 1;
-    while (text[end] != '"')
-        ++end;
-    return text[1 .. end];
-}
-
-private ubyte aluCodeOf(string symbol) nothrow @nogc {
-    switch (symbol) {
-        case "+": return 0;
-        case "|": return 1;
-        case "&": return 4;
-        case "-": return 5;
-        case "^": return 6;
-        case "*": return 8;
-        default: return 255;
-    }
-}
-
-private ubyte fpCodeOf(string symbol) nothrow @nogc {
-    switch (symbol) {
-        case "+": return 0;
-        case "-": return 1;
-        case "*": return 2;
-        default: return 3;
-    }
-}
-
-private ubyte comparisonOf(string symbol) nothrow @nogc {
-    foreach (index, candidate; comparisonSymbols)
-        if (candidate == symbol)
-            return cast(ubyte) index;
-    return 255;
-}
-
-private JitOp jop(JKind kind, ubyte a = 0, ubyte b = 0, ubyte c = 0,
-    ubyte d = 0, ubyte e = 0, ubyte w = 0) nothrow @nogc
-{
-    JitOp op;
-    op.kind = kind;
-    op.a = a; op.b = b; op.c = c; op.d = d; op.e = e; op.w = w;
-    return op;
-}
-
-private void buildJitTable() nothrow @nogc {
-    static foreach (triple; threeAddressNames) {{
-        enum symbol = quotedSymbol(triple[2]);
-        static foreach (constant; [false, true]) {{
-            enum suffix = constant ? "K" : "";
-            auto handler = mixin("&" ~ triple[0] ~ suffix);
-            static if (triple[1] == "opInt3")
-                jitPut(handler, jop(JKind.int3, aluCodeOf(symbol), constant));
-            else static if (triple[1] == "opShift3")
-                jitPut(handler, jop(JKind.shift,
-                    symbol == "<<" ? 0 : triple[2][$ - 4 .. $] == "true" ? 2 : 1,
-                    0, constant));
-            else static if (triple[1] == "opFloat3")
-                jitPut(handler, jop(JKind.fp3, fpCodeOf(symbol), 0, constant));
-            else static if (triple[1] == "opCompare3")
-                jitPut(handler, jop(JKind.cmp3, comparisonOf(symbol),
-                    triple[2][$ - 4 .. $] == "true", constant));
-            else static if (triple[1] == "opFloatCompare3")
-                jitPut(handler, jop(JKind.fpcmp3, comparisonOf(symbol), 0,
-                    constant));
-        }}
-    }}
-    static foreach (triple; registerNames) {{
-        enum symbol = quotedSymbol(triple[2]);
-        static foreach (constant; [false, true])
-            static foreach (from; [false, true])
-                static foreach (to; [false, true])
-                    static if (from || to) {{
-                        auto handler = registerForm(mixin("&" ~ triple[0]
-                            ~ (constant ? "K" : "")), from, to);
-                        static if (triple[1] == "opInt3R")
-                            jitPut(handler, jop(JKind.int3, aluCodeOf(symbol),
-                                constant, from, to));
-                        else
-                            jitPut(handler, jop(JKind.fp3, fpCodeOf(symbol), 0,
-                                constant, from, to));
-                    }}
-    }}
-    foreach (index, handler; fusedHandlers) {
-        const constant = index % 2;
-        const jumpWhen = (index / 2) % 2;
-        const kind = (index / 4) % 3;
-        const comparison = index / 12;
-        jitPut(handler, jop(JKind.fused, cast(ubyte) comparison,
-            cast(ubyte) kind, cast(ubyte) jumpWhen, cast(ubyte) constant, 0));
-        jitPut(fusedRegisterHandlers[index], jop(JKind.fused,
-            cast(ubyte) comparison, cast(ubyte) kind, cast(ubyte) jumpWhen,
-            cast(ubyte) constant, 1));
-    }
-    jitPut(&opAdd, jop(JKind.int3, 0, 0, 0, 0, 1));
-    jitPut(&opSubtract, jop(JKind.int3, 5, 0, 0, 0, 1));
-    jitPut(&opMultiply, jop(JKind.int3, 8, 0, 0, 0, 1));
-    jitPut(&opBitAnd, jop(JKind.int3, 4, 0, 0, 0, 1));
-    jitPut(&opBitOr, jop(JKind.int3, 1, 0, 0, 0, 1));
-    jitPut(&opBitXor, jop(JKind.int3, 6, 0, 0, 0, 1));
-    jitPut(&opLessThanSigned, jop(JKind.cmp3, 0, 1, 0, 0, 1));
-    jitPut(&opLessOrEqualSigned, jop(JKind.cmp3, 1, 1, 0, 0, 1));
-    jitPut(&opGreaterThanSigned, jop(JKind.cmp3, 2, 1, 0, 0, 1));
-    jitPut(&opGreaterOrEqualSigned, jop(JKind.cmp3, 3, 1, 0, 0, 1));
-    jitPut(&opLessThanUnsigned, jop(JKind.cmp3, 0, 0, 0, 0, 1));
-    jitPut(&opLessOrEqualUnsigned, jop(JKind.cmp3, 1, 0, 0, 0, 1));
-    jitPut(&opGreaterThanUnsigned, jop(JKind.cmp3, 2, 0, 0, 0, 1));
-    jitPut(&opGreaterOrEqualUnsigned, jop(JKind.cmp3, 3, 0, 0, 0, 1));
-    jitPut(&opEqual, jop(JKind.cmp3, 4, 0, 0, 0, 1));
-    jitPut(&opNotEqual, jop(JKind.cmp3, 5, 0, 0, 0, 1));
-
-    jitPut(&opShiftLeft, jop(JKind.shift, 0, 0, 0, 0, 1));
-    jitPut(&opShiftRightLogical, jop(JKind.shift, 1, 0, 0, 0, 1));
-    jitPut(&opShiftRightArithmetic, jop(JKind.shift, 2, 0, 0, 0, 1));
-    jitPut(&opCopy, jop(JKind.copy));
-    static foreach (width; 1 .. 17) {
-        jitPut(&opCopyFixed!(width, true), jop(JKind.copy, 1, 0, 0, 0, 0, width));
-        jitPut(&opCopyFixed!width, jop(JKind.copy, 0, 0, 0, 0, 0, width));
-    }
-    jitPut(&opConstant, jop(JKind.constant));
-    jitPut(&opZero, jop(JKind.zero));
-    jitPut(&opJump, jop(JKind.jump));
-    jitPut(&opBranchFalse, jop(JKind.branch, 0));
-    jitPut(&opBranchTrue, jop(JKind.branch, 1));
-    jitPut(&opStaticLoad, jop(JKind.staticLoad));
-    jitPut(&opStaticStore, jop(JKind.staticStore));
-    jitPut(&opStaticAddress, jop(JKind.staticAddr));
-    jitPut(&opLoadIndirect, jop(JKind.loadInd));
-    jitPut(&opStoreIndirect, jop(JKind.storeInd));
-    static foreach (width; [1, 2, 4, 8, 16, 32]) {
-        jitPut(&opLoadIndirectFixed!width, jop(JKind.loadInd, 0, 0, 0, 0, 0, width));
-        jitPut(&opStoreIndirectFixed!width, jop(JKind.storeInd, 0, 0, 0, 0, 0, width));
-        static foreach (copyWidth; [1, 2, 4, 8, 16])
-            jitPut(&opLoadThenCopy!(width, copyWidth),
-                jop(JKind.loadInd, 0, 0, 0, 0, 0, width));
-    }
-    static foreach (base; EnumMembers!IndexBase)
-        jitPut(&opIndex!base, jop(JKind.index, base));
-    foreach (instance; checkedInstances)
-        jitPut(instance.handler, jop(JKind.checked, cast(ubyte) instance.access,
-            cast(ubyte) instance.fixedLength, cast(ubyte) instance.indexWidth,
-            cast(ubyte) instance.signed, cast(ubyte) instance.constantValue,
-            cast(ubyte) instance.elementSize));
-    jitPut(&opFrameAddress, jop(JKind.frameAddr));
-    jitPut(&opLogicalNot, jop(JKind.boolOp, 0));
-    jitPut(&opCastToBool, jop(JKind.boolOp, 1));
-    jitPut(&opNegate, jop(JKind.unary, 0));
-    jitPut(&opComplement, jop(JKind.unary, 1));
-    jitPut(&opCastWidenSigned, jop(JKind.widen, 0));
-    jitPut(&opCastWidenUnsigned, jop(JKind.widen, 1));
-    static foreach (kind; AliasSeq!(CastKind.narrow, CastKind.widenSigned,
-        CastKind.widenUnsigned))
-        static foreach (destSize; [1, 2, 4, 8])
-            static foreach (sourceSize; [1, 2, 4, 8])
-                jitPut(&opCastFixedAs!(kind, destSize, sourceSize),
-                    jop(JKind.castFixed, kind == CastKind.widenUnsigned,
-                        sourceSize, 0, 0, 0, destSize));
-}
-
+private __gshared HandlerMap!(Instruction.Handler, JitOp) jitTable;
 
 private shared bool jitTableReady;
-
-// The tables that classify handlers. Built once, by the first thread that
-// compiles, under the JIT lock; they are read only under it.
-private bool ensureJitTables() nothrow @nogc {
-    if (!jitTableReady) {
-        buildJitTable;
-        if (!buildUnspecialiseTable)
-            return false;
-        jitTableReady = true;
-    }
-    return true;
-}
 
 // How `specialiseHandlers` made a handler: the general handler, and the
 // indirect operands whose bit it cleared (`mask`: 1 destination, 2 source,
 // 4 right operand).
 private struct Unspecialised {
-    Instruction.Handler handler;
     Instruction.Handler general;
     ubyte mask;
     bool ambiguous;
 }
 
-private __gshared Unspecialised[] unspecialised;
-
-// False if the memory for the table is missing.
-private bool buildUnspecialiseTable() nothrow @nogc {
-    import core.stdc.stdlib: calloc;
-
-    size_t count;
-    foreach (ref entry; specialisations)
-        if (entry.general !is null) {
-            count += 2 * widthSlots;
-            if (entry.masked !is null)
-                count += 7 * widthSlots;
-        }
-    size_t capacity = 1024;
-    while (capacity < 2 * count)
-        capacity *= 2;
-    auto memory = cast(Unspecialised*) calloc(capacity, Unspecialised.sizeof);
-    if (memory is null)
-        return false;
-    auto table = memory[0 .. capacity];
-
-    void put(Instruction.Handler handler, Instruction.Handler general,
-        ubyte mask)
-    {
-        if (handler is null)
-            return;
-        auto slot = ((cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL) >> 20)
-            & (capacity - 1);
-        while (table[slot].handler !is null && table[slot].handler !is handler)
-            slot = (slot + 1) & (capacity - 1);
-        if (table[slot].handler is handler) {
-            if (table[slot].general !is general || table[slot].mask != mask) {
-                table[slot].ambiguous = true;
-            }
-            return;
-        }
-        table[slot] = Unspecialised(handler, general, mask, false);
-    }
-
-    foreach (ref entry; specialisations) {
-        if (entry.general is null)
-            continue;
-        foreach (frame; entry.handlers)
-            foreach (handler; frame)
-                put(handler, entry.general, 0);
-        if (entry.masked !is null)
-            foreach (mask, frame; *entry.masked)
-                foreach (handler; frame)
-                    put(handler, entry.general, cast(ubyte) (mask + 1));
-    }
-    unspecialised = table;
-    return true;
-}
-
-// The instruction as it was before `specialiseHandlers`.
-private bool unspecialise(ref Instruction instruction) nothrow @nogc {
-    const capacity = unspecialised.length;
-    auto slot = ((cast(size_t) instruction.handler * 0x9E37_79B9_7F4A_7C15UL)
-        >> 20) & (capacity - 1);
-    while (unspecialised[slot].handler !is null) {
-        if (unspecialised[slot].handler is instruction.handler) {
-            const entry = &unspecialised[slot];
-            if (entry.ambiguous)
-                return false;
-            instruction.handler = entry.general;
-            if (entry.mask & 1)
-                instruction.destination |= indirectBit;
-            if (entry.mask & 2)
-                instruction.source |= indirectBit;
-            if (entry.mask & 4)
-                instruction.sourceWidth |= indirectBit;
-            return true;
-        }
-        slot = (slot + 1) & (capacity - 1);
-    }
-    return true;
-}
+private __gshared HandlerMap!(Instruction.Handler, Unspecialised) unspecialised;
 
 // The buffers of one compile. They belong to the JIT lock.
 private __gshared Scratch!JitOp jitOpScratch;
@@ -5877,9 +5590,9 @@ private bool compileUnderLock(Function* function_) nothrow @nogc {
         // The code of a branch does not count; a call keeps its twin, which
         // counts the callee.
         if (handler !is null) {
-            if (auto original = pairGet(uncountedOf, handler))
-                if (!isCountedCall(original))
-                    handler = original;
+            if (auto original = uncountedOf.find(handler))
+                if (!isCountedCall(*original))
+                    handler = *original;
         }
         originals[index] = handler;
         snapshot[index] = instructions[index];
@@ -5896,6 +5609,326 @@ private bool compileUnderLock(Function* function_) nothrow @nogc {
     }
     return jitFunction(instructions, snapshot, ops, originals,
         function_.constants);
+}
+
+// The tables that classify handlers. Built once, by the first thread that
+// compiles, under the JIT lock; they are read only under it.
+private bool ensureJitTables() nothrow @nogc {
+    if (!jitTableReady) {
+        if (!buildJitTable || !buildUnspecialiseTable)
+            return false;
+        jitTableReady = true;
+    }
+    return true;
+}
+
+// False if the memory for the table is missing.
+private bool buildJitTable() nothrow @nogc {
+    alias Kind = JitOp.Kind;
+    alias IntOperation = JitOp.IntOperation;
+    alias ShiftKind = JitOp.ShiftKind;
+
+    bool failed;
+    void put(Instruction.Handler handler, JitOp op) {
+        if (handler !is null && !jitTable.put(handler, op))
+            failed = true;
+    }
+
+    static foreach (triple; threeAddressNames) {{
+        static foreach (constant; [false, true]) {{
+            auto handler = mixin("&" ~ triple.name ~ (constant ? "K" : ""));
+            static if (triple.family == "opInt3")
+                put(handler, threeAddressInt(intOperationOf(triple.symbol),
+                    constant));
+            else static if (triple.family == "opShift3")
+                put(handler, threeAddressShift(
+                    shiftKindOf(triple.symbol, triple.flag), constant));
+            else static if (triple.family == "opFloat3")
+                put(handler, threeAddressFloat(floatOperationOf(triple.symbol),
+                    constant));
+            else static if (triple.family == "opCompare3")
+                put(handler, threeAddressCompare(comparisonOf(triple.symbol),
+                    triple.flag, constant));
+            else static if (triple.family == "opFloatCompare3")
+                put(handler, floatCompare(comparisonOf(triple.symbol),
+                    constant));
+        }}
+    }}
+    static foreach (triple; registerNames) {{
+        static foreach (constant; [false, true])
+            static foreach (from; [false, true])
+                static foreach (to; [false, true])
+                    static if (from || to) {{
+                        auto handler = registerForm(mixin("&" ~ triple[0]
+                            ~ (constant ? "K" : "")), from, to);
+                        static if (triple[1] == "opInt3R")
+                            put(handler, registerInt(
+                                intOperationOf(triple[2]), constant, from, to));
+                        else
+                            put(handler, registerFloat(
+                                floatOperationOf(triple[2]), constant, from,
+                                to));
+                    }}
+    }}
+    static foreach (comparison; EnumMembers!Comparison)
+        static foreach (kind; EnumMembers!CompareKind)
+            static foreach (jumpWhen; [false, true])
+                static foreach (constant; [false, true]) {
+                    put(fusedBranchHandler(comparison, kind, jumpWhen,
+                            constant),
+                        fusedBranch(comparison, kind, jumpWhen, constant,
+                            false));
+                    put(fusedRegisterHandlers[fusedIndex(comparison, kind,
+                            jumpWhen, constant)],
+                        fusedBranch(comparison, kind, jumpWhen, constant,
+                            true));
+                }
+    put(&opAdd, twoAddressInt(IntOperation.add));
+    put(&opSubtract, twoAddressInt(IntOperation.subtract));
+    put(&opMultiply, twoAddressInt(IntOperation.multiply));
+    put(&opBitAnd, twoAddressInt(IntOperation.and));
+    put(&opBitOr, twoAddressInt(IntOperation.or));
+    put(&opBitXor, twoAddressInt(IntOperation.xor));
+    put(&opLessThanSigned, twoAddressCompare(Comparison.lessThan, true));
+    put(&opLessOrEqualSigned,
+        twoAddressCompare(Comparison.lessOrEqual, true));
+    put(&opGreaterThanSigned, twoAddressCompare(Comparison.greaterThan, true));
+    put(&opGreaterOrEqualSigned,
+        twoAddressCompare(Comparison.greaterOrEqual, true));
+    put(&opLessThanUnsigned, twoAddressCompare(Comparison.lessThan, false));
+    put(&opLessOrEqualUnsigned,
+        twoAddressCompare(Comparison.lessOrEqual, false));
+    put(&opGreaterThanUnsigned,
+        twoAddressCompare(Comparison.greaterThan, false));
+    put(&opGreaterOrEqualUnsigned,
+        twoAddressCompare(Comparison.greaterOrEqual, false));
+    put(&opEqual, twoAddressCompare(Comparison.equal, false));
+    put(&opNotEqual, twoAddressCompare(Comparison.notEqual, false));
+
+    put(&opShiftLeft, twoAddressShift(ShiftKind.left));
+    put(&opShiftRightLogical, twoAddressShift(ShiftKind.logicalRight));
+    put(&opShiftRightArithmetic, twoAddressShift(ShiftKind.arithmeticRight));
+    put(&opCopy, JitOp.plain(Kind.copy));
+    static foreach (width; 1 .. 17) {
+        put(&opCopyFixed!(width, true),
+            JitOp.make!(Kind.copy)(JitOp.Copy(true), width));
+        put(&opCopyFixed!width,
+            JitOp.make!(Kind.copy)(JitOp.Copy(false), width));
+    }
+    put(&opConstant, JitOp.plain(Kind.constant));
+    put(&opZero, JitOp.plain(Kind.zero));
+    put(&opJump, JitOp.plain(Kind.jump));
+    put(&opBranchFalse, JitOp.make!(Kind.branch)(JitOp.Branch(false)));
+    put(&opBranchTrue, JitOp.make!(Kind.branch)(JitOp.Branch(true)));
+    put(&opStaticLoad, JitOp.plain(Kind.staticLoad));
+    put(&opStaticStore, JitOp.plain(Kind.staticStore));
+    put(&opStaticAddress, JitOp.plain(Kind.staticAddr));
+    put(&opLoadIndirect, JitOp.plain(Kind.loadInd));
+    put(&opStoreIndirect, JitOp.plain(Kind.storeInd));
+    static foreach (width; [1, 2, 4, 8, 16, 32]) {
+        put(&opLoadIndirectFixed!width, JitOp.plain(Kind.loadInd, width));
+        put(&opStoreIndirectFixed!width, JitOp.plain(Kind.storeInd, width));
+        static foreach (copyWidth; [1, 2, 4, 8, 16])
+            put(&opLoadThenCopy!(width, copyWidth),
+                JitOp.plain(Kind.loadInd, width));
+    }
+    static foreach (base; EnumMembers!IndexBase)
+        put(&opIndex!base, JitOp.make!(Kind.index)(JitOp.Index(base)));
+    foreach (instance; checkedInstances)
+        put(instance.handler, JitOp.make!(Kind.checked)(
+            JitOp.Checked(instance.access, instance.fixedLength,
+                cast(ubyte) instance.indexWidth, instance.signed,
+                instance.constantValue),
+            cast(ubyte) instance.elementSize));
+    put(&opFrameAddress, JitOp.plain(Kind.frameAddr));
+    put(&opLogicalNot, JitOp.make!(Kind.boolOp)(JitOp.BoolOp(false)));
+    put(&opCastToBool, JitOp.make!(Kind.boolOp)(JitOp.BoolOp(true)));
+    put(&opNegate, JitOp.make!(Kind.unary)(JitOp.Unary(false)));
+    put(&opComplement, JitOp.make!(Kind.unary)(JitOp.Unary(true)));
+    put(&opCastWidenSigned, JitOp.make!(Kind.widen)(JitOp.Widen(false)));
+    put(&opCastWidenUnsigned, JitOp.make!(Kind.widen)(JitOp.Widen(true)));
+    static foreach (kind; AliasSeq!(CastKind.narrow, CastKind.widenSigned,
+        CastKind.widenUnsigned))
+        static foreach (destSize; [1, 2, 4, 8])
+            static foreach (sourceSize; [1, 2, 4, 8])
+                put(&opCastFixedAs!(kind, destSize, sourceSize),
+                    JitOp.make!(Kind.castFixed)(
+                        JitOp.CastFixed(kind == CastKind.widenUnsigned,
+                            sourceSize),
+                        destSize));
+    return !failed;
+}
+
+// The operand layouts of the handlers. `threeAddress` ones have a destination,
+// a left and a right operand; `twoAddress` ones have the destination as the
+// left operand; `register` ones read the left operand from the register
+// argument, write the result there, or both.
+private JitOp threeAddressInt(JitOp.IntOperation operation,
+    bool constantRight) nothrow @nogc
+{
+    return intOp(operation, constantRight, false, false, false);
+}
+
+private JitOp registerInt(JitOp.IntOperation operation, bool constantRight,
+    bool leftInR0, bool resultInR0) nothrow @nogc
+{
+    return intOp(operation, constantRight, leftInR0, resultInR0, false);
+}
+
+private JitOp twoAddressInt(JitOp.IntOperation operation) nothrow @nogc {
+    return intOp(operation, false, false, false, true);
+}
+
+private JitOp threeAddressCompare(Comparison comparison, bool signed,
+    bool constantRight) nothrow @nogc
+{
+    return JitOp.make!(JitOp.Kind.cmp3)(
+        JitOp.Cmp3(comparison, signed, constantRight, false));
+}
+
+private JitOp twoAddressCompare(Comparison comparison, bool signed)
+    nothrow @nogc
+{
+    return JitOp.make!(JitOp.Kind.cmp3)(
+        JitOp.Cmp3(comparison, signed, false, true));
+}
+
+private JitOp threeAddressShift(JitOp.ShiftKind kind, bool constantRight)
+    nothrow @nogc
+{
+    return JitOp.make!(JitOp.Kind.shift)(
+        JitOp.Shift(kind, constantRight, false));
+}
+
+private JitOp twoAddressShift(JitOp.ShiftKind kind) nothrow @nogc {
+    return JitOp.make!(JitOp.Kind.shift)(JitOp.Shift(kind, false, true));
+}
+
+private JitOp threeAddressFloat(JitOp.FloatOperation operation,
+    bool constantRight) nothrow @nogc
+{
+    return registerFloat(operation, constantRight, false, false);
+}
+
+private JitOp registerFloat(JitOp.FloatOperation operation, bool constantRight,
+    bool leftInFp0, bool resultInFp0) nothrow @nogc
+{
+    return JitOp.make!(JitOp.Kind.fp3)(
+        JitOp.Fp3(operation, constantRight, leftInFp0, resultInFp0));
+}
+
+private JitOp floatCompare(Comparison comparison, bool constantRight)
+    nothrow @nogc
+{
+    return JitOp.make!(JitOp.Kind.fpcmp3)(
+        JitOp.FpCmp3(comparison, constantRight));
+}
+
+private JitOp fusedBranch(Comparison comparison, CompareKind kind,
+    bool jumpWhen, bool constantRight, bool leftInR0) nothrow @nogc
+{
+    return JitOp.make!(JitOp.Kind.fused)(JitOp.Fused(comparison, kind,
+        jumpWhen, constantRight, leftInR0));
+}
+
+private JitOp intOp(JitOp.IntOperation operation, bool constantRight,
+    bool leftInR0, bool resultInR0, bool twoAddress) nothrow @nogc
+{
+    return JitOp.make!(JitOp.Kind.int3)(JitOp.Int3(operation, constantRight,
+        leftInR0, resultInR0, twoAddress));
+}
+
+private JitOp.IntOperation intOperationOf(string symbol) nothrow @nogc {
+    switch (symbol) {
+        case "+": return JitOp.IntOperation.add;
+        case "|": return JitOp.IntOperation.or;
+        case "&": return JitOp.IntOperation.and;
+        case "-": return JitOp.IntOperation.subtract;
+        case "^": return JitOp.IntOperation.xor;
+        case "*": return JitOp.IntOperation.multiply;
+        default: assert(false, "an integer operator without a template");
+    }
+}
+
+private JitOp.FloatOperation floatOperationOf(string symbol) nothrow @nogc {
+    switch (symbol) {
+        case "+": return JitOp.FloatOperation.add;
+        case "-": return JitOp.FloatOperation.subtract;
+        case "*": return JitOp.FloatOperation.multiply;
+        case "/": return JitOp.FloatOperation.divide;
+        default: assert(false, "a floating operator without a template");
+    }
+}
+
+private JitOp.ShiftKind shiftKindOf(string symbol, bool arithmetic)
+    nothrow @nogc
+{
+    if (symbol == "<<")
+        return JitOp.ShiftKind.left;
+    return arithmetic
+        ? JitOp.ShiftKind.arithmeticRight : JitOp.ShiftKind.logicalRight;
+}
+
+private Comparison comparisonOf(string symbol) nothrow @nogc {
+    foreach (index, candidate; comparisonSymbols)
+        if (candidate == symbol)
+            return cast(Comparison) index;
+    assert(false, "a comparison operator without a template");
+}
+
+// False if the memory for the table is missing.
+private bool buildUnspecialiseTable() nothrow @nogc {
+    bool failed;
+    void put(Instruction.Handler handler, Instruction.Handler general,
+        ubyte mask)
+    {
+        if (handler is null)
+            return;
+        bool added;
+        auto entry = unspecialised.insert(handler, added);
+        if (entry is null)
+            failed = true;
+        else if (added)
+            *entry = Unspecialised(general, mask, false);
+        else if (entry.general !is general || entry.mask != mask)
+            entry.ambiguous = true;
+    }
+
+    foreach (ref entry; specialisations) {
+        if (entry.general is null)
+            continue;
+        foreach (frame; entry.handlers)
+            foreach (handler; frame)
+                put(handler, entry.general, 0);
+        if (entry.masked !is null)
+            foreach (mask, frame; *entry.masked)
+                foreach (handler; frame)
+                    put(handler, entry.general, cast(ubyte) (mask + 1));
+    }
+    return !failed;
+}
+
+// The instruction as it was before `specialiseHandlers`.
+private bool unspecialise(ref Instruction instruction) nothrow @nogc {
+    const entry = unspecialised.find(instruction.handler);
+    if (entry is null)
+        return true;
+    if (entry.ambiguous)
+        return false;
+    instruction.handler = cast(Instruction.Handler) entry.general;
+    if (entry.mask & 1)
+        instruction.destination |= indirectBit;
+    if (entry.mask & 2)
+        instruction.source |= indirectBit;
+    if (entry.mask & 4)
+        instruction.sourceWidth |= indirectBit;
+    return true;
+}
+
+private JitOp jitGet(in Instruction.Handler handler) nothrow @nogc {
+    if (auto op = jitTable.find(handler))
+        return *op;
+    return JitOp.init;
 }
 
 } else {
