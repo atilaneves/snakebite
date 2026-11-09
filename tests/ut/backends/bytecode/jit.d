@@ -92,37 +92,35 @@ unittest {
 }
 
 // A function that the host calls once, and whose do-while loop runs 10000
-// times, is
-// hot at its backward branch, a conditional branch.
+// times, is hot at its backward branch, a conditional branch.
 @("jit.functionCalledOnceIsHotAtItsDoWhileLoop")
-@Tags("changes-jit") // The JIT choice is process-wide.
 unittest {
-    withDefaultJit({
-        auto guestModule = parseSnippet(q{
-            module jitloop;
-            long loop(long n) {
-                long sum;
-                long i;
-                do {
-                    sum += i % 7;
-                    ++i;
-                } while (i < n);
-                return sum;
-            }
-        });
-        auto program = Program([guestModule]);
-        auto backend = Owned!Bytecode(program);
-        auto loop = findFunction(guestModule, "loop");
-        long n = 10_000;
-        long result;
-        backend.call(loop, &result, [cast(void*) &n]);
-        result.should == (n / 7) * 21 + [0, 0, 1, 3, 6, 10, 15][n % 7];
-
-        bool compiled;
-        backend.eachCompiled((declaration, function_) {
-            if (declaration.ident.toString == "loop")
-                compiled = isJitCompiled(function_);
-        });
-        compiled.should == true;
+    if (!testJit.enabled)
+        return;
+    auto guestModule = parseSnippet(q{
+        module jitloop;
+        long loop(long n) {
+            long sum;
+            long i;
+            do {
+                sum += i % 7;
+                ++i;
+            } while (i < n);
+            return sum;
+        }
     });
+    auto program = Program([guestModule]);
+    auto backend = ownedBackend!Bytecode(program);
+    auto loop = findFunction(guestModule, "loop");
+    long n = 10_000;
+    long result;
+    backend.call(loop, &result, [cast(void*) &n]);
+    result.should == (n / 7) * 21 + [0, 0, 1, 3, 6, 10, 15][n % 7];
+
+    bool compiled;
+    backend.eachCompiled((declaration, function_) {
+        if (declaration.ident.toString == "loop")
+            compiled = isJitCompiled(function_);
+    });
+    compiled.should == true;
 }
