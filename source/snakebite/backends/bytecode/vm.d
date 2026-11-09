@@ -5363,634 +5363,649 @@ public struct JitSetting {
 
 static if (jitSupported) {
 
-import core.memory: GC;
-import snakebite.backends.bytecode.handlermap: HandlerMap;
-import snakebite.backends.bytecode.jit: JitLock, JitOp, jitUsable, Scratch;
+    import core.memory: GC;
+    import snakebite.backends.bytecode.handlermap: HandlerMap;
+    import snakebite.backends.bytecode.jit: JitLock, JitOp, jitUsable, Scratch;
 
-// An event is a guest call of a function or an execution of one of its
-// backward branches. A function with this many events gets JIT code. The
-// counting adds `jitStep` to `Function.jitHeat`, so that the 32-bit sum carries
-// out at the threshold.
-package enum jitThreshold = 256;
-private enum jitStep = cast(uint) ((1UL << 32) / jitThreshold);
+    // An event is a guest call of a function or an execution of one of its
+    // backward branches. A function with this many events gets JIT code. The
+    // counting adds `jitStep` to `Function.jitHeat`, so that the 32-bit sum
+    // carries out at the threshold.
+    package enum jitThreshold = 256;
+    private enum jitStep = cast(uint) ((1UL << 32) / jitThreshold);
 
-// What `Function.jitHeat` starts with.
-package uint jitStartHeat(in JitSetting setting) nothrow @nogc {
-    return setting.eager ? cast(uint) -jitStep : 0;
-}
-
-// Whether the functions of a backend with `setting` count their events.
-package bool jitCounting(in JitSetting setting) nothrow @nogc {
-    return setting.enabled;
-}
-
-// Whether `instruction`, at `index`, counts an event for the JIT: a call, or a
-// branch whose target is at or before it. `target` is the instruction index
-// that a branch jumps to, and null for an instruction that does not branch.
-package bool jitCountsEvent(in JitSetting setting, in Instruction instruction,
-    in size_t index, in size_t* target) nothrow @nogc
-{
-    if (!setting.jitCounting)
-        return false;
-    return target is null
-        ? isCountedCall(instruction.handler) : *target <= index;
-}
-
-// For the paths that cannot know at compile time whether the JIT is on.
-pragma(inline, true)
-private void countCallIfOn(const(Function)* callee) {
-    if (callee.jitCounts)
-        countCall(callee);
-}
-
-pragma(inline, true)
-private void countCall(const(Function)* callee) {
-    auto function_ = cast(Function*) callee;
-    if (addHeat(function_, jitStep))
-        jitTierUp(function_);
-}
-
-private bool isCountedCall(in Instruction.Handler handler) nothrow @nogc {
-    static foreach (operation; AliasSeq!(
-        opCall, opCallWindowFrame, opCallWindowIndirect, opCallWindowDiscard,
-        opCallIndirectWindowFrame, opCallIndirectWindowIndirect,
-        opCallIndirectWindowDiscard,
-    ))
-        if (handler is &operation)
-            return true;
-    return false;
-}
-
-// Whether the code in `function_` runs as JIT code, for tests.
-version (unittest)
-package bool jitCompiled(const(Function)* function_) {
-    import core.atomic: atomicLoad, MemoryOrder;
-    return atomicLoad!(MemoryOrder.acq)(
-        *cast(shared(uint)*) &function_.jitState) == JitTier.compiled;
-}
-
-// `original` with a count of the event in front of it. The slow path is a
-// call of its own, so that the counting path has no stack frame, and the step
-// is an immediate: the count is a load of the function, an add and a branch.
-private const(Instruction)* countedHandler(alias original)(
-    const(Instruction)* pc,
-    Activation* active,
-    DispatchState* state,
-    ubyte* frame,
-    ulong r0,
-    double fp0,
-) {
-    if (addHeat(cast(Function*) active.function_, jitStep))
-        return countedTierUp!original(pc, active, state, frame, r0, fp0);
-    return original(pc, active, state, frame, r0, fp0);
-}
-
-pragma(inline, false)
-private const(Instruction)* countedTierUp(alias original)(
-    const(Instruction)* pc,
-    Activation* active,
-    DispatchState* state,
-    ubyte* frame,
-    ulong r0,
-    double fp0,
-) {
-    if (jitTierUp(cast(Function*) active.function_)) {
-        // The word of this instruction now holds JIT code.
-        import core.atomic: atomicLoad, MemoryOrder;
-        const compiled = cast(Instruction.Handler) atomicLoad!(MemoryOrder.acq)(
-            *cast(shared(size_t)*) &pc.handler);
-        return compiled(pc, active, state, frame, r0, fp0);
-    }
-    return original(pc, active, state, frame, r0, fp0);
-}
-
-pragma(inline, true)
-private bool addHeat(Function* function_, uint step) {
-    import core.checkedint: addu;
-
-    bool overflow;
-    function_.jitHeat = addu(function_.jitHeat, step, overflow);
-    return overflow;
-}
-
-// An instruction that counts its event, by its handler; and back.
-private struct CountingTwins {
-    HandlerMap!(Instruction.Handler, Instruction.Handler) countedOf;
-    HandlerMap!(Instruction.Handler, Instruction.Handler) uncountedOf;
-}
-
-// `specialiseWith` adds the twins of the branches to `newTwins`, and the
-// constructor below those of the jump and the calls; then it makes them
-// `countingTwins`, before any thread reads them.
-private immutable CountingTwins countingTwins;
-
-// The module constructors run on the main thread, so this is a variable of
-// that thread.
-private CountingTwins newTwins;
-
-// The twin of each handler that `original` has, by the place of the handler in
-// `counted`, which holds the twins.
-private void addCountedTwins(in Specialisation original,
-    in Specialisation counted)
-{
-    foreach (frame; 0 .. original.handlers.length)
-        foreach (slot; 0 .. widthSlots)
-            if (original.handlers[frame][slot] !is null)
-                addCounted(cast(Instruction.Handler) original.handlers[frame][slot],
-                    cast(Instruction.Handler) counted.handlers[frame][slot]);
-    if (original.masked !is null)
-        foreach (mask; 0 .. (*original.masked).length)
-            foreach (slot; 0 .. widthSlots)
-                if ((*original.masked)[mask][slot] !is null)
-                    addCounted(
-                        cast(Instruction.Handler) (*original.masked)[mask][slot],
-                        cast(Instruction.Handler) (*counted.masked)[mask][slot]);
-}
-
-shared static this() {
-    addCounted(&opJump, &countedHandler!opJump);
-    static foreach (destination; EnumMembers!Destination) {
-        addCounted(&callWindow!destination,
-            &callWindow!(destination, true));
-        addCounted(&callIndirectWindow!destination,
-            &callIndirectWindow!(destination, true));
-    }
-    addCounted(&callGeneral!false, &callGeneral!true);
-    countingTwins = cast(immutable) newTwins;
-    newTwins = CountingTwins.init;
-}
-
-private void addCounted(Instruction.Handler original,
-    Instruction.Handler counted)
-{
-    if (!newTwins.countedOf.put(original, counted)
-            || !newTwins.uncountedOf.put(counted, original))
-        internalFailure("no memory for the counting twins");
-}
-
-// Replaces the handler of each of `instructions[indices]` by its counting
-// twin. `indices` are the backward branches and the calls. A handler with no
-// twin stays: that instruction does not count.
-package void jitCountEvents(Instruction[] instructions,
-    const(size_t)[] indices)
-{
-    foreach (index; indices)
-        if (auto counted = countingTwins.countedOf.find(
-                instructions[index].handler))
-            instructions[index].handler = cast(Instruction.Handler) *counted;
-}
-
-// What a function is in: `compiling` while one thread makes its code, and
-// `failed` when it cannot have any.
-private enum JitTier : uint { interpreted, compiling, compiled, failed }
-
-// The tables that classify handlers, and the buffers of one compile. They
-// belong to the JIT lock: only `JitLock.owned` gives access to them. The first
-// thread that compiles builds the tables.
-private struct JitTables {
-    // The handlers that have a template, with how to emit them.
-    HandlerMap!(Instruction.Handler, JitOp) jitTable;
-    HandlerMap!(Instruction.Handler, Unspecialised) unspecialised;
-    bool ready;
-    Scratch!JitOp opScratch;
-    Scratch!Instruction snapshotScratch;
-    Scratch!(Instruction.Handler) originalScratch;
-}
-
-private shared JitTables jitTables;
-
-// How `specialiseHandlers` made a handler: the general handler, and the
-// indirect operands whose bit it cleared (`mask`: 1 destination, 2 source,
-// 4 right operand).
-private struct Unspecialised {
-    Instruction.Handler general;
-    ubyte mask;
-    bool ambiguous;
-}
-
-// Makes JIT code for `function_`, once; returns true when it has JIT code. A
-// thread that loses the race, finds the JIT busy, or is in a GC finalizer,
-// runs the handlers: it does not wait, because the thread that holds the
-// lock can be one that the GC suspended. The function then counts another
-// `jitThreshold` events and tries again.
-pragma(inline, false)
-private bool jitTierUp(Function* function_) nothrow @nogc {
-    import core.atomic: atomicLoad, atomicStore, cas, MemoryOrder;
-
-    auto state = cast(shared(uint)*) &function_.jitState;
-    const seen = atomicLoad!(MemoryOrder.acq)(*state);
-    if (seen != JitTier.interpreted)
-        return seen == JitTier.compiled;
-    if (!cas(state, cast(uint) JitTier.interpreted,
-            cast(uint) JitTier.compiling))
-        return false;
-    // A guest destructor in a GC finalizer can make a function hot. The
-    // function keeps its handlers until a later event outside the finalizer.
-    auto lock = GC.inFinalizer ? JitLock.init : JitLock.tryTake;
-    if (!lock.held) {
-        atomicStore!(MemoryOrder.rel)(*state, cast(uint) JitTier.interpreted);
-        return false;
+    // What `Function.jitHeat` starts with.
+    package uint jitStartHeat(in JitSetting setting) nothrow @nogc {
+        return setting.eager ? cast(uint) -jitStep : 0;
     }
 
-    const ok = compileUnderLock(lock, function_);
-    atomicStore!(MemoryOrder.rel)(*state,
-        cast(uint) (ok ? JitTier.compiled : JitTier.failed));
-    return ok;
-}
-
-private bool compileUnderLock(ref JitLock lock, Function* function_)
-    nothrow @nogc
-{
-    if (!lock.jitUsable)
-        return false;
-    ref tables = lock.owned(jitTables);
-    if (!tables.ensureJitTables)
-        return false;
-    auto instructions = function_.instructions;
-    const n = instructions.length;
-    auto snapshotMemory = tables.snapshotScratch.reserve(n);
-    auto opMemory = tables.opScratch.reserve(n);
-    auto originalMemory = tables.originalScratch.reserve(n);
-    if (snapshotMemory is null || opMemory is null || originalMemory is null)
-        return false;
-    auto snapshot = snapshotMemory[0 .. n];
-    auto ops = opMemory[0 .. n];
-    auto originals = originalMemory[0 .. n];
-    foreach (index; 0 .. n) {
-        auto handler = instructions[index].handler;
-        // The code of a branch does not count; a call keeps its twin, which
-        // counts the callee.
-        if (handler !is null) {
-            if (auto original = countingTwins.uncountedOf.find(handler))
-                if (!isCountedCall(*original))
-                    handler = *original;
-        }
-        originals[index] = handler;
-        snapshot[index] = instructions[index];
-        snapshot[index].handler = handler;
-        if (handler is null) {
-            ops[index] = JitOp.init;
-            continue;
-        }
-        // A handler of a call, as installed, has no template; the general
-        // handler that `specialiseHandlers` replaced is what has one.
-        if (!tables.unspecialise(snapshot[index]))
-            return false;
-        ops[index] = tables.jitGet(snapshot[index].handler);
-    }
-    return lock.jitFunction(instructions, snapshot, ops, originals,
-        function_.constants);
-}
-
-// Builds the tables of `tables` once.
-private bool ensureJitTables(ref JitTables tables) nothrow @nogc {
-    if (!tables.ready) {
-        if (!tables.buildJitTable || !tables.buildUnspecialiseTable)
-            return false;
-        tables.ready = true;
-    }
-    return true;
-}
-
-// False if the memory for the table is missing.
-private bool buildJitTable(ref JitTables tables) nothrow @nogc {
-    alias Kind = JitOp.Kind;
-    alias IntOperation = JitOp.IntOperation;
-    alias ShiftKind = JitOp.ShiftKind;
-
-    bool failed;
-    void put(Instruction.Handler handler, JitOp op) {
-        if (handler !is null && !tables.jitTable.put(handler, op))
-            failed = true;
+    // Whether the functions of a backend with `setting` count their events.
+    package bool jitCounting(in JitSetting setting) nothrow @nogc {
+        return setting.enabled;
     }
 
-    static foreach (triple; threeAddressNames) {{
-        static foreach (constant; [false, true]) {{
-            auto handler = mixin("&" ~ triple.name ~ (constant ? "K" : ""));
-            static if (triple.family == "opInt3")
-                put(handler, threeAddressInt(intOperationOf(triple.symbol),
-                    constant));
-            else static if (triple.family == "opShift3")
-                put(handler, threeAddressShift(
-                    shiftKindOf(triple.symbol, triple.flag), constant));
-            else static if (triple.family == "opFloat3")
-                put(handler, threeAddressFloat(floatOperationOf(triple.symbol),
-                    constant));
-            else static if (triple.family == "opCompare3")
-                put(handler, threeAddressCompare(comparisonOf(triple.symbol),
-                    triple.flag, constant));
-            else static if (triple.family == "opFloatCompare3")
-                put(handler, floatCompare(comparisonOf(triple.symbol),
-                    constant));
-        }}
-    }}
-    static foreach (triple; registerNames) {{
-        static foreach (constant; [false, true])
-            static foreach (from; [false, true])
-                static foreach (to; [false, true])
-                    static if (from || to) {{
-                        auto handler = registerForm(mixin("&" ~ triple[0]
-                            ~ (constant ? "K" : "")), from, to);
-                        static if (triple[1] == "opInt3R")
-                            put(handler, registerInt(
-                                intOperationOf(triple[2]), constant, from, to));
-                        else
-                            put(handler, registerFloat(
-                                floatOperationOf(triple[2]), constant, from,
-                                to));
-                    }}
-    }}
-    static foreach (comparison; EnumMembers!Comparison)
-        static foreach (kind; EnumMembers!CompareKind)
-            static foreach (jumpWhen; [false, true])
-                static foreach (constant; [false, true]) {
-                    put(fusedBranchHandler(comparison, kind, jumpWhen,
-                            constant),
-                        fusedBranch(comparison, kind, jumpWhen, constant,
-                            false));
-                    put(fusedRegisterHandlers[fusedIndex(comparison, kind,
-                            jumpWhen, constant)],
-                        fusedBranch(comparison, kind, jumpWhen, constant,
-                            true));
-                }
-    put(&opAdd, twoAddressInt(IntOperation.add));
-    put(&opSubtract, twoAddressInt(IntOperation.subtract));
-    put(&opMultiply, twoAddressInt(IntOperation.multiply));
-    put(&opBitAnd, twoAddressInt(IntOperation.and));
-    put(&opBitOr, twoAddressInt(IntOperation.or));
-    put(&opBitXor, twoAddressInt(IntOperation.xor));
-    put(&opLessThanSigned, twoAddressCompare(Comparison.lessThan, true));
-    put(&opLessOrEqualSigned,
-        twoAddressCompare(Comparison.lessOrEqual, true));
-    put(&opGreaterThanSigned, twoAddressCompare(Comparison.greaterThan, true));
-    put(&opGreaterOrEqualSigned,
-        twoAddressCompare(Comparison.greaterOrEqual, true));
-    put(&opLessThanUnsigned, twoAddressCompare(Comparison.lessThan, false));
-    put(&opLessOrEqualUnsigned,
-        twoAddressCompare(Comparison.lessOrEqual, false));
-    put(&opGreaterThanUnsigned,
-        twoAddressCompare(Comparison.greaterThan, false));
-    put(&opGreaterOrEqualUnsigned,
-        twoAddressCompare(Comparison.greaterOrEqual, false));
-    put(&opEqual, twoAddressCompare(Comparison.equal, false));
-    put(&opNotEqual, twoAddressCompare(Comparison.notEqual, false));
-
-    put(&opShiftLeft, twoAddressShift(ShiftKind.left));
-    put(&opShiftRightLogical, twoAddressShift(ShiftKind.logicalRight));
-    put(&opShiftRightArithmetic, twoAddressShift(ShiftKind.arithmeticRight));
-    put(&opCopy, JitOp.plain(Kind.copy));
-    static foreach (width; 1 .. 17) {
-        put(&opCopyFixed!(width, true),
-            JitOp.make!(Kind.copy)(JitOp.Copy(true), width));
-        put(&opCopyFixed!width,
-            JitOp.make!(Kind.copy)(JitOp.Copy(false), width));
-    }
-    put(&opConstant, JitOp.plain(Kind.constant));
-    put(&opZero, JitOp.plain(Kind.zero));
-    put(&opJump, JitOp.plain(Kind.jump));
-    put(&opBranchFalse, JitOp.make!(Kind.branch)(JitOp.Branch(false)));
-    put(&opBranchTrue, JitOp.make!(Kind.branch)(JitOp.Branch(true)));
-    put(&opStaticLoad, JitOp.plain(Kind.staticLoad));
-    put(&opStaticStore, JitOp.plain(Kind.staticStore));
-    put(&opStaticAddress, JitOp.plain(Kind.staticAddr));
-    put(&opLoadIndirect, JitOp.plain(Kind.loadInd));
-    put(&opStoreIndirect, JitOp.plain(Kind.storeInd));
-    static foreach (width; [1, 2, 4, 8, 16, 32]) {
-        put(&opLoadIndirectFixed!width, JitOp.plain(Kind.loadInd, width));
-        put(&opStoreIndirectFixed!width, JitOp.plain(Kind.storeInd, width));
-        static foreach (copyWidth; [1, 2, 4, 8, 16])
-            put(&opLoadThenCopy!(width, copyWidth),
-                JitOp.plain(Kind.loadInd, width));
-    }
-    static foreach (base; EnumMembers!IndexBase)
-        put(&opIndex!base, JitOp.make!(Kind.index)(JitOp.Index(base)));
-    foreach (instance; checkedInstances)
-        put(instance.handler, JitOp.make!(Kind.checked)(
-            JitOp.Checked(instance.access, instance.fixedLength,
-                cast(ubyte) instance.indexWidth, instance.signed,
-                instance.constantValue),
-            cast(ubyte) instance.elementSize));
-    put(&opFrameAddress, JitOp.plain(Kind.frameAddr));
-    put(&opLogicalNot, JitOp.make!(Kind.boolOp)(JitOp.BoolOp(false)));
-    put(&opCastToBool, JitOp.make!(Kind.boolOp)(JitOp.BoolOp(true)));
-    put(&opNegate, JitOp.make!(Kind.unary)(JitOp.Unary(false)));
-    put(&opComplement, JitOp.make!(Kind.unary)(JitOp.Unary(true)));
-    put(&opCastWidenSigned, JitOp.make!(Kind.widen)(JitOp.Widen(false)));
-    put(&opCastWidenUnsigned, JitOp.make!(Kind.widen)(JitOp.Widen(true)));
-    static foreach (kind; AliasSeq!(CastKind.narrow, CastKind.widenSigned,
-        CastKind.widenUnsigned))
-        static foreach (destSize; [1, 2, 4, 8])
-            static foreach (sourceSize; [1, 2, 4, 8])
-                put(&opCastFixedAs!(kind, destSize, sourceSize),
-                    JitOp.make!(Kind.castFixed)(
-                        JitOp.CastFixed(kind == CastKind.widenUnsigned,
-                            sourceSize),
-                        destSize));
-    return !failed;
-}
-
-// The operand layouts of the handlers. `threeAddress` ones have a destination,
-// a left and a right operand; `twoAddress` ones have the destination as the
-// left operand; `register` ones read the left operand from the register
-// argument, write the result there, or both.
-private JitOp threeAddressInt(JitOp.IntOperation operation,
-    bool constantRight) nothrow @nogc
-{
-    return intOp(operation, constantRight, false, false, false);
-}
-
-private JitOp registerInt(JitOp.IntOperation operation, bool constantRight,
-    bool leftInR0, bool resultInR0) nothrow @nogc
-{
-    return intOp(operation, constantRight, leftInR0, resultInR0, false);
-}
-
-private JitOp twoAddressInt(JitOp.IntOperation operation) nothrow @nogc {
-    return intOp(operation, false, false, false, true);
-}
-
-private JitOp threeAddressCompare(Comparison comparison, bool signed,
-    bool constantRight) nothrow @nogc
-{
-    return JitOp.make!(JitOp.Kind.cmp3)(
-        JitOp.Cmp3(comparison, signed, constantRight, false));
-}
-
-private JitOp twoAddressCompare(Comparison comparison, bool signed)
-    nothrow @nogc
-{
-    return JitOp.make!(JitOp.Kind.cmp3)(
-        JitOp.Cmp3(comparison, signed, false, true));
-}
-
-private JitOp threeAddressShift(JitOp.ShiftKind kind, bool constantRight)
-    nothrow @nogc
-{
-    return JitOp.make!(JitOp.Kind.shift)(
-        JitOp.Shift(kind, constantRight, false));
-}
-
-private JitOp twoAddressShift(JitOp.ShiftKind kind) nothrow @nogc {
-    return JitOp.make!(JitOp.Kind.shift)(JitOp.Shift(kind, false, true));
-}
-
-private JitOp threeAddressFloat(JitOp.FloatOperation operation,
-    bool constantRight) nothrow @nogc
-{
-    return registerFloat(operation, constantRight, false, false);
-}
-
-private JitOp registerFloat(JitOp.FloatOperation operation, bool constantRight,
-    bool leftInFp0, bool resultInFp0) nothrow @nogc
-{
-    return JitOp.make!(JitOp.Kind.fp3)(
-        JitOp.Fp3(operation, constantRight, leftInFp0, resultInFp0));
-}
-
-private JitOp floatCompare(Comparison comparison, bool constantRight)
-    nothrow @nogc
-{
-    return JitOp.make!(JitOp.Kind.fpcmp3)(
-        JitOp.FpCmp3(comparison, constantRight));
-}
-
-private JitOp fusedBranch(Comparison comparison, CompareKind kind,
-    bool jumpWhen, bool constantRight, bool leftInR0) nothrow @nogc
-{
-    return JitOp.make!(JitOp.Kind.fused)(JitOp.Fused(comparison, kind,
-        jumpWhen, constantRight, leftInR0));
-}
-
-private JitOp intOp(JitOp.IntOperation operation, bool constantRight,
-    bool leftInR0, bool resultInR0, bool twoAddress) nothrow @nogc
-{
-    return JitOp.make!(JitOp.Kind.int3)(JitOp.Int3(operation, constantRight,
-        leftInR0, resultInR0, twoAddress));
-}
-
-private JitOp.IntOperation intOperationOf(string symbol) nothrow @nogc {
-    switch (symbol) {
-        case "+": return JitOp.IntOperation.add;
-        case "|": return JitOp.IntOperation.or;
-        case "&": return JitOp.IntOperation.and;
-        case "-": return JitOp.IntOperation.subtract;
-        case "^": return JitOp.IntOperation.xor;
-        case "*": return JitOp.IntOperation.multiply;
-        default: assert(false, "an integer operator without a template");
-    }
-}
-
-private JitOp.FloatOperation floatOperationOf(string symbol) nothrow @nogc {
-    switch (symbol) {
-        case "+": return JitOp.FloatOperation.add;
-        case "-": return JitOp.FloatOperation.subtract;
-        case "*": return JitOp.FloatOperation.multiply;
-        case "/": return JitOp.FloatOperation.divide;
-        default: assert(false, "a floating operator without a template");
-    }
-}
-
-private JitOp.ShiftKind shiftKindOf(string symbol, bool arithmetic)
-    nothrow @nogc
-{
-    if (symbol == "<<")
-        return JitOp.ShiftKind.left;
-    return arithmetic
-        ? JitOp.ShiftKind.arithmeticRight : JitOp.ShiftKind.logicalRight;
-}
-
-private Comparison comparisonOf(string symbol) nothrow @nogc {
-    foreach (index, candidate; comparisonSymbols)
-        if (candidate == symbol)
-            return cast(Comparison) index;
-    assert(false, "a comparison operator without a template");
-}
-
-// False if the memory for the table is missing.
-private bool buildUnspecialiseTable(ref JitTables tables) nothrow @nogc {
-    bool failed;
-    void put(Instruction.Handler handler, Instruction.Handler general,
-        ubyte mask)
+    // Whether `instruction`, at `index`, counts an event for the JIT: a call,
+    // or a branch whose target is at or before it. `target` is the instruction
+    // index that a branch jumps to, and null for an instruction that does not
+    // branch.
+    package bool jitCountsEvent(in JitSetting setting,
+        in Instruction instruction, in size_t index, in size_t* target)
+        nothrow @nogc
     {
-        if (handler is null)
-            return;
-        bool added;
-        auto entry = tables.unspecialised.insert(handler, added);
-        if (entry is null)
-            failed = true;
-        else if (added)
-            *entry = Unspecialised(general, mask, false);
-        else if (entry.general !is general || entry.mask != mask)
-            entry.ambiguous = true;
+        if (!setting.jitCounting)
+            return false;
+        return target is null
+            ? isCountedCall(instruction.handler) : *target <= index;
     }
 
-    foreach (ref entry; specialisations) {
-        if (entry.general is null)
-            continue;
-        foreach (frame; entry.handlers)
-            foreach (handler; frame)
-                put(handler, entry.general, 0);
-        if (entry.masked !is null)
-            foreach (mask, frame; *entry.masked)
-                foreach (handler; frame)
-                    put(handler, entry.general, cast(ubyte) (mask + 1));
+    // For the paths that cannot know at compile time whether the JIT is on.
+    pragma(inline, true)
+    private void countCallIfOn(const(Function)* callee) {
+        if (callee.jitCounts)
+            countCall(callee);
     }
-    return !failed;
-}
 
-// The instruction as it was before `specialiseHandlers`.
-private bool unspecialise(const ref JitTables tables,
-    ref Instruction instruction) nothrow @nogc
-{
-    const entry = tables.unspecialised.find(instruction.handler);
-    if (entry is null)
-        return true;
-    if (entry.ambiguous)
+    pragma(inline, true)
+    private void countCall(const(Function)* callee) {
+        auto function_ = cast(Function*) callee;
+        if (addHeat(function_, jitStep))
+            jitTierUp(function_);
+    }
+
+    private bool isCountedCall(in Instruction.Handler handler) nothrow @nogc {
+        static foreach (operation; AliasSeq!(
+            opCall, opCallWindowFrame, opCallWindowIndirect,
+            opCallWindowDiscard, opCallIndirectWindowFrame,
+            opCallIndirectWindowIndirect, opCallIndirectWindowDiscard,
+        ))
+            if (handler is &operation)
+                return true;
         return false;
-    instruction.handler = cast(Instruction.Handler) entry.general;
-    if (entry.mask & 1)
-        instruction.destination |= indirectBit;
-    if (entry.mask & 2)
-        instruction.source |= indirectBit;
-    if (entry.mask & 4)
-        instruction.sourceWidth |= indirectBit;
-    return true;
-}
+    }
 
-private JitOp jitGet(const ref JitTables tables,
-    in Instruction.Handler handler) nothrow @nogc
-{
-    if (auto op = tables.jitTable.find(handler))
-        return *op;
-    return JitOp.init;
-}
+    // Whether the code in `function_` runs as JIT code, for tests.
+    version (unittest)
+    package bool jitCompiled(const(Function)* function_) {
+        import core.atomic: atomicLoad, MemoryOrder;
+        return atomicLoad!(MemoryOrder.acq)(
+            *cast(shared(uint)*) &function_.jitState) == JitTier.compiled;
+    }
+
+    // `original` with a count of the event in front of it. The slow path is a
+    // call of its own, so that the counting path has no stack frame, and the
+    // step is an immediate: the count is a load of the function, an add and a
+    // branch.
+    private const(Instruction)* countedHandler(alias original)(
+        const(Instruction)* pc,
+        Activation* active,
+        DispatchState* state,
+        ubyte* frame,
+        ulong r0,
+        double fp0,
+    ) {
+        if (addHeat(cast(Function*) active.function_, jitStep))
+            return countedTierUp!original(pc, active, state, frame, r0, fp0);
+        return original(pc, active, state, frame, r0, fp0);
+    }
+
+    pragma(inline, false)
+    private const(Instruction)* countedTierUp(alias original)(
+        const(Instruction)* pc,
+        Activation* active,
+        DispatchState* state,
+        ubyte* frame,
+        ulong r0,
+        double fp0,
+    ) {
+        if (jitTierUp(cast(Function*) active.function_)) {
+            // The word of this instruction now holds JIT code.
+            import core.atomic: atomicLoad, MemoryOrder;
+            const compiled = cast(Instruction.Handler)
+                atomicLoad!(MemoryOrder.acq)(
+                    *cast(shared(size_t)*) &pc.handler);
+            return compiled(pc, active, state, frame, r0, fp0);
+        }
+        return original(pc, active, state, frame, r0, fp0);
+    }
+
+    pragma(inline, true)
+    private bool addHeat(Function* function_, uint step) {
+        import core.checkedint: addu;
+
+        bool overflow;
+        function_.jitHeat = addu(function_.jitHeat, step, overflow);
+        return overflow;
+    }
+
+    // An instruction that counts its event, by its handler; and back.
+    private struct CountingTwins {
+        HandlerMap!(Instruction.Handler, Instruction.Handler) countedOf;
+        HandlerMap!(Instruction.Handler, Instruction.Handler) uncountedOf;
+    }
+
+    // `specialiseWith` adds the twins of the branches to `newTwins`, and the
+    // constructor below those of the jump and the calls; then it makes them
+    // `countingTwins`, before any thread reads them.
+    private immutable CountingTwins countingTwins;
+
+    // The module constructors run on the main thread, so this is a variable of
+    // that thread.
+    private CountingTwins newTwins;
+
+    // The twin of each handler that `original` has, by the place of the handler
+    // in `counted`, which holds the twins.
+    private void addCountedTwins(in Specialisation original,
+        in Specialisation counted)
+    {
+        foreach (frame; 0 .. original.handlers.length)
+            foreach (slot; 0 .. widthSlots)
+                if (original.handlers[frame][slot] !is null)
+                    addCounted(
+                        cast(Instruction.Handler)
+                            original.handlers[frame][slot],
+                        cast(Instruction.Handler)
+                            counted.handlers[frame][slot]);
+        if (original.masked !is null)
+            foreach (mask; 0 .. (*original.masked).length)
+                foreach (slot; 0 .. widthSlots)
+                    if ((*original.masked)[mask][slot] !is null)
+                        addCounted(cast(Instruction.Handler)
+                                (*original.masked)[mask][slot],
+                            cast(Instruction.Handler)
+                                (*counted.masked)[mask][slot]);
+    }
+
+    shared static this() {
+        addCounted(&opJump, &countedHandler!opJump);
+        static foreach (destination; EnumMembers!Destination) {
+            addCounted(&callWindow!destination,
+                &callWindow!(destination, true));
+            addCounted(&callIndirectWindow!destination,
+                &callIndirectWindow!(destination, true));
+        }
+        addCounted(&callGeneral!false, &callGeneral!true);
+        countingTwins = cast(immutable) newTwins;
+        newTwins = CountingTwins.init;
+    }
+
+    private void addCounted(Instruction.Handler original,
+        Instruction.Handler counted)
+    {
+        if (!newTwins.countedOf.put(original, counted)
+                || !newTwins.uncountedOf.put(counted, original))
+            internalFailure("no memory for the counting twins");
+    }
+
+    // Replaces the handler of each of `instructions[indices]` by its counting
+    // twin. `indices` are the backward branches and the calls. A handler with
+    // no twin stays: that instruction does not count.
+    package void jitCountEvents(Instruction[] instructions,
+        const(size_t)[] indices)
+    {
+        foreach (index; indices)
+            if (auto counted = countingTwins.countedOf.find(
+                    instructions[index].handler))
+                instructions[index].handler =
+                    cast(Instruction.Handler) *counted;
+    }
+
+    // What a function is in: `compiling` while one thread makes its code, and
+    // `failed` when it cannot have any.
+    private enum JitTier : uint { interpreted, compiling, compiled, failed }
+
+    // The tables that classify handlers, and the buffers of one compile. They
+    // belong to the JIT lock: only `JitLock.owned` gives access to them. The
+    // first thread that compiles builds the tables.
+    private struct JitTables {
+        // The handlers that have a template, with how to emit them.
+        HandlerMap!(Instruction.Handler, JitOp) jitTable;
+        HandlerMap!(Instruction.Handler, Unspecialised) unspecialised;
+        bool ready;
+        Scratch!JitOp opScratch;
+        Scratch!Instruction snapshotScratch;
+        Scratch!(Instruction.Handler) originalScratch;
+    }
+
+    private shared JitTables jitTables;
+
+    // How `specialiseHandlers` made a handler: the general handler, and the
+    // indirect operands whose bit it cleared (`mask`: 1 destination, 2 source,
+    // 4 right operand).
+    private struct Unspecialised {
+        Instruction.Handler general;
+        ubyte mask;
+        bool ambiguous;
+    }
+
+    // Makes JIT code for `function_`, once; returns true when it has JIT code.
+    // A thread that loses the race, finds the JIT busy, or is in a GC
+    // finalizer, runs the handlers: it does not wait, because the thread that
+    // holds the lock can be one that the GC suspended. The function then counts
+    // another `jitThreshold` events and tries again.
+    pragma(inline, false)
+    private bool jitTierUp(Function* function_) nothrow @nogc {
+        import core.atomic: atomicLoad, atomicStore, cas, MemoryOrder;
+
+        auto state = cast(shared(uint)*) &function_.jitState;
+        const seen = atomicLoad!(MemoryOrder.acq)(*state);
+        if (seen != JitTier.interpreted)
+            return seen == JitTier.compiled;
+        if (!cas(state, cast(uint) JitTier.interpreted,
+                cast(uint) JitTier.compiling))
+            return false;
+        // A guest destructor in a GC finalizer can make a function hot. The
+        // function keeps its handlers until a later event outside the
+        // finalizer.
+        auto lock = GC.inFinalizer ? JitLock.init : JitLock.tryTake;
+        if (!lock.held) {
+            atomicStore!(MemoryOrder.rel)(*state,
+                cast(uint) JitTier.interpreted);
+            return false;
+        }
+
+        const ok = compileUnderLock(lock, function_);
+        atomicStore!(MemoryOrder.rel)(*state,
+            cast(uint) (ok ? JitTier.compiled : JitTier.failed));
+        return ok;
+    }
+
+    private bool compileUnderLock(ref JitLock lock, Function* function_)
+        nothrow @nogc
+    {
+        if (!lock.jitUsable)
+            return false;
+        ref tables = lock.owned(jitTables);
+        if (!tables.ensureJitTables)
+            return false;
+        auto instructions = function_.instructions;
+        const n = instructions.length;
+        auto snapshotMemory = tables.snapshotScratch.reserve(n);
+        auto opMemory = tables.opScratch.reserve(n);
+        auto originalMemory = tables.originalScratch.reserve(n);
+        if (snapshotMemory is null || opMemory is null
+                || originalMemory is null)
+            return false;
+        auto snapshot = snapshotMemory[0 .. n];
+        auto ops = opMemory[0 .. n];
+        auto originals = originalMemory[0 .. n];
+        foreach (index; 0 .. n) {
+            auto handler = instructions[index].handler;
+            // The code of a branch does not count; a call keeps its twin, which
+            // counts the callee.
+            if (handler !is null) {
+                if (auto original = countingTwins.uncountedOf.find(handler))
+                    if (!isCountedCall(*original))
+                        handler = *original;
+            }
+            originals[index] = handler;
+            snapshot[index] = instructions[index];
+            snapshot[index].handler = handler;
+            if (handler is null) {
+                ops[index] = JitOp.init;
+                continue;
+            }
+            // A handler of a call, as installed, has no template; the general
+            // handler that `specialiseHandlers` replaced is what has one.
+            if (!tables.unspecialise(snapshot[index]))
+                return false;
+            ops[index] = tables.jitGet(snapshot[index].handler);
+        }
+        return lock.jitFunction(instructions, snapshot, ops, originals,
+            function_.constants);
+    }
+
+    // Builds the tables of `tables` once.
+    private bool ensureJitTables(ref JitTables tables) nothrow @nogc {
+        if (!tables.ready) {
+            if (!tables.buildJitTable || !tables.buildUnspecialiseTable)
+                return false;
+            tables.ready = true;
+        }
+        return true;
+    }
+
+    // False if the memory for the table is missing.
+    private bool buildJitTable(ref JitTables tables) nothrow @nogc {
+        alias Kind = JitOp.Kind;
+        alias IntOperation = JitOp.IntOperation;
+        alias ShiftKind = JitOp.ShiftKind;
+
+        bool failed;
+        void put(Instruction.Handler handler, JitOp op) {
+            if (handler !is null && !tables.jitTable.put(handler, op))
+                failed = true;
+        }
+
+        static foreach (triple; threeAddressNames) {{
+            static foreach (constant; [false, true]) {{
+                auto handler = mixin("&" ~ triple.name ~ (constant ? "K" : ""));
+                static if (triple.family == "opInt3")
+                    put(handler, threeAddressInt(intOperationOf(triple.symbol),
+                        constant));
+                else static if (triple.family == "opShift3")
+                    put(handler, threeAddressShift(
+                        shiftKindOf(triple.symbol, triple.flag), constant));
+                else static if (triple.family == "opFloat3")
+                    put(handler, threeAddressFloat(
+                        floatOperationOf(triple.symbol), constant));
+                else static if (triple.family == "opCompare3")
+                    put(handler, threeAddressCompare(
+                        comparisonOf(triple.symbol), triple.flag, constant));
+                else static if (triple.family == "opFloatCompare3")
+                    put(handler, floatCompare(comparisonOf(triple.symbol),
+                        constant));
+            }}
+        }}
+        static foreach (triple; registerNames) {{
+            static foreach (constant; [false, true])
+                static foreach (from; [false, true])
+                    static foreach (to; [false, true])
+                        static if (from || to) {{
+                            auto handler = registerForm(mixin("&" ~ triple[0]
+                                ~ (constant ? "K" : "")), from, to);
+                            static if (triple[1] == "opInt3R")
+                                put(handler, registerInt(
+                                    intOperationOf(triple[2]), constant, from,
+                                    to));
+                            else
+                                put(handler, registerFloat(
+                                    floatOperationOf(triple[2]), constant, from,
+                                    to));
+                        }}
+        }}
+        static foreach (comparison; EnumMembers!Comparison)
+            static foreach (kind; EnumMembers!CompareKind)
+                static foreach (jumpWhen; [false, true])
+                    static foreach (constant; [false, true]) {
+                        put(fusedBranchHandler(comparison, kind, jumpWhen,
+                                constant),
+                            fusedBranch(comparison, kind, jumpWhen, constant,
+                                false));
+                        put(fusedRegisterHandlers[fusedIndex(comparison, kind,
+                                jumpWhen, constant)],
+                            fusedBranch(comparison, kind, jumpWhen, constant,
+                                true));
+                    }
+        put(&opAdd, twoAddressInt(IntOperation.add));
+        put(&opSubtract, twoAddressInt(IntOperation.subtract));
+        put(&opMultiply, twoAddressInt(IntOperation.multiply));
+        put(&opBitAnd, twoAddressInt(IntOperation.and));
+        put(&opBitOr, twoAddressInt(IntOperation.or));
+        put(&opBitXor, twoAddressInt(IntOperation.xor));
+        put(&opLessThanSigned, twoAddressCompare(Comparison.lessThan, true));
+        put(&opLessOrEqualSigned,
+            twoAddressCompare(Comparison.lessOrEqual, true));
+        put(&opGreaterThanSigned,
+            twoAddressCompare(Comparison.greaterThan, true));
+        put(&opGreaterOrEqualSigned,
+            twoAddressCompare(Comparison.greaterOrEqual, true));
+        put(&opLessThanUnsigned, twoAddressCompare(Comparison.lessThan, false));
+        put(&opLessOrEqualUnsigned,
+            twoAddressCompare(Comparison.lessOrEqual, false));
+        put(&opGreaterThanUnsigned,
+            twoAddressCompare(Comparison.greaterThan, false));
+        put(&opGreaterOrEqualUnsigned,
+            twoAddressCompare(Comparison.greaterOrEqual, false));
+        put(&opEqual, twoAddressCompare(Comparison.equal, false));
+        put(&opNotEqual, twoAddressCompare(Comparison.notEqual, false));
+
+        put(&opShiftLeft, twoAddressShift(ShiftKind.left));
+        put(&opShiftRightLogical, twoAddressShift(ShiftKind.logicalRight));
+        put(&opShiftRightArithmetic,
+            twoAddressShift(ShiftKind.arithmeticRight));
+        put(&opCopy, JitOp.plain(Kind.copy));
+        static foreach (width; 1 .. 17) {
+            put(&opCopyFixed!(width, true),
+                JitOp.make!(Kind.copy)(JitOp.Copy(true), width));
+            put(&opCopyFixed!width,
+                JitOp.make!(Kind.copy)(JitOp.Copy(false), width));
+        }
+        put(&opConstant, JitOp.plain(Kind.constant));
+        put(&opZero, JitOp.plain(Kind.zero));
+        put(&opJump, JitOp.plain(Kind.jump));
+        put(&opBranchFalse, JitOp.make!(Kind.branch)(JitOp.Branch(false)));
+        put(&opBranchTrue, JitOp.make!(Kind.branch)(JitOp.Branch(true)));
+        put(&opStaticLoad, JitOp.plain(Kind.staticLoad));
+        put(&opStaticStore, JitOp.plain(Kind.staticStore));
+        put(&opStaticAddress, JitOp.plain(Kind.staticAddr));
+        put(&opLoadIndirect, JitOp.plain(Kind.loadInd));
+        put(&opStoreIndirect, JitOp.plain(Kind.storeInd));
+        static foreach (width; [1, 2, 4, 8, 16, 32]) {
+            put(&opLoadIndirectFixed!width, JitOp.plain(Kind.loadInd, width));
+            put(&opStoreIndirectFixed!width, JitOp.plain(Kind.storeInd, width));
+            static foreach (copyWidth; [1, 2, 4, 8, 16])
+                put(&opLoadThenCopy!(width, copyWidth),
+                    JitOp.plain(Kind.loadInd, width));
+        }
+        static foreach (base; EnumMembers!IndexBase)
+            put(&opIndex!base, JitOp.make!(Kind.index)(JitOp.Index(base)));
+        foreach (instance; checkedInstances)
+            put(instance.handler, JitOp.make!(Kind.checked)(
+                JitOp.Checked(instance.access, instance.fixedLength,
+                    cast(ubyte) instance.indexWidth, instance.signed,
+                    instance.constantValue),
+                cast(ubyte) instance.elementSize));
+        put(&opFrameAddress, JitOp.plain(Kind.frameAddr));
+        put(&opLogicalNot, JitOp.make!(Kind.boolOp)(JitOp.BoolOp(false)));
+        put(&opCastToBool, JitOp.make!(Kind.boolOp)(JitOp.BoolOp(true)));
+        put(&opNegate, JitOp.make!(Kind.unary)(JitOp.Unary(false)));
+        put(&opComplement, JitOp.make!(Kind.unary)(JitOp.Unary(true)));
+        put(&opCastWidenSigned, JitOp.make!(Kind.widen)(JitOp.Widen(false)));
+        put(&opCastWidenUnsigned, JitOp.make!(Kind.widen)(JitOp.Widen(true)));
+        static foreach (kind; AliasSeq!(CastKind.narrow, CastKind.widenSigned,
+            CastKind.widenUnsigned))
+            static foreach (destSize; [1, 2, 4, 8])
+                static foreach (sourceSize; [1, 2, 4, 8])
+                    put(&opCastFixedAs!(kind, destSize, sourceSize),
+                        JitOp.make!(Kind.castFixed)(
+                            JitOp.CastFixed(kind == CastKind.widenUnsigned,
+                                sourceSize),
+                            destSize));
+        return !failed;
+    }
+
+    // The operand layouts of the handlers. `threeAddress` ones have a
+    // destination, a left and a right operand; `twoAddress` ones have the
+    // destination as the left operand; `register` ones read the left operand
+    // from the register argument, write the result there, or both.
+    private JitOp threeAddressInt(JitOp.IntOperation operation,
+        bool constantRight) nothrow @nogc
+    {
+        return intOp(operation, constantRight, false, false, false);
+    }
+
+    private JitOp registerInt(JitOp.IntOperation operation, bool constantRight,
+        bool leftInR0, bool resultInR0) nothrow @nogc
+    {
+        return intOp(operation, constantRight, leftInR0, resultInR0, false);
+    }
+
+    private JitOp twoAddressInt(JitOp.IntOperation operation) nothrow @nogc {
+        return intOp(operation, false, false, false, true);
+    }
+
+    private JitOp threeAddressCompare(Comparison comparison, bool signed,
+        bool constantRight) nothrow @nogc
+    {
+        return JitOp.make!(JitOp.Kind.cmp3)(
+            JitOp.Cmp3(comparison, signed, constantRight, false));
+    }
+
+    private JitOp twoAddressCompare(Comparison comparison, bool signed)
+        nothrow @nogc
+    {
+        return JitOp.make!(JitOp.Kind.cmp3)(
+            JitOp.Cmp3(comparison, signed, false, true));
+    }
+
+    private JitOp threeAddressShift(JitOp.ShiftKind kind, bool constantRight)
+        nothrow @nogc
+    {
+        return JitOp.make!(JitOp.Kind.shift)(
+            JitOp.Shift(kind, constantRight, false));
+    }
+
+    private JitOp twoAddressShift(JitOp.ShiftKind kind) nothrow @nogc {
+        return JitOp.make!(JitOp.Kind.shift)(JitOp.Shift(kind, false, true));
+    }
+
+    private JitOp threeAddressFloat(JitOp.FloatOperation operation,
+        bool constantRight) nothrow @nogc
+    {
+        return registerFloat(operation, constantRight, false, false);
+    }
+
+    private JitOp registerFloat(JitOp.FloatOperation operation,
+        bool constantRight, bool leftInFp0, bool resultInFp0) nothrow @nogc
+    {
+        return JitOp.make!(JitOp.Kind.fp3)(
+            JitOp.Fp3(operation, constantRight, leftInFp0, resultInFp0));
+    }
+
+    private JitOp floatCompare(Comparison comparison, bool constantRight)
+        nothrow @nogc
+    {
+        return JitOp.make!(JitOp.Kind.fpcmp3)(
+            JitOp.FpCmp3(comparison, constantRight));
+    }
+
+    private JitOp fusedBranch(Comparison comparison, CompareKind kind,
+        bool jumpWhen, bool constantRight, bool leftInR0) nothrow @nogc
+    {
+        return JitOp.make!(JitOp.Kind.fused)(JitOp.Fused(comparison, kind,
+            jumpWhen, constantRight, leftInR0));
+    }
+
+    private JitOp intOp(JitOp.IntOperation operation, bool constantRight,
+        bool leftInR0, bool resultInR0, bool twoAddress) nothrow @nogc
+    {
+        return JitOp.make!(JitOp.Kind.int3)(JitOp.Int3(operation, constantRight,
+            leftInR0, resultInR0, twoAddress));
+    }
+
+    private JitOp.IntOperation intOperationOf(string symbol) nothrow @nogc {
+        switch (symbol) {
+            case "+": return JitOp.IntOperation.add;
+            case "|": return JitOp.IntOperation.or;
+            case "&": return JitOp.IntOperation.and;
+            case "-": return JitOp.IntOperation.subtract;
+            case "^": return JitOp.IntOperation.xor;
+            case "*": return JitOp.IntOperation.multiply;
+            default: assert(false, "an integer operator without a template");
+        }
+    }
+
+    private JitOp.FloatOperation floatOperationOf(string symbol) nothrow @nogc {
+        switch (symbol) {
+            case "+": return JitOp.FloatOperation.add;
+            case "-": return JitOp.FloatOperation.subtract;
+            case "*": return JitOp.FloatOperation.multiply;
+            case "/": return JitOp.FloatOperation.divide;
+            default: assert(false, "a floating operator without a template");
+        }
+    }
+
+    private JitOp.ShiftKind shiftKindOf(string symbol, bool arithmetic)
+        nothrow @nogc
+    {
+        if (symbol == "<<")
+            return JitOp.ShiftKind.left;
+        return arithmetic
+            ? JitOp.ShiftKind.arithmeticRight : JitOp.ShiftKind.logicalRight;
+    }
+
+    private Comparison comparisonOf(string symbol) nothrow @nogc {
+        foreach (index, candidate; comparisonSymbols)
+            if (candidate == symbol)
+                return cast(Comparison) index;
+        assert(false, "a comparison operator without a template");
+    }
+
+    // False if the memory for the table is missing.
+    private bool buildUnspecialiseTable(ref JitTables tables) nothrow @nogc {
+        bool failed;
+        void put(Instruction.Handler handler, Instruction.Handler general,
+            ubyte mask)
+        {
+            if (handler is null)
+                return;
+            bool added;
+            auto entry = tables.unspecialised.insert(handler, added);
+            if (entry is null)
+                failed = true;
+            else if (added)
+                *entry = Unspecialised(general, mask, false);
+            else if (entry.general !is general || entry.mask != mask)
+                entry.ambiguous = true;
+        }
+
+        foreach (ref entry; specialisations) {
+            if (entry.general is null)
+                continue;
+            foreach (frame; entry.handlers)
+                foreach (handler; frame)
+                    put(handler, entry.general, 0);
+            if (entry.masked !is null)
+                foreach (mask, frame; *entry.masked)
+                    foreach (handler; frame)
+                        put(handler, entry.general, cast(ubyte) (mask + 1));
+        }
+        return !failed;
+    }
+
+    // The instruction as it was before `specialiseHandlers`.
+    private bool unspecialise(const ref JitTables tables,
+        ref Instruction instruction) nothrow @nogc
+    {
+        const entry = tables.unspecialised.find(instruction.handler);
+        if (entry is null)
+            return true;
+        if (entry.ambiguous)
+            return false;
+        instruction.handler = cast(Instruction.Handler) entry.general;
+        if (entry.mask & 1)
+            instruction.destination |= indirectBit;
+        if (entry.mask & 2)
+            instruction.source |= indirectBit;
+        if (entry.mask & 4)
+            instruction.sourceWidth |= indirectBit;
+        return true;
+    }
+
+    private JitOp jitGet(const ref JitTables tables,
+        in Instruction.Handler handler) nothrow @nogc
+    {
+        if (auto op = tables.jitTable.find(handler))
+            return *op;
+        return JitOp.init;
+    }
 
 } else {
 
-package bool jitCounting(in JitSetting) pure nothrow @nogc @safe {
-    return false;
-}
+    package bool jitCounting(in JitSetting) pure nothrow @nogc @safe {
+        return false;
+    }
 
-package uint jitStartHeat(in JitSetting) pure nothrow @nogc @safe {
-    return 0;
-}
+    package uint jitStartHeat(in JitSetting) pure nothrow @nogc @safe {
+        return 0;
+    }
 
-package bool jitCountsEvent(in JitSetting, in Instruction, in size_t,
-    in size_t*) pure nothrow @nogc @safe
-{
-    return false;
-}
+    package bool jitCountsEvent(in JitSetting, in Instruction, in size_t,
+        in size_t*) pure nothrow @nogc @safe
+    {
+        return false;
+    }
 
-package void jitCountEvents(Instruction[], const(size_t)[])
-    pure nothrow @nogc @safe {}
+    package void jitCountEvents(Instruction[], const(size_t)[])
+        pure nothrow @nogc @safe {}
 
-private void countCall(const(Function)*) pure nothrow @nogc @safe {}
+    private void countCall(const(Function)*) pure nothrow @nogc @safe {}
 
-private void countCallIfOn(const(Function)*) pure nothrow @nogc @safe {}
+    private void countCallIfOn(const(Function)*) pure nothrow @nogc @safe {}
 
-version (unittest)
-package bool jitCompiled(const(Function)*) pure nothrow @nogc @safe {
-    return false;
-}
+    version (unittest)
+    package bool jitCompiled(const(Function)*) pure nothrow @nogc @safe {
+        return false;
+    }
 
 }
