@@ -14,10 +14,6 @@ module snakebite.backends.bytecode.jit;
 // The emitter allocates nothing per instruction (it works in reused buffers),
 // because the cost of a compile is paid at run time.
 
-import snakebite.backends.bytecode.vm: Instruction, indirectBit,
-    DispatchState, chainedDispatch, Comparison, CompareKind, CheckedAccess,
-    IndexBase;
-
 private:
 
 
@@ -42,12 +38,6 @@ else
 
 static if (jitSupported):
 
-import core.atomic: atomicLoad, atomicStore, cas, MemoryOrder;
-import core.stdc.stdlib: malloc, realloc, free;
-import core.sys.posix.sys.mman;
-import snakebite.internalfailure: internalFailure;
-import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset;
-
 @nogc nothrow:
 
 // What the JIT does for one instruction: the kind of template and its
@@ -55,6 +45,9 @@ import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset;
 // the union; `width` is a fixed operand width, or 0 when the instruction holds
 // it. `emitOp` says what each kind emits.
 package struct JitOp {
+    import snakebite.backends.bytecode.vm: CheckedAccess, CompareKind,
+        Comparison, IndexBase;
+
     enum Kind : ubyte {
         none, copy, constant, zero, jump, branch, int3, cmp3, fused, fp3,
         fpcmp3, index, checked, castFixed, widen, loadInd, storeInd,
@@ -256,29 +249,188 @@ private enum : ubyte {
 }
 
 
+// What the JIT keeps from one compile to the next. It belongs to the JIT lock:
+// only `JitLock.owned` gives access to it.
+private struct JitState {
+    import snakebite.backends.bytecode.vm: Instruction;
+
+    @nogc nothrow:
+
+    CodeRegion region;
+    // Whether the CPU has the BMI2 shifts (`shlx`, `shrx`, `sarx`); without
+    // them the shift instructions keep their handlers.
+    bool bmi2;
+    // The buffers of the fixup and label tables, which compiles reuse.
+    Scratch!Fixup fixups;
+    Scratch!size_t labels;
+
+    Emitted emitFunction(Instruction[] instructions,
+        const(Instruction)[] snapshot, const(JitOp)[] ops,
+        const(Instruction.Handler)[] originals,
+        const(long)[] constants)
+    {
+        import core.atomic: atomicStore, MemoryOrder;
+        import snakebite.backends.bytecode.vm: chainedDispatch, DispatchState;
+
+        const start = region.chunkUsed;
+        const cap = region.chunkCapacity - start;
+        Gen g;
+        g.a.buf = region.writeBase + start;
+        g.fixupScratch = &fixups;
+        g.bmi2 = bmi2;
+        g.instructions = instructions;
+        g.snapshot = snapshot;
+        g.constants = constants;
+        auto labelMemory = labels.reserve(instructions.length + 1);
+        if (labelMemory is null)
+            return Emitted.failed;
+        g.labels = labelMemory[0 .. instructions.length + 1];
+        g.fixups = fixups.ptr;
+        g.fixupCap = fixups.cap;
+
+        foreach (i; 0 .. instructions.length) {
+            if (cap - g.a.n < maximumBytesPerInstruction)
+                return Emitted.full;
+            g.labels[i] = g.a.n;
+            const saved = g.a.n;
+            const savedFixups = g.fixupCount;
+            bool done;
+            if (originals[i] !is null && ops[i].kind != JitOp.Kind.none)
+                done = g.emitOp(i, ops[i]);
+            if (g.outOfMemory)
+                return Emitted.failed;
+            if (!done) {
+                g.a.n = saved;
+                g.fixupCount = savedFixups;
+                if (originals[i] is null)
+                    g.a.ud2();
+                else {
+                    // Without chained dispatch the handler returns the next
+                    // instruction to `dispatchLoop`, which then passes the
+                    // register arguments from `DispatchState`: save r0 and fp0
+                    // there first, as `executeRegister` does at its end.
+                    static if (!chainedDispatch) {
+                        g.a.st(8,
+                            Mem(STATE, cast(int) DispatchState.r0.offsetof),
+                            REG0);
+                        g.a.sse(doublePrefix, storeOpcode, fp0Register,
+                            Mem(STATE, cast(int) DispatchState.fp0.offsetof));
+                    }
+                    g.a.movI(PCREG, cast(size_t) &instructions[i]);
+                    g.a.movI(RAX, cast(size_t) originals[i]);
+                    g.a.jmpRax;
+                }
+            }
+        }
+        if (cap - g.a.n < codeAlignment)
+            return Emitted.full;
+        g.labels[instructions.length] = g.a.n;
+        g.a.ud2();
+
+        foreach (f; g.fixups[0 .. g.fixupCount])
+            *cast(int*) (g.a.buf + f.position) = cast(int) (
+                g.labels[f.target] - (f.position + 4));
+
+        const size = (g.a.n + codeAlignment - 1) & ~(codeAlignment - 1UL);
+        region.chunkUsed = start + size;
+        if (region.chunkUsed + populateSize / 4 > region.populatedEnd)
+            region.populate;
+
+        auto code = region.execBase + start;
+        // One aligned 8-byte store with release order for each word, after
+        // the code is complete. A thread that runs the function moves to JIT
+        // code at its next dispatch.
+        foreach (i, ref instruction; instructions)
+            atomicStore!(MemoryOrder.rel)(
+                *cast(shared(size_t)*) &instruction.handler,
+                cast(size_t) (code + g.labels[i]));
+        return Emitted.done;
+    }
+}
+
+private shared JitState jitState;
+
 // The code region. It is a memfd file that grows by chunks. Each chunk is
 // mapped twice: `writeBase` is read+write, where the JIT emits, and `execBase`
 // is read+execute, where the handlers point. No page changes protection.
 // Functions are packed with 16-byte alignment, and a function never spans two
 // chunks. Memory is made present (`MADV_POPULATE_*`) a part of a chunk at a
-// time. The fields below and the scratch buffers belong to `jitLock`.
-private __gshared int regionFile = -1;
-private __gshared size_t regionFileSize;
-private __gshared ubyte* writeBase;
-private __gshared ubyte* execBase;
-private __gshared size_t chunkCapacity;
-private __gshared size_t chunkUsed;
-private __gshared size_t populatedEnd;
+// time.
+private struct CodeRegion {
+    @nogc nothrow:
+
+    int file = -1;
+    size_t fileSize;
+    ubyte* writeBase;
+    ubyte* execBase;
+    size_t chunkCapacity;
+    size_t chunkUsed;
+    size_t populatedEnd;
+
+    bool create() {
+        import core.sys.posix.unistd: close;
+
+        file = memfd_create("snakebite-jit", MFD_CLOEXEC);
+        if (file < 0)
+            return false;
+        if (newChunk(chunkSize))
+            return true;
+        close(file);
+        return false;
+    }
+
+    // Makes a chunk of at least `bytes` the current one. The old chunks stay
+    // mapped: their code is in use.
+    bool newChunk(size_t bytes) {
+        import core.sys.posix.sys.mman: MAP_FAILED, MAP_SHARED, mmap, munmap,
+            PROT_EXEC, PROT_READ, PROT_WRITE;
+        import core.sys.posix.unistd: ftruncate;
+
+        const size = (bytes + chunkSize - 1) & ~(chunkSize - 1);
+        if (ftruncate(file, fileSize + size) != 0)
+            return false;
+        auto write = mmap(null, size, PROT_READ | PROT_WRITE, MAP_SHARED,
+            file, fileSize);
+        auto execute = mmap(null, size, PROT_READ | PROT_EXEC, MAP_SHARED,
+            file, fileSize);
+        if (write is MAP_FAILED || execute is MAP_FAILED) {
+            if (write !is MAP_FAILED)
+                munmap(write, size);
+            if (execute !is MAP_FAILED)
+                munmap(execute, size);
+            return false;
+        }
+        fileSize += size;
+        writeBase = cast(ubyte*) write;
+        execBase = cast(ubyte*) execute;
+        chunkCapacity = size;
+        chunkUsed = 0;
+        populatedEnd = 0;
+        populate;
+        return true;
+    }
+
+    void populate() {
+        if (populatedEnd + populateSize > chunkCapacity)
+            return;
+        madvise(writeBase + populatedEnd, populateSize, MADV_POPULATE_WRITE);
+        madvise(execBase + populatedEnd, populateSize, MADV_POPULATE_READ);
+        populatedEnd += populateSize;
+    }
+}
+
 private enum chunkSize = 1UL << 20;
 private enum populateSize = 1UL << 17;
 private enum codeAlignment = 16;
 // The most that the code of one instruction can need. Emission checks this much
 // room before each instruction.
 private enum maximumBytesPerInstruction = 1024;
+// Druntime and Phobos declare none of these: no `memfd_create`, no
+// `MFD_CLOEXEC`, no `MADV_POPULATE_*`, and `core.sys.linux.sys.mman` declares
+// `madvise` only when `_DEFAULT_SOURCE` is true, which it is not for glibc.
 private enum MADV_POPULATE_READ = 22;
 private enum MADV_POPULATE_WRITE = 23;
 private enum MFD_CLOEXEC = 1;
-private enum MAP_NORESERVE = 0x4000;
 
 extern(C) private int madvise(void*, size_t, int) nothrow @nogc;
 extern(C) private int memfd_create(const(char)* name, uint flags) nothrow @nogc;
@@ -287,34 +439,94 @@ extern(C) private int memfd_create(const(char)* name, uint flags) nothrow @nogc;
 // process cannot have (no memfd). It is read without the lock.
 private enum Setup : int { pending, ready, unavailable }
 private shared Setup setup;
-private __gshared bool bmi2;
 
 private shared int lockWord;
 
-// Without waiting: a thread that waits for the lock can wait for a thread
-// that the GC suspended while it held the lock.
-package bool tryLock() {
-    return cas(&lockWord, 0, 1);
-}
+// The JIT lock. A thread takes it without waiting: a thread that waits for the
+// lock can wait for a thread that the GC suspended while it held the lock. The
+// lock is released when the `JitLock` that holds it goes out of scope.
+package struct JitLock {
+    import snakebite.backends.bytecode.vm: Instruction;
 
-package void unlock() {
-    atomicStore!(MemoryOrder.rel)(lockWord, 0);
+    @nogc nothrow:
+
+    private bool _held;
+
+    @disable this(this);
+
+    package static JitLock tryTake() {
+        import core.atomic: cas;
+
+        JitLock lock;
+        lock._held = cas(&lockWord, 0, 1);
+        return lock;
+    }
+
+    ~this() {
+        import core.atomic: atomicStore, MemoryOrder;
+
+        if (_held)
+            atomicStore!(MemoryOrder.rel)(lockWord, 0);
+    }
+
+    package bool held() const {
+        return _held;
+    }
+
+    // `state`, which belongs to the JIT lock, for the thread that holds it.
+    package ref T owned(T)(return ref shared T state) {
+        import snakebite.internalfailure: internalFailure;
+
+        if (!_held)
+            internalFailure("JIT state used without the JIT lock");
+        return *cast(T*) &state;
+    }
+
+    // Gives the function JIT code. Returns false when it could not: the
+    // function then keeps its handlers. The caller has seen `jitUsable`.
+    //
+    // The code goes after the code in the current chunk. If the chunk has too
+    // little room left, emission stops (it checks before each instruction)
+    // and starts again in a new chunk, whose size no function can exceed. A
+    // function does not reserve room for its worst case before it emits.
+    package bool jitFunction(Instruction[] instructions,
+        const(Instruction)[] snapshot, const(JitOp)[] ops,
+        const(Instruction.Handler)[] originals,
+        const(long)[] constants)
+    {
+        if (instructions.length == 0)
+            return false;
+        ref state = owned(jitState);
+        auto result = state.emitFunction(instructions, snapshot, ops, originals,
+            constants);
+        if (result == Emitted.full) {
+            const worst = instructions.length * maximumBytesPerInstruction
+                + 4096;
+            if (!state.region.newChunk(worst))
+                return false;
+            result = state.emitFunction(instructions, snapshot, ops,
+                originals, constants);
+        }
+        return result == Emitted.done;
+    }
 }
 
 // True when a function can get JIT code. The first call sets the JIT up:
 // the CPU features, the region, and the check of the calling convention.
-// The caller holds `jitLock`.
-package bool jitUsable() {
+package bool jitUsable(ref JitLock lock) {
+    import core.atomic: atomicLoad, atomicStore, MemoryOrder;
+
     final switch (atomicLoad!(MemoryOrder.acq)(setup)) {
         case Setup.ready: return true;
         case Setup.unavailable: return false;
         case Setup.pending:
             break;
     }
-    const ok = createRegion;
+    ref state = lock.owned(jitState);
+    const ok = state.region.create;
     if (ok)
-        checkCallingConvention;
-    bmi2 = ok && cpuHasBmi2;
+        checkCallingConvention(state.region);
+    state.bmi2 = ok && cpuHasBmi2;
     atomicStore!(MemoryOrder.rel)(setup, ok ? Setup.ready : Setup.unavailable);
     return ok;
 }
@@ -344,52 +556,13 @@ private bool cpuHasBmi2() {
 }
 
 
-private bool createRegion() {
-    import core.sys.posix.unistd: close;
-
-    regionFile = memfd_create("snakebite-jit", MFD_CLOEXEC);
-    if (regionFile < 0)
-        return false;
-    if (newChunk(chunkSize))
-        return true;
-    close(regionFile);
-    return false;
-}
-
-// Makes a chunk of at least `bytes` the current one. The old chunks stay
-// mapped: their code is in use.
-private bool newChunk(size_t bytes) {
-    import core.sys.posix.unistd: ftruncate;
-
-    const size = (bytes + chunkSize - 1) & ~(chunkSize - 1);
-    if (ftruncate(regionFile, regionFileSize + size) != 0)
-        return false;
-    auto write = mmap(null, size, PROT_READ | PROT_WRITE, MAP_SHARED,
-        regionFile, regionFileSize);
-    auto execute = mmap(null, size, PROT_READ | PROT_EXEC, MAP_SHARED,
-        regionFile, regionFileSize);
-    if (write is MAP_FAILED || execute is MAP_FAILED) {
-        if (write !is MAP_FAILED)
-            munmap(write, size);
-        if (execute !is MAP_FAILED)
-            munmap(execute, size);
-        return false;
-    }
-    regionFileSize += size;
-    writeBase = cast(ubyte*) write;
-    execBase = cast(ubyte*) execute;
-    chunkCapacity = size;
-    chunkUsed = 0;
-    populatedEnd = 0;
-    populate;
-    return true;
-}
-
 // Calls a stub with known argument values and compares what it finds in the
 // registers with the map above. The map was read from the disassembly of a
 // handler of each compiler; this fails loudly if a compiler version changes
 // its convention, instead of running code that reads the wrong registers.
-private void checkCallingConvention() {
+private void checkCallingConvention(ref CodeRegion region) {
+    import snakebite.backends.bytecode.vm: Instruction;
+    import snakebite.internalfailure: internalFailure;
     import std.traits: FunctionAttribute, functionAttributes, functionLinkage,
         Parameters, SetFunctionAttributes;
 
@@ -402,7 +575,7 @@ private void checkCallingConvention() {
 
     ulong[5] seen;
     Asm a;
-    a.buf = writeBase;
+    a.buf = region.writeBase;
     a.st(8, Mem(FRAME, 0), PCREG);
     a.st(8, Mem(FRAME, 8), ACTIVE);
     a.st(8, Mem(FRAME, 16), STATE);
@@ -415,7 +588,7 @@ private void checkCallingConvention() {
         functionLinkage!(Instruction.Handler),
         functionAttributes!(Instruction.Handler) | FunctionAttribute.nogc
             | FunctionAttribute.nothrow_);
-    auto stub = cast(NoGcHandler) execBase;
+    auto stub = cast(NoGcHandler) region.execBase;
     stub(cast(Arguments[0]) pcValue, cast(Arguments[1]) activeValue,
         cast(Arguments[2]) stateValue, cast(Arguments[3]) seen.ptr,
         r0Value, fp0Value);
@@ -427,23 +600,15 @@ private void checkCallingConvention() {
             ~ "calling convention of this compiler");
 }
 
-// Caller holds `jitLock`.
-private void populate() {
-    if (populatedEnd + populateSize > chunkCapacity)
-        return;
-    madvise(writeBase + populatedEnd, populateSize, MADV_POPULATE_WRITE);
-    madvise(execBase + populatedEnd, populateSize, MADV_POPULATE_READ);
-    populatedEnd += populateSize;
-}
-
-// A growable buffer that lives as long as the process; compiles reuse it. The
-// buffers belong to `jitLock`.
+// A growable buffer that lives as long as the process; compiles reuse it.
 package struct Scratch(T) {
     T* ptr;
     size_t cap;
 
     // At least `n` elements; the contents are undefined. Null if no memory.
     T* reserve(size_t n) {
+        import core.stdc.stdlib: free, malloc;
+
         if (n > cap) {
             auto newCap = cap ? cap : 1024;
             while (newCap < n)
@@ -457,6 +622,8 @@ package struct Scratch(T) {
 
     // Keeps the contents. Null if no memory.
     T* grow(size_t n) {
+        import core.stdc.stdlib: realloc;
+
         if (n > cap) {
             auto newCap = cap ? cap : 256;
             while (newCap < n)
@@ -732,15 +899,16 @@ private struct Asm {
     void jmpRax() { b(0xFF); b(0xE0); }
 }
 
-// The buffers of the label and fixup tables; compiles share them under the
-// JIT lock.
-private __gshared Scratch!Fixup fixupScratch;
-private __gshared Scratch!size_t labelScratch;
-
 private struct Gen {
+    import snakebite.backends.bytecode.vm: CheckedAccess, CompareKind,
+        Comparison, DispatchState, indirectBit, IndexBase, Instruction;
+    import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset;
+
     @nogc nothrow:
 
     Asm a;
+    Scratch!Fixup* fixupScratch;
+    bool bmi2;
     const(Instruction)[] instructions;
     const(Instruction)[] snapshot;
     const(long)[] constants;
@@ -1532,109 +1700,5 @@ private struct Gen {
     }
 }
 
-// Gives the function JIT code. Returns false
-// when it could not: the function then keeps its handlers. The caller holds
-// the lock and has seen `jitUsable`.
-//
-// The code goes after the code in the current chunk. If the chunk has too
-// little room left, emission stops (it checks before each instruction) and
-// starts again in a new chunk, whose size no function can exceed. A function
-// does not reserve room for its worst case before it emits.
-package bool jitFunction(Instruction[] instructions,
-    const(Instruction)[] snapshot, const(JitOp)[] ops,
-    const(Instruction.Handler)[] originals,
-    const(long)[] constants)
-{
-    if (instructions.length == 0)
-        return false;
-    auto result = emitFunction(instructions, snapshot, ops, originals,
-        constants);
-    if (result == Emitted.full) {
-        const worst = instructions.length * maximumBytesPerInstruction
-            + 4096;
-        if (!newChunk(worst))
-            return false;
-        result = emitFunction(instructions, snapshot, ops, originals,
-            constants);
-    }
-    return result == Emitted.done;
-}
 
 private enum Emitted { done, failed, full }
-
-private Emitted emitFunction(Instruction[] instructions,
-    const(Instruction)[] snapshot, const(JitOp)[] ops,
-    const(Instruction.Handler)[] originals,
-    const(long)[] constants)
-{
-    const start = chunkUsed;
-    const cap = chunkCapacity - start;
-    Gen g;
-    g.a.buf = writeBase + start;
-    g.instructions = instructions;
-    g.snapshot = snapshot;
-    g.constants = constants;
-    auto labels = labelScratch.reserve(instructions.length + 1);
-    if (labels is null)
-        return Emitted.failed;
-    g.labels = labels[0 .. instructions.length + 1];
-    g.fixups = fixupScratch.ptr;
-    g.fixupCap = fixupScratch.cap;
-
-    foreach (i; 0 .. instructions.length) {
-        if (cap - g.a.n < maximumBytesPerInstruction)
-            return Emitted.full;
-        g.labels[i] = g.a.n;
-        const saved = g.a.n;
-        const savedFixups = g.fixupCount;
-        bool done;
-        if (originals[i] !is null && ops[i].kind != JitOp.Kind.none)
-            done = g.emitOp(i, ops[i]);
-        if (g.outOfMemory)
-            return Emitted.failed;
-        if (!done) {
-            g.a.n = saved;
-            g.fixupCount = savedFixups;
-            if (originals[i] is null)
-                g.a.ud2();
-            else {
-                // Without chained dispatch the handler returns the next
-                // instruction to `dispatchLoop`, which then passes the
-                // register arguments from `DispatchState`: save r0 and fp0
-                // there first, as `executeRegister` does at its end.
-                static if (!chainedDispatch) {
-                    g.a.st(8, Mem(STATE, cast(int) DispatchState.r0.offsetof),
-                        REG0);
-                    g.a.sse(doublePrefix, storeOpcode, fp0Register,
-                        Mem(STATE, cast(int) DispatchState.fp0.offsetof));
-                }
-                g.a.movI(PCREG, cast(size_t) &instructions[i]);
-                g.a.movI(RAX, cast(size_t) originals[i]);
-                g.a.jmpRax;
-            }
-        }
-    }
-    if (cap - g.a.n < codeAlignment)
-        return Emitted.full;
-    g.labels[instructions.length] = g.a.n;
-    g.a.ud2();
-
-    foreach (f; g.fixups[0 .. g.fixupCount])
-        *cast(int*) (g.a.buf + f.position) = cast(int) (
-            g.labels[f.target] - (f.position + 4));
-
-    const size = (g.a.n + codeAlignment - 1) & ~(codeAlignment - 1UL);
-    chunkUsed = start + size;
-    if (chunkUsed + populateSize / 4 > populatedEnd)
-        populate;
-
-    auto code = execBase + start;
-    // One aligned 8-byte store with release order for each word, after the
-    // code is complete. A thread that runs the function moves to JIT code at
-    // its next dispatch.
-    foreach (i, ref instruction; instructions)
-        atomicStore!(MemoryOrder.rel)(
-            *cast(shared(size_t)*) &instruction.handler,
-            cast(size_t) (code + g.labels[i]));
-    return Emitted.done;
-}
