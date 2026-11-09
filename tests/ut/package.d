@@ -23,8 +23,16 @@ string[] selectFrontendMemoryFromArguments(string[] args) {
 
 
 // The JIT setting that this run of `bin/ut` gives to every `Bytecode` backend
-// that a test makes.
-public __gshared JitSetting testJit;
+// that a test makes. It is fixed before any test runs.
+public immutable JitSetting testJit;
+
+shared static this() {
+    import core.runtime: Runtime;
+    import std.algorithm.searching: canFind;
+
+    const args = Runtime.args;
+    testJit = JitSetting(!args.canFind("--no-jit"), args.canFind("--eager-jit"));
+}
 
 // A handle on a new backend of type `B` for `program`. A `Bytecode` backend
 // gets the JIT setting of this run of `bin/ut`.
@@ -40,8 +48,8 @@ public imported!"snakebite.backends.backend".Owned!B ownedBackend(B)(
         return Owned!B(program);
 }
 
-// `--no-jit` and `--eager-jit` for a test runner, taken out before
-// unit-threaded parses the rest. By default the JIT is on and a function gets
+// `--no-jit` and `--eager-jit` for a test runner, which set `testJit`, taken
+// out before unit-threaded parses the rest. By default the JIT is on and a function gets
 // JIT code after `jitThreshold` events. `--no-jit` makes no JIT code, and
 // `--eager-jit` makes JIT code at the first event of every function, so that
 // the tests run mostly on JIT code.
@@ -51,7 +59,6 @@ string[] selectJitFromArguments(string[] args) {
     import std.array: array;
     import std.stdio: writeln;
 
-    testJit = JitSetting(!args.canFind("--no-jit"), args.canFind("--eager-jit"));
     if (args.canFind("-h") || args.canFind("--help")) {
         writeln("  --no-jit: Make no JIT code.");
         writeln("  --eager-jit: Make JIT code at the first event of a function.");
