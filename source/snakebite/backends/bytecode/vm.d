@@ -681,71 +681,6 @@ version (LDC) {
 } else
     package enum chainedDispatch = false;
 
-// Under `-version=BytecodeCount` (the `bin/sb-count` build), every handler
-// instantiation owns one counter slot. Its first execution registers the slot;
-// the slots are printed to stderr at exit as `BCOUNT <count> <handler name>`.
-// The counts are not atomic: a guest with several threads gives approximate
-// counts.
-version (BytecodeCount) {
-    private struct CountSlot {
-        ulong n;
-        string name;
-        shared bool registered;
-    }
-
-    private enum maxCountSlots = 4096;
-    private __gshared CountSlot*[maxCountSlots] _countSlots;
-    private shared size_t _countUsed;
-    private shared bool _countExitHooked;
-
-    private enum countName(string op, OperandKind d, OperandKind s,
-        size_t width, OperandKind r, P...) =
-        op ~ "/" ~ d.stringof ~ "/" ~ s.stringof ~ "/w" ~ width.stringof
-            ~ (r == OperandKind.storage ? "" : "/r/" ~ r.stringof)
-            ~ P.stringof;
-
-    private extern(C) void dumpCounts() {
-        import core.atomic: atomicLoad;
-        import core.stdc.stdio: fprintf, stderr;
-        const used = atomicLoad(_countUsed);
-        foreach (slot; _countSlots[0 .. used < maxCountSlots ? used : maxCountSlots]) {
-            if (slot is null)
-                continue;
-            fprintf(stderr, "BCOUNT %llu %.*s\n", slot.n,
-                cast(int) slot.name.length, slot.name.ptr);
-        }
-    }
-
-    // Exactly once for each slot, whatever the number of threads: the thread
-    // that wins the compare-and-swap on `registered` appends the slot.
-    private void registerCount(CountSlot* slot, string name) {
-        import core.atomic: atomicOp, atomicStore, cas, MemoryOrder;
-        import core.stdc.stdio: fprintf, stderr;
-        import core.stdc.stdlib: atexit, abort;
-        if (!cas(&slot.registered, false, true))
-            return;
-        if (cas(&_countExitHooked, false, true))
-            atexit(&dumpCounts);
-        const index = atomicOp!"+="(_countUsed, 1) - 1;
-        if (index >= maxCountSlots) {
-            fprintf(stderr, "bin/sb-count: more than %zu handler instantiations; raise maxCountSlots\n",
-                maxCountSlots);
-            abort;
-        }
-        slot.name = name;
-        atomicStore!(MemoryOrder.rel)(*cast(shared) &_countSlots[index], cast(shared) slot);
-    }
-
-    // Counts one execution of a handler. The counts are not atomic; the
-    // registration is.
-    private void countExecution(CountSlot* slot, string name) {
-        import core.atomic: atomicLoad, MemoryOrder;
-        if (!atomicLoad!(MemoryOrder.raw)(slot.registered))
-            registerCount(slot, name);
-        slot.n++;
-    }
-}
-
 // Operations that cannot throw a D exception or call out. They never need
 // the position of the running instruction, so their handlers do not store it.
 private alias positionFree = AliasSeq!(
@@ -785,11 +720,6 @@ private const(Instruction)* executeWith(
     ulong r0,
     double fp0,
 ) {
-    version (BytecodeCount) {
-        static __gshared CountSlot slot;
-        countExecution(&slot, countName!(__traits(identifier, operation),
-            destinationKind, sourceKind, width, rightKind, Parameters));
-    }
     // The position of a throw selects its handler.
     static if (storesPosition!operation)
         activation.pc = pc;
@@ -835,11 +765,6 @@ private const(Instruction)* executeRegister(
     ulong r0,
     double fp0,
 ) {
-    version (BytecodeCount) {
-        static __gshared CountSlot slot;
-        countExecution(&slot, countName!(__traits(identifier, operation),
-            destinationKind, sourceKind, fixedWidth, rightKind, Parameters));
-    }
     static if (storesPosition!operation)
         activation.pc = pc;
     auto execution = Execution!(destinationKind, sourceKind, fixedWidth,
@@ -880,11 +805,6 @@ private const(Instruction)* executeOnce(
     ulong r0,
     double fp0,
 ) {
-    version (BytecodeCount) {
-        static __gshared CountSlot slot;
-        countExecution(&slot, countName!(__traits(identifier, operation),
-            destinationKind, sourceKind, 0, OperandKind.storage, Parameters));
-    }
     activation.pc = pc;
     auto execution = Execution!(destinationKind, sourceKind)(
         pc, activation, state, frame,
@@ -907,11 +827,6 @@ private const(Instruction)* executeCall(
     ulong r0,
     double fp0,
 ) {
-    version (BytecodeCount) {
-        static __gshared CountSlot slot;
-        countExecution(&slot, countName!(__traits(identifier, operation),
-            destinationKind, sourceKind, 0, OperandKind.storage));
-    }
     activation.pc = pc;
     state.current = activation;
     auto execution = Execution!(destinationKind, sourceKind)(
@@ -1729,10 +1644,6 @@ public const(Instruction)* opTemporaryEnd(
     ulong r0,
     double fp0,
 ) {
-    version (BytecodeCount) {
-        static __gshared CountSlot slot;
-        countExecution(&slot, "opTemporaryEnd");
-    }
     auto execution = Execution!(OperandKind.storage, OperandKind.immediate)(
         pc, activation, state, frame);
     const mark = loadUnsigned(execution.destination, size_t.sizeof);
@@ -1969,10 +1880,6 @@ package const(Instruction)* opThrow(
     ulong r0,
     double fp0,
 ) {
-    version (BytecodeCount) {
-        static __gshared CountSlot slot;
-        countExecution(&slot, "opThrow");
-    }
     activation.pc = pc;
     auto execution = Execution!(OperandKind.storage, OperandKind.immediate)(
         pc, activation, state, frame);
@@ -2033,10 +1940,6 @@ private const(Instruction)* callGeneral(bool counted)(
     ulong r0,
     double fp0,
 ) {
-    version (BytecodeCount) {
-        static __gshared CountSlot slot;
-        countExecution(&slot, "opCall");
-    }
     return opCallSlow!counted(pc, active, state, frame, r0, fp0);
 }
 
@@ -2068,10 +1971,6 @@ private const(Instruction)* callWindow(Destination destination,
     ulong r0,
     double fp0,
 ) {
-    version (BytecodeCount) {
-        static __gshared CountSlot slot;
-        countExecution(&slot, "opCallWindow." ~ destination.stringof);
-    }
     import core.atomic: atomicLoad, MemoryOrder;
 
     const site = &active.callSites[pc.source];
@@ -2106,10 +2005,6 @@ private const(Instruction)* callIndirectWindow(Destination destination,
     ulong r0,
     double fp0,
 ) {
-    version (BytecodeCount) {
-        static __gshared CountSlot slot;
-        countExecution(&slot, "opCallIndirectWindow." ~ destination.stringof);
-    }
     const site = &active.callSites[pc.source];
     const address = *cast(const(void)**) (frame + site.calleeSlotOffset);
     ptrdiff_t adjustment;
@@ -2668,10 +2563,6 @@ package const(Instruction)* returnHandler(size_t width, bool frameOnly)(
 ) {
     import core.stdc.string: memcpy;
 
-    version (BytecodeCount) {
-        static __gshared CountSlot slot;
-        countExecution(&slot, "opReturn");
-    }
     static if (frameOnly)
         const source = frame + pc.source;
     else
@@ -2739,10 +2630,6 @@ public const(Instruction)* opReturnVoid(
     ulong r0,
     double fp0,
 ) {
-    version (BytecodeCount) {
-        static __gshared CountSlot slot;
-        countExecution(&slot, "opReturnVoid");
-    }
     activation.pc = pc;
     static if (chainedDispatch) {
         const resume = leaveToCaller(activation, state);

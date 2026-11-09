@@ -461,8 +461,6 @@ Build reggaeBuild() {
     // Function alignment fixes the addresses of the VM handlers.
     auto releaseFlags = CompilerFlags("-release", "-O", "-flto=thin",
         "-L-plugin-opt=-align-all-functions=6");
-    // `bin/sb` with the bytecode counter; see "Performance work" in CLAUDE.md.
-    auto countFlags = CompilerFlags(releaseFlags.value ~ "-d-version=BytecodeCount");
     // `bin/sb` for `perf record --call-graph fp`; see "Performance work" in
     // CLAUDE.md.
     // Not -g: ThinLTO in LDC 1.43 drops the full debug info of member functions.
@@ -475,7 +473,6 @@ Build reggaeBuild() {
         ~ dubTarget("dmd", "arena-validation", "arena-validation", "arena")
         ~ dubTarget("ldc2", "acceptance-test", "release", "at", releaseFlags)
         ~ dubTarget("ldc2", "sb", "release", "sb", releaseFlags)
-        ~ dubTarget("ldc2", "sb", "sb-count", "sb-count", countFlags)
         ~ dubTarget("ldc2", "sb-repl", "release", "sb-repl", releaseFlags)
         ~ dubTarget("ldc2", "bench", "release", "bench", releaseFlags);
     // Optional: `ninja bin/sb-prof` builds it, a plain `ninja` does not.
