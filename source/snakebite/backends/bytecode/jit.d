@@ -69,9 +69,9 @@ private ulong nowNs() {
 
 private extern(C) void dumpStats() {
     fprintf(stderr, "JIT functions=%llu instructions=%llu templated=%llu "
-        ~ "declined=%llu bytes=%llu emit_ms=%.3f memory_ms=%.3f\n",
+        ~ "declined=%llu bytes=%llu region=%llu emit_ms=%.3f memory_ms=%.3f\n",
         statFunctions, statInstructions, statTemplated, statDeclined,
-        statBytes, statEmitNs / 1e6, statProtectNs / 1e6);
+        statBytes, cast(ulong) regionCursor, statEmitNs / 1e6, statProtectNs / 1e6);
 }
 
 // The code region. A memfd file is mapped twice: `writeBase` is read+write,
