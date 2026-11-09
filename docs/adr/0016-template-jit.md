@@ -155,11 +155,13 @@ ends.
 ### Independent of stored bytecode
 
 The JIT replaces handler words in the live instruction array, and the
-compiler does not know about it. Code that inspects the instructions of a
-function for relocation (`inspection.unrecordedWords`, the relocation tests)
-needs the bytecode that the compiler made. Those tests run their programs
-with the JIT off. The compiler itself makes the same bytecode whether the
-JIT is on or off, except that the JIT adds counting twins when it is on.
+compiler does not know about it. The JIT changes no operand and no table
+entry of a function, so its relocation records stay true with the JIT on:
+`inspection.misplacedRelocs` reads only those words, and the relocation
+tests run with the JIT setting of the test run. No test scans the live
+instructions of a function for addresses that no record names. The compiler
+itself makes the same bytecode whether the JIT is on or off, except that the
+JIT adds counting twins when it is on.
 
 ## Platform limits
 
