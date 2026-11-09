@@ -3733,27 +3733,41 @@ private enum threeAddressNames = [
     ThreeAddress("opBitAnd3", "opInt3", "&"),
     ThreeAddress("opBitOr3", "opInt3", "|"),
     ThreeAddress("opBitXor3", "opInt3", "^"),
-    ThreeAddress("opShiftLeft3", "opShift3", "<<", true, false),
-    ThreeAddress("opShiftRightLogical3", "opShift3", ">>", true, false),
-    ThreeAddress("opShiftRightArithmetic3", "opShift3", ">>", true, true),
-    ThreeAddress("opDivideSigned3", "opDivide3", "/", true, true),
-    ThreeAddress("opDivideUnsigned3", "opDivide3", "/", true, false),
-    ThreeAddress("opModuloSigned3", "opDivide3", "%", true, true),
-    ThreeAddress("opModuloUnsigned3", "opDivide3", "%", true, false),
+    ThreeAddress("opShiftLeft3", "opShift3", "<<", hasFlag: true, flag: false),
+    ThreeAddress("opShiftRightLogical3", "opShift3", ">>",
+        hasFlag: true, flag: false),
+    ThreeAddress("opShiftRightArithmetic3", "opShift3", ">>",
+        hasFlag: true, flag: true),
+    ThreeAddress("opDivideSigned3", "opDivide3", "/",
+        hasFlag: true, flag: true),
+    ThreeAddress("opDivideUnsigned3", "opDivide3", "/",
+        hasFlag: true, flag: false),
+    ThreeAddress("opModuloSigned3", "opDivide3", "%",
+        hasFlag: true, flag: true),
+    ThreeAddress("opModuloUnsigned3", "opDivide3", "%",
+        hasFlag: true, flag: false),
     ThreeAddress("opFloatAdd3", "opFloat3", "+"),
     ThreeAddress("opFloatSubtract3", "opFloat3", "-"),
     ThreeAddress("opFloatMultiply3", "opFloat3", "*"),
     ThreeAddress("opFloatDivide3", "opFloat3", "/"),
-    ThreeAddress("opLessThanSigned3", "opCompare3", "<", true, true),
-    ThreeAddress("opLessThanUnsigned3", "opCompare3", "<", true, false),
-    ThreeAddress("opLessOrEqualSigned3", "opCompare3", "<=", true, true),
-    ThreeAddress("opLessOrEqualUnsigned3", "opCompare3", "<=", true, false),
-    ThreeAddress("opGreaterThanSigned3", "opCompare3", ">", true, true),
-    ThreeAddress("opGreaterThanUnsigned3", "opCompare3", ">", true, false),
-    ThreeAddress("opGreaterOrEqualSigned3", "opCompare3", ">=", true, true),
-    ThreeAddress("opGreaterOrEqualUnsigned3", "opCompare3", ">=", true, false),
-    ThreeAddress("opEqual3", "opCompare3", "==", true, false),
-    ThreeAddress("opNotEqual3", "opCompare3", "!=", true, false),
+    ThreeAddress("opLessThanSigned3", "opCompare3", "<",
+        hasFlag: true, flag: true),
+    ThreeAddress("opLessThanUnsigned3", "opCompare3", "<",
+        hasFlag: true, flag: false),
+    ThreeAddress("opLessOrEqualSigned3", "opCompare3", "<=",
+        hasFlag: true, flag: true),
+    ThreeAddress("opLessOrEqualUnsigned3", "opCompare3", "<=",
+        hasFlag: true, flag: false),
+    ThreeAddress("opGreaterThanSigned3", "opCompare3", ">",
+        hasFlag: true, flag: true),
+    ThreeAddress("opGreaterThanUnsigned3", "opCompare3", ">",
+        hasFlag: true, flag: false),
+    ThreeAddress("opGreaterOrEqualSigned3", "opCompare3", ">=",
+        hasFlag: true, flag: true),
+    ThreeAddress("opGreaterOrEqualUnsigned3", "opCompare3", ">=",
+        hasFlag: true, flag: false),
+    ThreeAddress("opEqual3", "opCompare3", "==", hasFlag: true, flag: false),
+    ThreeAddress("opNotEqual3", "opCompare3", "!=", hasFlag: true, flag: false),
     ThreeAddress("opFloatEqual3", "opFloatCompare3", "=="),
     ThreeAddress("opFloatNotEqual3", "opFloatCompare3", "!="),
     ThreeAddress("opFloatLessThan3", "opFloatCompare3", "<"),
@@ -5714,11 +5728,11 @@ static if (jitSupported) {
                         put(fusedBranchHandler(comparison, kind, jumpWhen,
                                 constant),
                             fusedBranch(comparison, kind, jumpWhen, constant,
-                                false));
+                                leftInR0: false));
                         put(fusedRegisterHandlers[fusedIndex(comparison, kind,
                                 jumpWhen, constant)],
                             fusedBranch(comparison, kind, jumpWhen, constant,
-                                true));
+                                leftInR0: true));
                     }
         put(&opAdd, twoAddressInt(IntOperation.add));
         put(&opSubtract, twoAddressInt(IntOperation.subtract));
@@ -5726,22 +5740,24 @@ static if (jitSupported) {
         put(&opBitAnd, twoAddressInt(IntOperation.and));
         put(&opBitOr, twoAddressInt(IntOperation.or));
         put(&opBitXor, twoAddressInt(IntOperation.xor));
-        put(&opLessThanSigned, twoAddressCompare(Comparison.lessThan, true));
+        put(&opLessThanSigned,
+            twoAddressCompare(Comparison.lessThan, signed: true));
         put(&opLessOrEqualSigned,
-            twoAddressCompare(Comparison.lessOrEqual, true));
+            twoAddressCompare(Comparison.lessOrEqual, signed: true));
         put(&opGreaterThanSigned,
-            twoAddressCompare(Comparison.greaterThan, true));
+            twoAddressCompare(Comparison.greaterThan, signed: true));
         put(&opGreaterOrEqualSigned,
-            twoAddressCompare(Comparison.greaterOrEqual, true));
-        put(&opLessThanUnsigned, twoAddressCompare(Comparison.lessThan, false));
+            twoAddressCompare(Comparison.greaterOrEqual, signed: true));
+        put(&opLessThanUnsigned,
+            twoAddressCompare(Comparison.lessThan, signed: false));
         put(&opLessOrEqualUnsigned,
-            twoAddressCompare(Comparison.lessOrEqual, false));
+            twoAddressCompare(Comparison.lessOrEqual, signed: false));
         put(&opGreaterThanUnsigned,
-            twoAddressCompare(Comparison.greaterThan, false));
+            twoAddressCompare(Comparison.greaterThan, signed: false));
         put(&opGreaterOrEqualUnsigned,
-            twoAddressCompare(Comparison.greaterOrEqual, false));
-        put(&opEqual, twoAddressCompare(Comparison.equal, false));
-        put(&opNotEqual, twoAddressCompare(Comparison.notEqual, false));
+            twoAddressCompare(Comparison.greaterOrEqual, signed: false));
+        put(&opEqual, twoAddressCompare(Comparison.equal, signed: false));
+        put(&opNotEqual, twoAddressCompare(Comparison.notEqual, signed: false));
 
         put(&opShiftLeft, twoAddressShift(ShiftKind.left));
         put(&opShiftRightLogical, twoAddressShift(ShiftKind.logicalRight));
@@ -5750,15 +5766,17 @@ static if (jitSupported) {
         put(&opCopy, JitOp.plain(Kind.copy));
         static foreach (width; 1 .. 17) {
             put(&opCopyFixed!(width, true),
-                JitOp.make!(Kind.copy)(JitOp.Copy(true), width));
+                JitOp.make!(Kind.copy)(JitOp.Copy(staticSource: true), width));
             put(&opCopyFixed!width,
-                JitOp.make!(Kind.copy)(JitOp.Copy(false), width));
+                JitOp.make!(Kind.copy)(JitOp.Copy(staticSource: false), width));
         }
         put(&opConstant, JitOp.plain(Kind.constant));
         put(&opZero, JitOp.plain(Kind.zero));
         put(&opJump, JitOp.plain(Kind.jump));
-        put(&opBranchFalse, JitOp.make!(Kind.branch)(JitOp.Branch(false)));
-        put(&opBranchTrue, JitOp.make!(Kind.branch)(JitOp.Branch(true)));
+        put(&opBranchFalse,
+            JitOp.make!(Kind.branch)(JitOp.Branch(jumpIfNonzero: false)));
+        put(&opBranchTrue,
+            JitOp.make!(Kind.branch)(JitOp.Branch(jumpIfNonzero: true)));
         put(&opStaticLoad, JitOp.plain(Kind.staticLoad));
         put(&opStaticStore, JitOp.plain(Kind.staticStore));
         put(&opStaticAddress, JitOp.plain(Kind.staticAddr));
@@ -5780,12 +5798,17 @@ static if (jitSupported) {
                     instance.constantValue),
                 cast(ubyte) instance.elementSize));
         put(&opFrameAddress, JitOp.plain(Kind.frameAddr));
-        put(&opLogicalNot, JitOp.make!(Kind.boolOp)(JitOp.BoolOp(false)));
-        put(&opCastToBool, JitOp.make!(Kind.boolOp)(JitOp.BoolOp(true)));
-        put(&opNegate, JitOp.make!(Kind.unary)(JitOp.Unary(false)));
-        put(&opComplement, JitOp.make!(Kind.unary)(JitOp.Unary(true)));
-        put(&opCastWidenSigned, JitOp.make!(Kind.widen)(JitOp.Widen(false)));
-        put(&opCastWidenUnsigned, JitOp.make!(Kind.widen)(JitOp.Widen(true)));
+        put(&opLogicalNot,
+            JitOp.make!(Kind.boolOp)(JitOp.BoolOp(nonzero: false)));
+        put(&opCastToBool,
+            JitOp.make!(Kind.boolOp)(JitOp.BoolOp(nonzero: true)));
+        put(&opNegate, JitOp.make!(Kind.unary)(JitOp.Unary(complement: false)));
+        put(&opComplement,
+            JitOp.make!(Kind.unary)(JitOp.Unary(complement: true)));
+        put(&opCastWidenSigned,
+            JitOp.make!(Kind.widen)(JitOp.Widen(zeroExtend: false)));
+        put(&opCastWidenUnsigned,
+            JitOp.make!(Kind.widen)(JitOp.Widen(zeroExtend: true)));
         static foreach (kind; AliasSeq!(CastKind.narrow, CastKind.widenSigned,
             CastKind.widenUnsigned))
             static foreach (destSize; [1, 2, 4, 8])
@@ -5804,48 +5827,54 @@ static if (jitSupported) {
     private JitOp threeAddressInt(JitOp.IntOperation operation,
         bool constantRight) nothrow @nogc
     {
-        return intOp(operation, constantRight, false, false, false);
+        return intOp(operation, constantRight, leftInR0: false,
+            resultInR0: false, twoAddress: false);
     }
 
     private JitOp registerInt(JitOp.IntOperation operation, bool constantRight,
         bool leftInR0, bool resultInR0) nothrow @nogc
     {
-        return intOp(operation, constantRight, leftInR0, resultInR0, false);
+        return intOp(operation, constantRight, leftInR0, resultInR0,
+            twoAddress: false);
     }
 
     private JitOp twoAddressInt(JitOp.IntOperation operation) nothrow @nogc {
-        return intOp(operation, false, false, false, true);
+        return intOp(operation, constantRight: false, leftInR0: false,
+            resultInR0: false, twoAddress: true);
     }
 
     private JitOp threeAddressCompare(Comparison comparison, bool signed,
         bool constantRight) nothrow @nogc
     {
         return JitOp.make!(JitOp.Kind.cmp3)(
-            JitOp.Cmp3(comparison, signed, constantRight, false));
+            JitOp.Cmp3(comparison, signed, constantRight, twoAddress: false));
     }
 
     private JitOp twoAddressCompare(Comparison comparison, bool signed)
         nothrow @nogc
     {
         return JitOp.make!(JitOp.Kind.cmp3)(
-            JitOp.Cmp3(comparison, signed, false, true));
+            JitOp.Cmp3(comparison, signed, constantRight: false,
+                twoAddress: true));
     }
 
     private JitOp threeAddressShift(JitOp.ShiftKind kind, bool constantRight)
         nothrow @nogc
     {
         return JitOp.make!(JitOp.Kind.shift)(
-            JitOp.Shift(kind, constantRight, false));
+            JitOp.Shift(kind, constantRight, twoAddress: false));
     }
 
     private JitOp twoAddressShift(JitOp.ShiftKind kind) nothrow @nogc {
-        return JitOp.make!(JitOp.Kind.shift)(JitOp.Shift(kind, false, true));
+        return JitOp.make!(JitOp.Kind.shift)(JitOp.Shift(kind,
+            constantRight: false, twoAddress: true));
     }
 
     private JitOp threeAddressFloat(JitOp.FloatOperation operation,
         bool constantRight) nothrow @nogc
     {
-        return registerFloat(operation, constantRight, false, false);
+        return registerFloat(operation, constantRight, leftInFp0: false,
+            resultInFp0: false);
     }
 
     private JitOp registerFloat(JitOp.FloatOperation operation,
@@ -5927,7 +5956,7 @@ static if (jitSupported) {
                     entry.ambiguous = true;
             } else
                 tables.unspecialised[handler] = Unspecialised(general, mask,
-                    false);
+                    ambiguous: false);
         }
 
         foreach (ref entry; specialisations) {
