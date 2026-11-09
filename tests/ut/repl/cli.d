@@ -140,3 +140,13 @@ unittest {
     result.options.showHelp.should == true;
     (result.diagnostic.length > 0).should == true;
 }
+
+
+@("lowmemAndNoJit.setTheirFlags")
+unittest {
+    const result = parseReplArgs(["sb", "--lowmem", "--no-jit"]);
+
+    result.status.should == 0;
+    result.options.lowmem.should == true;
+    result.options.noJit.should == true;
+}

@@ -348,36 +348,38 @@ public struct ReplCliResult {
 
 public ReplCliResult parseReplArgs(string[] args) {
     import snakebite.backends: parseBackendName, validBackendNames;
-    import snakebite.gc: lowmemHelp;
-    import snakebite.projectoptions: noJitHelp;
-    import std.getopt: getopt, GetOptException;
+    import snakebite.projectoptions:
+        backendOption, parseCommonOptions;
+    import std.getopt: GetOptException;
 
     ReplCliResult result;
     string backendName = "bytecode";
 
-    typeof(getopt(args)) helpInfo;
+    typeof(parseCommonOptions(
+        args,
+        result.options.importPaths,
+        result.options.versions,
+        result.options.lowmem,
+        result.options.noJit,
+    )) helpInfo;
     try {
-        helpInfo = getopt(
+        helpInfo = parseCommonOptions(
             args,
+            result.options.importPaths,
+            result.options.versions,
+            result.options.lowmem,
+            result.options.noJit,
             "c", "Run one D expression and exit.", (string _, string val) {
                 result.options.hasCommand = true;
                 result.options.command = val;
             },
-            "I", "Add an import path.", (string _, string val) {
-                result.options.importPaths ~= val;
-            },
-            "version", "Define a version identifier (repeatable).",
-                &result.options.versions,
             "project", "Use import paths from a DUB project.",
                 &result.options.projectDirectory,
             "dub", "Fetch and use a DUB project.",
                 &result.options.dubProject,
-            "b|backend", "Select the backend (default: bytecode).",
-                &backendName,
+            backendOption(backendName).expand,
             "l", "Stay interactive after loading file arguments.",
                 &result.options.liveAfterFiles,
-            "lowmem", lowmemHelp, &result.options.lowmem,
-            "no-jit", noJitHelp, &result.options.noJit,
         );
     } catch (GetOptException exception) {
         return ReplCliResult(1, exception.msg);
