@@ -21,6 +21,28 @@ string[] selectFrontendMemoryFromArguments(string[] args) {
 }
 
 
+// `--no-jit` and `--eager-jit` for a test runner, taken out before
+// unit-threaded parses the rest. By default the JIT is on and a function gets
+// JIT code after `jitThreshold` events. `--no-jit` makes no JIT code, and
+// `--eager-jit` makes JIT code at the first event of every function, so that
+// the tests run mostly on JIT code.
+string[] selectJitFromArguments(string[] args) {
+    import snakebite.backends.bytecode.vm: jitCompileOnFirstEvent, selectJit;
+    import std.algorithm.iteration: filter;
+    import std.algorithm.searching: canFind;
+    import std.array: array;
+    import std.stdio: writeln;
+
+    selectJit(!args.canFind("--no-jit"));
+    jitCompileOnFirstEvent(args.canFind("--eager-jit"));
+    if (args.canFind("-h") || args.canFind("--help")) {
+        writeln("  --no-jit: Make no JIT code.");
+        writeln("  --eager-jit: Make JIT code at the first event of a function.");
+    }
+    return args.filter!(arg => arg != "--no-jit" && arg != "--eager-jit").array;
+}
+
+
 // A native library that the build of `bin/ut` made from tests/fixtures/native.
 // It lies next to the executable, so no test needs a compiler to have it.
 string nativeFixture(in string name) {

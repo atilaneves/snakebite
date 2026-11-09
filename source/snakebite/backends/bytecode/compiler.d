@@ -862,7 +862,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         CompareKind, Comparison, constantForm, fusedBranchHandler, fusesConstant,
         firstComparisonHandler, threeAddressConstantHandlers,
         threeAddressHandlers,
-        decodesIndirect, isFusedBranch, specialiseHandlers, jitEnabled, jitCountBackEdges, RegisterFamily, registerFamily,
+        decodesIndirect, isFusedBranch, specialiseHandlers, isCountedCall, jitCountEvents,
+        jitEnabled, jitStartHeat, RegisterFamily, registerFamily,
         fusedRegisterFamily, registerForm, fusedRegisterForm,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall, opCallWindowDiscard, opCallWindowFrame,
@@ -1275,8 +1276,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         fuseLoadCopies;
         assignRegisters;
         specialiseHandlers(_instructions);
-        if (!recordRelocs && jitEnabled)
-            jitCountBackEdges(_instructions, _backEdges);
+        jitCountEvents(_instructions, _countedEvents);
 
         foreach (ref site; _callSites)
             if (site.cleanupStartIndex != size_t.max) {
@@ -1334,6 +1334,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         result.windowBytes = _windowReach;
         result.windowCallable = windowFits(_function, _layout);
         result.fixWindowFacts();
+        result.jitHeat = jitStartHeat;
         return result;
     }
 
@@ -3167,6 +3168,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return offset;
     }
 
+    // The indices of the instructions that count an event for the JIT: the
+    // backward branches and the calls. Empty when the JIT is off.
+    private size_t[] _countedEvents;
+
     // Every `opJump`/`opBranchFalse`/`opBranchTrue` this compiler emitted
     // still names its target by a plain instruction index at this point -
     // `compileIf`/`compileFor`/`compileContinue` patch
@@ -3177,19 +3182,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // cannot execute memory outside the function. A cleanup may branch
     // to its exclusive end, even one past the last instruction: the VM
     // stops at that address before it reads an instruction.
-    // The indices of the backward branches, when the JIT counts them.
-    private size_t[] _backEdges;
-
     private void resolveBranches() {
         import std.conv: text;
 
-        const counting = !recordRelocs && jitEnabled;
+        const counting = jitEnabled;
         foreach (index, ref instruction; _instructions) {
             auto target = branchTargetField(instruction);
-            if (target is null)
+            if (target is null) {
+                if (counting && isCountedCall(instruction.handler))
+                    _countedEvents ~= index;
                 continue;
+            }
             if (counting && *target <= index)
-                _backEdges ~= index;
+                _countedEvents ~= index;
 
             if (!(*target < _instructions.length
                     || (*target == _instructions.length

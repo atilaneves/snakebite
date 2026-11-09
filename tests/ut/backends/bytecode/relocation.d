@@ -5,7 +5,8 @@ import ut.backends;
 import dmd.func: FuncDeclaration;
 import snakebite.backends.backend: Program;
 import snakebite.backends.bytecode.inspection:
-    handlerRoleMismatches, misplacedRelocs, relocsOf, unrecordedWords;
+    handlerRoleMismatches, misplacedRelocs, relocsOf, unrecordedWords,
+    withoutJit;
 import snakebite.backends.bytecode.relocation: Place, Target, recordRelocs;
 import snakebite.backends.bytecode.vm:
     Function, Instruction, opConstant, registerFormsWithChangedRoles,
@@ -249,20 +250,25 @@ private void withCompiledProgram(
     string source, in Checksum[] checksums,
     scope void delegate(string, const(Function)*) visit,
 ) {
-    const before = recordRelocs;
-    recordRelocs = true;
-    scope(exit) recordRelocs = before;
-    auto guestModule = parseSnippet(source);
-    auto program = Program([guestModule]);
-    auto backend = Owned!Bytecode(program);
-    foreach (checksum; checksums) {
-        long result;
-        backend.call(findFunction(guestModule, checksum.entryPoint),
-            &result, []);
-        result.should == checksum.expected;
-    }
-    backend.eachCompiled((FuncDeclaration declaration, const(Function)* function_) {
-        visit(declaration.toPrettyChars.fromStringz.idup, function_);
+    // The scan reads the handler words, which the JIT replaces in a function
+    // that ran hot, so the programs compile and run without it.
+    withoutJit({
+        const before = recordRelocs;
+        recordRelocs = true;
+        scope(exit) recordRelocs = before;
+        auto guestModule = parseSnippet(source);
+        auto program = Program([guestModule]);
+        auto backend = Owned!Bytecode(program);
+        foreach (checksum; checksums) {
+            long result;
+            backend.call(findFunction(guestModule, checksum.entryPoint),
+                &result, []);
+            result.should == checksum.expected;
+        }
+        backend.eachCompiled((FuncDeclaration declaration,
+                const(Function)* function_) {
+            visit(declaration.toPrettyChars.fromStringz.idup, function_);
+        });
     });
 }
 

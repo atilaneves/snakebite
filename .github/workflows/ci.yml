@@ -53,6 +53,15 @@ jobs:
       - name: Run CI
         run: build/ci.sh
 
+      # build/ci.sh ran the unit tests with the JIT at its default threshold.
+      # These runs cover the handlers alone, and the JIT code of every
+      # function (the test hook makes a function hot at its first event).
+      - name: Unit tests without the JIT
+        run: build/ut-without-build-tools.sh --no-jit
+
+      - name: Unit tests with the JIT at the minimum threshold
+        run: build/ut-without-build-tools.sh --eager-jit
+
       # kcov was dropped from Ubuntu's repos, so it has to be built
       # from source. Cached by version: bump the "kcov-43" cache key
       # (and the --branch below) together to pick up a new release.

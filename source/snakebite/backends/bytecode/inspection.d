@@ -9,11 +9,43 @@ private:
 
 
 import snakebite.backends.bytecode.relocation: Place, Reloc, Target;
-import snakebite.backends.bytecode.vm: Function, Instruction, Role, Roles, rolesOf;
+import snakebite.backends.bytecode.vm: Function, Instruction, Role, Roles,
+    jitCompiled, jitCompileOnFirstEvent, jitEnabled, jitStartHeat, rolesOf,
+    selectJit;
 import std.conv: text;
 
 public const(Reloc)[] relocsOf(const(Function)* function_) {
     return function_.relocs;
+}
+
+// Whether `function_` runs as JIT code.
+public bool isJitCompiled(const(Function)* function_) {
+    return jitCompiled(function_);
+}
+
+// Runs `body` with the JIT off, so that the functions it compiles keep the
+// bytecode the compiler made: no counting twin, no JIT code in the handler
+// words. A scan of handlers for relocation needs that.
+public void withoutJit(scope void delegate() body) {
+    const before = jitEnabled;
+    selectJit(false);
+    scope (exit)
+        selectJit(before);
+    body();
+}
+
+// Runs `body` with the JIT on and the threshold of the program (256 events),
+// whatever the test runner chose, and restores the runner's choice.
+public void withDefaultJit(scope void delegate() body) {
+    const enabled = jitEnabled;
+    const eager = jitStartHeat != 0;
+    selectJit(true);
+    jitCompileOnFirstEvent(false);
+    scope (exit) {
+        selectJit(enabled);
+        jitCompileOnFirstEvent(eager);
+    }
+    body();
 }
 
 public size_t instructionCount(const(Function)* function_) {

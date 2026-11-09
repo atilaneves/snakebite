@@ -18,6 +18,7 @@ public struct ReplOptions {
     public string[] files;
     public bool liveAfterFiles;
     public bool lowmem;
+    public bool noJit;
 }
 
 
@@ -30,6 +31,7 @@ public int run(string[] args) {
     import snakebite.execution: runProject;
     import snakebite.project: EndsProcess;
     import snakebite.dependencypreparation: prepareStartupDependencies;
+    import snakebite.backends.bytecode.vm: selectJit;
     import snakebite.gc: selectFrontendMemory;
     import snakebite.repl: Repl;
     import std.algorithm.iteration: map;
@@ -49,6 +51,7 @@ public int run(string[] args) {
     }
 
     selectFrontendMemory(parsed.options.lowmem);
+    selectJit(!parsed.options.noJit);
     // The REPL evaluates single snippets, so it is the snippet world.
     initialize(Snippets.yes);
 
@@ -346,6 +349,7 @@ public struct ReplCliResult {
 public ReplCliResult parseReplArgs(string[] args) {
     import snakebite.backends: parseBackendName, validBackendNames;
     import snakebite.gc: lowmemHelp;
+    import snakebite.projectoptions: noJitHelp;
     import std.getopt: getopt, GetOptException;
 
     ReplCliResult result;
@@ -373,6 +377,7 @@ public ReplCliResult parseReplArgs(string[] args) {
             "l", "Stay interactive after loading file arguments.",
                 &result.options.liveAfterFiles,
             "lowmem", lowmemHelp, &result.options.lowmem,
+            "no-jit", noJitHelp, &result.options.noJit,
         );
     } catch (GetOptException exception) {
         return ReplCliResult(1, exception.msg);
@@ -411,4 +416,5 @@ private enum helpText =
         ~ imported!"snakebite.backends".validBackendNames ~ "\n" ~
     "  -l                    Stay interactive after loading file arguments\n" ~
     "  --lowmem              " ~ imported!"snakebite.gc".lowmemHelp ~ "\n" ~
+    "  --no-jit              " ~ imported!"snakebite.projectoptions".noJitHelp ~ "\n" ~
     "  -h, --help            Show this help\n";

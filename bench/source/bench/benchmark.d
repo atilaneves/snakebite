@@ -37,6 +37,7 @@ public int run(string[] args) {
     import std.stdio: stderr, writeln;
     import snakebite.execution: PreparationReport, prepareSources, runProject;
     import snakebite.project: EndsProcess;
+    import snakebite.backends.bytecode.vm: selectJit;
     import snakebite.gc: selectFrontendMemory;
 
     Options options;
@@ -50,6 +51,7 @@ public int run(string[] args) {
     if (options.helpWanted)
         return 0;
     selectFrontendMemory(options.lowmem);
+    selectJit(!options.noJit);
 
     if (const error = validate(options)) {
         stderr.writeln(error);
@@ -427,6 +429,8 @@ private void measureMemory(ref BackendReport report, in Options options) {
         command ~= ["--version", identifier];
     if (options.lowmem)
         command ~= "--lowmem";
+    if (options.noJit)
+        command ~= "--no-jit";
     command ~= options.projectDirectory;
     command ~= "--" ~ options.programArguments;
 

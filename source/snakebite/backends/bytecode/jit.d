@@ -1,28 +1,48 @@
 module snakebite.backends.bytecode.jit;
 
-// Prototype template JIT for the bytecode VM (issue #873, P1).
+// The template JIT of the bytecode VM (docs/adr/0016-template-jit.md).
 //
-// For each compiled function, every instruction that has a template gets
-// x86-64 machine code with its operands as immediates. The address of the
-// code of instruction i replaces `instructions[i].handler`. The code obeys
-// the `Instruction.Handler` calling convention (System V: pc in rdi, activation
-// in rsi, state in rdx, frame in rcx, r0 in r8, fp0 in xmm0). It has no stack
-// frame, makes no call and uses only rax, rdi, r9, r10, r11, xmm1 and xmm2 as
-// scratch, so r0 and fp0 survive and exceptions need no unwind information:
-// they happen only in real handlers, which the JIT code reaches by a tail jump.
-// An instruction without a template gets a stub that sets `pc` and jumps to
-// its real handler.
-
-import core.atomic: atomicStore, MemoryOrder;
-import core.stdc.stdio: FILE, fopen, fprintf, fflush, stderr;
-import core.stdc.stdlib: malloc, realloc, free, getenv, atexit;
-import core.stdc.string: strcmp;
-import core.sys.posix.sys.mman;
-import core.sys.posix.time: clock_gettime, timespec, CLOCK_MONOTONIC;
-import core.sys.posix.unistd: getpid;
+// A hot function gets x86-64 code for each instruction that has a template,
+// with the operands as immediates. The address of the code of instruction i
+// replaces `instructions[i].handler`. The code obeys the `Instruction.Handler`
+// calling convention (see the register map below). It has no stack frame,
+// makes no call and uses only the scratch registers, so r0 and fp0 survive,
+// and a throw needs no unwind information: it happens only in real handlers,
+// which the JIT code reaches by a tail jump. An instruction without a
+// template gets a stub that sets `pc` and jumps to its handler.
+//
+// The emitter allocates nothing per instruction (it works in reused buffers),
+// because the cost of a compile is paid at run time.
 
 import snakebite.backends.bytecode.vm: Instruction, indirectBit,
     DispatchState, chainedDispatch;
+
+private:
+
+
+// The code generator exists only where the register maps below are known.
+public enum jitSupported = jitPlatform && jitCompiler;
+
+version (linux) version (X86_64)
+    private enum jitPlatform = true;
+private static if (!is(typeof(jitPlatform)))
+    private enum jitPlatform = false;
+
+version (LDC)
+    private enum jitCompiler = true;
+else version (DigitalMars)
+    private enum jitCompiler = true;
+else
+    private enum jitCompiler = false;
+
+static if (jitSupported):
+
+import core.atomic: atomicLoad, atomicStore, cas, MemoryOrder;
+import core.stdc.stdlib: malloc, realloc, free;
+import core.sys.posix.sys.mman;
+import snakebite.internalfailure: internalFailure;
+
+@nogc nothrow:
 
 package enum JKind : ubyte {
     none, copy, constant, zero, jump, branch, int3, cmp3, fused, fp3, fpcmp3,
@@ -50,16 +70,19 @@ private enum : ubyte {
 // activation rcx, state rdx, frame rsi, r0 rdi, fp0 xmm0. `SC2` is a scratch
 // register: the one that holds `pc` on entry, which the code never reads.
 // Scratch registers are rax, SC2, r9, r10, r11, xmm1 and xmm2 in both maps.
-version (DigitalMars) {
-    private enum FRAME = RSI;
-    private enum REG0 = RDI;
-    private enum SC2 = R8;
-    private enum PCREG = R8;
-} else {
+// `checkCallingConvention` compares this map with the compiler at run time.
+version (LDC) {
     private enum FRAME = RCX;
     private enum REG0 = R8;
     private enum SC2 = RDI;
     private enum PCREG = RDI;
+    private enum ACTIVE = RSI;
+} else {
+    private enum FRAME = RSI;
+    private enum REG0 = RDI;
+    private enum SC2 = R8;
+    private enum PCREG = R8;
+    private enum ACTIVE = RCX;
 }
 private enum STATE = RDX;
 
@@ -80,122 +103,194 @@ private enum : ubyte {
     CC_P = 0xA, CC_NP = 0xB, CC_L = 0xC, CC_GE = 0xD, CC_LE = 0xE, CC_G = 0xF,
 }
 
-// Stats, printed at exit under SNAKEBITE_JIT_STATS=1.
-private __gshared ulong statEmitNs, statProtectNs, statFunctions,
-    statInstructions, statTemplated, statBytes, statDeclined;
-private __gshared bool statsOn;
-private __gshared bool statsHooked;
 
-private ulong nowNs() {
-    timespec t;
-    clock_gettime(CLOCK_MONOTONIC, &t);
-    return cast(ulong) t.tv_sec * 1_000_000_000UL + t.tv_nsec;
+// Whether the CPU has the BMI2 shifts (`shlx`, `shrx`, `sarx`); without them
+// the shift instructions keep their handlers. Druntime's `core.cpuid` has no
+// public accessor for BMI2, so this reads CPUID leaf 7 itself.
+private bool cpuHasBmi2() {
+    uint maximumLeaf;
+    asm pure nothrow @nogc {
+        mov EAX, 0;
+        cpuid;
+        mov maximumLeaf, EAX;
+    }
+    enum structuredExtendedFeatures = 7;
+    if (maximumLeaf < structuredExtendedFeatures)
+        return false;
+    uint features;
+    asm pure nothrow @nogc {
+        mov EAX, 7;
+        mov ECX, 0;
+        cpuid;
+        mov features, EBX;
+    }
+    enum bmi2Bit = 1U << 8;
+    return (features & bmi2Bit) != 0;
 }
 
-private extern(C) void dumpStats() {
-    fprintf(stderr, "JIT functions=%llu instructions=%llu templated=%llu "
-        ~ "declined=%llu bytes=%llu region=%llu emit_ms=%.3f memory_ms=%.3f\n",
-        statFunctions, statInstructions, statTemplated, statDeclined,
-        statBytes, cast(ulong) regionCursor, statEmitNs / 1e6, statProtectNs / 1e6);
-    import snakebite.backends.bytecode.vm: jitBackEdgesCounted,
-        jitBackEdgesMissed, jitAmbiguous;
-    fprintf(stderr, "JIT backedges counted=%llu missed=%llu ambiguous=%llu\n",
-        cast(ulong) jitBackEdgesCounted, cast(ulong) jitBackEdgesMissed,
-        cast(ulong) jitAmbiguous);
-}
 
-// The code region. A memfd file is mapped twice: `writeBase` is read+write,
-// where the JIT emits, and `execBase` is read+execute, where the handlers
-// point. No page changes protection. Functions are packed with 16-byte
-// alignment. Memory is made present (`MADV_POPULATE_*`) one chunk at a time.
-// All fields are protected by `regionLock`.
+// The code region. It is a memfd file that grows by chunks. Each chunk is
+// mapped twice: `writeBase` is read+write, where the JIT emits, and `execBase`
+// is read+execute, where the handlers point. No page changes protection.
+// Functions are packed with 16-byte alignment, and a function never spans two
+// chunks. Memory is made present (`MADV_POPULATE_*`) a part of a chunk at a
+// time. The fields below and the scratch buffers belong to `jitLock`.
+private __gshared int regionFile = -1;
+private __gshared size_t regionFileSize;
 private __gshared ubyte* writeBase;
 private __gshared ubyte* execBase;
-private __gshared size_t regionCursor;
+private __gshared size_t chunkCapacity;
+private __gshared size_t chunkUsed;
 private __gshared size_t populatedEnd;
-private enum regionSize = 1UL << 30;
-private enum chunkSize = 1UL << 17;
+private enum chunkSize = 1UL << 20;
+private enum populateSize = 1UL << 17;
+private enum codeAlignment = 16;
+// The most that one instruction can need; a function needs room for this.
+private enum maximumBytesPerInstruction = 1024;
 private enum MADV_POPULATE_READ = 22;
 private enum MADV_POPULATE_WRITE = 23;
-private shared int regionLock;
-private shared bool regionReady;
-private __gshared FILE* perfMap;
+private enum MFD_CLOEXEC = 1;
+private enum MAP_NORESERVE = 0x4000;
 
 extern(C) private int madvise(void*, size_t, int) nothrow @nogc;
 extern(C) private int memfd_create(const(char)* name, uint flags) nothrow @nogc;
 
-private void lock() {
-    import core.atomic: cas;
-    while (!cas(&regionLock, 0, 1)) {}
+// How far the one-time set-up got: nothing, a usable JIT, or a JIT that this
+// process cannot have (no memfd). It is read without the lock.
+private enum Setup : int { pending, ready, unavailable }
+private shared Setup setup;
+private __gshared bool bmi2;
+
+private shared int lockWord;
+
+// Without waiting: a thread that waits for the lock can wait for a thread
+// that the GC suspended while it held the lock.
+package bool tryLock() {
+    return cas(&lockWord, 0, 1);
 }
 
-private void unlock() {
-    import core.atomic: atomicStore;
-    atomicStore(regionLock, 0);
+package void unlock() {
+    atomicStore!(MemoryOrder.rel)(lockWord, 0);
 }
 
-// Caller holds `regionLock`, or is single threaded.
-private void populateChunk() {
-    if (populatedEnd + chunkSize > regionSize)
-        return;
-    const t = statsOn ? nowNs() : 0;
-    madvise(writeBase + populatedEnd, chunkSize, MADV_POPULATE_WRITE);
-    madvise(execBase + populatedEnd, chunkSize, MADV_POPULATE_READ);
-    populatedEnd += chunkSize;
-    if (statsOn)
-        statProtectNs += nowNs() - t;
+// True when a function can get JIT code. The first call sets the JIT up:
+// the CPU features, the region, and the check of the calling convention.
+// The caller holds `jitLock`.
+package bool jitUsable() {
+    final switch (atomicLoad!(MemoryOrder.acq)(setup)) {
+        case Setup.ready: return true;
+        case Setup.unavailable: return false;
+        case Setup.pending:
+            break;
+    }
+    const ok = createRegion;
+    if (ok)
+        checkCallingConvention;
+    bmi2 = ok && cpuHasBmi2;
+    atomicStore!(MemoryOrder.rel)(setup, ok ? Setup.ready : Setup.unavailable);
+    return ok;
 }
 
-private bool ensureRegion() {
-    import core.atomic: atomicLoad, atomicStore, MemoryOrder;
-    if (atomicLoad!(MemoryOrder.acq)(regionReady))
+private bool createRegion() {
+    import core.sys.posix.unistd: close;
+
+    regionFile = memfd_create("snakebite-jit", MFD_CLOEXEC);
+    if (regionFile < 0)
+        return false;
+    if (newChunk(chunkSize))
         return true;
-    lock();
-    scope (exit)
-        unlock();
-    if (regionReady)
-        return true;
-    const fd = memfd_create("snakebite-jit", 0);
-    if (fd < 0)
+    close(regionFile);
+    return false;
+}
+
+// Makes a chunk of at least `bytes` the current one. The old chunks stay
+// mapped: their code is in use.
+private bool newChunk(size_t bytes) {
+    import core.sys.posix.unistd: ftruncate;
+
+    const size = (bytes + chunkSize - 1) & ~(chunkSize - 1);
+    if (ftruncate(regionFile, regionFileSize + size) != 0)
         return false;
-    import core.sys.posix.unistd: ftruncate, close;
-    if (ftruncate(fd, regionSize) != 0) {
-        close(fd);
+    auto write = mmap(null, size, PROT_READ | PROT_WRITE, MAP_SHARED,
+        regionFile, regionFileSize);
+    auto execute = mmap(null, size, PROT_READ | PROT_EXEC, MAP_SHARED,
+        regionFile, regionFileSize);
+    if (write is MAP_FAILED || execute is MAP_FAILED) {
+        if (write !is MAP_FAILED)
+            munmap(write, size);
+        if (execute !is MAP_FAILED)
+            munmap(execute, size);
         return false;
     }
-    auto w = mmap(null, regionSize, PROT_READ | PROT_WRITE,
-        MAP_SHARED | 0x4000, fd, 0);
-    auto x = mmap(null, regionSize, PROT_READ | PROT_EXEC,
-        MAP_SHARED | 0x4000, fd, 0);
-    close(fd);
-    if (w is MAP_FAILED || x is MAP_FAILED)
-        return false;
-    writeBase = cast(ubyte*) w;
-    execBase = cast(ubyte*) x;
-    const s = getenv("SNAKEBITE_JIT_STATS");
-    statsOn = s !is null && s[0] == '1';
-    if (statsOn && !statsHooked) {
-        statsHooked = true;
-        atexit(&dumpStats);
-    }
-    populateChunk;
-    const m = getenv("SNAKEBITE_JIT_PERFMAP");
-    if (m !is null && m[0] == '1') {
-        import core.stdc.stdio: snprintf;
-        char[64] path;
-        snprintf(path.ptr, path.length, "/tmp/perf-%d.map", getpid());
-        perfMap = fopen(path.ptr, "w");
-    }
-    atomicStore!(MemoryOrder.rel)(regionReady, true);
+    regionFileSize += size;
+    writeBase = cast(ubyte*) write;
+    execBase = cast(ubyte*) execute;
+    chunkCapacity = size;
+    chunkUsed = 0;
+    populatedEnd = 0;
+    populate;
     return true;
 }
 
-// A growable buffer that lives as long as its thread; compiles reuse it.
+// Calls a stub with known argument values and compares what it finds in the
+// registers with the map above. The map was read from the disassembly of a
+// handler of each compiler; this fails loudly if a compiler version changes
+// its convention, instead of running code that reads the wrong registers.
+private void checkCallingConvention() {
+    import std.traits: FunctionAttribute, functionAttributes, functionLinkage,
+        Parameters, SetFunctionAttributes;
+
+    alias Arguments = Parameters!(Instruction.Handler);
+    enum ulong pcValue = 0x1111_1111_1111_1111;
+    enum ulong activeValue = 0x2222_2222_2222_2222;
+    enum ulong stateValue = 0x3333_3333_3333_3333;
+    enum ulong r0Value = 0x5555_5555_5555_5555;
+    enum double fp0Value = 7.25;
+
+    ulong[5] seen;
+    Asm a;
+    a.buf = writeBase;
+    a.cap = codeAlignment * 16;
+    a.st(8, Mem(FRAME, 0), PCREG);
+    a.st(8, Mem(FRAME, 8), ACTIVE);
+    a.st(8, Mem(FRAME, 16), STATE);
+    a.st(8, Mem(FRAME, 24), REG0);
+    a.sse(doublePrefix, storeOpcode, fp0Register, Mem(FRAME, 32));
+    a.aluRR(6, 4, RAX, RAX);
+    a.b(0xC3);
+
+    alias NoGcHandler = SetFunctionAttributes!(Instruction.Handler,
+        functionLinkage!(Instruction.Handler),
+        functionAttributes!(Instruction.Handler) | FunctionAttribute.nogc
+            | FunctionAttribute.nothrow_);
+    auto stub = cast(NoGcHandler) execBase;
+    stub(cast(Arguments[0]) pcValue, cast(Arguments[1]) activeValue,
+        cast(Arguments[2]) stateValue, cast(Arguments[3]) seen.ptr,
+        r0Value, fp0Value);
+    const matches = seen[0] == pcValue && seen[1] == activeValue
+        && seen[2] == stateValue && seen[3] == r0Value
+        && *cast(double*) &seen[4] == fp0Value;
+    if (!matches)
+        internalFailure("the registers of the JIT map do not match the "
+            ~ "calling convention of this compiler");
+}
+
+// Caller holds `jitLock`.
+private void populate() {
+    if (populatedEnd + populateSize > chunkCapacity)
+        return;
+    madvise(writeBase + populatedEnd, populateSize, MADV_POPULATE_WRITE);
+    madvise(execBase + populatedEnd, populateSize, MADV_POPULATE_READ);
+    populatedEnd += populateSize;
+}
+
+// A growable buffer that lives as long as the process; compiles reuse it. The
+// buffers belong to `jitLock`.
 package struct Scratch(T) {
     T* ptr;
     size_t cap;
 
-    // At least `n` elements; the contents are undefined.
+    // At least `n` elements; the contents are undefined. Null if no memory.
     T* reserve(size_t n) {
         if (n > cap) {
             auto newCap = cap ? cap : 1024;
@@ -203,18 +298,21 @@ package struct Scratch(T) {
                 newCap *= 2;
             free(ptr);
             ptr = cast(T*) malloc(newCap * T.sizeof);
-            cap = newCap;
+            cap = ptr is null ? 0 : newCap;
         }
         return ptr;
     }
 
-    // Keeps the contents.
+    // Keeps the contents. Null if no memory.
     T* grow(size_t n) {
         if (n > cap) {
             auto newCap = cap ? cap : 256;
             while (newCap < n)
                 newCap *= 2;
-            ptr = cast(T*) realloc(ptr, newCap * T.sizeof);
+            auto grown = cast(T*) realloc(ptr, newCap * T.sizeof);
+            if (grown is null)
+                return null;
+            ptr = grown;
             cap = newCap;
         }
         return ptr;
@@ -229,6 +327,8 @@ private struct Fixup {
 }
 
 private struct Asm {
+    @nogc nothrow:
+
     ubyte* buf;
     size_t n;
     size_t cap;
@@ -479,12 +579,14 @@ private struct Asm {
     void ud2() { b(0x0F); b(0x0B); }
 }
 
-// Thread-local, so that compiles on different threads do not share them.
-private Scratch!Fixup fixupScratch;
-private Scratch!size_t labelScratch;
-private Scratch!(Instruction.Handler) originalScratch;
+// The buffers of the label and fixup tables; compiles share them under the
+// JIT lock.
+private __gshared Scratch!Fixup fixupScratch;
+private __gshared Scratch!size_t labelScratch;
 
 private struct Gen {
+    @nogc nothrow:
+
     Asm a;
     const(Instruction)[] instructions;
     const(Instruction)[] snapshot;
@@ -493,12 +595,16 @@ private struct Gen {
     Fixup* fixups;
     size_t fixupCount;
     size_t fixupCap;
-    bool declined;
+    bool outOfMemory;
 
     void fix(size_t target) {
         if (fixupCount == fixupCap) {
-            fixupCap = fixupCap ? fixupCap * 2 : 256;
-            fixups = fixupScratch.grow(fixupCap);
+            auto grown = fixupScratch.grow(fixupCap ? fixupCap * 2 : 256);
+            if (grown is null) {
+                outOfMemory = true;
+                return;
+            }
+            fixups = grown;
             fixupCap = fixupScratch.cap;
         }
         fixups[fixupCount++] = Fixup(a.n, target);
@@ -1216,7 +1322,7 @@ private struct Gen {
     // a: 0 left, 1 logical right, 2 arithmetic right.
     bool emitShift(in Instruction ins, in JitOp op) {
         const w = cast(int) (op.w ? op.w : ins.width);
-        if (!goodWidth(w))
+        if (!bmi2 || !goodWidth(w))
             return false;
         Mem d, l, r;
         size_t rr;
@@ -1244,22 +1350,21 @@ private struct Gen {
     }
 }
 
-// Returns true when the function got JIT code.
+// Gives the function JIT code. Returns false
+// when it could not: the function then keeps its handlers. The caller holds
+// the lock and has seen `jitUsable`.
 package bool jitFunction(Instruction[] instructions,
     const(Instruction)[] snapshot, const(JitOp)[] ops,
     const(Instruction.Handler)[] originals,
-    const(long)[] constants, const(char)[] name)
+    const(long)[] constants)
 {
-    if (instructions.length == 0 || !ensureRegion())
+    if (instructions.length == 0)
         return false;
-    const t0 = statsOn ? nowNs() : 0;
-    lock();
-    scope (exit)
-        unlock();
-    const start = (regionCursor + 15) & ~15UL;
-    const cap = regionSize - start;
-    if (cap < instructions.length * 1024 + 4096)
+    const room = instructions.length * maximumBytesPerInstruction + 4096;
+    if (chunkCapacity - chunkUsed < room && !newChunk(room))
         return false;
+    const start = chunkUsed;
+    const cap = chunkCapacity - start;
 
     Gen g;
     g.a.buf = writeBase + start;
@@ -1267,12 +1372,13 @@ package bool jitFunction(Instruction[] instructions,
     g.instructions = instructions;
     g.snapshot = snapshot;
     g.constants = constants;
-    g.labels = labelScratch.reserve(instructions.length + 1)[
-        0 .. instructions.length + 1];
+    auto labels = labelScratch.reserve(instructions.length + 1);
+    if (labels is null)
+        return false;
+    g.labels = labels[0 .. instructions.length + 1];
     g.fixups = fixupScratch.ptr;
     g.fixupCap = fixupScratch.cap;
 
-    size_t templated;
     foreach (i; 0 .. instructions.length) {
         g.labels[i] = g.a.n;
         const saved = g.a.n;
@@ -1280,9 +1386,9 @@ package bool jitFunction(Instruction[] instructions,
         bool done;
         if (originals[i] !is null && ops[i].kind != JKind.none)
             done = g.emitOp(i, ops[i]);
-        if (done)
-            ++templated;
-        else {
+        if (g.outOfMemory)
+            return false;
+        if (!done) {
             g.a.n = saved;
             g.fixupCount = savedFixups;
             if (originals[i] is null)
@@ -1313,11 +1419,10 @@ package bool jitFunction(Instruction[] instructions,
         *cast(int*) (g.a.buf + f.position) = cast(int) (
             g.labels[f.target] - (f.position + 4));
 
-    const size = g.a.n;
-    const t1 = statsOn ? nowNs() : 0;
-    regionCursor = start + size;
-    if (regionCursor + chunkSize / 4 > populatedEnd)
-        populateChunk;
+    const size = (g.a.n + codeAlignment - 1) & ~(codeAlignment - 1UL);
+    chunkUsed = start + size;
+    if (chunkUsed + populateSize / 4 > populatedEnd)
+        populate;
 
     auto code = execBase + start;
     // One aligned 8-byte store with release order for each word, after the
@@ -1327,16 +1432,5 @@ package bool jitFunction(Instruction[] instructions,
         atomicStore!(MemoryOrder.rel)(
             *cast(shared(size_t)*) &instruction.handler,
             cast(size_t) (code + g.labels[i]));
-
-    ++statFunctions;
-    statInstructions += instructions.length;
-    statTemplated += templated;
-    statBytes += size;
-    statEmitNs += t1 - t0;
-    if (perfMap !is null) {
-        fprintf(perfMap, "%lx %lx %.*s\n", cast(size_t) code, size,
-            cast(int) name.length, name.ptr);
-        fflush(perfMap);
-    }
     return true;
 }

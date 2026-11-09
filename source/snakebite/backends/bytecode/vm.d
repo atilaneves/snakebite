@@ -5,6 +5,7 @@ private:
 
 
 import snakebite.internalfailure: internalFailure;
+import snakebite.backends.bytecode.jit: jitSupported;
 
 
 extern(C) const(void)* directWordCallTarget(
@@ -672,9 +673,12 @@ package ubyte* operandStorage(ubyte* frame, in size_t operand)
 // the branch predictor sees one history per handler instead of one per loop.
 // Only a compiler that makes the tail call lets the stack stay flat. Other
 // builds return to `dispatchLoop` after each instruction.
-version (LDC) version (D_Optimized)
-    package enum chainedDispatch = true;
-private static if (!is(typeof(chainedDispatch)))
+version (LDC) {
+    version (D_Optimized)
+        package enum chainedDispatch = true;
+    else
+        package enum chainedDispatch = false;
+} else
     package enum chainedDispatch = false;
 
 // Under `-version=BytecodeCount` (the `bin/sb-count` build), every handler
@@ -1102,9 +1106,8 @@ public struct Function {
     // `callee` and `state`.
     package CallSite.FastCall windowFacts;
 
-    // Tier-up (issue #873, P1d). Both are zero when the function is made.
-    // `jitHeat` wraps around after `jitThreshold` events; `jitState` is a
-    // `JitTier`.
+    // Tier-up. `jitHeat` wraps around after `jitThreshold` events; `jitState`
+    // is a `JitTier`.
     package uint jitHeat;
     package uint jitState;
 
@@ -1284,7 +1287,7 @@ public struct Vm {
             &_frames, frame.base, returnPlace);
         initializeClosure(&function_, frame.base, &_frames);
         initializeWindow(&function_, frame.base, &_frames);
-        countCall(&function_);
+        countCallIfOn(&function_);
         auto pc = function_.instructions.ptr;
         dispatch(pc, frame.base, returnPlace, &function_, &_frames, &this);
     }
@@ -2017,7 +2020,10 @@ private alias opCallGeneral =
     executeCall!(runCall, OperandKind.result, OperandKind.immediate);
 
 // Every call that is not a window call: `opCallSlow` takes it.
-public const(Instruction)* opCall(
+public alias opCall = callGeneral!false;
+
+// `counted` makes the twin that counts the calls it makes (see `Counting`).
+private const(Instruction)* callGeneral(bool counted)(
     const(Instruction)* pc,
     Activation* active,
     DispatchState* state,
@@ -2029,7 +2035,7 @@ public const(Instruction)* opCall(
         static __gshared CountSlot slot;
         countExecution(&slot, "opCall");
     }
-    return opCallSlow(pc, active, state, frame, r0, fp0);
+    return opCallSlow!counted(pc, active, state, frame, r0, fp0);
 }
 
 // Where a call writes its result, which the compiler knows when it chooses
@@ -2051,7 +2057,8 @@ public alias opCallWindowDiscard = callWindow!(Destination.discard);
 // committed frame stack, take `opCallSlow`. In a chained build it ends with a
 // tail call to the callee's first handler, so it keeps no value in a
 // callee-saved register over that call.
-private const(Instruction)* callWindow(Destination destination)(
+private const(Instruction)* callWindow(Destination destination,
+    bool counted = false)(
     const(Instruction)* pc,
     Activation* active,
     DispatchState* state,
@@ -2069,9 +2076,9 @@ private const(Instruction)* callWindow(Destination destination)(
     const fast = &site.fast;
     if (atomicLoad!(MemoryOrder.acq)(
             *cast(shared(uint)*) &fast.state) != CallSite.FastCall.State.ready)
-        return opCallSlow(pc, active, state, frame, r0, fp0);
+        return opCallSlow!counted(pc, active, state, frame, r0, fp0);
 
-    return enterWindow!(destination, false)(
+    return enterWindow!(destination, false, counted)(
         pc, active, state, frame, r0, fp0, site, fast, fast.callee, 0);
 }
 
@@ -2088,7 +2095,8 @@ public alias opCallIndirectWindowDiscard =
 // reads the window as it is, the call enters that function like a window
 // call. Any other value, and a callee that the window does not fit, take
 // `opCallSlow`, which reads the arguments from the window.
-private const(Instruction)* callIndirectWindow(Destination destination)(
+private const(Instruction)* callIndirectWindow(Destination destination,
+    bool counted = false)(
     const(Instruction)* pc,
     Activation* active,
     DispatchState* state,
@@ -2113,10 +2121,10 @@ private const(Instruction)* callIndirectWindow(Destination destination)(
         state.decodedAddress = address;
         state.decodedWord = callee;
         state.decodedAdjustment = adjustment;
-        return opCallSlow(pc, active, state, frame, r0, fp0);
+        return opCallSlow!counted(pc, active, state, frame, r0, fp0);
     }
 
-    return enterWindow!(destination, true)(
+    return enterWindow!(destination, true, counted)(
         pc, active, state, frame, r0, fp0, site, &callee.windowFacts, callee,
         adjustment);
 }
@@ -2124,7 +2132,8 @@ private const(Instruction)* callIndirectWindow(Destination destination)(
 // Links the activation of `fast.callee` in the window of `site` and enters
 // it. `adjustment` is added to the context slot of the callee.
 pragma(inline, true)
-private const(Instruction)* enterWindow(Destination destination, bool indirect)(
+private const(Instruction)* enterWindow(Destination destination, bool indirect,
+    bool counted)(
     const(Instruction)* pc,
     Activation* active,
     DispatchState* state,
@@ -2144,7 +2153,7 @@ private const(Instruction)* enterWindow(Destination destination, bool indirect)(
         "a window activation lies on the alignment of the frame stack's top");
     if (!frames.claimFast(cast(ubyte*) activation + fast.frameBytes,
             cast(ubyte*) activation + fast.reachBytes))
-        return opCallSlow(pc, active, state, frame, r0, fp0);
+        return opCallSlow!counted(pc, active, state, frame, r0, fp0);
 
     // The position of a throw selects its handler, and the new activation
     // resumes this one.
@@ -2175,7 +2184,8 @@ private const(Instruction)* enterWindow(Destination destination, bool indirect)(
     *cast(void**) (calleeFrame + fast.placeStore) = place;
     *cast(ubyte**) (calleeFrame + fast.windowStore) =
         cast(ubyte*) activation + fast.windowBase;
-    countCall(callee);
+    static if (counted)
+        countCall(callee);
     activation.pc = callee.instructions.ptr;
     activation.function_ = callee;
     activation.cleanupMark = frames.cleanupMark;
@@ -2325,7 +2335,7 @@ private const(Instruction)* opCallDirectWide(
 // Every call `opCall` does not take. A native site is a direct word call
 // when it can be; any other call goes to `opCallPlain`.
 pragma(inline, false)
-private const(Instruction)* opCallSlow(
+private const(Instruction)* opCallSlow(bool counted = false)(
     const(Instruction)* pc,
     Activation* active,
     DispatchState* state,
@@ -2342,7 +2352,7 @@ private const(Instruction)* opCallSlow(
                 *cast(shared(uint)*) &nativeSite.directState)
                 != CallSite.DirectState.general)
         return opCallNative(nativeSite, pc, active, state, frame, r0, fp0);
-    return opCallPlain(pc, active, state, frame, r0, fp0);
+    return opCallPlain!counted(pc, active, state, frame, r0, fp0);
 }
 
 // `opCallPlain` for `opCallNative`, as a call and not a second copy of the
@@ -2363,7 +2373,7 @@ private const(Instruction)* opCallNotDirect(
 // holds it inline, so that a call that is not native pays for no extra
 // call.
 pragma(inline, true)
-private const(Instruction)* opCallPlain(
+private const(Instruction)* opCallPlain(bool counted = false)(
     const(Instruction)* pc,
     Activation* active,
     DispatchState* state,
@@ -2400,7 +2410,8 @@ private const(Instruction)* opCallPlain(
     *cast(void**) (calleeFrame + fast.placeStore) = place;
     *cast(ubyte**) (calleeFrame + fast.windowStore) =
         cast(ubyte*) activation + fast.windowBase;
-    countCall(fast.callee);
+    static if (counted)
+        countCall(fast.callee);
     activation.pc = fast.callee.instructions.ptr;
     activation.function_ = fast.callee;
     activation.cleanupMark = frames.cleanupMark;
@@ -2626,7 +2637,7 @@ private const(Instruction)* callFunction(bool redirected = false, Decoded)(
         execution.frames, activation.frame,
         site.returnWidth == 0 ? null : execution.destination);
     initializeWindow(callee, activation.frame, execution.frames);
-    countCall(callee);
+    countCallIfOn(callee);
     activation.pc = callee.instructions.ptr;
     activation.function_ = callee;
     activation.cleanupMark = execution.frames.cleanupMark;
@@ -4087,7 +4098,7 @@ package RegisterFamily fusedRegisterFamily(
 // register, writes its result to it, or both; null when there is none.
 package Instruction.Handler registerForm(
     Instruction.Handler handler, in bool fromRegister, in bool toRegister,
-) {
+) nothrow @nogc {
     static foreach (triple; registerNames)
         static foreach (constant; [false, true])
             if (handler is mixin("&" ~ triple[0] ~ (constant ? "K" : "")))
@@ -5293,10 +5304,235 @@ private const(Specialisation)* lookupSpecialisation(
 }
 
 
-// Prototype template JIT (issue #873, P1): classification of the handlers that
-// have a template. See `jit.d`.
-import snakebite.backends.bytecode.jit: JitOp, JKind, jitFunction, Scratch;
+// The JIT: tier-up, counting and the classification of handlers. The code
+// generator is `jit.d`; docs/adr/0016-template-jit.md explains the design.
+// A build for another platform or compiler (`jitSupported`) has none of this.
 
+static if (jitSupported) {
+
+import core.memory: GC;
+import snakebite.backends.bytecode.jit: JitOp, JKind, jitFunction, jitUsable,
+    Scratch, tryLock, unlock;
+
+// An event is a guest call of a function or an execution of one of its
+// backward branches. A function with this many events gets JIT code. The
+// counting adds `jitStep` to `Function.jitHeat`, so that the 32-bit sum carries
+// out at the threshold.
+package enum jitThreshold = 256;
+private enum jitStep = cast(uint) ((1UL << 32) / jitThreshold);
+
+// Whether new functions are made to count. Set once before the first
+// function compiles; functions that already compiled keep what they have.
+private __gshared bool jitSelected = true;
+// What `Function.jitHeat` starts with.
+private __gshared uint jitInitialHeat;
+
+// `bin/sb --no-jit`: no counting twin is installed and nothing becomes JIT
+// code.
+public void selectJit(in bool on) nothrow @nogc {
+    jitSelected = on;
+}
+
+package bool jitEnabled() nothrow @nogc {
+    return jitSelected;
+}
+
+// A test hook: with `on`, every function that compiles from now on gets JIT
+// code at its first event, so that the tests run mostly on JIT code.
+public void jitCompileOnFirstEvent(in bool on) nothrow @nogc {
+    jitInitialHeat = on ? cast(uint) -jitStep : 0;
+}
+
+package uint jitStartHeat() nothrow @nogc {
+    return jitInitialHeat;
+}
+
+pragma(inline, true)
+private bool addHeat(Function* function_, uint step) {
+    import core.checkedint: addu;
+
+    bool overflow;
+    function_.jitHeat = addu(function_.jitHeat, step, overflow);
+    return overflow;
+}
+
+pragma(inline, true)
+private void countCall(const(Function)* callee) {
+    auto function_ = cast(Function*) callee;
+    if (addHeat(function_, jitStep))
+        jitTierUp(function_);
+}
+
+// For the paths that cannot know at compile time whether the JIT is on.
+pragma(inline, true)
+private void countCallIfOn(const(Function)* callee) {
+    if (jitSelected)
+        countCall(callee);
+}
+
+package bool isCountedCall(in Instruction.Handler handler) nothrow @nogc {
+    static foreach (operation; AliasSeq!(
+        opCall, opCallWindowFrame, opCallWindowIndirect, opCallWindowDiscard,
+        opCallIndirectWindowFrame, opCallIndirectWindowIndirect,
+        opCallIndirectWindowDiscard,
+    ))
+        if (handler is &operation)
+            return true;
+    return false;
+}
+
+// Whether the code in `function_` runs as JIT code, for tests.
+version (unittest)
+package bool jitCompiled(const(Function)* function_) {
+    import core.atomic: atomicLoad, MemoryOrder;
+    return atomicLoad!(MemoryOrder.acq)(
+        *cast(shared(uint)*) &function_.jitState) == JitTier.compiled;
+}
+
+// `original` with a count of the event in front of it. The slow path is a
+// call of its own, so that the counting path has no stack frame, and the step
+// is an immediate: the count is a load of the function, an add and a branch.
+private const(Instruction)* countedHandler(alias original)(
+    const(Instruction)* pc,
+    Activation* active,
+    DispatchState* state,
+    ubyte* frame,
+    ulong r0,
+    double fp0,
+) {
+    if (addHeat(cast(Function*) active.function_, jitStep))
+        return countedTierUp!original(pc, active, state, frame, r0, fp0);
+    return original(pc, active, state, frame, r0, fp0);
+}
+
+pragma(inline, false)
+private const(Instruction)* countedTierUp(alias original)(
+    const(Instruction)* pc,
+    Activation* active,
+    DispatchState* state,
+    ubyte* frame,
+    ulong r0,
+    double fp0,
+) {
+    if (jitTierUp(cast(Function*) active.function_)) {
+        // The word of this instruction now holds JIT code.
+        import core.atomic: atomicLoad, MemoryOrder;
+        const compiled = cast(Instruction.Handler) atomicLoad!(MemoryOrder.acq)(
+            *cast(shared(size_t)*) &pc.handler);
+        return compiled(pc, active, state, frame, r0, fp0);
+    }
+    return original(pc, active, state, frame, r0, fp0);
+}
+
+// Handler pairs, found by the address of the key.
+private struct HandlerPair {
+    Instruction.Handler key;
+    Instruction.Handler value;
+}
+
+private enum pairSlots = 1024;
+// An instruction that counts its event, by its handler; and back.
+private __gshared HandlerPair[pairSlots] countedOf;
+private __gshared HandlerPair[pairSlots] uncountedOf;
+
+private size_t pairSlot(in Instruction.Handler handler) nothrow @nogc {
+    return ((cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL) >> 20)
+        & (pairSlots - 1);
+}
+
+private void pairPut(ref HandlerPair[pairSlots] table,
+    Instruction.Handler key, Instruction.Handler value) nothrow @nogc
+{
+    auto slot = pairSlot(key);
+    while (table[slot].key !is null && table[slot].key !is key)
+        slot = (slot + 1) & (pairSlots - 1);
+    table[slot] = HandlerPair(key, value);
+}
+
+private Instruction.Handler pairGet(ref const HandlerPair[pairSlots] table,
+    in Instruction.Handler key) nothrow @nogc
+{
+    auto slot = pairSlot(key);
+    while (table[slot].key !is null) {
+        if (table[slot].key is key)
+            return table[slot].value;
+        slot = (slot + 1) & (pairSlots - 1);
+    }
+    return null;
+}
+
+private void addCounted(Instruction.Handler original,
+    Instruction.Handler counted)
+{
+    pairPut(countedOf, original, counted);
+    pairPut(uncountedOf, counted, original);
+}
+
+private shared bool countedTablesReady;
+private shared int countedTablesLock;
+
+// Builds the tables of the counting twins, once, even when several threads
+// compile. A twin is made for each handler of a branch and of a call.
+private void ensureCountedTables() {
+    import core.atomic: atomicLoad, atomicStore, cas, MemoryOrder;
+
+    if (atomicLoad!(MemoryOrder.acq)(countedTablesReady))
+        return;
+    while (!cas(&countedTablesLock, 0, 1)) {}
+    if (!countedTablesReady) {
+        buildCountedTables;
+        atomicStore!(MemoryOrder.rel)(countedTablesReady, true);
+    }
+    atomicStore(countedTablesLock, 0);
+}
+
+private void buildCountedTables() {
+    addCounted(&opJump, &countedHandler!opJump);
+    addCounted(&opBranchFalse, &countedHandler!opBranchFalse);
+    addCounted(&opBranchTrue, &countedHandler!opBranchTrue);
+    static foreach (comparison; EnumMembers!Comparison)
+        static foreach (kind; EnumMembers!CompareKind)
+            static foreach (jumpWhen; [false, true])
+                static foreach (constant; [false, true]) {
+                    addCounted(fusedBranchHandler(comparison, kind, jumpWhen,
+                            constant),
+                        &countedHandler!(opFusedBranch!(comparison, kind,
+                            jumpWhen, constant)));
+                    addCounted(fusedRegisterHandlers[fusedIndex(comparison,
+                            kind, jumpWhen, constant)],
+                        &countedHandler!(opFusedBranchR!(comparison, kind,
+                            jumpWhen, constant)));
+                }
+    static foreach (destination; EnumMembers!Destination) {
+        addCounted(&callWindow!destination,
+            &callWindow!(destination, true));
+        addCounted(&callIndirectWindow!destination,
+            &callIndirectWindow!(destination, true));
+    }
+    addCounted(&callGeneral!false, &callGeneral!true);
+}
+
+// Replaces the handler of each of `instructions[indices]` by its counting
+// twin. `indices` are the backward branches and the calls. A handler with no
+// twin stays: that instruction does not count.
+package void jitCountEvents(Instruction[] instructions,
+    const(size_t)[] indices)
+{
+    if (indices.length == 0)
+        return;
+    ensureCountedTables;
+    foreach (index; indices) {
+        const counted = pairGet(countedOf, instructions[index].handler);
+        if (counted !is null)
+            instructions[index].handler = cast(Instruction.Handler) counted;
+    }
+}
+
+// What a function is in: `compiling` while one thread makes its code, and
+// `failed` when it cannot have any.
+private enum JitTier : uint { interpreted, compiling, compiled, failed }
+
+// The handlers that have a template, with how to emit them.
 private struct JitEntry {
     Instruction.Handler handler;
     JitOp op;
@@ -5304,56 +5540,13 @@ private struct JitEntry {
 
 private enum jitSlots = 16384;
 private __gshared JitEntry[jitSlots] jitTable;
-private shared bool jitTableReady;
-private __gshared bool jitEnabledFlag;
-private __gshared bool jitChecked;
 
-// The step added to `Function.jitHeat` for each event: 2^32 / threshold, so
-// that the sum carries out after `threshold` events. Zero while the JIT is
-// off, so that nothing ever carries.
-package __gshared uint jitStep;
-// The step of a guest call: `jitStep` times SNAKEBITE_JIT_CALL_WEIGHT.
-package __gshared uint jitCallStep;
-private __gshared uint jitThreshold = 256;
-
-version (X86_64)
-    private enum isX86_64 = true;
-else
-    private enum isX86_64 = false;
-
-package bool jitEnabled() {
-    import core.stdc.stdlib: getenv, atoi;
-
-    if (!jitChecked) {
-        const value = getenv("SNAKEBITE_JIT");
-        jitEnabledFlag = isX86_64 && value !is null && value[0] == '1';
-        if (jitEnabledFlag) {
-            const threshold = getenv("SNAKEBITE_JIT_THRESHOLD");
-            if (threshold !is null)
-                jitThreshold = atoi(threshold);
-            if (jitThreshold < 2)
-                jitThreshold = 2;
-            ensureJitTable;
-            jitStep = cast(uint) (((1UL << 32) + jitThreshold - 1)
-                / jitThreshold);
-            jitCallStep = jitStep;
-            const weight = getenv("SNAKEBITE_JIT_CALL_WEIGHT");
-            if (weight !is null && atoi(weight) > 1) {
-                const product = cast(ulong) jitStep * atoi(weight);
-                jitCallStep = product > uint.max ? uint.max : cast(uint) product;
-            }
-        }
-        jitChecked = true;
-    }
-    return jitEnabledFlag;
-}
-
-private size_t jitSlot(in Instruction.Handler handler) {
+private size_t jitSlot(in Instruction.Handler handler) nothrow @nogc {
     return ((cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL) >> 20)
         & (jitSlots - 1);
 }
 
-private void jitPut(Instruction.Handler handler, JitOp op) {
+private void jitPut(Instruction.Handler handler, JitOp op) nothrow @nogc {
     if (handler is null)
         return;
     auto slot = jitSlot(handler);
@@ -5362,7 +5555,7 @@ private void jitPut(Instruction.Handler handler, JitOp op) {
     jitTable[slot] = JitEntry(handler, op);
 }
 
-private JitOp jitGet(in Instruction.Handler handler) {
+private JitOp jitGet(in Instruction.Handler handler) nothrow @nogc {
     if (handler is null)
         return JitOp.init;
     auto slot = jitSlot(handler);
@@ -5374,14 +5567,14 @@ private JitOp jitGet(in Instruction.Handler handler) {
     return JitOp.init;
 }
 
-private string quotedSymbol(string text) {
+private string quotedSymbol(string text) nothrow @nogc {
     size_t end = 1;
     while (text[end] != '"')
         ++end;
     return text[1 .. end];
 }
 
-private ubyte aluCodeOf(string symbol) {
+private ubyte aluCodeOf(string symbol) nothrow @nogc {
     switch (symbol) {
         case "+": return 0;
         case "|": return 1;
@@ -5393,7 +5586,7 @@ private ubyte aluCodeOf(string symbol) {
     }
 }
 
-private ubyte fpCodeOf(string symbol) {
+private ubyte fpCodeOf(string symbol) nothrow @nogc {
     switch (symbol) {
         case "+": return 0;
         case "-": return 1;
@@ -5402,7 +5595,7 @@ private ubyte fpCodeOf(string symbol) {
     }
 }
 
-private ubyte comparisonOf(string symbol) {
+private ubyte comparisonOf(string symbol) nothrow @nogc {
     foreach (index, candidate; comparisonSymbols)
         if (candidate == symbol)
             return cast(ubyte) index;
@@ -5410,7 +5603,7 @@ private ubyte comparisonOf(string symbol) {
 }
 
 private JitOp jop(JKind kind, ubyte a = 0, ubyte b = 0, ubyte c = 0,
-    ubyte d = 0, ubyte e = 0, ubyte w = 0)
+    ubyte d = 0, ubyte e = 0, ubyte w = 0) nothrow @nogc
 {
     JitOp op;
     op.kind = kind;
@@ -5418,7 +5611,7 @@ private JitOp jop(JKind kind, ubyte a = 0, ubyte b = 0, ubyte c = 0,
     return op;
 }
 
-private void buildJitTable() {
+private void buildJitTable() nothrow @nogc {
     static foreach (triple; threeAddressNames) {{
         enum symbol = quotedSymbol(triple[2]);
         static foreach (constant; [false, true]) {{
@@ -5532,170 +5725,19 @@ private void buildJitTable() {
                         sourceSize, 0, 0, 0, destSize));
 }
 
-private shared int jitTableLock;
 
-// Builds the tables once, even when several threads compile.
-private void ensureJitTable() {
-    import core.atomic: atomicLoad, atomicStore, cas, MemoryOrder;
-    if (atomicLoad!(MemoryOrder.acq)(jitTableReady))
-        return;
-    while (!cas(&jitTableLock, 0, 1)) {}
+private shared bool jitTableReady;
+
+// The tables that classify handlers. Built once, by the first thread that
+// compiles, under the JIT lock; they are read only under it.
+private bool ensureJitTables() nothrow @nogc {
     if (!jitTableReady) {
         buildJitTable;
-        buildCountedTables;
-        buildUnspecialiseTable;
-        atomicStore!(MemoryOrder.rel)(jitTableReady, true);
+        if (!buildUnspecialiseTable)
+            return false;
+        jitTableReady = true;
     }
-    atomicStore(jitTableLock, 0);
-}
-
-private Scratch!JitOp jitOpScratch;
-private Scratch!Instruction jitSnapshotScratch;
-private Scratch!(Instruction.Handler) jitOriginalScratch;
-
-// Tier-up (issue #873, P1d). An event is a guest call of a function, or an
-// execution of one of its backward branches. Each adds `jitStep` to
-// `Function.jitHeat`; the carry out of the 32-bit sum, after `jitThreshold`
-// events, makes `jitTierUp` compile the function. Nothing is made for a
-// function when it is compiled to bytecode, except that the compiler swaps
-// the handler of each backward branch for its counting twin (`countedHandler`,
-// found in `countedOf`). The snapshot and the original handlers the JIT needs
-// are rebuilt from the instructions at tier-up.
-private enum JitTier : uint { interpreted, compiling, compiled, failed }
-
-private struct HandlerPair {
-    Instruction.Handler key;
-    Instruction.Handler value;
-}
-
-private enum pairSlots = 1024;
-private __gshared HandlerPair[pairSlots] countedOf;
-private __gshared HandlerPair[pairSlots] uncountedOf;
-
-private size_t pairSlot(in Instruction.Handler handler) {
-    return ((cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL) >> 20)
-        & (pairSlots - 1);
-}
-
-private void pairPut(ref HandlerPair[pairSlots] table,
-    Instruction.Handler key, Instruction.Handler value)
-{
-    auto slot = pairSlot(key);
-    while (table[slot].key !is null && table[slot].key !is key)
-        slot = (slot + 1) & (pairSlots - 1);
-    table[slot] = HandlerPair(key, value);
-}
-
-private Instruction.Handler pairGet(ref const HandlerPair[pairSlots] table,
-    in Instruction.Handler key)
-{
-    auto slot = pairSlot(key);
-    while (table[slot].key !is null) {
-        if (table[slot].key is key)
-            return table[slot].value;
-        slot = (slot + 1) & (pairSlots - 1);
-    }
-    return null;
-}
-
-pragma(inline, true)
-private bool addHeat(Function* function_, uint step) {
-    import core.checkedint: addu;
-
-    bool overflow;
-    function_.jitHeat = addu(function_.jitHeat, step, overflow);
-    return overflow;
-}
-
-pragma(inline, true)
-private void countCall(const(Function)* callee) {
-    auto function_ = cast(Function*) callee;
-    if (addHeat(function_, jitCallStep))
-        jitTierUp(function_);
-}
-
-// `original` with a count of the event in front of it. The slow path is a
-// call of its own, so that the counting path has no stack frame.
-private const(Instruction)* countedHandler(alias original)(
-    const(Instruction)* pc,
-    Activation* active,
-    DispatchState* state,
-    ubyte* frame,
-    ulong r0,
-    double fp0,
-) {
-    if (addHeat(cast(Function*) active.function_, jitStep))
-        return countedTierUp!original(pc, active, state, frame, r0, fp0);
-    return original(pc, active, state, frame, r0, fp0);
-}
-
-pragma(inline, false)
-private const(Instruction)* countedTierUp(alias original)(
-    const(Instruction)* pc,
-    Activation* active,
-    DispatchState* state,
-    ubyte* frame,
-    ulong r0,
-    double fp0,
-) {
-    if (jitTierUp(cast(Function*) active.function_)) {
-        // The word of this instruction now holds JIT code.
-        import core.atomic: atomicLoad, MemoryOrder;
-        const compiled = cast(Instruction.Handler) atomicLoad!(MemoryOrder.acq)(
-            *cast(shared(size_t)*) &pc.handler);
-        return compiled(pc, active, state, frame, r0, fp0);
-    }
-    return original(pc, active, state, frame, r0, fp0);
-}
-
-private void addCounted(Instruction.Handler original,
-    Instruction.Handler counted)
-{
-    pairPut(countedOf, original, counted);
-    pairPut(uncountedOf, counted, original);
-}
-
-private void buildCountedTables() {
-    addCounted(&opJump, &countedHandler!opJump);
-    addCounted(&opBranchFalse, &countedHandler!opBranchFalse);
-    addCounted(&opBranchTrue, &countedHandler!opBranchTrue);
-    static foreach (comparison; EnumMembers!Comparison)
-        static foreach (kind; EnumMembers!CompareKind)
-            static foreach (jumpWhen; [false, true])
-                static foreach (constant; [false, true]) {
-                    addCounted(fusedBranchHandler(comparison, kind, jumpWhen,
-                            constant),
-                        &countedHandler!(opFusedBranch!(comparison, kind,
-                            jumpWhen, constant)));
-                    addCounted(fusedRegisterHandlers[fusedIndex(comparison,
-                            kind, jumpWhen, constant)],
-                        &countedHandler!(opFusedBranchR!(comparison, kind,
-                            jumpWhen, constant)));
-                }
-}
-
-// Backward branches seen at tier-up, by whether they had a counting twin.
-// Printed with the JIT stats.
-package __gshared size_t jitBackEdgesCounted, jitBackEdgesMissed;
-package __gshared Instruction.Handler[8] jitMissedHandlers;
-
-// Replaces the handler of each of `instructions[indices]` by its counting
-// twin. A handler with no twin stays: that branch is not counted.
-package void jitCountBackEdges(Instruction[] instructions,
-    const(size_t)[] indices)
-{
-    foreach (index; indices) {
-        auto counted = pairGet(countedOf, instructions[index].handler);
-        if (counted !is null) {
-            instructions[index].handler = counted;
-            ++jitBackEdgesCounted;
-        } else {
-            if (jitBackEdgesMissed < jitMissedHandlers.length)
-                jitMissedHandlers[jitBackEdgesMissed] =
-                    instructions[index].handler;
-            ++jitBackEdgesMissed;
-        }
-    }
+    return true;
 }
 
 // How `specialiseHandlers` made a handler: the general handler, and the
@@ -5709,9 +5751,9 @@ private struct Unspecialised {
 }
 
 private __gshared Unspecialised[] unspecialised;
-package __gshared size_t jitAmbiguous;
 
-private void buildUnspecialiseTable() {
+// False if the memory for the table is missing.
+private bool buildUnspecialiseTable() nothrow @nogc {
     import core.stdc.stdlib: calloc;
 
     size_t count;
@@ -5724,8 +5766,10 @@ private void buildUnspecialiseTable() {
     size_t capacity = 1024;
     while (capacity < 2 * count)
         capacity *= 2;
-    auto table = (cast(Unspecialised*) calloc(capacity,
-        Unspecialised.sizeof))[0 .. capacity];
+    auto memory = cast(Unspecialised*) calloc(capacity, Unspecialised.sizeof);
+    if (memory is null)
+        return false;
+    auto table = memory[0 .. capacity];
 
     void put(Instruction.Handler handler, Instruction.Handler general,
         ubyte mask)
@@ -5739,7 +5783,6 @@ private void buildUnspecialiseTable() {
         if (table[slot].handler is handler) {
             if (table[slot].general !is general || table[slot].mask != mask) {
                 table[slot].ambiguous = true;
-                ++jitAmbiguous;
             }
             return;
         }
@@ -5758,10 +5801,11 @@ private void buildUnspecialiseTable() {
                     put(handler, entry.general, cast(ubyte) (mask + 1));
     }
     unspecialised = table;
+    return true;
 }
 
 // The instruction as it was before `specialiseHandlers`.
-private bool unspecialise(ref Instruction instruction) {
+private bool unspecialise(ref Instruction instruction) nothrow @nogc {
     const capacity = unspecialised.length;
     auto slot = ((cast(size_t) instruction.handler * 0x9E37_79B9_7F4A_7C15UL)
         >> 20) & (capacity - 1);
@@ -5784,10 +5828,18 @@ private bool unspecialise(ref Instruction instruction) {
     return true;
 }
 
-// Compiles `function_` once; returns true when it has JIT code. Only one
-// thread compiles: a thread that loses runs the interpreter.
+// The buffers of one compile. They belong to the JIT lock.
+private __gshared Scratch!JitOp jitOpScratch;
+private __gshared Scratch!Instruction jitSnapshotScratch;
+private __gshared Scratch!(Instruction.Handler) jitOriginalScratch;
+
+// Makes JIT code for `function_`, once; returns true when it has JIT code. A
+// thread that loses the race, finds the JIT busy, or is in a GC finalizer,
+// runs the handlers: it does not wait, because the thread that holds the
+// lock can be one that the GC suspended. The function then counts another
+// `jitThreshold` events and tries again.
 pragma(inline, false)
-private bool jitTierUp(Function* function_) {
+private bool jitTierUp(Function* function_) nothrow @nogc {
     import core.atomic: atomicLoad, atomicStore, cas, MemoryOrder;
 
     auto state = cast(shared(uint)*) &function_.jitState;
@@ -5797,18 +5849,42 @@ private bool jitTierUp(Function* function_) {
     if (!cas(state, cast(uint) JitTier.interpreted,
             cast(uint) JitTier.compiling))
         return false;
+    // A guest destructor in a GC finalizer can make a function hot. The
+    // function keeps its handlers until a later event outside the finalizer.
+    if (GC.inFinalizer || !tryLock) {
+        atomicStore!(MemoryOrder.rel)(*state, cast(uint) JitTier.interpreted);
+        return false;
+    }
+    scope (exit)
+        unlock;
 
+    const ok = compileUnderLock(function_);
+    atomicStore!(MemoryOrder.rel)(*state,
+        cast(uint) (ok ? JitTier.compiled : JitTier.failed));
+    return ok;
+}
+
+private bool compileUnderLock(Function* function_) nothrow @nogc {
+    if (!jitUsable || !ensureJitTables)
+        return false;
     auto instructions = function_.instructions;
     const n = instructions.length;
-    auto snapshot = jitSnapshotScratch.reserve(n)[0 .. n];
-    auto ops = jitOpScratch.reserve(n)[0 .. n];
-    auto originals = jitOriginalScratch.reserve(n)[0 .. n];
-    bool ok = true;
+    auto snapshotMemory = jitSnapshotScratch.reserve(n);
+    auto opMemory = jitOpScratch.reserve(n);
+    auto originalMemory = jitOriginalScratch.reserve(n);
+    if (snapshotMemory is null || opMemory is null || originalMemory is null)
+        return false;
+    auto snapshot = snapshotMemory[0 .. n];
+    auto ops = opMemory[0 .. n];
+    auto originals = originalMemory[0 .. n];
     foreach (index; 0 .. n) {
         auto handler = instructions[index].handler;
+        // The code of a branch does not count; a call keeps its twin, which
+        // counts the callee.
         if (handler !is null) {
             if (auto original = pairGet(uncountedOf, handler))
-                handler = original;
+                if (!isCountedCall(original))
+                    handler = original;
         }
         originals[index] = handler;
         snapshot[index] = instructions[index];
@@ -5817,14 +5893,44 @@ private bool jitTierUp(Function* function_) {
             ops[index] = JitOp.init;
             continue;
         }
+        // A handler of a call, as installed, has no template; the general
+        // handler that `specialiseHandlers` replaced is what has one.
         if (!unspecialise(snapshot[index]))
-            ok = false;
+            return false;
         ops[index] = jitGet(snapshot[index].handler);
     }
-    if (ok)
-        ok = jitFunction(instructions, snapshot, ops, originals,
-            function_.constants, "jit");
-    atomicStore!(MemoryOrder.rel)(*state,
-        cast(uint) (ok ? JitTier.compiled : JitTier.failed));
-    return ok;
+    return jitFunction(instructions, snapshot, ops, originals,
+        function_.constants);
+}
+
+} else {
+
+package bool jitEnabled() pure nothrow @nogc @safe {
+    return false;
+}
+
+public void selectJit(in bool) pure nothrow @nogc @safe {}
+
+public void jitCompileOnFirstEvent(in bool) pure nothrow @nogc @safe {}
+
+package uint jitStartHeat() pure nothrow @nogc @safe {
+    return 0;
+}
+
+package bool isCountedCall(in Instruction.Handler) pure nothrow @nogc @safe {
+    return false;
+}
+
+package void jitCountEvents(Instruction[], const(size_t)[])
+    pure nothrow @nogc @safe {}
+
+private void countCall(const(Function)*) pure nothrow @nogc @safe {}
+
+private void countCallIfOn(const(Function)*) pure nothrow @nogc @safe {}
+
+version (unittest)
+package bool jitCompiled(const(Function)*) pure nothrow @nogc @safe {
+    return false;
+}
+
 }

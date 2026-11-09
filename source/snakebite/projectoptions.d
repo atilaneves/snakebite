@@ -4,6 +4,10 @@ module snakebite.projectoptions;
 private:
 
 
+// What `--no-jit` does, for the help of every tool that takes it.
+public enum noJitHelp =
+    "Run the bytecode backend's handlers only; make no JIT code.";
+
 // The options that `bin/sb` and `bin/bench` both take to describe the
 // project to run.
 public struct ProjectOptions {
@@ -11,6 +15,7 @@ public struct ProjectOptions {
     public string[] stringImportPaths; // ditto
     public string[] versions;
     public bool lowmem;
+    public bool noJit;
     // What follows `--` on the command line: the arguments of the program.
     public string[] programArguments;
 }
@@ -44,6 +49,7 @@ public auto parseProjectOptions(Own...)(
         "version", "Define a version identifier (repeatable).",
             &options.versions,
         "lowmem", lowmemHelp, &options.lowmem,
+        "no-jit", noJitHelp, &options.noJit,
         own,
     );
 }
