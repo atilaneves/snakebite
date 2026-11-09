@@ -21,7 +21,8 @@ import core.sys.posix.sys.mman;
 import core.sys.posix.time: clock_gettime, timespec, CLOCK_MONOTONIC;
 import core.sys.posix.unistd: getpid;
 
-import snakebite.backends.bytecode.vm: Instruction, indirectBit;
+import snakebite.backends.bytecode.vm: Instruction, indirectBit,
+    DispatchState, chainedDispatch;
 
 package enum JKind : ubyte {
     none, copy, constant, zero, jump, branch, int3, cmp3, fused, fp3, fpcmp3,
@@ -42,7 +43,25 @@ private enum : ubyte {
     R11 = 11,
 }
 
-private enum FRAME = RCX;
+// The registers of `Instruction.Handler`, by the compiler that built the VM:
+// a build has one compiler, and its handlers use that compiler's convention.
+// LDC gives System V order: pc rdi, activation rsi, state rdx, frame rcx,
+// r0 r8, fp0 xmm0. DMD's `extern(D)` reverses the integer parameters: pc r8,
+// activation rcx, state rdx, frame rsi, r0 rdi, fp0 xmm0. `SC2` is a scratch
+// register: the one that holds `pc` on entry, which the code never reads.
+// Scratch registers are rax, SC2, r9, r10, r11, xmm1 and xmm2 in both maps.
+version (DigitalMars) {
+    private enum FRAME = RSI;
+    private enum REG0 = RDI;
+    private enum SC2 = R8;
+    private enum PCREG = R8;
+} else {
+    private enum FRAME = RCX;
+    private enum REG0 = R8;
+    private enum SC2 = RDI;
+    private enum PCREG = RDI;
+}
+private enum STATE = RDX;
 
 private struct Mem {
     ubyte base;
@@ -708,12 +727,12 @@ private struct Gen {
                 case 1: a.lea(RAX, s); break;
                 default: a.ld(8, RAX, s);
             }
-            a.ld(8, RDI, r);
+            a.ld(8, SC2, r);
             if (es == 1 || es == 2 || es == 4 || es == 8)
-                a.lea(RAX, Mem(RAX, 0, RDI, cast(ubyte) es));
+                a.lea(RAX, Mem(RAX, 0, SC2, cast(ubyte) es));
             else {
-                a.imulRI(RDI, RDI, cast(int) es);
-                a.aluRR(0, 8, RAX, RDI);
+                a.imulRI(SC2, SC2, cast(int) es);
+                a.aluRR(0, 8, RAX, SC2);
             }
             a.st(8, d, RAX);
             return true;
@@ -758,8 +777,8 @@ private struct Gen {
             Mem d, s;
             if (!opnd(ins.destination, R9, d) || !opnd(ins.source, R10, s))
                 return false;
-            a.ld(8, RDI, s);
-            copyChunks(Mem(RDI, 0), d, size);
+            a.ld(8, SC2, s);
+            copyChunks(Mem(SC2, 0), d, size);
             return true;
         }
 
@@ -770,8 +789,8 @@ private struct Gen {
             Mem d, s;
             if (!opnd(ins.destination, R9, d) || !opnd(ins.source, R10, s))
                 return false;
-            a.ld(8, RDI, d);
-            copyChunks(s, Mem(RDI, 0), size);
+            a.ld(8, SC2, d);
+            copyChunks(s, Mem(SC2, 0), size);
             return true;
         }
 
@@ -885,7 +904,7 @@ private struct Gen {
         size_t rr;
         if (!binary(ins, op.e != 0, op.b != 0, op.c != 0, op.d != 0, d, l, r, rr))
             return false;
-        const acc = op.d ? R8 : RAX;
+        const acc = op.d ? REG0 : RAX;
         int imm = 0;
         bool haveImm;
         if (op.b) {
@@ -895,8 +914,8 @@ private struct Gen {
         const narrowMul = mul && w < 4;
         // Left operand into acc.
         if (op.c) {
-            if (acc != R8)
-                a.movRR64(acc, R8);
+            if (acc != REG0)
+                a.movRR64(acc, REG0);
             if (narrowMul)
                 a.movzxRR(w, acc, acc);
         } else if (narrowMul)
@@ -907,24 +926,24 @@ private struct Gen {
             const mw = w == 8 ? 8 : 4;
             if (op.b) {
                 if (narrowMul || !haveImm) {
-                    a.movI(RDI, constantAt(rr, w));
-                    a.imulRR(mw, acc, RDI);
+                    a.movI(SC2, constantAt(rr, w));
+                    a.imulRR(mw, acc, SC2);
                 } else {
                     a.imulRI(acc, acc, imm);
                     // imulRI is 64-bit; for 4 bytes that is still right in
                     // the low 32 bits.
                 }
             } else if (narrowMul) {
-                a.ldzx(w, RDI, r);
-                a.imulRR(4, acc, RDI);
+                a.ldzx(w, SC2, r);
+                a.imulRR(4, acc, SC2);
             } else
                 a.imulM(mw, acc, r);
         } else if (op.b) {
             if (haveImm)
                 a.aluRI(op.a, w, acc, imm);
             else {
-                a.movI(RDI, constantAt(rr, w));
-                a.aluRR(op.a, w, acc, RDI);
+                a.movI(SC2, constantAt(rr, w));
+                a.aluRR(op.a, w, acc, SC2);
             }
         } else
             a.alu(op.a, w, acc, r);
@@ -949,8 +968,8 @@ private struct Gen {
             if (immOf(w, constantAt(rr, w), imm))
                 a.aluRI(7, w, RAX, imm);
             else {
-                a.movI(RDI, constantAt(rr, w));
-                a.aluRR(7, w, RAX, RDI);
+                a.movI(SC2, constantAt(rr, w));
+                a.aluRR(7, w, RAX, SC2);
             }
         } else
             a.alu(7, w, RAX, r);
@@ -973,7 +992,7 @@ private struct Gen {
                 return false;
             if (!op.d && !opnd(ins.source, R10, r))
                 return false;
-            int leftReg = R8;
+            int leftReg = REG0;
             if (!op.e) {
                 a.ld(w, RAX, l);
                 leftReg = RAX;
@@ -984,8 +1003,8 @@ private struct Gen {
                 if (immOf(w, v, imm))
                     a.aluRI(7, w, leftReg, imm);
                 else {
-                    a.movI(RDI, v);
-                    a.aluRR(7, w, leftReg, RDI);
+                    a.movI(SC2, v);
+                    a.aluRR(7, w, leftReg, SC2);
                 }
             } else
                 a.alu(7, w, leftReg, r);
@@ -1103,12 +1122,12 @@ private struct Gen {
             a.sse(ucomiPrefix, 0x2E, 1, r);
             if (cmp == 4) {
                 a.setccR(CC_E, RAX);
-                a.setccR(CC_NP, RDI);
-                a.aluRR(4, 1, RAX, RDI);
+                a.setccR(CC_NP, SC2);
+                a.aluRR(4, 1, RAX, SC2);
             } else {
                 a.setccR(CC_NE, RAX);
-                a.setccR(CC_P, RDI);
-                a.aluRR(1, 1, RAX, RDI);
+                a.setccR(CC_P, SC2);
+                a.aluRR(1, 1, RAX, SC2);
             }
             a.st(1, d, RAX);
         }
@@ -1152,8 +1171,8 @@ private struct Gen {
                 if (hi <= int.max)
                     a.aluRI(7, 8, RAX, cast(int) hi);
                 else {
-                    a.movI(RDI, hi);
-                    a.aluRR(7, 8, RAX, RDI);
+                    a.movI(SC2, hi);
+                    a.aluRR(7, 8, RAX, SC2);
                 }
             } else
                 a.alu(7, 8, RAX, s); // arrayLengthOffset is 0
@@ -1161,10 +1180,10 @@ private struct Gen {
         }
         if (access != 2) {
             if (op.b)
-                a.lea(RDI, s);
+                a.lea(SC2, s);
             else
-                a.ld(8, RDI, Mem(s.base, s.disp + 8));
-            const element = Mem(RDI, 0, RAX, cast(ubyte) es);
+                a.ld(8, SC2, Mem(s.base, s.disp + 8));
+            const element = Mem(SC2, 0, RAX, cast(ubyte) es);
             if (access == 0) {
                 a.ld(es, R11, element);
                 a.st(es, d, R11);
@@ -1203,14 +1222,16 @@ private struct Gen {
         else
             a.ldzx(w, RAX, l);
         if (op.c)
-            a.movI(RDI, constantAt(rr, w));
+            a.movI(SC2, constantAt(rr, w));
         else
-            a.ldzx(w, RDI, r);
-        a.aluRI(4, 4, RDI, w == 8 ? 63 : 31);
+            a.ldzx(w, SC2, r);
+        a.aluRI(4, 4, SC2, w == 8 ? 63 : 31);
         // shlx, shrx, sarx rax, rax, rdi (BMI2).
         a.b(0xC4);
         a.b(0xE2);
-        a.b(cast(ubyte) (0xC0 | (op.a == 0 ? 1 : op.a == 1 ? 3 : 2)));
+        // W = 1, vvvv = the inverted second source (SC2), L = 0, pp.
+        a.b(cast(ubyte) (0x80 | ((~SC2 & 15) << 3)
+            | (op.a == 0 ? 1 : op.a == 1 ? 3 : 2)));
         a.b(0xF7);
         a.b(0xC0);
         a.st(w, d, RAX);
@@ -1262,8 +1283,18 @@ package bool jitFunction(Instruction[] instructions,
             if (originals[i] is null)
                 g.a.ud2();
             else {
-                // mov rdi, &instruction; mov rax, handler; jmp rax
-                g.a.movI(RDI, cast(size_t) &instructions[i]);
+                // Without chained dispatch the handler returns the next
+                // instruction to `dispatchLoop`, which then passes the
+                // register arguments from `DispatchState`: save r0 and fp0
+                // there first, as `executeRegister` does at its end.
+                static if (!chainedDispatch) {
+                    g.a.st(8, Mem(STATE, cast(int) DispatchState.r0.offsetof),
+                        REG0);
+                    g.a.sse(0xF2, 0x11, 0,
+                        Mem(STATE, cast(int) DispatchState.fp0.offsetof));
+                }
+                // mov pc, &instruction; mov rax, handler; jmp rax
+                g.a.movI(PCREG, cast(size_t) &instructions[i]);
                 g.a.movI(RAX, cast(size_t) originals[i]);
                 g.a.b(0xFF);
                 g.a.b(0xE0);

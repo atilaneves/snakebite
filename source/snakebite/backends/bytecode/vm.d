@@ -673,9 +673,9 @@ package ubyte* operandStorage(ubyte* frame, in size_t operand)
 // Only a compiler that makes the tail call lets the stack stay flat. Other
 // builds return to `dispatchLoop` after each instruction.
 version (LDC) version (D_Optimized)
-    private enum chainedDispatch = true;
+    package enum chainedDispatch = true;
 private static if (!is(typeof(chainedDispatch)))
-    private enum chainedDispatch = false;
+    package enum chainedDispatch = false;
 
 // Under `-version=BytecodeCount` (the `bin/sb-count` build), every handler
 // instantiation owns one counter slot. Its first execution registers the slot;
@@ -1411,7 +1411,7 @@ private struct RootActivation {
     bool noHandlers;
 }
 
-private struct DispatchState {
+package struct DispatchState {
     FrameStack* frames;
     // The activation that runs. A chained build keeps it up to date at every
     // call and return; other builds set it only where a handler can throw.
@@ -5316,12 +5316,17 @@ package __gshared uint jitStep;
 package __gshared uint jitCallStep;
 private __gshared uint jitThreshold = 256;
 
+version (X86_64)
+    private enum isX86_64 = true;
+else
+    private enum isX86_64 = false;
+
 package bool jitEnabled() {
     import core.stdc.stdlib: getenv, atoi;
 
     if (!jitChecked) {
         const value = getenv("SNAKEBITE_JIT");
-        jitEnabledFlag = chainedDispatch && value !is null && value[0] == '1';
+        jitEnabledFlag = isX86_64 && value !is null && value[0] == '1';
         if (jitEnabledFlag) {
             const threshold = getenv("SNAKEBITE_JIT_THRESHOLD");
             if (threshold !is null)
