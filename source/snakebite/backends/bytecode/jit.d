@@ -1101,7 +1101,30 @@ private struct Gen {
 
     // a: 0 left, 1 logical right, 2 arithmetic right.
     bool emitShift(in Instruction ins, in JitOp op) {
-        return false;
+        const w = cast(int) (op.w ? op.w : ins.width);
+        if (!goodWidth(w))
+            return false;
+        Mem d, l, r;
+        size_t rr;
+        if (!binary(ins, op.e != 0, op.c != 0, false, false, d, l, r, rr))
+            return false;
+        if (op.a == 2)
+            a.ldsx(w, RAX, l);
+        else
+            a.ldzx(w, RAX, l);
+        if (op.c)
+            a.movI(RDI, constantAt(rr, w));
+        else
+            a.ldzx(w, RDI, r);
+        a.aluRI(4, 4, RDI, w == 8 ? 63 : 31);
+        // shlx, shrx, sarx rax, rax, rdi (BMI2).
+        a.b(0xC4);
+        a.b(0xE2);
+        a.b(cast(ubyte) (0xC0 | (op.a == 0 ? 1 : op.a == 1 ? 3 : 2)));
+        a.b(0xF7);
+        a.b(0xC0);
+        a.st(w, d, RAX);
+        return true;
     }
 }
 

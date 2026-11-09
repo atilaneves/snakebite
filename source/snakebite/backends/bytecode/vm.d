@@ -5388,6 +5388,10 @@ private void buildJitTable() {
             auto handler = mixin("&" ~ triple[0] ~ suffix);
             static if (triple[1] == "opInt3")
                 jitPut(handler, jop(JKind.int3, aluCodeOf(symbol), constant));
+            else static if (triple[1] == "opShift3")
+                jitPut(handler, jop(JKind.shift,
+                    symbol == "<<" ? 0 : triple[2][$ - 4 .. $] == "true" ? 2 : 1,
+                    0, constant));
             else static if (triple[1] == "opFloat3")
                 jitPut(handler, jop(JKind.fp3, fpCodeOf(symbol), 0, constant));
             else static if (triple[1] == "opCompare3")
@@ -5442,6 +5446,9 @@ private void buildJitTable() {
     jitPut(&opEqual, jop(JKind.cmp3, 4, 0, 0, 0, 1));
     jitPut(&opNotEqual, jop(JKind.cmp3, 5, 0, 0, 0, 1));
 
+    jitPut(&opShiftLeft, jop(JKind.shift, 0, 0, 0, 0, 1));
+    jitPut(&opShiftRightLogical, jop(JKind.shift, 1, 0, 0, 0, 1));
+    jitPut(&opShiftRightArithmetic, jop(JKind.shift, 2, 0, 0, 0, 1));
     jitPut(&opCopy, jop(JKind.copy));
     static foreach (width; 1 .. 17) {
         jitPut(&opCopyFixed!(width, true), jop(JKind.copy, 1, 0, 0, 0, 0, width));
