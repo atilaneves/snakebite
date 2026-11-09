@@ -5884,7 +5884,8 @@ static if (jitSupported) {
             case "-": return JitOp.IntOperation.subtract;
             case "^": return JitOp.IntOperation.xor;
             case "*": return JitOp.IntOperation.multiply;
-            default: assert(false, "an integer operator without a template");
+            default:
+                internalFailure("an integer operator without a template");
         }
     }
 
@@ -5894,7 +5895,8 @@ static if (jitSupported) {
             case "-": return JitOp.FloatOperation.subtract;
             case "*": return JitOp.FloatOperation.multiply;
             case "/": return JitOp.FloatOperation.divide;
-            default: assert(false, "a floating operator without a template");
+            default:
+                internalFailure("a floating operator without a template");
         }
     }
 
@@ -5911,7 +5913,7 @@ static if (jitSupported) {
         foreach (index, candidate; comparisonSymbols)
             if (candidate == symbol)
                 return cast(Comparison) index;
-        assert(false, "a comparison operator without a template");
+        internalFailure("a comparison operator without a template");
     }
 
     private void buildUnspecialiseTable(ref JitTables tables) nothrow {

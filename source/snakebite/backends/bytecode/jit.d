@@ -1322,13 +1322,16 @@ private struct Gen {
     }
 
     static Alu aluOf(JitOp.IntOperation operation) {
+        import snakebite.internalfailure: internalFailure;
+
         final switch (operation) with (JitOp.IntOperation) {
             case add: return Alu.add;
             case or: return Alu.or;
             case and: return Alu.and;
             case subtract: return Alu.sub;
             case xor: return Alu.xor;
-            case multiply: assert(false, "a multiplication is not an ALU op");
+            case multiply:
+                internalFailure("a multiplication is not an ALU op");
         }
     }
 
