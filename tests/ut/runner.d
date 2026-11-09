@@ -65,7 +65,7 @@ static import ut.backends.run.main,
     ut.backends.concurrency,
     ut.backends.bytecode.vm,
     ut.backends.bytecode.relocation,
-    ut.backends.bytecode.imagea,
+    ut.backends.bytecode.serialization,
     ut.backends.casts,
     ut.backends.staticchain,
     ut.backends.program,
@@ -122,8 +122,12 @@ mixin disableDefaultRunner;
 
 // `bin/ut`: prepare the frontend for the selected tests, then run them.
 int run(string[] args) {
-    if (args.length == 4 && args[1] == "--image-a-save") {
-        import ut.backends.bytecode.imagea: saveFixture;
+    if (args.length >= 6 && args[1] == "--load") {
+        import ut.backends.bytecode.serialization: loadFixture;
+        return loadFixture(args[2 .. $]);
+    }
+    if (args.length == 4 && args[1] == "--save") {
+        import ut.backends.bytecode.serialization: saveFixture;
         return saveFixture(args[2], args[3]);
     }
     import snakebite.frontend.compiler: Snippets, initialize;
@@ -203,7 +207,7 @@ int run(string[] args) {
         "ut.backends.concurrency",
         "ut.backends.bytecode.vm",
         "ut.backends.bytecode.relocation",
-        "ut.backends.bytecode.imagea",
+        "ut.backends.bytecode.serialization",
         "ut.backends.casts",
         "ut.backends.staticchain",
         "ut.backends.program",

@@ -130,7 +130,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             (name) => _plans.resolve(name), &callableAddress,
             &classRuntimeInfo,
             (type, loc) => _nativeData.initialValue(type, loc));
-        _runtimeTypes.imageData = &_nativeData.imageData;
+        _runtimeTypes.dataRelocations = &_nativeData.dataRelocations;
         _vms = ExecutionStates!(Vm*)(() {
             return heapNew!Vm(defaultFrameCapacity, _nativeData.tlsSlots);
         }, () => _nativeData.release);
@@ -194,12 +194,12 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         runHostToGuest(compiled, function_, returnPlace, args);
     }
 
-    public const(Function)* compileImageFunction(FuncDeclaration function_,
-        in bool forImage = true) {
+    public const(Function)* compileForSave(FuncDeclaration function_,
+        in bool forSerialization = true) {
         import snakebite.backends.bytecode.relocation: recordRelocs;
         const previous = recordRelocs;
-        recordRelocs = forImage;
-        _nativeData.imageData.enabled = forImage;
+        recordRelocs = forSerialization;
+        _nativeData.dataRelocations.enabled = forSerialization;
         scope(exit) recordRelocs = previous;
         return compileFunction(function_);
     }
@@ -1339,7 +1339,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         );
         result.inlineBody = inlineBody;
         result.relocs = _relocs;
-        result.imageData = &_bytecode._nativeData.imageData;
+        result.dataRelocations = &_bytecode._nativeData.dataRelocations;
         result.windowSlot = _windowSlot;
         result.windowBytes = _windowReach;
         result.windowCallable = windowFits(_function, _layout);

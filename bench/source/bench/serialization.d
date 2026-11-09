@@ -1,23 +1,23 @@
-module bench.imagea;
+module bench.serialization;
 
-import snakebite.backends.bytecode.imagea:
-    saveImageBundleA, loadImageBundleA, runImageA;
-import std.datetime.stopwatch: StopWatch;
-import std.stdio: writeln;
-import std.file: readText, write;
+private:
 
 public int run(string[] args) {
+    import snakebite.backends.bytecode.serialization: save, load, execute;
+    import std.datetime.stopwatch: StopWatch;
+    import std.stdio: writeln;
+    import std.file: readText, write;
     if (args.length == 7)
         return compareCalls(args);
     import std.exception: enforce;
     import std.conv: to, text;
     enforce(args.length >= 4,
-        "bench --sbc-a-save source.d image [count] | --sbc-a-load image x y");
+        "bench --save source.d file [count] | --load file x y");
     import snakebite.gc: selectFrontendMemory;
     selectFrontendMemory(false);
     StopWatch watch;
     watch.start;
-    if (args[1] == "--sbc-a-save" || args[1] == "--sbc-a-baseline") {
+    if (args[1] == "--save" || args[1] == "--baseline") {
         import snakebite.frontend.compiler: initialize, Snippets, parseSnippet;
         import snakebite.frontend.dmd.functions: findFunction;
         import snakebite.backends.backend: Program, Owned;
@@ -30,52 +30,56 @@ public int run(string[] args) {
         const count = args.length > 4 ? args[4].to!size_t : 1;
         const(Function)*[] functions;
         foreach (index; 0 .. count)
-            functions ~= backend.compileImageFunction(findFunction(module_,
+            functions ~= backend.compileForSave(findFunction(module_,
                 index == 0 ? "arithmetic" : text("arithmetic", index)),
-                args[1] != "--sbc-a-baseline");
+                args[1] != "--baseline");
         const compile = watch.peek.total!"nsecs" - frontend;
         const full = watch.peek.total!"nsecs";
         watch.reset;
-        if (args[1] == "--sbc-a-save")
-            write(args[3], saveImageBundleA(functions));
-        const save = watch.peek.total!"nsecs";
+        if (args[1] == "--save")
+            write(args[3], save(functions));
+        const saveNs = watch.peek.total!"nsecs";
         watch.reset;
         ulong checksum;
-        if (args[1] == "--sbc-a-baseline")
+        if (args[1] == "--baseline")
             foreach (function_; functions)
                 foreach (pair; [[7UL, 11UL], [0UL, 1UL], [123UL, 456UL],
                         [ulong.max, 1UL], [ulong.max, ulong.max]])
-                    checksum += runImageA(*function_, pair[0], pair[1]);
+                    checksum += execute(*function_, pair[0], pair[1]);
         writeln("frontend_ns=", frontend, " compile_ns=", compile,
-            " full_ns=", full, " save_ns=", save,
+            " full_ns=", full, " save_ns=", saveNs,
             " execution_ns=", watch.peek.total!"nsecs",
             " checksum=", checksum, " functions=", functions.length);
     } else {
-        enforce(args[1] == "--sbc-a-load" && args.length >= 4,
-            "bench --sbc-a-load image all | image x y");
-        const functions = loadImageBundleA(args[2]);
-        const load = watch.peek.total!"nsecs";
+        enforce(args[1] == "--load" && args.length >= 4,
+            "bench --load file all | file x y");
+        const functions = load(args[2]);
+        const loadNs = watch.peek.total!"nsecs";
         watch.reset;
         ulong checksum;
         if (args[3] == "all") {
             foreach (ref function_; functions)
                 foreach (pair; [[7UL, 11UL], [0UL, 1UL], [123UL, 456UL],
                         [ulong.max, 1UL], [ulong.max, ulong.max]])
-                    checksum += runImageA(function_, pair[0], pair[1]);
+                    checksum += execute(function_, pair[0], pair[1]);
         } else {
-            enforce(args.length == 5, "bench --sbc-a-load image x y");
+            enforce(args.length == 5, "bench --load file x y");
             const x = args[3].to!ulong;
             const y = args[4].to!ulong;
             foreach (ref function_; functions)
-                checksum += runImageA(function_, x, y);
+                checksum += execute(function_, x, y);
         }
-        writeln("load_ns=", load, " execution_ns=", watch.peek.total!"nsecs",
+        writeln("load_ns=", loadNs, " execution_ns=", watch.peek.total!"nsecs",
             " checksum=", checksum, " functions=", functions.length);
     }
     return 0;
 }
 
 private int compareCalls(string[] args) {
+    import snakebite.backends.bytecode.serialization: save, load, execute;
+    import std.datetime.stopwatch: StopWatch;
+    import std.stdio: writeln;
+    import std.file: readText, write;
     import std.conv: to;
     import std.string: split;
     import std.exception: enforce;
@@ -96,15 +100,14 @@ private int compareCalls(string[] args) {
     watch.start;
     const(Function)*[] roots;
     Function[] loaded;
-    long setup, frontend, entryCompile, preparation, full, saving, load;
-    long diagnosticBundleNs, diagnosticWriteNs;
+    long setup, frontend, entryCompile, preparation, full, saving, loadNs;
     size_t bodies, bytes;
     if (mode == "load") {
-        loaded = loadImageBundleA(args[3]);
+        loaded = load(args[3]);
         enforce(loaded.length == names.length, "wrong root count");
         foreach (ref function_; loaded)
             roots ~= &function_;
-        load = watch.peek.total!"nsecs";
+        loadNs = watch.peek.total!"nsecs";
     } else {
         import snakebite.frontend.compiler: initialize, Snippets, parseSnippet;
         import snakebite.frontend.dmd.functions: findFunction;
@@ -118,31 +121,26 @@ private int compareCalls(string[] args) {
         frontend = watch.peek.total!"nsecs" - setup;
         auto backend = Owned!Bytecode(Program([module_]));
         foreach (name; names)
-            roots ~= backend.compileImageFunction(findFunction(module_, name),
+            roots ~= backend.compileForSave(findFunction(module_, name),
                 mode == "save");
         const entryEnd = watch.peek.total!"nsecs";
         entryCompile = entryEnd - setup - frontend;
         foreach (name; callees)
-            backend.compileImageFunction(findFunction(module_, name), mode == "save");
+            backend.compileForSave(findFunction(module_, name), mode == "save");
         bodies = names.length + callees.length;
         full = watch.peek.total!"nsecs";
         preparation = full - entryEnd;
         const saveStart = full;
         if (mode == "save") {
             const misses = backend.compilationStatistics.cacheMisses;
-            StopWatch diagnosticTimer;
-            diagnosticTimer.start;
-            const image = saveImageBundleA(roots);
-            diagnosticBundleNs = diagnosticTimer.peek.total!"nsecs";
+            const image = save(roots);
             enforce(backend.compilationStatistics.cacheMisses == misses,
                 "comparison callee list missed a compiled body");
             enforce(image.length >= 16
                 && *cast(const(size_t)*) image.ptr == bodies,
                 "comparison callee list has the wrong body count");
             bytes = image.length;
-            diagnosticTimer.reset;
             write(args[3], image);
-            diagnosticWriteNs = diagnosticTimer.peek.total!"nsecs";
         }
         saving = watch.peek.total!"nsecs" - saveStart;
     }
@@ -154,21 +152,16 @@ private int compareCalls(string[] args) {
             foreach (function_; roots)
                 foreach (pair; [[7UL, 11UL], [0UL, 1UL], [123UL, 456UL],
                         [ulong.max, 1UL], [ulong.max, ulong.max]]) {
-                    checksum += runImageA(*function_, pair[0], pair[1]);
+                    checksum += execute(*function_, pair[0], pair[1]);
                 }
     }
     const execution = watch.peek.total!"nsecs";
     writeln("setup_ns=", setup, " frontend_ns=", frontend,
         " entry_compile_ns=", entryCompile, " preparation_ns=", preparation,
         " full_compile_ns=", full, " save_ns=", saving,
-        " compile_save_ns=", compileSave, " load_ns=", load,
+        " compile_save_ns=", compileSave, " load_ns=", loadNs,
         " execution_ns=", execution, " checksum=", checksum,
         " roots=", roots.length, " bodies=", bodies,
         " bytes=", bytes, " rounds=", rounds);
-    import snakebite.backends.bytecode.imagea: diagnosticPhases;
-    import snakebite.backends.bytecode.vm: diagnosticImageHandlerNs;
-    writeln("diagnostic_handler_ns=", diagnosticImageHandlerNs,
-        " bundle_ns=", diagnosticBundleNs, " write_ns=", diagnosticWriteNs,
-        " phases=", diagnosticPhases);
     return 0;
 }

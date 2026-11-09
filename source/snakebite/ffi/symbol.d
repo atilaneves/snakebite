@@ -8,7 +8,6 @@ private:
 // addresses and missing symbols, so a missing template instance is not
 // looked up again on every call. Every thread reads the cache without a
 // lock (ADR-0006); a symbol is looked up once, on its first use.
-version (SbcRuntimeOnly) {} else
 public struct Resolver {
     import snakebite.dependencyimage: DependencyImage;
     import snakebite.runtimeentry: RuntimeEntry;
@@ -75,11 +74,6 @@ public struct Resolver {
     public size_t lookups() @safe @nogc nothrow pure const scope {
         return _lookups;
     }
-}
-
-public void* resolveProcessSymbol(in char[] name) {
-    import snakebite.runtimeentry: RuntimeEntry;
-    return RuntimeEntry.route(symbolAddress(name));
 }
 
 

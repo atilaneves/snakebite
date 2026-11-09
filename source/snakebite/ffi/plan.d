@@ -1,17 +1,14 @@
 module snakebite.ffi.plan;
 
 
-version (SbcRuntimeOnly) {} else {
 import snakebite.ffi.callback: CallbackBridge;
 import snakebite.ffi.symbol: Resolver;
-}
 import snakebite.ffi.load: LoadKind = Load, loadWidth;
 
 
 private:
 
-version (SbcRuntimeOnly) {} else
-    import snakebite.nativelayout: typeFacts;
+import snakebite.nativelayout: typeFacts;
 
 
 
@@ -41,16 +38,6 @@ import snakebite.internalfailure: internalFailure;
 // for a plan with no SSE argument registers and no stack words - and
 // keeps its address. `callAt` only replays the moves: read a word, write
 // it into the frame, call that one entry once, and read the result back.
-private struct CallbackHooks {
-    struct GuestTarget {
-        const(void)* word;
-        ptrdiff_t adjustment;
-    }
-    const(void)* delegate(const(void)*) entryOf;
-    const(void)* delegate(const(void)*) wordOf;
-    GuestTarget delegate(const(void)*) guestTarget;
-}
-
 public struct CallPlan {
     import snakebite.ffi.abi: ArgumentPlan, Register;
     import snakebite.ffi.sysv:
@@ -151,7 +138,7 @@ public struct CallPlan {
     // entries. Shared mutable state owned by the `PlanCache`, never part
     // of this plan's own value: `callWithCallbacks` casts the `const`
     // away to reserve an entry on first use.
-    private CallbackHooks* _callbacks;
+    private CallbackBridge* _callbacks;
     private string _symbol;
     private bool _processSymbol;
 
@@ -304,7 +291,7 @@ public struct CallPlan {
             delegateFunctionOffset, delegateValueSize;
 
         // See `_callbacks`'s own doc for why the `const` goes.
-        auto bridge = cast(CallbackHooks*) _callbacks;
+        auto bridge = cast(CallbackBridge*) _callbacks;
         if (bridge is null)
             throw new Exception(
                 "ffi: this plan has a callback-typed parameter, but no " ~
@@ -1146,7 +1133,6 @@ public struct CallPlan {
 
     // Whether `storeOf` has a width for each register of the result of
     // `type`.
-    version (SbcRuntimeOnly) {} else
     private static bool hasResultStore(
         imported!"dmd.mtype".TypeFunction type,
     ) {
@@ -1166,9 +1152,7 @@ public struct CallPlan {
         return true;
     }
 
-    // The image carries ABI facts, not a frontend type or a process address.
-    public struct Image {
-        public enum Resolution : ubyte { process }
+    public struct Description {
         public string symbol;
         public ArgumentPlan[] arguments;
         public ArgumentPlan result;
@@ -1177,44 +1161,42 @@ public struct CallPlan {
         public bool contextPrecedesHiddenReturnPointer;
         public bool reversedArguments;
         public bool variadic;
-        public Resolution resolution;
     }
 
-    public Image image() const {
+    public Description describe() const {
         import std.exception: enforce;
         enforce(_symbol.length != 0 && _processSymbol
             && _callbackArguments.length == 0,
-            "image A native call needs a process symbol without callbacks");
-        return Image(_symbol, _arguments.dup, _return, _hiddenReturnPointer,
+            "saved bytecode requires a process symbol without callbacks");
+        return Description(_symbol, _arguments.dup, _return, _hiddenReturnPointer,
             _hiddenContext, _contextPrecedesHiddenReturnPointer,
             _reversedArguments, _variadicCall);
     }
 
-    public static CallPlan fromImage(scope const ref Image image) {
-        import snakebite.ffi.symbol: resolveProcessSymbol;
+    public static CallPlan fromDescription(
+        scope const ref Description description, ref Resolver resolver,
+    ) {
         import std.exception: enforce;
         import std.conv: text;
-        enforce(image.resolution == Image.Resolution.process,
-            "image A invalid native resolution context");
-        foreach (argument; image.arguments)
+        foreach (argument; description.arguments)
             enforce(argument.count <= argument.registers.length,
                 "image A invalid native argument shape");
-        enforce(image.result.count <= image.result.registers.length,
+        enforce(description.result.count <= description.result.registers.length,
             "image A invalid native return shape");
         CallPlan plan;
-        plan._address = resolveProcessSymbol(image.symbol);
+        plan._address = resolver.resolve(description.symbol);
         enforce(plan._address !is null,
-            text("image A cannot resolve process symbol: ", image.symbol));
-        plan._symbol = image.symbol;
+            text("image A cannot resolve process symbol: ", description.symbol));
+        plan._symbol = description.symbol;
         plan._processSymbol = true;
-        plan._arguments = image.arguments.dup;
-        plan._parameterCount = image.arguments.length;
-        plan._return = image.result;
-        plan._hiddenReturnPointer = image.hiddenReturnPointer;
-        plan._hiddenContext = image.hiddenContext;
-        plan._contextPrecedesHiddenReturnPointer = image.contextPrecedesHiddenReturnPointer;
-        plan._reversedArguments = image.reversedArguments;
-        plan._variadicCall = image.variadic;
+        plan._arguments = description.arguments.dup;
+        plan._parameterCount = description.arguments.length;
+        plan._return = description.result;
+        plan._hiddenReturnPointer = description.hiddenReturnPointer;
+        plan._hiddenContext = description.hiddenContext;
+        plan._contextPrecedesHiddenReturnPointer = description.contextPrecedesHiddenReturnPointer;
+        plan._reversedArguments = description.reversedArguments;
+        plan._variadicCall = description.variadic;
         plan.buildMoves;
         return plan;
     }
@@ -1381,7 +1363,6 @@ public extern(C) bool executeIndirectCallPlan(
 // resolve to. A call site is the finer key, and would let a plan be found
 // without hashing at all, but it needs somewhere on the call site to keep
 // it, which is the caller's business and not this package's.
-version (SbcRuntimeOnly) {} else {
 public struct PlanCache {
     import snakebite.dependencyimage: DependencyImage;
 
@@ -1404,7 +1385,6 @@ public struct PlanCache {
     import dmd.mtype: TypeFunction;
 
     private CallbackBridge* _callbacks;
-    private CallbackHooks* _callbackHooks;
 
     public void* callableAddress(
         const(void)* word, FuncDeclaration declaration,
@@ -1481,7 +1461,7 @@ public struct PlanCache {
         // variadic ABI plan (including the SSE register count).
         *plan = _shapeOf(type, context, type.linkage, null,
             type.parameterList.varargs == VarArg.variadic);
-        plan._callbacks = _callbackHooks;
+        plan._callbacks = _callbacks;
         return *_signatures.insert(key, plan);
     }
 
@@ -1491,14 +1471,6 @@ public struct PlanCache {
     // it at call time to swap a guest function word for its entry.
     public void useCallbacks(CallbackBridge* callbacks) {
         _callbacks = callbacks;
-        _callbackHooks = callbacks is null ? null : new CallbackHooks(
-            &callbacks.entryOf,
-            (word) => callbacks.wordOf(word),
-            (address) {
-                const target = callbacks.guestTarget(address);
-                return CallbackHooks.GuestTarget(target.word, target.adjustment);
-            },
-        );
     }
 
     // Records that `word` is what this backend stores for the guest
@@ -1739,7 +1711,7 @@ public struct PlanCache {
         countPreparation;
         auto plan = new CallPlan;
         *plan = prepare(function_, _resolver);
-        plan._callbacks = _callbackHooks;
+        plan._callbacks = _callbacks;
         return *_plans.insert(function_, plan);
     }
 
@@ -1767,7 +1739,7 @@ public struct PlanCache {
         countPreparation;
         auto plan = new CallPlan;
         *plan = prepareVariadic(function_, _resolver, extraArgumentTypes);
-        plan._callbacks = _callbackHooks;
+        plan._callbacks = _callbacks;
         return plan;
     }
 
@@ -1779,7 +1751,7 @@ public struct PlanCache {
         auto plan = new CallPlan;
         *plan = prepareVariadicAtAddress(type, hasContext, address,
             extraArgumentTypes);
-        plan._callbacks = _callbackHooks;
+        plan._callbacks = _callbacks;
         return plan;
     }
 
@@ -2269,5 +2241,4 @@ private CallPlan _shapeOf(
 
         return plan;
     }
-}
 }

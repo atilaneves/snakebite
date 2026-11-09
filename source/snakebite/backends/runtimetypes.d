@@ -38,15 +38,16 @@ public struct RuntimeTypes {
     // (ADR-0006); an entry is built once, under the compiler lock.
     private SharedTable!(Type, TypeInfo) _types;
     private SharedTable!(StructDeclaration, TypeInfo_Struct) _structs;
-    public imported!"snakebite.nativeimage".NativeImageData* imageData;
+    import snakebite.backends.bytecode.relocation: DataRelocations;
+    public DataRelocations* dataRelocations;
 
     private T record(T)(T info) {
-        if (imageData is null || !imageData.enabled)
+        if (dataRelocations is null || !dataRelocations.enabled)
             return info;
-        imageData.block((cast(ubyte*) info)[0 .. __traits(classInstanceSize, T)],
+        dataRelocations.block((cast(ubyte*) info)[0 .. __traits(classInstanceSize, T)],
             (void*).alignof);
-        imageData.binding(*cast(void**) info, "_D" ~ T.mangleof[1 .. $] ~ "6__vtblZ");
-        imageData.pointer(cast(void*) info, *cast(void**) info);
+        dataRelocations.binding(*cast(void**) info, "_D" ~ T.mangleof[1 .. $] ~ "6__vtblZ");
+        dataRelocations.pointer(cast(void*) info, *cast(void**) info);
         recordFields(info);
         return info;
     }
@@ -73,14 +74,14 @@ public struct RuntimeTypes {
         static if (isDynamicArray!T) {
             if (field.ptr is null)
                 return;
-            imageData.block((cast(const(ubyte)*) field.ptr)[0 .. field.length * field[0].sizeof],
+            dataRelocations.block((cast(const(ubyte)*) field.ptr)[0 .. field.length * field[0].sizeof],
                 typeof(field[0]).alignof);
-            imageData.pointer(cast(ubyte*) &field + size_t.sizeof, field.ptr);
+            dataRelocations.pointer(cast(ubyte*) &field + size_t.sizeof, field.ptr);
             static if (is(typeof(field[0]) : TypeInfo))
                 foreach (ref element; field)
                     recordField(element);
         } else static if (is(T == class) || is(T == U*, U) || isSomeFunction!T) {
-            imageData.pointer(&field, cast(const(void)*) field);
+            dataRelocations.pointer(&field, cast(const(void)*) field);
         }
     }
 
@@ -139,8 +140,8 @@ public struct RuntimeTypes {
             auto address = _resolve(name[]);
             auto result = address is null ? null
                 : cast(immutable(void)*)(cast(ubyte*) address + offset);
-            if (imageData !is null && imageData.enabled)
-                imageData.binding(result, name[].idup, offset);
+            if (dataRelocations !is null && dataRelocations.enabled)
+                dataRelocations.binding(result, name[].idup, offset);
             return result;
         }
 
@@ -350,11 +351,11 @@ public struct RuntimeTypes {
                     Tpointer, Tsarray, Taarray, Tvector, Ttuple, Tarray:
                     internalFailure();
             }
-            if (imageData !is null && imageData.enabled) {
+            if (dataRelocations !is null && dataRelocations.enabled) {
                 import dmd.typinf: genTypeInfo;
                 // ABI argument types can precede the first guest typeid expression.
                 newInFrontend!genTypeInfo(null, Loc.initial, type, null);
-                imageData.binding(cast(void*) info, type.vtinfo.ident.toString.idup);
+                dataRelocations.binding(cast(void*) info, type.vtinfo.ident.toString.idup);
             }
         }
         return info;
@@ -390,8 +391,8 @@ public struct RuntimeTypes {
             name = text("_D", mangled[], "7__ClassZ");
         }
         auto info = cast(TypeInfo) _resolve(name);
-        if (imageData !is null && imageData.enabled)
-            imageData.binding(cast(void*) info, name.idup);
+        if (dataRelocations !is null && dataRelocations.enabled)
+            dataRelocations.binding(cast(void*) info, name.idup);
         return info;
     }
 
@@ -465,8 +466,8 @@ public struct RuntimeTypes {
     private byte[] initialValue(Type type, Loc loc) {
         const source = _initialValue(type, loc);
         auto bytes = cast(byte[]) source.dup;
-        if (imageData !is null)
-            imageData.copied(source, bytes);
+        if (dataRelocations !is null)
+            dataRelocations.copied(source, bytes);
         return bytes;
     }
 

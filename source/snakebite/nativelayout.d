@@ -490,7 +490,8 @@ public bool isStaticStructAddress(imported!"dmd.expression".AddrExp value) {
 
 // Owns constant storage and its referenced data for the backend's lifetime.
 public struct NativeData {
-    public imported!"snakebite.nativeimage".NativeImageData imageData;
+    import snakebite.backends.bytecode.relocation: DataRelocations;
+    public DataRelocations dataRelocations;
     // Holds `SharedTable`s and a `PerThread` (finding 2.4): a copy of
     // either would share storage with the original until one side
     // changed it.
@@ -677,7 +678,7 @@ public struct NativeData {
                     literal.len + 1, literal.sz);
                 assert(bytes !is null);
                 _stringBlocks ~= bytes;
-                imageData.block(bytes[0 .. (literal.len + 1) * literal.sz], literal.sz);
+                dataRelocations.block(bytes[0 .. (literal.len + 1) * literal.sz], literal.sz);
                 auto units = bytes[0 .. literal.len * literal.sz];
                 copyUnits(literal, units);
                 address = bytes;
@@ -746,7 +747,7 @@ public struct NativeData {
             const start =
                 -cast(size_t) _available.ptr & (facts.alignment - 1);
             bytes = _available[start .. start + facts.size];
-            imageData.block(bytes, facts.alignment);
+            dataRelocations.block(bytes, facts.alignment);
             _available = _available[start + facts.size .. $];
         });
         return bytes;
@@ -1162,7 +1163,7 @@ private void storeValue(
             storeIntegral(place,
                 cast(ulong) address, facts.size);
             if (nativeData !is null)
-                nativeData.imageData.pointer(place, address, base);
+                nativeData.dataRelocations.pointer(place, address, base);
             return;
         }
 
@@ -1220,7 +1221,7 @@ private void storeValue(
         *cast(void**) place =
             cast(ubyte*) base + symbol.offset;
         if (nativeData !is null)
-            nativeData.imageData.pointer(place, *cast(void**) place, base);
+            nativeData.dataRelocations.pointer(place, *cast(void**) place, base);
         return;
     }
 
@@ -1263,14 +1264,14 @@ private void storeValue(
         } else if (type.ty == Tpointer) {
             *cast(const(void)**) place = stringPointer(nativeData, literal);
             if (nativeData !is null)
-                nativeData.imageData.pointer(place, *cast(const(void)**) place);
+                nativeData.dataRelocations.pointer(place, *cast(const(void)**) place);
         } else {
             assert(type.ty == Tarray);
             storeIntegral(bytes + arrayLengthOffset, literal.len, size_t.sizeof);
             *cast(const(void)**) (bytes + arrayPointerOffset) =
                 stringPointer(nativeData, literal);
             if (nativeData !is null)
-                nativeData.imageData.pointer(bytes + arrayPointerOffset,
+                nativeData.dataRelocations.pointer(bytes + arrayPointerOffset,
                     *cast(const(void)**) (bytes + arrayPointerOffset));
         }
         return;
@@ -1281,7 +1282,7 @@ private void storeValue(
         const elementSize = type.nextOf.size;
         auto data = new void[literal.elements.length * elementSize];
         if (nativeData !is null)
-            nativeData.imageData.block(data, typeFacts(type.nextOf).alignment);
+            nativeData.dataRelocations.block(data, typeFacts(type.nextOf).alignment);
         foreach (i; 0 .. literal.elements.length)
             storeValue(type.nextOf, literal[i],
                 cast(ubyte*) data.ptr + i * elementSize, symbolAddress, nativeData);
@@ -1290,14 +1291,14 @@ private void storeValue(
         if (type.ty == Tpointer) {
             *cast(void**) place = data.ptr;
             if (nativeData !is null)
-                nativeData.imageData.pointer(place, data.ptr);
+                nativeData.dataRelocations.pointer(place, data.ptr);
             return;
         }
         storeIntegral(bytes + arrayLengthOffset, literal.elements.length,
             size_t.sizeof);
         *cast(void**) (bytes + arrayPointerOffset) = data.ptr;
         if (nativeData !is null)
-            nativeData.imageData.pointer(bytes + arrayPointerOffset, data.ptr);
+            nativeData.dataRelocations.pointer(bytes + arrayPointerOffset, data.ptr);
         return;
     }
 

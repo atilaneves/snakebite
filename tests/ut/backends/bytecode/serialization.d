@@ -1,8 +1,8 @@
-module ut.backends.bytecode.imagea;
+module ut.backends.bytecode.serialization;
 
 import ut;
-import snakebite.backends.bytecode.imagea:
-    saveImageA, loadImageA, runImageA, saveImageBundleA, loadImageBundleA;
+import snakebite.backends.bytecode.serialization:
+    saveFunction, loadFunction, execute, save, load;
 import snakebite.backends.bytecode.compiler: Bytecode;
 import snakebite.backends.bytecode.vm: Function;
 import snakebite.backends.backend: Program, Owned;
@@ -10,7 +10,7 @@ import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import std.file: write, remove;
 import std.path: buildPath;
-import std.conv: text;
+import std.conv: text, to;
 import ut.backends: Matrix, shouldBeRetOf, Omit, Ctfe, Because;
 import std.array: join, replace;
 import std.range: repeat;
@@ -30,20 +30,24 @@ private enum dataSource = q{
         StoredSlice full;
         StoredSlice interior;
         immutable(char)* alias_;
+        immutable(char)* absent;
     }
     static immutable Views views = Views(
         StoredSlice(StoredSlice.Descriptor(6, backing.ptr)),
         StoredSlice(StoredSlice.Descriptor(4, backing.ptr + 2)), backing.ptr + 2);
     ulong arithmetic(ulong x, ulong y) {
-        auto data = views;
-        auto full = data.full.value;
-        auto interior = data.interior.value;
+        auto firstCopy = views;
+        auto secondCopy = firstCopy;
+        auto full = firstCopy.full.value;
+        auto interior = secondCopy.interior.value;
         if (full.length != 6 || interior.length != 4
                 || full.ptr + 2 !is interior.ptr
-                || data.alias_ !is interior.ptr)
+                || firstCopy.alias_ !is interior.ptr
+                || secondCopy.alias_ !is firstCopy.alias_
+                || firstCopy.absent !is null || secondCopy.absent !is null)
             return 0;
         return full.ptr[x % 6] * 1000UL + interior.ptr[y % 4] * 10UL
-            + data.alias_[y % 4];
+            + secondCopy.alias_[y % 4];
     }
 };
 
@@ -99,18 +103,18 @@ static foreach (fixture; ["real", "float", "double", "end", "adjacentEnd"]) {
         import core.memory: GC;
         auto module_ = parseSnippet(regressionSource!fixture);
         auto backend = Owned!Bytecode(Program([module_]));
-        const compiled = backend.compileImageFunction(findFunction(module_, "arithmetic"));
+        const compiled = backend.compileForSave(findFunction(module_, "arithmetic"));
         const path = buildPath("/tmp/opencode", text("image-a-", fixture, "-", getpid(), ".sbc"));
-        write(path, saveImageBundleA([compiled]));
+        write(path, save([compiled]));
         scope(exit) remove(path);
-        const loaded = loadImageBundleA(path);
+        const loaded = load(path);
         GC.collect;
-        runImageA(loaded[0], 7, 11).should == regressionExpected!fixture;
+        execute(loaded[0], 7, 11).should == regressionExpected!fixture;
         static if (fixture == "real" || fixture == "float" || fixture == "double") {
-            write(path, saveImageA(*compiled));
-            const direct = loadImageA(path);
+            write(path, saveFunction(*compiled));
+            const direct = loadFunction(path);
             GC.collect;
-            runImageA(direct, 7, 11).should == regressionExpected!fixture;
+            execute(direct, 7, 11).should == regressionExpected!fixture;
         }
     }
 }
@@ -161,16 +165,16 @@ unittest {
     import core.memory: GC;
     auto module_ = parseSnippet(typeInfoSource);
     auto backend = Owned!Bytecode(Program([module_]));
-    const compiled = backend.compileImageFunction(findFunction(module_, "arithmetic"));
-    const metadata = backend.compileImageFunction(findFunction(module_, "metadata"));
+    const compiled = backend.compileForSave(findFunction(module_, "arithmetic"));
+    const metadata = backend.compileForSave(findFunction(module_, "metadata"));
     const path = buildPath("/tmp/opencode", text("image-a-typeinfo-", getpid(), ".sbc"));
-    write(path, saveImageBundleA([compiled, metadata]));
+    write(path, save([compiled, metadata]));
     scope(exit) remove(path);
-    const loaded = loadImageBundleA(path);
+    const loaded = load(path);
     GC.collect;
-    runImageA(loaded[0], 7, 11).should == 91UL;
-    const info = cast(TypeInfo) cast(void*) runImageA(loaded[1], 0, 0);
-    (info is cast(TypeInfo) cast(void*) runImageA(loaded[1], 7, 11)).should == true;
+    execute(loaded[0], 7, 11).should == 91UL;
+    const info = cast(TypeInfo) cast(void*) execute(loaded[1], 0, 0);
+    (info is cast(TypeInfo) cast(void*) execute(loaded[1], 7, 11)).should == true;
     (*cast(const(ulong)*) info.initializer.ptr).should == 73UL;
     (info.toString.length > 0).should == true;
 }
@@ -180,8 +184,8 @@ unittest {
     import core.sys.posix.unistd: getpid;
     auto module_ = parseSnippet(typeInfoSource);
     auto backend = Owned!Bytecode(Program([module_]));
-    const compiled = backend.compileImageFunction(findFunction(module_, "arithmetic"));
-    auto bytes = saveImageBundleA([compiled]);
+    const compiled = backend.compileForSave(findFunction(module_, "arithmetic"));
+    auto bytes = save([compiled]);
     enum symbol = "_D15TypeInfo_Struct6__vtblZ";
     const offset = bytes.countUntil(cast(const(ubyte)[]) symbol);
     (offset >= 0).should == true;
@@ -189,7 +193,7 @@ unittest {
     const path = buildPath("/tmp/opencode", text("image-a-typeinfo-missing-", getpid(), ".sbc"));
     write(path, bytes);
     scope(exit) remove(path);
-    loadImageBundleA(path).shouldThrowWithMessage(
+    load(path).shouldThrowWithMessage(
         "image A cannot resolve process symbol: " ~ symbol[0 .. $ - 1] ~ "Q");
 }
 
@@ -246,13 +250,13 @@ unittest {
     import core.sys.posix.unistd: getpid;
     auto module_ = parseSnippet(recursiveSource);
     auto backend = Owned!Bytecode(Program([module_]));
-    const compiled = backend.compileImageFunction(findFunction(module_, "arithmetic"));
+    const compiled = backend.compileForSave(findFunction(module_, "arithmetic"));
     const path = buildPath("/tmp/opencode", text("image-a-cycle-", getpid(), ".sbc"));
-    write(path, saveImageBundleA([compiled]));
+    write(path, save([compiled]));
     scope(exit) remove(path);
-    const loaded = loadImageBundleA(path);
-    runImageA(loaded[0], 7, 11).should == 571UL;
-    runImageA(loaded[0], 0, 11).should == 11UL;
+    const loaded = load(path);
+    execute(loaded[0], 7, 11).should == 571UL;
+    execute(loaded[0], 0, 11).should == 11UL;
 }
 
 // The child exits after save. It never enters a guest function.
@@ -277,12 +281,12 @@ public int saveFixture(in string path, in string fixture) {
     };
     auto module_ = parseSnippet(source);
     auto backend = Owned!Bytecode(Program([module_]));
-    const compiled = backend.compileImageFunction(findFunction(module_, "arithmetic"));
+    const compiled = backend.compileForSave(findFunction(module_, "arithmetic"));
     const before = backend.compilationStatistics.cacheMisses;
     const(Function)*[] roots = [compiled];
     if (fixture == "typeinfo")
-        roots ~= backend.compileImageFunction(findFunction(module_, "metadata"));
-    write(path, saveImageBundleA(roots));
+        roots ~= backend.compileForSave(findFunction(module_, "metadata"));
+    write(path, save(roots));
     const after = backend.compilationStatistics.cacheMisses;
     if (fixture == "direct" || fixture == "recursive")
         assert(after > before);
@@ -298,30 +302,37 @@ public int saveFixture(in string path, in string fixture) {
     return 0;
 }
 
+int loadFixture(string[] args) {
+    import std.stdio: writeln;
+    const functions = load(args[0]);
+    const result = execute(functions[0], args[1].to!ulong, args[2].to!ulong);
+    writeln(result);
+    if (args.length > 4 && args[4] == "typeinfo") {
+        assert(functions.length == 2);
+        const info = cast(TypeInfo) cast(void*) execute(functions[1], 0, 0);
+        assert(info is cast(TypeInfo) cast(void*) execute(functions[1], 7, 11));
+        assert(*cast(const(ulong)*) info.initializer.ptr == 73);
+        assert(info.toString.length != 0);
+    }
+    return result == args[3].to!ulong ? 0 : 1;
+}
+
 @("imageA.dataRoundTrip")
 unittest {
     import core.sys.posix.unistd: getpid;
     import core.memory: GC;
     auto module_ = parseSnippet(dataSource);
     auto backend = Owned!Bytecode(Program([module_]));
-    const compiled = backend.compileImageFunction(findFunction(module_, "arithmetic"));
+    const compiled = backend.compileForSave(findFunction(module_, "arithmetic"));
     const path = buildPath("/tmp/opencode", text("image-a-data-", getpid(), ".sbc"));
-    auto bytes = saveImageBundleA([compiled]);
-    const backing = cast(const(ubyte)[]) "abcdef\0";
-    bytes.count(backing).should == 1;
+    auto bytes = save([compiled]);
     write(path, bytes);
     scope(exit) remove(path);
-    const loaded = loadImageBundleA(path);
+    const loaded = load(path);
     GC.collect;
     foreach (x; 0UL .. 6)
         foreach (y; 0UL .. 4)
-            runImageA(loaded[0], x, y).should ==
-                (97UL + x) * 1000 + (99UL + y) * 11;
-    const position = bytes.countUntil(backing);
-    bytes[position + 3] = 'X';
-    write(path, bytes);
-    const changed = loadImageBundleA(path);
-    runImageA(changed[0], 3, 1).should == 88_968UL;
+            execute(loaded[0], x, y).should == execute(*compiled, x, y);
 }
 
 @("imageA.nativeRoundTrip")
@@ -329,14 +340,14 @@ unittest {
     import core.sys.posix.unistd: getpid;
     auto module_ = parseSnippet(nativeSource);
     auto backend = Owned!Bytecode(Program([module_]));
-    const compiled = backend.compileImageFunction(findFunction(module_, "arithmetic"));
+    const compiled = backend.compileForSave(findFunction(module_, "arithmetic"));
     const path = buildPath("/tmp/opencode", text("image-a-native-", getpid(), ".sbc"));
-    write(path, saveImageBundleA([compiled]));
+    write(path, save([compiled]));
     scope(exit) remove(path);
-    const loaded = loadImageBundleA(path);
+    const loaded = load(path);
     foreach (x; 0UL .. 6)
         foreach (y; 0UL .. 4)
-            runImageA(loaded[0], x, y).should ==
+            execute(loaded[0], x, y).should ==
                 6_400_000UL + (97UL + x) * 1000 + (99UL + y) * 11;
 }
 
@@ -345,17 +356,17 @@ unittest {
     import core.sys.posix.unistd: getpid;
     auto module_ = parseSnippet(nativeSource);
     auto backend = Owned!Bytecode(Program([module_]));
-    const compiled = backend.compileImageFunction(findFunction(module_, "arithmetic"));
-    auto bytes = saveImageBundleA([compiled]);
+    const compiled = backend.compileForSave(findFunction(module_, "arithmetic"));
+    auto bytes = save([compiled]);
     const path = buildPath("/tmp/opencode", text("image-a-missing-", getpid(), ".sbc"));
     scope(exit) remove(path);
     write(path, bytes[0 .. $ - 1]);
-    loadImageBundleA(path).shouldThrowWithMessage("image A truncated function");
+    load(path).shouldThrowWithMessage("image A truncated function");
     const offset = bytes.countUntil(cast(const(ubyte)[]) "strlen");
     (offset >= 0).should == true;
     bytes[offset .. offset + 6] = cast(const(ubyte)[]) "sbnone";
     write(path, bytes);
-    loadImageBundleA(path).shouldThrowWithMessage(
+    load(path).shouldThrowWithMessage(
         "image A cannot resolve process symbol: sbnone");
 }
 
@@ -372,17 +383,17 @@ unittest {
     import core.sys.posix.unistd: getpid;
     auto module_ = parseSnippet(directSource);
     auto backend = Owned!Bytecode(Program([module_]));
-    const compiled = backend.compileImageFunction(findFunction(module_, "arithmetic"));
+    const compiled = backend.compileForSave(findFunction(module_, "arithmetic"));
     const before = backend.compilationStatistics.cacheMisses;
-    const bytes = saveImageBundleA([compiled]);
+    const bytes = save([compiled]);
     (backend.compilationStatistics.cacheMisses > before).should == true;
     const path = buildPath("/tmp/opencode", text("image-a-direct-", getpid(), ".sbc"));
     write(path, bytes);
     scope(exit) remove(path);
-    const loaded = loadImageBundleA(path);
+    const loaded = load(path);
     loaded.length.should == 1;
     foreach (pair; [[7UL, 11UL], [0UL, 1UL], [ulong.max, 1UL]])
-        runImageA(loaded[0], pair[0], pair[1]).should ==
+        execute(loaded[0], pair[0], pair[1]).should ==
             directExpected(pair[0], pair[1]);
 }
 
@@ -408,8 +419,8 @@ unittest {
         ulong arithmetic(ulong x, ulong y) { return storage + x + y; }
     });
     auto backend = Owned!Bytecode(Program([module_]));
-    const compiled = backend.compileImageFunction(findFunction(module_, "arithmetic"));
-    saveImageA(*compiled).shouldThrowWithMessage(
+    const compiled = backend.compileForSave(findFunction(module_, "arithmetic"));
+    saveFunction(*compiled).shouldThrowWithMessage(
         "image A instruction holds an address");
 }
 
@@ -419,7 +430,7 @@ unittest {
     const path = buildPath("/tmp/opencode", text("image-a-short-", getpid(), ".sbc"));
     write(path, cast(ubyte[]) [1, 2, 3]);
     scope(exit) remove(path);
-    loadImageA(path).shouldThrowWithMessage("image A truncated header");
+    loadFunction(path).shouldThrowWithMessage("image A truncated header");
 }
 
 @("imageA.arithmeticRoundTrip")
@@ -434,13 +445,13 @@ unittest {
         source ~= "return a;}";
         auto module_ = parseSnippet(source);
         auto backend = Owned!Bytecode(Program([module_]));
-        const compiled = backend.compileImageFunction(findFunction(module_, "arithmetic"));
+        const compiled = backend.compileForSave(findFunction(module_, "arithmetic"));
         const path = buildPath("/tmp/opencode", text("image-a-", getpid(), ".sbc"));
         scope(exit) remove(path);
-        write(path, saveImageA(*compiled));
-        const loaded = loadImageA(path);
-        write(path, saveImageBundleA([compiled, compiled]));
-        const bundle = loadImageBundleA(path);
+        write(path, saveFunction(*compiled));
+        const loaded = loadFunction(path);
+        write(path, save([compiled, compiled]));
+        const bundle = load(path);
         bundle.length.should == 2;
         foreach (pair; [[7UL, 11UL], [0UL, 1UL], [123UL, 456UL],
                 [ulong.max, ulong.max]]) {
@@ -449,10 +460,10 @@ unittest {
             ulong expected = (x + y) * 3UL - x + y;
             foreach (i; 0 .. count)
                 expected = (expected + y) * 3UL - x;
-            runImageA(*compiled, x, y).should == expected;
-            runImageA(loaded, x, y).should == expected;
+            execute(*compiled, x, y).should == expected;
+            execute(loaded, x, y).should == expected;
             foreach (ref function_; bundle)
-                runImageA(function_, x, y).should == expected;
+                execute(function_, x, y).should == expected;
         }
     }
 }

@@ -1,27 +1,12 @@
-module snakebite.backends.bytecode.imagea;
+module snakebite.backends.bytecode.serialization;
 
 private:
 
-import snakebite.backends.bytecode.vm:
-    Function, Instruction, Vm, Role, Roles, rolesOf, imageHandler,
-    imageHandlerId, CallSite, Arg, branchTargetField;
-import snakebite.backends.returnplace: ReturnPlace;
-import snakebite.backends.bytecode.relocation: Place, Target;
-import snakebite.ffi.plan: CallPlan;
-import snakebite.ffi.abi: ArgumentPlan;
-import std.exception: enforce;
-import std.algorithm.searching: canFind, countUntil;
-import std.datetime.stopwatch: StopWatch;
-public struct DiagnosticPhases {
-    long referenceNs, completeNs, graphSaveNs, functionSaveNs, rootReferenceNs;
-    long readNs, graphLoadNs, bindingNs, decodeNs;
-    size_t references, blocks, edges, bindings;
-}
-public DiagnosticPhases diagnosticPhases;
 
-// This experiment accepts only trusted, same-build, native-endian images.
+// Saved bytecode requires trusted input from the same build and native target.
 // The bytecode compiler and VM remain the owners of instruction semantics.
 private struct Header {
+    import snakebite.backends.returnplace: ReturnPlace;
     ulong magic = 0x34414547414d4953;
     size_t instructions;
     size_t constants;
@@ -40,6 +25,7 @@ private struct Header {
 }
 
 private struct Literal {
+    import snakebite.backends.bytecode.relocation: Place;
     size_t instruction;
     size_t field;
     Place.Section section;
@@ -58,17 +44,15 @@ private struct DataEdge {
 }
 
 private struct DataGraph {
-    import snakebite.nativeimage: NativeImageData;
-    const(NativeImageData)*[] owners;
-    NativeImageData.Block[] blocks;
+    import snakebite.backends.bytecode.relocation: DataRelocations;
+    import std.exception: enforce;
+    import std.algorithm.searching: canFind, countUntil;
+    const(DataRelocations)*[] owners;
+    DataRelocations.Block[] blocks;
     DataEdge[] edges;
     string[] bindings;
 
     DataReference reference(in size_t address, in size_t base = 0) {
-        StopWatch timer;
-        timer.start;
-        ++diagnosticPhases.references;
-        scope(exit) diagnosticPhases.referenceNs += timer.peek.total!"nsecs";
         foreach (i, block; blocks)
             if (references(block.bytes, address, base))
                 return DataReference(i, address - cast(size_t) block.bytes.ptr);
@@ -76,7 +60,7 @@ private struct DataGraph {
             foreach (block; owner.blocks)
                 if (references(block.bytes, address, base)) {
                     const index = blocks.length;
-                    blocks ~= NativeImageData.Block(block.bytes, block.alignment);
+                    blocks ~= DataRelocations.Block(block.bytes, block.alignment);
                     return DataReference(index, address - cast(size_t) block.bytes.ptr);
                 }
         foreach (owner; owners)
@@ -94,9 +78,6 @@ private struct DataGraph {
     }
 
     void complete() {
-        StopWatch timer;
-        timer.start;
-        scope(exit) diagnosticPhases.completeNs += timer.peek.total!"nsecs";
         for (size_t i; i < blocks.length; ++i)
             foreach (owner; owners)
                 foreach (reloc; owner.relocs) {
@@ -114,12 +95,6 @@ private struct DataGraph {
     }
 
     ubyte[] save() {
-        StopWatch timer;
-        timer.start;
-        scope(exit) diagnosticPhases.graphSaveNs += timer.peek.total!"nsecs";
-        diagnosticPhases.blocks = blocks.length;
-        diagnosticPhases.edges = edges.length;
-        diagnosticPhases.bindings = bindings.length;
         ubyte[] bytes;
         append(bytes, bindings.length);
         foreach (binding; bindings) {
@@ -167,6 +142,7 @@ private void append(T)(ref ubyte[] bytes, in T value) {
 
 private T take(T)(ref ubyte[] bytes) {
     import core.stdc.string: memcpy;
+    import std.exception: enforce;
     enforce(bytes.length >= T.sizeof, "image A truncated data graph");
     T value;
     memcpy(&value, bytes.ptr, T.sizeof);
@@ -179,6 +155,7 @@ private struct LoadedData {
     void*[] bindings;
 
     size_t address(in DataReference reference) {
+        import std.exception: enforce;
         if (reference.binding != size_t.max) {
             enforce(reference.block == size_t.max
                 && reference.binding < bindings.length, "image A bad binding reference");
@@ -191,12 +168,11 @@ private struct LoadedData {
     }
 }
 
-private LoadedData loadDataGraph(ubyte[] bytes) {
-    StopWatch timer;
-    timer.start;
-    scope(exit) diagnosticPhases.graphLoadNs += timer.peek.total!"nsecs";
-    import snakebite.ffi.symbol: resolveProcessSymbol;
-    LoadedData data;
+private LoadedData loadDataGraph(
+    ubyte[] bytes, ref imported!"snakebite.ffi.symbol".Resolver resolver,
+) {
+    import std.exception: enforce;
+    LoadedData loadedStorage;
     const bindingCount = take!size_t(bytes);
     enforce(bindingCount <= bytes.length / size_t.sizeof, "image A bad binding count");
     foreach (i; 0 .. bindingCount) {
@@ -207,17 +183,14 @@ private LoadedData loadDataGraph(ubyte[] bytes) {
         const padding = paddingLength(length);
         enforce(padding <= bytes.length, "image A truncated binding padding");
         bytes = bytes[padding .. $];
-        StopWatch bindingTimer;
-        bindingTimer.start;
-        auto address = resolveProcessSymbol(name);
-        diagnosticPhases.bindingNs += bindingTimer.peek.total!"nsecs";
+        auto address = resolver.resolve(name);
         enforce(address !is null, "image A cannot resolve process symbol: " ~ name);
-        data.bindings ~= address;
+        loadedStorage.bindings ~= address;
     }
     const count = take!size_t(bytes);
     enforce(count <= bytes.length / (2 * size_t.sizeof), "image A bad data count");
-    data.blocks = new ubyte[][count];
-    auto blocks = data.blocks;
+    loadedStorage.blocks = new ubyte[][count];
+    auto blocks = loadedStorage.blocks;
     foreach (ref block; blocks) {
         const size = take!size_t(bytes);
         const alignment = take!size_t(bytes);
@@ -244,14 +217,15 @@ private LoadedData loadDataGraph(ubyte[] bytes) {
             && size_t.sizeof <= place.length - edge.place.offset,
             "image A bad data offset");
         import core.stdc.string: memcpy;
-        const address = data.address(edge.target);
+        const address = loadedStorage.address(edge.target);
         memcpy(place.ptr + edge.place.offset, &address, address.sizeof);
     }
     enforce(bytes.length == 0, "image A extra data graph bytes");
-    return data;
+    return loadedStorage;
 }
 
 private struct SavedCall {
+    import snakebite.backends.bytecode.vm: CallSite;
     size_t target;
     size_t argsStart;
     size_t argsCount;
@@ -267,6 +241,7 @@ private struct SavedCall {
 }
 
 private struct NativeShape {
+    import snakebite.ffi.abi: ArgumentPlan;
     size_t symbolBytes;
     size_t arguments;
     ArgumentPlan result;
@@ -275,48 +250,56 @@ private struct NativeShape {
     bool contextPrecedesHiddenReturnPointer;
     bool reversedArguments;
     bool variadic;
-    CallPlan.Image.Resolution resolution;
 }
 
-private ubyte[] saveNativePlan(in CallSite site) {
+private ubyte[] saveNativePlan(in imported!"snakebite.backends.bytecode.vm".CallSite site) {
+    import snakebite.ffi.plan: CallPlan;
     const opaque = site.nativePlan !is null ? site.nativePlan : site.prepareNativePlan();
-    const image = (cast(const(CallPlan)*) opaque).image;
+    const description = (cast(const(CallPlan)*) opaque).describe;
     ubyte[] bytes;
-    append(bytes, NativeShape(image.symbol.length, image.arguments.length,
-        image.result, image.hiddenReturnPointer, image.hiddenContext,
-        image.contextPrecedesHiddenReturnPointer, image.reversedArguments,
-        image.variadic, image.resolution));
-    bytes ~= cast(const(ubyte)[]) image.symbol;
-    foreach (argument; image.arguments)
+    append(bytes, NativeShape(description.symbol.length, description.arguments.length,
+        description.result, description.hiddenReturnPointer, description.hiddenContext,
+        description.contextPrecedesHiddenReturnPointer, description.reversedArguments,
+        description.variadic));
+    bytes ~= cast(const(ubyte)[]) description.symbol;
+    foreach (argument; description.arguments)
         append(bytes, argument);
     return bytes;
 }
 
-private const(CallPlan)* loadNativePlan(ubyte[] bytes) {
+private const(imported!"snakebite.ffi.plan".CallPlan)* loadNativePlan(
+    ubyte[] bytes, ref imported!"snakebite.ffi.symbol".Resolver resolver,
+) {
+    import snakebite.ffi.plan: CallPlan;
+    import snakebite.ffi.abi: ArgumentPlan;
+    import std.exception: enforce;
     const shape = take!NativeShape(bytes);
     enforce(shape.symbolBytes <= bytes.length, "image A truncated native symbol");
-    CallPlan.Image image;
-    image.symbol = cast(string) bytes[0 .. shape.symbolBytes];
+    CallPlan.Description description;
+    description.symbol = cast(string) bytes[0 .. shape.symbolBytes];
     bytes = bytes[shape.symbolBytes .. $];
     enforce(shape.arguments <= bytes.length / ArgumentPlan.sizeof,
         "image A truncated native signature");
-    image.arguments = new ArgumentPlan[shape.arguments];
-    foreach (ref argument; image.arguments)
+    description.arguments = new ArgumentPlan[shape.arguments];
+    foreach (ref argument; description.arguments)
         argument = take!ArgumentPlan(bytes);
     enforce(bytes.length == 0, "image A extra native plan bytes");
-    image.result = shape.result;
-    image.hiddenReturnPointer = shape.hiddenReturnPointer;
-    image.hiddenContext = shape.hiddenContext;
-    image.contextPrecedesHiddenReturnPointer = shape.contextPrecedesHiddenReturnPointer;
-    image.reversedArguments = shape.reversedArguments;
-    image.variadic = shape.variadic;
-    image.resolution = shape.resolution;
+    description.result = shape.result;
+    description.hiddenReturnPointer = shape.hiddenReturnPointer;
+    description.hiddenContext = shape.hiddenContext;
+    description.contextPrecedesHiddenReturnPointer = shape.contextPrecedesHiddenReturnPointer;
+    description.reversedArguments = shape.reversedArguments;
+    description.variadic = shape.variadic;
     auto plan = new CallPlan;
-    *plan = CallPlan.fromImage(image);
+    *plan = CallPlan.fromDescription(description, resolver);
     return plan;
 }
 
-private ref size_t operand(ref Instruction instruction, in size_t field) {
+private ref size_t operand(
+    ref imported!"snakebite.backends.bytecode.vm".Instruction instruction,
+    in size_t field,
+) {
+    import snakebite.backends.bytecode.relocation: Place;
     switch (field) {
         case Place.Field.destination: return instruction.destination;
         case Place.Field.source: return instruction.source;
@@ -325,25 +308,32 @@ private ref size_t operand(ref Instruction instruction, in size_t field) {
     }
 }
 
-private ubyte[] saveFunctionA(scope const ref Function function_,
-    scope const(Function)*[] functions, ref DataGraph graph) {
-    StopWatch timer;
-    timer.start;
-    scope(exit) diagnosticPhases.functionSaveNs += timer.peek.total!"nsecs";
+private ubyte[] encodeFunction(
+    scope const ref imported!"snakebite.backends.bytecode.vm".Function function_,
+    scope const(imported!"snakebite.backends.bytecode.vm".Function)*[] functions,
+    ref DataGraph graph,
+) {
+    import snakebite.backends.bytecode.vm:
+        Instruction, CallSite, Arg, Roles, Role, rolesOf, opReturnVoid,
+        branchTargetField;
+    import snakebite.backends.bytecode.relocation: Place, Target;
+    import std.exception: enforce;
+    import std.algorithm.searching: countUntil;
     enforce(function_.assertSites.length == 0
         && function_.exceptionHandlers.length == 0
         && function_.closureSize == 0
         && function_.contextOffset == size_t.max,
         "image A requires a pointer-free arithmetic function");
     size_t callArgsCount;
-    auto nativeImages = new ubyte[][function_.callSites.length];
+    auto serializedNativeCalls = new ubyte[][function_.callSites.length];
     size_t nativeBytes;
     foreach (i, site; function_.callSites) {
         enforce((site.kind == CallSite.Kind.guest || site.kind == CallSite.Kind.native)
             && site.value.signature is null, "image A requires fixed calls");
         if (site.kind == CallSite.Kind.native) {
-            nativeImages[i] = saveNativePlan(site);
-            nativeBytes += nativeImages[i].length + paddingLength(nativeImages[i].length);
+            serializedNativeCalls[i] = saveNativePlan(site);
+            nativeBytes += serializedNativeCalls[i].length
+                + paddingLength(serializedNativeCalls[i].length);
         }
         callArgsCount += site.args.length;
     }
@@ -377,9 +367,9 @@ private ubyte[] saveFunctionA(scope const ref Function function_,
                 "image A bad branch target");
             *target = (*target - start) / Instruction.sizeof;
         }
-        const id = imageHandlerId(stored.handler);
-        enforce(id != size_t.max, "image A handler has no ID");
-        stored.handler = cast(Instruction.Handler) id;
+        // The same executable has fixed code offsets even when ASLR moves it.
+        stored.handler = cast(Instruction.Handler)
+            (cast(size_t) stored.handler - cast(size_t) &opReturnVoid);
         bytes[offset .. offset + Instruction.sizeof] =
             (cast(const(ubyte)*) &stored)[0 .. Instruction.sizeof];
         offset += Instruction.sizeof;
@@ -449,53 +439,65 @@ private ubyte[] saveFunctionA(scope const ref Function function_,
         calls[i] = SavedCall(target, argsIndex, site.args.length,
             site.returnWidth, site.windowSlot, site.windowDisp,
             site.windowScratch, site.windowEnd, site.windowAlignment,
-            site.kind, nativeOffset, nativeImages[i].length);
+            site.kind, nativeOffset, serializedNativeCalls[i].length);
         bytes[bytes.length - nativeBytes + nativeOffset
-            .. bytes.length - nativeBytes + nativeOffset + nativeImages[i].length] =
-            nativeImages[i];
-        nativeOffset += nativeImages[i].length + paddingLength(nativeImages[i].length);
+            .. bytes.length - nativeBytes + nativeOffset + serializedNativeCalls[i].length] =
+            serializedNativeCalls[i];
+        nativeOffset += serializedNativeCalls[i].length
+            + paddingLength(serializedNativeCalls[i].length);
         args[argsIndex .. argsIndex + site.args.length] = site.args;
         argsIndex += site.args.length;
     }
     return bytes;
 }
 
-public ubyte[] saveImageA(scope const ref Function function_) {
+public ubyte[] saveFunction(
+    scope const ref imported!"snakebite.backends.bytecode.vm".Function function_,
+) {
+    import snakebite.backends.bytecode.relocation: Target;
+    import std.exception: enforce;
     enforce(function_.callSites.length == 0,
         "image A direct calls require a bundle");
     DataGraph graph;
     foreach (reloc; function_.relocs)
         enforce(reloc.target.kind == Target.Kind.constantPool,
             "image A instruction holds an address");
-    if (function_.imageData !is null)
-        graph.owners ~= function_.imageData;
-    auto bytes = saveFunctionA(function_, null, graph);
+    if (function_.dataRelocations !is null)
+        graph.owners ~= function_.dataRelocations;
+    auto bytes = encodeFunction(function_, null, graph);
     graph.complete;
-    const data = graph.save;
-    (cast(Header*) bytes.ptr).dataBytes = data.length;
-    bytes ~= data;
+    const serializedStorage = graph.save;
+    (cast(Header*) bytes.ptr).dataBytes = serializedStorage.length;
+    bytes ~= serializedStorage;
     return bytes;
 }
 
 // This is not a bytecode verifier. Do not load files from another build or
 // from an untrusted source. Operand bounds are guaranteed by the compiler.
-public Function loadImageA(in string path) {
+public imported!"snakebite.backends.bytecode.vm".Function loadFunction(in string path) {
     import std.file: read;
-    return decodeImageA(cast(ubyte[]) read(path));
+    import snakebite.ffi.symbol: Resolver;
+    Resolver resolver;
+    return decodeFunction(cast(ubyte[]) read(path), resolver);
 }
 
-private Function decodeImageA(ubyte[] bytes, Function[] functions = null,
-    LoadedData data = LoadedData.init) {
-    StopWatch timer;
-    timer.start;
-    scope(exit) diagnosticPhases.decodeNs += timer.peek.total!"nsecs";
+private imported!"snakebite.backends.bytecode.vm".Function decodeFunction(
+    ubyte[] bytes,
+    ref imported!"snakebite.ffi.symbol".Resolver resolver,
+    imported!"snakebite.backends.bytecode.vm".Function[] functions = null,
+    LoadedData loadedStorage = LoadedData.init,
+) {
+    import snakebite.backends.bytecode.vm:
+        Function, Instruction, Arg, CallSite, opReturnVoid, branchTargetField;
+    import snakebite.backends.bytecode.relocation: Place;
+    import std.exception: enforce;
     enforce(bytes.length >= Header.sizeof, "image A truncated header");
     const header = *cast(const(Header)*) bytes.ptr;
     enforce(header.magic == Header.init.magic, "image A bad magic");
     enforce(header.dataBytes <= bytes.length - Header.sizeof,
         "image A truncated data graph");
     if (header.dataBytes) {
-        data = loadDataGraph(bytes[$ - header.dataBytes .. $]);
+        loadedStorage = loadDataGraph(bytes[$ - header.dataBytes .. $], resolver);
         bytes = bytes[0 .. $ - header.dataBytes];
     }
     size_t remaining = bytes.length - Header.sizeof;
@@ -515,7 +517,7 @@ private Function decodeImageA(ubyte[] bytes, Function[] functions = null,
         && (header.frameAlignment & (header.frameAlignment - 1)) == 0,
         "image A invalid shape");
     Function function_;
-    function_.imageRoots = data.blocks;
+    function_.loadedAllocations = loadedStorage.blocks;
     size_t offset = Header.sizeof;
     function_.instructions = (cast(Instruction*) (bytes.ptr + offset))
         [0 .. header.instructions];
@@ -532,8 +534,8 @@ private Function decodeImageA(ubyte[] bytes, Function[] functions = null,
     function_.windowBytes = header.windowBytes;
     function_.windowCallable = header.windowCallable;
     foreach (ref instruction; function_.instructions) {
-        instruction.handler = imageHandler(cast(size_t) instruction.handler);
-        enforce(instruction.handler !is null, "image A bad handler ID");
+        instruction.handler = cast(Instruction.Handler)
+            (cast(size_t) &opReturnVoid + cast(size_t) instruction.handler);
         if (auto target = branchTargetField(instruction)) {
             enforce(*target < function_.instructions.length,
                 "image A bad branch target");
@@ -542,7 +544,7 @@ private Function decodeImageA(ubyte[] bytes, Function[] functions = null,
     }
     auto literals = (cast(Literal*) (bytes.ptr + offset))[0 .. header.literals];
     foreach (ref literal; literals) {
-        const address = data.address(literal.target);
+        const address = loadedStorage.address(literal.target);
         if (literal.section == Place.Section.constant) {
             enforce(literal.instruction < function_.constants.length,
                 "image A bad constant location");
@@ -576,7 +578,7 @@ private Function decodeImageA(ubyte[] bytes, Function[] functions = null,
                 && saved.nativeLength <= nativeBytes.length - saved.nativeOffset,
                 "image A bad native call record");
             site = CallSite.native(loadNativePlan(nativeBytes[saved.nativeOffset
-                .. saved.nativeOffset + saved.nativeLength]), arguments,
+                .. saved.nativeOffset + saved.nativeLength], resolver), arguments,
                 saved.returnWidth);
         }
         site.windowSlot = saved.windowSlot;
@@ -590,7 +592,12 @@ private Function decodeImageA(ubyte[] bytes, Function[] functions = null,
     return function_;
 }
 
-public ubyte[] saveImageBundleA(scope const(Function)*[] functions) {
+public ubyte[] save(
+    scope const(imported!"snakebite.backends.bytecode.vm".Function)*[] functions,
+) {
+    import snakebite.backends.bytecode.vm: Function, CallSite;
+    import std.exception: enforce;
+    import std.algorithm.searching: canFind;
     import snakebite.backends.bytecode.relocation: recordRelocs;
     const previous = recordRelocs;
     recordRelocs = true;
@@ -612,44 +619,44 @@ public ubyte[] saveImageBundleA(scope const(Function)*[] functions) {
     ubyte[] bytes;
     DataGraph graph;
     foreach (function_; reachable)
-        if (function_.imageData !is null
-                && !graph.owners.canFind(function_.imageData))
-            graph.owners ~= function_.imageData;
-    ubyte[][] images;
+        if (function_.dataRelocations !is null
+                && !graph.owners.canFind(function_.dataRelocations))
+            graph.owners ~= function_.dataRelocations;
+    ubyte[][] serializedFunctions;
     foreach (function_; reachable)
-        images ~= saveFunctionA(*function_, reachable, graph);
-    diagnosticPhases.rootReferenceNs = diagnosticPhases.referenceNs;
+        serializedFunctions ~= encodeFunction(*function_, reachable, graph);
     graph.complete;
-    const data = graph.save;
+    const serializedStorage = graph.save;
     const count = reachable.length;
     bytes ~= (cast(const(ubyte)*) &count)[0 .. count.sizeof];
     const roots = functions.length;
     bytes ~= (cast(const(ubyte)*) &roots)[0 .. roots.sizeof];
-    append(bytes, data.length);
-    bytes ~= data;
-    foreach (image; images) {
-        const length = image.length;
+    append(bytes, serializedStorage.length);
+    bytes ~= serializedStorage;
+    foreach (serializedFunction; serializedFunctions) {
+        const length = serializedFunction.length;
         bytes ~= (cast(const(ubyte)*) &length)[0 .. length.sizeof];
-        bytes ~= image;
+        bytes ~= serializedFunction;
     }
     return bytes;
 }
 
-public Function[] loadImageBundleA(in string path) {
+public imported!"snakebite.backends.bytecode.vm".Function[] load(in string path) {
+    import snakebite.ffi.symbol: Resolver;
+    import snakebite.backends.bytecode.vm: Function;
+    import std.exception: enforce;
     import std.file: read;
-    StopWatch readTimer;
-    readTimer.start;
     auto bytes = cast(ubyte[]) read(path);
-    diagnosticPhases.readNs += readTimer.peek.total!"nsecs";
     enforce(bytes.length >= 2 * size_t.sizeof, "image A truncated bundle");
     const count = *cast(const(size_t)*) bytes.ptr;
     bytes = bytes[size_t.sizeof .. $];
     const roots = *cast(const(size_t)*) bytes.ptr;
     bytes = bytes[size_t.sizeof .. $];
     enforce(roots <= count, "image A bad root count");
+    Resolver resolver;
     const dataLength = take!size_t(bytes);
     enforce(dataLength <= bytes.length, "image A truncated data graph");
-    auto data = loadDataGraph(bytes[0 .. dataLength]); // Fixups write native pointers.
+    auto loadedStorage = loadDataGraph(bytes[0 .. dataLength], resolver); // Fixups write native pointers.
     bytes = bytes[dataLength .. $];
     enforce(count <= bytes.length / size_t.sizeof, "image A bad function count");
     auto functions = new Function[count];
@@ -658,14 +665,19 @@ public Function[] loadImageBundleA(in string path) {
         const length = *cast(const(size_t)*) bytes.ptr;
         bytes = bytes[size_t.sizeof .. $];
         enforce(length <= bytes.length, "image A truncated function");
-        function_ = decodeImageA(bytes[0 .. length], functions, data);
+        function_ = decodeFunction(bytes[0 .. length], resolver, functions, loadedStorage);
         bytes = bytes[length .. $];
     }
     enforce(bytes.length == 0, "image A extra bundle data");
     return functions[0 .. roots];
 }
 
-public ulong runImageA(scope const ref Function function_, ulong x, ulong y) {
+public ulong execute(
+    scope const ref imported!"snakebite.backends.bytecode.vm".Function function_,
+    ulong x, ulong y,
+) {
+    import snakebite.backends.bytecode.vm: Vm;
+    import std.exception: enforce;
     import snakebite.framestack: defaultFrameCapacity;
     enforce(function_.parameterOffsets.length == 2,
         "image A expects two arithmetic arguments");

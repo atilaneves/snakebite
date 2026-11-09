@@ -335,7 +335,6 @@ snakebite_ffi_call_sysv_amd64_integer:
  * callback` cross-checks the two against each other at start-up.
  */
 
-#ifndef SNAKEBITE_FORWARD_ONLY
 #define CB_ENTRIES_PER_CHUNK 254
 #define CB_ENTRY_BYTES       16
 /* `CallFrame` is 304 bytes, already rounded for 16-byte alignment. */
@@ -456,6 +455,5 @@ snakebite_ffi_callback_common:
 
     .cfi_endproc
     .size   snakebite_ffi_callback_common, . - snakebite_ffi_callback_common
-#endif
 
     .section .note.GNU-stack,"",@progbits

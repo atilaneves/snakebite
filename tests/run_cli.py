@@ -187,6 +187,75 @@ def test_arena_runner_arguments(
     assert not list((tmp_path / "tmp" / "snakebite-ut").iterdir())
 
 
+@pytest.fixture(scope="session")
+def bytecode_image_loader() -> Path:
+    root = Path(__file__).resolve().parent.parent
+    return root / "bin/ut"
+
+
+def save_bytecode_fixture(tmp_path: Path, fixture: str) -> Path:
+    root = Path(__file__).resolve().parent.parent
+    image = tmp_path / f"{fixture}.sbc"
+    result = subprocess.run(
+        [str(root / "bin/ut"), "--save", str(image), fixture],
+        cwd=tmp_path, capture_output=True, text=True, check=False, timeout=60,
+    )
+    assert result.returncode == 0, output(result)
+    assert "guest_executions=0" in result.stdout, output(result)
+    assert image.is_file()
+    return image
+
+
+@pytest.mark.parametrize(
+    "fixture,x,y,expected",
+    [
+        ("arithmetic", 7, 11, 58),
+        ("direct", 7, 11, 12888667586533101800),
+        ("recursive", 7, 11, 571),
+        ("data", 7, 11, 99122),
+        ("data", 5, 0, 103089),
+        ("native", 7, 11, 6499122),
+        ("native", 5, 0, 6503089),
+        ("typeinfo", 7, 11, 91),
+        ("typeinfo", 5, 0, 78),
+        ("real", 7, 11, 8),
+        ("float", 7, 11, 8),
+        ("double", 7, 11, 8),
+        ("end", 7, 11, 3),
+        ("adjacentEnd", 7, 11, 8),
+    ],
+)
+def test_bytecode_image_fresh_process(
+    tmp_path: Path, bytecode_image_loader: Path,
+    fixture: str, x: int, y: int, expected: int,
+) -> None:
+    image = save_bytecode_fixture(tmp_path, fixture)
+    args = [str(bytecode_image_loader), "--load", str(image), str(x), str(y), str(expected)]
+    if fixture == "typeinfo":
+        args.append("typeinfo")
+    result = subprocess.run(
+        args, cwd=tmp_path, capture_output=True, text=True,
+        check=False, timeout=30,
+    )
+    assert result.returncode == 0, output(result)
+    assert result.stdout.strip() == str(expected), output(result)
+
+
+def test_bytecode_image_missing_native_symbol(
+    tmp_path: Path, bytecode_image_loader: Path,
+) -> None:
+    image = save_bytecode_fixture(tmp_path, "native")
+    data = image.read_bytes()
+    assert b"strlen" in data
+    image.write_bytes(data.replace(b"strlen", b"sbnone", 1))
+    result = subprocess.run(
+        [str(bytecode_image_loader), "--load", str(image), "7", "11", "6499122"],
+        cwd=tmp_path, capture_output=True, text=True, check=False, timeout=30,
+    )
+    assert result.returncode != 0, output(result)
+    assert "image A cannot resolve process symbol: sbnone" in output(result)
+
+
 # A host invariant failure must report its call site even when release
 # assertions are disabled. This driver imports no DMD frontend modules.
 @pytest.mark.parametrize("mode", ["message", "default", "pure", "native"])
