@@ -63,6 +63,11 @@ version (DigitalMars) {
 }
 private enum STATE = RDX;
 
+// `movsd [mem], xmm0`.
+private enum ubyte doublePrefix = 0xF2;
+private enum ubyte storeOpcode = 0x11;
+private enum fp0Register = 0;
+
 private struct Mem {
     ubyte base;
     int disp;
@@ -1290,7 +1295,7 @@ package bool jitFunction(Instruction[] instructions,
                 static if (!chainedDispatch) {
                     g.a.st(8, Mem(STATE, cast(int) DispatchState.r0.offsetof),
                         REG0);
-                    g.a.sse(0xF2, 0x11, 0,
+                    g.a.sse(doublePrefix, storeOpcode, fp0Register,
                         Mem(STATE, cast(int) DispatchState.fp0.offsetof));
                 }
                 // mov pc, &instruction; mov rax, handler; jmp rax
