@@ -205,8 +205,9 @@ private struct Asm {
     void d32(int x) { *cast(int*) (buf + n) = x; n += 4; }
     void q64(ulong x) { *cast(ulong*) (buf + n) = x; n += 8; }
 
-    // Prefix, REX, then `opc`, then ModRM for `m`.
-    void memOp(int w, bool byteReg, int reg, in Mem m, in ubyte[] opc,
+    // Prefix, REX, then `opc` (one byte, or `0x0F` and one byte as 0x0Fxx), then
+    // ModRM for `m`.
+    void memOp(int w, bool byteReg, int reg, in Mem m, uint opc,
         ubyte prefix = 0, bool forceW = false)
     {
         if (prefix)
@@ -224,8 +225,9 @@ private struct Asm {
             rex |= 1;
         if (rex != 0x40 || (byteReg && reg >= 4))
             b(rex);
-        foreach (o; opc)
-            b(o);
+        if (opc > 0xFF)
+            b(cast(ubyte) (opc >> 8));
+        b(cast(ubyte) opc);
         modrm(reg & 7, m);
     }
 
@@ -251,7 +253,7 @@ private struct Asm {
     }
 
     // reg, reg. `reg` is the ModRM reg field, `rm` the r/m field.
-    void rrOp(int w, bool byteReg, int reg, int rm, in ubyte[] opc,
+    void rrOp(int w, bool byteReg, int reg, int rm, uint opc,
         bool forceW = false)
     {
         if (w == 2)
@@ -265,54 +267,55 @@ private struct Asm {
             rex |= 1;
         if (rex != 0x40 || (byteReg && (reg >= 4 || rm >= 4)))
             b(rex);
-        foreach (o; opc)
-            b(o);
+        if (opc > 0xFF)
+            b(cast(ubyte) (opc >> 8));
+        b(cast(ubyte) opc);
         b(cast(ubyte) (0xC0 | ((reg & 7) << 3) | (rm & 7)));
     }
 
     // Loads and stores of width `w` with no extension.
     void ld(int w, int r, in Mem m) {
-        memOp(w, w == 1, r, m, w == 1 ? [cast(ubyte) 0x8A] : [cast(ubyte) 0x8B]);
+        memOp(w, w == 1, r, m, w == 1 ? 0x8A : 0x8B);
     }
 
     void st(int w, in Mem m, int r) {
-        memOp(w, w == 1, r, m, w == 1 ? [cast(ubyte) 0x88] : [cast(ubyte) 0x89]);
+        memOp(w, w == 1, r, m, w == 1 ? 0x88 : 0x89);
     }
 
     // Zero and sign extension to 64 bits.
     void ldzx(int w, int r, in Mem m) {
         switch (w) {
-            case 1: memOp(4, false, r, m, [cast(ubyte) 0x0F, 0xB6]); break;
-            case 2: memOp(4, false, r, m, [cast(ubyte) 0x0F, 0xB7]); break;
-            case 4: memOp(4, false, r, m, [cast(ubyte) 0x8B]); break;
-            default: memOp(8, false, r, m, [cast(ubyte) 0x8B]);
+            case 1: memOp(4, false, r, m, (0x0F << 8 | 0xB6)); break;
+            case 2: memOp(4, false, r, m, (0x0F << 8 | 0xB7)); break;
+            case 4: memOp(4, false, r, m, 0x8B); break;
+            default: memOp(8, false, r, m, 0x8B);
         }
     }
 
     void ldsx(int w, int r, in Mem m) {
         switch (w) {
-            case 1: memOp(8, false, r, m, [cast(ubyte) 0x0F, 0xBE]); break;
-            case 2: memOp(8, false, r, m, [cast(ubyte) 0x0F, 0xBF]); break;
-            case 4: memOp(8, false, r, m, [cast(ubyte) 0x63]); break;
-            default: memOp(8, false, r, m, [cast(ubyte) 0x8B]);
+            case 1: memOp(8, false, r, m, (0x0F << 8 | 0xBE)); break;
+            case 2: memOp(8, false, r, m, (0x0F << 8 | 0xBF)); break;
+            case 4: memOp(8, false, r, m, 0x63); break;
+            default: memOp(8, false, r, m, 0x8B);
         }
     }
 
     // ALU op (0 add, 1 or, 4 and, 5 sub, 6 xor, 7 cmp) reg, mem.
     void alu(int op, int w, int r, in Mem m) {
-        memOp(w, w == 1, r, m, [cast(ubyte) (op * 8 + (w == 1 ? 2 : 3))]);
+        memOp(w, w == 1, r, m, (op * 8 + (w == 1 ? 2 : 3)));
     }
 
     // ALU op mem, imm.
     void aluMI(int op, int w, in Mem m, int imm) {
         if (w == 1) {
-            memOp(w, false, op, m, [cast(ubyte) 0x80]);
+            memOp(w, false, op, m, 0x80);
             b(cast(ubyte) imm);
         } else if (imm >= -128 && imm <= 127) {
-            memOp(w, false, op, m, [cast(ubyte) 0x83]);
+            memOp(w, false, op, m, 0x83);
             b(cast(ubyte) imm);
         } else {
-            memOp(w, false, op, m, [cast(ubyte) 0x81]);
+            memOp(w, false, op, m, 0x81);
             if (w == 2) { b(cast(ubyte) imm); b(cast(ubyte) (imm >> 8)); }
             else d32(imm);
         }
@@ -320,7 +323,7 @@ private struct Asm {
 
     // ALU op reg, reg (reg is the destination).
     void aluRR(int op, int w, int dst, int src) {
-        rrOp(w, w == 1, src, dst, [cast(ubyte) (op * 8 + (w == 1 ? 0 : 1))]);
+        rrOp(w, w == 1, src, dst, (op * 8 + (w == 1 ? 0 : 1)));
     }
 
     void aluRI(int op, int w, int r, int imm) {
@@ -351,38 +354,38 @@ private struct Asm {
 
     // imul reg, mem and imul reg, reg (width 4 or 8).
     void imulM(int w, int r, in Mem m) {
-        memOp(w, false, r, m, [cast(ubyte) 0x0F, 0xAF]);
+        memOp(w, false, r, m, (0x0F << 8 | 0xAF));
     }
 
     void imulRR(int w, int dst, int src) {
-        rrOp(w, false, dst, src, [cast(ubyte) 0x0F, 0xAF]);
+        rrOp(w, false, dst, src, (0x0F << 8 | 0xAF));
     }
 
     void imulRI(int dst, int src, int imm) {
-        rrOp(8, false, dst, src, [cast(ubyte) 0x69]);
+        rrOp(8, false, dst, src, 0x69);
         d32(imm);
     }
 
     void movRR64(int dst, int src) {
-        rrOp(8, false, src, dst, [cast(ubyte) 0x89]);
+        rrOp(8, false, src, dst, 0x89);
     }
 
     void movzxRR(int w, int dst, int src) {
         // Zero-extend the low `w` bytes of src into dst (32-bit result).
         switch (w) {
-            case 1: rrOp(4, true, dst, src, [cast(ubyte) 0x0F, 0xB6]); break;
-            case 2: rrOp(4, false, dst, src, [cast(ubyte) 0x0F, 0xB7]); break;
-            default: rrOp(4, false, src, dst, [cast(ubyte) 0x89]);
+            case 1: rrOp(4, true, dst, src, (0x0F << 8 | 0xB6)); break;
+            case 2: rrOp(4, false, dst, src, (0x0F << 8 | 0xB7)); break;
+            default: rrOp(4, false, src, dst, 0x89);
         }
     }
 
     // mov store immediate.
     void stI(int w, in Mem m, int imm) {
         if (w == 1) {
-            memOp(w, false, 0, m, [cast(ubyte) 0xC6]);
+            memOp(w, false, 0, m, 0xC6);
             b(cast(ubyte) imm);
         } else {
-            memOp(w, false, 0, m, [cast(ubyte) 0xC7]);
+            memOp(w, false, 0, m, 0xC7);
             if (w == 2) { b(cast(ubyte) imm); b(cast(ubyte) (imm >> 8)); }
             else d32(imm);
         }
@@ -407,25 +410,25 @@ private struct Asm {
     }
 
     void lea(int r, in Mem m) {
-        memOp(8, false, r, m, [cast(ubyte) 0x8D]);
+        memOp(8, false, r, m, 0x8D);
     }
 
     void negNot(bool neg, int w, in Mem m) {
         memOp(w, false, neg ? 3 : 2, m,
-            w == 1 ? [cast(ubyte) 0xF6] : [cast(ubyte) 0xF7]);
+            w == 1 ? 0xF6 : 0xF7);
     }
 
     void setcc(int cc, in Mem m) {
-        memOp(1, false, 0, m, [cast(ubyte) 0x0F, cast(ubyte) (0x90 + cc)]);
+        memOp(1, false, 0, m, (0x0F << 8 | (0x90 + cc)));
     }
 
     void setccR(int cc, int r) {
-        rrOp(1, true, 0, r, [cast(ubyte) 0x0F, cast(ubyte) (0x90 + cc)]);
+        rrOp(1, true, 0, r, (0x0F << 8 | (0x90 + cc)));
     }
 
     // SSE. `prefix` 0xF2 (sd), 0xF3 (ss), 0x66, or 0.
     void sse(ubyte prefix, ubyte op, int x, in Mem m) {
-        memOp(4, false, x, m, [cast(ubyte) 0x0F, op], prefix);
+        memOp(4, false, x, m, (0x0F << 8 | op), prefix);
     }
 
     void sseRR(ubyte prefix, ubyte op, int dst, int src) {
@@ -1129,7 +1132,7 @@ private struct Gen {
             if (offset != 0)
                 a.aluRI(0, 4, RAX, offset);
             if (op.d)
-                a.rrOp(8, false, RAX, RAX, [cast(ubyte) 0x63]);
+                a.rrOp(8, false, RAX, RAX, 0x63);
         } else {
             a.ld(8, RAX, idx);
             if (offset != 0)
