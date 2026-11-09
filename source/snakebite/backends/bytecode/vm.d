@@ -5045,6 +5045,8 @@ private void specialiseWith(alias executor, alias operation,
     OperandKind destinationKind, OperandKind sourceKind,
     immutable(ulong)[] widths, bool right, Parameters...)()
 {
+    // `auto`: `addSpecialisation` takes a mutable copy, and the entry has
+    // pointers.
     auto entry = specialisationOf!(false, executor, operation, destinationKind,
         sourceKind, widths, right, Parameters);
     addSpecialisation(entry,
@@ -5555,7 +5557,7 @@ static if (jitSupported) {
         const(size_t)[] indices)
     {
         foreach (index; indices)
-            if (auto counted = instructions[index].handler
+            if (const counted = instructions[index].handler
                     in _countingTwins.countedOf)
                 instructions[index].handler =
                     cast(Instruction.Handler) *counted;
@@ -5644,7 +5646,7 @@ static if (jitSupported) {
             // The code of a branch does not count; a call keeps its twin, which
             // counts the callee.
             if (handler !is null) {
-                if (auto original = handler in _countingTwins.uncountedOf)
+                if (const original = handler in _countingTwins.uncountedOf)
                     if (!isCountedCall(*original))
                         handler = *original;
             }
@@ -5686,7 +5688,8 @@ static if (jitSupported) {
 
         static foreach (triple; threeAddressNames) {{
             static foreach (constant; [false, true]) {{
-                auto handler = mixin("&" ~ triple.name ~ (constant ? "K" : ""));
+                const handler =
+                    mixin("&" ~ triple.name ~ (constant ? "K" : ""));
                 static if (triple.family == "opInt3")
                     put(handler, threeAddressInt(intOperationOf(triple.symbol),
                         constant));
@@ -5709,7 +5712,7 @@ static if (jitSupported) {
                 static foreach (from; [false, true])
                     static foreach (to; [false, true])
                         static if (from || to) {{
-                            auto handler = registerForm(mixin("&" ~ triple[0]
+                            const handler = registerForm(mixin("&" ~ triple[0]
                                 ~ (constant ? "K" : "")), from, to);
                             static if (triple[1] == "opInt3R")
                                 put(handler, registerInt(
@@ -5994,7 +5997,7 @@ static if (jitSupported) {
     private JitOp jitGet(const ref JitTables tables,
         in Instruction.Handler handler) nothrow @nogc
     {
-        if (auto op = handler in tables.jitTable)
+        if (const op = handler in tables.jitTable)
             return *op;
         return JitOp.init;
     }

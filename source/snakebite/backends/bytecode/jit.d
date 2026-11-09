@@ -336,7 +336,7 @@ private struct JitState {
         if (region.chunkUsed + populateSize / 4 > region.populatedEnd)
             region.populate;
 
-        auto code = region.execBase + start;
+        const code = region.execBase + start;
         // One aligned 8-byte store with release order for each word, after
         // the code is complete. A thread that runs the function moves to JIT
         // code at its next dispatch.
@@ -389,6 +389,7 @@ private struct CodeRegion {
         const size = (bytes + chunkSize - 1) & ~(chunkSize - 1);
         if (ftruncate(file, fileSize + size) != 0)
             return false;
+        // `auto`: `munmap` takes a mutable pointer.
         auto write = mmap(null, size, PROT_READ | PROT_WRITE, MAP_SHARED,
             file, fileSize);
         auto execute = mmap(null, size, PROT_READ | PROT_EXEC, MAP_SHARED,
@@ -588,7 +589,7 @@ private void checkCallingConvention(ref CodeRegion region) {
         functionLinkage!(Instruction.Handler),
         functionAttributes!(Instruction.Handler) | FunctionAttribute.nogc
             | FunctionAttribute.nothrow_);
-    auto stub = cast(NoGcHandler) region.execBase;
+    const stub = cast(NoGcHandler) region.execBase;
     stub(cast(Arguments[0]) pcValue, cast(Arguments[1]) activeValue,
         cast(Arguments[2]) stateValue, cast(Arguments[3]) seen.ptr,
         r0Value, fp0Value);
@@ -628,6 +629,7 @@ package struct Scratch(T) {
             auto newCap = cap ? cap : 256;
             while (newCap < n)
                 newCap *= 2;
+            // `auto`: `ptr` takes it, and it must be mutable.
             auto grown = cast(T*) realloc(ptr, newCap * T.sizeof);
             if (grown is null)
                 return null;
@@ -922,6 +924,7 @@ private struct Gen {
 
     void fix(size_t target) {
         if (fixupCount == fixupCap) {
+            // `auto`: `fixups` takes it, and it must be mutable.
             auto grown = fixupScratch.grow(fixupCap ? fixupCap * 2 : 256);
             if (grown is null) {
                 outOfMemory = true;
