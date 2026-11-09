@@ -27,6 +27,8 @@
 * Do not use "magic literals" like `foo(true, 0, 42, "bar")`. It's
   impossible to know what those values are from the calling context.
   Either name them with a variable or add a comment.
+* Do not use `__gshared` unless absolutely necessary. Shared code
+  should be `immutable` if it can be, `shared` otherwise.
 
 ## Production code (in `source`)
 
