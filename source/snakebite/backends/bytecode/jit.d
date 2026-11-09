@@ -57,7 +57,7 @@ private enum : ubyte {
 
 // Stats, printed at exit under SNAKEBITE_JIT_STATS=1.
 private __gshared ulong statEmitNs, statProtectNs, statFunctions,
-    statInstructions, statTemplated, statBytes, statPages, statDeclined;
+    statInstructions, statTemplated, statBytes, statDeclined;
 private __gshared bool statsOn;
 private __gshared bool statsHooked;
 
@@ -69,20 +69,30 @@ private ulong nowNs() {
 
 private extern(C) void dumpStats() {
     fprintf(stderr, "JIT functions=%llu instructions=%llu templated=%llu "
-        ~ "declined=%llu bytes=%llu pages=%llu emit_ms=%.3f mprotect_ms=%.3f\n",
+        ~ "declined=%llu bytes=%llu emit_ms=%.3f memory_ms=%.3f\n",
         statFunctions, statInstructions, statTemplated, statDeclined,
-        statBytes, statPages, statEmitNs / 1e6, statProtectNs / 1e6);
+        statBytes, statEmitNs / 1e6, statProtectNs / 1e6);
 }
 
-// The executable region. Code of one function starts on a fresh page, so that
-// a page never changes from writable to executable while a thread runs code
-// in it.
-private __gshared ubyte* regionBase;
+// The code region. A memfd file is mapped twice: `writeBase` is read+write,
+// where the JIT emits, and `execBase` is read+execute, where the handlers
+// point. No page changes protection. Functions are packed with 16-byte
+// alignment. Memory is made present (`MADV_POPULATE_*`) one chunk at a time.
+// All fields are protected by `regionLock`.
+private __gshared ubyte* writeBase;
+private __gshared ubyte* execBase;
 private __gshared size_t regionCursor;
+private __gshared size_t populatedEnd;
 private enum regionSize = 1UL << 30;
-private enum pageSize = 4096;
+private enum chunkSize = 1UL << 20;
+private enum MADV_POPULATE_READ = 22;
+private enum MADV_POPULATE_WRITE = 23;
 private shared int regionLock;
+private shared bool regionReady;
 private __gshared FILE* perfMap;
+
+extern(C) private int madvise(void*, size_t, int) nothrow @nogc;
+extern(C) private int memfd_create(const(char)* name, uint flags) nothrow @nogc;
 
 private void lock() {
     import core.atomic: cas;
@@ -94,20 +104,51 @@ private void unlock() {
     atomicStore(regionLock, 0);
 }
 
+// Caller holds `regionLock`, or is single threaded.
+private void populateChunk() {
+    if (populatedEnd + chunkSize > regionSize)
+        return;
+    const t = statsOn ? nowNs() : 0;
+    madvise(writeBase + populatedEnd, chunkSize, MADV_POPULATE_WRITE);
+    madvise(execBase + populatedEnd, chunkSize, MADV_POPULATE_READ);
+    populatedEnd += chunkSize;
+    if (statsOn)
+        statProtectNs += nowNs() - t;
+}
+
 private bool ensureRegion() {
-    if (regionBase !is null)
+    import core.atomic: atomicLoad, atomicStore, MemoryOrder;
+    if (atomicLoad!(MemoryOrder.acq)(regionReady))
         return true;
-    auto p = mmap(null, regionSize, PROT_READ | PROT_WRITE,
-        MAP_PRIVATE | MAP_ANON | 0x4000, -1, 0);
-    if (p is MAP_FAILED)
+    lock();
+    scope (exit)
+        unlock();
+    if (regionReady)
+        return true;
+    const fd = memfd_create("snakebite-jit", 0);
+    if (fd < 0)
         return false;
-    regionBase = cast(ubyte*) p;
+    import core.sys.posix.unistd: ftruncate, close;
+    if (ftruncate(fd, regionSize) != 0) {
+        close(fd);
+        return false;
+    }
+    auto w = mmap(null, regionSize, PROT_READ | PROT_WRITE,
+        MAP_SHARED | 0x4000, fd, 0);
+    auto x = mmap(null, regionSize, PROT_READ | PROT_EXEC,
+        MAP_SHARED | 0x4000, fd, 0);
+    close(fd);
+    if (w is MAP_FAILED || x is MAP_FAILED)
+        return false;
+    writeBase = cast(ubyte*) w;
+    execBase = cast(ubyte*) x;
     const s = getenv("SNAKEBITE_JIT_STATS");
     statsOn = s !is null && s[0] == '1';
     if (statsOn && !statsHooked) {
         statsHooked = true;
         atexit(&dumpStats);
     }
+    populateChunk;
     const m = getenv("SNAKEBITE_JIT_PERFMAP");
     if (m !is null && m[0] == '1') {
         import core.stdc.stdio: snprintf;
@@ -115,6 +156,7 @@ private bool ensureRegion() {
         snprintf(path.ptr, path.length, "/tmp/perf-%d.map", getpid());
         perfMap = fopen(path.ptr, "w");
     }
+    atomicStore!(MemoryOrder.rel)(regionReady, true);
     return true;
 }
 
@@ -1139,13 +1181,13 @@ package bool jitFunction(Instruction[] instructions,
     lock();
     scope (exit)
         unlock();
-    const start = (regionCursor + pageSize - 1) & ~(pageSize - 1UL);
+    const start = (regionCursor + 15) & ~15UL;
     const cap = regionSize - start;
     if (cap < instructions.length * 1024 + 4096)
         return false;
 
     Gen g;
-    g.a.buf = regionBase + start;
+    g.a.buf = writeBase + start;
     g.a.cap = cap;
     g.instructions = instructions;
     g.snapshot = snapshot;
@@ -1196,25 +1238,22 @@ package bool jitFunction(Instruction[] instructions,
             g.labels[f.target] - (f.position + 4));
 
     const size = g.a.n;
-    const pages = (size + pageSize - 1) / pageSize;
     const t1 = nowNs();
-    if (mprotect(g.a.buf, pages * pageSize, PROT_READ | PROT_EXEC) != 0)
-        return false;
-    const t2 = nowNs();
-    regionCursor = start + pages * pageSize;
+    regionCursor = start + size;
+    if (regionCursor + chunkSize / 4 > populatedEnd)
+        populateChunk;
 
+    auto code = execBase + start;
     foreach (i, ref instruction; instructions)
-        instruction.handler = cast(Instruction.Handler) (g.a.buf + g.labels[i]);
+        instruction.handler = cast(Instruction.Handler) (code + g.labels[i]);
 
     ++statFunctions;
     statInstructions += instructions.length;
     statTemplated += templated;
     statBytes += size;
-    statPages += pages;
     statEmitNs += t1 - t0;
-    statProtectNs += t2 - t1;
     if (perfMap !is null) {
-        fprintf(perfMap, "%lx %lx %.*s\n", cast(size_t) g.a.buf, size,
+        fprintf(perfMap, "%lx %lx %.*s\n", cast(size_t) code, size,
             cast(int) name.length, name.ptr);
         fflush(perfMap);
     }
