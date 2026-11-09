@@ -5609,7 +5609,8 @@ private void countCall(const(Function)* callee) {
         jitTierUp(function_);
 }
 
-// `original` with a count of the event in front of it.
+// `original` with a count of the event in front of it. The slow path is a
+// call of its own, so that the counting path has no stack frame.
 private const(Instruction)* countedHandler(alias original)(
     const(Instruction)* pc,
     Activation* active,
@@ -5618,8 +5619,21 @@ private const(Instruction)* countedHandler(alias original)(
     ulong r0,
     double fp0,
 ) {
-    if (addHeat(cast(Function*) active.function_, jitStep)
-            && jitTierUp(cast(Function*) active.function_)) {
+    if (addHeat(cast(Function*) active.function_, jitStep))
+        return countedTierUp!original(pc, active, state, frame, r0, fp0);
+    return original(pc, active, state, frame, r0, fp0);
+}
+
+pragma(inline, false)
+private const(Instruction)* countedTierUp(alias original)(
+    const(Instruction)* pc,
+    Activation* active,
+    DispatchState* state,
+    ubyte* frame,
+    ulong r0,
+    double fp0,
+) {
+    if (jitTierUp(cast(Function*) active.function_)) {
         // The word of this instruction now holds JIT code.
         import core.atomic: atomicLoad, MemoryOrder;
         const compiled = cast(Instruction.Handler) atomicLoad!(MemoryOrder.acq)(
