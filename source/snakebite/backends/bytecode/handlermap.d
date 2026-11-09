@@ -1,12 +1,14 @@
+/// A hash table from the address of a handler to a value. It uses open
+/// addressing and never removes an entry, and it grows when it is half full.
+/// The null key marks a free slot, so it cannot be a key. A table does no
+/// locking: the owner builds it before threads read it, or reads and writes it
+/// under one lock.
+///
+/// It is not a built-in associative array because the JIT adds entries to its
+/// tables in `@nogc` code, when the first function compiles (the compile
+/// allocates nothing from the GC, ADR 0016), and an insertion into an
+/// associative array allocates from the GC.
 module snakebite.backends.bytecode.handlermap;
-
-// A hash table from the address of a handler to a value. It uses open
-// addressing and never removes an entry, and it grows when it is half full.
-// The null key marks a free slot, so it cannot be a key. A table does no
-// locking: the owner builds it before threads read it, or reads and writes it
-// under one lock.
-
-import core.stdc.stdlib: calloc, free;
 
 package struct HandlerMap(Key, Value) {
     @nogc nothrow:
@@ -64,6 +66,8 @@ package struct HandlerMap(Key, Value) {
     }
 
     private bool grow() {
+        import core.stdc.stdlib: calloc, free;
+
         const capacity = entries.length == 0
             ? initialCapacity : entries.length * 2;
         auto memory = cast(Entry*) calloc(capacity, Entry.sizeof);
