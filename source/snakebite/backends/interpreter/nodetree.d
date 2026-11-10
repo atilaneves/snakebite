@@ -20,7 +20,7 @@ import dmd.statement: Statement;
 import snakebite.language.storage.aggregateinit: InitStep;
 import snakebite.language.checks.failure: BoundsCheck;
 import snakebite.language.control.transfer: ControlFlowState, labelTargetOf;
-import snakebite.backends.fullexpression: FullExpressionScope;
+import snakebite.language.traversal.fullexpression: FullExpressionScope;
 import snakebite.backends.interpreter.faultslot:
     FaultSite, ResultWord, fastFrameLead, faultSlotOf, resultPlaceOf,
     resultWordOf, siteWord;

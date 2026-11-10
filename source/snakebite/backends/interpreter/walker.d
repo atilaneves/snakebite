@@ -239,7 +239,7 @@ import snakebite.frontend.dmd.dispatch: classReceiverOf, readsVtable;
 import snakebite.language.call.selection: ValueCall;
 import snakebite.failure.halt: isHalt;
 import snakebite.language.checks.assertion: CAssertCall;
-import snakebite.backends.loweringvisitor: LoweringVisitor;
+import snakebite.language.traversal.lowering: LoweringVisitor;
 import snakebite.language.operators.identity: IdentityPlan;
 import snakebite.language.control.ifplan: IfPlan;
 import snakebite.language.control.logical: LogicalPlan;
@@ -254,7 +254,7 @@ import snakebite.language.control.cases: SwitchPlan, switchPlan, selectCase,
     gotoCaseTarget, gotoDefaultTarget;
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
 import snakebite.host.cstack: CStack;
-import snakebite.backends.fullexpression:
+import snakebite.language.traversal.fullexpression:
     FullExpressionScope;
 import snakebite.language.layout.temporary: canRetainTemporaries;
 
@@ -8023,5 +8023,5 @@ private struct Cache(Key, Value) {
 // that imports it.
 private void assertEveryNodeHandled() {
     static assert(
-        imported!"snakebite.backends.nodecoverage".AssertEveryNodeHandled!(Evaluator!false));
+        imported!"snakebite.language.traversal.coverage".AssertEveryNodeHandled!(Evaluator!false));
 }

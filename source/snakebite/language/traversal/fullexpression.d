@@ -1,4 +1,4 @@
-module snakebite.backends.fullexpression;
+module snakebite.language.traversal.fullexpression;
 
 
 private:

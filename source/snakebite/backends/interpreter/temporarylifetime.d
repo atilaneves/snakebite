@@ -7,7 +7,7 @@ import dmd.declaration: VarDeclaration;
 import dmd.expression: DeclarationExp, Expression, StructLiteralExp;
 import snakebite.language.layout.temporary: TemporaryPlan;
 import snakebite.stack.temporaries: TemporaryStack;
-import snakebite.backends.fullexpression:
+import snakebite.language.traversal.fullexpression:
     FullExpressionScope;
 import snakebite.stack.frames: FrameStack, defaultFrameCapacity;
 import snakebite.host.cstack: CStack;

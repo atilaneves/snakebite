@@ -1,4 +1,4 @@
-module snakebite.backends.loweringvisitor;
+module snakebite.language.traversal.lowering;
 
 
 private:
@@ -18,7 +18,7 @@ import dmd.statement:
     SwitchErrorStatement, SwitchStatement, ThrowStatement, WithStatement;
 import dmd.location: Loc;
 import dmd.typesem: isString;
-import snakebite.backends.fullexpression: FullExpressionScope;
+import snakebite.language.traversal.fullexpression: FullExpressionScope;
 import snakebite.language.layout.lowered: LoweredExpressionTypes;
 import snakebite.language.operators.identity: IdentityPlan, identityPlan;
 import snakebite.language.control.logical: LogicalPlan, logicalPlan;

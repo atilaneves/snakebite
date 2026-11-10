@@ -13,7 +13,7 @@ import snakebite.failure.report: internalFailure;
 import dmd.mtype: Type;
 import object: TypeInfo_Class;
 import snakebite.native.argumentflow: Shape, SignatureTable;
-import snakebite.backends.loweringvisitor: LoweringVisitor;
+import snakebite.language.traversal.lowering: LoweringVisitor;
 import snakebite.language.operators.identity: IdentityPlan, identityPlan;
 import snakebite.language.control.ifplan: IfPlan;
 import snakebite.language.control.logical: LogicalPlan;
@@ -22,7 +22,7 @@ import snakebite.language.control.plaincondition:
 import snakebite.language.operators.comparison: ComparisonPlan, comparisonPlan;
 import snakebite.language.control.cases:
     SwitchPlan, switchPlan, gotoCaseTarget, gotoDefaultTarget;
-import snakebite.backends.fullexpression:
+import snakebite.language.traversal.fullexpression:
     FullExpressionScope;
 import snakebite.language.control.transfer:
     ScopeFrame, ScopePaths, labelTargetOf, scopePathsOf;
@@ -11630,5 +11630,5 @@ private string expressionText(imported!"dmd.expression".Expression expression) {
 // that imports it.
 private void assertEveryNodeHandled() {
     static assert(
-        imported!"snakebite.backends.nodecoverage".AssertEveryNodeHandled!FunctionCompiler);
+        imported!"snakebite.language.traversal.coverage".AssertEveryNodeHandled!FunctionCompiler);
 }

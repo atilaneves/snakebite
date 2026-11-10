@@ -1,4 +1,4 @@
-module snakebite.backends.nodecoverage;
+module snakebite.language.traversal.coverage;
 
 
 private:
