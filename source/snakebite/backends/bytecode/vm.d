@@ -5664,6 +5664,10 @@ static if (jitSupported) {
                 else static if (triple.family == "opShift3")
                     put(handler, threeAddressShift(
                         shiftKindOf(triple.symbol, triple.flag), constant));
+                else static if (triple.family == "opDivide3" && triple.flag)
+                    put(handler, JitOp.make!(Kind.signedDivide)(
+                        JitOp.SignedDivide(remainder: triple.symbol == "%",
+                            constantRight: constant)));
                 else static if (triple.family == "opFloat3")
                     put(handler, threeAddressFloat(
                         floatOperationOf(triple.symbol), constant));
@@ -5735,6 +5739,15 @@ static if (jitSupported) {
         put(&opShiftRightArithmetic,
             twoAddressShift(ShiftKind.arithmeticRight));
         put(&opArrayEqual, JitOp.plain(Kind.arrayEqual));
+        put(&opDivideSigned, JitOp.make!(Kind.signedDivide)(
+            JitOp.SignedDivide(twoAddress: true, widenInt: true)));
+        put(&opModuloSigned, JitOp.make!(Kind.signedDivide)(
+            JitOp.SignedDivide(remainder: true, twoAddress: true,
+                widenInt: true)));
+        put(&opDivideSigned32, JitOp.make!(Kind.signedDivide)(
+            JitOp.SignedDivide(twoAddress: true)));
+        put(&opModuloSigned32, JitOp.make!(Kind.signedDivide)(
+            JitOp.SignedDivide(remainder: true, twoAddress: true)));
         put(&opCopy, JitOp.plain(Kind.copy));
         static foreach (width; 1 .. 17) {
             put(&opCopyFixed!(width, true),

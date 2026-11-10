@@ -2840,6 +2840,35 @@ def test_bytecode_signed_int_overflowing_division_traps(
     ), output(result)
 
 
+@pytest.mark.parametrize("operand_type", ["int", "long"])
+@pytest.mark.parametrize("operator", ["/", "%"])
+@pytest.mark.parametrize("divisor", [0, -1])
+def test_bytecode_hot_signed_division_traps(
+    tmp_path: Path, operand_type: str, operator: str, divisor: int,
+) -> None:
+    write(
+        tmp_path / "app" / "main.d",
+        f"""
+        module main;
+        {operand_type} divide({operand_type} value, {operand_type} divisor) {{
+            assert(value != 0);
+            return value {operator} divisor;
+        }}
+        int main() {{
+            foreach (_; 0 .. 300)
+                if (divide(5, 3) != {1 if operator == "/" else 2})
+                    return 1;
+            return cast(int) divide({operand_type}.min, {divisor});
+        }}
+        """,
+    )
+    result = run_sb("--backend=bytecode", str(tmp_path / "app"), cwd=tmp_path)
+    assert result.returncode == -signal.SIGFPE, output(result)
+    assert result.stderr == (
+        "fatal: integer division by zero or overflow\n"
+    ), output(result)
+
+
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
 def test_virtual_call_on_null_receiver_evaluates_arguments_first(
     tmp_path: Path, backend: str,
