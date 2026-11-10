@@ -447,8 +447,9 @@ public struct CallSite {
     // fields, then publishes the shape in `directState`. `direct` is one or
     // two whole arguments with a result of at most one word.
     // `twoWordsPairResult` passes two frame words in register order and
-    // keeps a two-word frame result. `wide` handles other direct shapes using
-    // `directLoads[a]`, how an argument is read, and
+    // keeps a two-word frame result. `twoWordsIndirectPairResult` resolves
+    // the result place through a frame address slot. `wide` handles other
+    // direct shapes using `directLoads[a]`, how an argument is read, and
     // `directOrder[r]`, the argument that goes in integer register `r` (see
     // `directWordCallTarget`). `directSwapped` says the arguments are not in
     // register order.
@@ -461,6 +462,7 @@ public struct CallSite {
         threeWordsSign32,
         threeWordsZero32,
         twoWordsPairResult,
+        twoWordsIndirectPairResult,
     }
 
     package uint directState;
@@ -2205,8 +2207,9 @@ private const(Instruction)* opCallNative(
                 && loads[0] == Load.word64 && loads[1] == Load.word64
                 && isFrameOperand(site.args[0].callerOffset)
                 && isFrameOperand(site.args[1].callerOffset)
-                && isFrameOperand(pc.destination))
-            current = State.twoWordsPairResult;
+                && pc.destination != discardResult)
+            current = isFrameOperand(pc.destination) ? State.twoWordsPairResult
+                : State.twoWordsIndirectPairResult;
         if (current == State.wide && parameterCount == 3
                 && site.returnWidth == ulong.sizeof
                 && pc.destination != discardResult
@@ -2225,7 +2228,7 @@ private const(Instruction)* opCallNative(
     }
     if (current != State.direct) {
         if (current == State.twoWordsPairResult)
-            return opCallDirectTwoWordsPairResult(site, pc, active, state, frame);
+            return opCallDirectTwoWordsPairResult!false(site, pc, active, state, frame);
         if (current == State.wide)
             return opCallDirectWide(site, pc, active, state, frame);
         if (current == State.threeWordsSign32)
@@ -2234,6 +2237,8 @@ private const(Instruction)* opCallNative(
         if (current == State.threeWordsZero32)
             return opCallDirectThreeWords!(Load.zero32)(
                 site, pc, active, state, frame);
+        if (current == State.twoWordsIndirectPairResult)
+            return opCallDirectTwoWordsPairResult!true(site, pc, active, state, frame);
         return opCallNotDirect(pc, active, state, frame, r0, fp0);
     }
     }
@@ -2268,7 +2273,7 @@ private const(Instruction)* opCallNative(
 }
 
 pragma(inline, false)
-private const(Instruction)* opCallDirectTwoWordsPairResult(
+private const(Instruction)* opCallDirectTwoWordsPairResult(bool indirect)(
     CallSite* site,
     const(Instruction)* pc,
     Activation* active,
@@ -2280,8 +2285,10 @@ private const(Instruction)* opCallDirectTwoWordsPairResult(
     state.current = active;
     const first = loadWord(frame + site.args[0].callerOffset, Load.word64);
     const second = loadWord(frame + site.args[1].callerOffset, Load.word64);
+    auto place = indirect ? indirectStorageAt(frame, pc.destination)
+        : frame + pc.destination;
     callDirectWords(site.directTarget, first, second,
-        /* third */ 0, /* resultWidth */ 16, frame + pc.destination);
+        /* third */ 0, /* resultWidth */ 16, place);
     return pc + 1;
 }
 
