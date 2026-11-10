@@ -19,7 +19,7 @@ import snakebite.nativevalue: TypeFacts;
 import snakebite.nativelayout: NativeData;
 import snakebite.nativevalue: BitfieldAccess;
 import snakebite.backends.argumentflow: SignatureTable;
-import snakebite.sharedtable: SharedTable;
+import snakebite.host.sharedtable: SharedTable;
 
 // Facts have one program owner. Preparation and ordinary execution use the
 // same builders, so a prepared callback reads the same immutable entries.

@@ -26,8 +26,8 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     import dmd.func: FuncDeclaration;
     import snakebite.backends.program: Program;
     import snakebite.ffi: CallbackBridge, CallbackCall;
-    import snakebite.hostthreads: heapNew;
-    import snakebite.executionstates: ExecutionStates;
+    import snakebite.host.threads: heapNew;
+    import snakebite.host.executionstates: ExecutionStates;
 
     // What every thread that runs this program shares: the caches that
     // are filled once per key, and the plan cache with its callback
@@ -110,7 +110,7 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         void* context,
         CallbackCall* call,
     ) {
-        version(unittest) import snakebite.sharedtable: PreparedExecution;
+        version(unittest) import snakebite.host.sharedtable: PreparedExecution;
         auto interpreter = cast(Interpreter) context;
         version(unittest)
             auto preparedExecution = PreparedExecution(isFinalizerCallback(
@@ -204,7 +204,7 @@ private final class GuestException: Exception {
     private Throwable _guest;
 
     public static GuestException make(Throwable guest) {
-        import snakebite.hostthreads: heapNew;
+        import snakebite.host.threads: heapNew;
 
         return heapNew!GuestException(guest);
     }
@@ -222,7 +222,7 @@ private final class GuestException: Exception {
     }
 
     private Throwable take() {
-        import snakebite.hostthreads: heapDelete;
+        import snakebite.host.threads: heapDelete;
 
         auto guest = _guest;
         _guest = null;
@@ -253,7 +253,7 @@ import snakebite.failure.unwind:
 import snakebite.backends.switchplan: SwitchPlan, switchPlan, selectCase,
     gotoCaseTarget, gotoDefaultTarget;
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
-import snakebite.cstack: CStack;
+import snakebite.host.cstack: CStack;
 import snakebite.backends.fullexpression:
     FullExpressionScope;
 import snakebite.backends.temporary: canRetainTemporaries;
@@ -287,7 +287,7 @@ private struct Shared {
     import snakebite.nativevalue: TypeFacts;
     import snakebite.nativelayout: NativeData;
     import snakebite.nativevalue: BitfieldAccess;
-    import snakebite.sharedtable: SharedTable;
+    import snakebite.host.sharedtable: SharedTable;
 
     // The program being run: its `isInterpreted` is the one decision for
     // whether a callee is walked or called natively.
@@ -7976,7 +7976,7 @@ private struct StaticChainKey {
 // The count itself is `bin/ut` only: an unconditional increment here
 // would be exactly the per-node cost it exists to measure.
 private struct Cache(Key, Value) {
-    import snakebite.sharedtable: SharedTable;
+    import snakebite.host.sharedtable: SharedTable;
 
     private SharedTable!(Key, Value)* _table;
     version(unittest) private size_t _lookups;

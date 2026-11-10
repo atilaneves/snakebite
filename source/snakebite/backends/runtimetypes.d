@@ -27,7 +27,7 @@ public struct RuntimeTypes {
     import dmd.mtype: Type;
     import object:
         TypeInfo, TypeInfo_Class, TypeInfo_Interface, TypeInfo_Struct;
-    import snakebite.sharedtable: SharedTable;
+    import snakebite.host.sharedtable: SharedTable;
 
     private bool delegate(Dsymbol) const _isRootOwned;
     private void* delegate(const(char)[]) _resolve;

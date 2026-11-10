@@ -34,7 +34,7 @@ public StartupReport runDruntimeMain(
     in bool endsProcess = false,
 ) {
     import snakebite.backends.runprogram: runMain;
-    import snakebite.guestrunlock: guestRunLock;
+    import snakebite.host.runlock: guestRunLock;
     import snakebite.backends.guestmodules: GuestModules;
     import snakebite.dependencyimage: TestHooks;
     import std.algorithm.iteration: map;

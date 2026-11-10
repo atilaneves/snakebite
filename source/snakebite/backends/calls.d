@@ -21,7 +21,7 @@ public struct CallSelection {
 
     import snakebite.backends.builtins:
         BuiltinCall, ParameterType, startVariadicEntry;
-    import snakebite.sharedtable: SharedTable;
+    import snakebite.host.sharedtable: SharedTable;
 
     // Every call site resolves to exactly one of these. `guest` and
     // `native` are the two routes `usesGuestBody` always answered;
@@ -167,7 +167,7 @@ public struct CallSelection {
             return *cached;
 
         version(unittest) {
-            import snakebite.sharedtable: assertCacheFillAllowed;
+            import snakebite.host.sharedtable: assertCacheFillAllowed;
             assertCacheFillAllowed!"intrinsic classification";
         }
         IntrinsicPlan plan;

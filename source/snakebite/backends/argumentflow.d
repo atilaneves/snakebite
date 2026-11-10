@@ -4,7 +4,7 @@ module snakebite.backends.argumentflow;
 private:
 
 import snakebite.nativevalue: TypeFacts;
-import snakebite.sharedtable: SharedTable;
+import snakebite.host.sharedtable: SharedTable;
 
 
 // The part of one argument that decides which register the System V x86-64

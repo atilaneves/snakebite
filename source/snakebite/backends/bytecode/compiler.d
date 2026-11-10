@@ -59,11 +59,11 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import snakebite.backends.bytecode.vm: Function, InlineBody, JitSetting, Vm;
     import snakebite.backends.layout: FrameLayout;
     import snakebite.frontend.checks: Checks;
-    import snakebite.sharedtable: SharedTable;
+    import snakebite.host.sharedtable: SharedTable;
     import snakebite.failure.exception: SnakebiteException;
     import snakebite.framestack: defaultFrameCapacity;
-    import snakebite.hostthreads: heapNew;
-    import snakebite.executionstates: ExecutionStates;
+    import snakebite.host.threads: heapNew;
+    import snakebite.host.executionstates: ExecutionStates;
     import snakebite.nativelayout: NativeData;
     import snakebite.frontend.dmd.mangle: nativeSymbolName;
     import snakebite.backends.runtimetypes: RuntimeTypes;

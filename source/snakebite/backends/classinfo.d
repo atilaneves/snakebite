@@ -51,7 +51,7 @@ public struct ClassRuntimeCache {
     // storage with the original until one side grows.
     @disable this(this);
 
-    import snakebite.sharedtable: SharedTable;
+    import snakebite.host.sharedtable: SharedTable;
 
     private SharedTable!(ClassDeclaration, TypeInfo_Class) _published;
     // Guarded by the compiler lock (`build`).

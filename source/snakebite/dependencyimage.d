@@ -88,7 +88,7 @@ public struct DependencyImage {
     private string _path;
     private alias Modules = extern(C) const(ModuleInfo*)* function(size_t*);
     private Modules _modules;
-    import snakebite.runtimeentry: RuntimeEntry;
+    import snakebite.host.runtimeentry: RuntimeEntry;
     // The image's own function for each function of `RuntimeEntry`, or null.
     // Code in the image calls it and takes its address, so a guest
     // reference must give the same address.
@@ -322,7 +322,7 @@ public DependencyImage prepareImage(
 // Loads an image that is already built, instead of having `prepareImage` make
 // one.
 public DependencyImage loadImage(in string path) {
-    import snakebite.guestrunlock: guestRunLock;
+    import snakebite.host.runlock: guestRunLock;
 
     // Hooks belong to the process, and a guest run installs and watches them
     // under this lock. A load must not capture or restore a run's hooks.
@@ -370,7 +370,7 @@ private DependencyImage loadImageLocked(in string path) {
         "snakebite_dependency_image_modules_v1");
     if (image._modules !is null) {
         import std.string: toStringz;
-        import snakebite.runtimeentry: RuntimeEntry;
+        import snakebite.host.runtimeentry: RuntimeEntry;
 
         foreach (i, symbol; RuntimeEntry.symbols)
             image._wrappers[i] = dlsym(

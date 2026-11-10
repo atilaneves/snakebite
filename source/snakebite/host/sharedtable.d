@@ -1,4 +1,4 @@
-module snakebite.sharedtable;
+module snakebite.host.sharedtable;
 
 
 private:
@@ -7,7 +7,7 @@ import core.atomic: atomicLoad, atomicStore, MemoryOrder;
 import core.sync.mutex: Mutex;
 
 version(unittest) {
-    import snakebite.hostthreads: heapNew, PerThread;
+    import snakebite.host.threads: heapNew, PerThread;
 
     private struct PreparedState {
         bool active;

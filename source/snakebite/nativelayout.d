@@ -28,8 +28,8 @@ public struct NativeData {
     import dmd.location: Loc;
     import dmd.mtype: Type;
 
-    import snakebite.hostthreads: heapNew, PerThread;
-    import snakebite.sharedtable: SharedTable;
+    import snakebite.host.threads: heapNew, PerThread;
+    import snakebite.host.sharedtable: SharedTable;
     import snakebite.tlsstorage: TlsDescriptor, TlsSlots;
 
     private bool delegate(Dsymbol) const _isRootOwned;
@@ -109,7 +109,7 @@ public struct NativeData {
         import core.stdc.string: memcpy;
         import dmd.expressionsem: toInteger;
         import snakebite.frontend.compiler: withCompilerLock;
-        version(unittest) import snakebite.sharedtable: assertCacheFillAllowed;
+        version(unittest) import snakebite.host.sharedtable: assertCacheFillAllowed;
 
         void* address;
         withCompilerLock({
@@ -153,7 +153,7 @@ public struct NativeData {
     // The one static struct value for a compile-time `&literal`.
     private void* structValue(StructLiteralExp literal) {
         import snakebite.frontend.compiler: withCompilerLock;
-        version(unittest) import snakebite.sharedtable: assertCacheFillAllowed;
+        version(unittest) import snakebite.host.sharedtable: assertCacheFillAllowed;
 
         void* address;
         withCompilerLock({

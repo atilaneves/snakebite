@@ -1,4 +1,4 @@
-module snakebite.cstack;
+module snakebite.host.cstack;
 
 
 private:

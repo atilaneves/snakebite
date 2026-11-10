@@ -72,7 +72,7 @@ public struct GuestModules {
         public this(Backend backend) {
             import std.conv: text;
             import std.string: toStringz;
-            import snakebite.runtimeentry: RuntimeEntry;
+            import snakebite.host.runtimeentry: RuntimeEntry;
 
             auto start = &backend.startData();
             if (!start.hasCEntryPoint || start.betterC)
@@ -87,7 +87,7 @@ public struct GuestModules {
 
         public ~this() {
             import core.sys.posix.unistd: close;
-            import snakebite.runtimeentry: RuntimeEntry;
+            import snakebite.host.runtimeentry: RuntimeEntry;
 
             if (_entry is null)
                 return;

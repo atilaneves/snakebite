@@ -1,10 +1,10 @@
-module snakebite.executionstates;
+module snakebite.host.executionstates;
 
 
 private:
 
 
-import snakebite.hostthreads: heapDelete, heapNew, PerThread;
+import snakebite.host.threads: heapDelete, heapNew, PerThread;
 
 
 // Execution entries can outlive the owner through callbacks or suspended

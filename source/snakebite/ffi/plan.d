@@ -1479,7 +1479,7 @@ public struct PlanCache {
     import dmd.func: FuncDeclaration;
     import dmd.mtype: Type;
     import snakebite.ffi.abi: Register;
-    import snakebite.sharedtable: SharedTable;
+    import snakebite.host.sharedtable: SharedTable;
 
     // Read without a lock by every thread that runs guest code
     // (ADR-0006); a plan is prepared once, on its first use.

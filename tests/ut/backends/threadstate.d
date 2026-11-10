@@ -7,8 +7,8 @@ import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import core.thread: Fiber, Thread;
 import core.sync.semaphore: Semaphore;
-import snakebite.executionstates: ExecutionStates;
-import snakebite.hostthreads: heapNew, heapObjectsOfThisThread;
+import snakebite.host.executionstates: ExecutionStates;
+import snakebite.host.threads: heapNew, heapObjectsOfThisThread;
 import ut.backends;
 import ut.threadsync: beginExplicitCollect, endExplicitCollect;
 

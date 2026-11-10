@@ -142,7 +142,7 @@ public void withCompilerQuery(scope void delegate() query) {
     import snakebite.gc: resumeFrontend, suspendFrontend;
 
     version(unittest) {
-        import snakebite.sharedtable: assertCacheFillAllowed;
+        import snakebite.host.sharedtable: assertCacheFillAllowed;
         assertCacheFillAllowed!"frontend metadata query";
     }
     compiler.mutex.lock;

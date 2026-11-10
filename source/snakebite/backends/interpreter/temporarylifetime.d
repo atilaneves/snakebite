@@ -10,7 +10,7 @@ import snakebite.backends.temporarystack: TemporaryStack;
 import snakebite.backends.fullexpression:
     FullExpressionScope;
 import snakebite.framestack: FrameStack, defaultFrameCapacity;
-import snakebite.cstack: CStack;
+import snakebite.host.cstack: CStack;
 import snakebite.nativevalue: TypeFacts;
 
 

@@ -7,8 +7,8 @@ private:
 import snakebite.failure.report: internalFailure;
 
 import snakebite.backends.temporarystack: TemporaryStack;
-import snakebite.cstack: CStack;
-import snakebite.hostthreads: heapDelete, heapNew;
+import snakebite.host.cstack: CStack;
+import snakebite.host.threads: heapDelete, heapNew;
 import snakebite.tlsstorage: TlsDescriptor, TlsSlots;
 
 

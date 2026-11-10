@@ -1,4 +1,4 @@
-module snakebite.runtimeentry;
+module snakebite.host.runtimeentry;
 
 
 private:

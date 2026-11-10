@@ -2,7 +2,7 @@ module snakebite.backends.temporarystack;
 
 private:
 
-import snakebite.cstack: CStack;
+import snakebite.host.cstack: CStack;
 
 
 // Backend neutral state for expression-scoped destructors. The payload is
