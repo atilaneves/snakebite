@@ -101,7 +101,7 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         auto interpreter = cast(Interpreter) context;
         version(unittest)
             auto preparedExecution = PreparedExecution(isFinalizerCallback(
-                *(call.function_ in interpreter._shared.entryDeclarations)));
+                interpreter._shared.entryDeclarationOf(call.function_)));
         interpreter.onEvaluator!((evaluator) =>
             evaluator.callGuestFromHost(call));
     }
@@ -120,7 +120,7 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     ) {
         auto interpreter = cast(Interpreter) context;
         interpreter.prepareOnEvaluator(
-            *(word in interpreter._shared.entryDeclarations));
+            interpreter._shared.entryDeclarationOf(word));
     }
 
     public override string eval(FuncDeclaration function_) {
@@ -379,6 +379,17 @@ private struct Shared {
             &classRuntimeInfo,
             (type, loc) => nativeData.initialValue(type, loc));
         facts = PreparedFacts(&nativeData, &runtimeTypes);
+    }
+
+    // The guest function a registered entry word stands for. A word that
+    // was registered through `registerEntry` always has one; a missing
+    // word is a defect of this interpreter, not of the guest.
+    FuncDeclaration entryDeclarationOf(const(void)* word) {
+        if (auto found = word in entryDeclarations)
+            return *found;
+        throw new Exception(
+            "interpreter: a native entry was reached for a word with no " ~
+                "recorded guest function");
     }
 
     private FuncDeclaration definitionOf(FuncDeclaration function_) {
@@ -2129,7 +2140,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // `Throwable` the body throws unwinds through the host frames
     // untouched (ADR-0004).
     extern(D) final void callGuestFromHost(CallbackCall* call) {
-        runHostToGuest(*(call.function_ in _shared.entryDeclarations),
+        runHostToGuest(_shared.entryDeclarationOf(call.function_),
             call.returnPlace, call.arguments, call.variadicCursor,
             call.variadicTypes);
     }

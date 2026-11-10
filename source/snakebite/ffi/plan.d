@@ -1341,10 +1341,6 @@ public struct PlanCache {
     ) {
         if (word is null)
             word = of(declaration)._address;
-        if (adjustment == 0) {
-            const entry = _callbacks.entryOf(word);
-            return cast(void*) (entry is null ? word : entry);
-        }
         return cast(void*) _callbacks.adjustedEntryOf(
             word, nativeSignatureOf(declaration), adjustment, declaration);
     }
@@ -1436,28 +1432,30 @@ public struct PlanCache {
         const(void)* word,
         FuncDeclaration declaration,
     ) {
-        if (_callbacks is null)
-            throw new Exception(
-                "ffi: a guest function was registered before the " ~
-                    "backend installed its callback bridge",
-            );
+        requireCallbacks;
         if (!_callbacks.contains(word))
             _callbacks.register(
                 word, nativeSignatureOf(declaration), declaration);
     }
 
     // As `registerGuestFunction`, for a backend that keeps the
-    // declaration itself.
+    // declaration itself. It does not look at `contains`: the bridge
+    // ignores a word it already holds, and the caller, which has to build
+    // `signature` from the AST, asks `isGuestWord` first to skip that work.
     public void registerEntry(
         const(void)* word,
         NativeSignature signature,
     ) {
+        requireCallbacks;
+        _callbacks.register(word, signature);
+    }
+
+    private void requireCallbacks() const {
         if (_callbacks is null)
             throw new Exception(
                 "ffi: a guest function was registered before the " ~
                     "backend installed its callback bridge",
             );
-        _callbacks.register(word, signature);
     }
 
     import dmd.func: FuncDeclaration;
@@ -1973,9 +1971,9 @@ package CallPlan prepareCallback(in NativeSignature signature) {
     return plan;
 }
 
-// Everything `prepareCommon` shares with `nativeSignatureOf`: the plan's
-// whole shape, from `function_`'s signature and `linkage` alone, with
-// `_address` left unset.
+// The plan's whole shape, from `function_`'s signature and `linkage`
+// alone, with `_address` left unset: `signatureOf` classifies it and
+// `planOf` lays it out.
 private CallPlan shapeOf(
     imported!"dmd.func".FuncDeclaration function_,
     in imported!"dmd.astenums".LINK linkage,

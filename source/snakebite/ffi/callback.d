@@ -15,8 +15,10 @@ import snakebite.ffi.sysv:
     snakebite_ffi_callback_chunk_trailer, snakebite_ffi_callback_common;
 
 // `imported!"dmd.func"` is a module-scope-only construct (ai/CODING.md);
-// this names the one type this module only carries for `CallbackCall`,
-// so every struct and class below reads it as a plain type instead.
+// this names the one type this module only carries for a backend that
+// keeps the declaration (`CallbackCall`, `Registered`, `Slot` and
+// `adjustedEntryOf`), so every struct and class below reads it as a plain
+// type instead.
 private alias FuncDeclaration = imported!"dmd.func".FuncDeclaration;
 
 
@@ -754,10 +756,10 @@ public struct CallbackBridge {
         if (_prepare !is null)
             _prepare(_owner, word);
 
-        // `prepareCallback` touches dmd (finding 1.2), so this takes the
-        // compiler lock in place of a bridge-only mutex: one lock order
-        // everywhere - the compiler lock, then the pool (ADR-0003) -
-        // instead of two locks a caller could take in either order.
+        // The bridge has no mutex of its own: the compiler lock guards
+        // its tables and `reserve` takes the pool lock (ADR-0003) inside
+        // it, so there is one lock order everywhere, not two locks a
+        // caller could take in either order.
         import snakebite.frontend.compiler: withCompilerLock;
 
         withCompilerLock({
@@ -835,7 +837,7 @@ public struct CallbackBridge {
     // A native ABI thunk owns the receiver adjustment. Callers keep the
     // original interface pointer, including when they store a delegate.
     public const(void)* adjustedEntryOf(
-        const(void)* word, NativeSignature signature,
+        const(void)* word, lazy NativeSignature signature,
         in ptrdiff_t adjustment, FuncDeclaration declaration = null,
     ) {
         if (adjustment == 0) {

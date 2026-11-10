@@ -123,6 +123,25 @@ private bool inTemplateChunk(const(void)* entry) {
         && entry < cast(const(void)*) &snakebite_ffi_callback_chunk_end;
 }
 
+private extern(C) void doubleIntNoDeclaration(void*, CallbackCall* call) {
+    assert(call.declaration is null);
+    *cast(int*) call.returnPlace = *cast(const int*) call.arguments[0] * 2;
+}
+
+// A backend with no AST registers an entry from the signature data alone.
+@("entry.fromSignatureWithoutDeclaration")
+unittest {
+    auto signature = nativeSignatureOf(
+        declarationOf(q{ extern(C) int twice(int x); }, "twice"));
+    auto bridge = new CallbackBridge(&doubleIntNoDeclaration, null);
+    int word;
+    bridge.register(&word, signature);
+
+    auto entry = cast(IntOfInt) bridge.entryOf(&word);
+    (entry !is null).should == true;
+    entry(21).should == 42;
+}
+
 @("entry.vector4ArgumentAndReturn")
 unittest {
     auto function_ = declarationOf(
