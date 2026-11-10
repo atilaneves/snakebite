@@ -56,7 +56,6 @@ package(snakebite) LogicalPlan logicalPlan(
     imported!"dmd.expression".LogicalExp expression,
 ) {
     import dmd.astenums: Tnoreturn, Tvoid;
-    import dmd.tokens: EXP;
     import dmd.typesem: toBasetype;
 
     const rightType = expression.e2.type.toBasetype.ty;

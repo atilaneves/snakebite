@@ -4,7 +4,7 @@ module snakebite.run.modules;
 private:
 
 
-import snakebite.failure.report: internalFailure;
+import snakebite.failure.report: internalFailure, SnakebiteException;
 
 
 // What compiled D does with the modules of a program, done for the root
@@ -282,7 +282,6 @@ private import core.atomic: atomicLoad, atomicOp, atomicStore, cas;
 private import snakebite.backends.api: Backend;
 private import snakebite.start.data:
     FunctionHandle, GateStorage, ModuleStart, StartData;
-private import snakebite.failure.report: SnakebiteException;
 private import snakebite.ffi.callback: CallbackBridge, CallbackCall;
 private import snakebite.ffi.plan: NativeSignature;
 

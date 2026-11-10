@@ -7039,8 +7039,6 @@ private Node buildNew(E)(E ev, NewExp expression) {
 // The tree hooks of `driveInit`: each step appends its node, and a step that
 // the tree does not build, where the evaluator falls back, is recorded.
 private struct NewInitHooks(E) {
-    import snakebite.language.storage.lifetime: InitStep;
-
     E ev;
     Node[] steps;
     bool failed;

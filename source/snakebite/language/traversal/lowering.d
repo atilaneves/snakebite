@@ -20,10 +20,10 @@ import dmd.location: Loc;
 import dmd.typesem: isString;
 import snakebite.language.traversal.fullexpression: FullExpressionScope;
 import snakebite.language.layout.lowered: LoweredExpressionTypes;
-import snakebite.language.operators.comparison: IdentityPlan, identityPlan;
-import snakebite.language.control.condition: LogicalPlan, logicalPlan;
-import snakebite.language.control.condition: IfPlan, ifPlan;
-import snakebite.language.operators.comparison: ComparisonPlan, comparisonPlan;
+import snakebite.language.operators.comparison:
+    IdentityPlan, identityPlan, ComparisonPlan, comparisonPlan;
+import snakebite.language.control.condition:
+    LogicalPlan, logicalPlan, IfPlan, ifPlan;
 import snakebite.language.storage.lifetime: NewPlan, planNew;
 import dmd.visitor: Visitor;
 import dmd.mtype: Type;

@@ -239,7 +239,6 @@ private enum mainSignature = NativeSignature(
 
 
 private extern(C) void callMain(void* owner, CallbackCall* call) {
-
     auto run = cast(MainRun*) owner;
     const arguments = *cast(string[]*) call.arguments[0];
     *cast(int*) call.returnPlace = runMain(

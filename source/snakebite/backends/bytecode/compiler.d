@@ -14,12 +14,10 @@ import dmd.mtype: Type;
 import object: TypeInfo_Class;
 import snakebite.native.argumentflow: Shape, SignatureTable;
 import snakebite.language.traversal.lowering: LoweringVisitor;
-import snakebite.language.operators.comparison: IdentityPlan, identityPlan;
-import snakebite.language.control.condition: IfPlan;
-import snakebite.language.control.condition: LogicalPlan;
+import snakebite.language.operators.comparison:
+    IdentityPlan, identityPlan, ComparisonPlan, comparisonPlan;
 import snakebite.language.control.condition:
-    isPlainCondition, isPlainPlace, isRealFloatType;
-import snakebite.language.operators.comparison: ComparisonPlan, comparisonPlan;
+    IfPlan, LogicalPlan, isPlainCondition, isPlainPlace, isRealFloatType;
 import snakebite.language.control.cases:
     SwitchPlan, switchPlan, gotoCaseTarget, gotoDefaultTarget;
 import snakebite.language.traversal.fullexpression:
@@ -8545,8 +8543,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in FullExpressionScope.Position position,
         in Flag!"plain" plain,
     ) {
-        import snakebite.language.operators.comparison: ComparisonPlan, comparisonPlan;
-
         const logical = condition.op == EXP.andAnd
             || condition.op == EXP.orOr;
         if (logical && plain == Yes.plain) {

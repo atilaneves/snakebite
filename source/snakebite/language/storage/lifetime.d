@@ -4,9 +4,8 @@ module snakebite.language.storage.lifetime;
 private:
 
 
-import snakebite.frontend.typefacts: typeFacts;
+import snakebite.frontend.typefacts: typeFacts, fieldOffset;
 import snakebite.native.value: TypeFacts;
-import snakebite.frontend.typefacts: fieldOffset;
 import dmd.typesem: toBasetype;
 import snakebite.language.call.druntimehook: DruntimeHook;
 
@@ -384,7 +383,6 @@ package(snakebite) VectorInitPlan planVectorInit(
     imported!"dmd.expression".VectorExp expression,
 ) {
     import dmd.astenums: Tsarray;
-    import dmd.typesem: toBasetype;
 
     const sourceFacts = typeFacts(expression.e1.type);
     if (expression.e1.type.toBasetype.ty == Tsarray)

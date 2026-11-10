@@ -13,7 +13,7 @@ import snakebite.frontend.typefacts: tryTypeFacts, truthFacts;
 
 
 
-import snakebite.failure.report: internalFailure;
+import snakebite.failure.report: internalFailure, SnakebiteException;
 
 import std.conv: text;
 import snakebite.native.arguments: CallArguments;
@@ -177,7 +177,6 @@ public final class Interpreter: imported!"snakebite.backends.api".Backend {
 
 }
 
-import snakebite.failure.report: SnakebiteException;
 import snakebite.failure.fault: GuestPosition, GuestRun, register, unregister;
 
 // Runs `action` on the evaluator of the calling thread: made on its first
@@ -240,10 +239,9 @@ import snakebite.language.call.selection: ValueCall;
 import snakebite.failure.halt: isHalt;
 import snakebite.language.checks.assertion: CAssertCall;
 import snakebite.language.traversal.lowering: LoweringVisitor;
-import snakebite.language.operators.comparison: IdentityPlan;
-import snakebite.language.control.condition: IfPlan;
-import snakebite.language.control.condition: LogicalPlan;
-import snakebite.language.operators.comparison: ComparisonPlan;
+import snakebite.language.operators.comparison:
+    IdentityPlan, ComparisonPlan, comparisonPlan;
+import snakebite.language.control.condition: IfPlan, LogicalPlan;
 import snakebite.language.control.transfer: ControlFlowState,
     ScopeFrame, ScopePaths, scopePathsOf;
 import snakebite.language.control.unwinding: CatchPlan, catchPlanOf;
@@ -5258,7 +5256,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // zero have different representations but compare equal in D.
     protected override void visitUnloweredEqual(EqualExp expression) {
         import core.stdc.string: memcmp;
-        import snakebite.language.operators.comparison: comparisonPlan;
         import snakebite.native.value: checkedStoreIntegral;
 
         const plan = comparisonPlan(expression);

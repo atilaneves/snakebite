@@ -30,7 +30,7 @@ import snakebite.failure.report: internalFailure;
 import core.gc.gcinterface: GC;
 
 
-// The name rt_options selects this GC by.
+// The name that `rt_options` uses to select this GC.
 public enum gcName = "snakebite";
 
 
@@ -651,12 +651,12 @@ private extern(C) void registerSnakebiteGC() {
 }
 
 
-// Runtime setup every snakebite host executable shares. Each one links
-// this module, so druntime reads these options in each of them: the
-// shared druntime finds `rt_options` through the executable's dynamic
-// symbol table.
+// The druntime options of `rt_options` below, for every snakebite host
+// executable. Each one links this module, so druntime reads these options
+// in each of them: the shared druntime finds `rt_options` through the
+// executable's dynamic symbol table.
 //
-// `gc`: the frontend allocates like dmd does (`snakebite.memory.gc`).
+// `gc`: select this GC, so the frontend allocates like dmd does.
 // `cleanup:none`: no collection at exit. The process is about to end and
 // the OS takes its memory back; a final collection only costs time.
 // `heapSizeFactor:4`: fewer collections. A collection costs about the
