@@ -54,9 +54,11 @@ def test_jit_perf_map(
         tmp_path / "perf_map_guest.d",
         """
         module perf_map_guest;
-        import core.stdc.stdio: fflush, getchar, puts;
+        version (ObserveJitPerfMap)
+            import core.stdc.stdio: fflush, getchar, puts;
 
         T hot(T)(T count) {
+            assert(count > 0);
             T sum;
             foreach (i; 0 .. count)
                 sum += i;
@@ -64,50 +66,66 @@ def test_jit_perf_map(
         }
 
         int main() {
+            version (ObserveJitPerfMap)
+                assert(getchar() == 's');
             assert(hot(300) == 44850);
             assert(hot(301L) == 45150);
             assert(hot(300) == 44850);
-            puts("ready");
-            fflush(null);
-            return getchar() == 'x' ? 0 : 1;
+            version (ObserveJitPerfMap) {
+                puts("ready");
+                fflush(null);
+                return getchar() == 'x' ? 0 : 1;
+            } else
+                return 0;
         }
         """,
     )
+    if mapped:
+        flags = [*flags, "--version=ObserveJitPerfMap"]
     child = subprocess.Popen(
         [sb_path(), f"--backend={backend}", *flags, str(tmp_path)],
         cwd=tmp_path, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, text=True,
     )
     path = Path(f"/tmp/perf-{child.pid}.map")
+    new_map = not path.exists()
     try:
+        if not mapped:
+            stdout, _ = child.communicate(timeout=30)
+            assert child.returncode == 0, stdout
+            assert not path.exists()
+            return
+
+        assert new_map, f"map already exists: {path}"
+        assert child.stdin is not None
+        child.stdin.write("s")
+        child.stdin.flush()
         # Read the map while the guest is still running.
         assert child.stdout is not None
         assert select.select([child.stdout], [], [], 30)[0], "guest did not start"
         ready = child.stdout.readline()
         assert ready.strip() == "ready", f"unexpected guest output: {ready!r}"
-        assert path.exists() == mapped
-        if mapped:
-            records = [line.split() for line in path.read_text().splitlines()]
-            assert len(records) == 2
-            assert records[0][2] != records[1][2]
-            ranges = []
-            for start, size, name in records:
-                assert name.startswith("_D14perf_map_guest")
-                assert "hot" in name
-                base, length = int(start, 16), int(size, 16)
-                assert length > 0
-                ranges.append((base, base + length))
-            ranges.sort()
-            assert ranges[0][1] <= ranges[1][0]
+        records = [line.split() for line in path.read_text().splitlines()]
+        assert len(records) == 2
+        assert records[0][2] != records[1][2]
+        ranges = []
+        for start, size, name in records:
+            assert name.startswith("_D14perf_map_guest")
+            assert "hot" in name
+            base, length = int(start, 16), int(size, 16)
+            assert length > 0
+            ranges.append((base, base + length))
+        ranges.sort()
+        assert ranges[0][1] <= ranges[1][0]
 
-            mappings = Path(f"/proc/{child.pid}/maps").read_text().splitlines()
-            executable = [
-                tuple(int(address, 16) for address in line.split()[0].split("-"))
-                for line in mappings
-                if "/memfd:snakebite-jit" in line and line.split()[1].startswith("r-x")
-            ]
-            for start, end in ranges:
-                assert any(low <= start < end <= high for low, high in executable)
+        mappings = Path(f"/proc/{child.pid}/maps").read_text().splitlines()
+        executable = [
+            tuple(int(address, 16) for address in line.split()[0].split("-"))
+            for line in mappings
+            if "/memfd:snakebite-jit" in line and line.split()[1].startswith("r-x")
+        ]
+        for start, end in ranges:
+            assert any(low <= start < end <= high for low, high in executable)
 
         stdout, _ = child.communicate(input="x", timeout=30)
         assert child.returncode == 0, stdout
@@ -115,7 +133,7 @@ def test_jit_perf_map(
         if child.poll() is None:
             child.kill()
         child.communicate(timeout=30)
-        if mapped:
+        if new_map:
             path.unlink(missing_ok=True)
 
 
