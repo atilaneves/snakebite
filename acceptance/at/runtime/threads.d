@@ -20,7 +20,7 @@ import std.string: split, toStringz;
 import std.uuid: randomUUID;
 
 
-// `loadImage` (source/snakebite/dependencyimage.d) used to pin every
+// `loadImage` (source/snakebite/image/dependency.d) used to pin every
 // dependency image with an extra `dlopen(RTLD_NODELETE)` but never
 // release the `Runtime.loadLibrary` reference it took first. That left
 // the loading thread with a permanent explicit-load duty on the image,

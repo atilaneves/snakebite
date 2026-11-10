@@ -4,7 +4,7 @@ module snakebite.repl;
 private:
 
 private alias DependencyImage =
-    imported!"snakebite.dependencyimage".DependencyImage;
+    imported!"snakebite.image.dependency".DependencyImage;
 
 // One REPL session: an accumulated module source, the backend it runs
 // on, and any input still waiting for a closing brace. Declarations from

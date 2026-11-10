@@ -60,7 +60,7 @@ private bool decode(in ubyte[] bytes, out imported!"std.json".JSONValue value) {
 public imported!"snakebite.dub".DubDescription cachedDubDescription(
     in string directory, in string compiler, in string[] versions,
     scope imported!"snakebite.dub".DubDescription delegate() describe,
-    in string generator = imported!"snakebite.dependencyimage".runningExecutable,
+    in string generator = imported!"snakebite.image.dependency".runningExecutable,
     in string mode = imported!"std.process".environment.get("SNAKEBITE_DUB_CACHE", "on"),
 ) {
     import std.json: JSONValue, JSONType;
@@ -68,7 +68,7 @@ public imported!"snakebite.dub".DubDescription cachedDubDescription(
     import std.path: baseName, buildPath, dirName;
     import std.uuid: randomUUID;
     import std.conv: text;
-    import snakebite.dependencyimage: generatorKey;
+    import snakebite.image.dependency: generatorKey;
     import snakebite.projectstate: projectStateDirectory;
 
     if (mode == "off")

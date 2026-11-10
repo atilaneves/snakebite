@@ -127,7 +127,7 @@ private extern(C++) class Collector
             return "";
         import std.algorithm: sort;
         import std.array: array;
-        import snakebite.dependencyimage: DependencyImage;
+        import snakebite.image.dependency: DependencyImage;
         import snakebite.frontend.dmd.mangle: completeFunctionType, mangledNameOf;
         foreach (key; _references.keys.sort)
             foreach (function_; _references[key].functions)

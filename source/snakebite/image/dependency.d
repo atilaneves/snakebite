@@ -1,4 +1,4 @@
-module snakebite.dependencyimage;
+module snakebite.image.dependency;
 
 
 private:

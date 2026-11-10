@@ -3,7 +3,7 @@ module at.dub;
 import dub.dub: SkipPackageSuppliers;
 import ut.backends;
 import snakebite.dub: dubDescribeProject, fetchProject;
-import snakebite.dependencyimage: defaultCompiler;
+import snakebite.image.dependency: defaultCompiler;
 import std.conv: text;
 import std.path: buildPath, absolutePath;
 import std.process: execute, Config;

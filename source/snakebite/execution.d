@@ -99,8 +99,8 @@ public PreparationReport prepareProject(
     in string[] stringImportPaths = null,
     in bool nativeDependencies = true,
     in string[] versions = null,
-    in imported!"snakebite.dependencyimage".Optimise optimise
-        = imported!"snakebite.dependencyimage".Optimise.yes,
+    in imported!"snakebite.image.dependency".Optimise optimise
+        = imported!"snakebite.image.dependency".Optimise.yes,
 ) {
     import snakebite.project: sourceSet;
     import std.datetime.stopwatch: AutoStart, StopWatch;
@@ -121,8 +121,8 @@ public PreparationReport prepareSources(
     imported!"snakebite.project".SourceSet sources,
     in imported!"core.time".Duration discovery,
     in bool nativeDependencies = true,
-    in imported!"snakebite.dependencyimage".Optimise optimise
-        = imported!"snakebite.dependencyimage".Optimise.yes,
+    in imported!"snakebite.image.dependency".Optimise optimise
+        = imported!"snakebite.image.dependency".Optimise.yes,
 ) {
     import snakebite.frontend.compiler: Snippets, initialize;
     import snakebite.project: loadProject;

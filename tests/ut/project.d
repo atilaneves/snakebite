@@ -6,7 +6,7 @@ import core.runtime: UnitTestResult;
 import core.sync.mutex: Mutex;
 import snakebite.backends: BackendName, backendIdentity;
 import snakebite.backends.program: Program;
-import snakebite.dependencyimage: TestHooks;
+import snakebite.image.dependency: TestHooks;
 import snakebite.execution: prepareProject, executeBackend, runProject;
 import snakebite.dub: DubDescription, dubSources;
 import snakebite.dubcache: projectDescriptionFromJson;
