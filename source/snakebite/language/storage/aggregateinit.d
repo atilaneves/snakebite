@@ -1,4 +1,4 @@
-module snakebite.backends.aggregateinit;
+module snakebite.language.storage.aggregateinit;
 
 
 private:

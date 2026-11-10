@@ -17,7 +17,7 @@ import dmd.func: FuncDeclaration;
 import dmd.location: Loc;
 import dmd.mtype: Type;
 import dmd.statement: Statement;
-import snakebite.backends.aggregateinit: InitStep;
+import snakebite.language.storage.aggregateinit: InitStep;
 import snakebite.language.checks.failure: BoundsCheck;
 import snakebite.language.control.transfer: ControlFlowState, labelTargetOf;
 import snakebite.backends.fullexpression: FullExpressionScope;
@@ -26,7 +26,7 @@ import snakebite.backends.interpreter.faultslot:
     resultWordOf, siteWord;
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.ffi.load: callDirectWordsPair, extendWord, storeWordResult, WordPair;
-import snakebite.frontend.storage: SlicePlan;
+import snakebite.language.storage.resolver: SlicePlan;
 import snakebite.native.value: TypeFacts;
 import snakebite.native.value: BitfieldAccess, CastLayout;
 import std.meta: AliasSeq;
@@ -2594,7 +2594,7 @@ private final class AggregateStore : Node {
     }
     private ubyte* store(ubyte* frame) {
         import core.stdc.string: memcpy;
-        import snakebite.backends.assignment: executeAssignment;
+        import snakebite.language.storage.assignment: executeAssignment;
 
         auto target = _target.executeAddr(frame);
         auto storage = FrameGuard(_frames);
@@ -5862,7 +5862,7 @@ private bool returnsReference(CallExp call) {
 
 private Node buildIndexAddress(E)(E ev, IndexExp indexed) {
     import dmd.astenums: TY;
-    import snakebite.frontend.storage: readsIndexAfterBase;
+    import snakebite.language.storage.resolver: readsIndexAfterBase;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: nextOf, toBasetype;
 
@@ -5948,7 +5948,7 @@ private Slot dollarSlot(E)(E ev, VarDeclaration dollar) {
 // resolver does.
 private Node indexOfArray(E)(E ev, IndexExp indexed, Node array,
         Node position, size_t stride, in Slot dollar) {
-    import snakebite.frontend.storage: readsIndexAfterBase;
+    import snakebite.language.storage.resolver: readsIndexAfterBase;
 
     if (dollar.ok)
         return fuse!(MakeIndex!(IndexDynamic, true, true).make, long,
@@ -6771,7 +6771,7 @@ private Node buildSliceAssignment(E)(
 ) {
     import dmd.expression: MemorySet;
     import dmd.typesem: nextOf, toBasetype;
-    import snakebite.frontend.storage: planSlice;
+    import snakebite.language.storage.resolver: planSlice;
 
     if (planSlice(target).yieldsStaticArray
             || (assignment.isConstructExp !is null
@@ -6874,7 +6874,7 @@ private Node buildSliceOf(E)(E ev, SliceExp expression) {
     import dmd.astenums: TY;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: nextOf, toBasetype;
-    import snakebite.frontend.storage: planSlice;
+    import snakebite.language.storage.resolver: planSlice;
 
     const plan = planSlice(expression);
     if (plan.yieldsStaticArray)
@@ -6985,7 +6985,7 @@ private Node buildZeroPair(E)(E ev, Expression operand) {
 private Node buildNew(E)(E ev, NewExp expression) {
     import dmd.astenums: TY;
     import dmd.typesem: toBasetype;
-    import snakebite.backends.aggregateinit: AggregateInitPlan, driveInit,
+    import snakebite.language.storage.aggregateinit: AggregateInitPlan, driveInit,
         NewPlan, planClassContext, planNew, planPositionalFields;
 
     auto plan = planNew(expression);
@@ -7039,7 +7039,7 @@ private Node buildNew(E)(E ev, NewExp expression) {
 // The tree hooks of `driveInit`: each step appends its node, and a step that
 // the tree does not build, where the evaluator falls back, is recorded.
 private struct NewInitHooks(E) {
-    import snakebite.backends.aggregateinit: InitStep;
+    import snakebite.language.storage.aggregateinit: InitStep;
 
     E ev;
     Node[] steps;
@@ -7072,10 +7072,10 @@ private struct NewInitHooks(E) {
 // The storage of the object that `new` makes, before `driveInit`.
 private Node buildNewStorage(E)(
     E ev, NewExp expression,
-    imported!"snakebite.backends.aggregateinit".NewPlan plan,
+    imported!"snakebite.language.storage.aggregateinit".NewPlan plan,
 ) {
     import dmd.typesem: toBasetype;
-    import snakebite.backends.aggregateinit: NewPlan;
+    import snakebite.language.storage.aggregateinit: NewPlan;
 
     final switch (plan.destination) with (NewPlan.Destination) {
         case lowering:
@@ -7393,7 +7393,7 @@ private Node notOf(Node operand) {
 // The node that yields `expression`'s scalar value.
 private Node buildValue(E)(E ev, Expression expression) {
     import dmd.tokens: EXP;
-    import snakebite.frontend.storage: typeInfoAddressedBy;
+    import snakebite.language.storage.resolver: typeInfoAddressedBy;
     import snakebite.frontend.typefacts: isStaticStructAddress;
     import snakebite.native.value: checkedLoadIntegral;
     import snakebite.native.value: loadFloating;
@@ -7566,7 +7566,7 @@ private Node buildValue(E)(E ev, Expression expression) {
                 ev.functionAddressOf(expression.isFuncExp.fd));
         case symbolOffset: {
             // `&variable`, `&function` or the address of a `TypeInfo`.
-            import snakebite.frontend.storage: typeInfoObjectOf;
+            import snakebite.language.storage.resolver: typeInfoObjectOf;
 
             if (scalar.kind != Scalar.Kind.integral)
                 return null;

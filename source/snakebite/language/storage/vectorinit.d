@@ -1,4 +1,4 @@
-module snakebite.backends.vectorinit;
+module snakebite.language.storage.vectorinit;
 
 
 private:

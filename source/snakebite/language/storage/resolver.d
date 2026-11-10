@@ -1,4 +1,4 @@
-module snakebite.frontend.storage;
+module snakebite.language.storage.resolver;
 
 private:
 

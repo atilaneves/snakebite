@@ -247,7 +247,7 @@ import snakebite.language.operators.comparison: ComparisonPlan;
 import snakebite.language.control.transfer: ControlFlowState,
     ScopeFrame, ScopePaths, scopePathsOf;
 import snakebite.language.control.unwinding: CatchPlan, catchPlanOf;
-import snakebite.backends.aggregateinit: AggregateInitPlan;
+import snakebite.language.storage.aggregateinit: AggregateInitPlan;
 import snakebite.failure.unwind:
     ExceptionCandidate, ExceptionUnwindPlan = UnwindPlan;
 import snakebite.language.control.cases: SwitchPlan, switchPlan, selectCase,
@@ -590,7 +590,7 @@ private struct CallShape {
 // state, and reads every per-function answer from the `Shared` tables
 // the program's evaluators fill together.
 extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
-    import snakebite.backends.aggregateinit: InitStep, NewPlan;
+    import snakebite.language.storage.aggregateinit: InitStep, NewPlan;
     import snakebite.language.call.selection: CallSelection;
     import snakebite.program: Program;
     import snakebite.frontend.dmd.delegates:
@@ -2236,7 +2236,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             (variable) => attempt({ prepareVariable(variable); }),
             (declaration) => attempt({ classRuntimeInfo(declaration); }),
             (expression) => attempt({
-                import snakebite.backends.deleteplan: planDelete;
+                import snakebite.language.storage.deletion: planDelete;
                 import snakebite.language.call.druntimehook: planOf;
 
                 planOf(*_plans, planDelete(expression).hook);
@@ -3639,7 +3639,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     override void visit(VectorExp expression) {
         import core.stdc.string: memcpy;
-        import snakebite.backends.vectorinit: planVectorInit;
+        import snakebite.language.storage.vectorinit: planVectorInit;
 
         const plan = planVectorInit(expression);
         evaluate(expression.e1, expression.e1.type, plan.sourceFacts, _place);
@@ -4218,7 +4218,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     private void* assignAt(AssignExp expression, void* target) {
         import core.stdc.string: memcpy;
-        import snakebite.backends.assignment: executeAssignment;
+        import snakebite.language.storage.assignment: executeAssignment;
         import snakebite.native.value: checkedLoadIntegral, checkedStoreIntegral;
 
         const isConstruct = expression.isConstructExp !is null;
@@ -4385,7 +4385,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         }
 
         public void* storageSlice(SliceExp expression) {
-            import snakebite.frontend.storage: planSlice;
+            import snakebite.language.storage.resolver: planSlice;
 
             if (planSlice(expression).yieldsStaticArray)
                 return evaluator.sliceView(expression).pointer;
@@ -4628,7 +4628,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         Evaluator evaluator;
 
         public void* symbolAddress(SymOffExp expression) {
-            import snakebite.frontend.storage: typeInfoObjectOf;
+            import snakebite.language.storage.resolver: typeInfoObjectOf;
 
             if (auto function_ = expression.var.isFuncDeclaration)
                 return evaluator.callableAddress(function_, 0);
@@ -4652,7 +4652,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     private void* addressOf(Expression target) {
-        import snakebite.frontend.storage: StorageResolver;
+        import snakebite.language.storage.resolver: StorageResolver;
 
         return StorageResolver!(void*, StorageAdapter)(StorageAdapter(this))
             .resolve(target);
@@ -5941,7 +5941,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     override void visit(SymOffExp expression) {
         import snakebite.native.value: checkedStoreIntegral;
 
-        import snakebite.frontend.storage: SymbolAddressResolver;
+        import snakebite.language.storage.resolver: SymbolAddressResolver;
 
         const address = SymbolAddressResolver!(void*, SymbolAddressAdapter)(
             SymbolAddressAdapter(this),
@@ -5960,7 +5960,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // index - this just stores whichever one it finds as a `size_t`, the
     // way any other pointer value is stored.
     override void visit(AddrExp expression) {
-        import snakebite.frontend.storage: typeInfoAddressedBy;
+        import snakebite.language.storage.resolver: typeInfoAddressedBy;
         import snakebite.frontend.typefacts: isStaticStructAddress;
         import snakebite.native.value: checkedStoreIntegral;
 
@@ -6425,7 +6425,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import core.stdc.string: memcpy;
         import snakebite.native.value:
             arrayLengthOffset, arrayPointerOffset, checkedStoreIntegral;
-        import snakebite.frontend.storage: planSlice;
+        import snakebite.language.storage.resolver: planSlice;
 
         auto view = sliceView(expression);
         if (planSlice(expression).yieldsStaticArray) {
@@ -6448,7 +6448,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // a static array (`cast(T[N]) a[lo .. hi]`) is those elements in
     // place, so the address of that value is `pointer`.
     private SliceView sliceView(SliceExp expression) {
-        import snakebite.frontend.storage: planSlice;
+        import snakebite.language.storage.resolver: planSlice;
         import std.conv: text;
 
         auto array = expression.e1;
@@ -6726,7 +6726,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // value of that class type would use, so it lands before the
     // constructor call the same way a nested struct's own `vthis` does.
     private void finishNew(NewExp expression, ubyte* object) {
-        import snakebite.backends.aggregateinit:
+        import snakebite.language.storage.aggregateinit:
             driveInit, planClassContext, planPositionalFields;
 
         auto structType = expression.newtype.toBasetype.isTypeStruct;
@@ -6741,7 +6741,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     override void visit(DeleteExp expression) {
-        import snakebite.backends.deleteplan: planDelete;
+        import snakebite.language.storage.deletion: planDelete;
         import snakebite.language.call.druntimehook: planOf;
 
         auto deletion = planDelete(expression);
@@ -6784,7 +6784,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // slot in their own `FrameLayout`, so nothing here needs to know
     // which aggregate kind `expression.newtype` names.
     private void constructAggregate(NewExp expression, ubyte* object) {
-        import snakebite.backends.aggregateinit: planNew;
+        import snakebite.language.storage.aggregateinit: planNew;
 
         auto constructor = expression.member;
         auto layout = layoutOf(constructor);
@@ -6995,7 +6995,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         memcpy(place, bytes.ptr, bytes.length);
     }
 
-    // The four hooks `snakebite.backends.aggregateinit.applyStep` and
+    // The four hooks `snakebite.language.storage.aggregateinit.applyStep` and
     // `driveInit` drive, one per `InitStep.Kind`, each run at `base`, the
     // aggregate's own bytes directly - `visit(StructLiteralExp)` passes
     // `_place`, `finishNew` the fresh allocation, both already plain
@@ -7096,7 +7096,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         assert(structType !is null && structType.sym == expression.sd,
             "a struct literal destination has the same struct type");
 
-        import snakebite.backends.aggregateinit: applyStep;
+        import snakebite.language.storage.aggregateinit: applyStep;
 
         auto plan = _shared.facts.structLiteralOf(expression);
         if (plan.zeroFill)

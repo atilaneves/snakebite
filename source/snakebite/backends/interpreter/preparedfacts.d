@@ -10,7 +10,7 @@ import dmd.astenums: Tfunction, Ttuple, Terror;
 import dmd.typesem: toBasetype, baseElemOf;
 import dmd.location: Loc;
 import snakebite.language.statics.typeinfo: RuntimeTypes;
-import snakebite.backends.aggregateinit: AggregateInitPlan, planStructLiteral;
+import snakebite.language.storage.aggregateinit: AggregateInitPlan, planStructLiteral;
 import snakebite.language.operators.casts: CastPlan, classify;
 import snakebite.language.context.source: ContextSource, calleeContextSourceOf;
 import snakebite.frontend.compiler: gagged;

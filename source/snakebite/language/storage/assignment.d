@@ -1,4 +1,4 @@
-module snakebite.backends.assignment;
+module snakebite.language.storage.assignment;
 
 private:
 

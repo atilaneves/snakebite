@@ -1,4 +1,4 @@
-module snakebite.backends.deleteplan;
+module snakebite.language.storage.deletion;
 
 
 private:
