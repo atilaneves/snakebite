@@ -131,7 +131,16 @@ private extern(D) long snakebite_ut_dWordCombine(long first, long second) {
 public extern(C) long snakebite_ut_word_three(
     const(long)* values, int index, long scale,
 ) {
+    if (index == int.min)
+        throw new Exception("invalid index");
     return values[index] * scale;
+}
+
+
+public extern(C) ulong snakebite_ut_word_three_unsigned(
+    ulong high, uint middle, ulong low,
+) {
+    return high + 2UL * middle + 3UL * low;
 }
 
 
@@ -4590,10 +4599,10 @@ static foreach (backend; Matrix!(
 }
 
 
-// Three word arguments: a pointer, a negative `int` and a `long`, called
-// through the same site more than once.
+// Calls with a signed or unsigned middle parameter keep the full result.
+// A thrown call leaves the destination's previous value in place.
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+    Omit!(Ctfe, Because.inexpressible, "The native callee has no CTFE body"),
 )) {
     @("directWordCall.threeArguments." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -4604,12 +4613,40 @@ static foreach (backend; Matrix!(
                 pragma(mangle, "snakebite_ut_word_three")
                 extern(C) long three(const(long)* values, int index, long scale);
 
+                pragma(mangle, "snakebite_ut_word_three_unsigned")
+                extern(C) ulong threeUnsigned(
+                    ulong high, uint middle, ulong low,
+                );
+
+                long forwardResult(const(long)* values, int index, long scale) {
+                    return three(values, index, scale);
+                }
+
                 int answer() {
                     long[3] values = [7, 8, 9];
+                    long result = 0;
                     foreach (round; 0 .. 3) {
                         if (three(&values[2], -1, 10) != 80) return 1;
                         if (three(&values[0], 2, -1) != -9) return 2;
                         if (three(&values[1], 0, 3) != 24) return 3;
+                        const uint middle = uint.max - round;
+                        if (threeUnsigned(1UL << 61, middle, 1UL << 59)
+                                != (1UL << 61) + 2UL * middle + (3UL << 59))
+                            return 4;
+                        if (forwardResult(&values[1], -1, round) != 7 * round)
+                            return 5;
+                        cast(void) three(&values[1], 1, round);
+
+                        const index = round == 1 ? int.min : -1;
+                        try {
+                            result = three(&values[1], index, 10 + round);
+                            if (round == 1 || result != 7L * (10 + round))
+                                return 6;
+                        } catch (Exception exception) {
+                            if (round != 1 || result != 70
+                                    || exception.msg != "invalid index")
+                                return 7;
+                        }
                     }
                     return 0;
                 }
