@@ -134,15 +134,21 @@ static foreach (backend; Matrix!()) {
     }
 
 
-    @("jit.hotForLoopChecksItsFirstIteration." ~ backend.stringof)
+    @("jit.hotForLoopChecksItsFirstIterationAndContinue." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOfWithJitCode!(backend, q{
             int countOdd(int first, int end) {
                 assert(end <= 5000);
                 int count;
-                for (int i = first; i < end; ++i)
-                    count += i & 1;
+                for (int i = first; i < end;) {
+                    if ((i & 1) == 0) {
+                        ++i;
+                        continue;
+                    }
+                    ++count;
+                    ++i;
+                }
                 return count;
             }
             int main() {

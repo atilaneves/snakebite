@@ -1389,6 +1389,11 @@ private struct Gen {
         fix(target);
     }
 
+    void jmpLocalTo(size_t offset) {
+        a.b(0xE9);
+        a.d32(cast(int) (offset - (a.n + 4)));
+    }
+
     void jccTo(int cc, size_t target) {
         a.b(0x0F);
         a.b(cast(ubyte) (0x80 + cc));
@@ -1800,8 +1805,26 @@ private struct Gen {
                     JitOp.Fused test = ops[t].fused;
                     test.jumpWhen = !test.jumpWhen;
                     const saved = a.n;
-                    if (emitFused(header, test, t + 1))
+                    const previous = ops[i - 1];
+                    const update = snapshot[i - 1];
+                    const forwardLeft = previous.kind == int3
+                        && !previous.int3.resultInR0 && !test.leftInR0
+                        && !(update.destination & indirectBit)
+                        && update.destination == header.destination
+                        && (previous.width ? previous.width : update.width)
+                            == header.width;
+                    if (emitFused(header, test, t + 1, forwardLeft)) {
+                        if (forwardLeft) {
+                            // Only the preceding template leaves its result
+                            // in RAX. Dispatch into the back edge reloads it.
+                            jmpTo(exit);
+                            labels[i] = a.n;
+                            a.ld(cast(int) header.width, RAX,
+                                Mem(FRAME, cast(int) header.destination));
+                            jmpLocalTo(saved);
+                        }
                         return true;
+                    }
                     a.n = saved;
                 }
             }
@@ -2175,7 +2198,9 @@ private struct Gen {
         return true;
     }
 
-    bool emitFused(in Instruction ins, in JitOp.Fused p, size_t t) {
+    bool emitFused(in Instruction ins, in JitOp.Fused p, size_t t,
+        bool forwardLeft = false)
+    {
         const w = cast(int) ins.width;
         Mem l;
         if (p.kind != CompareKind.floating) {
@@ -2188,7 +2213,8 @@ private struct Gen {
                 return false;
             int leftReg = REG0;
             if (!p.leftInR0) {
-                a.ld(w, RAX, l);
+                if (!forwardLeft)
+                    a.ld(w, RAX, l);
                 leftReg = RAX;
             }
             int imm;
