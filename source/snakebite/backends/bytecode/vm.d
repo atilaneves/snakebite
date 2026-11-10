@@ -5727,6 +5727,10 @@ static if (jitSupported) {
             put(&opReturnVoid, JitOp.plain(Kind.returnVoid));
         }
 
+        put(&opTemporarySuspend, JitOp.plain(Kind.temporaryTransition));
+        put(&opTemporaryArm, JitOp.plain(Kind.temporaryTransition));
+        put(&opTemporaryArmAddress, JitOp.plain(Kind.temporaryTransition));
+
         static foreach (triple; threeAddressNames) {{
             static foreach (constant; [false, true]) {{
                 const handler =
