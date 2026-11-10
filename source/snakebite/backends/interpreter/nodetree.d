@@ -26,8 +26,8 @@ import snakebite.backends.interpreter.faultslot:
     resultWordOf, siteWord;
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.ffi.load: callDirectWordsPair, extendWord, storeWordResult, WordPair;
-import snakebite.backends.sliceplan: SlicePlan;
-import snakebite.nativelayout: TypeFacts;
+import snakebite.frontend.storage: SlicePlan;
+import snakebite.nativevalue: TypeFacts;
 import snakebite.nativevalue: BitfieldAccess, CastLayout;
 import std.meta: AliasSeq;
 import std.traits: Select, isFloatingPoint;
@@ -765,11 +765,11 @@ private struct SliceValue {
     public ubyte* pointer;
 }
 
-private enum lengthOffset = imported!"snakebite.nativelayout".arrayLengthOffset;
-private enum pointerOffset = imported!"snakebite.nativelayout".arrayPointerOffset;
+private enum lengthOffset = imported!"snakebite.nativevalue".arrayLengthOffset;
+private enum pointerOffset = imported!"snakebite.nativevalue".arrayPointerOffset;
 static assert(SliceValue.length.offsetof == lengthOffset
     && SliceValue.pointer.offsetof == pointerOffset
-    && SliceValue.sizeof == imported!"snakebite.nativelayout".arrayValueSize);
+    && SliceValue.sizeof == imported!"snakebite.nativevalue".arrayValueSize);
 
 private abstract class SliceNode : Node {
     public override void executeVoid(ubyte* frame) {
@@ -880,7 +880,7 @@ private final class SliceTruth : BoolNode {
     private size_t _second;
 
     public this(Node slice, Type type) {
-        import snakebite.nativelayout: truthFacts;
+        import snakebite.frontend.typefacts: truthFacts;
 
         const truth = truthFacts(type);
         _slice = slice;
@@ -2451,14 +2451,14 @@ private final class Scoped(E) : BoolNode {
 // there is tested after the expression ends.
 private final class ScopedTruth(E) : BoolNode {
     private Scoped!E _scope;
-    private imported!"snakebite.nativelayout".TypeFacts.Truth _truth;
+    private imported!"snakebite.nativevalue".TypeFacts.Truth _truth;
     public this(Scoped!E scope_, Type type) {
-        import snakebite.nativelayout: truthFacts;
+        import snakebite.frontend.typefacts: truthFacts;
 
         _scope = scope_; _truth = truthFacts(type);
     }
     public override bool executeBool(ubyte* frame) {
-        import snakebite.nativelayout: isTrueAt;
+        import snakebite.nativevalue: isTrueAt;
 
         ubyte* address;
         _scope.run(frame, { address = _scope._inner.executeAddr(frame); });
@@ -2477,11 +2477,11 @@ private final class ScopedIntegral(E) : LongNode {
         _scope = scope_; _facts = facts;
     }
     public override long executeLong(ubyte* frame) {
-        import snakebite.nativelayout: loadIntegral;
+        import snakebite.nativevalue: checkedLoadIntegral;
 
         ubyte* address;
         _scope.run(frame, { address = _scope._inner.executeAddr(frame); });
-        return loadIntegral(address, _facts.size, !_facts.isUnsigned);
+        return checkedLoadIntegral(address, _facts.size, !_facts.isUnsigned);
     }
 }
 
@@ -2729,7 +2729,7 @@ private final class FrameDelegate : SliceNode {
         _hops = hops; _function = function_;
     }
     public override void executeInto(ubyte* frame, ubyte* dest) {
-        import snakebite.nativelayout:
+        import snakebite.nativevalue:
             delegateContextOffset, delegateFunctionOffset;
 
         *cast(ubyte**) (dest + delegateContextOffset)
@@ -2758,8 +2758,8 @@ private final class MethodDelegate(E, MethodReceiver kind) : SliceNode {
         _root = ev._treeRoot;
     }
     public override void executeInto(ubyte* frame, ubyte* dest) {
-        import snakebite.nativelayout: delegateContextOffset,
-            delegateFunctionOffset, virtualFunctionWord;
+        import snakebite.nativevalue:
+            delegateContextOffset, delegateFunctionOffset, virtualFunctionWord;
 
         static if (kind == MethodReceiver.structAddress)
             auto context = cast(void*) _receiver.executeAddr(frame);
@@ -5151,10 +5151,10 @@ private struct DelegateValue {
 }
 
 static assert(DelegateValue.context.offsetof
-        == imported!"snakebite.nativelayout".delegateContextOffset
+        == imported!"snakebite.nativevalue".delegateContextOffset
     && DelegateValue.function_.offsetof
-        == imported!"snakebite.nativelayout".delegateFunctionOffset
-    && DelegateValue.sizeof == imported!"snakebite.nativelayout".delegateValueSize);
+        == imported!"snakebite.nativevalue".delegateFunctionOffset
+    && DelegateValue.sizeof == imported!"snakebite.nativevalue".delegateValueSize);
 
 // What the word of a function pointer or a delegate names: the adjustment
 // of the context, and the callee when the tree runs the function.
@@ -6645,8 +6645,7 @@ private Node buildMethodDelegate(E)(
 }
 
 private Node constantDelegate(void* function_) {
-    import snakebite.nativelayout:
-        delegateContextOffset, delegateFunctionOffset;
+    import snakebite.nativevalue: delegateContextOffset, delegateFunctionOffset;
 
     SliceValue value;
     auto bytes = cast(ubyte*) &value;
@@ -6772,7 +6771,7 @@ private Node buildSliceAssignment(E)(
 ) {
     import dmd.expression: MemorySet;
     import dmd.typesem: nextOf, toBasetype;
-    import snakebite.backends.sliceplan: planSlice;
+    import snakebite.frontend.storage: planSlice;
 
     if (planSlice(target).yieldsStaticArray
             || (assignment.isConstructExp !is null
@@ -6875,7 +6874,7 @@ private Node buildSliceOf(E)(E ev, SliceExp expression) {
     import dmd.astenums: TY;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: nextOf, toBasetype;
-    import snakebite.backends.sliceplan: planSlice;
+    import snakebite.frontend.storage: planSlice;
 
     const plan = planSlice(expression);
     if (plan.yieldsStaticArray)
@@ -7395,7 +7394,8 @@ private Node notOf(Node operand) {
 private Node buildValue(E)(E ev, Expression expression) {
     import dmd.tokens: EXP;
     import snakebite.frontend.storage: typeInfoAddressedBy;
-    import snakebite.nativelayout: isStaticStructAddress, loadIntegral;
+    import snakebite.frontend.typefacts: isStaticStructAddress;
+    import snakebite.nativevalue: checkedLoadIntegral;
     import snakebite.nativevalue: loadFloating;
 
     // A call whose result is a struct or a static array has no value in a
@@ -7418,7 +7418,7 @@ private Node buildValue(E)(E ev, Expression expression) {
             align(8) ubyte[8] buffer;
             ev._nativeData.write(expression.type, scalar.facts, expression,
                 buffer.ptr);
-            return new Constant!long(loadIntegral(
+            return new Constant!long(checkedLoadIntegral(
                 buffer.ptr, scalar.facts.size, !scalar.facts.isUnsigned));
         }
         case float64: {
@@ -8005,7 +8005,7 @@ private Node fuseStep(alias make, V, Kind[] steps, Args...)(
 private Node buildOpAssign(string op, E)(E ev, BinAssignExp e, in Scalar scalar) {
     import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
     import snakebite.backends.shifts: shiftPlan;
-    import snakebite.frontend.storage: compoundTarget;
+    import snakebite.backends.compoundassign: compoundTarget;
 
     const plan = arithmeticPlan(e);
     auto step = buildValue(ev, e.e2);
@@ -8264,7 +8264,8 @@ private Node buildInitializer(E)(
     E ev, VarDeclaration variable, DeclarationExp declaration,
     imported!"dmd.init".ExpInitializer initializer,
 ) {
-    import snakebite.nativelayout: initializerRunsForEffect, initializerValueOf;
+    import snakebite.frontend.typefacts:
+        initializerRunsForEffect, initializerValueOf;
 
     if (ev.isRefStorage(variable)
             && !initializerRunsForEffect(initializer, variable))
@@ -8447,7 +8448,7 @@ private Node buildAggregateEffect(E)(E ev, Expression expression) {
 }
 
 private Node buildStructLiteral(E)(E ev, imported!"dmd.expression".StructLiteralExp literal) {
-    import snakebite.nativelayout: isStoredLiteral;
+    import snakebite.frontend.typefacts: isStoredLiteral;
 
     const facts = ev.factsOf(literal.type);
     if (literal.useStaticInit)
@@ -8477,7 +8478,7 @@ private Node buildArrayLiteral(E)(
     E ev, imported!"dmd.expression".ArrayLiteralExp literal,
 ) {
     import snakebite.backends.arrayliteral: ArrayLiteralPlan, planArrayLiteral;
-    import snakebite.nativelayout: isStoredLiteral;
+    import snakebite.frontend.typefacts: isStoredLiteral;
 
     auto plan = planArrayLiteral(literal, ev._function);
     assert(plan.result == ArrayLiteralPlan.Result.value,

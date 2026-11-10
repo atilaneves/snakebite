@@ -2,11 +2,39 @@ module snakebite.backends.compoundassign;
 
 private:
 
-import snakebite.nativelayout: typeFacts;
-
+import dmd.typesem: toBasetype;
 
 import snakebite.backends.arithmetic: ArithmeticPlan;
 import snakebite.backends.casts: CastPlan;
+import snakebite.frontend.typefacts: typeFacts;
+
+// DMD represents the target of a compound assignment at its promoted
+// operation type. The original target type remains on the assignment node;
+// use that pair to remove only this frontend-generated lvalue promotion.
+public imported!"dmd.expression".Expression compoundTarget(
+    imported!"dmd.expression".BinAssignExp expression,
+) {
+    const type = expression.type.toBasetype;
+    if (sameScalar(expression.e1.type.toBasetype, type))
+        return expression.e1;
+
+    // A shift by a wider count promotes the target twice, e.g.
+    // `cast(long)cast(int)b` for a `byte`.
+    for (auto promotion = expression.e1.isCastExp; promotion !is null;
+            promotion = promotion.e1.isCastExp)
+        if (sameScalar(promotion.e1.type.toBasetype, type))
+            return promotion.e1;
+    return expression.e1;
+}
+
+// The assignment's own type is `const` when it initialises a `const`
+// variable, while the target it promotes is not. The ordinary case is the
+// first comparison alone.
+private bool sameScalar(
+    imported!"dmd.mtype".Type a, in imported!"dmd.mtype".Type b,
+) {
+    return a.equals(b) || (a.ty == b.ty && a.isTypeBasic !is null);
+}
 
 // How a compound assignment `target op= step` moves its target in and out
 // of the operation. dmd types the operation in the common type of both
@@ -35,8 +63,7 @@ package CompoundConversion compoundConversion(
 ) {
     import snakebite.backends.arithmetic: arithmeticKind;
     import snakebite.backends.casts: classify;
-    import snakebite.frontend.storage: compoundTarget;
-    import snakebite.nativelayout: TypeFacts;
+    import snakebite.nativevalue: TypeFacts;
 
     auto targetType = compoundTarget(expression).type;
     auto operationType = expression.e1.type;

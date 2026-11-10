@@ -2,13 +2,13 @@ module snakebite.backends.comparison;
 
 private:
 
-import snakebite.nativelayout: typeFacts;
+import snakebite.frontend.typefacts: typeFacts;
 
 
 
 import snakebite.internalfailure: internalFailure;
 
-import snakebite.nativelayout: TypeFacts;
+import snakebite.nativevalue: TypeFacts;
 
 package struct ComparisonPlan {
     enum Kind {

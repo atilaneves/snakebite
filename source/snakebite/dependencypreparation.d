@@ -51,7 +51,7 @@ private DependencyAnalysis dependencyAnalysis(
     imported!"snakebite.backends".Program program,
 ) {
     import snakebite.frontend.compiler: withCompilerLock;
-    import snakebite.frontend.imagesource: imageSource, imageInputs;
+    import snakebite.imagesource: imageSource, imageInputs;
 
     DependencyAnalysis result;
     withCompilerLock({

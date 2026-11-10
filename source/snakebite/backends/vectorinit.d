@@ -3,10 +3,10 @@ module snakebite.backends.vectorinit;
 
 private:
 
-import snakebite.nativelayout: typeFacts;
+import snakebite.frontend.typefacts: typeFacts;
 
 
-import snakebite.nativelayout: TypeFacts;
+import snakebite.nativevalue: TypeFacts;
 
 
 // Evaluate the source once, then copy its native bytes `count` times. An

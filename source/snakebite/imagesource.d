@@ -1,4 +1,4 @@
-module snakebite.frontend.imagesource;
+module snakebite.imagesource;
 
 
 private:

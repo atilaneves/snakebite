@@ -398,7 +398,7 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
     }
 
     if (type.isIntegral) {
-        import snakebite.nativelayout: isIntegralSize;
+        import snakebite.nativevalue: isIntegralSize;
 
         const bytes = type.size;
         if (bytes.isIntegralSize) {

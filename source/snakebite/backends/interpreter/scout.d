@@ -22,7 +22,7 @@ import snakebite.backends.controlflow: ScopePaths;
 import snakebite.backends.lowered: LoweredExpressionTypes;
 import snakebite.backends.switchplan: gotoCaseTarget, gotoDefaultTarget;
 import snakebite.frontend.dmd.functions: unresolvedCalleeOf;
-import snakebite.nativelayout: initializerValueOf;
+import snakebite.frontend.typefacts: initializerValueOf;
 import std.meta: staticIndexOf;
 import snakebite.backends.interpreter.preparedfacts: PreparedFacts;
 

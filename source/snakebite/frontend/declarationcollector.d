@@ -13,7 +13,7 @@ private:
 // `Declaration`, but the C parser wraps the variables of `int a, b;` in a
 // `LinkDeclaration`, which is not one. The base of every walk that can
 // start before semantic analysis, `inlineasm.d`'s version gate among them.
-package extern(C++) class ImportCSafeVisitor
+package(snakebite) extern(C++) class ImportCSafeVisitor
         : imported!"dmd.visitor".SemanticTimeTransitiveVisitor {
     import dmd.init: CInitializer;
     import dmd.statement: CompoundDeclarationStatement;
@@ -60,7 +60,7 @@ package extern(C++) class ImportCSafeVisitor
 // declaration compile into the build", so that answer lives here once.
 // Each subclass overrides only `visit(FuncDeclaration)`, where the two
 // collectors' jobs differ.
-package extern(C++) class DeclarationCollector : ImportCSafeVisitor {
+package(snakebite) extern(C++) class DeclarationCollector : ImportCSafeVisitor {
     alias visit = ImportCSafeVisitor.visit;
 
     import dmd.attrib: AttribDeclaration, ConditionalDeclaration;

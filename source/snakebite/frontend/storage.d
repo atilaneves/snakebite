@@ -12,32 +12,33 @@ import dmd.expression:
 import dmd.astenums: Tarray, Tsarray, Tvector;
 import dmd.typesem: isIntegral, toBasetype;
 
-// DMD represents the target of a compound assignment at its promoted
-// operation type. The original target type remains on the assignment node;
-// use that pair to remove only this frontend-generated lvalue promotion.
-public imported!"dmd.expression".Expression compoundTarget(
-    imported!"dmd.expression".BinAssignExp expression,
-) {
-    const type = expression.type.toBasetype;
-    if (sameScalar(expression.e1.type.toBasetype, type))
-        return expression.e1;
-
-    // A shift by a wider count promotes the target twice, e.g.
-    // `cast(long)cast(int)b` for a `byte`.
-    for (auto promotion = expression.e1.isCastExp; promotion !is null;
-            promotion = promotion.e1.isCastExp)
-        if (sameScalar(promotion.e1.type.toBasetype, type))
-            return promotion.e1;
-    return expression.e1;
+// The decisions both backends use for a `SliceExp`: its bounds checks, which
+// dmd makes in its glue layer (`e2ir.d`), and what the slice yields. The
+// checks are unsigned compares. A pointer has no length, so only the order
+// of its bounds can fail; an array also needs its upper bound within its
+// length. A check the frontend already proved (`lowerIsLessThanUpper`,
+// `upperIsInBounds`) is skipped. The failure reports the length of an array
+// source, and `0` for a pointer, as compiled D does.
+public struct SlicePlan {
+    public bool checkOrder;
+    public bool checkUpper;
+    public bool reportsSourceLength;
+    // dmd gives a slice the type `T[N]` when it converts a slice with
+    // constant bounds, or a slice with no bounds of a static array, to a
+    // static array. Its value is then the `N` elements in place, an lvalue,
+    // not a length and a pointer.
+    public bool yieldsStaticArray;
 }
 
-// The assignment's own type is `const` when it initialises a `const`
-// variable, while the target it promotes is not. The ordinary case is the
-// first comparison alone.
-private bool sameScalar(
-    imported!"dmd.mtype".Type a, in imported!"dmd.mtype".Type b,
-) {
-    return a.equals(b) || (a.ty == b.ty && a.isTypeBasic !is null);
+public SlicePlan planSlice(imported!"dmd.expression".SliceExp expression) {
+    const isPointer = expression.e1.type.toBasetype.isTypePointer !is null;
+
+    return SlicePlan(
+        !expression.lowerIsLessThanUpper,
+        !isPointer && !expression.upperIsInBounds,
+        !isPointer,
+        expression.type.toBasetype.isTypeSArray !is null,
+    );
 }
 
 // An index without calls or side effects is only a read, and it is read
@@ -115,13 +116,13 @@ public struct StorageResolver(Result, Adapter) {
             return _adapter.storagePointer(ptrExp);
 
         if (auto context = expression.isDelegatePtrExp) {
-            import snakebite.nativelayout: delegateContextOffset;
+            import snakebite.nativevalue: delegateContextOffset;
             return _adapter.storageDelegateWord(
                 resolve(context.e1), delegateContextOffset);
         }
 
         if (auto functionPointer = expression.isDelegateFuncptrExp) {
-            import snakebite.nativelayout: delegateFunctionOffset;
+            import snakebite.nativevalue: delegateFunctionOffset;
             return _adapter.storageDelegateWord(
                 resolve(functionPointer.e1), delegateFunctionOffset);
         }
@@ -276,8 +277,6 @@ public struct StorageResolver(Result, Adapter) {
     private Result assignmentResult(
         AssignExp expression, Expression targetExpression,
     ) {
-        import snakebite.backends.sliceplan: planSlice;
-
         if (expression.memset == MemorySet.referenceInit)
             return _adapter.storageReferenceInit(expression);
 
@@ -304,6 +303,8 @@ public struct StorageResolver(Result, Adapter) {
         // CatAssignExp is a BinAssignExp in dmd's AST. The typed overload
         // keeps that family dispatch complete without asking `isAssignExp`,
         // whose predicate only accepts the plain `EXP.assign` opcode.
+        import snakebite.backends.compoundassign: compoundTarget;
+
         auto target = resolve(compoundTarget(expression));
         if (auto cat = expression.isCatAssignExp)
             _adapter.storageCatAssignment(cast(CatAssignExp) cat, target);
