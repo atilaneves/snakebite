@@ -279,6 +279,7 @@ private import core.atomic: atomicLoad, atomicStore, cas;
 private import snakebite.backends.backend: Backend, Program;
 private import snakebite.exception: SnakebiteException;
 private import snakebite.ffi.callback: CallbackBridge, CallbackCall;
+private import snakebite.ffi.plan: NativeSignature;
 
 
 // What `endAtExit` needs, in memory that the GC does not own: after a normal
@@ -466,7 +467,6 @@ private struct Run {
     ModuleInfo*[] records;
     Image image;
     CallbackBridge* bridge;
-    FuncDeclaration nativeDeclaration;
     const(ModuleInfo*)[] dependencyModules;
     ExitRecord* exit;
     // The thread that registered, and the modules with destructors in the
@@ -667,20 +667,6 @@ private Run* newRun(
     run.backend = backend;
     run.bridge = new CallbackBridge(&callPhase, cast(void*) run);
     run.dependencyModules = dependencies;
-    if (dependencies.length) {
-        import dmd.astenums: LINK, STC;
-        import dmd.func: FuncDeclaration;
-        import dmd.identifier: Identifier;
-        import dmd.location: Loc;
-        import dmd.mtype: Type, TypeFunction, ParameterList;
-        import snakebite.frontend.compiler: newInFrontend;
-        auto identifier = newInFrontend!(Identifier.idPool)( // DMD takes a mutable identifier.
-            "snakebite_module_phase");
-        auto type = newInFrontend!TypeFunction( // DMD declarations take a mutable type.
-            ParameterList.init, Type.tvoid, LINK.d);
-        run.nativeDeclaration = newInFrontend!FuncDeclaration(
-            Loc.initial, Loc.initial, identifier, cast(STC) 0, type);
-    }
     run.records = recordsOf(run, specs, tests);
     return run;
 }
@@ -811,7 +797,7 @@ private ModuleInfo*[] nativeRecordsOf(Run* run) {
                     : flag == MIunitTest ? Phase.Kind.unitTests
                     : Phase.Kind.destructor;
                 phase.nativeFunction = cast(void function()) *slot;
-                run.bridge.register(phase, run.nativeDeclaration);
+                run.bridge.register(phase, phaseSignature);
                 *slot = cast(void*) run.entryOf(phase);
             }
             ++slot;
@@ -907,6 +893,11 @@ private auto reversed(imported!"dmd.func".FuncDeclaration[] functions) {
 }
 
 
+// The type of every phase entry: `extern(D) void()`, the type of the
+// compiler's own module constructors and destructors.
+private enum phaseSignature = NativeSignature(imported!"dmd.astenums".LINK.d);
+
+
 // The phase of a module that runs `functions`, or null when there is
 // nothing to run and, for a constructor phase, no destructor phase to place.
 private Phase* phaseOf(
@@ -920,12 +911,7 @@ private Phase* phaseOf(
         return null;
 
     auto phase = new Phase(run, kind, functions, gates, destructor);
-    // The entry takes its type from a function: the destructors have the
-    // type of the constructors.
-    run.bridge.register(
-        phase,
-        functions.length ? functions[0] : destructor.functions[0],
-    );
+    run.bridge.register(phase, phaseSignature);
     return phase;
 }
 

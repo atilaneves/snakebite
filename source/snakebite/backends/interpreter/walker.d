@@ -98,10 +98,10 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         CallbackCall* call,
     ) {
         version(unittest) import snakebite.sharedtable: PreparedExecution;
-        version(unittest)
-            auto preparedExecution = PreparedExecution(
-                isFinalizerCallback(call.declaration));
         auto interpreter = cast(Interpreter) context;
+        version(unittest)
+            auto preparedExecution = PreparedExecution(isFinalizerCallback(
+                *(call.function_ in interpreter._shared.entryDeclarations)));
         interpreter.onEvaluator!((evaluator) =>
             evaluator.callGuestFromHost(call));
     }
@@ -116,10 +116,11 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
 
     private static void prepareCallback(
         void* context,
-        FuncDeclaration function_,
+        const(void)* word,
     ) {
         auto interpreter = cast(Interpreter) context;
-        interpreter.prepareOnEvaluator(function_);
+        interpreter.prepareOnEvaluator(
+            *(word in interpreter._shared.entryDeclarations));
     }
 
     public override string eval(FuncDeclaration function_) {
@@ -340,6 +341,9 @@ private struct Shared {
     // evaluator, not only the one that first resolved it - is interpreted
     // directly instead of crossing the FFI barrier to call itself.
     SharedTable!(const(void)*, FuncDeclaration) callableDeclarations;
+    // The guest function behind each word registered with the callback
+    // bridge: the bridge knows an entry by its signature only.
+    SharedTable!(const(void)*, FuncDeclaration) entryDeclarations;
     // What an AST node's plan is, which depends on nothing but the node.
     // Each one is built once per node, by the first evaluator that reaches
     // it or by the preparation of a callback, and read without a lock
@@ -463,8 +467,13 @@ private struct Shared {
                 (callee) => program.isInterpreted(callee),
                 hasNativeSymbol,
                 plans.hasIndependentNativeSymbol(method))) {
-            plans.registerGuestFunction(cast(void*) method, method);
             word = cast(void*) method;
+            if (!plans.isGuestWord(word)) {
+                import snakebite.ffi.plan: nativeSignatureOf;
+
+                entryDeclarations.insert(word, method);
+                plans.registerEntry(word, nativeSignatureOf(method));
+            }
             if (prepare !is null && method !in prepared)
                 prepare(method);
             if (callSelection.storesGuestWord(
@@ -2120,8 +2129,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // `Throwable` the body throws unwinds through the host frames
     // untouched (ADR-0004).
     extern(D) final void callGuestFromHost(CallbackCall* call) {
-        runHostToGuest(call.declaration, call.returnPlace, call.arguments,
-            call.variadicCursor, call.variadicTypes);
+        runHostToGuest(*(call.function_ in _shared.entryDeclarations),
+            call.returnPlace, call.arguments, call.variadicCursor,
+            call.variadicTypes);
     }
 
     // Fills everything that executing `function_`, or a function it calls
