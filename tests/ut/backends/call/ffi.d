@@ -4706,16 +4706,19 @@ static foreach (backend; Matrix!(
                 pragma(mangle, "snakebite_ut_word_slice")
                 extern(C) long[] slice(long* values, long length);
 
-                void assign(long[]* destination, long* values, long length) {
-                    *destination = slice(values, length);
+                struct GuardedSlice {
+                    long before;
+                    long[] view;
+                    long after;
+                }
+
+                void assign(GuardedSlice* destination, long* values, long length) {
+                    long[] view = slice(values, length);
+                    long[] capturedView() { return view; }
+                    destination.view = capturedView();
                 }
 
                 int answer() {
-                    struct GuardedSlice {
-                        long before;
-                        long[] view;
-                        long after;
-                    }
                     long[4] values = [3, 5, 7, 11];
                     foreach (round; 0 .. 3) {
                         auto whole = slice(values.ptr, 4);
@@ -4730,27 +4733,27 @@ static foreach (backend; Matrix!(
                         auto tail = slice(&values[2], 2);
                         if (tail.length != 2 || tail[0] != 7) return 4;
                     }
-                    GuardedSlice result = GuardedSlice(13, values[], 17);
-                    foreach (length; [3L, 2L, 1L, -1L, 0L]) {
-                        try {
-                            result.view = slice(&values[1], length);
-                            if (length < 0 || result.view.length != length
-                                    || result.view.ptr !is &values[1])
-                                return 5;
-                        } catch (Exception exception) {
-                            if (length != -1 || exception.msg != "negative slice length"
-                                    || result.view.length != 1
-                                    || result.view.ptr !is &values[1])
-                                return 6;
+                    foreach (indirect; [false, true]) {
+                        GuardedSlice result = GuardedSlice(13, values[], 17);
+                        foreach (length; [3L, 2L, 1L, -1L, 0L]) {
+                            try {
+                                if (indirect)
+                                    assign(&result, &values[1], length);
+                                else
+                                    result.view = slice(&values[1], length);
+                                if (length < 0 || result.view.length != length
+                                        || result.view.ptr !is &values[1])
+                                    return 5;
+                            } catch (Exception exception) {
+                                if (length != -1 || exception.msg != "negative slice length"
+                                        || result.view.length != 1
+                                        || result.view.ptr !is &values[1])
+                                    return 6;
+                            }
+                            if (result.before != 13 || result.after != 17)
+                                return 7;
                         }
-                        if (result.before != 13 || result.after != 17)
-                            return 7;
                     }
-                    assign(&result.view, &values[2], 2);
-                    if (result.view.length != 2 || result.view.ptr !is &values[2]
-                            || result.view[1] != 11
-                            || result.before != 13 || result.after != 17)
-                        return 8;
                     return 0;
                 }
             },
