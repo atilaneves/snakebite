@@ -2167,36 +2167,35 @@ private struct Gen {
             return false;
         const w = cast(int) ins.width;
         const divideWidth = w == 8 || (w == 4 && p.widenInt) ? 8 : 4;
-        Mem d, l, r;
-        size_t rr;
+        Mem d, l;
+        IntegerRight right;
         if (!binary(ins, p.twoAddress, p.constantRight,
-                leftInReg: false, destInReg: false, d, l, r, rr))
+                leftInReg: false, destInReg: false, w, d, l, right))
             return false;
-        const bits = p.constantRight ? constantAt(rr, w) : 0;
-        if (p.constantRight && w == 4 && divideWidth == 4
-                && emitSigned32Constant(d, l, cast(int) bits, p.remainder))
+        if (right.constant && w == 4 && divideWidth == 4
+                && emitSigned32Constant(d, l, cast(int) right.bits, p.remainder))
             return true;
         if (w == divideWidth)
             a.ld(w, RAX, l);
         else
             a.ldsx(w, RAX, l);
-        if (p.constantRight) {
+        if (right.constant) {
             int imm;
-            const divisor = w != divideWidth && immOf(w, bits, imm)
-                ? cast(ulong) imm : bits;
+            const divisor = w != divideWidth && immOf(w, right.bits, imm)
+                ? cast(ulong) imm : right.bits;
             a.movI(R11, divisor);
         } else if (w != divideWidth)
-            a.ldsx(w, R11, r);
+            a.ldsx(w, R11, right.memory);
 
         // idiv uses rdx for the dividend and remainder. Save the VM state
         // until the result is stored. The hardware reports the same faults
         // as the handler.
         a.movRR64(SC2, STATE);
         a.extendDividend(divideWidth);
-        if (p.constantRight || w != divideWidth)
+        if (right.constant || w != divideWidth)
             a.idivR(divideWidth, R11);
         else
-            a.idivM(divideWidth, r);
+            a.idivM(divideWidth, right.memory);
         a.st(w, d, p.remainder ? RDX : RAX);
         a.movRR64(STATE, SC2);
         return true;
