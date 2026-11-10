@@ -1030,6 +1030,7 @@ public struct Function {
     package uint jitState;
     // Whether calls of this function count towards `jitHeat`.
     package bool jitCounts;
+    package const(char)[] jitName;
     // The JIT state of the `Bytecode` instance that compiled this function.
     static if (jitSupported)
         package imported!"snakebite.backends.bytecode.jit".JitInstance* jit;
@@ -1269,7 +1270,7 @@ private void initializeClosure(
 
 // Guest calls reserve activations beside their values. Native stack use
 // therefore depends on barrier crossings, not guest call depth.
-private struct Activation {
+package struct Activation {
     const(Instruction)* pc;
     const(Instruction)* resume;
     ubyte* frame;
@@ -1951,7 +1952,7 @@ private const(Instruction)* callGeneral(bool counted)(
 
 // Where a call writes its result, which the compiler knows when it chooses
 // the handler.
-private enum Destination {
+package enum Destination {
     frame,
     indirect,
     discard,
@@ -5313,6 +5314,7 @@ private const(Specialisation)* lookupSpecialisation(
 public struct JitSetting {
     public bool enabled = true;
     public bool eager;
+    public bool perfMap;
 }
 
 // The JIT: tier-up, counting and the classification of handlers. The code
@@ -5322,14 +5324,8 @@ public struct JitSetting {
 static if (jitSupported) {
 
     import core.memory: GC;
-    import snakebite.backends.bytecode.jit: JitLock, JitOp, jitUsable, Scratch;
-
-    // An event is a guest call of a function or an execution of one of its
-    // backward branches. A function with this many events gets JIT code. The
-    // counting adds `jitStep` to `Function.jitHeat`, so that the 32-bit sum
-    // carries out at the threshold.
-    package enum jitThreshold = 256;
-    private enum jitStep = cast(uint) ((1UL << 32) / jitThreshold);
+    import snakebite.backends.bytecode.jit: JitLock, JitOp, jitStep, jitUsable,
+        Scratch;
 
     // What `Function.jitHeat` starts with.
     package uint jitStartHeat(in JitSetting setting) nothrow @nogc {
@@ -5592,14 +5588,12 @@ static if (jitSupported) {
                 ops[index] = JitOp.init;
                 continue;
             }
-            // A handler of a call, as installed, has no template; the general
-            // handler that `specialiseHandlers` replaced is what has one.
+            // Templates use the operand layout from before specialisation.
             if (!tables.unspecialise(snapshot[index]))
                 return false;
             ops[index] = tables.jitGet(snapshot[index].handler);
         }
-        return lock.jitFunction(instructions, snapshot, ops, originals,
-            function_.constants);
+        return lock.jitFunction(function_, snapshot, ops, originals);
     }
 
     private void buildJitTable(ref JitTables tables) nothrow {
@@ -5610,6 +5604,16 @@ static if (jitSupported) {
         void put(Instruction.Handler handler, JitOp op) {
             if (handler !is null)
                 tables.jitTable[handler] = op;
+        }
+
+        static if (chainedDispatch) {
+            static foreach (destination; EnumMembers!Destination)
+                static foreach (counted; [false, true])
+                    put(&callWindow!(destination, counted),
+                        JitOp.make!(Kind.callWindow)(
+                            JitOp.CallWindow(destination, counted)));
+            put(&opReturn, JitOp.plain(Kind.returnValue));
+            put(&opReturnVoid, JitOp.plain(Kind.returnVoid));
         }
 
         static foreach (triple; threeAddressNames) {{

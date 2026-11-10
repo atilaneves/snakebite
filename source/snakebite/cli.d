@@ -14,6 +14,7 @@ public struct Options {
     public BackendName backend;
     public string projectDirectory;
     public bool showHelp;
+    public bool jitPerfMap;
     // Real `bin/sb` use keeps optimisation: a guest run pays the image's
     // run time, not just its build time. This flag trades that away for
     // faster image builds, for a caller that only checks behaviour.
@@ -67,7 +68,8 @@ public int run(string[] args) {
                         ~ parsed.options.programArguments,
                     false,
                     true,
-                    JitSetting(!parsed.options.noJit),
+                    JitSetting(!parsed.options.noJit,
+                        /*eager*/ false, parsed.options.jitPerfMap),
                 );
                 _statistics = Statistics(true, preparation, report);
                 return report.status;
@@ -177,6 +179,7 @@ public CliResult parseArgs(string[] args) {
             result.options.project,
             "b|backend", "Select the backend (default: bytecode).",
                 &backendName,
+            "jit-perf-map", jitPerfMapHelp, &result.options.jitPerfMap,
             "no-optimise-image", "Build the dependency image without optimisation (faster build, slower run).",
                 &result.options.noOptimiseImage,
         );
@@ -205,6 +208,8 @@ public CliResult parseArgs(string[] args) {
 }
 
 
+private enum jitPerfMapHelp = "Write JIT symbols to /tmp/perf-<pid>.map.";
+
 private enum helpText =
     "Usage: sb [options] <directory> [-- program arguments...]\n" ~
     "\n" ~
@@ -226,4 +231,5 @@ private enum helpText =
         ~ imported!"snakebite.gc".lowmemHelp ~ "\n" ~
     "  --no-jit                  "
         ~ imported!"snakebite.projectoptions".noJitHelp ~ "\n" ~
+    "  --jit-perf-map            " ~ jitPerfMapHelp ~ "\n" ~
     "  -h, --help                Show this help\n";

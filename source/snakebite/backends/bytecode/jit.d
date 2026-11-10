@@ -6,8 +6,9 @@ module snakebite.backends.bytecode.jit;
 // with the operands as immediates. The address of the code of instruction i
 // replaces `instructions[i].handler`. The code obeys the `Instruction.Handler`
 // calling convention (see the register map below). It has no stack frame,
-// makes no call and uses only the scratch registers, so r0 and fp0 survive,
-// and a throw needs no unwind information: it happens only in real handlers,
+// and makes no native call. Scratch registers hold operands; guest calls
+// and returns also set the handler arguments. A throw needs no unwind
+// information: it happens only in real handlers,
 // which the JIT code reaches by a tail jump. An instruction without a
 // template gets a stub that sets `pc` and jumps to its handler.
 //
@@ -36,18 +37,24 @@ static if (jitSupported):
 
 @nogc nothrow:
 
+// Each guest call or backward branch adds `jitStep` to `Function.jitHeat`.
+// A carry out of the 32-bit sum means the function has reached the threshold.
+private enum jitThreshold = 256;
+package enum jitStep = cast(uint) ((1UL << 32) / jitThreshold);
+
 // What the JIT does for one instruction: the kind of template and its
 // parameters. Each kind that has parameters has the member of its own name in
 // the union; `width` is a fixed operand width, or 0 when the instruction holds
 // it. `emitOp` says what each kind emits.
 package struct JitOp {
     import snakebite.backends.bytecode.vm: CheckedAccess, CompareKind,
-        Comparison, IndexBase;
+        Comparison, Destination, IndexBase;
 
     enum Kind : ubyte {
         none, copy, constant, zero, jump, branch, int3, cmp3, fused, fp3,
         fpcmp3, index, checked, castFixed, widen, loadInd, storeInd,
         frameAddr, staticLoad, staticStore, staticAddr, boolOp, unary, shift,
+        callWindow, returnValue, returnVoid,
     }
 
     enum IntOperation : ubyte { add, or, and, subtract, xor, multiply }
@@ -143,6 +150,11 @@ package struct JitOp {
         bool twoAddress;
     }
 
+    static struct CallWindow {
+        Destination destination;
+        bool counted;
+    }
+
     Kind kind;
     ubyte width;
     union {
@@ -160,6 +172,7 @@ package struct JitOp {
         BoolOp boolOp;
         Unary unary;
         Shift shift;
+        CallWindow callWindow;
     }
 
     // A kind that has no parameters.
@@ -248,7 +261,7 @@ private enum : ubyte {
 // What the JIT keeps from one compile to the next. It belongs to the JIT lock
 // of its `JitInstance`: only `JitLock.owned` gives access to it.
 package struct JitState {
-    import snakebite.backends.bytecode.vm: Instruction;
+    import snakebite.backends.bytecode.vm: Function, Instruction;
 
     @nogc nothrow:
 
@@ -256,9 +269,11 @@ package struct JitState {
     // Whether the CPU has the BMI2 shifts (`shlx`, `shrx`, `sarx`); without
     // them the shift instructions keep their handlers.
     bool bmi2;
-    // The buffers of the fixup and label tables, which compiles reuse.
+    // Compiles reuse these buffers.
     Scratch!Fixup fixups;
+    Scratch!Literal literals;
     Scratch!size_t labels;
+    PerfMap perfMap;
     // The buffers of one compile in `vm.d`: the template of each instruction,
     // a snapshot of the instructions, and their handlers.
     Scratch!JitOp opScratch;
@@ -270,28 +285,30 @@ package struct JitState {
         region.release;
         fixups.release;
         labels.release;
+        literals.release;
         opScratch.release;
         snapshotScratch.release;
         originalScratch.release;
     }
 
-    Emitted emitFunction(Instruction[] instructions,
+    Emitted emitFunction(Function* function_,
         const(Instruction)[] snapshot, const(JitOp)[] ops,
-        const(Instruction.Handler)[] originals,
-        const(long)[] constants)
+        const(Instruction.Handler)[] originals)
     {
         import core.atomic: atomicStore, MemoryOrder;
-        import snakebite.backends.bytecode.vm: chainedDispatch, DispatchState;
 
+        const instructions = function_.instructions;
         const start = region.chunkUsed;
         const cap = region.chunkCapacity - start;
         Gen g;
         g.a.buf = region.writeBase + start;
         g.fixupScratch = &fixups;
+        g.literalScratch = &literals;
         g.bmi2 = bmi2;
         g.instructions = instructions;
         g.snapshot = snapshot;
-        g.constants = constants;
+        g.constants = function_.constants;
+        g.callSites = function_.callSites;
         auto labelMemory = labels.reserve(instructions.length + 1);
         if (labelMemory is null)
             return Emitted.failed;
@@ -300,43 +317,34 @@ package struct JitState {
         g.fixupCap = fixups.cap;
 
         foreach (i; 0 .. instructions.length) {
-            if (cap - g.a.n < maximumBytesPerInstruction)
+            if (cap - g.a.n - g.literalBytes < maximumBytesPerInstruction)
                 return Emitted.full;
             g.labels[i] = g.a.n;
             const saved = g.a.n;
             const savedFixups = g.fixupCount;
+            const savedLiterals = g.literalCount;
             bool done;
             if (originals[i] !is null && ops[i].kind != JitOp.Kind.none)
-                done = g.emitOp(i, ops[i]);
+                done = g.emitOp(i, ops[i], originals[i]);
             if (g.outOfMemory)
                 return Emitted.failed;
             if (!done) {
                 g.a.n = saved;
                 g.fixupCount = savedFixups;
+                g.literalCount = savedLiterals;
                 if (originals[i] is null)
                     g.a.ud2();
-                else {
-                    // Without chained dispatch the handler returns the next
-                    // instruction to `dispatchLoop`, which then passes the
-                    // register arguments from `DispatchState`: save r0 and fp0
-                    // there first, as `executeRegister` does at its end.
-                    static if (!chainedDispatch) {
-                        g.a.st(8,
-                            Mem(STATE, cast(int) DispatchState.r0.offsetof),
-                            REG0);
-                        g.a.sse(doublePrefix, storeOpcode, fp0Register,
-                            Mem(STATE, cast(int) DispatchState.fp0.offsetof));
-                    }
-                    g.a.movI(PCREG, cast(size_t) &instructions[i]);
-                    g.a.movI(RAX, cast(size_t) originals[i]);
-                    g.a.jmpRax;
-                }
+                else
+                    g.jumpToHandler(i, originals[i]);
             }
         }
-        if (cap - g.a.n < codeAlignment)
+        if (cap - g.a.n - g.literalBytes < codeAlignment)
             return Emitted.full;
+        if (g.literalCount && g.a.n + g.literalBytes + Asm.ud2Size > int.max)
+            return Emitted.failed;
         g.labels[instructions.length] = g.a.n;
         g.a.ud2();
+        g.emitLiterals;
 
         foreach (f; g.fixups[0 .. g.fixupCount])
             *cast(int*) (g.a.buf + f.position) = cast(int) (
@@ -348,6 +356,8 @@ package struct JitState {
             region.populate;
 
         const code = region.execBase + start;
+        if (function_.jitName.length)
+            perfMap.record(code, g.a.n, function_.jitName);
         // One aligned 8-byte store with release order for each word, after
         // the code is complete. A thread that runs the function moves to JIT
         // code at its next dispatch.
@@ -384,17 +394,114 @@ package struct JitInstance {
     }
 }
 
-// The code region. It is a memfd file that grows by chunks. Each chunk is
+private struct PerfMap {
+    import core.stdc.stdio: FILE;
+    import core.sys.posix.sys.types: dev_t, ino_t, pid_t;
+
+    @nogc nothrow:
+
+    private pid_t _pid;
+    private dev_t _device;
+    private ino_t _inode;
+    private bool _available;
+
+    void record(in ubyte* code, in size_t size, in char[] name) {
+        import core.stdc.stdio: fclose, fprintf, fputc, perror;
+        import core.sys.posix.unistd: getpid;
+
+        const pid = getpid();
+        const first = pid != _pid;
+        if (!first && !_available)
+            return;
+        _pid = pid;
+        _available = false;
+
+        // A guest can replace any descriptor between compiles, also after fork.
+        auto file = openMap(pid, first); // The writer needs a mutable FILE.
+        if (file is null)
+            return;
+        const written = fprintf(file, "%zx %zx ", cast(size_t) code, size) >= 0
+            && writeSymbol(file, name) && fputc('\n', file) >= 0;
+        if (!written)
+            perror("snakebite: cannot write JIT perf map");
+        const closed = fclose(file) == 0;
+        if (written && !closed)
+            perror("snakebite: cannot write JIT perf map");
+        _available = written && closed;
+    }
+
+    private FILE* openMap(in pid_t pid, in bool first) {
+        import core.stdc.stdio: fprintf, perror, snprintf, stderr;
+        import core.sys.posix.fcntl: O_APPEND, O_CLOEXEC, O_CREAT, O_EXCL,
+            O_NOFOLLOW, O_NONBLOCK, O_WRONLY, open;
+        import core.sys.posix.stdio: fdopen;
+        import core.sys.posix.sys.stat: fstat, stat_t, S_IRUSR, S_IWUSR;
+        import core.sys.posix.unistd: close;
+
+        char[64] path;
+        snprintf(path.ptr, path.length, "/tmp/perf-%d.map", pid);
+        const flags = O_WRONLY | O_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK;
+        const descriptor = first
+            ? open(path.ptr, flags | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR)
+            : open(path.ptr, flags);
+        if (descriptor < 0) {
+            perror(path.ptr);
+            return null;
+        }
+
+        stat_t info;
+        if (fstat(descriptor, &info) != 0) {
+            perror(path.ptr);
+            close(descriptor);
+            return null;
+        }
+        if (!first && (info.st_dev != _device || info.st_ino != _inode)) {
+            fprintf(stderr, "snakebite: JIT perf map changed: %s\n", path.ptr);
+            close(descriptor);
+            return null;
+        }
+        _device = info.st_dev;
+        _inode = info.st_ino;
+
+        auto file = fdopen(descriptor, "a"); // The writer needs a mutable FILE.
+        if (file is null) {
+            perror(path.ptr);
+            close(descriptor);
+        }
+        return file;
+    }
+
+    private static bool writeSymbol(FILE* file, in char[] name) {
+        import core.stdc.stdio: fputs, fwrite;
+
+        size_t start;
+        foreach (index, character; name) {
+            if (character != '\r' && character != '\n')
+                continue;
+            const length = index - start;
+            const escape = character == '\r' ? "\\r" : "\\n";
+            if (fwrite(name.ptr + start, char.sizeof, length, file) != length
+                    || fputs(escape.ptr, file) < 0)
+                return false;
+            start = index + 1;
+        }
+        const length = name.length - start;
+        return fwrite(name.ptr + start, char.sizeof, length, file) == length;
+    }
+}
+
+// The code region grows by chunks. Each chunk has its own memfd file and is
 // mapped twice: `writeBase` is read+write, where the JIT emits, and `execBase`
 // is read+execute, where the handlers point. No page changes protection.
 // Functions are packed with 16-byte alignment, and a function never spans two
 // chunks. Memory is made present (`MADV_POPULATE_*`) a part of a chunk at a
 // time.
 private struct CodeRegion {
+    import core.sys.posix.sys.types: pid_t;
+
     @nogc nothrow:
 
-    int file = -1;
-    size_t fileSize;
+    private pid_t _process;
     ubyte* writeBase;
     ubyte* execBase;
     size_t chunkCapacity;
@@ -411,39 +518,45 @@ private struct CodeRegion {
         size_t size;
     }
 
-    // Unmaps every chunk and closes the file. The code is gone: no function
-    // that points into it may run again.
+    // The code is gone: no function that points into it may run again.
     void release() {
         import core.stdc.stdlib: free;
         import core.sys.posix.sys.mman: munmap;
-        import core.sys.posix.unistd: close;
 
         foreach (chunk; chunks[0 .. chunkCount]) {
-            munmap(chunk.write, chunk.size);
-            munmap(chunk.execute, chunk.size);
+            if (chunk.write !is null)
+                munmap(chunk.write, chunk.size);
+            if (chunk.execute !is null)
+                munmap(chunk.execute, chunk.size);
         }
         free(chunks);
         chunks = null;
         chunkCount = chunkRecordCapacity = 0;
-        if (file >= 0)
-            close(file);
-        file = -1;
-        fileSize = 0;
         writeBase = execBase = null;
         chunkCapacity = chunkUsed = populatedEnd = 0;
     }
 
-    bool create() {
-        import core.sys.posix.unistd: close;
+    bool prepare() {
+        import core.sys.posix.sys.mman: munmap;
+        import core.sys.posix.unistd: getpid;
 
-        file = memfd_create("snakebite-jit", MFD_CLOEXEC);
-        if (file < 0)
-            return false;
-        if (newChunk(chunkSize))
-            return true;
-        close(file);
-        file = -1;
-        return false;
+        const process = getpid();
+        if (process == _process)
+            return chunkCapacity != 0;
+
+        // A fork copies the write views of each shared memfd. Keep the execute
+        // views because inherited handlers still use them. The child emits into
+        // a new chunk, so it cannot overwrite code in the parent.
+        foreach (ref chunk; chunks[0 .. chunkCount]) {
+            if (chunk.write !is null) {
+                munmap(chunk.write, chunk.size);
+                chunk.write = null;
+            }
+        }
+        writeBase = execBase = null;
+        chunkCapacity = chunkUsed = populatedEnd = 0;
+        _process = process;
+        return newChunk(chunkSize);
     }
 
     // Makes a chunk of at least `bytes` the current one. The old chunks stay
@@ -451,16 +564,20 @@ private struct CodeRegion {
     bool newChunk(size_t bytes) {
         import core.sys.posix.sys.mman: MAP_FAILED, MAP_SHARED, mmap, munmap,
             PROT_EXEC, PROT_READ, PROT_WRITE;
-        import core.sys.posix.unistd: ftruncate;
+        import core.sys.posix.unistd: close, ftruncate;
 
+        const file = memfd_create("snakebite-jit", MFD_CLOEXEC);
+        if (file < 0)
+            return false;
+        scope(exit) close(file);
         const size = (bytes + chunkSize - 1) & ~(chunkSize - 1);
-        if (ftruncate(file, fileSize + size) != 0)
+        if (ftruncate(file, size) != 0)
             return false;
         // `auto`: `munmap` takes a mutable pointer.
         auto write = mmap(null, size, PROT_READ | PROT_WRITE, MAP_SHARED,
-            file, fileSize);
+            file, 0);
         auto execute = mmap(null, size, PROT_READ | PROT_EXEC, MAP_SHARED,
-            file, fileSize);
+            file, 0);
         if (write is MAP_FAILED || execute is MAP_FAILED) {
             if (write !is MAP_FAILED)
                 munmap(write, size);
@@ -483,7 +600,6 @@ private struct CodeRegion {
         }
         chunks[chunkCount++] = Chunk(cast(ubyte*) write, cast(ubyte*) execute,
             size);
-        fileSize += size;
         writeBase = cast(ubyte*) write;
         execBase = cast(ubyte*) execute;
         chunkCapacity = size;
@@ -526,7 +642,7 @@ private enum Setup : int { pending, ready, unavailable }
 // lock can wait for a thread that the GC suspended while it held the lock. The
 // lock is released when the `JitLock` that holds it goes out of scope.
 package struct JitLock {
-    import snakebite.backends.bytecode.vm: Instruction;
+    import snakebite.backends.bytecode.vm: Function, Instruction;
 
     @nogc nothrow:
 
@@ -576,23 +692,20 @@ package struct JitLock {
     // little room left, emission stops (it checks before each instruction)
     // and starts again in a new chunk, whose size no function can exceed. A
     // function does not reserve room for its worst case before it emits.
-    package bool jitFunction(Instruction[] instructions,
+    package bool jitFunction(Function* function_,
         const(Instruction)[] snapshot, const(JitOp)[] ops,
-        const(Instruction.Handler)[] originals,
-        const(long)[] constants)
+        const(Instruction.Handler)[] originals)
     {
-        if (instructions.length == 0)
+        if (snapshot.length == 0)
             return false;
         ref state = this.state;
-        auto result = state.emitFunction(instructions, snapshot, ops, originals,
-            constants);
+        auto result = state.emitFunction(function_, snapshot, ops, originals);
         if (result == Emitted.full) {
-            const worst = instructions.length * maximumBytesPerInstruction
+            const worst = snapshot.length * maximumBytesPerInstruction
                 + 4096;
             if (!state.region.newChunk(worst))
                 return false;
-            result = state.emitFunction(instructions, snapshot, ops,
-                originals, constants);
+            result = state.emitFunction(function_, snapshot, ops, originals);
         }
         return result == Emitted.done;
     }
@@ -606,13 +719,13 @@ package bool jitUsable(ref JitLock lock) {
 
     ref instance = *lock._instance;
     final switch (atomicLoad!(MemoryOrder.acq)(instance.setup)) {
-        case Setup.ready: return true;
+        case Setup.ready: return lock.state.region.prepare;
         case Setup.unavailable: return false;
         case Setup.pending:
             break;
     }
     ref state = lock.state;
-    const ok = state.region.create;
+    const ok = state.region.prepare;
     if (ok) {
         // Instances that race here can each run the check before one of them
         // sets the flag. The result is the same, and each run uses a little
@@ -765,6 +878,11 @@ private static immutable int[4] _chunkSizes = [8, 4, 2, 1];
 private struct Fixup {
     size_t position;
     size_t target;
+}
+
+private struct Literal {
+    size_t displacement;
+    ulong bits;
 }
 
 private struct Asm {
@@ -1004,6 +1122,18 @@ private struct Asm {
         memOp(4, byteReg: false, x, m, (0x0F << 8 | op), prefix);
     }
 
+    // ModRM mode 00 and r/m 101 address data relative to the next instruction.
+    void sseRip(ubyte prefix, ubyte op, int x) {
+        if (prefix)
+            b(prefix);
+        if (x >= 8)
+            b(0x44);
+        b(0x0F);
+        b(op);
+        b(cast(ubyte) (((x & 7) << 3) | 5));
+        d32(0);
+    }
+
     void sseRR(ubyte prefix, ubyte op, int dst, int src) {
         if (prefix)
             b(prefix);
@@ -1017,29 +1147,42 @@ private struct Asm {
         b(cast(ubyte) (0xC0 | ((dst & 7) << 3) | (src & 7)));
     }
 
-    void ud2() { b(0x0F); b(0x0B); }
+    private enum ubyte[2] _ud2Encoding = [0x0F, 0x0B];
+    enum ud2Size = _ud2Encoding.length;
+
+    void ud2() {
+        static foreach (index; 0 .. ud2Size)
+            b(_ud2Encoding[index]);
+    }
 
     // `jmp rax`.
     void jmpRax() { b(0xFF); b(0xE0); }
+
+    void jmpM(in Mem target) { memOp(4, byteReg: false, 4, target, 0xFF); }
 }
 
 private struct Gen {
-    import snakebite.backends.bytecode.vm: CheckedAccess, CompareKind,
-        Comparison, DispatchState, indirectBit, IndexBase, Instruction;
+    import snakebite.backends.bytecode.vm: Activation, CallSite,
+        chainedDispatch, CheckedAccess, CompareKind, Comparison, Destination,
+        DispatchState, Function, indirectBit, IndexBase, Instruction;
+    import snakebite.framestack: FrameStack;
     import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset;
 
     @nogc nothrow:
 
     Asm a;
     Scratch!Fixup* fixupScratch;
+    Scratch!Literal* literalScratch;
     bool bmi2;
     const(Instruction)[] instructions;
     const(Instruction)[] snapshot;
     const(long)[] constants;
+    const(CallSite)[] callSites;
     size_t[] labels;
     Fixup* fixups;
     size_t fixupCount;
     size_t fixupCap;
+    size_t literalCount;
     bool outOfMemory;
 
     void fix(size_t target) {
@@ -1055,6 +1198,44 @@ private struct Gen {
         }
         fixups[fixupCount++] = Fixup(a.n, target);
         a.d32(0);
+    }
+
+    size_t literalBytes() const {
+        return literalCount * ulong.sizeof;
+    }
+
+    void emitLiterals() {
+        foreach (literal; literalScratch.ptr[0 .. literalCount]) {
+            *cast(int*) (a.buf + literal.displacement) = cast(int) (
+                a.n - (literal.displacement + int.sizeof));
+            a.q64(literal.bits);
+        }
+    }
+
+    static struct FloatRight {
+        Mem memory;
+        size_t literalAddress;
+    }
+
+    bool floatRight(ubyte scratch, size_t raw, bool constant, out FloatRight r) {
+        if (!constant)
+            return opnd(raw, scratch, r.memory);
+        r.literalAddress = raw;
+        return true;
+    }
+
+    void sseRight(int width, ubyte prefix, ubyte opcode, int x, in FloatRight r) {
+        if (!r.literalAddress) {
+            a.sse(prefix, opcode, x, r.memory);
+            return;
+        }
+        if (literalScratch.grow(literalCount + 1) is null) {
+            outOfMemory = true;
+            return;
+        }
+        a.sseRip(prefix, opcode, x);
+        literalScratch.ptr[literalCount++] = Literal(a.n - int.sizeof,
+            constantAt(r.literalAddress, width));
     }
 
     void jmpTo(size_t target) {
@@ -1133,6 +1314,135 @@ private struct Gen {
         }
     }
 
+    bool emitCallWindow(size_t i, in JitOp.CallWindow op,
+        Instruction.Handler original)
+    {
+        import core.atomic: atomicLoad, MemoryOrder;
+
+        const ins = snapshot[i];
+        const site = &callSites[ins.source];
+        const fast = &site.fast;
+        // Preparing a site may compile guest bytecode. Only read facts that
+        // the handler has published and that will stay valid for this site.
+        if (atomicLoad!(MemoryOrder.acq)(
+                *cast(shared(uint)*) &fast.state) != CallSite.FastCall.State.ready)
+            return false;
+        const callee = fast.callee;
+        const hasPlace = callee.returnPlace.offset != size_t.max;
+        const hasWindows = callee.windowSlot != size_t.max;
+        if (site.windowSlot > int.max || site.windowDisp > int.max
+                || site.windowScratch > int.max || fast.frameBytes > int.max
+                || fast.frameOffset > int.max || fast.reachBytes > int.max
+                || (hasPlace && fast.placeStore > int.max)
+                || (hasWindows && (fast.windowStore > int.max
+                    || fast.windowBase > int.max)))
+            return false;
+
+        a.ld(8, R9, Mem(STATE, DispatchState.frames.offsetof));
+        a.ld(8, R10, Mem(FRAME, cast(int) site.windowSlot));
+        a.lea(R11, Mem(R10, cast(int) site.windowDisp));
+        a.lea(RAX, Mem(R11, cast(int) fast.reachBytes));
+        a.alu(Alu.cmp, 8, RAX, Mem(R9, FrameStack.fastEndOffset));
+        const grow = jccLocal(CC_A);
+
+        a.movI(PCREG, cast(size_t) callee);
+        size_t tierUp;
+        if (op.counted) {
+            const heat = Mem(PCREG, Function.jitHeat.offsetof);
+            a.ld(4, RAX, heat);
+            a.aluRI(Alu.add, 4, RAX, jitStep);
+            // Let the counting handler perform the event on carry.
+            tierUp = jccLocal(CC_B);
+            a.st(4, heat, RAX);
+        }
+        a.st(8, Mem(R11, Activation.function_.offsetof), PCREG);
+
+        Mem place;
+        if (op.destination == Destination.discard)
+            place = Mem(R10, cast(int) site.windowScratch);
+        else if (!opnd(ins.destination, RAX, place))
+            return false;
+        a.lea(RAX, place);
+        a.st(8, Mem(R11, Activation.returnPlace.offsetof), RAX);
+        a.lea(FRAME, Mem(R11, cast(int) fast.frameOffset));
+        a.st(8, Mem(R11, Activation.frame.offsetof), FRAME);
+        if (hasPlace)
+            a.st(8, Mem(FRAME, cast(int) fast.placeStore), RAX);
+        if (hasWindows) {
+            a.lea(RAX, Mem(R11, cast(int) fast.windowBase));
+            a.st(8, Mem(FRAME, cast(int) fast.windowStore), RAX);
+        }
+
+        a.ld(8, RAX, Mem(R9, FrameStack.topOffset));
+        a.alu(Alu.sub, 8, RAX, Mem(R9, FrameStack.baseOffset));
+        a.st(8, Mem(R11, Activation.frameMark.offsetof), RAX);
+        a.lea(RAX, Mem(R11, cast(int) fast.frameBytes));
+        a.st(8, Mem(R9, FrameStack.topOffset), RAX);
+        a.ld(8, RAX, Mem(R9, FrameStack.cleanupMarkOffset));
+        a.st(8, Mem(R11, Activation.cleanupMark.offsetof), RAX);
+
+        // A throw from the callee uses the call site in the parent.
+        a.movI(PCREG, cast(size_t) &instructions[i]);
+        a.st(8, Mem(ACTIVE, Activation.pc.offsetof), PCREG);
+        a.lea(RAX, Mem(PCREG, Instruction.sizeof));
+        a.st(8, Mem(ACTIVE, Activation.resume.offsetof), RAX);
+        a.st(8, Mem(R11, Activation.parent.offsetof), ACTIVE);
+        a.movI(PCREG, cast(size_t) callee.instructions.ptr);
+        a.st(8, Mem(R11, Activation.pc.offsetof), PCREG);
+        a.st(8, Mem(STATE, DispatchState.current.offsetof), R11);
+        a.movRR64(ACTIVE, R11);
+        a.jmpM(Mem(PCREG, Instruction.handler.offsetof));
+
+        patchHere(grow);
+        if (op.counted)
+            patchHere(tierUp);
+        jumpToHandler(i, original);
+        return true;
+    }
+
+    bool emitReturn(size_t i, bool hasValue, Instruction.Handler original) {
+        const ins = snapshot[i];
+        if (hasValue && ins.width > 64)
+            return false;
+
+        a.ld(8, R10, Mem(ACTIVE, Activation.parent.offsetof));
+        a.aluRI(Alu.cmp, 8, R10, 0);
+        const root = jccLocal(CC_E);
+        a.ld(8, R9, Mem(STATE, DispatchState.frames.offsetof));
+        a.ld(8, R11, Mem(R9, FrameStack.cleanupMarkOffset));
+        a.alu(Alu.cmp, 8, R11, Mem(ACTIVE, Activation.cleanupMark.offsetof));
+        const cleanup = jccLocal(CC_NE);
+
+        if (hasValue && ins.width != 0) {
+            Mem source;
+            if (!opnd(ins.source, SC2, source))
+                return false;
+            a.ld(8, R11, Mem(ACTIVE, Activation.returnPlace.offsetof));
+            a.aluRI(Alu.cmp, 8, R11, 0);
+            const discard = jccLocal(CC_E);
+            a.lea(RAX, source);
+            a.aluRR(Alu.cmp, 8, RAX, R11);
+            const aliased = jccLocal(CC_E);
+            copyChunks(source, Mem(R11, 0), ins.width);
+            patchHere(aliased);
+            patchHere(discard);
+        }
+
+        a.ld(8, RAX, Mem(ACTIVE, Activation.frameMark.offsetof));
+        a.alu(Alu.add, 8, RAX, Mem(R9, FrameStack.baseOffset));
+        a.st(8, Mem(R9, FrameStack.topOffset), RAX);
+        a.st(8, Mem(STATE, DispatchState.current.offsetof), R10);
+        a.movRR64(ACTIVE, R10);
+        a.ld(8, FRAME, Mem(ACTIVE, Activation.frame.offsetof));
+        a.ld(8, PCREG, Mem(ACTIVE, Activation.resume.offsetof));
+        a.jmpM(Mem(PCREG, Instruction.handler.offsetof));
+
+        patchHere(root);
+        patchHere(cleanup);
+        jumpToHandler(i, original);
+        return true;
+    }
+
     // The value of `width` bytes at a constant-pool address, zero-extended.
     static ulong constantAt(size_t address, int w) {
         switch (w) {
@@ -1172,11 +1482,30 @@ private struct Gen {
         return t[comparison];
     }
 
-    bool emitOp(size_t i, in JitOp op) {
+    void jumpToHandler(size_t i, Instruction.Handler handler) {
+        // The unchained dispatcher gets its register arguments from the state.
+        static if (!chainedDispatch) {
+            a.st(8, Mem(STATE, DispatchState.r0.offsetof), REG0);
+            a.sse(doublePrefix, storeOpcode, fp0Register,
+                Mem(STATE, DispatchState.fp0.offsetof));
+        }
+        a.movI(PCREG, cast(size_t) &instructions[i]);
+        a.movI(RAX, cast(size_t) handler);
+        a.jmpRax;
+    }
+
+    bool emitOp(size_t i, in JitOp op, Instruction.Handler original) {
         const ins = snapshot[i];
         final switch (op.kind) with (JitOp.Kind) {
         case none:
             return false;
+
+        case callWindow:
+            return emitCallWindow(i, op.callWindow, original);
+
+        case returnValue:
+        case returnVoid:
+            return emitReturn(i, op.kind == returnValue, original);
 
         case copy: {
             const size = op.width ? op.width : ins.width;
@@ -1585,10 +1914,8 @@ private struct Gen {
         const comparePrefix = w == 8 ? operandSizePrefix : noPrefix;
         if (!p.leftInR0 && !opnd(ins.destination, R9, l))
             return false;
-        if (p.constantRight) {
-            a.movI(R10, ins.source);
-            r = Mem(R10, 0);
-        } else if (!opnd(ins.source, R10, r))
+        FloatRight right;
+        if (!floatRight(R10, ins.source, p.constantRight, right))
             return false;
         int leftX = fp0Register;
         if (!p.leftInR0) {
@@ -1598,7 +1925,7 @@ private struct Gen {
         final switch (p.comparison) with (Comparison) {
             case greaterThan:
             case greaterOrEqual: {
-                a.sse(comparePrefix, compareOpcode, leftX, r);
+                sseRight(w, comparePrefix, compareOpcode, leftX, right);
                 int cc = p.comparison == greaterThan ? CC_A : CC_AE;
                 if (!p.jumpWhen)
                     cc ^= 1;
@@ -1609,7 +1936,7 @@ private struct Gen {
             case lessOrEqual: {
                 // Compares the right operand with the left one, so that an
                 // unordered answer sets the carry flag.
-                a.sse(prefix, loadOpcode, XMM2, r);
+                sseRight(w, prefix, loadOpcode, XMM2, right);
                 a.sseRR(comparePrefix, compareOpcode, XMM2, leftX);
                 int cc = p.comparison == lessThan ? CC_A : CC_AE;
                 if (!p.jumpWhen)
@@ -1619,7 +1946,7 @@ private struct Gen {
             }
             case equal:
             case notEqual: {
-                a.sse(comparePrefix, compareOpcode, leftX, r);
+                sseRight(w, comparePrefix, compareOpcode, leftX, right);
                 const eq = p.comparison == equal;
                 if (eq == p.jumpWhen) {
                     // Jump when ZF=1 and PF=0.
@@ -1643,15 +1970,13 @@ private struct Gen {
         if (p.leftInFp0 && w != 8)
             return false;
         const prefix = w == 8 ? doublePrefix : singlePrefix;
-        Mem d, l, r;
+        Mem d, l;
         if (!p.resultInFp0 && !opnd(ins.destination, R9, d))
             return false;
         if (!p.leftInFp0 && !opnd(ins.source, R10, l))
             return false;
-        if (p.constantRight) {
-            a.movI(R11, ins.sourceWidth);
-            r = Mem(R11, 0);
-        } else if (!opnd(ins.sourceWidth, R11, r))
+        FloatRight right;
+        if (!floatRight(R11, ins.sourceWidth, p.constantRight, right))
             return false;
         const acc = p.resultInFp0 ? fp0Register : XMM1;
         if (p.leftInFp0) {
@@ -1659,7 +1984,7 @@ private struct Gen {
                 a.sseRR(noPrefix, moveAlignedOpcode, acc, fp0Register);
         } else
             a.sse(prefix, loadOpcode, acc, l);
-        a.sse(prefix, _floatOpcodes[p.operation], acc, r);
+        sseRight(w, prefix, _floatOpcodes[p.operation], acc, right);
         if (!p.resultInFp0)
             a.sse(prefix, storeOpcode, acc, d);
         return true;
@@ -1672,36 +1997,34 @@ private struct Gen {
             return false;
         const prefix = w == 8 ? doublePrefix : singlePrefix;
         const comparePrefix = w == 8 ? operandSizePrefix : noPrefix;
-        Mem d, l, r;
+        Mem d, l;
         if (!opnd(ins.destination, R9, d) || !opnd(ins.source, R10, l))
             return false;
-        if (p.constantRight) {
-            a.movI(R11, ins.sourceWidth);
-            r = Mem(R11, 0);
-        } else if (!opnd(ins.sourceWidth, R11, r))
+        FloatRight right;
+        if (!floatRight(R11, ins.sourceWidth, p.constantRight, right))
             return false;
         a.sse(prefix, loadOpcode, XMM1, l);
         final switch (p.comparison) with (Comparison) {
             case greaterThan:
             case greaterOrEqual:
-                a.sse(comparePrefix, compareOpcode, XMM1, r);
+                sseRight(w, comparePrefix, compareOpcode, XMM1, right);
                 a.setcc(p.comparison == greaterThan ? CC_A : CC_AE, d);
                 break;
             case lessThan:
             case lessOrEqual:
-                a.sse(prefix, loadOpcode, XMM2, r);
+                sseRight(w, prefix, loadOpcode, XMM2, right);
                 a.sseRR(comparePrefix, compareOpcode, XMM2, XMM1);
                 a.setcc(p.comparison == lessThan ? CC_A : CC_AE, d);
                 break;
             case equal:
-                a.sse(comparePrefix, compareOpcode, XMM1, r);
+                sseRight(w, comparePrefix, compareOpcode, XMM1, right);
                 a.setccR(CC_E, RAX);
                 a.setccR(CC_NP, SC2);
                 a.aluRR(Alu.and, 1, RAX, SC2);
                 a.st(1, d, RAX);
                 break;
             case notEqual:
-                a.sse(comparePrefix, compareOpcode, XMM1, r);
+                sseRight(w, comparePrefix, compareOpcode, XMM1, right);
                 a.setccR(CC_NE, RAX);
                 a.setccR(CC_P, SC2);
                 a.aluRR(Alu.or, 1, RAX, SC2);

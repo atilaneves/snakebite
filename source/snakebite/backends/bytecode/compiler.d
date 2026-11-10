@@ -836,6 +836,11 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                 this, _jit, function_, layout, returnFacts, isVoidReturn,
                 isRefReturn);
             *placeholder = compiler.build(body_);
+            if (placeholder.jitCounts && _jit.perfMap) {
+                import snakebite.frontend.dmd.mangle: mangledNameOf;
+
+                placeholder.jitName = function_.mangledNameOf;
+            }
             _complete.insert(function_, placeholder);
             if (outermost)
                 prepareCallbackBodies;

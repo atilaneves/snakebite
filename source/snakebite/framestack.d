@@ -72,6 +72,12 @@ public struct FrameStack {
     private TlsSlots* _tls;
     private bool _ownsTls;
 
+    package(snakebite) enum baseOffset = _base.offsetof;
+    package(snakebite) enum fastEndOffset = _fastEnd.offsetof;
+    package(snakebite) enum topOffset = _top.offsetof;
+    package(snakebite) enum cleanupMarkOffset =
+        _cleanups.offsetof + TemporaryStack.markOffset;
+
     @disable this(this);
 
     public this(size_t capacity, TlsSlots* tls) @system {

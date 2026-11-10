@@ -18,6 +18,8 @@ public struct CStack(T, bool scanned = false) {
     private size_t _length;
     private size_t _capacity;
 
+    package(snakebite) enum lengthOffset = _length.offsetof;
+
     @disable this(this);
 
     ~this() {

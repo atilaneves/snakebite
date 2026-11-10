@@ -81,6 +81,8 @@ public struct TemporaryStack {
     private size_t _latest = noEntry;
     private bool _indexed;
 
+    package(snakebite) enum markOffset = _entries.offsetof + CStack!Entry.lengthOffset;
+
     public size_t mark() const @nogc nothrow pure {
         return _entries.length;
     }
