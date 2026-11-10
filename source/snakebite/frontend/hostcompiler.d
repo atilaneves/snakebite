@@ -7,7 +7,7 @@ module snakebite.frontend.hostcompiler;
 
 private:
 
-import snakebite.failure.exception: SnakebiteException;
+import snakebite.failure.report: SnakebiteException;
 
 // An LDC target links the frontend with LDC's additions (`reggaefile.d`);
 // a missing import path would build the unpatched one.

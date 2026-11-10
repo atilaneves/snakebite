@@ -60,7 +60,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import snakebite.language.layout.frame: FrameLayout;
     import snakebite.frontend.checks: Checks;
     import snakebite.host.sharedtable: SharedTable;
-    import snakebite.failure.exception: SnakebiteException;
+    import snakebite.failure.report: SnakebiteException;
     import snakebite.stack.frames: defaultFrameCapacity;
     import snakebite.host.threads: heapNew;
     import snakebite.host.executionstates: ExecutionStates;
@@ -984,7 +984,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Address, Place, Reloc, Target;
     import snakebite.language.layout.frame: ClosureLayout, FrameLayout;
     import snakebite.language.layout.temporary: TemporaryPlan, constructTemporary;
-    import snakebite.failure.exception: SnakebiteException;
+    import snakebite.failure.report: SnakebiteException;
     import snakebite.frontend.typefacts:
         initializerRunsForEffect, initializerValueOf, isThreadLocalStorage;
     import snakebite.native.value: alignUp, isIntegralSize, TypeFacts;

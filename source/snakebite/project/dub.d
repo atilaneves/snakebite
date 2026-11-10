@@ -224,7 +224,7 @@ private void runPreBuildCommands(
 ) {
     import dub.generators.generator: CommandType, makeCommandEnvironmentVariables;
     import dub.project: processVars;
-    import snakebite.failure.exception: SnakebiteException;
+    import snakebite.failure.report: SnakebiteException;
     import std.conv: text;
     import std.process: Config, environment, executeShell;
 
@@ -267,7 +267,7 @@ public void buildDubDependencies(
     in string directory, in string stateDirectory,
     in DubDescription description, in string[] linkerFiles,
 ) {
-    import snakebite.failure.exception: SnakebiteException;
+    import snakebite.failure.report: SnakebiteException;
     import std.algorithm: all;
     import std.conv: text;
     import std.file: exists, mkdirRecurse, readText, write;

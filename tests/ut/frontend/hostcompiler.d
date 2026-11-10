@@ -6,7 +6,7 @@ module ut.frontend.hostcompiler;
 // configuration file is an error of the user's environment.
 
 
-import snakebite.failure.exception: SnakebiteException;
+import snakebite.failure.report: SnakebiteException;
 import snakebite.frontend.hostcompiler: HostCompiler, hostImportPaths;
 import std.file: mkdirRecurse, rmdirRecurse, tempDir, write;
 import std.path: buildPath;

@@ -177,7 +177,7 @@ public final class Interpreter: imported!"snakebite.backends.api".Backend {
 
 }
 
-import snakebite.failure.exception: SnakebiteException;
+import snakebite.failure.report: SnakebiteException;
 import snakebite.failure.fault: GuestPosition, GuestRun, register, unregister;
 
 // Runs `action` on the evaluator of the calling thread: made on its first

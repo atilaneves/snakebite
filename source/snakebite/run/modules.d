@@ -282,7 +282,7 @@ private import core.atomic: atomicLoad, atomicOp, atomicStore, cas;
 private import snakebite.backends.api: Backend;
 private import snakebite.start.data:
     FunctionHandle, GateStorage, ModuleStart, StartData;
-private import snakebite.failure.exception: SnakebiteException;
+private import snakebite.failure.report: SnakebiteException;
 private import snakebite.ffi.callback: CallbackBridge, CallbackCall;
 private import snakebite.ffi.plan: NativeSignature;
 

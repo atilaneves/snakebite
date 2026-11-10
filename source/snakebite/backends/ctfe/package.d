@@ -10,7 +10,7 @@ public final class Ctfe: imported!"snakebite.backends.api".Backend {
     import snakebite.backends.api: DeclarationHandle;
     import snakebite.program: Program;
     import snakebite.start.data: FunctionHandle;
-    import snakebite.failure.exception: SnakebiteException;
+    import snakebite.failure.report: SnakebiteException;
 
     public this(const Program program) {
         super(program);
