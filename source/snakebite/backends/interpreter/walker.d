@@ -97,15 +97,7 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
 
     // The interpreter runs a declaration, so the declaration names it.
     public override FunctionHandle compiledFunction(FuncDeclaration function_) {
-        return new DeclarationHandle(function_);
-    }
-
-    public override void callCompiled(
-        FunctionHandle handle,
-        void* returnPlace,
-        void*[] args,
-    ) {
-        call((cast(DeclarationHandle) handle).function_, returnPlace, args);
+        return new DeclarationHandle(this, function_);
     }
 
     private void prepareOnEvaluator(FuncDeclaration function_) {

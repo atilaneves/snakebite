@@ -41,15 +41,7 @@ public final class Ctfe: imported!"snakebite.backends.backend".Backend {
 
     // CTFE runs a declaration, so the declaration names it.
     public override FunctionHandle compiledFunction(FuncDeclaration function_) {
-        return new DeclarationHandle(function_);
-    }
-
-    public override void callCompiled(
-        FunctionHandle handle,
-        void* returnPlace,
-        void*[] args,
-    ) {
-        call((cast(DeclarationHandle) handle).function_, returnPlace, args);
+        return new DeclarationHandle(this, function_);
     }
 
     public override string eval(FuncDeclaration function_) {

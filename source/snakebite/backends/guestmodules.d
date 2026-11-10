@@ -277,7 +277,7 @@ private extern(C) RuntimeGroup* registeredGroup(void* dso);
 private import core.atomic: atomicLoad, atomicStore, cas;
 private import snakebite.backends.backend: Backend;
 private import snakebite.backends.startdata:
-    CompiledFunction, GateStorage, ModuleStart, StartData;
+    FunctionHandle, GateStorage, ModuleStart, StartData;
 private import snakebite.exception: SnakebiteException;
 private import snakebite.ffi.callback: CallbackBridge, CallbackCall;
 private import snakebite.ffi.plan: NativeSignature;
@@ -558,7 +558,7 @@ private struct Phase {
 
     Run* run;
     Kind kind;
-    CompiledFunction[] functions;
+    FunctionHandle[] functions;
     // dmd's glue layer increments the gate of each destructor of a template
     // instance while it runs the constructors of the module: the destructor
     // body returns early unless it brings the gate back to zero.
@@ -625,7 +625,7 @@ private void call(Phase* phase) {
             phase.nativeFunction(); // A function pointer needs explicit call syntax.
         else
         foreach (function_; phase.functions)
-            function_.call(phase.run.backend, null, []);
+            function_.call(null, []);
     catch (SnakebiteException failure)
         throw new HostFailure(failure.msg);
 }
@@ -799,7 +799,7 @@ private ModuleInfo* crtRecordOf(Run* run, StartData start) {
 }
 
 
-private CompiledFunction[] reversed(CompiledFunction[] functions) {
+private FunctionHandle[] reversed(FunctionHandle[] functions) {
     import std.algorithm.mutation: reverse;
 
     return functions.dup.reverse;
@@ -816,7 +816,7 @@ private enum phaseSignature = NativeSignature(imported!"dmd.astenums".LINK.d);
 private Phase* phaseOf(
     Run* run,
     in Phase.Kind kind,
-    CompiledFunction[] functions,
+    FunctionHandle[] functions,
     GateStorage[] gates = null,
     Phase* destructor = null,
 ) {

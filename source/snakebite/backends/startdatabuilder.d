@@ -6,7 +6,7 @@ private:
 
 import snakebite.backends.backend: Backend, Program;
 import snakebite.backends.startdata:
-    CompiledFunction, GateStorage, ModuleStart, StartData;
+    FunctionHandle, GateStorage, ModuleStart, StartData;
 
 
 // Reads the frontend one time and builds the start data of `program`. The
@@ -92,22 +92,22 @@ private void addModules(
 }
 
 
-private CompiledFunction[] compiled(
+private FunctionHandle[] compiled(
     Backend backend,
     imported!"dmd.func".FuncDeclaration[] functions,
 ) {
-    CompiledFunction[] result;
+    FunctionHandle[] result;
     foreach (function_; functions)
         result ~= compiled(backend, function_);
     return result;
 }
 
 
-private CompiledFunction compiled(
+private FunctionHandle compiled(
     Backend backend,
     imported!"dmd.func".FuncDeclaration function_,
 ) {
-    return CompiledFunction(backend.compiledFunction(function_));
+    return backend.compiledFunction(function_);
 }
 
 

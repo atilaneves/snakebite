@@ -9,10 +9,18 @@ import snakebite.backends.startdata: FunctionHandle, StartData;
 
 // The handle of a backend that runs a function from its declaration.
 public final class DeclarationHandle: FunctionHandle {
-    public imported!"dmd.func".FuncDeclaration function_;
+    private imported!"dmd.func".FuncDeclaration _function;
+    private Backend _backend;
 
-    public this(imported!"dmd.func".FuncDeclaration function_) {
-        this.function_ = function_;
+    public this(
+        Backend backend, imported!"dmd.func".FuncDeclaration function_,
+    ) {
+        _backend = backend;
+        _function = function_;
+    }
+
+    public override void call(void* returnPlace, void*[] args) {
+        _backend.call(_function, returnPlace, args);
     }
 }
 
@@ -309,17 +317,12 @@ public abstract class Backend {
         imported!"dmd.declaration".VarDeclaration variable,
     );
 
-    // The handle of `function_` in this backend, for `callCompiled`. A
+    // The handle of `function_` in this backend, for `FunctionHandle.call`. A
     // handle is valid for the life of the backend. The backend decides when
     // the function is compiled: the bytecode backend compiles it at the
-    // first `callCompiled`. The start data (`StartData`) needs a frontend
+    // first call of the handle. The start data (`StartData`) needs a frontend
     // declaration in this and in `staticStorage`, and nowhere else.
     public abstract FunctionHandle compiledFunction(FuncDeclaration function_);
-
-    // As `call`, for a function named by `compiledFunction`.
-    public abstract void callCompiled(
-        FunctionHandle handle, void* returnPlace, void*[] args,
-    );
 
     // The start data of the program, built once (see `buildStartData`).
     public final ref StartData startData() {
@@ -412,7 +415,7 @@ package(snakebite) int runMain(
     }
     return failing(() {
         start.main.function_.call(
-            backend, start.main.returnsVoid ? null : &status, mainArguments);
+            start.main.returnsVoid ? null : &status, mainArguments);
     }) ? 1 : status;
 }
 

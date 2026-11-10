@@ -12,22 +12,10 @@ private:
 
 // What a backend gives out to name a function. It means nothing outside the
 // backend that made it, and that backend decides when the function is
-// compiled.
+// compiled: at the first `call`.
 public abstract class FunctionHandle {
-}
-
-
-// A function as the backend that built the start data names it.
-public struct CompiledFunction {
-    import snakebite.backends.backend: Backend;
-
-    public FunctionHandle handle;
-
-    public void call(
-        Backend backend, void* returnPlace, void*[] args,
-    ) const {
-        backend.callCompiled(cast() handle, returnPlace, args);
-    }
+    // Calls the function as `Backend.call` does.
+    public abstract void call(void* returnPlace, void*[] args);
 }
 
 
@@ -46,12 +34,12 @@ public struct ModuleStart {
     // The names of every module this module imports, for the records of a
     // dependency image. Empty when the program has no dependency image.
     public string[] importNames;
-    public CompiledFunction[] independentConstructors;
-    public CompiledFunction[] sharedConstructors;
-    public CompiledFunction[] threadConstructors;
-    public CompiledFunction[] sharedDestructors;
-    public CompiledFunction[] threadDestructors;
-    public CompiledFunction[] unitTests;
+    public FunctionHandle[] independentConstructors;
+    public FunctionHandle[] sharedConstructors;
+    public FunctionHandle[] threadConstructors;
+    public FunctionHandle[] sharedDestructors;
+    public FunctionHandle[] threadDestructors;
+    public FunctionHandle[] unitTests;
     // dmd's glue layer increments the gate of each destructor of a template
     // instance while it runs the constructors of the module: the destructor
     // body returns early unless it brings the gate back to zero.
@@ -75,7 +63,7 @@ public struct MainStart {
     public bool returnsVoid;
     // The number of parameters `main` declares.
     public size_t parameterCount;
-    public CompiledFunction function_;
+    public FunctionHandle function_;
 }
 
 
@@ -87,8 +75,8 @@ public struct StartData {
     public bool betterC;
     public ModuleStart[] modules;
     // In the order of the modules, which is the order of the constructors.
-    public CompiledFunction[] crtConstructors;
-    public CompiledFunction[] crtDestructors;
+    public FunctionHandle[] crtConstructors;
+    public FunctionHandle[] crtDestructors;
     public const(ModuleInfo*)[] dependencyModules;
     public MainStart main;
 }
