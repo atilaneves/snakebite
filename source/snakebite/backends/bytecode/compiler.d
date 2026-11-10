@@ -3,7 +3,7 @@ module snakebite.backends.bytecode.compiler;
 
 private:
 
-import snakebite.backends.startdata: FunctionHandle;
+import snakebite.start.data: FunctionHandle;
 import snakebite.frontend.typefacts: typeFacts, truthFacts;
 
 

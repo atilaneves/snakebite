@@ -5,7 +5,7 @@ private:
 
 
 import snakebite.backends.api: Backend;
-import snakebite.backends.startdata: StartData;
+import snakebite.start.data: StartData;
 
 
 // "Run on this project": do what a compiled build of it does, implemented

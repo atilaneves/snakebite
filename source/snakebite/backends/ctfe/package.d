@@ -9,7 +9,7 @@ public final class Ctfe: imported!"snakebite.backends.api".Backend {
     import dmd.func: FuncDeclaration;
     import snakebite.backends.api: DeclarationHandle;
     import snakebite.program: Program;
-    import snakebite.backends.startdata: FunctionHandle;
+    import snakebite.start.data: FunctionHandle;
     import snakebite.failure.exception: SnakebiteException;
 
     public this(const Program program) {

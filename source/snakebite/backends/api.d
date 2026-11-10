@@ -5,7 +5,7 @@ private:
 
 
 import snakebite.program: Program;
-import snakebite.backends.startdata: FunctionHandle, StartData;
+import snakebite.start.data: FunctionHandle, StartData;
 
 
 // The handle of a backend that runs a function from its declaration.
@@ -176,7 +176,7 @@ public abstract class Backend {
     // The start data of the program, built once (see `buildStartData`).
     public final ref StartData startData() {
         import core.atomic: atomicLoad, atomicStore, MemoryOrder;
-        import snakebite.backends.startdatabuilder: buildStartData;
+        import snakebite.start.builder: buildStartData;
         import snakebite.frontend.compiler: withCompilerLock;
 
         if (!atomicLoad!(MemoryOrder.acq)(_startBuilt))

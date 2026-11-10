@@ -8,7 +8,7 @@ import snakebite.backends.interpreter.nodetree:
     AccessSite, CalleeResult, OuterVariable, TreeCallee, TreeFlow, TreeRoot,
     hasNoResult, isAggregate, isPair, isScalar, resultWordFor, rootOf;
 import snakebite.backends.api: DeclarationHandle;
-import snakebite.backends.startdata: FunctionHandle;
+import snakebite.start.data: FunctionHandle;
 import snakebite.frontend.typefacts: tryTypeFacts, truthFacts;
 
 

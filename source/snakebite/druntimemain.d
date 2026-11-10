@@ -5,7 +5,7 @@ private:
 
 
 import snakebite.backends.api: Backend;
-import snakebite.backends.startdata: StartData;
+import snakebite.start.data: StartData;
 import snakebite.ffi.abi: ArgumentPlan, Register;
 import snakebite.ffi.callback: CallbackBridge, CallbackCall;
 import snakebite.ffi.plan: NativeSignature;

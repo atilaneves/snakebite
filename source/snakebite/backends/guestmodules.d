@@ -276,7 +276,7 @@ private extern(C) RuntimeGroup* registeredGroup(void* dso);
 
 private import core.atomic: atomicLoad, atomicStore, cas;
 private import snakebite.backends.api: Backend;
-private import snakebite.backends.startdata:
+private import snakebite.start.data:
     FunctionHandle, GateStorage, ModuleStart, StartData;
 private import snakebite.failure.exception: SnakebiteException;
 private import snakebite.ffi.callback: CallbackBridge, CallbackCall;

@@ -1,4 +1,4 @@
-module snakebite.backends.startdata;
+module snakebite.start.data;
 
 
 private:
