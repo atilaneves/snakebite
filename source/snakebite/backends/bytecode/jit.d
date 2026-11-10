@@ -332,7 +332,6 @@ package struct JitState {
             g.usedKnown = false;
             if (originals[i] !is null && ops[i].kind != JitOp.Kind.none)
                 done = g.emitOp(i, ops[i], originals[i]);
-                done = g.emitOp(i, ops[i], originals[i]);
             else
                 g.fpSlots = FpSlots.init;
             if (g.outOfMemory)
