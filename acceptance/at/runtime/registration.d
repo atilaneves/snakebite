@@ -33,7 +33,7 @@ private size_t runsThatGiveBack(Backend)(
         const mapped = executableChunkBytes;
         auto program = Program([parseSnippet(code)]);
         auto instance = Owned!Backend(program);
-        run(instance, program).should == status;
+        run(instance).should == status;
         if (GuestModules.held == held && executableChunkBytes == mapped)
             ++givenBack;
     }

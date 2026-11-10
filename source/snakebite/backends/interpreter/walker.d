@@ -7,6 +7,8 @@ import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.backends.interpreter.nodetree:
     AccessSite, CalleeResult, OuterVariable, TreeCallee, TreeFlow, TreeRoot,
     hasNoResult, isAggregate, isPair, isScalar, resultWordFor, rootOf;
+import snakebite.backends.backend: DeclarationHandle;
+import snakebite.backends.startdata: FunctionHandle;
 import snakebite.nativelayout: tryTypeFacts, truthFacts;
 
 
@@ -91,6 +93,11 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         imported!"dmd.declaration".VarDeclaration variable,
     ) {
         return _shared.nativeData.storageOf(variable);
+    }
+
+    // The interpreter runs a declaration, so the declaration names it.
+    public override FunctionHandle compiledFunction(FuncDeclaration function_) {
+        return new DeclarationHandle(this, function_);
     }
 
     private void prepareOnEvaluator(FuncDeclaration function_) {

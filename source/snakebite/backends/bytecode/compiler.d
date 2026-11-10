@@ -3,6 +3,7 @@ module snakebite.backends.bytecode.compiler;
 
 private:
 
+import snakebite.backends.startdata: FunctionHandle;
 import snakebite.nativelayout: typeFacts, truthFacts;
 
 
@@ -246,6 +247,26 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         imported!"dmd.declaration".VarDeclaration variable,
     ) {
         return _nativeData.storageOf(variable);
+    }
+
+    // The handle is a `StartFunction` of this backend. It holds the compiled
+    // function once there is one; until then it holds the step that compiles
+    // it, so the function compiles at its first call, as with `call`. The
+    // declaration is reachable only through that step.
+    public override FunctionHandle compiledFunction(FuncDeclaration function_) {
+        return new StartFunction(() => compileFunction(function_));
+    }
+
+    private final class StartFunction: FunctionHandle {
+        FunctionCompiler.Deferred!(const(Function)*) function_;
+
+        this(const(Function)* delegate() compute) {
+            function_ = typeof(function_)(compute);
+        }
+
+        public override void call(void* returnPlace, void*[] args) {
+            runHostToGuest(function_.get(), returnPlace, args);
+        }
     }
 
     // The bytecode backend's one host-to-guest entry. The program
