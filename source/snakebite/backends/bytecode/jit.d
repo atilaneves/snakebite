@@ -256,8 +256,9 @@ private struct JitState {
     // Whether the CPU has the BMI2 shifts (`shlx`, `shrx`, `sarx`); without
     // them the shift instructions keep their handlers.
     bool bmi2;
-    // The buffers of the fixup and label tables, which compiles reuse.
+    // Compiles reuse these buffers.
     Scratch!Fixup fixups;
+    Scratch!Literal literals;
     Scratch!size_t labels;
     PerfMap perfMap;
 
@@ -274,6 +275,7 @@ private struct JitState {
         Gen g;
         g.a.buf = region.writeBase + start;
         g.fixupScratch = &fixups;
+        g.literalScratch = &literals;
         g.bmi2 = bmi2;
         g.instructions = instructions;
         g.snapshot = snapshot;
@@ -286,11 +288,12 @@ private struct JitState {
         g.fixupCap = fixups.cap;
 
         foreach (i; 0 .. instructions.length) {
-            if (cap - g.a.n < maximumBytesPerInstruction)
+            if (cap - g.a.n - g.literalBytes < maximumBytesPerInstruction)
                 return Emitted.full;
             g.labels[i] = g.a.n;
             const saved = g.a.n;
             const savedFixups = g.fixupCount;
+            const savedLiterals = g.literalCount;
             bool done;
             if (originals[i] !is null && ops[i].kind != JitOp.Kind.none)
                 done = g.emitOp(i, ops[i]);
@@ -299,6 +302,7 @@ private struct JitState {
             if (!done) {
                 g.a.n = saved;
                 g.fixupCount = savedFixups;
+                g.literalCount = savedLiterals;
                 if (originals[i] is null)
                     g.a.ud2();
                 else {
@@ -319,10 +323,13 @@ private struct JitState {
                 }
             }
         }
-        if (cap - g.a.n < codeAlignment)
+        if (cap - g.a.n - g.literalBytes < codeAlignment)
             return Emitted.full;
+        if (g.literalCount && g.a.n + g.literalBytes + 2 > int.max)
+            return Emitted.failed;
         g.labels[instructions.length] = g.a.n;
         g.a.ud2();
+        g.emitLiterals;
 
         foreach (f; g.fixups[0 .. g.fixupCount])
             *cast(int*) (g.a.buf + f.position) = cast(int) (
@@ -677,6 +684,11 @@ private struct Fixup {
     size_t target;
 }
 
+private struct Literal {
+    size_t displacement;
+    ulong bits;
+}
+
 private struct Asm {
     @nogc nothrow:
 
@@ -914,6 +926,18 @@ private struct Asm {
         memOp(4, byteReg: false, x, m, (0x0F << 8 | op), prefix);
     }
 
+    // ModRM mode 00 and r/m 101 address data relative to the next instruction.
+    void sseRip(ubyte prefix, ubyte op, int x) {
+        if (prefix)
+            b(prefix);
+        if (x >= 8)
+            b(0x44);
+        b(0x0F);
+        b(op);
+        b(cast(ubyte) (((x & 7) << 3) | 5));
+        d32(0);
+    }
+
     void sseRR(ubyte prefix, ubyte op, int dst, int src) {
         if (prefix)
             b(prefix);
@@ -942,6 +966,7 @@ private struct Gen {
 
     Asm a;
     Scratch!Fixup* fixupScratch;
+    Scratch!Literal* literalScratch;
     bool bmi2;
     const(Instruction)[] instructions;
     const(Instruction)[] snapshot;
@@ -950,6 +975,7 @@ private struct Gen {
     Fixup* fixups;
     size_t fixupCount;
     size_t fixupCap;
+    size_t literalCount;
     bool outOfMemory;
 
     void fix(size_t target) {
@@ -965,6 +991,44 @@ private struct Gen {
         }
         fixups[fixupCount++] = Fixup(a.n, target);
         a.d32(0);
+    }
+
+    size_t literalBytes() const {
+        return literalCount * ulong.sizeof;
+    }
+
+    void emitLiterals() {
+        foreach (literal; literalScratch.ptr[0 .. literalCount]) {
+            *cast(int*) (a.buf + literal.displacement) = cast(int) (
+                a.n - (literal.displacement + int.sizeof));
+            a.q64(literal.bits);
+        }
+    }
+
+    static struct FloatRight {
+        Mem memory;
+        size_t literalAddress;
+    }
+
+    bool floatRight(ubyte scratch, size_t raw, bool constant, out FloatRight r) {
+        if (!constant)
+            return opnd(raw, scratch, r.memory);
+        r.literalAddress = raw;
+        return true;
+    }
+
+    void sseRight(int width, ubyte prefix, ubyte opcode, int x, in FloatRight r) {
+        if (!r.literalAddress) {
+            a.sse(prefix, opcode, x, r.memory);
+            return;
+        }
+        if (literalScratch.grow(literalCount + 1) is null) {
+            outOfMemory = true;
+            return;
+        }
+        a.sseRip(prefix, opcode, x);
+        literalScratch.ptr[literalCount++] = Literal(a.n - int.sizeof,
+            constantAt(r.literalAddress, width));
     }
 
     void jmpTo(size_t target) {
@@ -1495,10 +1559,8 @@ private struct Gen {
         const comparePrefix = w == 8 ? operandSizePrefix : noPrefix;
         if (!p.leftInR0 && !opnd(ins.destination, R9, l))
             return false;
-        if (p.constantRight) {
-            a.movI(R10, ins.source);
-            r = Mem(R10, 0);
-        } else if (!opnd(ins.source, R10, r))
+        FloatRight right;
+        if (!floatRight(R10, ins.source, p.constantRight, right))
             return false;
         int leftX = fp0Register;
         if (!p.leftInR0) {
@@ -1508,7 +1570,7 @@ private struct Gen {
         final switch (p.comparison) with (Comparison) {
             case greaterThan:
             case greaterOrEqual: {
-                a.sse(comparePrefix, compareOpcode, leftX, r);
+                sseRight(w, comparePrefix, compareOpcode, leftX, right);
                 int cc = p.comparison == greaterThan ? CC_A : CC_AE;
                 if (!p.jumpWhen)
                     cc ^= 1;
@@ -1519,7 +1581,7 @@ private struct Gen {
             case lessOrEqual: {
                 // Compares the right operand with the left one, so that an
                 // unordered answer sets the carry flag.
-                a.sse(prefix, loadOpcode, XMM2, r);
+                sseRight(w, prefix, loadOpcode, XMM2, right);
                 a.sseRR(comparePrefix, compareOpcode, XMM2, leftX);
                 int cc = p.comparison == lessThan ? CC_A : CC_AE;
                 if (!p.jumpWhen)
@@ -1529,7 +1591,7 @@ private struct Gen {
             }
             case equal:
             case notEqual: {
-                a.sse(comparePrefix, compareOpcode, leftX, r);
+                sseRight(w, comparePrefix, compareOpcode, leftX, right);
                 const eq = p.comparison == equal;
                 if (eq == p.jumpWhen) {
                     // Jump when ZF=1 and PF=0.
@@ -1553,15 +1615,13 @@ private struct Gen {
         if (p.leftInFp0 && w != 8)
             return false;
         const prefix = w == 8 ? doublePrefix : singlePrefix;
-        Mem d, l, r;
+        Mem d, l;
         if (!p.resultInFp0 && !opnd(ins.destination, R9, d))
             return false;
         if (!p.leftInFp0 && !opnd(ins.source, R10, l))
             return false;
-        if (p.constantRight) {
-            a.movI(R11, ins.sourceWidth);
-            r = Mem(R11, 0);
-        } else if (!opnd(ins.sourceWidth, R11, r))
+        FloatRight right;
+        if (!floatRight(R11, ins.sourceWidth, p.constantRight, right))
             return false;
         const acc = p.resultInFp0 ? fp0Register : XMM1;
         if (p.leftInFp0) {
@@ -1569,7 +1629,7 @@ private struct Gen {
                 a.sseRR(noPrefix, moveAlignedOpcode, acc, fp0Register);
         } else
             a.sse(prefix, loadOpcode, acc, l);
-        a.sse(prefix, _floatOpcodes[p.operation], acc, r);
+        sseRight(w, prefix, _floatOpcodes[p.operation], acc, right);
         if (!p.resultInFp0)
             a.sse(prefix, storeOpcode, acc, d);
         return true;
@@ -1582,36 +1642,34 @@ private struct Gen {
             return false;
         const prefix = w == 8 ? doublePrefix : singlePrefix;
         const comparePrefix = w == 8 ? operandSizePrefix : noPrefix;
-        Mem d, l, r;
+        Mem d, l;
         if (!opnd(ins.destination, R9, d) || !opnd(ins.source, R10, l))
             return false;
-        if (p.constantRight) {
-            a.movI(R11, ins.sourceWidth);
-            r = Mem(R11, 0);
-        } else if (!opnd(ins.sourceWidth, R11, r))
+        FloatRight right;
+        if (!floatRight(R11, ins.sourceWidth, p.constantRight, right))
             return false;
         a.sse(prefix, loadOpcode, XMM1, l);
         final switch (p.comparison) with (Comparison) {
             case greaterThan:
             case greaterOrEqual:
-                a.sse(comparePrefix, compareOpcode, XMM1, r);
+                sseRight(w, comparePrefix, compareOpcode, XMM1, right);
                 a.setcc(p.comparison == greaterThan ? CC_A : CC_AE, d);
                 break;
             case lessThan:
             case lessOrEqual:
-                a.sse(prefix, loadOpcode, XMM2, r);
+                sseRight(w, prefix, loadOpcode, XMM2, right);
                 a.sseRR(comparePrefix, compareOpcode, XMM2, XMM1);
                 a.setcc(p.comparison == lessThan ? CC_A : CC_AE, d);
                 break;
             case equal:
-                a.sse(comparePrefix, compareOpcode, XMM1, r);
+                sseRight(w, comparePrefix, compareOpcode, XMM1, right);
                 a.setccR(CC_E, RAX);
                 a.setccR(CC_NP, SC2);
                 a.aluRR(Alu.and, 1, RAX, SC2);
                 a.st(1, d, RAX);
                 break;
             case notEqual:
-                a.sse(comparePrefix, compareOpcode, XMM1, r);
+                sseRight(w, comparePrefix, compareOpcode, XMM1, right);
                 a.setccR(CC_NE, RAX);
                 a.setccR(CC_P, SC2);
                 a.aluRR(Alu.or, 1, RAX, SC2);

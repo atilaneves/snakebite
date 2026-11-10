@@ -57,6 +57,29 @@ static foreach (backend; Matrix!()) {
             }
         }, ["scan"]);
     }
+
+    @("jit.floatingLiteralsKeepTheirValues." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            int work(double value, float narrow) {
+                assert(value != 0.0);
+                const quotient = value / -0.0;
+                const product = narrow * 0.25f;
+                const bool equal = product == 0.75f;
+                if (quotient != -double.infinity) return 1;
+                if (value < double.nan) return 2;
+                return equal ? 0 : 3;
+            }
+            int main() {
+                foreach (i; 0 .. 300) {
+                    const status = work(2.0, 3.0f);
+                    if (status) return status;
+                }
+                return 0;
+            }
+        }, ["work"]);
+    }
 }
 
 static foreach (backend; Matrix!(
