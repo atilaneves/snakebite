@@ -1,10 +1,10 @@
 module ut.dub;
 
 
-import snakebite.dub: DubDescription, dependencyFingerprint, dubSources;
-import snakebite.dubcache: cachedDubDescription, projectDescriptionFromJson;
+import snakebite.project.dub: DubDescription, dependencyFingerprint, dubSources;
+import snakebite.project.dubcache: cachedDubDescription, projectDescriptionFromJson;
 import snakebite.image.dependency: defaultCompiler, generatorKey;
-import snakebite.project: projectStateDirectory;
+import snakebite.project.loading: projectStateDirectory;
 import dub.description: ProjectDescription;
 import std.json: parseJSON;
 import std.file: write, remove, rename, readText, dirEntries, SpanMode;

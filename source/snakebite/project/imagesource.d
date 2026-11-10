@@ -1,4 +1,4 @@
-module snakebite.imagesource;
+module snakebite.project.imagesource;
 
 
 private:

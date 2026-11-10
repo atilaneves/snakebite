@@ -27,10 +27,10 @@ public int run(string[] args) {
     import snakebite.frontend.compiler:
         compilerPath, FrontendFlags, initialize, Snippets;
     import snakebite.image.dependency: DependencyImage;
-    import snakebite.dub: fetchProject;
+    import snakebite.project.dub: fetchProject;
     import snakebite.execution: runProject;
-    import snakebite.project: EndsProcess;
-    import snakebite.dependencypreparation: prepareStartupDependencies;
+    import snakebite.project.loading: EndsProcess;
+    import snakebite.project.dependencies: prepareStartupDependencies;
     import snakebite.backends.bytecode.vm: JitSetting;
     import snakebite.memory.gc: selectFrontendMemory;
     import snakebite.repl: Repl;

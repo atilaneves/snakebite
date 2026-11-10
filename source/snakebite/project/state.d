@@ -1,4 +1,4 @@
-module snakebite.projectstate;
+module snakebite.project.state;
 
 
 private:

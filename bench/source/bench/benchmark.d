@@ -36,7 +36,7 @@ public int run(string[] args) {
     import bench.report: printTable;
     import std.stdio: stderr, writeln;
     import snakebite.execution: PreparationReport, prepareSources, runProject;
-    import snakebite.project: EndsProcess;
+    import snakebite.project.loading: EndsProcess;
     import snakebite.memory.gc: selectFrontendMemory;
 
     Options options;
@@ -150,7 +150,7 @@ private string projectDirectory(in string nameOrPath) {
     if (nameOrPath.exists && nameOrPath.isDir)
         return nameOrPath.absolutePath.buildNormalizedPath;
 
-    import snakebite.dub: fetchProject;
+    import snakebite.project.dub: fetchProject;
     try
         return fetchProject(nameOrPath);
     catch (Exception exception)
@@ -219,7 +219,7 @@ private string validate(in Options options) {
 }
 
 private BackendReport[] benchmarkAll(
-    imported!"snakebite.project".Project project,
+    imported!"snakebite.project.loading".Project project,
     in Options options,
     in void delegate() enterWorkingDirectory,
 ) {

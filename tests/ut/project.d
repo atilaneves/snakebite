@@ -8,9 +8,9 @@ import snakebite.backends: BackendName, backendIdentity;
 import snakebite.program: Program;
 import snakebite.image.dependency: TestHooks;
 import snakebite.execution: prepareProject, executeBackend, runProject;
-import snakebite.dub: DubDescription, dubSources;
-import snakebite.dubcache: projectDescriptionFromJson;
-import snakebite.project:
+import snakebite.project.dub: DubDescription, dubSources;
+import snakebite.project.dubcache: projectDescriptionFromJson;
+import snakebite.project.loading:
     EndsProcess, ProjectDirectory,
     projectStateDirectory;
 import std.algorithm.searching: endsWith;

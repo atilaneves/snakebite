@@ -1,11 +1,11 @@
-module snakebite.project;
+module snakebite.project.loading;
 
 
 private:
 
 
-public import snakebite.sources: SourceSet;
-public import snakebite.projectstate: projectStateDirectory;
+public import snakebite.project.sources: SourceSet;
+public import snakebite.project.state: projectStateDirectory;
 
 public struct Project {
     import snakebite.backends: Program;
@@ -75,7 +75,7 @@ public SourceSet sourceSet(
     const normalized = directory.absolutePath.buildNormalizedPath;
 
     if (isDubProject(normalized)) {
-        import snakebite.dub: dubSources;
+        import snakebite.project.dub: dubSources;
         return dubSources(normalized, versions);
     }
 

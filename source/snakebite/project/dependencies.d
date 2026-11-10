@@ -1,4 +1,4 @@
-module snakebite.dependencypreparation;
+module snakebite.project.dependencies;
 
 
 private:
@@ -9,7 +9,7 @@ private:
 // For startup without a live program, use `prepareStartupDependencies`.
 public const(imported!"snakebite.image.dependency".DependencyImage)* prepareDependencies(
     in string directory,
-    in imported!"snakebite.project".SourceSet sources,
+    in imported!"snakebite.project.loading".SourceSet sources,
     scope imported!"snakebite.backends".Program delegate() program,
     in imported!"snakebite.image.dependency".Optimise optimise
         = imported!"snakebite.image.dependency".Optimise.yes,
@@ -28,11 +28,11 @@ public const(imported!"snakebite.image.dependency".DependencyImage)* prepareDepe
 // during analysis because diagnostic capture redirects process-wide fd 2.
 public const(imported!"snakebite.image.dependency".DependencyImage)* prepareStartupDependencies(
     in string directory,
-    imported!"snakebite.project".SourceSet sources,
+    imported!"snakebite.project.loading".SourceSet sources,
     in imported!"snakebite.image.dependency".Optimise optimise
         = imported!"snakebite.image.dependency".Optimise.yes,
 ) {
-    import snakebite.project: loadProject;
+    import snakebite.project.loading: loadProject;
 
     const buildsDependencyImage = true;
     return Preparation(directory, sources, optimise, Mode.startup).run(
@@ -51,7 +51,7 @@ private DependencyAnalysis dependencyAnalysis(
     imported!"snakebite.backends".Program program,
 ) {
     import snakebite.frontend.compiler: withCompilerLock;
-    import snakebite.imagesource: imageSource, imageInputs;
+    import snakebite.project.imagesource: imageSource, imageInputs;
 
     DependencyAnalysis result;
     withCompilerLock({
@@ -68,7 +68,7 @@ private enum Mode { live, projectEntry, startup }
 private struct Preparation {
     import snakebite.backends: Program;
     import snakebite.image.dependency: DependencyImage, Optimise;
-    import snakebite.project: SourceSet;
+    import snakebite.project.loading: SourceSet;
 
     private const(SourceSet) _sources;
     private Optimise _optimise;
@@ -78,7 +78,7 @@ private struct Preparation {
     private this(in string directory, in SourceSet sources,
         in Optimise optimise, in Mode mode,
     ) {
-        import snakebite.projectstate: projectStateDirectory;
+        import snakebite.project.state: projectStateDirectory;
         import std.path: buildPath;
 
         _sources = sources;

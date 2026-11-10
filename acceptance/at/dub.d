@@ -2,7 +2,7 @@ module at.dub;
 
 import dub.dub: SkipPackageSuppliers;
 import ut.backends;
-import snakebite.dub: dubDescribeProject, fetchProject;
+import snakebite.project.dub: dubDescribeProject, fetchProject;
 import snakebite.image.dependency: defaultCompiler;
 import std.conv: text;
 import std.path: buildPath, absolutePath;
@@ -45,11 +45,12 @@ configuration "unittest" {
     }
 }
 
-// `snakebite.project.bareSourceSet` calls `dirEntries!false(string, string,
-// SpanMode, bool)` on the host, to find this very project's own `*.d`
-// files, before any guest code runs. That instantiates the same mangled
-// symbol inside `bin/sb` (an LDC build) that a guest program's own call to
-// `dirEntries(dir, "*.d", SpanMode.depth)` needs. A resolver that reaches
+// `snakebite.project.loading.bareSourceSet` calls
+// `dirEntries!false(string, string, SpanMode, bool)` on the host, to find
+// this very project's own `*.d` files, before any guest code runs. That
+// instantiates the same mangled symbol inside `bin/sb` (an LDC build) that a
+// guest program's own call to `dirEntries(dir, "*.d", SpanMode.depth)`
+// needs. A resolver that reaches
 // the main executable before the dependency image or an already-loaded
 // shared object binds the guest call to `bin/sb`'s own copy: `dirEntries`'s
 // nested closure `f` was allocated with LDC's frame layout by that native
@@ -150,7 +151,7 @@ unittest {
 // a pre-build command of the dependency prints the search path that it gets.
 @("buildDubDependencies.keepsTheSearchPathOfTheProcess")
 unittest {
-    import snakebite.dub: dubSources;
+    import snakebite.project.dub: dubSources;
     import std.file: readText;
     import std.process: environment;
     import std.string: strip;

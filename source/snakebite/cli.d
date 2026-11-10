@@ -26,9 +26,9 @@ public struct Options {
 public int run(string[] args) {
     import snakebite.backends: BackendName;
     import snakebite.image.dependency: Optimise;
-    import snakebite.dub: fetchProject;
+    import snakebite.project.dub: fetchProject;
     import snakebite.execution: executeBackend, prepareSources, runProject;
-    import snakebite.project: EndsProcess;
+    import snakebite.project.loading: EndsProcess;
     import snakebite.backends.bytecode.vm: JitSetting;
     import snakebite.memory.gc: selectFrontendMemory;
     import std.file: exists, isDir;
