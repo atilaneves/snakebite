@@ -393,9 +393,10 @@ unittest {
 
 // Every chunk of a bridge is a copy of the template: `beginChunk` forces a
 // fresh chunk made with the given strategy, so the entry reserved next lives
-// outside the binary's own template bytes. The dual-mapping strategy is the fallback for a
-// kernel that refuses to make written memory executable; a kernel that
-// allows it never takes that path on its own, so this drives it directly.
+// outside the binary's own template bytes. The dual-mapping strategy is the
+// fallback for a kernel that refuses to make written memory executable; a
+// kernel that allows it never takes that path on its own, so this drives it
+// directly.
 static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
     @("chunk." ~ text(strategy))
     unittest {
@@ -419,53 +420,27 @@ static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
 }
 
 
-// Bytes of read-execute mappings the process holds that have no file, or
-// that are the pool's memory file: what a chunk of entries occupies.
-private size_t executableChunkBytes() {
-    import std.algorithm: canFind;
-    import std.file: readText;
-    import std.string: lineSplitter, split;
-
-    size_t total;
-    foreach (line; readText("/proc/self/maps").lineSplitter) {
-        const fields = line.split;
-        if (fields[1][0 .. 3] != "r-x" || (fields.length > 5
-                && !fields[5].canFind("snakebite-callbacks")))
-            continue;
-        const range = fields[0].split("-");
-        total += range[1].to!size_t(16) - range[0].to!size_t(16);
-    }
-    return total;
-}
-
-
-// A released bridge gives back what it mapped: after many bridges were made,
-// used and released, the process holds no more executable memory for entries
-// than before. Without this, a process that makes a bridge per module run
-// ends up out of mappings.
+// A released bridge gives back its chunks: it has none left, however many it
+// had. That every chunk is also unmapped is measured on the whole process in
+// `bin/at` (`at.runtime.registration`), where no other thread maps memory.
 static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
     @("release.givesBackChunks." ~ text(strategy))
     unittest {
-        import core.memory: pageSize;
-
         auto function_ = declarationOf(
             q{ extern(C) int twice(int x); }, "twice");
         int word;
         Recorded recorded;
-        enum rounds = 2000;
 
-        const before = executableChunkBytes;
-        foreach (round; 0 .. rounds) {
-            auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
-            bridge.register(&word, function_);
-            bridge.beginChunk(strategy);
-            auto entry = cast(IntOfInt) bridge.entryOf(&word);
-            entry(round).should == round * 2 + 1;
-            bridge.release;
-        }
+        auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
+        bridge.register(&word, function_);
+        auto entry = cast(IntOfInt) bridge.entryOf(&word);
+        bridge.beginChunk(strategy);
+        bridge.chunkCount.should == 2;
+        entry(3).should == 7;
 
-        (executableChunkBytes - before < rounds * pageSize / 4)
-            .should == true;
+        bridge.release;
+
+        bridge.chunkCount.should == 0;
     }
 }
 

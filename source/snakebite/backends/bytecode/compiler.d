@@ -162,6 +162,12 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         _plans.useCallbacks(_callbacks);
     }
 
+    // How many chunks of callback entries this instance's bridge has.
+    version(unittest)
+    public size_t callbackChunkCount() {
+        return _plans.callbackChunkCount;
+    }
+
     // The owner ends the instance. The JIT code goes when no guest code can
     // run: host code holds no callback entry, and (`ExecutionStates`) no
     // thread has an execution state left, which is checked when the last

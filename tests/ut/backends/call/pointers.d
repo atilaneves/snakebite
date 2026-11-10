@@ -1377,6 +1377,7 @@ static foreach (backend; Matrix!(
             backend_.call(function_, &result, []);
 
             result.should == expected;
+            backend_.callbackChunkCount.shouldBeGreaterThan(1);
         }
     }
 }

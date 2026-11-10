@@ -26,15 +26,15 @@ import snakebite.ffi.sysv:
 // which finds the entry's slot and replays the slot's plan in reverse to
 // re-enter the backend that owns the slot.
 //
-// Each `CallbackBridge` owns a `Pool`: its chunks and its mutex. The template linked into the binary is only bytes: a new chunk
-// is a copy of them in a new mapping, flipped to read-execute
-// (`allocateChunk`), so memory is never writable and executable at the
-// same time. A slot is released only by `CallbackBridge.release`, for a
-// bridge whose entries no host code can call any more; it unmaps every
-// chunk and drops the root of every slot table. Until then a chunk and its
-// slot table stay, so an entry that host code keeps stays callable.
-// Nothing else is shared between bridges, and no lock is taken when an
-// entry is called (ADR-0006).
+// Each `CallbackBridge` owns a `Pool`: its chunks and its mutex. The
+// template linked into the binary is only bytes: a new chunk is a copy of
+// them in a new mapping, flipped to read-execute (`allocateChunk`), so
+// memory is never writable and executable at the same time. A slot is
+// released only by `CallbackBridge.release`, for a bridge whose entries no
+// host code can call any more; it unmaps every chunk and drops the root of
+// every slot table. Until then a chunk and its slot table stay, so an entry
+// that host code keeps stays callable. Nothing else is shared between
+// bridges, and no lock is taken when an entry is called (ADR-0006).
 
 
 // What the pool hands a backend when host code calls one of its guest
@@ -195,7 +195,7 @@ private Chunk allocateChunk(in ChunkStrategy strategy, in bool fallback) {
     import core.memory: GC;
 
     auto slots = new Slot[callbackEntriesPerChunk];
-    const bytes = templateEnd - templateBase;
+    const bytes = chunkBytes;
 
     const(ubyte)* base;
     final switch (strategy) with (ChunkStrategy) {
@@ -229,7 +229,7 @@ private void fillChunk(
 ) {
     import core.stdc.string: memcpy;
 
-    memcpy(writable, templateBase, templateEnd - templateBase);
+    memcpy(writable, templateBase, chunkBytes);
     auto trailer = cast(CallbackTrailer*) (writable + trailerOffset);
     trailer.commonDelta = commonEntry - (executable + trailerOffset);
     trailer.slots = slots;
@@ -240,7 +240,6 @@ private void fillChunk(
 // Returns null, with the mapping released, when the kernel refuses the
 // flip - the one failure `allocateChunk` can fall back from.
 private const(ubyte)* copyThenProtect(in size_t bytes, Slot* slots) {
-
     const size = roundUpToPage(bytes);
     auto mapping = cast(ubyte*) mmap(
         null, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
@@ -328,9 +327,9 @@ private string errnoText(string what) {
 // Called by `snakebite_ffi_callback_common` for every callback: `entry`
 // is the entry the host called, `trailer` its chunk's trailer, and
 // `frame` the spilled argument registers plus where the host's stack
-// arguments start. A chunk names its own slot table in its
-// trailer. Nothing here takes a
-// lock: the slot was fully written before its entry was ever handed out.
+// arguments start. A chunk names its own slot table in its trailer. Nothing
+// here takes a lock: the slot was fully written before its entry was ever
+// handed out.
 public extern(C) void snakebite_ffi_callback_handler(
     const(void)* entry,
     const(CallbackTrailer)* trailer,
@@ -450,8 +449,6 @@ public struct CallbackBridge {
     private CallbackHandler _handler;
     private void* _owner;
     private void function(void*, const(void)*) _prepare;
-    // Every entry this bridge reserved, written under the compiler lock.
-    private const(void)*[] _reserved;
     // This bridge's chunks of entries, free list and lock (ADR-0003).
     private Pool _pool;
 
@@ -556,18 +553,16 @@ public struct CallbackBridge {
 
         withCompilerLock({
             _pool.releaseChunks;
-            _reserved = null;
         });
     }
 
     // Whether host code can hold an entry of this bridge: it reserved one and
     // did not give it back.
     public bool hasEntries() {
-        import snakebite.frontend.compiler: withCompilerLock;
+        _pool.mutex.lock;
+        scope(exit) _pool.mutex.unlock;
 
-        bool result;
-        withCompilerLock({ result = _reserved.length != 0; });
-        return result;
+        return _pool.chunks.length != 0;
     }
 
     // How many chunks this bridge has.
