@@ -4293,7 +4293,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private void* assignSlice(AssignExp expression, void* target) {
         import core.stdc.string: memcpy;
         import snakebite.language.checks.failure: boundsPlanOf, FailurePlan;
-        import snakebite.native.slicecopy: copyUnchecked, slicesConform;
+        import snakebite.native.value: copyUnchecked, slicesConform;
 
         auto destination = _frames.push(_facts.size, _facts.alignment);
         // `addressOf` has already evaluated the slice bounds and left its

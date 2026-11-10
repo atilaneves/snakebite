@@ -4635,7 +4635,7 @@ package alias opSliceCopy =
 private const(Instruction)* runSliceCopy(Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.native.slicecopy: copyUnchecked;
+    import snakebite.native.value: copyUnchecked;
 
     copyUnchecked(
         *cast(void[]*) execution.destination,
@@ -4655,7 +4655,7 @@ package alias opSlicesConform =
 private const(Instruction)* runSlicesConform(Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.native.slicecopy: slicesConform;
+    import snakebite.native.value: slicesConform;
 
     auto dest = execution.destination;
     *cast(ubyte*) dest = slicesConform(

@@ -1051,7 +1051,7 @@ private final class SliceCopy : SliceNode {
     }
     pragma(inline, true)
     private SliceValue copy(ubyte* frame) {
-        import snakebite.native.slicecopy: copyUnchecked, slicesConform;
+        import snakebite.native.value: copyUnchecked, slicesConform;
 
         SliceValue to = void, from = void;
         _to.executeInto(frame, cast(ubyte*) &to);
