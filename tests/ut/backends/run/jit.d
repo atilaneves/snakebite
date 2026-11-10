@@ -133,6 +133,27 @@ static foreach (backend; Matrix!()) {
         }, ["update"]);
     }
 
+
+    @("jit.hotForLoopChecksItsFirstIteration." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            int countOdd(int first, int end) {
+                assert(end <= 5000);
+                int count;
+                for (int i = first; i < end; ++i)
+                    count += i & 1;
+                return count;
+            }
+            int main() {
+                if (countOdd(-5, 5000) != 2503)
+                    return 1;
+                if (countOdd(-3, -3) != 0)
+                    return 2;
+                return countOdd(-3, -2) == 1 ? 0 : 3;
+            }
+        }, ["countOdd"]);
+    }
 }
 
 static foreach (backend; Matrix!(
