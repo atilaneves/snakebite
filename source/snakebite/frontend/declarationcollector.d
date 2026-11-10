@@ -60,7 +60,7 @@ package extern(C++) class ImportCSafeVisitor
 // declaration compile into the build", so that answer lives here once.
 // Each subclass overrides only `visit(FuncDeclaration)`, where the two
 // collectors' jobs differ.
-package extern(C++) class DeclarationCollector : ImportCSafeVisitor {
+public extern(C++) class DeclarationCollector : ImportCSafeVisitor {
     alias visit = ImportCSafeVisitor.visit;
 
     import dmd.attrib: AttribDeclaration, ConditionalDeclaration;
