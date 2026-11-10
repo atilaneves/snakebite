@@ -574,7 +574,7 @@ extern(C++) private final class LocalsCollector:
     import dmd.expression: ArrayLiteralExp, DeclarationExp, Expression,
         IndexExp, NewExp, SliceExp;
     import dmd.func: FuncDeclaration;
-    import snakebite.backends.loweringvisitor: LoweredExpressionTypes;
+    import snakebite.backends.lowered: LoweredExpressionTypes;
     import dmd.statement:
         Catch, CompoundStatement, DoStatement, ExpStatement, ForStatement,
         IfStatement, ImportStatement, LabelStatement, ReturnStatement,
