@@ -109,7 +109,7 @@ configuration "sb" {
     targetPath "bin"
     lflags "--export-dynamic-symbol=rt_options" "--version-script=$PACKAGE_DIR/build/host-exports.map" platform="linux"
 
-    mainSourceFile "source/snakebite/main.d"
+    mainSourceFile "source/snakebite/driver/main.d"
     dependency "readline" version="0.3.0"
 }
 

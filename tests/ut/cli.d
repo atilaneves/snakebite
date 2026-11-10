@@ -1,7 +1,7 @@
 module ut.cli;
 
 
-import snakebite.cli: parseArgs;
+import snakebite.driver.cli: parseArgs;
 import snakebite.backends: BackendName;
 import std.algorithm.searching: startsWith;
 import ut;

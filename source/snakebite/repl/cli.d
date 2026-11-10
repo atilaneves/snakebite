@@ -28,7 +28,7 @@ public int run(string[] args) {
         compilerPath, FrontendFlags, initialize, Snippets;
     import snakebite.image.dependency: DependencyImage;
     import snakebite.project.dub: fetchProject;
-    import snakebite.execution: runProject;
+    import snakebite.driver.execution: runProject;
     import snakebite.project.loading: EndsProcess;
     import snakebite.project.dependencies: prepareStartupDependencies;
     import snakebite.backends.bytecode.vm: JitSetting;
@@ -349,7 +349,7 @@ public struct ReplCliResult {
 public ReplCliResult parseReplArgs(string[] args) {
     import snakebite.backends: parseBackendName, validBackendNames;
     import snakebite.memory.gc: lowmemHelp;
-    import snakebite.projectoptions: noJitHelp;
+    import snakebite.driver.options: noJitHelp;
     import std.getopt: getopt, GetOptException;
 
     ReplCliResult result;
@@ -416,5 +416,5 @@ private enum helpText =
         ~ imported!"snakebite.backends".validBackendNames ~ "\n" ~
     "  -l                    Stay interactive after loading file arguments\n" ~
     "  --lowmem              " ~ imported!"snakebite.memory.gc".lowmemHelp ~ "\n" ~
-    "  --no-jit              " ~ imported!"snakebite.projectoptions".noJitHelp ~ "\n" ~
+    "  --no-jit              " ~ imported!"snakebite.driver.options".noJitHelp ~ "\n" ~
     "  -h, --help            Show this help\n";

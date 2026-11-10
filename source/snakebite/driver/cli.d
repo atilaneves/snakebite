@@ -1,4 +1,4 @@
-module snakebite.cli;
+module snakebite.driver.cli;
 
 
 private:
@@ -7,7 +7,7 @@ private:
 public struct Options {
     import snakebite.backends: BackendName;
 
-    import snakebite.projectoptions: ProjectOptions;
+    import snakebite.driver.options: ProjectOptions;
 
     public ProjectOptions project;
     alias project this;
@@ -27,7 +27,7 @@ public int run(string[] args) {
     import snakebite.backends: BackendName;
     import snakebite.image.dependency: Optimise;
     import snakebite.project.dub: fetchProject;
-    import snakebite.execution: executeBackend, prepareSources, runProject;
+    import snakebite.driver.execution: executeBackend, prepareSources, runProject;
     import snakebite.project.loading: EndsProcess;
     import snakebite.backends.bytecode.vm: JitSetting;
     import snakebite.memory.gc: selectFrontendMemory;
@@ -87,8 +87,8 @@ public int run(string[] args) {
 // for the destructors of the host, which run after the program's.
 private struct Statistics {
     bool pending;
-    imported!"snakebite.execution".PreparationReport preparation;
-    imported!"snakebite.execution".ExecutionReport report;
+    imported!"snakebite.driver.execution".PreparationReport preparation;
+    imported!"snakebite.driver.execution".ExecutionReport report;
 }
 
 
@@ -102,10 +102,10 @@ shared static ~this() {
 
 
 private void printStatistics(
-    in imported!"snakebite.execution".PreparationReport preparation,
-    in imported!"snakebite.execution".ExecutionReport report,
+    in imported!"snakebite.driver.execution".PreparationReport preparation,
+    in imported!"snakebite.driver.execution".ExecutionReport report,
 ) {
-    import snakebite.execution: discoveryLabel;
+    import snakebite.driver.execution: discoveryLabel;
     import std.stdio: writefln;
 
     // Two one-off costs before any backend runs: finding out what to run
@@ -166,7 +166,7 @@ public struct CliResult {
 
 public CliResult parseArgs(string[] args) {
     import snakebite.backends: parseBackendName, validBackendNames;
-    import snakebite.projectoptions: parseProjectOptions;
+    import snakebite.driver.options: parseProjectOptions;
     import std.getopt: GetOptException;
 
     CliResult result;
@@ -230,6 +230,6 @@ private enum helpText =
     "  --lowmem                  "
         ~ imported!"snakebite.memory.gc".lowmemHelp ~ "\n" ~
     "  --no-jit                  "
-        ~ imported!"snakebite.projectoptions".noJitHelp ~ "\n" ~
+        ~ imported!"snakebite.driver.options".noJitHelp ~ "\n" ~
     "  --jit-perf-map            " ~ jitPerfMapHelp ~ "\n" ~
     "  -h, --help                Show this help\n";

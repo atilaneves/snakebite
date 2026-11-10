@@ -17,7 +17,7 @@ module bench.benchmark;
 
 import bench.report: BackendReport;
 import core.time: Duration;
-import snakebite.projectoptions: ProjectOptions;
+import snakebite.driver.options: ProjectOptions;
 
 
 struct Options {
@@ -35,7 +35,7 @@ struct Options {
 public int run(string[] args) {
     import bench.report: printTable;
     import std.stdio: stderr, writeln;
-    import snakebite.execution: PreparationReport, prepareSources, runProject;
+    import snakebite.driver.execution: PreparationReport, prepareSources, runProject;
     import snakebite.project.loading: EndsProcess;
     import snakebite.memory.gc: selectFrontendMemory;
 
@@ -99,7 +99,7 @@ public int run(string[] args) {
 }
 
 private Options parseOptions(string[] args) {
-    import snakebite.projectoptions: parseProjectOptions;
+    import snakebite.driver.options: parseProjectOptions;
     import std.getopt: defaultGetoptPrinter;
 
     Options options;
@@ -279,7 +279,7 @@ public BackendReport benchmark(
 ) {
     import bench.capture: captureStdout;
     import bench.report: timingStatistics, updateTestCounts;
-    import snakebite.execution: executeBackend, ExecutionReport;
+    import snakebite.driver.execution: executeBackend, ExecutionReport;
 
     BackendReport report;
     report.name = name;
@@ -349,11 +349,11 @@ private enum knownBackendNames = () {
 }();
 
 private string headerLine(
-    in imported!"snakebite.execution".PreparationReport preparation,
+    in imported!"snakebite.driver.execution".PreparationReport preparation,
     in Options options,
 ) {
     import bench.report: milliseconds;
-    import snakebite.execution: discoveryLabel;
+    import snakebite.driver.execution: discoveryLabel;
     import std.conv: text;
 
     // Both one-off costs a user pays before any backend runs: finding out

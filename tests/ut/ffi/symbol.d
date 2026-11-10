@@ -7,7 +7,7 @@ import snakebite.image.dependency:
     DependencyImage, ProjectImageCache, defaultCompiler, loadImage;
 import core.thread: Thread;
 import snakebite.backends: backendIdentity;
-import snakebite.execution: prepareProject, executeBackend;
+import snakebite.driver.execution: prepareProject, executeBackend;
 import snakebite.project.dependencies: prepareDependencies;
 import snakebite.image.dependency: Optimise;
 import snakebite.program: Program;

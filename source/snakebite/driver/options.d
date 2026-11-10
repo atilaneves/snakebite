@@ -1,4 +1,4 @@
-module snakebite.projectoptions;
+module snakebite.driver.options;
 
 
 private:

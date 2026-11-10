@@ -19,7 +19,7 @@ public struct Project {
 
 // Finding the sources (`sourceSet`: `dub describe` for a dub project) and
 // running the frontend over them are separate steps so a caller can time
-// the second alone; see `snakebite.execution.prepareProject`.
+// the second alone; see `snakebite.driver.execution.prepareProject`.
 public Project loadProject(
     in string directory,
     SourceSet sources,
