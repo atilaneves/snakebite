@@ -5735,6 +5735,7 @@ static if (jitSupported) {
             JitOp.make!(Kind.widen)(JitOp.Widen(zeroExtend: false)));
         put(&opCastWidenUnsigned,
             JitOp.make!(Kind.widen)(JitOp.Widen(zeroExtend: true)));
+        put(&opCastAs!(CastKind.sliceToPointer), JitOp.plain(Kind.sliceToPointer));
         static foreach (kind; AliasSeq!(CastKind.narrow, CastKind.widenSigned,
             CastKind.widenUnsigned))
             static foreach (destSize; [1, 2, 4, 8])

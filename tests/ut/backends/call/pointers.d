@@ -535,10 +535,15 @@ static foreach (backend; Matrix!()) {
         120.shouldBeRetOf!(
             backend,
             q{
+                void castInto(ref int* result, ref int[] source) {
+                    result = cast(int*) source;
+                }
+
                 int sum() {
                     int[] arr = [10, 20, 30];
                     int* viaDotPtr = arr.ptr;
-                    int* viaCast = cast(int*) arr;
+                    int* viaCast;
+                    castInto(viaCast, arr);
                     return *viaDotPtr + *viaCast
                         + (viaDotPtr is viaCast ? 100 : 0);
                 }

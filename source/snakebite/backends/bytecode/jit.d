@@ -46,7 +46,7 @@ package struct JitOp {
 
     enum Kind : ubyte {
         none, copy, constant, zero, jump, branch, int3, cmp3, fused, fp3,
-        fpcmp3, index, checked, castFixed, widen, loadInd, storeInd,
+        fpcmp3, index, checked, castFixed, sliceToPointer, widen, loadInd, storeInd,
         frameAddr, staticLoad, staticStore, staticAddr, boolOp, unary, shift,
     }
 
@@ -1304,6 +1304,18 @@ private struct Gen {
             else
                 a.ldsx(op.castFixed.sourceSize, RAX, s);
             a.st(op.width, d, RAX);
+            return true;
+        }
+
+        case sliceToPointer: {
+            if (ins.width != size_t.sizeof)
+                return false;
+            Mem d, s;
+            if (!opnd(ins.destination, R9, d) || !opnd(ins.source, R10, s))
+                return false;
+            s.disp += cast(int) arrayPointerOffset;
+            a.ld(size_t.sizeof, RAX, s);
+            a.st(size_t.sizeof, d, RAX);
             return true;
         }
 
