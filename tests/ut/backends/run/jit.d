@@ -59,7 +59,8 @@ static foreach (backend; Matrix!()) {
     }
 
     @("jit.floatingLiteralsKeepTheirValues." ~ backend.stringof)
-    @Tags(backend.stringof)
+    @Tags(is(backend == Bytecode) ? [backend.stringof, "requires-jit-code"]
+        : [backend.stringof])
     unittest {
         0.shouldBeStatusOfWithJitCode!(backend, q{
             int work(double value, float narrow) {

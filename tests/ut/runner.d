@@ -240,6 +240,8 @@ int run(string[] args) {
 // after a parallel pass whose guest threads could still be ending. A test
 // that changes the working directory of the process runs alone as well:
 // the directory belongs to all threads.
+// A test with the requires-jit-code tag needs an idle JIT lock because
+// tier-up can defer compilation when another test holds that lock.
 private int runSelectedTests(
     Options options,
     in TestData[] tests,
@@ -265,5 +267,6 @@ private int runSelectedTests(
 
 private bool runsAlone(in TestData test) {
     return test.tags.canFind("forced-finalizers")
-        || test.tags.canFind("changes-working-directory");
+        || test.tags.canFind("changes-working-directory")
+        || test.tags.canFind("requires-jit-code");
 }
