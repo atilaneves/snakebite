@@ -11,22 +11,22 @@ import snakebite.failure.exception: SnakebiteException;
 // frame offset and width of each declared parameter, of the hidden `this`
 // and of the C-variadic cursor and types. It holds no frontend data, so a
 // compiled function carries it.
-package struct HostCallLayout {
-    package struct Argument {
-        package size_t offset;
-        package size_t width;
+package(snakebite) struct HostCallLayout {
+    package(snakebite) struct Argument {
+        package(snakebite) size_t offset;
+        package(snakebite) size_t width;
     }
 
     // How errors name the function.
-    package string name;
-    package Argument[] parameters;
-    package bool hasHiddenThis;
-    package Argument hiddenThis;
+    package(snakebite) string name;
+    package(snakebite) Argument[] parameters;
+    package(snakebite) bool hasHiddenThis;
+    package(snakebite) Argument hiddenThis;
     // `size_t.max` unless the function reads that variadic slot.
-    package size_t variadicCursor = size_t.max;
-    package size_t variadicTypes = size_t.max;
+    package(snakebite) size_t variadicCursor = size_t.max;
+    package(snakebite) size_t variadicTypes = size_t.max;
 
-    package void checkArgumentCount(
+    package(snakebite) void checkArgumentCount(
         in size_t argumentCount, in string backendName,
     ) const {
         checkArgumentCountRule(
@@ -45,7 +45,7 @@ package struct HostCallLayout {
 // specific "no context" message; every other mismatch gets the generic
 // one. `backendName` names the caller in both messages. `name` is read
 // only to build a message.
-package void checkArgumentCountRule(
+package(snakebite) void checkArgumentCountRule(
     in size_t argumentCount, in size_t declared, in bool hasHiddenThis,
     lazy const(char)[] name, in string backendName,
 ) {
