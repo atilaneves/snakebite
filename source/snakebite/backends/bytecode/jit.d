@@ -285,7 +285,7 @@ package struct JitState {
     Scratch!Literal literals;
     Scratch!size_t labels;
     PerfMap perfMap;
-    Scratch!FpEntry fpEntries;
+    Scratch!ReloadEntry reloadEntries;
     // The buffers of one compile in `vm.d`: the template of each instruction,
     // a snapshot of the instructions, and their handlers.
     Scratch!JitOp opScratch;
@@ -298,7 +298,7 @@ package struct JitState {
         fixups.release;
         labels.release;
         literals.release;
-        fpEntries.release;
+        reloadEntries.release;
         opScratch.release;
         snapshotScratch.release;
         originalScratch.release;
@@ -317,7 +317,7 @@ package struct JitState {
         g.a.buf = region.writeBase + start;
         g.fixupScratch = &fixups;
         g.literalScratch = &literals;
-        g.fpEntryScratch = &fpEntries;
+        g.reloadEntryScratch = &reloadEntries;
         g.bmi2 = bmi2;
         g.instructions = instructions;
         g.snapshot = snapshot;
@@ -343,8 +343,10 @@ package struct JitState {
             g.usedKnown = false;
             if (originals[i] !is null && ops[i].kind != JitOp.Kind.none)
                 done = g.emitOp(i, ops, originals[i]);
-            else
+            else {
                 g.fpSlots = FpSlots.init;
+                g.intSlot = IntSlot.init;
+            }
             if (g.outOfMemory)
                 return Emitted.failed;
             if (!done) {
@@ -386,12 +388,15 @@ package struct JitState {
             return Emitted.failed;
         g.emitLiterals;
 
-        foreach (ref const entry; fpEntries.ptr[0 .. g.fpEntryCount]) {
+        foreach (ref const entry; reloadEntries.ptr[0 .. g.reloadEntryCount]) {
             if (cap - g.a.n < maximumBytesPerInstruction)
                 return Emitted.full;
             const body = g.labels[entry.index];
             g.labels[entry.index] = g.a.n;
-            entry.slots.reload(g.a);
+            entry.fpSlots.reload(g.a);
+            if (entry.intSlot.width)
+                g.a.ld(entry.intSlot.width, entry.intSlot.reg,
+                    Mem(FRAME, entry.intSlot.offset));
             g.a.b(0xE9);
             g.a.d32(cast(int) (body - (g.a.n + int.sizeof)));
         }
@@ -1142,6 +1147,15 @@ private struct Asm {
         }
     }
 
+    void movsxRR(int w, int r) {
+        switch (w) {
+            case 1: rrOp(8, byteReg: true, r, r, (0x0F << 8 | 0xBE)); break;
+            case 2: rrOp(8, byteReg: false, r, r, (0x0F << 8 | 0xBF)); break;
+            case 4: rrOp(8, byteReg: false, r, r, signExtend32Opcode); break;
+            default: break;
+        }
+    }
+
     // mov store immediate.
     void stI(int w, in Mem m, int imm) {
         if (w == 1) {
@@ -1302,9 +1316,16 @@ private struct FpSlots {
     }
 }
 
-private struct FpEntry {
+private struct IntSlot {
+    int offset;
+    int width;
+    int reg;
+}
+
+private struct ReloadEntry {
     size_t index;
-    FpSlots slots;
+    FpSlots fpSlots;
+    IntSlot intSlot;
 }
 
 private struct Gen {
@@ -1320,9 +1341,11 @@ private struct Gen {
     Asm a;
     Scratch!Fixup* fixupScratch;
     Scratch!Literal* literalScratch;
-    Scratch!FpEntry* fpEntryScratch;
+    Scratch!ReloadEntry* reloadEntryScratch;
     FpSlots fpSlots;
-    size_t fpEntryCount;
+    IntSlot intSlot;
+    bool readIntSlot;
+    size_t reloadEntryCount;
     bool bmi2;
     const(Instruction)[] instructions;
     const(Instruction)[] snapshot;
@@ -1431,11 +1454,6 @@ private struct Gen {
     void jmpTo(size_t target) {
         a.b(0xE9);
         fix(target);
-    }
-
-    void jmpLocalTo(size_t offset) {
-        a.b(0xE9);
-        a.d32(cast(int) (offset - (a.n + 4)));
     }
 
     void jccTo(int cc, size_t target) {
@@ -1737,26 +1755,37 @@ private struct Gen {
         Instruction.Handler original)
     {
         const op = ops[i];
-        const arithmetic = op.kind == JitOp.Kind.fp3;
-        const compare = op.kind == JitOp.Kind.fused
+        const fpArithmetic = op.kind == JitOp.Kind.fp3;
+        const fpCompare = op.kind == JitOp.Kind.fused
             && op.fused.kind == CompareKind.floating;
-        if (!arithmetic && !compare) {
+        const usesInt = op.kind == JitOp.Kind.int3 || op.kind == JitOp.Kind.cmp3
+            || op.kind == JitOp.Kind.castFixed || op.kind == JitOp.Kind.widen
+            || op.kind == JitOp.Kind.jump
+            || (op.kind == JitOp.Kind.fused && !fpCompare);
+        if (!fpArithmetic && !fpCompare)
             fpSlots = FpSlots.init;
+        if (!usesInt)
+            intSlot = IntSlot.init;
+        if (!fpArithmetic && !fpCompare && !usesInt)
             return emitTemplate(i, ops, op, original);
-        }
 
-        const incoming = fpSlots;
+        const incomingFp = fpSlots;
+        const incomingInt = intSlot;
+        readIntSlot = false;
         const done = emitTemplate(i, ops, op, original);
-        if (!done || compare)
+        if (!done || fpCompare)
             fpSlots = FpSlots.init;
-        if (done && !incoming.empty) {
+        if (!done || op.kind == JitOp.Kind.jump)
+            intSlot = IntSlot.init;
+        if (done && (!incomingFp.empty || readIntSlot)) {
             // Only the preceding template's fallthrough can assume these
             // registers are live. All other entries reload the frame.
-            auto entries = fpEntryScratch.grow(fpEntryCount + 1);
+            auto entries = reloadEntryScratch.grow(reloadEntryCount + 1);
             if (entries is null)
                 outOfMemory = true;
             else
-                entries[fpEntryCount++] = FpEntry(i, incoming);
+                entries[reloadEntryCount++] = ReloadEntry(i, incomingFp,
+                    readIntSlot ? incomingInt : IntSlot.init);
         }
         return done;
     }
@@ -1860,26 +1889,8 @@ private struct Gen {
                     JitOp.Fused test = ops[t].fused;
                     test.jumpWhen = !test.jumpWhen;
                     const saved = a.n;
-                    const previous = ops[i - 1];
-                    const update = snapshot[i - 1];
-                    const forwardLeft = previous.kind == int3
-                        && !previous.int3.resultInR0 && !test.leftInR0
-                        && !(update.destination & indirectBit)
-                        && update.destination == header.destination
-                        && (previous.width ? previous.width : update.width)
-                            == header.width;
-                    if (emitFused(header, test, t + 1, forwardLeft)) {
-                        if (forwardLeft) {
-                            // Only the preceding template leaves its result
-                            // in RAX. Dispatch into the back edge reloads it.
-                            jmpTo(exit);
-                            labels[i] = a.n;
-                            a.ld(cast(int) header.width, RAX,
-                                Mem(FRAME, cast(int) header.destination));
-                            jmpLocalTo(saved);
-                        }
+                    if (emitFused(header, test, t + 1))
                         return true;
-                    }
                     a.n = saved;
                 }
             }
@@ -1951,11 +1962,8 @@ private struct Gen {
             Mem d, s;
             if (!opnd(ins.destination, R9, d) || !opnd(ins.source, R10, s))
                 return false;
-            if (op.castFixed.zeroExtend)
-                a.ldzx(op.castFixed.sourceSize, RAX, s);
-            else
-                a.ldsx(op.castFixed.sourceSize, RAX, s);
-            a.st(op.width, d, RAX);
+            emitIntCast(d, op.width, s, op.castFixed.sourceSize,
+                op.castFixed.zeroExtend);
             return true;
         }
 
@@ -1978,11 +1986,8 @@ private struct Gen {
             Mem d;
             if (!opnd(ins.destination, R9, d))
                 return false;
-            if (op.widen.zeroExtend)
-                a.ldzx(cast(int) ins.source, RAX, d);
-            else
-                a.ldsx(cast(int) ins.source, RAX, d);
-            a.st(cast(int) ins.width, d, RAX);
+            emitIntCast(d, cast(int) ins.width, d, cast(int) ins.source,
+                op.widen.zeroExtend);
             return true;
         }
 
@@ -2159,6 +2164,40 @@ private struct Gen {
         return true;
     }
 
+    int cachedInt(in Mem m, int w) {
+        if (m.base != FRAME || intSlot.offset != m.disp || intSlot.width != w)
+            return -1;
+        readIntSlot = true;
+        return intSlot.reg;
+    }
+
+    void storeInt(in Mem dest, int w, int reg) {
+        a.st(w, dest, reg);
+        intSlot = dest.base == FRAME ? IntSlot(dest.disp, w, reg) : IntSlot.init;
+    }
+
+    void emitIntCast(in Mem dest, int width, in Mem src, int sourceWidth,
+        bool zeroExtend)
+    {
+        const cached = cachedInt(src, sourceWidth);
+        const reg = cached >= 0 ? cached : RAX;
+        if (cached < 0) {
+            if (zeroExtend)
+                a.ldzx(sourceWidth, reg, src);
+            else
+                a.ldsx(sourceWidth, reg, src);
+        } else if (zeroExtend) {
+            if (sourceWidth < 8)
+                a.movzxRR(sourceWidth, reg, reg);
+        } else
+            a.movsxRR(sourceWidth, reg);
+        storeInt(dest, width, reg);
+    }
+
+    static int intScratch(int avoid) pure @safe {
+        return avoid == RAX ? SC2 : RAX;
+    }
+
     static Alu aluOf(JitOp.IntOperation operation) {
         import snakebite.failure.report: internalFailure;
 
@@ -2179,53 +2218,65 @@ private struct Gen {
         if (!goodWidth(w))
             return false;
         Mem d, l;
-        IntegerRight right;
+        IntegerRight rhs;
         if (!binary(ins, p.twoAddress, p.constantRight, p.leftInR0,
-                p.resultInR0, w, d, l, right))
+                p.resultInR0, w, d, l, rhs))
             return false;
-        const acc = p.resultInR0 ? REG0 : RAX;
+        const left = p.leftInR0 ? REG0 : cachedInt(l, w);
+        const rightReg = rhs.constant ? -1 : cachedInt(rhs.memory, w);
+        const acc = p.resultInR0 ? REG0
+            : left >= 0 && left != REG0 ? left : intScratch(rightReg);
+        const scratch = acc == SC2 ? RAX : SC2;
         int imm = 0;
         bool haveImm;
-        if (right.constant)
-            haveImm = immOf(w, right.bits, imm);
+        if (rhs.constant)
+            haveImm = immOf(w, rhs.bits, imm);
         const mul = p.operation == JitOp.IntOperation.multiply;
         const narrowMul = mul && w < 4;
-        if (p.leftInR0) {
-            if (acc != REG0)
-                a.movRR64(acc, REG0);
+        if (left >= 0) {
             if (narrowMul)
-                a.movzxRR(w, acc, acc);
+                a.movzxRR(w, acc, left);
+            else if (acc != left)
+                a.movRR64(acc, left);
         } else if (narrowMul)
             a.ldzx(w, acc, l);
         else
             a.ld(w, acc, l);
         if (mul) {
             const mw = w == 8 ? 8 : 4;
-            if (right.constant) {
+            if (rhs.constant) {
                 if (narrowMul || !haveImm) {
-                    a.movI(SC2, right.bits);
-                    a.imulRR(mw, acc, SC2);
+                    a.movI(scratch, rhs.bits);
+                    a.imulRR(mw, acc, scratch);
                 } else {
                     // `imulRI` is 64-bit; for 4 bytes that is still right in
                     // the low 32 bits.
                     a.imulRI(acc, acc, imm);
                 }
+            } else if (rightReg >= 0) {
+                if (narrowMul && rightReg != acc)
+                    a.movzxRR(w, rightReg, rightReg);
+                a.imulRR(mw, acc, rightReg);
             } else if (narrowMul) {
-                a.ldzx(w, SC2, right.memory);
-                a.imulRR(4, acc, SC2);
+                a.ldzx(w, scratch, rhs.memory);
+                a.imulRR(4, acc, scratch);
             } else
-                a.imulM(mw, acc, right.memory);
-        } else if (right.constant) {
+                a.imulM(mw, acc, rhs.memory);
+        } else if (rhs.constant) {
             if (haveImm)
                 a.aluRI(aluOf(p.operation), w, acc, imm);
             else {
-                a.movI(SC2, right.bits);
-                a.aluRR(aluOf(p.operation), w, acc, SC2);
+                a.movI(scratch, rhs.bits);
+                a.aluRR(aluOf(p.operation), w, acc, scratch);
             }
-        } else
-            a.alu(aluOf(p.operation), w, acc, right.memory);
-        if (!p.resultInR0)
-            a.st(w, d, acc);
+        } else if (rightReg >= 0)
+            a.aluRR(aluOf(p.operation), w, acc, rightReg);
+        else
+            a.alu(aluOf(p.operation), w, acc, rhs.memory);
+        if (p.resultInR0)
+            intSlot = IntSlot.init;
+        else
+            storeInt(d, w, acc);
         return true;
     }
 
@@ -2360,25 +2411,37 @@ private struct Gen {
         if (!binary(ins, p.twoAddress, p.constantRight,
                 leftInReg: false, destInReg: false, w, d, l, right))
             return false;
-        a.ld(w, RAX, l);
-        int imm;
-        if (right.constant) {
-            if (immOf(w, right.bits, imm))
-                a.aluRI(Alu.cmp, w, RAX, imm);
-            else {
-                a.movI(SC2, right.bits);
-                a.aluRR(Alu.cmp, w, RAX, SC2);
-            }
-        } else
-            a.alu(Alu.cmp, w, RAX, right.memory);
+        emitIntCompare(w, l, right, leftInR0: false);
         a.setcc(p.signed ? signedCc(p.comparison) : unsignedCc(p.comparison),
             d);
         return true;
     }
 
-    bool emitFused(in Instruction ins, in JitOp.Fused p, size_t t,
-        bool forwardLeft = false)
-    {
+    void emitIntCompare(int w, in Mem l, in IntegerRight right, bool leftInR0) {
+        int left = leftInR0 ? REG0 : cachedInt(l, w);
+        const rightReg = right.constant ? -1 : cachedInt(right.memory, w);
+        if (left < 0) {
+            left = intScratch(rightReg);
+            a.ld(w, left, l);
+        }
+        if (right.constant) {
+            const value = right.bits;
+            int imm;
+            if (immOf(w, value, imm))
+                a.aluRI(Alu.cmp, w, left, imm);
+            else {
+                const scratch = intScratch(left);
+                a.movI(scratch, value);
+                a.aluRR(Alu.cmp, w, left, scratch);
+            }
+        } else if (rightReg >= 0)
+            a.aluRR(Alu.cmp, w, left, rightReg);
+        else
+            a.alu(Alu.cmp, w, left, right.memory);
+        intSlot = IntSlot.init;
+    }
+
+    bool emitFused(in Instruction ins, in JitOp.Fused p, size_t t) {
         const w = cast(int) ins.width;
         Mem l;
         if (p.kind != CompareKind.floating) {
@@ -2389,22 +2452,7 @@ private struct Gen {
             IntegerRight right;
             if (!integerRight(ins.source, p.constantRight, w, R10, right))
                 return false;
-            int leftReg = REG0;
-            if (!p.leftInR0) {
-                if (!forwardLeft)
-                    a.ld(w, RAX, l);
-                leftReg = RAX;
-            }
-            int imm;
-            if (right.constant) {
-                if (immOf(w, right.bits, imm))
-                    a.aluRI(Alu.cmp, w, leftReg, imm);
-                else {
-                    a.movI(SC2, right.bits);
-                    a.aluRR(Alu.cmp, w, leftReg, SC2);
-                }
-            } else
-                a.alu(Alu.cmp, w, leftReg, right.memory);
+            emitIntCompare(w, l, right, p.leftInR0);
             int cc = p.kind == CompareKind.signed
                 ? signedCc(p.comparison) : unsignedCc(p.comparison);
             if (!p.jumpWhen)

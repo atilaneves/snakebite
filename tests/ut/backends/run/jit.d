@@ -215,6 +215,53 @@ static foreach (backend; Matrix!()) {
             }
         }, ["countOdd"]);
     }
+
+    @("jit.integerSlotsFollowJumpsAndSignedWidening." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            long scale(int n, int delta, long ceiling, bool skip) {
+                assert(delta > 0);
+                if (skip)
+                    goto convert;
+                n += delta;
+            convert:
+                const long value = n;
+                if (value >= ceiling)
+                    return value;
+                return value * delta;
+            }
+            int main() {
+                foreach (_; 0 .. 300) {
+                    if (scale(-5, 4, -3, false) != -1)
+                        return 1;
+                    if (scale(-5, 4, -3, true) != -20)
+                        return 2;
+                }
+                return 0;
+            }
+        }, ["scale"]);
+    }
+
+    @("jit.loopUpdateUsesTheNewStep." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            int countVisits(int first, int end, int step) {
+                assert(end > first);
+                int count;
+                for (int i = first; i < end; i += ++step)
+                    ++count;
+                return count;
+            }
+            int main() {
+                foreach (_; 0 .. 300)
+                    if (countVisits(1, 7, 0) != 3)
+                        return 1;
+                return 0;
+            }
+        }, ["countVisits"]);
+    }
 }
 
 static foreach (backend; Matrix!(
