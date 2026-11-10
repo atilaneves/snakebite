@@ -11,7 +11,7 @@ import snakebite.internalfailure: internalFailure;
 
 import dmd.mtype: Type;
 import object: TypeInfo_Class;
-import snakebite.backends.argumentflow: Shape;
+import snakebite.backends.argumentflow: Shape, SignatureTable;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan, identityPlan;
 import snakebite.backends.ifplan: IfPlan;
@@ -117,6 +117,13 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // paths and host entry. Publication permits lock-free callback reads
     // after preparation, including during GC finalization (ADR-0006).
     private SharedTable!(FuncDeclaration, FrameLayout) _layouts;
+    // The interned parameter signatures of the layouts of this backend. A
+    // `Signature*` of this backend meets only others of this backend.
+    package SignatureTable signatures;
+
+    // Whether the compiler records relocs. It is off: nothing reads the
+    // relocs yet, and recording them costs compile time and memory.
+    public bool recordRelocs;
 
     public this(const Program program, in JitSetting jit = JitSetting.init) {
         super(program);
@@ -293,7 +300,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             // FrameLayout.of completes body semantics before collecting
             // locals, including lowering temporaries. Publish only that
             // complete layout, owned by this backend rather than the AST.
-            result = _layouts.insert(function_, FrameLayout.of(function_));
+            result = _layouts.insert(
+                function_, FrameLayout.of(function_, signatures));
         });
         return result;
     }
@@ -915,7 +923,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         constructsThroughPair, contextSourceOf,
         pairPlanOf;
     import snakebite.backends.bytecode.relocation:
-        Address, Place, Reloc, Target, recordRelocs;
+        Address, Place, Reloc, Target;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.backends.temporary: TemporaryPlan, constructTemporary;
     import snakebite.exception: SnakebiteException;
@@ -1292,7 +1300,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     site.cleanupEndIndex);
             }
 
-        if (recordRelocs) {
+        if (_bytecode.recordRelocs) {
             foreach (index, ref site; _callSites)
                 recordCallSiteRelocs(_relocs, index, site);
             foreach (index, ref site; _assertSites)
@@ -2111,7 +2119,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import std.conv: text;
 
-        if (!recordRelocs)
+        if (!_bytecode.recordRelocs)
             return;
         Roles roles;
         const known = rolesOf(handler, roles);
@@ -2133,7 +2141,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private size_t addConstant(in Address address) {
-        if (recordRelocs && !address.isNull)
+        if (_bytecode.recordRelocs && !address.isNull)
             _relocs ~= Reloc(
             Place(Place.Section.constant, Place.Field.word,
                 _constants.length),
@@ -9740,7 +9748,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         evalInto(receiver, objectOffset, size_t.sizeof);
 
         const calleeSlotOffset = reserveTemp(pointerFacts);
-        auto valueCall = ValueCall.of(calleeType, true);
+        auto valueCall = ValueCall.of(
+            calleeType, true, _bytecode.signatures);
         const calleeLayout = valueCall.layout;
         Arg[] args;
         args ~= Arg(
@@ -10003,7 +10012,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _receiverDest = size_t.max;
         final switch (receiver.kind) with (CallReceiver.Kind) {
         case enclosing:
-            return contextOffsetOf(calleeContextSourceOf(_function, callee));
+            return contextOffsetOf(calleeContextSourceOf(
+                _function, callee, _bytecode.signatures));
         case classValue:
             // A receiver that is `this` or a plain local is read in place
             // by an inlined callee that only writes its own frame.
@@ -10799,7 +10809,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             compileNullCheck(calleeOffset, expression.loc);
         }
 
-        auto valueCall = ValueCall.of(functionType, isDelegateCall);
+        auto valueCall = ValueCall.of(
+            functionType, isDelegateCall, _bytecode.signatures);
         if (valueCall.mismatches(expression.arguments))
             internalFailure("dmd rejects a call with the wrong number of arguments");
 

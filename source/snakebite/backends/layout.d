@@ -10,7 +10,7 @@ import snakebite.nativelayout: typeFacts;
 import snakebite.internalfailure: internalFailure;
 
 
-import snakebite.backends.argumentflow: Shape, Signature;
+import snakebite.backends.argumentflow: Shape, Signature, SignatureTable;
 import snakebite.exception: SnakebiteException;
 
 // One guest function's declared-storage layout: each parameter's byte
@@ -71,7 +71,8 @@ package struct FrameLayout {
 
     // The parameters of the function type, shared by every layout of equal
     // parameters: a call through a value compares it with the one of the
-    // value's type to know that the two frames agree.
+    // value's type to know that the two frames agree. The builders intern
+    // it in the `SignatureTable` that they get.
     package const(Signature)* signature;
 
     // A struct method's hidden `this`, together in one place: the slot
@@ -120,13 +121,15 @@ package struct FrameLayout {
     // when a backend should reuse a completed layout.
     version(unittest) package static size_t builds;
 
-    package static FrameLayout of(FuncDeclaration function_) {
+    package static FrameLayout of(
+        FuncDeclaration function_, ref SignatureTable signatures,
+    ) {
         import snakebite.frontend.dmd.delegates: runSemantic3;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         // Imported guest bodies can still have unresolved locals.
         runSemantic3(function_);
-        auto layout = ofParameters(function_);
+        auto layout = ofParameters(function_, signatures);
         layout._returns = imported!"snakebite.backends.returnstorage"
             .ReturnStoragePlan.of(function_);
 
@@ -165,7 +168,9 @@ package struct FrameLayout {
     // FFI calls need argument storage even when the native body's locals
     // have never had semantic analysis. Walking those locals would force
     // work that belongs to the native compiler, not this call's frame.
-    package static FrameLayout ofParameters(FuncDeclaration function_) {
+    package static FrameLayout ofParameters(
+        FuncDeclaration function_, ref SignatureTable signatures,
+    ) {
         import snakebite.frontend.dmd.delegates: hasHiddenThis;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
         import dmd.astenums: STC;
@@ -244,7 +249,6 @@ package struct FrameLayout {
 
         layout.reserveVariadic(typeFunctionOf(function_));
         layout.reserveNativeCursor(typeFunctionOf(function_));
-        layout.signature = layout.signatureOf(typeFunctionOf(function_));
         if (function_.v_arguments !is null)
             layout._slotOf[function_.v_arguments] =
                 VariableSlot(layout.variadicTypes, false);
@@ -252,6 +256,8 @@ package struct FrameLayout {
             layout._slotOf[function_.v_argptr] =
                 VariableSlot(layout.variadicCursor, false);
 
+        layout.signature = layout.signatureOf(
+            signatures, typeFunctionOf(function_));
         return layout;
     }
 
@@ -273,7 +279,8 @@ package struct FrameLayout {
     // its declared parameters, so a delegate call site that reserves this
     // same slot first lines up with whatever callee it actually reaches.
     package static FrameLayout ofParameters(
-        TypeFunction type, in bool hasContext = false,
+        TypeFunction type, ref SignatureTable signatures,
+        in bool hasContext = false,
     ) {
         FrameLayout layout;
 
@@ -293,11 +300,13 @@ package struct FrameLayout {
 
         layout.reserveVariadic(type);
         layout.reserveNativeCursor(type);
-        layout.signature = layout.signatureOf(type);
+        layout.signature = layout.signatureOf(signatures, type);
         return layout;
     }
 
-    private const(Signature)* signatureOf(TypeFunction type) const {
+    private const(Signature)* signatureOf(
+        ref SignatureTable table, TypeFunction type,
+    ) const {
         import dmd.astenums: VarArg;
 
         Shape[] shapes;
@@ -309,7 +318,7 @@ package struct FrameLayout {
             ? Signature.Variadic.none
             : type.isDstyleVariadic
                 ? Signature.Variadic.d : Signature.Variadic.c;
-        return Signature.intern(shapes, variadic);
+        return table.intern(shapes, variadic);
     }
 
     private void reserveVariadic(TypeFunction type) {

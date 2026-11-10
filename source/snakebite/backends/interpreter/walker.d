@@ -253,6 +253,7 @@ import snakebite.backends.temporary: canRetainTemporaries;
 // lock after that, so the only thing an evaluator keeps for itself is
 // its own execution state.
 private struct Shared {
+    import snakebite.backends.argumentflow: SignatureTable;
     import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration;
     import dmd.func: FuncDeclaration;
@@ -311,6 +312,8 @@ private struct Shared {
     // layout: the signal handler reads it and can take no lock, which dmd
     // needs to make the name.
     SharedTable!(FuncDeclaration, const(char)[]) names;
+    // The interned signatures of the layouts of this interpreter.
+    SignatureTable signatures;
     // The FFI call adapter for a guest callee's own signature: whether it
     // returns by `ref`, and whether each declared parameter passes an
     // address or a value. `FrameLayout` describes storage, not the
@@ -378,7 +381,7 @@ private struct Shared {
             &callableAddress,
             &classRuntimeInfo,
             (type, loc) => nativeData.initialValue(type, loc));
-        facts = PreparedFacts(&nativeData, &runtimeTypes);
+        facts = PreparedFacts(&nativeData, &runtimeTypes, &signatures);
     }
 
     // The guest function a registered entry word stands for. A word that
@@ -1115,13 +1118,13 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             // Native code owns its locals. Only its inferred signature,
             // if any, is needed to bind this call's arguments.
             completeFunctionType(function_);
-            return FrameLayout.ofParameters(function_);
+            return FrameLayout.ofParameters(function_, _shared.signatures);
         }
 
         import snakebite.frontend.compiler: withCompilerLock;
         import std.string: fromStringz;
 
-        auto layout = FrameLayout.of(function_);
+        auto layout = FrameLayout.of(function_, _shared.signatures);
         // `toPrettyChars` allocates and reads shared DMD symbol state.
         withCompilerLock({
             _shared.names.insert(
@@ -1152,7 +1155,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto call = site in _valueCalls;
         if (call is null)
             call = _valueCalls.build(
-                site, () => ValueCall.of(type, hasContext));
+                site, () => ValueCall.of(type, hasContext, _shared.signatures));
         _lastValueCallSite = site;
         _lastValueCall = call;
         return call;
@@ -3916,7 +3919,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return *cached;
 
         return *_staticChains.build(key,
-            () => ClosurePlan.staticChainPath(from, owner));
+            () => ClosurePlan.staticChainPath(
+                from, owner, _shared.signatures));
     }
 
     private bool functionNeedsClosure(FuncDeclaration function_) {
@@ -7463,7 +7467,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return _callVariadicIndirect(
                 expression, type, address, context, hasContext, returnPlace);
 
-        const layout = FrameLayout.ofParameters(type, hasContext);
+        const layout = FrameLayout.ofParameters(
+            type, _shared.signatures, hasContext);
         auto frame = _frames.push(layout.size, layout.alignment);
         _bindArguments(type, expression.arguments, expression.loc,
             frame.base, &layout);
@@ -7492,7 +7497,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         const plan = preparation.prepareAtAddress(
             *_plans, address, hasContext,
         );
-        const layout = FrameLayout.ofParameters(type, hasContext);
+        const layout = FrameLayout.ofParameters(
+            type, _shared.signatures, hasContext);
         auto frame = _frames.push(layout.size, layout.alignment);
         _bindArguments(type, expression.arguments, expression.loc,
             frame.base, &layout, true);

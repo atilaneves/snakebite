@@ -31,6 +31,7 @@ public struct Repl {
     private JitSetting _jit;
     private string[] _importPaths;
     private FrontendFlags _flags;
+    private uint _probeCounter;
     private const(DependencyImage)* _dependencyImage;
     private string _accumulatedSource;
     private string _pendingInput;
@@ -211,7 +212,7 @@ public struct Repl {
             isStandalonePragmaMessageStatement,
             replCellLineDirective;
 
-        if (isIncompleteDeclaration(source, _flags)) {
+        if (isIncompleteDeclaration(source, _flags, _probeCounter)) {
             _pendingInput = source;
             return SubmitResult.init;
         }

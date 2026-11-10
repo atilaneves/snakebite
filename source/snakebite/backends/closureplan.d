@@ -4,6 +4,7 @@ module snakebite.backends.closureplan;
 private:
 
 
+import snakebite.backends.argumentflow: SignatureTable;
 import snakebite.backends.layout: ClosureLayout, FrameLayout;
 
 
@@ -53,8 +54,11 @@ public struct ClosurePlan {
     public static Hop[] staticChainPath(
         FuncDeclaration from,
         FuncDeclaration to,
+        ref SignatureTable signatures,
     ) {
-        return staticChainPath(from, to, &FrameLayout.of);
+        return staticChainPath(from, to,
+            (FuncDeclaration function_) =>
+                FrameLayout.of(function_, signatures));
     }
 
     // The caller can reuse its complete layouts without changing the
