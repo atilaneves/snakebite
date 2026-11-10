@@ -177,9 +177,18 @@ address, the hexadecimal size in bytes, and the mangled function name.
 The JIT escapes carriage returns and line feeds in the name to keep one
 record per function. Only the process owner can read or write the file.
 The JIT writes the line before it publishes the handler addresses. The map
-stays on disk so `perf report` can read it after the process ends. The option
-is off by default. After a fork, the child map records functions that the
-child compiles.
+stays on disk after the process ends. The option is off by default. After a
+fork, the child map records functions that the child compiles.
+
+`perf report` shows raw addresses for `/memfd:snakebite-jit (deleted)`.
+Perf uses the map file only for executable mappings that it classifies as
+anonymous or without a shared object. The JIT's `memfd` mappings fall outside
+these categories. To identify JIT functions, match sample addresses against
+the ranges in the map file outside `perf report`.
+[Perf source for map selection][perf-map-lookup].
+
+[perf-map-lookup]:
+  https://github.com/torvalds/linux/blob/master/tools/perf/util/map.c#L129-L139
 
 After a fork, the child keeps the execute views that its handler words point
 to. The first JIT compile in the child opens a new file. This keeps the
