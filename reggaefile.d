@@ -58,12 +58,12 @@ Target assembledObject(in string source) {
     );
 }
 
-// The registry image of `source/snakebite/backends/guestmodules.d`: a shared
+// The registry image of `source/snakebite/run/modules.d`: a shared
 // object that the system C compiler makes from a tiny C file, and the object
 // that embeds its bytes. Linked into every target like the `.S` files above,
 // so no compiler is needed at run time to make it.
-enum registrySlotSource = "source/snakebite/backends/registry_slot.c";
-enum registryImageSource = "source/snakebite/backends/registry_image_amd64.S";
+enum registrySlotSource = "source/snakebite/run/registry_slot.c";
+enum registryImageSource = "source/snakebite/run/registry_image_amd64.S";
 
 Target registryImageObject() {
     return Target(

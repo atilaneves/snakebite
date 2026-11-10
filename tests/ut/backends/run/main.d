@@ -3,7 +3,7 @@ module ut.backends.run.main;
 
 import ut.backends;
 import snakebite.program: Program;
-import snakebite.backends.runprogram: run;
+import snakebite.run.program: run;
 import snakebite.frontend.compiler: parseSnippet, newInFrontend, withCompilerLock;
 import std.meta: AliasSeq;
 import dmd.expression: ErrorExp;

@@ -1,4 +1,4 @@
-/* The ELF image that `snakebite.backends.guestmodules` registers a guest
+/* The ELF image that `snakebite.run.modules` registers a guest
  * program's `ModuleInfo` records under. druntime keys a registration by the
  * address of a slot that lies inside an ELF image, so each registration
  * needs an image of its own; this one holds nothing else. It has no D

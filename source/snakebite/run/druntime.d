@@ -1,4 +1,4 @@
-module snakebite.druntimemain;
+module snakebite.run.druntime;
 
 
 private:
@@ -33,9 +33,9 @@ public StartupReport runDruntimeMain(
     in string[] arguments,
     in bool endsProcess = false,
 ) {
-    import snakebite.backends.runprogram: runMain;
+    import snakebite.run.program: runMain;
     import snakebite.host.runlock: guestRunLock;
-    import snakebite.backends.guestmodules: GuestModules;
+    import snakebite.run.modules: GuestModules;
     import snakebite.image.dependency: TestHooks;
     import std.algorithm.iteration: map;
     import std.array: array;
@@ -130,7 +130,7 @@ private enum mainSignature = NativeSignature(
 
 
 private extern(C) void callMain(void* owner, CallbackCall* call) {
-    import snakebite.backends.runprogram: runMain;
+    import snakebite.run.program: runMain;
 
     auto run = cast(MainRun*) owner;
     const arguments = *cast(string[]*) call.arguments[0];

@@ -121,7 +121,7 @@ public struct Repl {
 
     private SubmitResult submitExpression(in string source) {
         import snakebite.backends: makeBackend;
-        import snakebite.backends.guestmodules: GuestModules;
+        import snakebite.run.modules: GuestModules;
         import snakebite.frontend.compiler: parseSnippet;
         import snakebite.frontend.dmd.functions: findFunction;
         import snakebite.repl.cell: replCellLineDirective;
@@ -278,7 +278,7 @@ public struct Repl {
     // druntime's own default runner would. All failures are reported
     // together rather than stopping at the first one.
     private SubmitResult runLoadedTests() {
-        import snakebite.backends.guestmodules: GuestModules;
+        import snakebite.run.modules: GuestModules;
         import snakebite.frontend.dmd.functions: findUnittests;
         import std.array: join;
 

@@ -156,8 +156,8 @@ public ExecutionReport executeBackend(
         imported!"snakebite.backends.bytecode.vm".JitSetting.init,
 ) {
     import snakebite.backends: makeBackend;
-    import snakebite.backends.runprogram: run;
-    import snakebite.druntimemain: StartupReport, runDruntimeMain;
+    import snakebite.run.program: run;
+    import snakebite.run.druntime: StartupReport, runDruntimeMain;
     import std.datetime.stopwatch: AutoStart, StopWatch;
     import core.memory: GC;
 
@@ -178,7 +178,7 @@ public ExecutionReport executeBackend(
     auto backend = makeBackend(name, program, jit);
     import snakebite.backends.api: ExecutionClock;
     const running = ExecutionClock.start(backend);
-    import snakebite.backends.guestmodules: GuestModules;
+    import snakebite.run.modules: GuestModules;
     const entry = GuestModules.Entry(backend);
     StartupReport startup;
     int status;

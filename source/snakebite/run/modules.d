@@ -1,4 +1,4 @@
-module snakebite.backends.guestmodules;
+module snakebite.run.modules;
 
 
 private:

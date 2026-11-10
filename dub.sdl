@@ -32,7 +32,7 @@ subPackage {
 // (`snakebite_registry_image_start`), which only
 // `build/reggae.sh`'s ninja build produces, from
 // `source/snakebite/ffi/sysv_amd64.S`,
-// `source/snakebite/backends/registry_image_amd64.S` (with
+// `source/snakebite/run/registry_image_amd64.S` (with
 // `registry_slot.c`) - build through reggae (`build/*.sh`), not dub
 // directly. A system C compiler (`cc`) is required to build those files.
 configuration "unittest" {

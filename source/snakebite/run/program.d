@@ -1,4 +1,4 @@
-module snakebite.backends.runprogram;
+module snakebite.run.program;
 
 
 private:
@@ -18,7 +18,7 @@ public int run(
     Backend backend,
     in string[] hostArguments = null,
 ) {
-    import snakebite.backends.guestmodules: GuestModules;
+    import snakebite.run.modules: GuestModules;
 
     // A C `main` starts no druntime: no module constructor or destructor
     // of a D module runs.
