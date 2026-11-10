@@ -157,7 +157,7 @@ public ExecutionReport executeBackend(
 ) {
     import snakebite.backends: makeBackend;
     import snakebite.run.program: run;
-    import snakebite.run.druntime: StartupReport, runDruntimeMain;
+    import snakebite.run.program: StartupReport, runDruntimeMain;
     import std.datetime.stopwatch: AutoStart, StopWatch;
     import core.memory: GC;
 
