@@ -24,7 +24,7 @@ import snakebite.language.operators.comparison: IdentityPlan, identityPlan;
 import snakebite.language.control.logical: LogicalPlan, logicalPlan;
 import snakebite.language.control.ifplan: IfPlan, ifPlan;
 import snakebite.language.operators.comparison: ComparisonPlan, comparisonPlan;
-import snakebite.language.storage.aggregateinit: NewPlan, planNew;
+import snakebite.language.storage.lifetime: NewPlan, planNew;
 import dmd.visitor: Visitor;
 import dmd.mtype: Type;
 import dmd.func: FuncDeclaration;

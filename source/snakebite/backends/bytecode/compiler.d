@@ -967,7 +967,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import dmd.typesem: nextOf, toBasetype;
     import snakebite.frontend.dmd.delegates:
         DelegateTarget, delegateTargetOf, outerFunctionOf;
-    import snakebite.language.storage.aggregateinit: InitStep, NewPlan;
+    import snakebite.language.storage.lifetime: InitStep, NewPlan;
     import snakebite.frontend.typefacts: bitfieldAccess, fieldOffset;
     import snakebite.builtin.call: BuiltinCall;
     import snakebite.language.call.selection: CallSelection;
@@ -5165,7 +5165,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         const facts = typeFacts(expression.e1.type);
-        import snakebite.language.storage.assignment: executeAssignment;
+        import snakebite.language.storage.lifetime: executeAssignment;
 
         const valueOffset = executeAssignment!size_t(
             expression.isConstructExp !is null,
@@ -6076,7 +6076,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(VectorExp expression) {
-        import snakebite.language.storage.vectorinit: planVectorInit;
+        import snakebite.language.storage.lifetime: planVectorInit;
 
         requireDestination(expression);
         const plan = planVectorInit(expression);
@@ -6418,12 +6418,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCopy, _destination, baseOffset + field.offset, _width);
     }
 
-    // The four hooks `snakebite.language.storage.aggregateinit.applyStep` and
+    // The four hooks `snakebite.language.storage.lifetime.applyStep` and
     // `driveInit` drive, one per `InitStep.Kind`, each turning one step
     // into bytecode at `base`, a storage operand that preserves field
     // offsets for both frame values and allocations alike.
 
-    // Satisfies `aggregateinit`'s `Hooks` contract: forwards each
+    // Satisfies `lifetime`'s `Hooks` contract: forwards each
     // `InitStep.Kind` to the matching `apply*Step` method below, at
     // whichever `base` its call site is compiling into. Built
     // once per call site instead of the four lambdas each used to
@@ -6515,7 +6515,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         emit(&opZero, _destination, 0, _width);
 
-        import snakebite.language.storage.aggregateinit: applyStep, planStructLiteral;
+        import snakebite.language.storage.lifetime: applyStep, planStructLiteral;
 
         auto plan = planStructLiteral(expression);
         auto hooks = AggregateInitHooks(this, _destination);
@@ -7045,7 +7045,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // DMD leaves constructor and positional field initialization outside
     // the allocation lowering. Its result already occupies _destination.
-    // `driveInit` (`aggregateinit.d`) owns the order the `vthis` steps, the
+    // `driveInit` (`lifetime.d`) owns the order the `vthis` steps, the
     // constructor call, and the remaining positional field stores run in -
     // a nested struct's or nested class's `vthis` sits inside the
     // allocation the lowering just returned, at the same native offset a
@@ -7054,7 +7054,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `new Adder(2)` with a constructor and a bare `new Reader` (no
     // arguments at all) get a real context rather than `.init`'s zero.
     private void compileNew(NewExp expression) {
-        import snakebite.language.storage.aggregateinit:
+        import snakebite.language.storage.lifetime:
             driveInit, planClassContext, planNew, planPositionalFields;
 
         auto newPlan = planNew(expression);
@@ -7081,7 +7081,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(DeleteExp expression) {
-        import snakebite.language.storage.deletion: planDelete;
+        import snakebite.language.storage.lifetime: planDelete;
 
         auto deletion = planDelete(expression);
         const object = reserveTemp(pointerFacts);

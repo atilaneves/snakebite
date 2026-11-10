@@ -17,7 +17,7 @@ import dmd.func: FuncDeclaration;
 import dmd.location: Loc;
 import dmd.mtype: Type;
 import dmd.statement: Statement;
-import snakebite.language.storage.aggregateinit: InitStep;
+import snakebite.language.storage.lifetime: InitStep;
 import snakebite.language.checks.failure: BoundsCheck;
 import snakebite.language.control.transfer: ControlFlowState, labelTargetOf;
 import snakebite.language.traversal.fullexpression: FullExpressionScope;
@@ -2594,7 +2594,7 @@ private final class AggregateStore : Node {
     }
     private ubyte* store(ubyte* frame) {
         import core.stdc.string: memcpy;
-        import snakebite.language.storage.assignment: executeAssignment;
+        import snakebite.language.storage.lifetime: executeAssignment;
 
         auto target = _target.executeAddr(frame);
         auto storage = FrameGuard(_frames);
@@ -6985,7 +6985,7 @@ private Node buildZeroPair(E)(E ev, Expression operand) {
 private Node buildNew(E)(E ev, NewExp expression) {
     import dmd.astenums: TY;
     import dmd.typesem: toBasetype;
-    import snakebite.language.storage.aggregateinit: AggregateInitPlan, driveInit,
+    import snakebite.language.storage.lifetime: AggregateInitPlan, driveInit,
         NewPlan, planClassContext, planNew, planPositionalFields;
 
     auto plan = planNew(expression);
@@ -7039,7 +7039,7 @@ private Node buildNew(E)(E ev, NewExp expression) {
 // The tree hooks of `driveInit`: each step appends its node, and a step that
 // the tree does not build, where the evaluator falls back, is recorded.
 private struct NewInitHooks(E) {
-    import snakebite.language.storage.aggregateinit: InitStep;
+    import snakebite.language.storage.lifetime: InitStep;
 
     E ev;
     Node[] steps;
@@ -7072,10 +7072,10 @@ private struct NewInitHooks(E) {
 // The storage of the object that `new` makes, before `driveInit`.
 private Node buildNewStorage(E)(
     E ev, NewExp expression,
-    imported!"snakebite.language.storage.aggregateinit".NewPlan plan,
+    imported!"snakebite.language.storage.lifetime".NewPlan plan,
 ) {
     import dmd.typesem: toBasetype;
-    import snakebite.language.storage.aggregateinit: NewPlan;
+    import snakebite.language.storage.lifetime: NewPlan;
 
     final switch (plan.destination) with (NewPlan.Destination) {
         case lowering:

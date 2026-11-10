@@ -77,7 +77,7 @@ The shared layer owns every backend-independent decision: what dmd
 lowers (a `lowering` field) and what dmd decides instead in its own
 glue layer (`e2ir.d`: casts, truth, invariants, closure frames, unwind
 order, and so on). Put the decision in one shared module (for example
-`language/operators/casts.d`, `language/storage/aggregateinit.d`,
+`language/operators/casts.d`, `language/storage/lifetime.d`,
 `language/call/druntimehook.d`); each backend only
 executes that plan. A second backend that reimplements the same
 decision is a bug, not a parallel feature.
