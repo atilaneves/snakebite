@@ -100,15 +100,15 @@ def test_jit_perf_map(
         stderr=subprocess.STDOUT, text=True,
     )
     path = Path(f"/tmp/perf-{child.pid}.map")
-    new_map = not path.exists()
+    map_verified = False
     try:
         if not mapped:
             stdout, _ = child.communicate(timeout=30)
             assert child.returncode == 0, stdout
-            assert not path.exists()
+            assert not os.path.lexists(path)
             return
 
-        assert new_map, f"map already exists: {path}"
+        assert not os.path.lexists(path), f"map already exists: {path}"
         assert child.stdin is not None
         child.stdin.write("s")
         child.stdin.flush()
@@ -117,7 +117,9 @@ def test_jit_perf_map(
         assert select.select([child.stdout], [], [], 30)[0], "guest did not start"
         ready = child.stdout.readline()
         assert ready.strip() == "ready", f"unexpected guest output: {ready!r}"
-        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        mode = path.lstat().st_mode
+        assert stat.S_ISREG(mode)
+        assert stat.S_IMODE(mode) == 0o600
         records = [line.split(maxsplit=2) for line in path.read_text().splitlines()]
         assert len(records) == 3
         names = {record[2] for record in records}
@@ -125,6 +127,7 @@ def test_jit_perf_map(
         assert len(names) == 2
         assert all(name.startswith("_D14perf_map_guest") and "hot" in name
                    for name in names)
+        map_verified = True
         ranges = []
         for start, size, _ in records:
             base, length = int(start, 16), int(size, 16)
@@ -148,7 +151,7 @@ def test_jit_perf_map(
         if child.poll() is None:
             child.kill()
         child.communicate(timeout=30)
-        if new_map:
+        if map_verified:
             path.unlink(missing_ok=True)
 
 
@@ -174,8 +177,11 @@ def test_jit_perf_map_after_fork(tmp_path: Path) -> None:
             assert(hot(300) == 44850);
             const child = fork();
             assert(child >= 0);
-            if (child == 0)
+            if (child == 0) {
+                if (getchar() != 'c')
+                    _exit(1);
                 _exit(hot(301L) == 45150 ? 0 : 1);
+            }
             printf("child=%d\n", child);
             fflush(null);
             int status;
@@ -190,28 +196,41 @@ def test_jit_perf_map_after_fork(tmp_path: Path) -> None:
         stderr=subprocess.STDOUT, text=True,
     ) as process:
         parent_map = Path(f"/tmp/perf-{process.pid}.map")
-        new_map = not parent_map.exists()
-        child_map = None
+        verified_maps = []
         try:
-            assert new_map, f"map already exists: {parent_map}"
-            stdout, _ = process.communicate(input="s", timeout=30)
-            child = re.search(r"^child=(\d+)$", stdout, re.MULTILINE)
-            assert child is not None, stdout
+            assert not os.path.lexists(parent_map), f"map already exists: {parent_map}"
+            assert process.stdin is not None
+            assert process.stdout is not None
+            process.stdin.write("s")
+            process.stdin.flush()
+            assert select.select([process.stdout], [], [], 30)[0], "guest did not fork"
+            ready = process.stdout.readline().strip()
+            child = re.fullmatch(r"child=(\d+)", ready)
+            assert child is not None, ready
             child_map = Path(f"/tmp/perf-{child[1]}.map")
-            assert process.returncode == 0, stdout
+            assert stat.S_ISREG(parent_map.lstat().st_mode)
+            parent_record, = parent_map.read_text().splitlines()
+            assert parent_record.split(maxsplit=2)[2].startswith(
+                "_D13perf_map_fork__T3hotTiZ"
+            )
+            verified_maps.append(parent_map)
 
-            for path, type_code in [(parent_map, "i"), (child_map, "l")]:
-                record, = path.read_text().splitlines()
-                symbol = record.split(maxsplit=2)[2]
-                assert symbol.startswith(f"_D13perf_map_fork__T3hotT{type_code}Z")
+            assert not os.path.lexists(child_map), f"map already exists: {child_map}"
+            stdout, _ = process.communicate(input="c", timeout=30)
+            assert process.returncode == 0, stdout
+            assert stat.S_ISREG(child_map.lstat().st_mode)
+            child_record, = child_map.read_text().splitlines()
+            assert child_record.split(maxsplit=2)[2].startswith(
+                "_D13perf_map_fork__T3hotTlZ"
+            )
+            verified_maps.append(child_map)
+            assert parent_map.read_text().splitlines() == [parent_record]
         finally:
             if process.poll() is None:
                 process.kill()
                 process.communicate(timeout=30)
-            if new_map:
-                parent_map.unlink(missing_ok=True)
-            if child_map is not None:
-                child_map.unlink(missing_ok=True)
+            for path in verified_maps:
+                path.unlink(missing_ok=True)
 
 
 @pytest.mark.parametrize("collector", ["", "symgc", "unknown"])

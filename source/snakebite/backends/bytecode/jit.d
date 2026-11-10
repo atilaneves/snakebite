@@ -400,7 +400,7 @@ private struct PerfMap {
             perror(path.ptr);
             return null;
         }
-        auto file = fdopen(descriptor, "w");
+        auto file = fdopen(descriptor, "w"); // The writer needs a mutable FILE.
         if (file is null) {
             perror(path.ptr);
             close(descriptor);
