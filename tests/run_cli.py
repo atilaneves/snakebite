@@ -5966,6 +5966,78 @@ def test_unittest_configuration_settings_are_loaded(
     assert result.returncode == 3, output(result)
 
 
+# The pipe orders the two compiles. CTFE cannot call the POSIX functions.
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
+def test_fork_keeps_compiled_functions_in_both_processes(
+    tmp_path: Path, backend: str,
+) -> None:
+    source = tmp_path / "main.d"
+    write(
+        source,
+        """
+        import core.sys.posix.sys.wait: waitpid;
+        import core.sys.posix.unistd: _exit, close, fork, pipe, read, write;
+
+        int beforeFork(int count) {
+            assert(count > 0);
+            int sum;
+            foreach (i; 0 .. count) sum += i;
+            return sum;
+        }
+
+        int childHot(int count) {
+            assert(count > 0);
+            int sum;
+            foreach (i; 0 .. count) sum += i * 3;
+            return sum;
+        }
+
+        int parentHot(int count) {
+            assert(count > 0);
+            int sum;
+            foreach (i; 0 .. count) sum += i * 7;
+            return sum;
+        }
+
+        int main() {
+            assert(beforeFork(300) == 44850);
+            int[2] gate;
+            assert(pipe(gate) == 0);
+            const child = fork();
+            assert(child >= 0);
+            char ready;
+            if (child == 0) {
+                close(gate[1]);
+                assert(read(gate[0], &ready, 1) == 1);
+                close(gate[0]);
+                assert(childHot(300) == 134550, "child new function");
+                assert(beforeFork(300) == 44850, "child inherited function");
+                _exit(0);
+            }
+
+            close(gate[0]);
+            const firstResult = parentHot(300);
+            assert(write(gate[1], &ready, 1) == 1);
+            close(gate[1]);
+            int status;
+            assert(waitpid(child, &status, 0) == child);
+            assert(status == 0, "child exit status");
+            assert(firstResult == 313950, "parent new function");
+            assert(beforeFork(300) == 44850, "parent inherited function");
+            assert(parentHot(300) == 313950, "parent new function after child");
+            return 0;
+        }
+        """,
+    )
+    if backend == "native":
+        result = run_native(tmp_path, sources=[source.name])
+    else:
+        result = run_sb(
+            f"--backend={backend}", ".", cwd=tmp_path, timeout_seconds=20,
+        )
+    assert result.returncode == 0, output(result)
+
+
 def write(path: Path, text: str = "") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")

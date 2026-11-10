@@ -182,6 +182,10 @@ stays on disk so `perf report` can read it after the process ends. The option
 is off by default. After a fork, the child map records functions that the
 child compiles.
 
+After a fork, the child keeps the execute views that its handler words point
+to. The first JIT compile in the child opens a new file. This keeps the
+parent and child from writing code at the same offset in the inherited file.
+
 ### Independent of stored bytecode
 
 The JIT replaces handler words in the live instruction array, and the

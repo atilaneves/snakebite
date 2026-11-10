@@ -434,8 +434,11 @@ private struct PerfMap {
 // chunks. Memory is made present (`MADV_POPULATE_*`) a part of a chunk at a
 // time.
 private struct CodeRegion {
+    import core.sys.posix.sys.types: pid_t;
+
     @nogc nothrow:
 
+    private pid_t _process;
     int file = -1;
     size_t fileSize;
     ubyte* writeBase;
@@ -444,8 +447,22 @@ private struct CodeRegion {
     size_t chunkUsed;
     size_t populatedEnd;
 
-    bool create() {
-        import core.sys.posix.unistd: close;
+    bool prepare() {
+        import core.sys.posix.sys.mman: munmap;
+        import core.sys.posix.unistd: close, getpid;
+
+        const process = getpid();
+        if (process == _process)
+            return file >= 0;
+
+        // After fork the copied cursor would write into the parent's file.
+        // Keep the execute views because the child still uses their handlers.
+        if (file >= 0) {
+            munmap(writeBase, chunkCapacity);
+            close(file);
+        }
+        this = CodeRegion.init;
+        _process = process;
 
         file = memfd_create("snakebite-jit", MFD_CLOEXEC);
         if (file < 0)
@@ -453,6 +470,7 @@ private struct CodeRegion {
         if (newChunk(chunkSize))
             return true;
         close(file);
+        file = -1;
         return false;
     }
 
@@ -592,13 +610,13 @@ package bool jitUsable(ref JitLock lock) {
     import core.atomic: atomicLoad, atomicStore, MemoryOrder;
 
     final switch (atomicLoad!(MemoryOrder.acq)(_setup)) {
-        case Setup.ready: return true;
+        case Setup.ready: return lock.owned(_jitState).region.prepare;
         case Setup.unavailable: return false;
         case Setup.pending:
             break;
     }
     ref state = lock.owned(_jitState);
-    const ok = state.region.create;
+    const ok = state.region.prepare;
     if (ok)
         checkCallingConvention(state.region);
     state.bmi2 = ok && cpuHasBmi2;
