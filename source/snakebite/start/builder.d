@@ -1,11 +1,11 @@
-module snakebite.backends.startdatabuilder;
+module snakebite.start.builder;
 
 
 private:
 
 
-import snakebite.backends.program: Program;
-import snakebite.backends.startdata:
+import snakebite.program: Program;
+import snakebite.start.data:
     FunctionHandle, GateStorage, ModuleStart, StartData;
 
 

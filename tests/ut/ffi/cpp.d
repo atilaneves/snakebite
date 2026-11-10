@@ -3,8 +3,8 @@ module ut.ffi.cpp;
 
 import ut;
 import ut.backends;
-import snakebite.backends.program: Program;
-import snakebite.dependencyimage: DependencyImage, loadImage;
+import snakebite.program: Program;
+import snakebite.image.dependency: DependencyImage, loadImage;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import ut.ffi.cpp_oracle: Counts, bind, handlers, nativeShape;

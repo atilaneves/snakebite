@@ -3,14 +3,14 @@ module ut.ffi.symbol;
 
 import ut;
 import snakebite.ffi: Resolver;
-import snakebite.dependencyimage:
+import snakebite.image.dependency:
     DependencyImage, ProjectImageCache, defaultCompiler, loadImage;
 import core.thread: Thread;
 import snakebite.backends: backendIdentity;
 import snakebite.execution: prepareProject, executeBackend;
 import snakebite.dependencypreparation: prepareDependencies;
-import snakebite.dependencyimage: Optimise;
-import snakebite.backends.program: Program;
+import snakebite.image.dependency: Optimise;
+import snakebite.program: Program;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import snakebite.imagesource: imageInputs, imageSource;

@@ -1,11 +1,11 @@
-module snakebite.druntimemain;
+module snakebite.run.druntime;
 
 
 private:
 
 
-import snakebite.backends.backend: Backend;
-import snakebite.backends.startdata: StartData;
+import snakebite.backends.api: Backend;
+import snakebite.start.data: StartData;
 import snakebite.ffi.abi: ArgumentPlan, Register;
 import snakebite.ffi.callback: CallbackBridge, CallbackCall;
 import snakebite.ffi.plan: NativeSignature;
@@ -28,15 +28,15 @@ public struct StartupReport {
 // goes on running programs in one process has its destructors run before
 // this returns.
 public StartupReport runDruntimeMain(
-    imported!"snakebite.backends.backend".Backend backend,
-    in imported!"snakebite.dependencyimage".TestHooks testHooks,
+    imported!"snakebite.backends.api".Backend backend,
+    in imported!"snakebite.image.dependency".TestHooks testHooks,
     in string[] arguments,
     in bool endsProcess = false,
 ) {
-    import snakebite.backends.runprogram: runMain;
+    import snakebite.run.program: runMain;
     import snakebite.host.runlock: guestRunLock;
-    import snakebite.backends.guestmodules: GuestModules;
-    import snakebite.dependencyimage: TestHooks;
+    import snakebite.run.modules: GuestModules;
+    import snakebite.image.dependency: TestHooks;
     import std.algorithm.iteration: map;
     import std.array: array;
     import std.string: toStringz;
@@ -130,7 +130,7 @@ private enum mainSignature = NativeSignature(
 
 
 private extern(C) void callMain(void* owner, CallbackCall* call) {
-    import snakebite.backends.runprogram: runMain;
+    import snakebite.run.program: runMain;
 
     auto run = cast(MainRun*) owner;
     const arguments = *cast(string[]*) call.arguments[0];

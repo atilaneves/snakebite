@@ -7,12 +7,12 @@ private:
 // Collects image data from a live program without resetting the frontend.
 // `program` runs at most once, only when cache validation needs image source.
 // For startup without a live program, use `prepareStartupDependencies`.
-public const(imported!"snakebite.dependencyimage".DependencyImage)* prepareDependencies(
+public const(imported!"snakebite.image.dependency".DependencyImage)* prepareDependencies(
     in string directory,
     in imported!"snakebite.project".SourceSet sources,
     scope imported!"snakebite.backends".Program delegate() program,
-    in imported!"snakebite.dependencyimage".Optimise optimise
-        = imported!"snakebite.dependencyimage".Optimise.yes,
+    in imported!"snakebite.image.dependency".Optimise optimise
+        = imported!"snakebite.image.dependency".Optimise.yes,
     in bool projectEntry = true,
 ) {
     return Preparation(directory, sources, optimise, projectEntry
@@ -26,11 +26,11 @@ public const(imported!"snakebite.dependencyimage".DependencyImage)* prepareDepen
 // so constructors can wait for workers that use the frontend. A clean cache
 // hit does not analyse or reset. Unrelated stderr writers must be absent
 // during analysis because diagnostic capture redirects process-wide fd 2.
-public const(imported!"snakebite.dependencyimage".DependencyImage)* prepareStartupDependencies(
+public const(imported!"snakebite.image.dependency".DependencyImage)* prepareStartupDependencies(
     in string directory,
     imported!"snakebite.project".SourceSet sources,
-    in imported!"snakebite.dependencyimage".Optimise optimise
-        = imported!"snakebite.dependencyimage".Optimise.yes,
+    in imported!"snakebite.image.dependency".Optimise optimise
+        = imported!"snakebite.image.dependency".Optimise.yes,
 ) {
     import snakebite.project: loadProject;
 
@@ -67,7 +67,7 @@ private enum Mode { live, projectEntry, startup }
 
 private struct Preparation {
     import snakebite.backends: Program;
-    import snakebite.dependencyimage: DependencyImage, Optimise;
+    import snakebite.image.dependency: DependencyImage, Optimise;
     import snakebite.project: SourceSet;
 
     private const(SourceSet) _sources;
@@ -88,7 +88,7 @@ private struct Preparation {
     }
 
     private const(DependencyImage)* run(scope Program delegate() program) {
-        import snakebite.dependencyimage: ProjectImageCache;
+        import snakebite.image.dependency: ProjectImageCache;
         import snakebite.frontend.compiler: withScratchFrontend;
         import std.path: buildPath;
 
@@ -142,7 +142,7 @@ private struct Preparation {
     private DependencyImage buildImage(in string source,
         in DependencyAnalysis analysis,
     ) const {
-        import snakebite.dependencyimage: defaultCompiler, prepareImage;
+        import snakebite.image.dependency: defaultCompiler, prepareImage;
 
         return prepareImage(source, _imageDirectory, defaultCompiler,
             analysis.inputs, _sources.importPaths, _sources.stringImportPaths,

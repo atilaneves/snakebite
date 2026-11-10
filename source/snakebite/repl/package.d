@@ -4,7 +4,7 @@ module snakebite.repl;
 private:
 
 private alias DependencyImage =
-    imported!"snakebite.dependencyimage".DependencyImage;
+    imported!"snakebite.image.dependency".DependencyImage;
 
 // One REPL session: an accumulated module source, the backend it runs
 // on, and any input still waiting for a closing brace. Declarations from
@@ -38,7 +38,7 @@ public struct Repl {
     private uint _cellCount = 1;
     private Module _module;
     private imported!"snakebite.backends".Program _program;
-    private imported!"snakebite.backends.backend".Owned!Backend _backend;
+    private imported!"snakebite.backends.api".Owned!Backend _backend;
 
     public this(
         BackendName backendName,
@@ -121,7 +121,7 @@ public struct Repl {
 
     private SubmitResult submitExpression(in string source) {
         import snakebite.backends: makeBackend;
-        import snakebite.backends.guestmodules: GuestModules;
+        import snakebite.run.modules: GuestModules;
         import snakebite.frontend.compiler: parseSnippet;
         import snakebite.frontend.dmd.functions: findFunction;
         import snakebite.repl.cell: replCellLineDirective;
@@ -262,7 +262,7 @@ public struct Repl {
         in string fullSource,
         Module module_,
         imported!"snakebite.backends".Program program,
-        imported!"snakebite.backends.backend".Owned!Backend backend,
+        imported!"snakebite.backends.api".Owned!Backend backend,
     ) {
         import core.lifetime: move;
 
@@ -278,7 +278,7 @@ public struct Repl {
     // druntime's own default runner would. All failures are reported
     // together rather than stopping at the first one.
     private SubmitResult runLoadedTests() {
-        import snakebite.backends.guestmodules: GuestModules;
+        import snakebite.run.modules: GuestModules;
         import snakebite.frontend.dmd.functions: findUnittests;
         import std.array: join;
 

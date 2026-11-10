@@ -8,7 +8,7 @@ module ut.backends.run.classes;
 
 import ut.backends;
 import ut.threadsync: beginExplicitCollect, endExplicitCollect;
-import snakebite.backends.program: Program;
+import snakebite.program: Program;
 import snakebite.frontend.compiler: parseSnippet, parseSnippets;
 import snakebite.frontend.dmd.functions: findFunction;
 import std.string: endsWith;

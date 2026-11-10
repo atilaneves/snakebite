@@ -517,7 +517,7 @@ unittest {
 @Tags("Bytecode")
 unittest {
     import core.exception: RangeError;
-    import snakebite.backends.program: Program;
+    import snakebite.program: Program;
     import snakebite.backends.bytecode: Bytecode;
     import snakebite.frontend.compiler: parseSnippet;
     import snakebite.frontend.dmd.functions: findFunction;
@@ -552,7 +552,7 @@ unittest {
 @Tags("Bytecode")
 unittest {
     import core.exception: RangeError;
-    import snakebite.backends.program: Program;
+    import snakebite.program: Program;
     import snakebite.backends.bytecode: Bytecode;
     import snakebite.frontend.compiler: parseSnippet;
     import snakebite.frontend.dmd.functions: findFunction;
@@ -929,7 +929,7 @@ static foreach (backend; Matrix!()) {
 @Tags("Bytecode")
 unittest {
     import core.exception: RangeError;
-    import snakebite.backends.program: Program;
+    import snakebite.program: Program;
     import snakebite.backends.bytecode: Bytecode;
     import snakebite.frontend.compiler: parseSnippet;
     import snakebite.frontend.dmd.functions: findFunction;

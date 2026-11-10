@@ -2,7 +2,7 @@ module ut.backends.call.ffi;
 
 
 import ut.backends;
-import snakebite.backends.program: Program;
+import snakebite.program: Program;
 import snakebite.ffi: PlanCache;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
@@ -3257,7 +3257,7 @@ static foreach (backend; Matrix!(
 @Tags("Interpreter")
 unittest {
     import core.memory: GC;
-    import snakebite.backends.program: Program;
+    import snakebite.program: Program;
     import snakebite.backends.interpreter: Interpreter;
 
     auto module_ = parseSnippet(q{
@@ -3291,7 +3291,7 @@ unittest {
 @Tags("Bytecode")
 unittest {
     import core.memory: GC;
-    import snakebite.backends.program: Program;
+    import snakebite.program: Program;
     import snakebite.backends.bytecode: Bytecode;
 
     auto module_ = parseSnippet(q{

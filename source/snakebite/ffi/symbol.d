@@ -9,7 +9,7 @@ private:
 // looked up again on every call. Every thread reads the cache without a
 // lock (ADR-0006); a symbol is looked up once, on its first use.
 public struct Resolver {
-    import snakebite.dependencyimage: DependencyImage;
+    import snakebite.image.dependency: DependencyImage;
     import snakebite.host.runtimeentry: RuntimeEntry;
     import snakebite.host.sharedtable: SharedTable;
 

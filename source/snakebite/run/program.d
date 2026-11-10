@@ -1,11 +1,11 @@
-module snakebite.backends.runprogram;
+module snakebite.run.program;
 
 
 private:
 
 
-import snakebite.backends.backend: Backend;
-import snakebite.backends.startdata: StartData;
+import snakebite.backends.api: Backend;
+import snakebite.start.data: StartData;
 
 
 // "Run on this project": do what a compiled build of it does, implemented
@@ -18,7 +18,7 @@ public int run(
     Backend backend,
     in string[] hostArguments = null,
 ) {
-    import snakebite.backends.guestmodules: GuestModules;
+    import snakebite.run.modules: GuestModules;
 
     // A C `main` starts no druntime: no module constructor or destructor
     // of a D module runs.

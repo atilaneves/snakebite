@@ -1,5 +1,5 @@
 /* The bytes of `registry_slot.c`, built as a shared object by the build, for
- * `snakebite.backends.guestmodules` to load. `registry_slot.so` is found
+ * `snakebite.run.modules` to load. `registry_slot.so` is found
  * through the include path of the assembler.
  */
     .section .rodata

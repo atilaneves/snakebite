@@ -3,7 +3,7 @@ module ut.backends.bytecode.relocation;
 
 import ut.backends;
 import dmd.func: FuncDeclaration;
-import snakebite.backends.program: Program;
+import snakebite.program: Program;
 import snakebite.backends.bytecode.inspection:
     handlerRoleMismatches, misplacedRelocs, relocsOf;
 import snakebite.backends.bytecode.relocation: Place, Target;

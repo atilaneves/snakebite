@@ -3,7 +3,7 @@ module snakebite.backends.bytecode.compiler;
 
 private:
 
-import snakebite.backends.startdata: FunctionHandle;
+import snakebite.start.data: FunctionHandle;
 import snakebite.frontend.typefacts: typeFacts, truthFacts;
 
 
@@ -46,14 +46,14 @@ private imported!"snakebite.native.value".TypeFacts pointerFactsOf() {
     return TypeFacts(size_t.sizeof, size_t.sizeof, false, true);
 }
 
-public final class Bytecode: imported!"snakebite.backends.backend".Backend {
+public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import core.time: Duration;
     import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration;
     import dmd.func: FuncDeclaration;
     import dmd.root.string: toDString;
-    import snakebite.backends.backend: CompilationStatistics;
-    import snakebite.backends.program: Program;
+    import snakebite.backends.api: CompilationStatistics;
+    import snakebite.program: Program;
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.classinfo;
     import snakebite.backends.bytecode.vm: Function, InlineBody, JitSetting, Vm;

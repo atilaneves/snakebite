@@ -99,8 +99,8 @@ public PreparationReport prepareProject(
     in string[] stringImportPaths = null,
     in bool nativeDependencies = true,
     in string[] versions = null,
-    in imported!"snakebite.dependencyimage".Optimise optimise
-        = imported!"snakebite.dependencyimage".Optimise.yes,
+    in imported!"snakebite.image.dependency".Optimise optimise
+        = imported!"snakebite.image.dependency".Optimise.yes,
 ) {
     import snakebite.project: sourceSet;
     import std.datetime.stopwatch: AutoStart, StopWatch;
@@ -121,8 +121,8 @@ public PreparationReport prepareSources(
     imported!"snakebite.project".SourceSet sources,
     in imported!"core.time".Duration discovery,
     in bool nativeDependencies = true,
-    in imported!"snakebite.dependencyimage".Optimise optimise
-        = imported!"snakebite.dependencyimage".Optimise.yes,
+    in imported!"snakebite.image.dependency".Optimise optimise
+        = imported!"snakebite.image.dependency".Optimise.yes,
 ) {
     import snakebite.frontend.compiler: Snippets, initialize;
     import snakebite.project: loadProject;
@@ -156,8 +156,8 @@ public ExecutionReport executeBackend(
         imported!"snakebite.backends.bytecode.vm".JitSetting.init,
 ) {
     import snakebite.backends: makeBackend;
-    import snakebite.backends.runprogram: run;
-    import snakebite.druntimemain: StartupReport, runDruntimeMain;
+    import snakebite.run.program: run;
+    import snakebite.run.druntime: StartupReport, runDruntimeMain;
     import std.datetime.stopwatch: AutoStart, StopWatch;
     import core.memory: GC;
 
@@ -176,9 +176,9 @@ public ExecutionReport executeBackend(
 
     auto stopWatch = StopWatch(AutoStart.yes);
     auto backend = makeBackend(name, program, jit);
-    import snakebite.backends.backend: ExecutionClock;
+    import snakebite.backends.api: ExecutionClock;
     const running = ExecutionClock.start(backend);
-    import snakebite.backends.guestmodules: GuestModules;
+    import snakebite.run.modules: GuestModules;
     const entry = GuestModules.Entry(backend);
     StartupReport startup;
     int status;

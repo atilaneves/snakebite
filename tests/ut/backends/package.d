@@ -4,14 +4,14 @@ public import ut;
 public import snakebite.backends.bytecode: Bytecode;
 public import snakebite.backends.ctfe: Ctfe;
 public import snakebite.backends.interpreter: Interpreter;
-public import snakebite.backends.backend: Owned;
+public import snakebite.backends.api: Owned;
 public import std.meta: AliasSeq;
 
 import core.sync.mutex: Mutex;
 import dmd.dmodule: Module;
 import dmd.func: FuncDeclaration;
-import snakebite.backends.program: Program;
-import snakebite.backends.runprogram: run;
+import snakebite.program: Program;
+import snakebite.run.program: run;
 import snakebite.frontend.compiler: parseSnippet, parseSnippets;
 import snakebite.frontend.dmd.functions: findFunction, findStruct;
 import std.conv: text;
@@ -197,7 +197,7 @@ public void shouldBeStatusOfWithJitCode(
 }
 
 // `main`'s exit status, run natively, mirroring the backend-side semantics
-// documented on `snakebite.backends.runprogram.run`: `void main` is status 0,
+// documented on `snakebite.run.program.run`: `void main` is status 0,
 // an escaping `Throwable` is status 1, and no `main` at all is status 0.
 //
 // `code` is mixed into a struct, the same isolation `batchSource` gives the

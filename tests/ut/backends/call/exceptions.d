@@ -2,7 +2,7 @@ module ut.backends.call.exceptions;
 
 
 import ut.backends;
-import snakebite.backends.program: Program;
+import snakebite.program: Program;
 import snakebite.failure.exception: SnakebiteException;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction, findStruct;
@@ -153,7 +153,7 @@ static foreach (backend; Matrix!(
             catch (AssertError error)
                 caught = error;
         } else {
-            import snakebite.backends.program: Program;
+            import snakebite.program: Program;
             import snakebite.frontend.compiler: parseSnippet;
             import snakebite.frontend.dmd.functions: findFunction;
 
@@ -224,7 +224,7 @@ static foreach (backend; Matrix!(
             const tripled = tripleFour();
             tripled.should == 12;
         } else {
-            import snakebite.backends.program: Program;
+            import snakebite.program: Program;
             import snakebite.frontend.compiler: parseSnippet;
             import snakebite.frontend.dmd.functions: findFunction;
 

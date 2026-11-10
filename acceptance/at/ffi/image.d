@@ -2,7 +2,7 @@ module at.ffi.image;
 
 
 import ut;
-import snakebite.dependencyimage: Optimise, defaultCompiler, prepareImage;
+import snakebite.image.dependency: Optimise, defaultCompiler, prepareImage;
 import snakebite.failure.exception: SnakebiteException;
 import std.array: array;
 import std.conv: text;

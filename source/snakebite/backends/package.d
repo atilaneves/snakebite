@@ -1,9 +1,8 @@
 module snakebite.backends;
 
 
-public import snakebite.backends.backend;
-public import snakebite.backends.runprogram;
-public import snakebite.backends.program;
+public import snakebite.backends.api;
+public import snakebite.program;
 
 
 private:
@@ -56,13 +55,13 @@ public bool parseBackendName(
 }
 
 
-public imported!"snakebite.backends.backend".Owned!Backend makeBackend(
+public imported!"snakebite.backends.api".Owned!Backend makeBackend(
     in BackendName name,
     Program program,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit =
         imported!"snakebite.backends.bytecode.vm".JitSetting.init,
 ) {
-    import snakebite.backends.backend: Owned;
+    import snakebite.backends.api: Owned;
     import snakebite.backends.interpreter: Interpreter;
     import snakebite.backends.bytecode: Bytecode;
     import snakebite.backends.ctfe: Ctfe;

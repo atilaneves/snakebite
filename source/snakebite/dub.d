@@ -119,7 +119,7 @@ public string fetchProject(
 public DubDescription dubDescribeProject(
     in string directory, in string[] versions = null,
 ) {
-    import snakebite.dependencyimage: defaultCompiler;
+    import snakebite.image.dependency: defaultCompiler;
     import snakebite.dubcache: cachedDubDescription;
 
     return cachedDubDescription(directory, defaultCompiler, versions, {
@@ -175,7 +175,7 @@ private auto platformSettings(
     import dub.compilers.compiler: getCompiler;
     import dub.generators.generator: GeneratorSettings;
     import dub.internal.vibecompat.inet.path: NativePath;
-    import snakebite.dependencyimage: defaultCompiler;
+    import snakebite.image.dependency: defaultCompiler;
 
     GeneratorSettings settings;
     settings.compiler = getCompiler(defaultCompiler);
@@ -315,7 +315,7 @@ public void buildDubDependencies(
 // on what the description is made from. The script of a description is
 // written when the build knows the description.
 private string compilerBinary(in string directory, in string[] versions) {
-    import snakebite.dependencyimage: defaultCompiler;
+    import snakebite.image.dependency: defaultCompiler;
     import snakebite.projectstate: projectStateDirectory;
     import std.digest.sha: sha256Of;
     import std.digest: toHexString;
@@ -369,7 +369,7 @@ private void installCompilerWrapper(in string binary, in DubDescription descript
 // A real build lets dub run its hooks and report every build failure. A
 // script that has nothing to translate starts the compiler as it is.
 private string compilerWrapperScript(in string binary, in DubDescription description) {
-    import snakebite.dependencyimage: defaultCompiler;
+    import snakebite.image.dependency: defaultCompiler;
     import snakebite.frontend.checks: isCheckFlag, ldcArguments;
     import std.algorithm: canFind, startsWith;
     import std.json: JSONValue;
@@ -447,7 +447,7 @@ public string dependencyFingerprint(in string directory, in DubDescription descr
     import std.digest.sha: sha256Of;
     import std.digest: toHexString;
     import std.process: environment;
-    import snakebite.dependencyimage: defaultCompiler;
+    import snakebite.image.dependency: defaultCompiler;
 
     return text("snakebite-dub-v3", defaultCompiler, __VERSION__,
         environment.get("DFLAGS", ""), environment.get("LFLAGS", ""),
