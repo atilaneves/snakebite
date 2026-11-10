@@ -5480,7 +5480,7 @@ private final class FloatIntrinsic(T, string name) : DoubleNode {
 private final class BuiltinOp : Node {
     private enum maxArguments = 4;
 
-    private imported!"snakebite.backends.builtins".BuiltinCall _entry;
+    private imported!"snakebite.builtin.call".BuiltinCall _entry;
     private Operand[] _args;
     private ArgumentWriter[] _writers;
     private size_t _resultSize;

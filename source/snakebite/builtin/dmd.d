@@ -1,4 +1,4 @@
-module snakebite.backends.dmdintrinsics;
+module snakebite.builtin.dmd;
 
 
 private:

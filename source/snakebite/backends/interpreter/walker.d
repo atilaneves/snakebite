@@ -1398,7 +1398,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 returnPlace, withCursor.ptr, withCursor.length);
             return;
         case vaCopy:
-            import snakebite.backends.builtins: variadicCopySize;
+            import snakebite.builtin.call: variadicCopySize;
 
             const(void)*[3] withStorage;
             withStorage[0 .. argumentCount] = arguments[0 .. argumentCount];

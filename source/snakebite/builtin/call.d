@@ -1,4 +1,4 @@
-module snakebite.backends.builtins;
+module snakebite.builtin.call;
 
 
 private:
@@ -302,7 +302,7 @@ private extern(C) void volatileWideEntry(
 )(
     void* returnPlace, scope const(void*)* arguments, size_t argumentCount,
 ) nothrow @nogc {
-    import snakebite.backends.dmdintrinsics: volatileCopyWide;
+    import snakebite.builtin.dmd: volatileCopyWide;
 
     assert(argumentCount == (store ? 2 : 1));
     auto address = *cast(void**) arguments[0];
@@ -348,7 +348,7 @@ private BuiltinCall roundedResultEntryOf(T)(in ParameterType result)
 private extern(C) void roundedEntry(Result, T)(
     void* returnPlace, scope const(void*)* arguments, size_t argumentCount,
 ) nothrow @nogc {
-    import snakebite.backends.dmdintrinsics: roundedTo;
+    import snakebite.builtin.dmd: roundedTo;
 
     assert(argumentCount == 1);
     *cast(Result*) returnPlace = roundedTo!Result(*cast(const(T)*) arguments[0]);
@@ -534,7 +534,7 @@ private BuiltinCall portOutputEntryOf(string name, Port, Value)(
 private extern(C) void entry(string name, Result, Params...)(
     void* returnPlace, scope const(void*)* arguments, size_t argumentCount,
 ) @trusted nothrow @nogc {
-    import snakebite.backends.dmdintrinsics;
+    import snakebite.builtin.dmd;
     import core.bitop;
     import core.volatile;
 

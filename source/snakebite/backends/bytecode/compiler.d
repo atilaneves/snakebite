@@ -969,7 +969,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         DelegateTarget, delegateTargetOf, outerFunctionOf;
     import snakebite.backends.aggregateinit: InitStep, NewPlan;
     import snakebite.frontend.typefacts: bitfieldAccess, fieldOffset;
-    import snakebite.backends.builtins: BuiltinCall;
+    import snakebite.builtin.call: BuiltinCall;
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.casts: CastPlan;
     import snakebite.backends.closureplan: ClosurePlan;
@@ -10706,7 +10706,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t destOffset,
         BuiltinCall entry,
     ) {
-        import snakebite.backends.builtins: variadicCopySize;
+        import snakebite.builtin.call: variadicCopySize;
 
         const size = reserveTemp(pointerFacts);
         emit(&opConstant, size, addConstant(cast(long) variadicCopySize),

@@ -2,13 +2,13 @@
 /// declares with `pragma(LDC_intrinsic)`, `LDC_atomic_*` or `LDC_fence` has
 /// no host symbol to call, so each call goes to a wrapper that LDC compiles
 /// into the host: the result is the one that native code built by LDC gives.
-module snakebite.backends.ldcintrinsics;
+module snakebite.builtin.ldc;
 
 private:
 
 version (LDC):
 
-import snakebite.backends.builtins: BuiltinCall;
+import snakebite.builtin.call: BuiltinCall;
 import snakebite.failure.report: internalFailure;
 import ldc.intrinsics;
 import core.int128: Cent;

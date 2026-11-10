@@ -1891,7 +1891,7 @@ private CallPlan prepareCommon(
             import gen.dpragma: LDCPragma;
 
             // LDC compiles this declaration inline, so the host has no symbol
-            // for it; a wrapper in `snakebite.backends.ldcintrinsics` is the
+            // for it; a wrapper in `snakebite.builtin.ldc` is the
             // way to a result, and this one has none.
             if (function_.llvmInternal != LDCPragma.LLVMnone)
                 throw new Exception(

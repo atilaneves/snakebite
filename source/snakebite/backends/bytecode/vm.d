@@ -41,7 +41,7 @@ extern(C) bool executeIndirectCallPlan(
 
 import snakebite.native.argumentflow: ArgumentFlow, Shape, Signature;
 import snakebite.backends.bytecode.relocation: Address, Place, Reloc, Target;
-import snakebite.backends.builtins: BuiltinCall;
+import snakebite.builtin.call: BuiltinCall;
 import snakebite.stack.hostcall: HostCallLayout;
 import snakebite.failure.halt: HaltAction, isHalt;
 import snakebite.failure.unwind:
@@ -104,7 +104,7 @@ public struct CallSite {
         // call is an `indirect` site that also sets `value.signature`, for
         // the check of its call window.
         value,
-        // `builtinEntry` is a `snakebite.backends.builtins.BuiltinCall`,
+        // `builtinEntry` is a `snakebite.builtin.call.BuiltinCall`,
         // resolved once by `CallSelection` (`snakebite.backends.calls`)
         // and never re-resolved: a compiler intrinsic (`core.math.fabs`
         // and the like), which has no host symbol FFI could ever find, so this VM calls the entry

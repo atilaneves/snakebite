@@ -19,7 +19,7 @@ public struct CallSelection {
 
     import dmd.func: FuncDeclaration;
 
-    import snakebite.backends.builtins:
+    import snakebite.builtin.call:
         BuiltinCall, ParameterType, startVariadicEntry;
     import snakebite.host.sharedtable: SharedTable;
 
@@ -28,7 +28,7 @@ public struct CallSelection {
     // `builtin` is the third one this backend adds for a bodiless
     // function that is a compiler intrinsic (`buildIntrinsicPlan`) -
     // `core.math.fabs` and friends, which have no host symbol FFI could
-    // ever resolve (they compile to an inline instruction, not a call). `snakebite.backends.builtins` holds the
+    // ever resolve (they compile to an inline instruction, not a call). `snakebite.builtin.call` holds the
     // wrapper `builtinEntry` calls for that route.
     //
     // `vaStart` is the one intrinsic that is not a pure function of its
@@ -54,7 +54,7 @@ public struct CallSelection {
         public Route route;
         public BuiltinCall builtinEntry;
         // For `builtin`: the declared parameter that the wrapper takes by
-        // address (`snakebite.backends.builtins.destinationParameterOf`).
+        // address (`snakebite.builtin.call.destinationParameterOf`).
         public size_t destinationParameter = size_t.max;
     }
 
@@ -432,9 +432,9 @@ public struct CallSelection {
         import core.stdc.string: strlen;
         import gen.dpragma: LDCPragma;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
-        import snakebite.backends.builtins:
+        import snakebite.builtin.call:
             copyVariadicEntry, endVariadicEntry;
-        import snakebite.backends.ldcintrinsics;
+        import snakebite.builtin.ldc;
 
         static IntrinsicPlan builtin(BuiltinCall entry) {
             return entry is null
@@ -495,7 +495,7 @@ public struct CallSelection {
     private static IntrinsicPlan buildIntrinsicPlan(FuncDeclaration function_,
         in imported!"dmd.dmodule".Module module_,
     ) {
-        import snakebite.backends.builtins:
+        import snakebite.builtin.call:
             destinationParameterOf, entryOf;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
@@ -591,7 +591,7 @@ public struct CallSelection {
         ) {
             import core.bitop: popcnt;
             import core.stdc.fenv;
-            import snakebite.backends.dmdintrinsics: swapTo;
+            import snakebite.builtin.dmd: swapTo;
             import snakebite.native.value: TypeFacts;
 
             auto function_ = expression.f;
@@ -834,7 +834,7 @@ public struct CallSelection {
         import dmd.backend.cdef: Vconst;
         import core.stdc.fenv;
         import core.stdc.string: memcpy;
-        import snakebite.backends.dmdintrinsics: magnitudeTo;
+        import snakebite.builtin.dmd: magnitudeTo;
         import snakebite.native.value: TypeFacts;
 
         // e2ir replaces toPrec with conversions, and evalu8 folds OPabs.
@@ -1056,7 +1056,7 @@ public struct CallSelection {
     }
 
     // The concrete types `function_` declares for its parameters and its
-    // result: the lookup key of `snakebite.backends.builtins.entryOf`,
+    // result: the lookup key of `snakebite.builtin.call.entryOf`,
     // which the name alone does not give. `false` when the signature has a
     // type that no wrapper takes, or a parameter or result that does not
     // have the plain value layout a wrapper reads and writes.
