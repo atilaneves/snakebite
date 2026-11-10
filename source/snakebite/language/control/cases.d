@@ -2,13 +2,18 @@ module snakebite.language.control.cases;
 
 private:
 
-import dmd.statement: Statement;
+import dmd.statement:
+    CaseStatement,
+    DefaultStatement,
+    GotoCaseStatement,
+    GotoDefaultStatement,
+    SwitchStatement;
 
 package(snakebite) struct SwitchPlan {
     enum NoMatch { defaultTarget, exit }
 
-    imported!"dmd.statement".CaseStatement[] cases;
-    imported!"dmd.statement".DefaultStatement defaultTarget;
+    CaseStatement[] cases;
+    DefaultStatement defaultTarget;
     // A case value is a `const` or `immutable` variable, known only at run
     // time. dmd then tests the cases in order (`hasVars`); otherwise each
     // case value is a constant.
@@ -25,9 +30,8 @@ package(snakebite) struct SwitchPlan {
 // expanded case ranges. Keep the cases and default target in one plan so
 // both backends select the same case.
 package(snakebite) SwitchPlan switchPlan(
-    imported!"dmd.statement".SwitchStatement statement,
+    SwitchStatement statement,
 ) {
-    import dmd.statement: CaseStatement;
 
     CaseStatement[] cases;
     if (statement.cases !is null)
@@ -62,11 +66,11 @@ package(snakebite) CaseTable caseTableOf(SwitchPlan plan) {
     return table;
 }
 
-package(snakebite) imported!"dmd.statement".CaseStatement selectCase(
+package(snakebite) CaseStatement selectCase(
     SwitchPlan plan,
     long value,
     scope long delegate(
-        imported!"dmd.statement".CaseStatement,
+        CaseStatement,
     ) caseValue,
 ) {
     foreach (case_; plan.cases)
@@ -81,16 +85,16 @@ package(snakebite) bool switchCaseMatches(long value, long caseValue)
     return value == caseValue;
 }
 
-package(snakebite) imported!"dmd.statement".CaseStatement gotoCaseTarget(
-    imported!"dmd.statement".GotoCaseStatement statement,
+package(snakebite) CaseStatement gotoCaseTarget(
+    GotoCaseStatement statement,
 )
     @safe @nogc nothrow pure scope
 {
     return statement.cs;
 }
 
-package(snakebite) imported!"dmd.statement".DefaultStatement gotoDefaultTarget(
-    imported!"dmd.statement".GotoDefaultStatement statement,
+package(snakebite) DefaultStatement gotoDefaultTarget(
+    GotoDefaultStatement statement,
 )
     @safe @nogc nothrow pure scope
 {

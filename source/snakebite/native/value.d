@@ -500,8 +500,7 @@ public void* virtualFunctionWord(in void* receiver, size_t index) {
 }
 
 // `storeIntegral` for a caller that has not validated `size`: it throws an
-// `Exception` for a width with no native layout, as the `nativelayout`
-// wrappers did before the native value operations moved to this module. A
+// `Exception` for a width with no native layout. A
 // caller that already validated its width calls `storeIntegral` directly.
 // `snakebite.backends.interpreter.walker` calls this on nearly every
 // integral assignment it interprets, so it collapses into that caller
@@ -572,8 +571,9 @@ public enum delegateContextOffset = 0;
 public enum delegateFunctionOffset = (void*).sizeof;
 public enum delegateValueSize = 2 * (void*).sizeof;
 
-// Which byte-level transform a cast performs, once `snakebite.backends.
-// casts.classify` has decided it. This is the one enum both
+// Which byte-level transform a cast performs, once
+// `snakebite.language.operators.casts.classify` has decided it. This is the
+// one enum both
 // `snakebite.language.operators.casts.CastPlan.kind` (classify's own answer,
 // while dmd's types are still in scope) and `applyCast`/`applyCastAs`
 // below (turning that answer into bytes, once they are not) read -

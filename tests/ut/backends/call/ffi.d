@@ -2532,9 +2532,9 @@ private extern(D) double snakebite_ut_dvariadic_mixed_sum_backend(...) {
 // type, in the test below - and returns that type's own `tsize`, read
 // off `_arguments[0]` the same way the real `_argptr`/register-save-area
 // machinery would (`object.TypeInfo_Struct.tsize`'s own druntime
-// implementation returns its `m_init.length`, which `snakebite.backends.
-// runtimetypes.RuntimeTypes.structInfo` already sets to the guest
-// struct's own real init bytes - so this test also checks that
+// implementation returns its `m_init.length`, which
+// `snakebite.language.statics.typeinfo.RuntimeTypes.structInfo` already sets
+// to the guest struct's own real init bytes - so this test also checks that
 // fabricated `TypeInfo_Struct` is the right size, not merely present).
 pragma(mangle, "snakebite_ut_dvariadic_struct_backend")
 private extern(D) size_t snakebite_ut_dvariadic_struct_backend(
