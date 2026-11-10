@@ -36,7 +36,7 @@ package(snakebite) struct FrameLayout {
 
     package(snakebite) size_t size;
     package(snakebite) uint alignment = 1;
-    package(snakebite) imported!"snakebite.stack.returnplace".ReturnPlace returnPlace;
+    package(snakebite) imported!"snakebite.stack.frames".ReturnPlace returnPlace;
     private imported!"snakebite.language.layout.returnstorage".ReturnStoragePlan _returns;
 
     // Whether a local of the function can point into the temporaries of its
@@ -137,7 +137,7 @@ package(snakebite) struct FrameLayout {
         if (layout._returns.hasPlace) {
             const result = typeFacts(
                 typeFunctionOf(function_).next);
-            layout.returnPlace = imported!"snakebite.stack.returnplace"
+            layout.returnPlace = imported!"snakebite.stack.frames"
                 .ReturnPlace(layout.reserveSlot(
                     imported!"snakebite.native.value".TypeFacts.pointer).offset,
                     result.size, result.alignment);

@@ -1758,9 +1758,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // old destination until then. A function whose returns are all of that
     // kind keeps a pointer to the place in a frame slot; the callers store it
     // there. Returns the place of the function.
-    private imported!"snakebite.stack.returnplace".ReturnPlace
+    private imported!"snakebite.stack.frames".ReturnPlace
     redirectReturns() {
-        import snakebite.stack.returnplace: ReturnPlace;
+        import snakebite.stack.frames: ReturnPlace;
 
         auto place = _layout.returnPlace;
         if (_isVoidReturn || _isRefReturn)
