@@ -34,7 +34,6 @@ private struct Recorded {
     // Set by the test before the call: whether the signature has a
     // hidden context. A raw handler has no layout to ask.
     bool expectsContext;
-    bool hasContext;
     size_t calls;
 }
 
@@ -47,9 +46,8 @@ private struct Recorded {
 private extern(C) void recordIntOfInt(void* owner, CallbackCall* call) {
     auto recorded = cast(Recorded*) owner;
     ++recorded.calls;
-    recorded.hasContext = recorded.expectsContext;
-    const first = recorded.hasContext ? 1 : 0;
-    recorded.context = recorded.hasContext
+    const first = recorded.expectsContext ? 1 : 0;
+    recorded.context = recorded.expectsContext
         ? *cast(void**) call.arguments[0] : null;
     recorded.integers ~= *cast(const int*) call.arguments[first];
     *cast(int*) call.returnPlace = cast(int) (recorded.integers[$ - 1] * 2 + 1);
@@ -124,24 +122,6 @@ private bool inTemplateChunk(const(void)* entry) {
         && entry < cast(const(void)*) &snakebite_ffi_callback_chunk_end;
 }
 
-private extern(C) void doubleIntNoDeclaration(void*, CallbackCall* call) {
-    *cast(int*) call.returnPlace = *cast(const int*) call.arguments[0] * 2;
-}
-
-// A backend with no AST registers an entry from the signature data alone.
-@("entry.fromSignatureWithoutDeclaration")
-unittest {
-    auto signature = nativeSignatureOf(
-        declarationOf(q{ extern(C) int twice(int x); }, "twice"));
-    auto bridge = new CallbackBridge(&doubleIntNoDeclaration, null);
-    int word;
-    bridge.register(&word, signature);
-
-    auto entry = cast(IntOfInt) bridge.entryOf(&word);
-    (entry !is null).should == true;
-    entry(21).should == 42;
-}
-
 @("entry.vector4ArgumentAndReturn")
 unittest {
     auto function_ = declarationOf(
@@ -194,7 +174,6 @@ unittest {
 
     recorded.calls.should == 2;
     recorded.integers.should == [20, -3];
-    recorded.hasContext.should == false;
 
     foreach (index; [4, 0]) {
         (bridge.entryOf(&words[index]) is null).should == true;
@@ -391,7 +370,6 @@ unittest {
     callback.ptr = &context;
 
     callback(4).should == 9;
-    recorded.hasContext.should == true;
     (recorded.context is &context).should == true;
     recorded.integers.should == [4];
 

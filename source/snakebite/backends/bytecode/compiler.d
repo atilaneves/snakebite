@@ -371,9 +371,6 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     package void registerGuestWord(
         FuncDeclaration function_, const(Function)* compiled,
     ) {
-        // A callback can first run during GC finalization, when allocating
-        // its argument layout is forbidden.
-        layoutOf(function_);
         _plans.registerGuestFunction(compiled, function_);
     }
 
@@ -1369,7 +1366,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             resultPlace,
         );
         result.inlineBody = inlineBody;
-        result.hostCall = _layout.hostCall(_function.toString.idup);
+        // No copy: this is the name of the function's identifier, which
+        // dmd interns in a table that lives, uncleared, until the process
+        // ends (`rebuildIdentifierTable` in frontend/compiler.d), or a
+        // string literal. It outlives every `Function`.
+        result.hostCall = _layout.hostCall(
+            cast(string) _function.toString);
         result.relocs = _relocs;
         result.windowSlot = _windowSlot;
         result.windowBytes = _windowReach;

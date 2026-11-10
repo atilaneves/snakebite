@@ -545,7 +545,6 @@ private void checkArgumentCountRule(
     );
 }
 
-
 // One guest closure's native context layout: the enclosing context pointer
 // followed by the captured variables dmd stores in the closure object.
 // Shared between backends because the context has the same native shape
