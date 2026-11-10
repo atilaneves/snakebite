@@ -160,18 +160,22 @@ public struct GuestModules {
         return _failed;
     }
 
-    // What the calling thread registered with druntime and did not unregister,
-    // and the registry images it opened and did not close. Unlike the maps of
-    // the process, other threads cannot change them.
+    // What the process registered with druntime and did not unregister, and
+    // the registry images it opened and did not close. The counts are for the
+    // whole process, so a test that reads them must run with no other test in
+    // the process: tag it `@alone` (build/ci.sh runs those with
+    // `bin/at -s '@alone'`).
     version(unittest)
     public static Held held() {
-        return Held(_registrations, _images, _leftToExit);
+        return Held(
+            atomicLoad(_registrations), atomicLoad(_images),
+            atomicLoad(_leftToExit));
     }
 
     public struct Held {
         ptrdiff_t registrations;
         ptrdiff_t images;
-        // The registrations that this thread left to the end of the process.
+        // The registrations that were left to the end of the process.
         ptrdiff_t leftToExit;
     }
 
@@ -274,7 +278,7 @@ pragma(mangle, "_D2rt19sections_elf_shared3DSO11moduleGroupMNgFNbNcNdNiNjZNgSQCh
 private extern(C) RuntimeGroup* registeredGroup(void* dso);
 
 
-private import core.atomic: atomicLoad, atomicStore, cas;
+private import core.atomic: atomicLoad, atomicOp, atomicStore, cas;
 private import snakebite.backends.api: Backend;
 private import snakebite.start.data:
     FunctionHandle, GateStorage, ModuleStart, StartData;
@@ -328,7 +332,7 @@ private ExitRecord* newExitRecord(Run* run, void** slot) {
 private void leaveToExit(Run* run) {
     run.exit = newExitRecord(null, run.image.slot);
     run.exit.left = true;
-    ++_leftToExit;
+    atomicOp!"+="(_leftToExit, 1);
 }
 
 
@@ -375,9 +379,9 @@ private extern(C) void endAtExit() {
 
 
 private shared(ExitRecord*) _ending;
-private ptrdiff_t _registrations;
-private ptrdiff_t _images;
-private ptrdiff_t _leftToExit;
+private shared ptrdiff_t _registrations;
+private shared ptrdiff_t _images;
+private shared ptrdiff_t _leftToExit;
 private shared bool _endHandlerRegistered;
 
 
@@ -953,7 +957,7 @@ private struct Image {
         if (image._slot is null)
             internalFailure("the registry image exports its slot");
 
-        ++_images;
+        atomicOp!"+="(_images, 1);
         return image;
     }
 
@@ -994,7 +998,7 @@ private struct Image {
             1, _slot, records.ptr, records.ptr + records.length);
         // druntime keeps the registration when a constructor throws.
         _registered = true;
-        ++_registrations;
+        atomicOp!"+="(_registrations, 1);
         _d_dso_registry(&data);
     }
 
@@ -1009,7 +1013,7 @@ private struct Image {
     public static void unregister(void** slot) {
         auto data = CompilerDSOData(1, slot, null, null);
         _d_dso_registry(&data);
-        --_registrations;
+        atomicOp!"-="(_registrations, 1);
     }
 
     public void** slot() {
@@ -1024,6 +1028,6 @@ private struct Image {
 
         dlclose(_handle);
         close(_file);
-        --_images;
+        atomicOp!"-="(_images, 1);
     }
 }
