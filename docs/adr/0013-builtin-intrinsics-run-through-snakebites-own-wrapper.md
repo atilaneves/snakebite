@@ -239,5 +239,5 @@ entry names all three.
 `source/snakebite/builtin/call.d` holds the covered signatures;
 `CallSelection` holds the shared DMD code-generator and call-site rules.
 Adding a wrapper does not make a declaration an intrinsic. The bytecode VM
-imports only `BuiltinCall` from `builtins.d`, never a dmd frontend
+imports only `BuiltinCall` from `builtin/call.d`, never a dmd frontend
 type (CODING.md, "Code organisation").
