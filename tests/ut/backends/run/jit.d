@@ -129,3 +129,50 @@ static foreach (backend; Matrix!(
         }, ["work"]);
     }
 }
+
+static foreach (backend; Matrix!()) {
+    // A backend that is gone gives back its JIT code region. Many backends
+    // that one after the other make a function hot must not keep a code
+    // file open each.
+    @("jit.backendsThatAreGoneDoNotKeepTheirCodeFiles." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        import core.memory: GC;
+
+        enum backends = 200;
+        const before = openJitFiles;
+        foreach (_; 0 .. backends) {
+            0.shouldBeStatusOf!(backend, q{
+                long work(long n) {
+                    assert(n > 0);
+                    long sum;
+                    foreach (i; 0 .. n)
+                        sum += i % 5;
+                    return sum;
+                }
+                int main() {
+                    return work(5000) == 5000 / 5 * 10 ? 0 : 1;
+                }
+            });
+        }
+        GC.collect;
+        (openJitFiles - before).shouldBeSmallerThan(backends / 2);
+    }
+}
+
+// The number of JIT code files that this process has open.
+private long openJitFiles() {
+    import std.algorithm: canFind;
+    import std.file: dirEntries, FileException, readLink, SpanMode;
+
+    long count;
+    foreach (entry; dirEntries("/proc/self/fd", SpanMode.shallow)) {
+        try {
+            if (readLink(entry.name).canFind("snakebite-jit"))
+                ++count;
+        } catch (FileException) {
+            // The descriptor of the directory listing itself can be gone.
+        }
+    }
+    return count;
+}
