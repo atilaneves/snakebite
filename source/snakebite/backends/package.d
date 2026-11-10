@@ -2,7 +2,6 @@ module snakebite.backends;
 
 
 public import snakebite.backends.api;
-public import snakebite.run.program;
 public import snakebite.program;
 
 

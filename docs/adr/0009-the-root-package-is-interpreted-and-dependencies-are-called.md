@@ -9,7 +9,7 @@ and which functions it calls across the barrier. Issue #41 states the
 rule as "what would compiled code do": a dub dependency's archive is
 called across the barrier. The root package's own object file is
 interpreted. `Program.isRootOwned` in
-`source/snakebite/backends/api.d` already tests this rule on
+`source/snakebite/program.d` already tests this rule on
 modules.
 
 ## Decision

@@ -10,7 +10,7 @@ the frame stack are per-context state, and they are not thread-safe.
 Before this decision, the interim workaround was to force
 unit-threaded's single-threaded flag; #35 and #40 call that a
 restriction, not a solution. Callbacks must work from any thread, the
-same as they do for compiled D. `runMain` (`backends/api.d`)
+same as they do for compiled D. `runMain` (`source/snakebite/run/program.d`)
 passes the host's own arguments unchanged - nothing in this project
 appends the single-threaded flag any more.
 
