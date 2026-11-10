@@ -332,7 +332,7 @@ package struct JitState {
             bool done;
             g.usedKnown = false;
             if (originals[i] !is null && ops[i].kind != JitOp.Kind.none)
-                done = g.emitOp(i, ops[i], originals[i]);
+                done = g.emitOp(i, ops, originals[i]);
             else
                 g.fpSlots = FpSlots.init;
             if (g.outOfMemory)
@@ -1389,6 +1389,11 @@ private struct Gen {
         fix(target);
     }
 
+    void jmpLocalTo(size_t offset) {
+        a.b(0xE9);
+        a.d32(cast(int) (offset - (a.n + 4)));
+    }
+
     void jccTo(int cc, size_t target) {
         a.b(0x0F);
         a.b(cast(ubyte) (0x80 + cc));
@@ -1684,17 +1689,20 @@ private struct Gen {
         a.jmpRax;
     }
 
-    bool emitOp(size_t i, in JitOp op, Instruction.Handler original) {
+    bool emitOp(size_t i, const(JitOp)[] ops,
+        Instruction.Handler original)
+    {
+        const op = ops[i];
         const arithmetic = op.kind == JitOp.Kind.fp3;
         const compare = op.kind == JitOp.Kind.fused
             && op.fused.kind == CompareKind.floating;
         if (!arithmetic && !compare) {
             fpSlots = FpSlots.init;
-            return emitTemplate(i, op, original);
+            return emitTemplate(i, ops, op, original);
         }
 
         const incoming = fpSlots;
-        const done = emitTemplate(i, op, original);
+        const done = emitTemplate(i, ops, op, original);
         if (!done || compare)
             fpSlots = FpSlots.init;
         if (done && !incoming.empty) {
@@ -1709,7 +1717,7 @@ private struct Gen {
         return done;
     }
 
-    bool emitTemplate(size_t i, in JitOp op,
+    bool emitTemplate(size_t i, const(JitOp)[] ops, in JitOp op,
         Instruction.Handler original)
     {
         const ins = snapshot[i];
@@ -1786,6 +1794,40 @@ private struct Gen {
             size_t t;
             if (!targetIndex(ins.destination, t))
                 return false;
+            if (t < i && ops[t].kind == fused
+                    && ops[t].fused.kind != CompareKind.floating) {
+                const header = snapshot[t];
+                size_t exit;
+                // Keep the header for initial entry. At the back edge, jump
+                // to its fallthrough only when the test would stay in the loop.
+                if (targetIndex(header.sourceWidth, exit) && exit == i + 1) {
+                    // `auto` would keep the copy const.
+                    JitOp.Fused test = ops[t].fused;
+                    test.jumpWhen = !test.jumpWhen;
+                    const saved = a.n;
+                    const previous = ops[i - 1];
+                    const update = snapshot[i - 1];
+                    const forwardLeft = previous.kind == int3
+                        && !previous.int3.resultInR0 && !test.leftInR0
+                        && !(update.destination & indirectBit)
+                        && update.destination == header.destination
+                        && (previous.width ? previous.width : update.width)
+                            == header.width;
+                    if (emitFused(header, test, t + 1, forwardLeft)) {
+                        if (forwardLeft) {
+                            // Only the preceding template leaves its result
+                            // in RAX. Dispatch into the back edge reloads it.
+                            jmpTo(exit);
+                            labels[i] = a.n;
+                            a.ld(cast(int) header.width, RAX,
+                                Mem(FRAME, cast(int) header.destination));
+                            jmpLocalTo(saved);
+                        }
+                        return true;
+                    }
+                    a.n = saved;
+                }
+            }
             jmpTo(t);
             return true;
         }
@@ -1807,8 +1849,10 @@ private struct Gen {
             return emitInt3(ins, op);
         case cmp3:
             return emitCmp3(ins, op);
-        case fused:
-            return emitFused(ins, op);
+        case fused: {
+            size_t t;
+            return targetIndex(ins.sourceWidth, t) && emitFused(ins, op.fused, t);
+        }
         case fp3:
             return emitFp3(ins, op);
         case fpcmp3:
@@ -2154,12 +2198,10 @@ private struct Gen {
         return true;
     }
 
-    bool emitFused(in Instruction ins, in JitOp op) {
-        const p = op.fused;
+    bool emitFused(in Instruction ins, in JitOp.Fused p, size_t t,
+        bool forwardLeft = false)
+    {
         const w = cast(int) ins.width;
-        size_t t;
-        if (!targetIndex(ins.sourceWidth, t))
-            return false;
         Mem l;
         if (p.kind != CompareKind.floating) {
             if (!goodWidth(w))
@@ -2171,7 +2213,8 @@ private struct Gen {
                 return false;
             int leftReg = REG0;
             if (!p.leftInR0) {
-                a.ld(w, RAX, l);
+                if (!forwardLeft)
+                    a.ld(w, RAX, l);
                 leftReg = RAX;
             }
             int imm;
