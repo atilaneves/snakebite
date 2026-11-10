@@ -1,4 +1,4 @@
-module snakebite.backends.contextpair;
+module snakebite.language.context.pair;
 
 
 private:

@@ -46,7 +46,7 @@ package struct TreeRoot {
     // The statements of the body: one node, a short sequence whose
     // children are fields, or a sequence.
     private Node _body;
-    package const(imported!"snakebite.backends.closureplan".ClosurePlan)*
+    package const(imported!"snakebite.language.context.chain".ClosurePlan)*
         closurePlan;
     package Type returnType;
     package TypeFacts returnFacts;
@@ -345,7 +345,7 @@ package struct AccessSite {
 // `indirect` is set when the slot holds the address of the storage.
 package struct OuterVariable {
     package bool ok;
-    package const(imported!"snakebite.backends.closureplan".Hop)[] hops;
+    package const(imported!"snakebite.language.context.chain".Hop)[] hops;
     package size_t offset;
     package bool indirect;
 }
@@ -587,7 +587,7 @@ private final class PointerAddress : Node {
 // A variable of an enclosing function: the static chain's words from the
 // running frame, then the variable's offset.
 private final class OuterAddress : Node {
-    import snakebite.backends.closureplan: Hop;
+    import snakebite.language.context.chain: Hop;
 
     private const(Hop)[] _hops;
     private size_t _offset;
@@ -2211,7 +2211,7 @@ private final class ContextFromValue : Node {
 // frame, or the frame of an enclosing function, reached through the static
 // chain.
 private final class FrameContextStore : Node {
-    import snakebite.backends.closureplan: Hop;
+    import snakebite.language.context.chain: Hop;
 
     private size_t _offset;
     private const(Hop)[] _hops;
@@ -2226,7 +2226,7 @@ private final class FrameContextStore : Node {
 // The context that `hops` reach from `frame` along the static chain. A
 // context that a hop finds null stays null.
 private ubyte* contextAlong(
-    ubyte* frame, const(imported!"snakebite.backends.closureplan".Hop)[] hops,
+    ubyte* frame, const(imported!"snakebite.language.context.chain".Hop)[] hops,
 ) {
     auto context = frame;
     foreach (hop; hops) {
@@ -2721,7 +2721,7 @@ private final class EvaluatedPair(E) : SliceNode {
 // finds null stays null: such a delegate does not capture, so its context is
 // never read.
 private final class FrameDelegate : SliceNode {
-    import snakebite.backends.closureplan: Hop;
+    import snakebite.language.context.chain: Hop;
 
     private const(Hop)[] _hops;
     private void* _function;
@@ -2782,7 +2782,7 @@ private final class MethodDelegate(E, MethodReceiver kind) : SliceNode {
 // its variable (`PairPlan`): the receiver, or the first context, and the
 // outer context. The node yields the address of the pair.
 private final class ContextPair : Node {
-    import snakebite.backends.contextsource: PairPlan;
+    import snakebite.language.context.source: PairPlan;
 
     private Node _storage;
     private Node _first;
@@ -4871,7 +4871,7 @@ private final class ConstructorCall(E) : Node {
 
     public this(E ev, CallExp site, FuncDeclaration constructor,
             Node receiver, bool receiverIsAddress, SiteArguments arguments) {
-        import snakebite.backends.contextpair: constructsThroughPair;
+        import snakebite.language.context.pair: constructsThroughPair;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         _ev = ev; _site = site;
@@ -4906,7 +4906,7 @@ private final class ConstructorCall(E) : Node {
 
     // Runs the constructor and returns the object that it constructed.
     private size_t construct(ubyte* frame) {
-        import snakebite.backends.contextpair: constructedObjectOffset;
+        import snakebite.language.context.pair: constructedObjectOffset;
         import snakebite.language.layout.temporary: constructTemporary;
 
         auto ev = _ev;
@@ -5701,9 +5701,9 @@ private Slot slotOf(E)(E ev, VarDeclaration variable) {
 // The words to load from the running frame to reach the running function's
 // own context: none when it is the frame, and the closure's slot when the
 // function has a closure.
-private const(imported!"snakebite.backends.closureplan".Hop)[]
+private const(imported!"snakebite.language.context.chain".Hop)[]
 ownContextHops(E)(E ev) {
-    import snakebite.backends.closureplan: Hop;
+    import snakebite.language.context.chain: Hop;
 
     const closure = ev._layout.closure;
     return closure == size_t.max
@@ -6064,7 +6064,7 @@ private Node buildCall(E)(E ev, CallExp call) {
     import dmd.astenums: TY;
     import dmd.typesem: toBasetype;
     import snakebite.backends.calls: CallSelection;
-    import snakebite.backends.contextsource: pairPlanOf;
+    import snakebite.language.context.source: pairPlanOf;
     import snakebite.frontend.dmd.dispatch: CallReceiver, readsVtable,
         receiverOf;
     import snakebite.frontend.dmd.functions: typeFunctionOf, unresolvedCalleeOf;
@@ -6207,7 +6207,7 @@ private Node bound(N)(TreeCallee* callee, N node) {
 private Node buildThisValue(E)(E ev, VarDeclaration variable) {
     import dmd.astenums: TY;
     import dmd.typesem: toBasetype;
-    import snakebite.backends.closureplan: ClosurePlan;
+    import snakebite.language.context.chain: ClosurePlan;
     import snakebite.frontend.dmd.delegates: outerFunctionOf;
 
     auto slot = buildVariableAddress(ev, variable);
@@ -6234,9 +6234,9 @@ private Node buildCalleeContext(E)(E ev, CallExp call, FuncDeclaration callee) {
 // The context that `source` names, as an address. Null when the tree does
 // not reach it.
 private Node buildContext(E)(
-    E ev, in imported!"snakebite.backends.contextsource".ContextSource source,
+    E ev, in imported!"snakebite.language.context.source".ContextSource source,
 ) {
-    import snakebite.backends.contextsource: ContextSource;
+    import snakebite.language.context.source: ContextSource;
     import snakebite.failure.report: internalFailure;
 
     final switch (source.kind) with (ContextSource.Kind) {
@@ -7118,7 +7118,7 @@ private const(void)[] classImageOf(E)(E ev, NewExp expression) {
 // made in: the frame of this function or of one that encloses it, or one
 // that the evaluator finds.
 private Node buildVthisStep(E)(E ev, InitStep step) {
-    import snakebite.backends.contextsource: ContextSource, contextSourceOf;
+    import snakebite.language.context.source: ContextSource, contextSourceOf;
 
     if (step.source !is null) {
         auto value = buildValue(ev, step.source);
@@ -7474,7 +7474,7 @@ private Node buildValue(E)(E ev, Expression expression) {
         case this_, super_: {
             // `super` is `this` with the type of the base class; dmd's
             // `SuperExp` is a `ThisExp`.
-            import snakebite.backends.closureplan: ClosurePlan;
+            import snakebite.language.context.chain: ClosurePlan;
             import snakebite.frontend.dmd.delegates: outerFunctionOf;
 
             auto variable = thisVariable(ev, cast(ThisExp) expression);

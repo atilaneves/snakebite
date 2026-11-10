@@ -280,8 +280,8 @@ private struct Shared {
     import snakebite.backends.classinfo: ClassRuntimeCache;
     import snakebite.language.layout.frame: ClosureLayout, FrameLayout;
     import snakebite.backends.runtimetypes: RuntimeTypes;
-    import snakebite.backends.closureplan: ClosurePlan, Hop;
-    import snakebite.backends.contextsource: ContextSource;
+    import snakebite.language.context.chain: ClosurePlan, Hop;
+    import snakebite.language.context.source: ContextSource;
     import snakebite.ffi: PlanCache;
     import dmd.declaration: VarDeclaration;
     import snakebite.native.value: TypeFacts;
@@ -596,8 +596,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     import snakebite.frontend.dmd.delegates:
         DelegateTarget, isCtfeVariable, outerFunctionOf;
     import snakebite.language.layout.frame: ClosureLayout, FrameLayout;
-    import snakebite.backends.closureplan: ClosurePlan, Hop;
-    import snakebite.backends.contextsource:
+    import snakebite.language.context.chain: ClosurePlan, Hop;
+    import snakebite.language.context.source:
         ContextSource, PairPlan, contextSourceOf, pairPlanOf;
     import snakebite.backends.interpreter.scout: BodyScout, Preparation;
     import snakebite.backends.classinfo;
@@ -1303,7 +1303,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             });
         }
 
-        import snakebite.backends.contextpair:
+        import snakebite.language.context.pair:
             constructedObjectOffset, constructsThroughPair;
         import snakebite.language.layout.temporary: constructTemporary;
         import snakebite.native.value: checkedLoadIntegral;

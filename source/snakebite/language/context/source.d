@@ -1,10 +1,10 @@
-module snakebite.backends.contextsource;
+module snakebite.language.context.source;
 
 
 private:
 
 
-import snakebite.backends.contextpair:
+import snakebite.language.context.pair:
     DualContext, fieldTowards, parentTowards, wordTowards;
 import snakebite.failure.report: internalFailure;
 
@@ -123,7 +123,7 @@ private ContextSource overriderSourceOf(
     imported!"dmd.func".FuncDeclaration owner,
     ref imported!"snakebite.native.argumentflow".SignatureTable signatures,
 ) {
-    import snakebite.backends.closureplan: ClosurePlan;
+    import snakebite.language.context.chain: ClosurePlan;
     import snakebite.language.layout.frame: FrameLayout;
 
     int adjustment;

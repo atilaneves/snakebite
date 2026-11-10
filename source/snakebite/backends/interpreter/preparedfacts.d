@@ -12,7 +12,7 @@ import dmd.location: Loc;
 import snakebite.backends.runtimetypes: RuntimeTypes;
 import snakebite.backends.aggregateinit: AggregateInitPlan, planStructLiteral;
 import snakebite.language.operators.casts: CastPlan, classify;
-import snakebite.backends.contextsource: ContextSource, calleeContextSourceOf;
+import snakebite.language.context.source: ContextSource, calleeContextSourceOf;
 import snakebite.frontend.compiler: gagged;
 import snakebite.frontend.typefacts: typeFacts, tryTypeFacts, bitfieldAccess;
 import snakebite.native.value: TypeFacts;
