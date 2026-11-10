@@ -11,7 +11,8 @@ import snakebite.internalfailure: internalFailure;
 
 
 import snakebite.backends.argumentflow: Shape, Signature, SignatureTable;
-import snakebite.exception: SnakebiteException;
+import snakebite.backends.hostcalllayout:
+    checkArgumentCountRule, HostCallLayout;
 
 // One guest function's declared-storage layout: each parameter's byte
 // offset, each local's byte offset, and the total size and alignment one
@@ -459,26 +460,28 @@ package struct FrameLayout {
         in size_t argumentCount, FuncDeclaration function_,
         in string backendName,
     ) const {
-        import std.conv: text;
+        checkArgumentCountRule(
+            argumentCount, parameters.length, hiddenThis.variable !is null,
+            function_.toString, backendName);
+    }
 
-        const required = parameters.length
-            + (hiddenThis.variable !is null ? 1 : 0);
-        if (argumentCount == required)
-            return;
-
-        if (hiddenThis.variable !is null
-                && argumentCount == parameters.length)
-            throw new SnakebiteException(
-                text(backendName, " cannot run `", function_.toString,
-                    "`: the host passed no context for its "
-                    ~ "hidden `this`"),
-            );
-
-        throw new SnakebiteException(
-            text(backendName, " expected ", required,
-                " host-to-guest argument(s) for `",
-                function_.toString, "`, got ", argumentCount),
-        );
+    // What a host caller needs to bind its arguments into a frame of this
+    // layout, with no declaration left in it. `name` is how errors about the
+    // function read.
+    package HostCallLayout hostCall(string name) const {
+        HostCallLayout result;
+        result.name = name;
+        foreach (parameter; parameters)
+            result.parameters ~= HostCallLayout.Argument(
+                parameter.offset, parameter.facts.size);
+        if (hiddenThis.variable !is null) {
+            result.hasHiddenThis = true;
+            result.hiddenThis = HostCallLayout.Argument(
+                hiddenThis.parameter.offset, size_t.sizeof);
+        }
+        result.variadicCursor = variadicCursor;
+        result.variadicTypes = variadicTypes;
+        return result;
     }
 }
 

@@ -14,13 +14,6 @@ import snakebite.ffi.sysv:
     snakebite_ffi_callback_chunk, snakebite_ffi_callback_chunk_end,
     snakebite_ffi_callback_chunk_trailer, snakebite_ffi_callback_common;
 
-// `imported!"dmd.func"` is a module-scope-only construct (ai/CODING.md);
-// this names the one type this module only carries for a backend that
-// keeps the declaration (`CallbackCall`, `Registered`, `Slot` and
-// `adjustedEntryOf`), so every struct and class below reads it as a plain
-// type instead.
-private alias FuncDeclaration = imported!"dmd.func".FuncDeclaration;
-
 
 // The pool of callback entries (ADR-0003): the addresses host code calls
 // when it calls a guest function through a function pointer or a
@@ -61,9 +54,6 @@ private alias FuncDeclaration = imported!"dmd.func".FuncDeclaration;
 // `runHostToGuest` reads it exactly as it reads a declared parameter.
 public struct CallbackCall {
     public const(void)* function_;
-    // Only what the caller of `register` or `adjustedEntryOf` passed;
-    // the pool never reads it.
-    public FuncDeclaration declaration;
     public void* returnPlace;
     public const(void*)[] arguments;
     // A native SysV `va_list` cursor for a C or D variadic callback.
@@ -85,7 +75,6 @@ private struct Slot {
     CallbackHandler handler;
     void* owner;
     const(void)* function_;
-    FuncDeclaration declaration;
     const(CallPlan)* plan;
     ptrdiff_t contextAdjustment;
     const(void)* nativeAddress;
@@ -620,7 +609,6 @@ private void invoke(ref Slot slot, CallFrame* frame) {
 
     CallbackCall call;
     call.function_ = slot.function_;
-    call.declaration = slot.declaration;
     call.arguments = cast(const(void*)[]) guestAddresses;
     call.returnPlace = plan.callbackReturnPlace(frame, scratch);
     call.variadicCursor = plan.callbackVariadicCursor(frame, scratch);
@@ -661,7 +649,6 @@ public struct CallbackBridge {
 
     private struct Registered {
         NativeSignature signature;
-        FuncDeclaration declaration;
         const(void)* entry;
     }
 
@@ -698,17 +685,11 @@ public struct CallbackBridge {
         _prepare = prepare;
     }
 
-    // `declaration` is handed to the backend in `CallbackCall.declaration`
-    // and serves nothing else: the entry's type is `signature`.
-    public void register(
-        const(void)* word,
-        NativeSignature signature,
-        FuncDeclaration declaration = null,
-    ) {
+    public void register(const(void)* word, NativeSignature signature) {
         if (word is null || word in _words)
             return;
         includeWord(cast(size_t) word);
-        _words.insert(word, Registered(signature, declaration, null));
+        _words.insert(word, Registered(signature, null));
     }
 
     // Publish a wider range before publishing its new word. Concurrent
@@ -767,7 +748,7 @@ public struct CallbackBridge {
                 auto plan = new CallPlan;
                 *plan = prepareCallback(registered.signature);
                 auto slot = Slot(
-                    _handler, _owner, word, registered.declaration, plan);
+                    _handler, _owner, word, plan);
                 slot.bridge = &this;
                 const entry = reserve(slot);
                 _wordOfEntry.insert(entry, word);
@@ -848,7 +829,7 @@ public struct CallbackBridge {
     // original interface pointer, including when they store a delegate.
     public const(void)* adjustedEntryOf(
         const(void)* word, lazy NativeSignature signature,
-        in ptrdiff_t adjustment, FuncDeclaration declaration = null,
+        in ptrdiff_t adjustment,
     ) {
         if (adjustment == 0) {
             const entry = entryOf(word);
@@ -870,7 +851,7 @@ public struct CallbackBridge {
             *plan = prepareCallback(signature);
             assert(plan.hasHiddenContext);
             auto slot = Slot(
-                _handler, _owner, word, declaration, plan, adjustment,
+                _handler, _owner, word, plan, adjustment,
                 contains(word) ? null : word,
             );
             slot.bridge = &this;

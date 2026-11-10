@@ -31,24 +31,23 @@ private struct Recorded {
     double[] doubles;
     real[] reals;
     void* context;
-    bool hasContext;
+    // Set by the test before the call: whether the signature has a
+    // hidden context. A raw handler has no layout to ask.
+    bool expectsContext;
     size_t calls;
 }
 
 
-// A raw handler has no layout of its own, only `call.declaration` - the
-// same thing a real backend's `runHostToGuest` asks to decide whether
-// `call.arguments[0]` is a hidden context or the first declared
-// parameter. There is one argument list either way: a context, when
-// there is one, is `arguments[0]`'s own address, not a separate field.
+// A raw handler has no layout of its own, so the test says through
+// `Recorded.expectsContext` whether `call.arguments[0]` is a hidden
+// context or the first declared parameter. There is one argument list
+// either way: a context, when there is one, is `arguments[0]`'s own
+// address, not a separate field.
 private extern(C) void recordIntOfInt(void* owner, CallbackCall* call) {
-    import snakebite.frontend.dmd.delegates: hasHiddenThis;
-
     auto recorded = cast(Recorded*) owner;
     ++recorded.calls;
-    recorded.hasContext = hasHiddenThis(call.declaration);
-    const first = recorded.hasContext ? 1 : 0;
-    recorded.context = recorded.hasContext
+    const first = recorded.expectsContext ? 1 : 0;
+    recorded.context = recorded.expectsContext
         ? *cast(void**) call.arguments[0] : null;
     recorded.integers ~= *cast(const int*) call.arguments[first];
     *cast(int*) call.returnPlace = cast(int) (recorded.integers[$ - 1] * 2 + 1);
@@ -101,11 +100,11 @@ private FuncDeclaration declarationOf(string code, string name) {
 
 
 // The registration a backend makes: the signature comes from the
-// declaration, which the handlers below also read in `call.declaration`.
+// declaration.
 private void registerFunction(
     CallbackBridge* bridge, const(void)* word, FuncDeclaration function_,
 ) {
-    bridge.register(word, nativeSignatureOf(function_), function_);
+    bridge.register(word, nativeSignatureOf(function_));
 }
 
 
@@ -114,32 +113,13 @@ private const(void)* adjustedFunctionEntryOf(
     ptrdiff_t adjustment,
 ) {
     return bridge.adjustedEntryOf(
-        word, nativeSignatureOf(function_), adjustment, function_);
+        word, nativeSignatureOf(function_), adjustment);
 }
 
 
 private bool inTemplateChunk(const(void)* entry) {
     return entry >= cast(const(void)*) &snakebite_ffi_callback_chunk
         && entry < cast(const(void)*) &snakebite_ffi_callback_chunk_end;
-}
-
-private extern(C) void doubleIntNoDeclaration(void*, CallbackCall* call) {
-    assert(call.declaration is null);
-    *cast(int*) call.returnPlace = *cast(const int*) call.arguments[0] * 2;
-}
-
-// A backend with no AST registers an entry from the signature data alone.
-@("entry.fromSignatureWithoutDeclaration")
-unittest {
-    auto signature = nativeSignatureOf(
-        declarationOf(q{ extern(C) int twice(int x); }, "twice"));
-    auto bridge = new CallbackBridge(&doubleIntNoDeclaration, null);
-    int word;
-    bridge.register(&word, signature);
-
-    auto entry = cast(IntOfInt) bridge.entryOf(&word);
-    (entry !is null).should == true;
-    entry(21).should == 42;
 }
 
 @("entry.vector4ArgumentAndReturn")
@@ -194,7 +174,6 @@ unittest {
 
     recorded.calls.should == 2;
     recorded.integers.should == [20, -3];
-    recorded.hasContext.should == false;
 
     foreach (index; [4, 0]) {
         (bridge.entryOf(&words[index]) is null).should == true;
@@ -380,6 +359,7 @@ unittest {
     auto function_ = findFunction(findStruct(module_, "Holder"), "twice");
     assert(function_ !is null, "No method `twice` in the snippet");
     Recorded recorded;
+    recorded.expectsContext = true;
     auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
     int word;
     bridge.registerFunction(&word, function_);
@@ -390,7 +370,6 @@ unittest {
     callback.ptr = &context;
 
     callback(4).should == 9;
-    recorded.hasContext.should == true;
     (recorded.context is &context).should == true;
     recorded.integers.should == [4];
 

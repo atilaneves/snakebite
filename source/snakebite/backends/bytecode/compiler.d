@@ -233,7 +233,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         void*[] args,
     ) {
         const compiled = compileFunction(function_);
-        runHostToGuest(compiled, function_, returnPlace, args);
+        runHostToGuest(compiled, returnPlace, args);
     }
 
     public override void[] staticStorage(
@@ -258,30 +258,26 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // A `ref`-returning callee hands back the result's own address, not
     // its value - the same word compiled D returns in `rax`.
     //
-    // `compiled` is already built, and `function_`'s frame layout below
-    // is read from a cache built under the compiler lock the first time
-    // any thread needs it (`layoutOf`): binding `args` into
-    // `Vm.HostArgument`s and running the compiled body touch no dmd
-    // state, so this takes no lock of its own. A thread that held the
-    // compiler lock here while it waited for another thread's callback -
-    // the way `Thread.join` waits in `otherThread`/`concurrentThreads`
-    // guest code - would never see that callback return, since the
-    // callback's own slow path (`layoutOf`'s miss branch) needs that
-    // same, recursive lock to build a layout the first time (ADR-0006).
+    // `compiled` is already built and carries the layout that binds `args`
+    // (`Function.hostCall`): binding `args` into `Vm.HostArgument`s and
+    // running the compiled body touch no dmd state, so this takes no lock
+    // of its own. A thread that held the compiler lock here while it
+    // waited for another thread's callback - the way `Thread.join` waits
+    // in `otherThread`/`concurrentThreads` guest code - would never see
+    // that callback return (ADR-0006).
     private void runHostToGuest(
         const(Function)* compiled,
-        FuncDeclaration function_,
         void* returnPlace,
         scope const(void*)[] args,
         void* variadicCursor = null,
         const(void)* variadicTypes = null,
     ) {
-        const layout = layoutOf(function_);
-        layout.checkHostArgumentCount(args.length, function_, "bytecode");
+        const layout = &compiled.hostCall;
+        layout.checkArgumentCount(args.length, "bytecode");
 
         Vm.HostArgument[16] inlineArguments = void;
         const count = layout.parameters.length
-            + (layout.hiddenThis.variable !is null)
+            + layout.hasHiddenThis
             + (variadicCursor !is null)
             + (variadicTypes !is null);
         auto arguments = count <= inlineArguments.length
@@ -289,18 +285,15 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         size_t filled;
 
         scope const(void*)[] declaredArguments = args;
-        if (layout.hiddenThis.variable !is null) {
+        if (layout.hasHiddenThis) {
             arguments[filled++] = Vm.HostArgument(
-                layout.hiddenThis.parameter.offset, args[0],
-                size_t.sizeof,
-            );
+                layout.hiddenThis.offset, args[0], layout.hiddenThis.width);
             declaredArguments = args[1 .. $];
         }
 
         foreach (i, parameter; layout.parameters)
             arguments[filled++] = Vm.HostArgument(
-                parameter.offset, declaredArguments[i],
-                parameter.facts.size);
+                parameter.offset, declaredArguments[i], parameter.width);
 
         if (variadicCursor !is null) {
             assert(layout.variadicCursor != size_t.max);
@@ -378,9 +371,6 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     package void registerGuestWord(
         FuncDeclaration function_, const(Function)* compiled,
     ) {
-        // A callback can first run during GC finalization, when allocating
-        // its argument layout is forbidden.
-        layoutOf(function_);
         _plans.registerGuestFunction(compiled, function_);
     }
 
@@ -402,7 +392,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // the host frames untouched (ADR-0004).
     private void callGuestFromHost(CallbackCall* call) {
         runHostToGuest(cast(const(Function)*) call.function_,
-            call.declaration, call.returnPlace, call.arguments,
+            call.returnPlace, call.arguments,
             call.variadicCursor, call.variadicTypes);
     }
 
@@ -1376,6 +1366,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             resultPlace,
         );
         result.inlineBody = inlineBody;
+        // No copy: this is the name of the function's identifier, which
+        // dmd interns in a table that lives, uncleared, until the process
+        // ends (`rebuildIdentifierTable` in frontend/compiler.d), or a
+        // string literal. It outlives every `Function`.
+        result.hostCall = _layout.hostCall(
+            cast(string) _function.toString);
         result.relocs = _relocs;
         result.windowSlot = _windowSlot;
         result.windowBytes = _windowReach;

@@ -1342,7 +1342,7 @@ public struct PlanCache {
         if (word is null)
             word = of(declaration)._address;
         return cast(void*) _callbacks.adjustedEntryOf(
-            word, nativeSignatureOf(declaration), adjustment, declaration);
+            word, nativeSignatureOf(declaration), adjustment);
     }
 
     public CallbackBridge.GuestTarget guestTarget(const(void)* address) const {
@@ -1434,8 +1434,7 @@ public struct PlanCache {
     ) {
         requireCallbacks;
         if (!_callbacks.contains(word))
-            _callbacks.register(
-                word, nativeSignatureOf(declaration), declaration);
+            _callbacks.register(word, nativeSignatureOf(declaration));
     }
 
     // As `registerGuestFunction`, for a backend that keeps the
