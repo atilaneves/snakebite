@@ -1,4 +1,4 @@
-module snakebite.dubcache;
+module snakebite.project.dubcache;
 
 private:
 
@@ -57,9 +57,9 @@ private bool decode(in ubyte[] bytes, out imported!"std.json".JSONValue value) {
 }
 
 // A cache miss always delegates semantics and generation to DUB.
-public imported!"snakebite.dub".DubDescription cachedDubDescription(
+public imported!"snakebite.project.dub".DubDescription cachedDubDescription(
     in string directory, in string compiler, in string[] versions,
-    scope imported!"snakebite.dub".DubDescription delegate() describe,
+    scope imported!"snakebite.project.dub".DubDescription delegate() describe,
     in string generator = imported!"snakebite.image.dependency".runningExecutable,
     in string mode = imported!"std.process".environment.get("SNAKEBITE_DUB_CACHE", "on"),
 ) {
@@ -69,7 +69,7 @@ public imported!"snakebite.dub".DubDescription cachedDubDescription(
     import std.uuid: randomUUID;
     import std.conv: text;
     import snakebite.image.dependency: generatorKey;
-    import snakebite.projectstate: projectStateDirectory;
+    import snakebite.project.state: projectStateDirectory;
 
     if (mode == "off")
         return describe();
@@ -213,8 +213,8 @@ private imported!"std.json".JSONValue collectWatches(
     import std.process: environment;
     import std.string: split;
     import std.algorithm: canFind;
-    import snakebite.dub: dubHomeDirectory;
-    import snakebite.projectstate: projectStateDirectory;
+    import snakebite.project.dub: dubHomeDirectory;
+    import snakebite.project.state: projectStateDirectory;
 
     string[string] watched;
     foreach (package_; description.packages)
@@ -451,10 +451,10 @@ public imported!"dub.description".ProjectDescription projectDescriptionFromJson(
     return withTargetLookup(fromJson!ProjectDescription(value));
 }
 
-private imported!"snakebite.dub".DubDescription descriptionFromJson(
+private imported!"snakebite.project.dub".DubDescription descriptionFromJson(
     in imported!"std.json".JSONValue value,
 ) {
-    import snakebite.dub: DubDescription;
+    import snakebite.project.dub: DubDescription;
 
     auto description = fromJson!DubDescription(value);
     description.project = withTargetLookup(description.project);

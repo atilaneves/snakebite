@@ -7,7 +7,7 @@ import bench.report: timingStatistics;
 import core.time: Duration;
 import snakebite.backends: backendIdentity, Backends, Program;
 import snakebite.frontend.compiler: parseSnippets;
-import snakebite.project: sourceSet;
+import snakebite.project.loading: sourceSet;
 import std.conv: text;
 import std.datetime.stopwatch: AutoStart, StopWatch;
 import std.datetime.systime: Clock;

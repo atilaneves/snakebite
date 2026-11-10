@@ -1,4 +1,4 @@
-module snakebite.execution;
+module snakebite.driver.execution;
 
 
 private:
@@ -22,7 +22,7 @@ public struct ExecutionReport {
 
 public struct PreparationReport {
     import core.time: Duration;
-    import snakebite.project: Project;
+    import snakebite.project.loading: Project;
 
     public Project project;
     // Finding out what to run the frontend on: `dub describe` for a dub
@@ -37,7 +37,7 @@ public struct PreparationReport {
 // What `PreparationReport.discovery` timed, for reports: dub itself for a
 // dub project, a directory scan otherwise.
 public string discoveryLabel(in PreparationReport report) {
-    import snakebite.project: isDubProject;
+    import snakebite.project.loading: isDubProject;
 
     return isDubProject(report.project.directory)
         ? "dub ovrhd"
@@ -62,15 +62,15 @@ public int runProject(
     in string[] callerImportPaths,
     in string[] callerStringImportPaths,
     in string[] versions,
-    in imported!"snakebite.project".EndsProcess endsProcess,
+    in imported!"snakebite.project.loading".EndsProcess endsProcess,
     in int delegate(
         string,
-        imported!"snakebite.project".SourceSet,
+        imported!"snakebite.project.sources".SourceSet,
         imported!"core.time".Duration,
         void delegate(),
     ) body,
 ) {
-    import snakebite.project: ProjectDirectory, sourceSet;
+    import snakebite.project.loading: ProjectDirectory, sourceSet;
     import std.datetime.stopwatch: AutoStart, StopWatch;
     import std.algorithm.iteration: map;
     import std.array: array;
@@ -102,7 +102,7 @@ public PreparationReport prepareProject(
     in imported!"snakebite.image.dependency".Optimise optimise
         = imported!"snakebite.image.dependency".Optimise.yes,
 ) {
-    import snakebite.project: sourceSet;
+    import snakebite.project.loading: sourceSet;
     import std.datetime.stopwatch: AutoStart, StopWatch;
 
     // Finding the sources is not frontend work (for a dub project it is the dub
@@ -118,15 +118,15 @@ public PreparationReport prepareProject(
 
 public PreparationReport prepareSources(
     in string directory,
-    imported!"snakebite.project".SourceSet sources,
+    imported!"snakebite.project.sources".SourceSet sources,
     in imported!"core.time".Duration discovery,
     in bool nativeDependencies = true,
     in imported!"snakebite.image.dependency".Optimise optimise
         = imported!"snakebite.image.dependency".Optimise.yes,
 ) {
     import snakebite.frontend.compiler: Snippets, initialize;
-    import snakebite.project: loadProject;
-    import snakebite.dependencypreparation: prepareDependencies;
+    import snakebite.project.loading: loadProject;
+    import snakebite.project.dependencies: prepareDependencies;
     import std.datetime.stopwatch: AutoStart, StopWatch;
 
     auto stopWatch = StopWatch(AutoStart.yes);

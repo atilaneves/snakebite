@@ -1,4 +1,4 @@
-module snakebite.dub;
+module snakebite.project.dub;
 
 private:
 
@@ -32,13 +32,13 @@ public struct DubDependencies {
     }
 
     public string identity() const {
-        import snakebite.dubcache: toJson;
+        import snakebite.project.dubcache: toJson;
 
         return _directory.length ? toJson(_description).toString : null;
     }
 
     public void build() const {
-        import snakebite.projectstate: projectStateDirectory;
+        import snakebite.project.state: projectStateDirectory;
 
         if (_directory.length && _linkerFiles.length)
             buildDubDependencies(_directory, projectStateDirectory(_directory),
@@ -51,7 +51,7 @@ public struct DubDependencies {
 }
 
 
-public imported!"snakebite.sources".SourceSet dubSources(
+public imported!"snakebite.project.sources".SourceSet dubSources(
     in string directory, in string[] versions = null,
 ) {
     return dubSources(directory, dubDescribeProject(directory, versions));
@@ -120,7 +120,7 @@ public DubDescription dubDescribeProject(
     in string directory, in string[] versions = null,
 ) {
     import snakebite.image.dependency: defaultCompiler;
-    import snakebite.dubcache: cachedDubDescription;
+    import snakebite.project.dubcache: cachedDubDescription;
 
     return cachedDubDescription(directory, defaultCompiler, versions, {
         auto dub = loadedDub(directory);
@@ -316,7 +316,7 @@ public void buildDubDependencies(
 // written when the build knows the description.
 private string compilerBinary(in string directory, in string[] versions) {
     import snakebite.image.dependency: defaultCompiler;
-    import snakebite.projectstate: projectStateDirectory;
+    import snakebite.project.state: projectStateDirectory;
     import std.digest.sha: sha256Of;
     import std.digest: toHexString;
     import std.path: absolutePath, buildPath;
@@ -442,7 +442,7 @@ private string compilerWrapperScript(in string binary, in DubDescription descrip
 // import-files list does not contain. Root source contents are excluded:
 // editing a guest module must not cause another native build.
 public string dependencyFingerprint(in string directory, in DubDescription description) {
-    import snakebite.dubcache: toJson;
+    import snakebite.project.dubcache: toJson;
     import std.conv: text;
     import std.digest.sha: sha256Of;
     import std.digest: toHexString;
@@ -495,9 +495,9 @@ private string fileFingerprint(in string[] files) {
 }
 
 
-public imported!"snakebite.sources".SourceSet dubSources(
+public imported!"snakebite.project.sources".SourceSet dubSources(
     in string directory,
-    imported!"snakebite.dub".DubDescription description,
+    imported!"snakebite.project.dub".DubDescription description,
 ) {
     import snakebite.frontend.compiler: FrontendFlags;
     import std.algorithm.iteration: filter, map;
@@ -505,7 +505,7 @@ public imported!"snakebite.sources".SourceSet dubSources(
     import std.conv: text;
     import dub.compilers.buildsettings: BuildOption, BuildSettings;
     import dub.description: SourceFileRole;
-    import snakebite.sources: SourceSet;
+    import snakebite.project.sources: SourceSet;
     import std.path: buildNormalizedPath, buildPath;
     import std.traits: EnumMembers;
 

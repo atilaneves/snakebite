@@ -52,7 +52,7 @@ reintroduces the compile step snakebite exists to remove.
 ## Consequences
 
 Each compiler family needs its own dependency build on disk.
-`snakebite.project` must ask `dub describe` for `linker-files`.
+`snakebite.project.dub` must ask `dub describe` for `linker-files`.
 Module constructors of dependencies run when druntime loads the
 image, not when snakebite decides to run them.
 

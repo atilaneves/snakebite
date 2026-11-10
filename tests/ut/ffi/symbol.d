@@ -7,13 +7,13 @@ import snakebite.image.dependency:
     DependencyImage, ProjectImageCache, defaultCompiler, loadImage;
 import core.thread: Thread;
 import snakebite.backends: backendIdentity;
-import snakebite.execution: prepareProject, executeBackend;
-import snakebite.dependencypreparation: prepareDependencies;
+import snakebite.driver.execution: prepareProject, executeBackend;
+import snakebite.project.dependencies: prepareDependencies;
 import snakebite.image.dependency: Optimise;
 import snakebite.program: Program;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
-import snakebite.imagesource: imageInputs, imageSource;
+import snakebite.project.imagesource: imageInputs, imageSource;
 import ut.backends;
 import std.file: setTimes, timeLastModified;
 import std.path: buildPath;
@@ -84,7 +84,7 @@ unittest {
 // separately loaded shared object below also defines. A guest-declared
 // symbol must resolve to the loaded shared object's copy, not to this one:
 // snakebite itself can hold a native instantiation of a template a guest
-// program also calls (`dirEntries` in `snakebite.project`, see
+// program also calls (`dirEntries` in `snakebite.project.loading`, see
 // docs/adr/0008), built with the host compiler's own closure layout, and a
 // guest backend reading that layout back would see garbage.
 export extern(C) int snakebite_symbol_dual_definition_test() { return 999; }

@@ -1,14 +1,13 @@
-module snakebite.project;
+module snakebite.project.loading;
 
 
 private:
 
+import snakebite.project.sources: SourceSet;
 
-public import snakebite.sources: SourceSet;
-public import snakebite.projectstate: projectStateDirectory;
 
 public struct Project {
-    import snakebite.backends: Program;
+    import snakebite.program: Program;
 
     public string name;
     public string directory;
@@ -19,13 +18,13 @@ public struct Project {
 
 // Finding the sources (`sourceSet`: `dub describe` for a dub project) and
 // running the frontend over them are separate steps so a caller can time
-// the second alone; see `snakebite.execution.prepareProject`.
+// the second alone; see `snakebite.driver.execution.prepareProject`.
 public Project loadProject(
     in string directory,
     SourceSet sources,
     in bool dependencyImage,
 ) {
-    import snakebite.backends: Program;
+    import snakebite.program: Program;
     import snakebite.frontend.compiler:
         checksOf, FrontendFlags, parseRootModules;
     import std.algorithm.iteration: map;
@@ -75,7 +74,7 @@ public SourceSet sourceSet(
     const normalized = directory.absolutePath.buildNormalizedPath;
 
     if (isDubProject(normalized)) {
-        import snakebite.dub: dubSources;
+        import snakebite.project.dub: dubSources;
         return dubSources(normalized, versions);
     }
 

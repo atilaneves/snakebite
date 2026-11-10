@@ -1,11 +1,11 @@
-module snakebite.main;
+module snakebite.driver.main;
 
 
 private:
 
 
 public int main(string[] args) {
-    import snakebite.cli: run;
+    import snakebite.driver.cli: run;
 
     return run(args);
 }

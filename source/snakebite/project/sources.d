@@ -1,4 +1,4 @@
-module snakebite.sources;
+module snakebite.project.sources;
 
 
 private:
@@ -6,7 +6,7 @@ private:
 
 public struct SourceSet {
     import snakebite.frontend.compiler: FrontendFlags;
-    import snakebite.dub: DubDependencies;
+    import snakebite.project.dub: DubDependencies;
 
     public string[] files;
     public string[] importPaths;

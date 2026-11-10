@@ -4,7 +4,7 @@ module bench.oracle;
 import bench.capture: ProcessResult, run = captureProcess;
 import bench.report: BackendReport, updateTestCounts;
 import core.time: Duration;
-import snakebite.project: SourceSet;
+import snakebite.project.sources: SourceSet;
 
 
 // Not a `Backend` (see `oracleReport`), so it needs its own entry in the
@@ -47,8 +47,8 @@ BackendReport oracleReport(
     in string[] programArguments = null,
 ) {
     import bench.report: timingStatistics;
-    import snakebite.project: isDubProject;
-    import snakebite.dub: DubTestProduct, dubTestProduct;
+    import snakebite.project.loading: isDubProject;
+    import snakebite.project.dub: DubTestProduct, dubTestProduct;
     import std.conv: text;
     import std.datetime.stopwatch: AutoStart, StopWatch;
     import std.file: exists, remove, tempDir;

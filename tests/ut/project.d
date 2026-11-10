@@ -7,12 +7,11 @@ import core.sync.mutex: Mutex;
 import snakebite.backends: BackendName, backendIdentity;
 import snakebite.program: Program;
 import snakebite.image.dependency: TestHooks;
-import snakebite.execution: prepareProject, executeBackend, runProject;
-import snakebite.dub: DubDescription, dubSources;
-import snakebite.dubcache: projectDescriptionFromJson;
-import snakebite.project:
-    EndsProcess, ProjectDirectory,
-    projectStateDirectory;
+import snakebite.driver.execution: prepareProject, executeBackend, runProject;
+import snakebite.project.dub: DubDescription, dubSources;
+import snakebite.project.dubcache: projectDescriptionFromJson;
+import snakebite.project.loading: EndsProcess, ProjectDirectory;
+import snakebite.project.state: projectStateDirectory;
 import std.algorithm.searching: endsWith;
 import std.digest.sha: sha256Of;
 import std.digest: toHexString;
