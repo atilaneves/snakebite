@@ -453,7 +453,7 @@ def test_unhandled_node_internal_failure(
     assert result.returncode > 0, output(result)
     assert f"{node.capitalize()} " in result.stderr, output(result)
     assert "no `visit` override" in result.stderr, output(result)
-    assert "snakebite/backends/loweringvisitor.d:" in result.stderr, output(result)
+    assert "snakebite/language/traversal/lowering.d:" in result.stderr, output(result)
 
 # The boundary also covers data and TLS, not only function calls. Compare
 # the actual ELF table, so an omitted linker flag cannot pass this check.

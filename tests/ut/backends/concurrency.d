@@ -10,7 +10,7 @@ import snakebite.frontend.dmd.functions: findFunction;
 import std.conv: text;
 
 
-// Regression test for a race between `snakebite.backends.runtimetypes.
+// Regression test for a race between `snakebite.language.statics.typeinfo.
 // RuntimeTypes.get`'s narrowed lock and `NativeData.classValue`'s full one,
 // both of which can reach `RuntimeTypes.linkedClassInfo` ->
 // `RuntimeTypes.linkedInfo` -> `dmd.mangle.mangleToBuffer` for the very

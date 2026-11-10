@@ -1,0 +1,700 @@
+module snakebite.language.traversal.lowering;
+
+
+private:
+
+import snakebite.frontend.typefacts: typeFacts;
+
+
+import dmd.expression:
+    ArrayLiteralExp, AssignExp, AssocArrayLiteralExp, CastExp, CatAssignExp,
+    CatExp, CallExp, CmpExp, EqualExp, HaltExp, IntegerExp, LogicalExp,
+    CatElemAssignExp, CatDcharAssignExp,
+    ConstructExp, DeclarationExp, Expression, IdentityExp, LoweredAssignExp,
+    NewExp, ThrowExp,
+    TupleExp;
+import dmd.statement:
+    Statement, ExpStatement, IfStatement, ReturnStatement,
+    SwitchErrorStatement, SwitchStatement, ThrowStatement, WithStatement;
+import dmd.location: Loc;
+import dmd.typesem: isString;
+import snakebite.language.traversal.fullexpression: FullExpressionScope;
+import snakebite.language.layout.lowered: LoweredExpressionTypes;
+import snakebite.language.operators.identity: IdentityPlan, identityPlan;
+import snakebite.language.control.logical: LogicalPlan, logicalPlan;
+import snakebite.language.control.ifplan: IfPlan, ifPlan;
+import snakebite.language.operators.comparison: ComparisonPlan, comparisonPlan;
+import snakebite.language.storage.aggregateinit: NewPlan, planNew;
+import dmd.visitor: Visitor;
+import dmd.mtype: Type;
+import dmd.func: FuncDeclaration;
+import snakebite.native.value: TypeFacts;
+import snakebite.frontend.compiler: newInFrontend;
+import std.meta: AliasSeq;
+
+
+// A frontend update must not introduce a lowering that bypasses this policy.
+static foreach (name; __traits(allMembers, imported!"dmd.expression")) {
+    static if (__traits(compiles,
+            __traits(getMember, imported!"dmd.expression", name)))
+        static assert(hasSharedLoweringPolicy!(
+            __traits(getMember, imported!"dmd.expression", name)),
+            name ~ " needs a final shared lowering policy");
+}
+
+// Allocation lowering produces storage; constructor execution remains on
+// NewExp. Destination hooks keep that result alive across nested evaluation.
+extern(C++) package(snakebite) abstract class LoweringVisitor: Visitor {
+    alias visit = Visitor.visit;
+
+    // Every backend uses the same terminal policy if closed dispatch fails.
+    final override void visit(Expression expression) {
+        import std.conv: text;
+        import snakebite.failure.report: internalFailure;
+
+        internalFailure(text("Expression ", expression.op,
+            ": no `visit` override, and not in `UnreachableNodes`"));
+    }
+
+    final override void visit(Statement statement) {
+        import std.conv: text;
+        import snakebite.failure.report: internalFailure;
+
+        internalFailure(text("Statement ", statement.stmt,
+            ": no `visit` override, and not in `UnreachableNodes`"));
+    }
+
+    // The statements and operands that end a full expression are opened
+    // here, so no backend can forget one; the positions are listed in
+    // `FullExpressionScope.Position`. A position that a backend's own control
+    // flow owns (a loop's condition, a `switch` operand) goes through
+    // `fullExpression` too. `withFullExpression` is the backend's hook and
+    // nothing else calls it.
+    extern(D) protected abstract void withFullExpression(
+        in FullExpressionScope.Position position,
+        Expression root,
+        scope void delegate() evaluate,
+    );
+
+    extern(D) protected abstract bool readsResultAfterEnd(
+        in FullExpressionScope.Position position,
+        Expression result,
+    );
+
+    extern(D) protected final void fullExpression(
+        in FullExpressionScope.Position position,
+        Expression root,
+        scope void delegate() evaluate,
+    ) {
+        withFullExpression(position, root, evaluate);
+    }
+
+    // Cleanup must finish before a delayed result read or a transfer. If
+    // cleanup throws, the pending result and transfer are both abandoned.
+    extern(D) protected final void fullExpressionResult(
+        in FullExpressionScope.Position position,
+        Expression expression,
+        scope void delegate(bool) prepare,
+        scope void delegate(bool) consume,
+    ) {
+        const afterEnd = readsResultAfterEnd(position, expression);
+        fullExpression(position, expression, { prepare(afterEnd); });
+        consume(afterEnd);
+    }
+
+    extern(D) protected void fullExpressionValue(Address)(
+        in FullExpressionScope.Position position,
+        Expression expression,
+        scope void delegate() evaluate,
+        scope Address delegate(Expression) addressOf,
+        scope void delegate(Address) read,
+    ) {
+        Address address;
+        fullExpressionResult(position, expression, (afterEnd) {
+            if (afterEnd)
+                address = addressOf(FullExpressionScope.lvalueOf(expression));
+            else
+                evaluate();
+        }, (afterEnd) {
+            if (afterEnd)
+                read(address);
+        });
+    }
+
+    final override void visit(ExpStatement statement) {
+        if (statement.exp is null)
+            return;
+
+        fullExpression(FullExpressionScope.Position.expressionStatement,
+            statement.exp, { visitExpressionStatement(statement); });
+    }
+
+    final override void visit(SwitchErrorStatement statement) {
+        assert(statement.exp !is null,
+            "dmd always gives a `SwitchErrorStatement` its `__switch_error` call");
+        fullExpression(FullExpressionScope.Position.switchError,
+            statement.exp, { visitSwitchError(statement); });
+    }
+
+    // dmd ends the full expression of a `throw` operand before it starts
+    // the throw, so a destructor of an operand temporary that throws
+    // replaces the exception the operand built.
+    final override void visit(ThrowStatement statement) {
+        throwOperand(statement.exp);
+    }
+
+    final override void visit(ThrowExp expression) {
+        throwOperand(expression.e1);
+    }
+
+    private void throwOperand(Expression operand) {
+        visitThrowBegin;
+        size_t thrown;
+        fullExpressionResult(FullExpressionScope.Position.throwOperand,
+            operand,
+            (afterEnd) { thrown = visitThrowOperand(operand, afterEnd); },
+            (afterEnd) { visitThrowTransfer(operand, thrown, afterEnd); });
+    }
+
+    // The initialiser of the `with` handle is a full expression of its own:
+    // its temporaries die before the body runs.
+    final override void visit(WithStatement statement) {
+        if (statement.wthis !is null) {
+            auto initializer = statement.wthis._init.isExpInitializer;
+            assert(initializer !is null,
+                "a with statement temporary has an expression initializer");
+            fullExpression(FullExpressionScope.Position.withOperand,
+                initializer.exp, { visitWithOperand(statement); });
+        }
+        visitWithBody(statement);
+    }
+
+    // The operand of `return` is evaluated before the function starts to
+    // return: a throw from the operand leaves with an exception, and no
+    // handler or cleanup that runs then may see a pending return. Which
+    // cleanups the transfer runs is the shared unwind plan's decision. The
+    // temporaries of the operand die when it has been evaluated, whether
+    // the function returns a value or a `ref`.
+    final override void visit(ReturnStatement statement) {
+        if (statement.exp is null) {
+            enum readsAfterEnd = false;
+            visitReturnOperand(statement, readsAfterEnd);
+        } else {
+            fullExpressionResult(FullExpressionScope.Position.returnOperand,
+                statement.exp,
+                (afterEnd) { visitReturnOperand(statement, afterEnd); },
+                (afterEnd) { visitReturnTransfer(statement); });
+            return;
+        }
+        visitReturnTransfer(statement);
+    }
+
+    protected abstract void visitExpressionStatement(ExpStatement statement);
+    protected abstract void visitSwitchError(SwitchErrorStatement statement);
+    // With `readsAfterEnd` the operand is an lvalue that dmd reads after the
+    // destructors of its temporaries ran: the backend resolves its address
+    // here and moves the value in `visitReturnTransfer`. A `ref` return
+    // yields the address either way. ldc reads the value before the
+    // destructors, so `return make(3).value` gives 3 with ldc and 0 with
+    // dmd; snakebite follows dmd (see `readsResultAfterEnd`).
+    protected abstract void visitReturnOperand(
+        ReturnStatement statement, bool readsAfterEnd);
+    protected abstract void visitReturnTransfer(ReturnStatement statement);
+
+    final override void visit(IfStatement statement) {
+        visitIf(statement, ifPlan(statement));
+    }
+
+    protected abstract void visitIf(IfStatement statement, in IfPlan plan);
+
+    // How many `if (__ctfe)` bodies the walk is inside. A callee is not
+    // inside the body that calls it, so a backend that walks callees with
+    // the same visitor resets this at a call.
+    protected uint ctfeBlockDepth;
+
+    // A backend walks the body of an `if (__ctfe)` block through this, so
+    // that the decision below knows where it is.
+    extern(D) protected final void inCtfeBlock(scope void delegate() walk) {
+        ++ctfeBlockDepth;
+        scope (exit)
+            --ctfeBlockDepth;
+
+        walk();
+    }
+
+    // dmd compiles the body of an `if (__ctfe)` block for compile time only
+    // and leaves some constructs in it without the lowering they get
+    // everywhere else. Run-time code gets into that body through a `case`
+    // label. Reaching such a construct there throws an `Error` that the
+    // guest can catch. Returns whether the construct was in such a body, in
+    // which case the backend has thrown and must not compile it.
+    extern(D) protected final bool throwIfUnloweredInCtfeBlock(
+        in string construct, in Loc loc,
+    ) {
+        import std.string: fromStringz;
+
+        if (ctfeBlockDepth == 0)
+            return false;
+
+        visitCtfeBlockError(
+            construct ~ " in the body of an if (__ctfe) block: dmd compiles "
+                ~ "that body for compile time only",
+            loc.filename.fromStringz.idup, loc.linnum);
+        return true;
+    }
+
+    extern(D) protected abstract void visitCtfeBlockError(
+        string message, string file, size_t line,
+    );
+
+    // dmd lowers a `switch` on a string only when it generates code, so the
+    // condition of one in an `if (__ctfe)` body is still a string.
+    protected final bool throwIfStringSwitchInCtfeBlock(
+        SwitchStatement statement,
+    ) {
+        if (!newInFrontend!isString(statement.condition.type))
+            return false;
+
+        return throwIfUnloweredInCtfeBlock("string switch", statement.loc);
+    }
+
+    protected abstract void visitWithOperand(WithStatement statement);
+    protected abstract void visitWithBody(WithStatement statement);
+
+    protected void visitThrowBegin() {}
+
+    // Evaluates the operand and returns a backend-defined handle for the
+    // object it made. The handle is a plain number because a destructor of
+    // an operand temporary can run during a collection, where a throw must
+    // not allocate. The shared visitor passes it to `visitThrowTransfer`
+    // once the full expression has ended. With `readsAfterEnd` the handle
+    // is the address of the object reference, which the transfer reads.
+    protected abstract size_t visitThrowOperand(
+        Expression operand, bool readsAfterEnd);
+    protected abstract void visitThrowTransfer(
+        Expression operand, size_t thrown, bool readsAfterEnd);
+
+    // DMD's semantic pass leaves `lowering` null in a scope that needs no
+    // code generation, and dmd's glue cannot compile such an append. In an
+    // `if (__ctfe)` body that a `case` label reaches, the guest gets an
+    // `Error`; anywhere else it halts.
+    final override void visit(CatAssignExp expression) {
+        if (expression.lowering is null) {
+            if (!throwIfUnloweredInCtfeBlock("~= append", expression.loc))
+                visitHalt;
+            return;
+        }
+
+        expression.lowering.accept(this);
+    }
+
+    final override void visit(HaltExp) {
+        visitHalt;
+    }
+
+    protected abstract void visitHalt();
+
+    final override void visit(CallExp expression) {
+        import snakebite.language.call.selection: CallSelection;
+
+        CallSelection.ScalarConstant constant;
+        if (callSelection.foldedScalarIntrinsic(expression, constant)) {
+            if (constant.hasStorage) {
+                import snakebite.native.value: TypeFacts;
+
+                visitConstantBytes(expression,
+                    constant.bytes(typeFacts(expression.type).size));
+            } else
+                constant.expression.accept(this);
+            return;
+        }
+        visitUnfoldedCall(expression);
+    }
+
+    protected abstract void visitUnfoldedCall(CallExp expression);
+
+    extern(D) protected abstract imported!"snakebite.language.call.selection".CallSelection*
+        callSelection();
+
+    extern(D) protected abstract void visitConstantBytes(
+        Expression expression, in void[] bytes);
+
+    final override void visit(EqualExp expression) {
+        if (expression.lowering !is null) {
+            expression.lowering.accept(this);
+            return;
+        }
+
+        visitUnloweredEqual(expression);
+    }
+
+    final override void visit(IdentityExp expression) {
+        visitIdentity(expression, identityPlan(expression));
+    }
+
+    final override void visit(CmpExp expression) {
+        visitComparison(expression, comparisonPlan(expression));
+    }
+
+    // The right operand of `&&` and `||` is a full expression
+    // (`FullExpressionScope.Position.logicalOperand`): the backend opens it
+    // around the operand, because only the backend knows where the branch
+    // that skips it goes.
+    final override void visit(LogicalExp expression) {
+        visitLogical(expression, logicalPlan(expression));
+    }
+
+    protected abstract void visitLogical(
+        LogicalExp expression, in LogicalPlan plan);
+
+    protected abstract void visitComparison(
+        CmpExp expression, in ComparisonPlan plan);
+
+    protected abstract void visitIdentity(
+        IdentityExp expression, in IdentityPlan plan);
+
+    protected abstract void visitUnloweredEqual(EqualExp expression);
+
+    final override void visit(CatElemAssignExp expression) {
+        visit(cast(CatAssignExp) expression);
+    }
+
+    final override void visit(CatDcharAssignExp expression) {
+        if (expression.lowering !is null) {
+            expression.lowering.accept(this);
+            return;
+        }
+        visitUnloweredCatDcharAssign(expression);
+    }
+
+    protected abstract void visitUnloweredCatDcharAssign(
+        CatDcharAssignExp expression);
+
+    // An associative-array literal is always a call to
+    // `_d_assocarrayliteralTX`; dmd leaves `lowering` null only when that
+    // hook could not be found, and dmd then reports an error, so a backend
+    // never runs such a literal.
+    final override void visit(AssocArrayLiteralExp expression) {
+        if (expression.lowering !is null) {
+            expression.lowering.accept(this);
+            return;
+        }
+
+        visitUnloweredAssocArrayLiteral(expression);
+    }
+
+    protected abstract void visitUnloweredAssocArrayLiteral(
+        AssocArrayLiteralExp expression);
+
+    // Most casts are native reinterpretations this visitor's own backend
+    // performs directly; a `lowering` only appears where dmd has decided the
+    // cast needs a druntime call of its own (an array-of-array-of-T cast,
+    // for instance), and that call is what must run.
+    final override void visit(CastExp expression) {
+        if (expression.lowering !is null) {
+            if (visitLoweredClassCast(expression))
+                return;
+            expression.lowering.accept(this);
+            return;
+        }
+
+        if (ctfeBlockDepth != 0 && needsArrayCastHook(expression)
+                && throwIfUnloweredInCtfeBlock("array cast", expression.loc))
+            return;
+
+        visitUnloweredCast(expression);
+    }
+
+    // expressionSemantic replaces these casts with object.__ArrayCast only
+    // in a code-generation scope. Raw slice resizing would skip its check.
+    private static bool needsArrayCastHook(CastExp expression) {
+        import dmd.astenums: Tarray;
+        import dmd.typesem: nextOf, size, toBasetype;
+
+        auto source = newInFrontend!toBasetype(expression.e1.type);
+        auto target = newInFrontend!toBasetype(expression.type);
+        if (source.ty != Tarray || target.ty != Tarray
+                || expression.e1.isArrayLiteralExp !is null)
+            return false;
+
+        const sourceSize = newInFrontend!size(source.nextOf);
+        const targetSize = newInFrontend!size(target.nextOf);
+        return sourceSize != targetSize
+            && (targetSize == 0 || sourceSize % targetSize != 0);
+    }
+
+    protected abstract void visitUnloweredCast(CastExp expression);
+
+    // A backend that compiles a class downcast itself instead of its
+    // `lowering` returns `true`.
+    protected bool visitLoweredClassCast(CastExp expression) {
+        return false;
+    }
+
+    final override void visit(AssignExp expression) {
+        if (expression.e1.isArrayLengthExp !is null
+                && throwIfUnloweredInCtfeBlock(
+                    "array length assignment", expression.loc))
+            return;
+
+        visitUnloweredAssign(expression);
+    }
+
+    protected abstract void visitUnloweredAssign(AssignExp expression);
+
+    // DMD lowers, for instance, dynamic-array length assignment to a native
+    // druntime call so allocation, prefix preservation, and the array
+    // pointer update stay in druntime rather than being emulated by a
+    // backend. `LoweredAssignExp` exists only to carry a non-null
+    // `lowering` (`expressionsem.d` never constructs one without one), so
+    // there is no unlowered form for a backend to refuse.
+    final override void visit(LoweredAssignExp expression) {
+        expression.lowering.accept(this);
+    }
+
+    final override void visit(ConstructExp expression) {
+        if (expression.lowering !is null) {
+            expression.lowering.accept(this);
+            return;
+        }
+
+        if (throwIfArrayConstructionInCtfeBlock(expression))
+            return;
+
+        visitUnloweredConstruct(expression);
+    }
+
+    // A declaration can read only the initializer's RHS. Keep this check
+    // before that shortcut as well as on direct construction expressions.
+    final override void visit(DeclarationExp expression) {
+        import snakebite.language.layout.variables: forEachRuntimeVariable;
+
+        bool threw;
+        if (ctfeBlockDepth != 0)
+            forEachRuntimeVariable(expression.declaration, (variable) {
+                if (threw || variable.isDataseg || variable._init is null)
+                    return;
+                if (auto initializer = variable._init.isExpInitializer)
+                    if (auto construct = initializer.exp.isConstructExp)
+                        threw = throwIfArrayConstructionInCtfeBlock(construct);
+            });
+        if (!threw)
+            visitDeclaration(expression);
+    }
+
+    protected abstract void visitDeclaration(DeclarationExp expression);
+
+    private bool throwIfArrayConstructionInCtfeBlock(ConstructExp expression) {
+        return ctfeBlockDepth != 0 && expression.lowering is null
+            && needsArrayConstructionHook(expression)
+            && throwIfUnloweredInCtfeBlock("array construction", expression.loc);
+    }
+
+    // Match expressionSemantic's _d_arrayctor/_d_arraysetctor selection,
+    // including the forms which move elements and need no hook.
+    private static bool needsArrayConstructionHook(ConstructExp expression) {
+        import dmd.astenums: Tarray, Tsarray;
+        import dmd.expressionsem: isLvalue;
+        import dmd.typesem: baseElemOf, equivalent, nextOf, toBasetype;
+
+        auto target = newInFrontend!toBasetype(expression.e1.type);
+        if (target.ty != Tsarray && target.ty != Tarray)
+            return false;
+
+        auto element = target.nextOf; // DMD type methods require mutable Type.
+        const structure = newInFrontend!baseElemOf(element).isTypeStruct;
+        if (structure is null || (!structure.sym.postblit
+                && !structure.sym.hasCopyCtor && !structure.sym.dtor))
+            return false;
+        if (target.ty != Tsarray && expression.e1.isSliceExp is null)
+            return false;
+        if (auto variable = expression.e1.isVarExp)
+            if (variable.var.isVarDeclaration.isReference)
+                return false;
+
+        auto rhs = expression.e2;
+        auto source = newInFrontend!toBasetype(rhs.type);
+        auto originalSource = source; // DMD needs mutable Type.
+        if (source.ty == Tarray)
+            if (auto cast_ = rhs.isCastExp)
+                if (newInFrontend!toBasetype(cast_.e1.type).ty == Tsarray) {
+                    rhs = cast_.e1;
+                    source = newInFrontend!toBasetype(rhs.type);
+                }
+
+        const arrayCopy = ((source.ty == Tarray && rhs.isArrayLiteralExp is null)
+                || (source.ty == Tsarray && newInFrontend!isLvalue(rhs)))
+            && newInFrontend!equivalent(element, originalSource.nextOf);
+        return arrayCopy || newInFrontend!equivalent(element, originalSource);
+    }
+
+    protected abstract void visitUnloweredConstruct(ConstructExp expression);
+
+    // dmd's expressionSemantic (`expressionsem.d`) attaches `lowering` - a
+    // call to `_d_newclassT` and friends - to every heap `NewExp` before
+    // dsymbolsem (`dsymbolsem.d`) decides a `scope` variable's initialiser
+    // can live on the stack and sets `onstack` on that same node, without
+    // clearing `lowering`. dmd's own glue layer (`glue/e2ir.d`) checks
+    // `onstack` (and `placement`) first and ignores `lowering` when either
+    // is set; a backend that dispatches on `lowering !is null` alone would
+    // run the heap-allocating lowering for a `scope` variable of an
+    // ordinary (non-`scope`) class instead of taking the on-stack path.
+    final override void visit(NewExp expression) {
+        auto plan = planNew(expression);
+        if (plan.destination != NewPlan.Destination.lowering) {
+            visitUnloweredNew(expression, plan);
+            return;
+        }
+
+        // dmd sets no lowering on a heap `new` in a scope that needs no code
+        // generation, and, except for a class, also under `-betterC`.
+        if (expression.lowering is null) {
+            if (!throwIfUnloweredInCtfeBlock("heap new", expression.loc))
+                visitUnloweredNew(expression, plan);
+            return;
+        }
+
+        prepareNew(expression);
+        scope (exit) restoreNew;
+        expression.lowering.accept(this);
+        visitLoweredNew(expression);
+    }
+
+    protected abstract void visitUnloweredNew(
+        NewExp expression, NewPlan plan,
+    );
+
+    protected abstract void prepareNew(NewExp expression);
+    protected abstract void restoreNew();
+    protected abstract void visitLoweredNew(NewExp expression);
+
+    // DMD's tuple expansion stores a side-effecting receiver in `e0`; it must
+    // run before the field expressions, which then retain their own lowering
+    // and assignment semantics through this visitor.
+    final override void visit(TupleExp expression) {
+        if (expression.e0 !is null)
+            visitTupleElement(expression.e0);
+
+        if (expression.exps !is null)
+            foreach (element; *expression.exps)
+                visitTupleElement(element);
+    }
+
+    protected abstract void visitTupleElement(Expression expression);
+
+    // Stage every element before publishing the result: an element can
+    // read the old destination. The pointer temporary holds either a call
+    // frame address or the frontend lowering's allocation result.
+    final override void visit(ArrayLiteralExp expression) {
+        import dmd.mtype: Type;
+        import dmd.typesem: pointerTo;
+        import snakebite.language.layout.arrayliteral: ArrayLiteralPlan, planArrayLiteral;
+        import snakebite.frontend.typefacts: isStoredLiteral;
+        import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
+
+        // Element types must remain mutable for DMD.
+        auto plan = planArrayLiteral(expression, currentFunction);
+        requireLiteralDestination(expression);
+        if (isStoredLiteral(expression))
+            return visitStoredArrayLiteral(expression);
+
+        auto pointerType = Type.tvoid.pointerTo;
+        withTemporaryDestination(pointerType, typeFacts(pointerType), {
+            final switch (plan.storage) {
+            case ArrayLiteralPlan.Storage.empty:
+                clearTemporaryPointer;
+                break;
+            case ArrayLiteralPlan.Storage.temporary:
+                reserveLiteralStorage(expression);
+                break;
+            case ArrayLiteralPlan.Storage.lowering:
+                import snakebite.frontend.compiler: arrayLiteralLowering;
+                import snakebite.frontend.dmd.functions: moduleOf;
+
+                arrayLiteralLowering(expression, moduleOf(currentFunction))
+                    .accept(this);
+                break;
+            }
+
+            foreach (i; 0 .. plan.count)
+                evaluateElement(expression[i], plan.elementType,
+                    plan.elementFacts, i * plan.elementFacts.size);
+
+            final switch (plan.result) {
+            case ArrayLiteralPlan.Result.slice:
+                storeConstant(plan.count, arrayLengthOffset);
+                storeAddress(arrayPointerOffset);
+                break;
+            case ArrayLiteralPlan.Result.pointer:
+                storeAddress(0);
+                break;
+            case ArrayLiteralPlan.Result.value:
+                if (plan.bytes != 0)
+                    copyBytes(plan.bytes);
+                break;
+            }
+        });
+    }
+
+    protected abstract void visitStoredArrayLiteral(
+        ArrayLiteralExp expression);
+    protected abstract void clearTemporaryPointer();
+    protected abstract void reserveLiteralStorage(ArrayLiteralExp expression);
+    protected abstract FuncDeclaration currentFunction();
+
+    // Called before a literal's temporary is set up, so a backend
+    // whose result can be discarded gives the stores below a destination.
+    protected void requireLiteralDestination(ArrayLiteralExp expression) {
+    }
+
+    extern(D) protected abstract void withTemporaryDestination(
+        Type type, in TypeFacts facts, scope void delegate() run,
+    );
+    protected abstract void evaluateElement(
+        Expression element, Type elementType, in TypeFacts facts,
+        in size_t byteOffset,
+    );
+    protected abstract void storeConstant(
+        in size_t value, in size_t byteOffset,
+    );
+    protected abstract void storeAddress(in size_t byteOffset);
+    protected abstract void copyBytes(in size_t width);
+
+    // `~` concatenation is always `_d_arraycatnTX`; dmd leaves `lowering`
+    // null under `-betterC` (`trySetCatExpLowering`), where it uses no GC.
+    final override void visit(CatExp expression) {
+        if (expression.lowering !is null) {
+            expression.lowering.accept(this);
+            return;
+        }
+
+        if (!throwIfUnloweredInCtfeBlock("~ concatenation", expression.loc))
+            visitUnloweredCat(expression);
+    }
+
+    protected abstract void visitUnloweredCat(CatExp expression);
+}
+
+
+private template hasSharedLoweringPolicy(alias Node) {
+    static if (is(Node : Expression) && __traits(hasMember, Node, "lowering")) {
+        import std.meta: staticIndexOf;
+        enum hasSharedLoweringPolicy =
+            staticIndexOf!(Node, LoweredExpressionTypes) >= 0
+            && hasFinalVisit!Node;
+    } else
+        enum hasSharedLoweringPolicy = true;
+}
+
+private bool hasFinalVisit(Node)() {
+    import std.traits: Parameters;
+
+    static foreach (method; __traits(getOverloads, LoweringVisitor, "visit")) {
+        static if (Parameters!method.length == 1) {
+            static if (is(Parameters!method[0] == Node)
+                    && __traits(isFinalFunction, method))
+                return true;
+        }
+    }
+    return false;
+}

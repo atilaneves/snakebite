@@ -1406,7 +1406,7 @@ public struct PlanCache {
     // own doc), and `_signatures` is a `SharedTable`, which brings its
     // own insert lock (ADR-0006) - the same reasoning `snakebite.
     // backends.interpreter.walker`'s `Cache.build` and `snakebite.
-    // backends.calls.CallSelection.decisionOf` already apply to their
+    // language.call.selection.CallSelection.decisionOf` already apply to their
     // own caches.
     public const(CallPlan)* signatureOf(
         TypeFunction type, in bool context,
@@ -1535,7 +1535,7 @@ public struct PlanCache {
     // native copy: the dependency image, or an already-loaded shared
     // object. Never the running executable's own copy of a template
     // instance snakebite itself instantiated
-    // (`snakebite.backends.calls.CallSelection.buildDecision` asks this,
+    // (`snakebite.language.call.selection.CallSelection.buildDecision` asks this,
     // never `hasNativeSymbol`, for that check). `nativeTarget` is a fixed
     // host wrapper, not a `dlsym` answer, so it counts as independent here
     // too.
@@ -2078,7 +2078,7 @@ private NativeSignature signatureOf(
         // doc). `VarArg.typesafe` (`T t...`) needs neither: the frontend
         // has already packed a typesafe call's trailing arguments into
         // one array-typed argument by the time this ever runs
-        // (`snakebite.backends.calls.arityMismatches`'s own doc), so it
+        // (`snakebite.language.call.selection.arityMismatches`'s own doc), so it
         // classifies like any other declared parameter below, through the
         // ordinary `prepare`/`.of` path.
         const isCVariadic = type.parameterList.varargs == VarArg.variadic
@@ -2130,7 +2130,7 @@ private NativeSignature signatureOf(
             // A `ref` parameter occupies a pointer slot in the caller's
             // frame - the address of the argument's own storage, not a
             // copy of its value (see `FrameLayout.of` in
-            // `backends/layout.d`, which lays such a slot out the
+            // `language/layout/frame.d`, which lays such a slot out the
             // same way). That address is the value that travels, so the
             // argument is one pointer register whatever
             // `parameterList[i].type` - the *pointee* type - would

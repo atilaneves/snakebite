@@ -18,9 +18,9 @@ import dmd.statement:
     ExpStatement, GotoCaseStatement, GotoDefaultStatement, GotoStatement,
     Statement, TryCatchStatement, TryFinallyStatement, WithStatement;
 import dmd.visitor: SemanticTimeTransitiveVisitor;
-import snakebite.backends.controlflow: ScopePaths;
-import snakebite.backends.lowered: LoweredExpressionTypes;
-import snakebite.backends.switchplan: gotoCaseTarget, gotoDefaultTarget;
+import snakebite.language.control.transfer: ScopePaths;
+import snakebite.language.layout.lowered: LoweredExpressionTypes;
+import snakebite.language.control.cases: gotoCaseTarget, gotoDefaultTarget;
 import snakebite.frontend.dmd.functions: unresolvedCalleeOf;
 import snakebite.frontend.typefacts: initializerValueOf;
 import std.meta: staticIndexOf;
@@ -212,7 +212,7 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
     // information is made when the program first needs it: the first
     // object of a class that a destructor makes is that one.
     private extern(D) void handle(NewExp expression) {
-        import snakebite.backends.aggregateinit: NewPlan, planNew;
+        import snakebite.language.storage.aggregateinit: NewPlan, planNew;
 
         if (expression.member !is null)
             _preparation.constructor(expression);

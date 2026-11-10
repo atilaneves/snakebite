@@ -11,7 +11,7 @@ import snakebite.failure.report: internalFailure;
 // (issue #40, ADR-0006, finding 1.3): the identity `TlsSlots.slotFor`
 // keys this thread's own copy by, and the bytes every thread's copy
 // starts from. Built once, under the compiler lock, by
-// `snakebite.nativelayout.NativeData.tlsDescriptorOf`; read here with no
+// `snakebite.language.statics.data.NativeData.tlsDescriptorOf`; read here with no
 // lock, since nothing ever changes a `TlsDescriptor` after that.
 //
 // A thread-local variable's storage differs by thread, the same way a

@@ -173,7 +173,7 @@ unittest {
 }
 
 // `resolveIndependent` answers the question `CallSelection.buildDecision`
-// (`snakebite.backends.calls`) asks for a template instance: `resolve`
+// (`snakebite.language.call.selection`) asks for a template instance: `resolve`
 // still finds this executable-only symbol (the test right above), but
 // `resolveIndependent` must never reach that last-resort tier - a guest
 // call through a template instance must not bind to `bin/ut`'s own copy

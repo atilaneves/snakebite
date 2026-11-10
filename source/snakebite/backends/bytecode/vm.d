@@ -105,7 +105,7 @@ public struct CallSite {
         // the check of its call window.
         value,
         // `builtinEntry` is a `snakebite.builtin.call.BuiltinCall`,
-        // resolved once by `CallSelection` (`snakebite.backends.calls`)
+        // resolved once by `CallSelection` (`snakebite.language.call.selection`)
         // and never re-resolved: a compiler intrinsic (`core.math.fabs`
         // and the like), which has no host symbol FFI could ever find, so this VM calls the entry
         // directly instead of going through `executeCallPlan`.

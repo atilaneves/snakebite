@@ -106,7 +106,7 @@ public struct CallAdapter {
 
         // `destination` is a declared parameter that the callee takes by
         // address though its declaration says by value (`snakebite.
-        // backends.calls.CallSelection.Decision.destinationParameter`).
+        // language.call.selection.CallSelection.Decision.destinationParameter`).
         public static Arguments of(
             TypeFunction type, Expressions* expressions,
             in size_t destination = size_t.max,

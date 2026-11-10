@@ -17,16 +17,16 @@ import dmd.func: FuncDeclaration;
 import dmd.location: Loc;
 import dmd.mtype: Type;
 import dmd.statement: Statement;
-import snakebite.backends.aggregateinit: InitStep;
-import snakebite.backends.checkplan: BoundsCheck;
-import snakebite.backends.controlflow: ControlFlowState, labelTargetOf;
-import snakebite.backends.fullexpression: FullExpressionScope;
+import snakebite.language.storage.aggregateinit: InitStep;
+import snakebite.language.checks.failure: BoundsCheck;
+import snakebite.language.control.transfer: ControlFlowState, labelTargetOf;
+import snakebite.language.traversal.fullexpression: FullExpressionScope;
 import snakebite.backends.interpreter.faultslot:
     FaultSite, ResultWord, fastFrameLead, faultSlotOf, resultPlaceOf,
     resultWordOf, siteWord;
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.ffi.load: callDirectWordsPair, extendWord, storeWordResult, WordPair;
-import snakebite.frontend.storage: SlicePlan;
+import snakebite.language.storage.resolver: SlicePlan;
 import snakebite.native.value: TypeFacts;
 import snakebite.native.value: BitfieldAccess, CastLayout;
 import std.meta: AliasSeq;
@@ -42,11 +42,11 @@ package enum TreeFlow : ubyte { normal, break_, continue_, return_, generic }
 // the function runs. A tree node reads none of those fields; the nodes that
 // hand control to the evaluator set them first (`syncTree`).
 package struct TreeRoot {
-    private const(imported!"snakebite.backends.layout".FrameLayout)* _layout;
+    private const(imported!"snakebite.language.layout.frame".FrameLayout)* _layout;
     // The statements of the body: one node, a short sequence whose
     // children are fields, or a sequence.
     private Node _body;
-    package const(imported!"snakebite.backends.closureplan".ClosurePlan)*
+    package const(imported!"snakebite.language.context.chain".ClosurePlan)*
         closurePlan;
     package Type returnType;
     package TypeFacts returnFacts;
@@ -70,13 +70,13 @@ package struct TreeRoot {
         return found is null ? null : *found;
     }
 
-    package const(imported!"snakebite.backends.layout".FrameLayout)* layout()
+    package const(imported!"snakebite.language.layout.frame".FrameLayout)* layout()
         const {
         return _layout;
     }
 
     package bool hasLayout(
-        in imported!"snakebite.backends.layout".FrameLayout* layout,
+        in imported!"snakebite.language.layout.frame".FrameLayout* layout,
     ) const {
         return _layout is layout;
     }
@@ -135,7 +135,7 @@ private ulong resultBits(T)(in T value) {
 
 package TreeRoot* rootOf(E)(
     E ev, FuncDeclaration function_, Statement body_,
-    const(imported!"snakebite.backends.layout".FrameLayout)* layout,
+    const(imported!"snakebite.language.layout.frame".FrameLayout)* layout,
 ) {
     import dmd.typesem: nextOf;
 
@@ -192,7 +192,7 @@ package TreeRoot* rootOf(E)(
 // Allocates the closure of a function whose captured variables dmd moves to
 // the heap, and keeps its address in the frame (`FrameLayout.closure`).
 private final class ClosureEntry(E) : Node {
-    import snakebite.backends.layout: ClosureLayout, FrameLayout;
+    import snakebite.language.layout.frame: ClosureLayout, FrameLayout;
 
     private E _ev;
     private FuncDeclaration _function;
@@ -278,8 +278,8 @@ package enum CalleeResult : ubyte { value, aggregate, reference }
 // What a call node needs to know about its callee, decided once per
 // function.
 package struct TreeCallee {
-    import snakebite.backends.calls: CallSelection;
-    import snakebite.backends.layout: FrameLayout;
+    import snakebite.language.call.selection: CallSelection;
+    import snakebite.language.layout.frame: FrameLayout;
     import snakebite.ffi.plan: CallPlan;
 
     package FuncDeclaration function_;
@@ -345,7 +345,7 @@ package struct AccessSite {
 // `indirect` is set when the slot holds the address of the storage.
 package struct OuterVariable {
     package bool ok;
-    package const(imported!"snakebite.backends.closureplan".Hop)[] hops;
+    package const(imported!"snakebite.language.context.chain".Hop)[] hops;
     package size_t offset;
     package bool indirect;
 }
@@ -587,7 +587,7 @@ private final class PointerAddress : Node {
 // A variable of an enclosing function: the static chain's words from the
 // running frame, then the variable's offset.
 private final class OuterAddress : Node {
-    import snakebite.backends.closureplan: Hop;
+    import snakebite.language.context.chain: Hop;
 
     private const(Hop)[] _hops;
     private size_t _offset;
@@ -1537,7 +1537,7 @@ private Node fuse(alias make, V, Kind[] lefts, Kind[] rights, Args...)(
 // besides its two operands.
 private struct Operation(string op) {
     static if (shiftOp!op)
-        public imported!"snakebite.backends.shifts".ShiftPlan plan;
+        public imported!"snakebite.language.operators.shifts".ShiftPlan plan;
     else static if (!simpleOp!op) {
         public TypeFacts leftFacts;
         public TypeFacts rightFacts;
@@ -1556,7 +1556,7 @@ private struct Operation(string op) {
 // `e` keeps its own type: a compound assignment plans its shift differently
 // from a plain shift.
 private Operation!op operationOf(string op, E, B : BinExp)(E ev, B e) {
-    import snakebite.backends.shifts: shiftPlan;
+    import snakebite.language.operators.shifts: shiftPlan;
 
     static if (shiftOp!op)
         return Operation!op(shiftPlan(e));
@@ -2211,7 +2211,7 @@ private final class ContextFromValue : Node {
 // frame, or the frame of an enclosing function, reached through the static
 // chain.
 private final class FrameContextStore : Node {
-    import snakebite.backends.closureplan: Hop;
+    import snakebite.language.context.chain: Hop;
 
     private size_t _offset;
     private const(Hop)[] _hops;
@@ -2226,7 +2226,7 @@ private final class FrameContextStore : Node {
 // The context that `hops` reach from `frame` along the static chain. A
 // context that a hop finds null stays null.
 private ubyte* contextAlong(
-    ubyte* frame, const(imported!"snakebite.backends.closureplan".Hop)[] hops,
+    ubyte* frame, const(imported!"snakebite.language.context.chain".Hop)[] hops,
 ) {
     auto context = frame;
     foreach (hop; hops) {
@@ -2594,7 +2594,7 @@ private final class AggregateStore : Node {
     }
     private ubyte* store(ubyte* frame) {
         import core.stdc.string: memcpy;
-        import snakebite.backends.assignment: executeAssignment;
+        import snakebite.language.storage.assignment: executeAssignment;
 
         auto target = _target.executeAddr(frame);
         auto storage = FrameGuard(_frames);
@@ -2721,7 +2721,7 @@ private final class EvaluatedPair(E) : SliceNode {
 // finds null stays null: such a delegate does not capture, so its context is
 // never read.
 private final class FrameDelegate : SliceNode {
-    import snakebite.backends.closureplan: Hop;
+    import snakebite.language.context.chain: Hop;
 
     private const(Hop)[] _hops;
     private void* _function;
@@ -2782,7 +2782,7 @@ private final class MethodDelegate(E, MethodReceiver kind) : SliceNode {
 // its variable (`PairPlan`): the receiver, or the first context, and the
 // outer context. The node yields the address of the pair.
 private final class ContextPair : Node {
-    import snakebite.backends.contextsource: PairPlan;
+    import snakebite.language.context.source: PairPlan;
 
     private Node _storage;
     private Node _first;
@@ -2872,7 +2872,7 @@ private final class Assertion(E) : Node {
 // an invariant: the object is read once, and a null one fails before the
 // invariant runs, as dmd's glue layer has it.
 private final class InvariantAssertion(E) : Node {
-    import snakebite.backends.exceptions: AssertInvariantPlan;
+    import snakebite.language.checks.assertion: AssertInvariantPlan;
 
     private E _ev;
     private Node _object;
@@ -3829,7 +3829,7 @@ private const(DirectWordCall)* directWordCallOf(
 // evaluation of the arguments.
 private struct Selection {
     public TreeCallee* callee;
-    public imported!"snakebite.backends.calls".CallSelection.Route route;
+    public imported!"snakebite.language.call.selection".CallSelection.Route route;
     public const(imported!"snakebite.ffi.plan".CallPlan)* plan;
     // Set when the call is a direct word call.
     public const(DirectWordCall)* direct;
@@ -3910,7 +3910,7 @@ private mixin template CalleeEntry(E) {
     }
 
     private Selection selectionOf(TreeCallee* callee) {
-        import snakebite.backends.calls: CallSelection;
+        import snakebite.language.call.selection: CallSelection;
 
         const decision = CallSelection.atCallSite(callee.decision, _site);
         auto steps = stepsOf(callee);
@@ -4057,7 +4057,7 @@ private mixin template CalleeEntry(E) {
     private void run(
         in Selection selection, ubyte* base, void* result, ubyte* frame,
     ) {
-        import snakebite.backends.calls: CallSelection;
+        import snakebite.language.call.selection: CallSelection;
 
         auto callee = cast(TreeCallee*) selection.callee;
         final switch (selection.route) with (CallSelection.Route) {
@@ -4312,7 +4312,7 @@ private abstract class Call(E) : Node {
 
     // How this site runs `callee` in place of a general call, or null.
     private FastCallee* fastOf(TreeCallee* callee, in Selection selected) {
-        import snakebite.backends.calls: CallSelection;
+        import snakebite.language.call.selection: CallSelection;
 
         if (selected.route != CallSelection.Route.guest)
             return null;
@@ -4871,7 +4871,7 @@ private final class ConstructorCall(E) : Node {
 
     public this(E ev, CallExp site, FuncDeclaration constructor,
             Node receiver, bool receiverIsAddress, SiteArguments arguments) {
-        import snakebite.backends.contextpair: constructsThroughPair;
+        import snakebite.language.context.pair: constructsThroughPair;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         _ev = ev; _site = site;
@@ -4906,8 +4906,8 @@ private final class ConstructorCall(E) : Node {
 
     // Runs the constructor and returns the object that it constructed.
     private size_t construct(ubyte* frame) {
-        import snakebite.backends.contextpair: constructedObjectOffset;
-        import snakebite.backends.temporary: constructTemporary;
+        import snakebite.language.context.pair: constructedObjectOffset;
+        import snakebite.language.layout.temporary: constructTemporary;
 
         auto ev = _ev;
         const receiver = runReceiver(frame);
@@ -5537,7 +5537,7 @@ private final class BuiltinOp : Node {
 private Node buildIntrinsicCall(E)(E ev, CallExp call, FuncDeclaration function_) {
     import dmd.astenums: TY;
     import dmd.typesem: toBasetype;
-    import snakebite.backends.calls: CallSelection;
+    import snakebite.language.call.selection: CallSelection;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
 
     const selected = ev._callSelection.floatIntrinsicOf(call, function_);
@@ -5701,9 +5701,9 @@ private Slot slotOf(E)(E ev, VarDeclaration variable) {
 // The words to load from the running frame to reach the running function's
 // own context: none when it is the frame, and the closure's slot when the
 // function has a closure.
-private const(imported!"snakebite.backends.closureplan".Hop)[]
+private const(imported!"snakebite.language.context.chain".Hop)[]
 ownContextHops(E)(E ev) {
-    import snakebite.backends.closureplan: Hop;
+    import snakebite.language.context.chain: Hop;
 
     const closure = ev._layout.closure;
     return closure == size_t.max
@@ -5862,7 +5862,7 @@ private bool returnsReference(CallExp call) {
 
 private Node buildIndexAddress(E)(E ev, IndexExp indexed) {
     import dmd.astenums: TY;
-    import snakebite.frontend.storage: readsIndexAfterBase;
+    import snakebite.language.storage.resolver: readsIndexAfterBase;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: nextOf, toBasetype;
 
@@ -5948,7 +5948,7 @@ private Slot dollarSlot(E)(E ev, VarDeclaration dollar) {
 // resolver does.
 private Node indexOfArray(E)(E ev, IndexExp indexed, Node array,
         Node position, size_t stride, in Slot dollar) {
-    import snakebite.frontend.storage: readsIndexAfterBase;
+    import snakebite.language.storage.resolver: readsIndexAfterBase;
 
     if (dollar.ok)
         return fuse!(MakeIndex!(IndexDynamic, true, true).make, long,
@@ -6063,8 +6063,8 @@ private bool bindsReference(E)(E ev, AssignExp e) {
 private Node buildCall(E)(E ev, CallExp call) {
     import dmd.astenums: TY;
     import dmd.typesem: toBasetype;
-    import snakebite.backends.calls: CallSelection;
-    import snakebite.backends.contextsource: pairPlanOf;
+    import snakebite.language.call.selection: CallSelection;
+    import snakebite.language.context.source: pairPlanOf;
     import snakebite.frontend.dmd.dispatch: CallReceiver, readsVtable,
         receiverOf;
     import snakebite.frontend.dmd.functions: typeFunctionOf, unresolvedCalleeOf;
@@ -6207,7 +6207,7 @@ private Node bound(N)(TreeCallee* callee, N node) {
 private Node buildThisValue(E)(E ev, VarDeclaration variable) {
     import dmd.astenums: TY;
     import dmd.typesem: toBasetype;
-    import snakebite.backends.closureplan: ClosurePlan;
+    import snakebite.language.context.chain: ClosurePlan;
     import snakebite.frontend.dmd.delegates: outerFunctionOf;
 
     auto slot = buildVariableAddress(ev, variable);
@@ -6234,9 +6234,9 @@ private Node buildCalleeContext(E)(E ev, CallExp call, FuncDeclaration callee) {
 // The context that `source` names, as an address. Null when the tree does
 // not reach it.
 private Node buildContext(E)(
-    E ev, in imported!"snakebite.backends.contextsource".ContextSource source,
+    E ev, in imported!"snakebite.language.context.source".ContextSource source,
 ) {
-    import snakebite.backends.contextsource: ContextSource;
+    import snakebite.language.context.source: ContextSource;
     import snakebite.failure.report: internalFailure;
 
     final switch (source.kind) with (ContextSource.Kind) {
@@ -6290,7 +6290,7 @@ private Node buildContext(E)(
 private Node buildIndirectCall(E)(E ev, CallExp call) {
     import dmd.astenums: TY;
     import dmd.typesem: nextOf, toBasetype;
-    import snakebite.backends.calls: isIndirectDelegateCall;
+    import snakebite.language.call.selection: isIndirectDelegateCall;
 
     auto callee = call.e1;
     const viaDelegate = isIndirectDelegateCall(callee.type);
@@ -6347,7 +6347,7 @@ private enum Extras : ubyte { packed, separate }
 
 // How a call of `callee` passes its extra arguments.
 private Extras extrasFor(in TreeCallee* callee) {
-    import snakebite.backends.calls: CallSelection;
+    import snakebite.language.call.selection: CallSelection;
 
     return callee.decision.route == CallSelection.Route.guest
         ? Extras.packed : Extras.separate;
@@ -6771,7 +6771,7 @@ private Node buildSliceAssignment(E)(
 ) {
     import dmd.expression: MemorySet;
     import dmd.typesem: nextOf, toBasetype;
-    import snakebite.frontend.storage: planSlice;
+    import snakebite.language.storage.resolver: planSlice;
 
     if (planSlice(target).yieldsStaticArray
             || (assignment.isConstructExp !is null
@@ -6874,7 +6874,7 @@ private Node buildSliceOf(E)(E ev, SliceExp expression) {
     import dmd.astenums: TY;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: nextOf, toBasetype;
-    import snakebite.frontend.storage: planSlice;
+    import snakebite.language.storage.resolver: planSlice;
 
     const plan = planSlice(expression);
     if (plan.yieldsStaticArray)
@@ -6941,7 +6941,7 @@ private Node buildSliceOf(E)(E ev, SliceExp expression) {
 
 // A cast whose result is a dynamic array.
 private Node buildSliceCast(E)(E ev, CastExp castExp) {
-    import snakebite.backends.casts: layoutOf;
+    import snakebite.language.operators.casts: layoutOf;
     import snakebite.failure.report: internalFailure;
     import snakebite.native.value: CastKind;
 
@@ -6985,7 +6985,7 @@ private Node buildZeroPair(E)(E ev, Expression operand) {
 private Node buildNew(E)(E ev, NewExp expression) {
     import dmd.astenums: TY;
     import dmd.typesem: toBasetype;
-    import snakebite.backends.aggregateinit: AggregateInitPlan, driveInit,
+    import snakebite.language.storage.aggregateinit: AggregateInitPlan, driveInit,
         NewPlan, planClassContext, planNew, planPositionalFields;
 
     auto plan = planNew(expression);
@@ -7039,7 +7039,7 @@ private Node buildNew(E)(E ev, NewExp expression) {
 // The tree hooks of `driveInit`: each step appends its node, and a step that
 // the tree does not build, where the evaluator falls back, is recorded.
 private struct NewInitHooks(E) {
-    import snakebite.backends.aggregateinit: InitStep;
+    import snakebite.language.storage.aggregateinit: InitStep;
 
     E ev;
     Node[] steps;
@@ -7072,10 +7072,10 @@ private struct NewInitHooks(E) {
 // The storage of the object that `new` makes, before `driveInit`.
 private Node buildNewStorage(E)(
     E ev, NewExp expression,
-    imported!"snakebite.backends.aggregateinit".NewPlan plan,
+    imported!"snakebite.language.storage.aggregateinit".NewPlan plan,
 ) {
     import dmd.typesem: toBasetype;
-    import snakebite.backends.aggregateinit: NewPlan;
+    import snakebite.language.storage.aggregateinit: NewPlan;
 
     final switch (plan.destination) with (NewPlan.Destination) {
         case lowering:
@@ -7118,7 +7118,7 @@ private const(void)[] classImageOf(E)(E ev, NewExp expression) {
 // made in: the frame of this function or of one that encloses it, or one
 // that the evaluator finds.
 private Node buildVthisStep(E)(E ev, InitStep step) {
-    import snakebite.backends.contextsource: ContextSource, contextSourceOf;
+    import snakebite.language.context.source: ContextSource, contextSourceOf;
 
     if (step.source !is null) {
         auto value = buildValue(ev, step.source);
@@ -7234,8 +7234,8 @@ private Node buildEffect(E)(E ev, Expression expression) {
 }
 
 private Node buildAssertion(E)(E ev, AssertExp expression) {
-    import snakebite.backends.checkplan: assertPlanOf, FailurePlan;
-    import snakebite.backends.exceptions:
+    import snakebite.language.checks.failure: assertPlanOf, FailurePlan;
+    import snakebite.language.checks.assertion:
         AssertInvariantPlan, assertInvariantPlanOf;
 
     final switch (assertPlanOf(ev._program.checks).kind) with (FailurePlan.Kind) {
@@ -7263,7 +7263,7 @@ private Node buildAssertion(E)(E ev, AssertExp expression) {
 // The node that tests the truth of `expression`, as a condition does.
 private Node buildTruth(E)(E ev, Expression expression) {
     import dmd.tokens: EXP;
-    import snakebite.backends.plaincondition: isPlainCondition;
+    import snakebite.language.control.plaincondition: isPlainCondition;
 
     if (expression.op == EXP.comma)
         return buildComma(ev, expression.isCommaExp, &buildTruth!E);
@@ -7345,7 +7345,7 @@ private Node buildTruthAfterEnd(E)(
 // `&&` or `||` as its plan says (`logicalPlan`): a right operand with a
 // value is a test, and one without runs for its effect.
 private Node buildLogical(E)(E ev, imported!"dmd.expression".LogicalExp logical) {
-    import snakebite.backends.logical: LogicalPlan, logicalPlan;
+    import snakebite.language.control.logical: LogicalPlan, logicalPlan;
 
     const plan = logicalPlan(logical);
     auto left = buildTruth(ev, logical.e1);
@@ -7393,7 +7393,7 @@ private Node notOf(Node operand) {
 // The node that yields `expression`'s scalar value.
 private Node buildValue(E)(E ev, Expression expression) {
     import dmd.tokens: EXP;
-    import snakebite.frontend.storage: typeInfoAddressedBy;
+    import snakebite.language.storage.resolver: typeInfoAddressedBy;
     import snakebite.frontend.typefacts: isStaticStructAddress;
     import snakebite.native.value: checkedLoadIntegral;
     import snakebite.native.value: loadFloating;
@@ -7441,7 +7441,7 @@ private Node buildValue(E)(E ev, Expression expression) {
             return new Constant!long(cast(long) address);
         }
         case arrayLiteral: {
-            import snakebite.backends.arrayliteral: planArrayLiteral;
+            import snakebite.language.layout.arrayliteral: planArrayLiteral;
 
             auto literal = expression.isArrayLiteralExp;
             return buildArrayLiteralStorage(
@@ -7474,7 +7474,7 @@ private Node buildValue(E)(E ev, Expression expression) {
         case this_, super_: {
             // `super` is `this` with the type of the base class; dmd's
             // `SuperExp` is a `ThisExp`.
-            import snakebite.backends.closureplan: ClosurePlan;
+            import snakebite.language.context.chain: ClosurePlan;
             import snakebite.frontend.dmd.delegates: outerFunctionOf;
 
             auto variable = thisVariable(ev, cast(ThisExp) expression);
@@ -7566,7 +7566,7 @@ private Node buildValue(E)(E ev, Expression expression) {
                 ev.functionAddressOf(expression.isFuncExp.fd));
         case symbolOffset: {
             // `&variable`, `&function` or the address of a `TypeInfo`.
-            import snakebite.frontend.storage: typeInfoObjectOf;
+            import snakebite.language.storage.resolver: typeInfoObjectOf;
 
             if (scalar.kind != Scalar.Kind.integral)
                 return null;
@@ -7645,7 +7645,7 @@ private Node buildConditional(alias buildBranch, Result, E)(
 // The vtable of an object of an interface type has the interface's own
 // information in between.
 private Node buildTypeidOf(E)(E ev, Expression object, in Scalar scalar) {
-    import snakebite.backends.classinfo: typeidLoadCount;
+    import snakebite.language.statics.classinfo: typeidLoadCount;
 
     static if (E.nullCheckedEvaluator)
         return null;
@@ -7662,7 +7662,7 @@ private Node buildTypeidOf(E)(E ev, Expression object, in Scalar scalar) {
 }
 
 private Node buildIdentity(bool negate, E)(E ev, IdentityExp e) {
-    import snakebite.backends.identity: identityPlan;
+    import snakebite.language.operators.identity: identityPlan;
 
     // `is` compares bits: the plan says how many, and which operands need
     // no compare. The nodes below serve the widths they can carry.
@@ -7794,7 +7794,7 @@ private template binaryOf(string op) {
 }
 
 private Node buildBinary(string op, E)(E ev, BinExp e, in Scalar scalar) {
-    import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
+    import snakebite.language.operators.arithmetic: ArithmeticPlan, arithmeticPlan;
 
     final switch (arithmeticPlan(e).kind) with (ArithmeticPlan.Kind) {
         // dmd has scaled the offset of a pointer by the size of the pointee,
@@ -7840,7 +7840,7 @@ private Node buildBinary(string op, E)(E ev, BinExp e, in Scalar scalar) {
 // `==` and `!=`: dmd's lowering (a call to `__equals`) where it made one;
 // otherwise dynamic arrays compared as bytes, or a scalar compare.
 private Node buildEquality(bool negate, E)(E ev, EqualExp e) {
-    import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
+    import snakebite.language.operators.comparison: ComparisonPlan, comparisonPlan;
 
     if (e.lowering !is null)
         return buildValue(ev, e.lowering);
@@ -7901,7 +7901,7 @@ private Node integerCompare(string op)(
 // reads the left operand last: `x < (x = 10)` with `int x = 1` is true with
 // dmd and false with ldc. snakebite follows dmd, the host compiler of `bin/ut`.
 private Node buildCompare(string op, E)(E ev, BinExp e) {
-    import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
+    import snakebite.language.operators.comparison: ComparisonPlan, comparisonPlan;
 
     const plan = comparisonPlan(e);
     auto left = buildValue(ev, e.e1);
@@ -8003,9 +8003,9 @@ private Node fuseStep(alias make, V, Kind[] steps, Args...)(
 // arrives wrapped in the cast that promotes it, and the result is converted
 // back to the target's own type.
 private Node buildOpAssign(string op, E)(E ev, BinAssignExp e, in Scalar scalar) {
-    import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
-    import snakebite.backends.shifts: shiftPlan;
-    import snakebite.backends.compoundassign: compoundTarget;
+    import snakebite.language.operators.arithmetic: ArithmeticPlan, arithmeticPlan;
+    import snakebite.language.operators.shifts: shiftPlan;
+    import snakebite.language.operators.compound: compoundTarget;
 
     const plan = arithmeticPlan(e);
     auto step = buildValue(ev, e.e2);
@@ -8041,7 +8041,7 @@ private Node buildOpAssign(string op, E)(E ev, BinAssignExp e, in Scalar scalar)
 private Node buildFloatingOpAssign(string op, E)(
     E ev, BinAssignExp e, in Scalar scalar, Target target, Node step,
 ) {
-    import snakebite.backends.compoundassign: compoundConversion;
+    import snakebite.language.operators.compound: compoundConversion;
 
     const conversion = compoundConversion(e);
     // The type the operation runs in: an integral target's comes from the
@@ -8082,7 +8082,7 @@ private Node buildFloatingOpAssign(string op, E)(
 // pointer: the value is the old one, and the new one wraps in the target's
 // own type.
 private Node buildPost(long delta, E)(E ev, PostExp e, in Scalar scalar) {
-    import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan,
+    import snakebite.language.operators.arithmetic: ArithmeticPlan, arithmeticPlan,
         pointerPostStep;
 
     if (scalar.kind != Scalar.Kind.integral)
@@ -8193,7 +8193,7 @@ private Position positionOf(E)(E ev, Expression root) {
 // declares. A declaration of an alias, a type, a template or a manifest
 // constant has nothing to run.
 private Node buildDeclaration(E)(E ev, DeclarationExp declaration) {
-    import snakebite.backends.declaration: forEachRuntimeVariable;
+    import snakebite.language.layout.variables: forEachRuntimeVariable;
 
     Node[] nodes;
     bool covered = true;
@@ -8241,7 +8241,7 @@ private Node initializationOf(E)(
     E ev, VarDeclaration variable, DeclarationExp declaration, Node store,
     in size_t materialised,
 ) {
-    import snakebite.backends.temporary: hasTemporaryDestructor;
+    import snakebite.language.layout.temporary: hasTemporaryDestructor;
 
     auto region = ev._treeRoot._region;
     const slot = ev._layout.slotOf(variable);
@@ -8477,7 +8477,7 @@ private Node buildStructLiteral(E)(E ev, imported!"dmd.expression".StructLiteral
 private Node buildArrayLiteral(E)(
     E ev, imported!"dmd.expression".ArrayLiteralExp literal,
 ) {
-    import snakebite.backends.arrayliteral: ArrayLiteralPlan, planArrayLiteral;
+    import snakebite.language.layout.arrayliteral: ArrayLiteralPlan, planArrayLiteral;
     import snakebite.frontend.typefacts: isStoredLiteral;
 
     auto plan = planArrayLiteral(literal, ev._function);
@@ -8506,9 +8506,9 @@ private Node buildArrayLiteral(E)(
 // of the destination.
 private Node buildArrayLiteralStorage(E)(
     E ev, imported!"dmd.expression".ArrayLiteralExp literal,
-    imported!"snakebite.backends.arrayliteral".ArrayLiteralPlan plan,
+    imported!"snakebite.language.layout.arrayliteral".ArrayLiteralPlan plan,
 ) {
-    import snakebite.backends.arrayliteral: ArrayLiteralPlan;
+    import snakebite.language.layout.arrayliteral: ArrayLiteralPlan;
     import snakebite.frontend.compiler: arrayLiteralLowering;
     import snakebite.frontend.dmd.functions: moduleOf;
 
@@ -8541,7 +8541,7 @@ private Node buildArrayLiteralStorage(E)(
 private Node buildArrayLiteralSlice(E)(
     E ev, imported!"dmd.expression".ArrayLiteralExp literal,
 ) {
-    import snakebite.backends.arrayliteral: planArrayLiteral;
+    import snakebite.language.layout.arrayliteral: planArrayLiteral;
 
     // `auto`: dmd's element type stays mutable.
     auto plan = planArrayLiteral(literal, ev._function);
@@ -8632,8 +8632,8 @@ private Node buildReferenceBinding(E)(
 private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
     import dmd.astenums: STMT;
     import dmd.tokens: EXP;
-    import snakebite.backends.ifplan: IfPlan, ifPlan;
-    import snakebite.backends.switchplan: gotoCaseTarget, gotoDefaultTarget;
+    import snakebite.language.control.ifplan: IfPlan, ifPlan;
+    import snakebite.language.control.cases: gotoCaseTarget, gotoDefaultTarget;
 
     Node generic() {
         return new GenericStatement!E(ev, statement);
@@ -8894,7 +8894,7 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
 private Node buildSwitch(E)(
     E ev, imported!"dmd.statement".SwitchStatement statement,
 ) {
-    import snakebite.backends.switchplan: SwitchPlan, caseTableOf, switchPlan;
+    import snakebite.language.control.cases: SwitchPlan, caseTableOf, switchPlan;
 
     enum where = FullExpressionScope.Position.switchOperand;
     auto operand = buildIntegral(ev, statement.condition, where);
@@ -9098,7 +9098,7 @@ private bool holdsLabel(in Statement statement, const(void)* label) {
 private bool runsNothing(Statement statement) {
     import dmd.astenums: STMT;
     import dmd.statement: ExpStatement;
-    import snakebite.backends.declaration: forEachRuntimeVariable;
+    import snakebite.language.layout.variables: forEachRuntimeVariable;
 
     switch (statement.stmt) with (STMT) {
         case Import, ScopeGuard:

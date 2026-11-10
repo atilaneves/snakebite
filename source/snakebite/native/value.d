@@ -500,8 +500,7 @@ public void* virtualFunctionWord(in void* receiver, size_t index) {
 }
 
 // `storeIntegral` for a caller that has not validated `size`: it throws an
-// `Exception` for a width with no native layout, as the `nativelayout`
-// wrappers did before the native value operations moved to this module. A
+// `Exception` for a width with no native layout. A
 // caller that already validated its width calls `storeIntegral` directly.
 // `snakebite.backends.interpreter.walker` calls this on nearly every
 // integral assignment it interprets, so it collapses into that caller
@@ -572,9 +571,10 @@ public enum delegateContextOffset = 0;
 public enum delegateFunctionOffset = (void*).sizeof;
 public enum delegateValueSize = 2 * (void*).sizeof;
 
-// Which byte-level transform a cast performs, once `snakebite.backends.
-// casts.classify` has decided it. This is the one enum both
-// `snakebite.backends.casts.CastPlan.kind` (classify's own answer,
+// Which byte-level transform a cast performs, once
+// `snakebite.language.operators.casts.classify` has decided it. This is the
+// one enum both
+// `snakebite.language.operators.casts.CastPlan.kind` (classify's own answer,
 // while dmd's types are still in scope) and `applyCast`/`applyCastAs`
 // below (turning that answer into bytes, once they are not) read -
 // `snakebite.backends.bytecode.vm` may not import DMD frontend
@@ -626,9 +626,9 @@ public enum CastKind {
     truth,
 }
 
-// The DMD-free subset of `snakebite.backends.casts.CastPlan` that
+// The DMD-free subset of `snakebite.language.operators.casts.CastPlan` that
 // `applyCast` needs to turn a cast's source bytes into its destination
-// bytes - `snakebite.backends.casts.layoutOf` builds one from a
+// bytes - `snakebite.language.operators.casts.layoutOf` builds one from a
 // `CastPlan`. Kept here, next to `applyCast` itself, rather than in
 // `casts.d`, because `snakebite.backends.bytecode.vm` may not import
 // DMD frontend modules and `casts.d` reaches dmd's own `Type` in its
@@ -804,7 +804,7 @@ pragma(inline, true) public void applyCastAs(CastKind kind)(
     // width, never inside the narrower destination, so `narrow` reads
     // the same regardless of sign. `widenSigned`/`widenUnsigned` fix
     // the sign the extension itself uses at the kind, rather than at
-    // `layout.sourceUnsigned` - `snakebite.backends.casts.classify`
+    // `layout.sourceUnsigned` - `snakebite.language.operators.casts.classify`
     // already chose between them on the source's own signedness, so
     // there is nothing left for `layout` to add.
     else static if (kind == narrow)

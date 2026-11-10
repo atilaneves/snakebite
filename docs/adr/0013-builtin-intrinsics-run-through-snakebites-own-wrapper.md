@@ -24,7 +24,7 @@ hand-written intrinsic declarations and match native DMD. This replaces
 the former CTFE-name and whole-module classification rule.
 
 `CallSelection.buildDecision`
-(`source/snakebite/backends/calls.d`) finds the compiler intrinsics
+(`source/snakebite/language/call/selection.d`) finds the compiler intrinsics
 among the bodiless declarations. Its shared classifier copies the rows
 of `dmd.glue.toir.intrinsic_op` in DMD 2.113.0, which is package-private
 and cannot be called here. It checks the module package and identifier,
