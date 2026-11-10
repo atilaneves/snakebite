@@ -323,7 +323,7 @@ private struct JitState {
         }
         if (cap - g.a.n - g.literalBytes < codeAlignment)
             return Emitted.full;
-        if (g.literalCount && g.a.n + g.literalBytes + 2 > int.max)
+        if (g.literalCount && g.a.n + g.literalBytes + Asm.ud2Size > int.max)
             return Emitted.failed;
         g.labels[instructions.length] = g.a.n;
         g.a.ud2();
@@ -946,7 +946,13 @@ private struct Asm {
         b(cast(ubyte) (0xC0 | ((dst & 7) << 3) | (src & 7)));
     }
 
-    void ud2() { b(0x0F); b(0x0B); }
+    private enum ubyte[2] _ud2Encoding = [0x0F, 0x0B];
+    enum ud2Size = _ud2Encoding.length;
+
+    void ud2() {
+        static foreach (index; 0 .. ud2Size)
+            b(_ud2Encoding[index]);
+    }
 
     // `jmp rax`.
     void jmpRax() { b(0xFF); b(0xE0); }
