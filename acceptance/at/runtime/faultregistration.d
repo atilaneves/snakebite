@@ -81,6 +81,65 @@ static foreach (backend; Matrix!(
     }
 }
 
+// The registration belongs to the process, not to the thread that ran the
+// program, so another thread sees it in `held` too. Only the non-Native arms
+// have a registration in the test process.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the Native arm runs no guest program in the test process, so no registration exists"),
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot run module destructors"),
+)) {
+    @("registrationLeftToTheEndOfTheProcessIsHeldForOtherThreads." ~ backend.stringof)
+    @Tags(backend.stringof, "alone")
+    unittest {
+        GC.collect;
+        const sandbox = Sandbox();
+        const before = GuestModules.held.leftToExit;
+        const readyPath = sandbox.inSandboxPath("ready");
+        const code =
+            "enum readyPath = `" ~ readyPath ~ "`;\n"
+            ~ "enum releasePath = `" ~ sandbox.inSandboxPath("release") ~ "`;\n"
+            ~ "enum donePath = `" ~ sandbox.inSandboxPath("done") ~ "`;\n"
+            ~ q{
+                import core.thread: Thread;
+                import core.time: msecs;
+                import std.file: exists, write;
+
+                shared static ~this() {
+                    new Thread({
+                        write(readyPath, "ready");
+                        foreach (_; 0 .. 5_000) {
+                            if (exists(releasePath)) {
+                                write(donePath, "done");
+                                return;
+                            }
+                            Thread.sleep(1.msecs);
+                        }
+                    }).start;
+                    foreach (_; 0 .. 5_000) {
+                        if (exists(readyPath))
+                            return;
+                        Thread.sleep(1.msecs);
+                    }
+                }
+
+                void main() {}
+            };
+
+        int status = 1;
+        auto runner = new Thread({ status = programStatus!backend(sandbox, code); });
+        runner.start;
+        runner.join;
+        scope(exit) {
+            sandbox.writeFile("release");
+            waitForSandboxFile(sandbox, "done");
+        }
+
+        status.should == 0;
+        GuestModules.held.leftToExit.should == before + 1;
+    }
+}
+
 private int programStatus(Backend)(in Sandbox sandbox, in string code) {
     static if (is(Backend == Native)) {
         sandbox.writeFile("guest.d", code);
