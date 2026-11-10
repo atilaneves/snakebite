@@ -131,6 +131,24 @@ public const(char)[] mangledNameOf(
 // thread retains that finished result too, so symbol lookup need not wait
 // for unrelated semantic work. Publishing follows successful completion;
 // an unfinished signature must never enter either cache.
+public string nativeSymbolName(imported!"dmd.declaration".Declaration symbol) {
+    import dmd.common.outbuffer: OutBuffer;
+    import dmd.mangle: mangleToBuffer;
+    import snakebite.frontend.compiler: newInFrontend;
+    import snakebite.frontend.dmd.mangle: completeMangleTargets;
+
+    // `symbol` is never itself a function (every caller branches to
+    // `snakebite.ffi.plan.PlanCache.addressOf`/`mangledNameOf` for that -
+    // see each caller's own `isFuncDeclaration` check), but it can still
+    // be nested inside one (a native module's own `static` local variable)
+    // whose mangled name recurses through that function's own mangled
+    // signature - see `completeMangleTargets`.
+    completeMangleTargets(symbol);
+    OutBuffer name;
+    newInFrontend!mangleToBuffer(symbol, name);
+    return name[].idup;
+}
+
 private struct ThreadNames {
     size_t generation;
     bool[imported!"dmd.dsymbol".Dsymbol] completed;

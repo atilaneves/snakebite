@@ -64,7 +64,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import snakebite.framestack: defaultFrameCapacity;
     import snakebite.hostthreads: heapNew;
     import snakebite.executionstates: ExecutionStates;
-    import snakebite.nativelayout: NativeData, nativeSymbolName;
+    import snakebite.nativelayout: NativeData;
+    import snakebite.frontend.dmd.mangle: nativeSymbolName;
     import snakebite.backends.runtimetypes: RuntimeTypes;
 
     // Each native stack needs its own guest frame stack. Fibers can resume

@@ -414,7 +414,7 @@ private struct Shared {
     }
 
     private void* constantSymbolAddress(Declaration symbol) {
-        import snakebite.nativelayout: nativeSymbolName;
+        import snakebite.frontend.dmd.mangle: nativeSymbolName;
 
         if (auto function_ = symbol.isFuncDeclaration)
             return callableAddress(function_, 0);
@@ -642,7 +642,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         UnrolledLoopStatement, WithStatement;
     import dmd.tokens: EXP;
     import dmd.typesem: isIntegral, nextOf, toBasetype;
-    import snakebite.nativelayout: NativeData, nativeSymbolName;
+    import snakebite.nativelayout: NativeData;
+    import snakebite.frontend.dmd.mangle: nativeSymbolName;
     import snakebite.backends.runtimetypes: RuntimeTypes;
 
     alias visit = LoweringVisitor.visit;
