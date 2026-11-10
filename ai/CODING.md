@@ -28,7 +28,10 @@
   impossible to know what those values are from the calling context.
   Either name them with a variable or add a comment.
 * Do not use `__gshared` unless absolutely necessary. Shared code
-  should be `immutable` if it can be, `shared` otherwise.
+  should be `immutable` if it can be, `shared` otherwise. All global
+  and TLS data is suspect and must have its existence justified.
+* Downcasts are a code smell - use virtual dispatch instead unless
+  justified.
 
 ## Production code (in `source`)
 
