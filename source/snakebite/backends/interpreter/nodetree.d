@@ -7662,7 +7662,7 @@ private Node buildTypeidOf(E)(E ev, Expression object, in Scalar scalar) {
 }
 
 private Node buildIdentity(bool negate, E)(E ev, IdentityExp e) {
-    import snakebite.language.operators.identity: identityPlan;
+    import snakebite.language.operators.comparison: identityPlan;
 
     // `is` compares bits: the plan says how many, and which operands need
     // no compare. The nodes below serve the widths they can carry.

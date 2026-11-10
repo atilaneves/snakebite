@@ -14,7 +14,7 @@ import dmd.mtype: Type;
 import object: TypeInfo_Class;
 import snakebite.native.argumentflow: Shape, SignatureTable;
 import snakebite.language.traversal.lowering: LoweringVisitor;
-import snakebite.language.operators.identity: IdentityPlan, identityPlan;
+import snakebite.language.operators.comparison: IdentityPlan, identityPlan;
 import snakebite.language.control.ifplan: IfPlan;
 import snakebite.language.control.logical: LogicalPlan;
 import snakebite.language.control.plaincondition:

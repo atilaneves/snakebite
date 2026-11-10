@@ -20,7 +20,7 @@ import dmd.location: Loc;
 import dmd.typesem: isString;
 import snakebite.language.traversal.fullexpression: FullExpressionScope;
 import snakebite.language.layout.lowered: LoweredExpressionTypes;
-import snakebite.language.operators.identity: IdentityPlan, identityPlan;
+import snakebite.language.operators.comparison: IdentityPlan, identityPlan;
 import snakebite.language.control.logical: LogicalPlan, logicalPlan;
 import snakebite.language.control.ifplan: IfPlan, ifPlan;
 import snakebite.language.operators.comparison: ComparisonPlan, comparisonPlan;

@@ -240,7 +240,7 @@ import snakebite.language.call.selection: ValueCall;
 import snakebite.failure.halt: isHalt;
 import snakebite.language.checks.assertion: CAssertCall;
 import snakebite.language.traversal.lowering: LoweringVisitor;
-import snakebite.language.operators.identity: IdentityPlan;
+import snakebite.language.operators.comparison: IdentityPlan;
 import snakebite.language.control.ifplan: IfPlan;
 import snakebite.language.control.logical: LogicalPlan;
 import snakebite.language.operators.comparison: ComparisonPlan;
