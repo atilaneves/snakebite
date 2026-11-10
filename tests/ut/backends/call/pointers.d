@@ -877,7 +877,7 @@ static foreach (backend; Matrix!(
 
 
 // State after a throw on a worker (finding 3.4): frame pops are RAII
-// (`snakebite.framestack.FrameStack`), so a worker that a guest
+// (`snakebite.stack.frames.FrameStack`), so a worker that a guest
 // exception unwound through, caught by host code on that same worker,
 // must still be able to make a normal call afterwards - the same
 // worker's frame stack is left exactly as it was before the throwing

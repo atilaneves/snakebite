@@ -1,4 +1,4 @@
-module snakebite.framestack;
+module snakebite.stack.frames;
 
 
 private:
@@ -6,10 +6,10 @@ private:
 
 import snakebite.failure.report: internalFailure;
 
-import snakebite.backends.temporarystack: TemporaryStack;
+import snakebite.stack.temporaries: TemporaryStack;
 import snakebite.host.cstack: CStack;
 import snakebite.host.threads: heapDelete, heapNew;
-import snakebite.tlsstorage: TlsDescriptor, TlsSlots;
+import snakebite.stack.tls: TlsDescriptor, TlsSlots;
 
 
 // Most guest frames fit in one page. The GC scans every committed byte,

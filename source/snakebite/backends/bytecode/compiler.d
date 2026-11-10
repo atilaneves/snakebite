@@ -61,7 +61,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import snakebite.frontend.checks: Checks;
     import snakebite.host.sharedtable: SharedTable;
     import snakebite.failure.exception: SnakebiteException;
-    import snakebite.framestack: defaultFrameCapacity;
+    import snakebite.stack.frames: defaultFrameCapacity;
     import snakebite.host.threads: heapNew;
     import snakebite.host.executionstates: ExecutionStates;
     import snakebite.nativelayout: NativeData;
@@ -1758,9 +1758,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // old destination until then. A function whose returns are all of that
     // kind keeps a pointer to the place in a frame slot; the callers store it
     // there. Returns the place of the function.
-    private imported!"snakebite.backends.returnplace".ReturnPlace
+    private imported!"snakebite.stack.returnplace".ReturnPlace
     redirectReturns() {
-        import snakebite.backends.returnplace: ReturnPlace;
+        import snakebite.stack.returnplace: ReturnPlace;
 
         auto place = _layout.returnPlace;
         if (_isVoidReturn || _isRefReturn)

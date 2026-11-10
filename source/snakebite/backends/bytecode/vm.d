@@ -42,7 +42,7 @@ extern(C) bool executeIndirectCallPlan(
 import snakebite.native.argumentflow: ArgumentFlow, Shape, Signature;
 import snakebite.backends.bytecode.relocation: Address, Place, Reloc, Target;
 import snakebite.backends.builtins: BuiltinCall;
-import snakebite.backends.hostcalllayout: HostCallLayout;
+import snakebite.stack.hostcall: HostCallLayout;
 import snakebite.failure.halt: HaltAction, isHalt;
 import snakebite.failure.unwind:
     ExceptionCandidate, UnwindPlan, unwindPlanOf;
@@ -1029,7 +1029,7 @@ public struct Function {
     package size_t cursorOffset = size_t.max;
     package size_t declaredParameters;
     package const(Signature)* signature;
-    package imported!"snakebite.backends.returnplace".ReturnPlace returnPlace;
+    package imported!"snakebite.stack.returnplace".ReturnPlace returnPlace;
     // Where a host caller writes the arguments, fixed once compiled.
     package HostCallLayout hostCall;
     // Not null when a caller can copy this function in place of a call.
@@ -1173,7 +1173,7 @@ package void recordExceptionHandlerRelocs(
 }
 
 
-import snakebite.framestack: FrameStack;
+import snakebite.stack.frames: FrameStack;
 
 public struct Vm {
     private FrameStack _frames;
@@ -1181,7 +1181,7 @@ public struct Vm {
     @disable this();
     @disable this(this);
 
-    import snakebite.tlsstorage: TlsSlots;
+    import snakebite.stack.tls: TlsSlots;
 
     public this(in size_t frameCapacity, TlsSlots* tls = null) {
         _frames = FrameStack(frameCapacity, tls);
@@ -1827,7 +1827,7 @@ private const(Instruction)* runStaticAddress(Decoded)(
 // address is never a compile-time constant (finding 1.3, ADR-0006) the
 // way a `shared`/`__gshared` variable's is: `opStatic*`'s `source`/
 // `destination` immediate holds a resolved address directly, but
-// `opTls*`'s holds a `snakebite.tlsstorage.TlsDescriptor*` instead,
+// `opTls*`'s holds a `snakebite.stack.tls.TlsDescriptor*` instead,
 // resolved through `frames.tlsSlotFor` - this thread's own storage, on
 // this thread's own frame stack - on every access, never cached in the
 // instruction itself.
@@ -1838,7 +1838,7 @@ private const(Instruction)* runTlsLoad(Decoded)(
     ref Decoded execution,
 ) {
     import core.stdc.string: memcpy;
-    import snakebite.tlsstorage: TlsDescriptor;
+    import snakebite.stack.tls: TlsDescriptor;
 
     auto slot = execution.frames.tlsSlotFor(
         cast(const(TlsDescriptor)*) execution.source);
@@ -1854,7 +1854,7 @@ private const(Instruction)* runTlsStore(Decoded)(
     ref Decoded execution,
 ) {
     import core.stdc.string: memcpy;
-    import snakebite.tlsstorage: TlsDescriptor;
+    import snakebite.stack.tls: TlsDescriptor;
 
     auto slot = execution.frames.tlsSlotFor(
         cast(const(TlsDescriptor)*) execution.destination);
@@ -1869,7 +1869,7 @@ package alias opTlsAddress =
 private const(Instruction)* runTlsAddress(Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.tlsstorage: TlsDescriptor;
+    import snakebite.stack.tls: TlsDescriptor;
 
     auto slot = execution.frames.tlsSlotFor(
         cast(const(TlsDescriptor)*) execution.source);
@@ -1887,7 +1887,7 @@ private const(Instruction)* runTlsAddress(Decoded)(
 // unhandled failure both see the genuine object, never a second exception
 // type standing in for it. Each `opCall` this throw unwinds through pops
 // its own callee `Frame` via that struct's destructor (see
-// `snakebite.framestack`), so no explicit cleanup is needed here.
+// `snakebite.stack.frames`), so no explicit cleanup is needed here.
 package alias opAssert =
     executeOnce!(runAssert, OperandKind.storage, OperandKind.immediate);
 

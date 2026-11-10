@@ -1091,13 +1091,13 @@ private final class SliceFill(T) : SliceNode {
 // of two words: the order is that of `SliceFill`, and each element gets a
 // copy of the bytes of `value`.
 private final class SliceFillBytes : SliceNode {
-    private imported!"snakebite.framestack".FrameStack* _frames;
+    private imported!"snakebite.stack.frames".FrameStack* _frames;
     private Node _to;
     private Node _value;
     private size_t _size;
     private uint _alignment;
     public this(
-        imported!"snakebite.framestack".FrameStack* frames, Node to,
+        imported!"snakebite.stack.frames".FrameStack* frames, Node to,
         Node value, in TypeFacts facts,
     ) {
         _frames = frames; _to = to; _value = value;
@@ -2335,7 +2335,7 @@ private final class Materialise : Node {
 // of a caller comes back too, since a callee runs its own expressions
 // inside the expression of the caller.
 private final class FrameRelease : BoolNode {
-    private imported!"snakebite.framestack".FrameStack* _frames;
+    private imported!"snakebite.stack.frames".FrameStack* _frames;
     private ubyte** _area;
     private Node _inner;
     private size_t _size;
@@ -2367,16 +2367,16 @@ private final class FrameRelease : BoolNode {
 
 // The storage of the rvalues of one full expression, which ends with it.
 private struct Area {
-    private imported!"snakebite.framestack".FrameStack* _frames;
+    private imported!"snakebite.stack.frames".FrameStack* _frames;
     private ubyte** _area;
     private ubyte* _outer;
-    private imported!"snakebite.framestack".FrameStack.Mark _mark;
+    private imported!"snakebite.stack.frames".FrameStack.Mark _mark;
 
     @disable this();
     @disable this(this);
 
     public this(
-        imported!"snakebite.framestack".FrameStack* frames, ubyte** area,
+        imported!"snakebite.stack.frames".FrameStack* frames, ubyte** area,
         in size_t size, in uint alignment,
     ) {
         _frames = frames; _area = area; _outer = *area; _mark = frames.mark;
@@ -2565,14 +2565,14 @@ private final class Initialization(E) : Node {
 // `executeAssignment` decides for every backend. The target is resolved
 // before the value runs, as `StorageResolver` does.
 private final class AggregateStore : Node {
-    private imported!"snakebite.framestack".FrameStack* _frames;
+    private imported!"snakebite.stack.frames".FrameStack* _frames;
     private Node _target;
     private Node _value;
     private size_t _size;
     private uint _alignment;
     private bool _construction;
     public this(
-        imported!"snakebite.framestack".FrameStack* frames, Node target,
+        imported!"snakebite.stack.frames".FrameStack* frames, Node target,
         Node value, in TypeFacts facts, bool construction,
     ) {
         _frames = frames; _target = target; _value = value;
@@ -2611,12 +2611,12 @@ private final class AggregateStore : Node {
 // A struct or static array value whose result nobody reads, which still has
 // a place to be written to.
 private final class DiscardedAggregate : Node {
-    private imported!"snakebite.framestack".FrameStack* _frames;
+    private imported!"snakebite.stack.frames".FrameStack* _frames;
     private Node _value;
     private size_t _size;
     private uint _alignment;
     public this(
-        imported!"snakebite.framestack".FrameStack* frames, Node value,
+        imported!"snakebite.stack.frames".FrameStack* frames, Node value,
         in TypeFacts facts,
     ) {
         _frames = frames; _value = value;
@@ -2831,7 +2831,7 @@ private final class LoadChain : Node {
 // of the storage, which the cursor of the callee holds.
 private final class VariadicExtras : LongNode {
     import snakebite.backends.interpreter.walker: VariadicCallPlan;
-    import snakebite.framestack: FrameStack;
+    import snakebite.stack.frames: FrameStack;
 
     private FrameStack* _frames;
     private const(VariadicCallPlan)* _plan;
@@ -3668,13 +3668,13 @@ private struct SiteArguments {
 
 // Gives the frame stack back to the position it had when this was made.
 private struct FrameGuard {
-    private imported!"snakebite.framestack".FrameStack* _stack;
+    private imported!"snakebite.stack.frames".FrameStack* _stack;
     private ubyte* _top;
 
     @disable this();
     @disable this(this);
 
-    public this(imported!"snakebite.framestack".FrameStack* stack) {
+    public this(imported!"snakebite.stack.frames".FrameStack* stack) {
         _stack = stack;
         _top = stack.top;
     }

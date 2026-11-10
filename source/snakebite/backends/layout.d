@@ -11,7 +11,7 @@ import snakebite.failure.report: internalFailure;
 
 
 import snakebite.native.argumentflow: Shape, Signature, SignatureTable;
-import snakebite.backends.hostcalllayout:
+import snakebite.stack.hostcall:
     checkArgumentCountRule, HostCallLayout;
 
 // One guest function's declared-storage layout: each parameter's byte
@@ -36,7 +36,7 @@ package struct FrameLayout {
 
     package size_t size;
     package uint alignment = 1;
-    package imported!"snakebite.backends.returnplace".ReturnPlace returnPlace;
+    package imported!"snakebite.stack.returnplace".ReturnPlace returnPlace;
     private imported!"snakebite.backends.returnstorage".ReturnStoragePlan _returns;
 
     // Whether a local of the function can point into the temporaries of its
@@ -137,7 +137,7 @@ package struct FrameLayout {
         if (layout._returns.hasPlace) {
             const result = typeFacts(
                 typeFunctionOf(function_).next);
-            layout.returnPlace = imported!"snakebite.backends.returnplace"
+            layout.returnPlace = imported!"snakebite.stack.returnplace"
                 .ReturnPlace(layout.reserveSlot(
                     imported!"snakebite.native.value".TypeFacts.pointer).offset,
                     result.size, result.alignment);

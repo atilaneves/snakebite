@@ -6,10 +6,10 @@ private:
 import dmd.declaration: VarDeclaration;
 import dmd.expression: DeclarationExp, Expression, StructLiteralExp;
 import snakebite.backends.temporary: TemporaryPlan;
-import snakebite.backends.temporarystack: TemporaryStack;
+import snakebite.stack.temporaries: TemporaryStack;
 import snakebite.backends.fullexpression:
     FullExpressionScope;
-import snakebite.framestack: FrameStack, defaultFrameCapacity;
+import snakebite.stack.frames: FrameStack, defaultFrameCapacity;
 import snakebite.host.cstack: CStack;
 import snakebite.native.value: TypeFacts;
 

@@ -1,4 +1,4 @@
-module snakebite.backends.hostcalllayout;
+module snakebite.stack.hostcall;
 
 // No frontend import here: the bytecode VM imports this module and must
 // compile without the DMD frontend import paths.

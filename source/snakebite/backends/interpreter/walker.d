@@ -603,7 +603,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     import snakebite.backends.classinfo;
     import dmd.dclass: ClassDeclaration;
     import dmd.dstruct: StructDeclaration;
-    import snakebite.framestack: FrameStack, defaultFrameCapacity;
+    import snakebite.stack.frames: FrameStack, defaultFrameCapacity;
     import snakebite.backends.interpreter.faultslot:
         ResultWord, faultSlotOf, fastFrameLead, frameLead, pushCallFrame,
         resultPlaceOf, resultWordOf, siteOf;
@@ -1708,7 +1708,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private static void reserveFrame(
         TreeCallee* callee, in size_t size, in uint alignment,
     ) {
-        import snakebite.framestack: FrameStack;
+        import snakebite.stack.frames: FrameStack;
 
         enum mask = size_t(FrameStack.topAlignment) - 1;
         callee.lead = frameLead(alignment);

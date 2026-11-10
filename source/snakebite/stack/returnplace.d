@@ -1,4 +1,4 @@
-module snakebite.backends.returnplace;
+module snakebite.stack.returnplace;
 
 
 private:
@@ -10,7 +10,7 @@ public struct ReturnPlace {
     public uint alignment = 1;
 
     public void* bind(
-        imported!"snakebite.framestack".FrameStack* frames,
+        imported!"snakebite.stack.frames".FrameStack* frames,
         void* frame,
         void* place,
     ) const @system {

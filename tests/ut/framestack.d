@@ -2,7 +2,7 @@ module ut.framestack;
 
 
 import ut;
-import snakebite.framestack: FrameStack;
+import snakebite.stack.frames: FrameStack;
 import core.memory: pageSize;
 
 

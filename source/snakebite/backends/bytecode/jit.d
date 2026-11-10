@@ -1267,7 +1267,7 @@ private struct Gen {
     import snakebite.backends.bytecode.vm: Activation, CallSite,
         chainedDispatch, CheckedAccess, CompareKind, Comparison, Destination,
         DispatchState, Function, indirectBit, IndexBase, Instruction;
-    import snakebite.framestack: FrameStack;
+    import snakebite.stack.frames: FrameStack;
     import snakebite.native.value: arrayLengthOffset, arrayPointerOffset,
         shiftCount;
 

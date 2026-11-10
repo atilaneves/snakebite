@@ -30,7 +30,7 @@ public struct NativeData {
 
     import snakebite.host.threads: heapNew, PerThread;
     import snakebite.host.sharedtable: SharedTable;
-    import snakebite.tlsstorage: TlsDescriptor, TlsSlots;
+    import snakebite.stack.tls: TlsDescriptor, TlsSlots;
 
     private bool delegate(Dsymbol) const _isRootOwned;
     private VarDeclaration delegate(VarDeclaration) _linkedVariable;

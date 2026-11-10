@@ -1,4 +1,4 @@
-module snakebite.backends.temporarystack;
+module snakebite.stack.temporaries;
 
 private:
 

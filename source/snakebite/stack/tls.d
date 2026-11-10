@@ -1,4 +1,4 @@
-module snakebite.tlsstorage;
+module snakebite.stack.tls;
 
 
 private:
