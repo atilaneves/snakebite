@@ -63,7 +63,7 @@ package CompoundConversion compoundConversion(
 ) {
     import snakebite.backends.arithmetic: arithmeticKind;
     import snakebite.backends.casts: classify;
-    import snakebite.nativevalue: TypeFacts;
+    import snakebite.native.value: TypeFacts;
 
     auto targetType = compoundTarget(expression).type;
     auto operationType = expression.e1.type;

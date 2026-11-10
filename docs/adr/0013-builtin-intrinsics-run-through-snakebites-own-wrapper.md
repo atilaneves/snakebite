@@ -45,7 +45,7 @@ intrinsic only when its callee is `OPvar`. A resolved call with a comma
 prefix, such as `(make(), bswap)(value)`, evaluates that prefix before its
 arguments and keeps the native route. A declaration-only cache does not
 prove that this call can use a wrapper or become a constant.
-`source/snakebite/backends/builtins.d` looks up a compiled wrapper by the
+`source/snakebite/builtin/call.d` looks up a compiled wrapper by the
 declaration's own identifier (`function_.ident`, the same identifier
 dmd's own code generator keys on), parameter types, and result type.
 The key includes parameter count. Parameters must be plain values, not
@@ -75,12 +75,12 @@ module name and an identifier. `LDC_va_start`, `LDC_va_end`, `LDC_va_copy`
 and `LDC_alloca` keep the routes of the frame-bound intrinsics. A
 `LDC_intrinsic` declaration, an `LDC_atomic_*` declaration, `LDC_fence` and
 the volatile access of `ldc.bitop` take the builtin route to a wrapper that
-LDC compiles into the host (`source/snakebite/backends/ldcintrinsics.d`),
+LDC compiles into the host (`source/snakebite/builtin/ldc.d`),
 keyed by the LLVM name of the intrinsic (`FuncDeclaration.mangleOverride`),
 or by the pragma and the size of its type argument for the atomics. A
 parameter that LLVM wants as a constant is a `switch` in the wrapper. A
 declaration with no wrapper takes the native route and the resolver's
-diagnostic. `dmdintrinsics.d` and the classifier of dmd's code generator are
+diagnostic. `builtin/dmd.d` and the classifier of dmd's code generator are
 for a dmd host only. The result of an intrinsic is then the result of native
 code that LDC built: `rndtol(2.5)` is 3, `sin` is libm's.
 
@@ -97,7 +97,7 @@ dmd, which rounds in the current rounding mode, and 3 with LDC, whose
 `core.math.rndtol` is `llround`. The wrapper under LDC rounds in the
 current rounding mode with an x87 integer store, so the guest gets 2.
 
-`source/snakebite/backends/dmdintrinsics.d` holds the native instruction
+`source/snakebite/builtin/dmd.d` holds the native instruction
 definitions that the wrappers call. Floating operations use DMD's
 instruction precision. For `fabs` with float or double operands and
 results, `xmmabs` clears the operand's sign bit without a numeric result
@@ -236,8 +236,8 @@ A bodiless declaration now has three possible outcomes, not two: guest
 body, barrier call, or builtin wrapper. `CONTEXT.md`'s "Call selection"
 entry names all three.
 
-`source/snakebite/backends/builtins.d` holds the covered signatures;
+`source/snakebite/builtin/call.d` holds the covered signatures;
 `CallSelection` holds the shared DMD code-generator and call-site rules.
 Adding a wrapper does not make a declaration an intrinsic. The bytecode VM
-imports only `BuiltinCall` from `builtins.d`, never a dmd frontend
+imports only `BuiltinCall` from `builtin/call.d`, never a dmd frontend
 type (CODING.md, "Code organisation").

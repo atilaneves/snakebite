@@ -4,7 +4,7 @@ module snakebite.backends.exceptions;
 private:
 
 
-public import snakebite.backends.unwindplan: catchMatches, unwindFinally;
+public import snakebite.failure.unwind: catchMatches, unwindFinally;
 
 
 // What a failed `assert` reports, decided once from the assertion itself

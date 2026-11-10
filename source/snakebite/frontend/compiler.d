@@ -139,10 +139,10 @@ public void withCompilerLock(
 // Metadata queries can run inside an unfinished diagnostic pass. They must
 // exclude semantic writers without clearing that pass's errors or flags.
 public void withCompilerQuery(scope void delegate() query) {
-    import snakebite.gc: resumeFrontend, suspendFrontend;
+    import snakebite.memory.gc: resumeFrontend, suspendFrontend;
 
     version(unittest) {
-        import snakebite.sharedtable: assertCacheFillAllowed;
+        import snakebite.host.sharedtable: assertCacheFillAllowed;
         assertCacheFillAllowed!"frontend metadata query";
     }
     compiler.mutex.lock;
@@ -217,7 +217,7 @@ private string pathUnder(in string path, in string directory) {
 // Calls `dmdSymbol` - a function dmd declares, or a dmd class, which is
 // then constructed - with `arguments`, inside the frontend: under the
 // frontend lock, with every allocation from the frontend arena, the way
-// dmd allocates (`snakebite.gc`). This is how host code reaches dmd for
+// dmd allocates (`snakebite.memory.gc`). This is how host code reaches dmd for
 // anything that can make or change AST: semantic, forcing a forward
 // reference, CTFE, a type's derived types (`pointerTo`...), a mangled
 // name, a new node. Only dmd code runs inside, so host data never lands
@@ -227,7 +227,7 @@ private string pathUnder(in string path, in string directory) {
 // the AST writes only other AST (frontend memory) into it.
 //
 // A debug build stops at the first dmd object made outside the frontend
-// (`snakebite.gc.requireInsideFrontend`).
+// (`snakebite.memory.gc.requireInsideFrontend`).
 public auto newInFrontend(alias dmdSymbol, Args...)(auto ref Args arguments) {
     static assert(
         declaredByDmd!dmdSymbol,
@@ -352,10 +352,10 @@ public const(SourceToken)[] lex(in char[] source) {
     });
 }
 
-// `snakebite.gc.arenaPointersIntoGC`, with the frontend lock held so
+// `snakebite.memory.gc.arenaPointersIntoGC`, with the frontend lock held so
 // the arena does not grow during the walk.
 debug public string arenaReport() {
-    import snakebite.gc: arenaPointersIntoGC;
+    import snakebite.memory.gc: arenaPointersIntoGC;
 
     string report;
     withCompilerLock({ report = arenaPointersIntoGC; });
@@ -550,13 +550,13 @@ final class Compiler {
 
     // Runs `work`, which is dmd code or this module's own code around
     // it, inside the frontend: under the lock, with every allocation of
-    // this thread from the frontend arena (`snakebite.gc`), the way dmd
+    // this thread from the frontend arena (`snakebite.memory.gc`), the way dmd
     // allocates. What `work` returns is arena memory, which is never
     // freed, so host code may keep it. An exception is made again
     // outside, so the host never gets an arena object that druntime's
     // unwinding could chain a GC exception onto.
     T inside(T)(scope T delegate() work) {
-        import snakebite.gc: enterFrontend, leaveFrontend;
+        import snakebite.memory.gc: enterFrontend, leaveFrontend;
 
         mutex.lock;
         scope(exit) mutex.unlock;
@@ -802,7 +802,7 @@ final class Compiler {
     // on this thread's stack. Applying the flags is dmd work, so it runs
     // inside, and `action` runs after leaving it.
     void withLock(scope void delegate() action, in FrontendFlags flags) {
-        import snakebite.gc:
+        import snakebite.memory.gc:
             enterFrontend, leaveFrontend, resumeFrontend, suspendFrontend;
 
         mutex.lock;
@@ -1870,7 +1870,7 @@ public string diagnosticMessageWithLocations() {
 // A copy of `value` made inside the frontend, so frontend memory: dmd
 // keeps what the host gives it (a module's source text and file name,
 // import paths, command-line arguments), and nothing in the arena may be
-// the only reference to GC memory (`snakebite.gc`). A string copy ends
+// the only reference to GC memory (`snakebite.memory.gc`). A string copy ends
 // in a zero byte past its length: dmd reads some of the strings it is
 // given as C strings.
 private auto ref owned(T)(auto ref return scope T value) {

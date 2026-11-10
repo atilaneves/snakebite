@@ -1,24 +1,24 @@
-module snakebite.backends.argumentflow;
+module snakebite.native.argumentflow;
 
 
 private:
 
-import snakebite.nativevalue: TypeFacts;
-import snakebite.sharedtable: SharedTable;
+import snakebite.native.value: TypeFacts;
+import snakebite.host.sharedtable: SharedTable;
 
 
 // The part of one argument that decides which register the System V x86-64
 // convention puts it in: how wide it is and which kind of register takes it.
 // Anything that is not a scalar or a pointer is `other`: the flow below does
 // not know how many registers it takes.
-package struct Shape {
-    package enum Class : ubyte { integer, sse, other }
+package(snakebite) struct Shape {
+    package(snakebite) enum Class : ubyte { integer, sse, other }
 
-    package size_t size;
-    package uint alignment;
-    package Class class_;
+    package(snakebite) size_t size;
+    package(snakebite) uint alignment;
+    package(snakebite) Class class_;
 
-    package TypeFacts facts() const {
+    package(snakebite) TypeFacts facts() const {
         return TypeFacts(size, alignment, false, false);
     }
 }
@@ -29,11 +29,11 @@ package struct Shape {
 // signatures have equal frame offsets for each parameter.
 // `SignatureTable.intern` returns one object for equal signatures, so a call
 // compares pointers.
-package struct Signature {
-    package enum Variadic : ubyte { none, c, d }
+package(snakebite) struct Signature {
+    package(snakebite) enum Variadic : ubyte { none, c, d }
 
-    package Shape[] parameters;
-    package Variadic variadic;
+    package(snakebite) Shape[] parameters;
+    package(snakebite) Variadic variadic;
 }
 
 // The signatures of one backend instance. A `Signature*` from one table
@@ -43,7 +43,7 @@ package struct Signature {
 public struct SignatureTable {
     private SharedTable!(Signature, Signature) _signatures;
 
-    package const(Signature)* intern(
+    package(snakebite) const(Signature)* intern(
         in Shape[] parameters, in Signature.Variadic variadic,
     ) {
         auto signature = Signature(parameters.dup, variadic);
@@ -70,31 +70,31 @@ public struct SignatureTable {
 // A parameter that is not a scalar or a pointer takes no register in this
 // model. Such a parameter is matched by position and class only, so the
 // arguments after it can be wrong when the types classify it differently.
-package struct ArgumentFlow {
+package(snakebite) struct ArgumentFlow {
     private enum integerRegisters = 6;
     private enum floatingRegisters = 8;
 
     // The parameters of the type of the value, and the arguments that follow
     // them (the variadic arguments of the call).
-    package const(Shape)[] declared;
-    package const(Shape)[] surplus;
+    package(snakebite) const(Shape)[] declared;
+    package(snakebite) const(Shape)[] surplus;
     // The named parameters of the callee.
-    package const(Shape)[] callee;
+    package(snakebite) const(Shape)[] callee;
     // Both sides pass a context first, in an integer register.
-    package bool context;
+    package(snakebite) bool context;
 
-    package size_t argumentCount() const {
+    package(snakebite) size_t argumentCount() const {
         return declared.length + surplus.length;
     }
 
-    package Shape argumentAt(in size_t index) const {
+    package(snakebite) Shape argumentAt(in size_t index) const {
         return index < declared.length
             ? declared[index] : surplus[index - declared.length];
     }
 
     // The argument that the callee parameter `parameter` reads, or
     // `size_t.max` when no argument is in its register.
-    package size_t sourceOf(in size_t parameter) const {
+    package(snakebite) size_t sourceOf(in size_t parameter) const {
         const wanted = locate(callee, null, parameter);
         foreach (index; 0 .. argumentCount)
             if (locate(declared, surplus, index) == wanted)
@@ -103,7 +103,7 @@ package struct ArgumentFlow {
     }
 
     // The arguments that no named parameter reads, in order.
-    package size_t[] unread() const {
+    package(snakebite) size_t[] unread() const {
         auto result = new size_t[](argumentCount);
         size_t count;
         foreach (index; 0 .. argumentCount) {

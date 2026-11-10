@@ -1,4 +1,4 @@
-module snakebite.guestrunlock;
+module snakebite.host.runlock;
 
 
 // The lock of guest runs. It also guards the process's runner hooks, which a

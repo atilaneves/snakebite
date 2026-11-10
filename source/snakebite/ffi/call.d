@@ -42,7 +42,7 @@ public alias CallInvoker = void delegate(
 public struct CallAdapter {
     import dmd.func: FuncDeclaration;
     import dmd.mtype: TypeFunction;
-    import snakebite.nativevalue: TypeFacts;
+    import snakebite.native.value: TypeFacts;
 
     private bool _referenceResult;
     private size_t _resultSize;
@@ -96,7 +96,7 @@ public struct CallAdapter {
         import dmd.expression: Expression;
         import dmd.func: FuncDeclaration;
         import dmd.mtype: Type, TypeFunction;
-        import snakebite.callarguments: CallArguments;
+        import snakebite.native.arguments: CallArguments;
         import snakebite.ffi.plan: CallPlan, PlanCache;
 
         private TypeFunction _type;
@@ -432,14 +432,14 @@ pragma(inline, true) private void storeReference(
     void* place,
     void* address,
 ) {
-    import snakebite.nativevalue: checkedStoreIntegral;
+    import snakebite.native.value: checkedStoreIntegral;
 
     checkedStoreIntegral(place, cast(size_t) address, size_t.sizeof);
 }
 
 
 private void* referenceAt(const(void)* place) {
-    import snakebite.nativevalue: checkedLoadIntegral;
+    import snakebite.native.value: checkedLoadIntegral;
 
     return cast(void*) checkedLoadIntegral(place, size_t.sizeof, false);
 }

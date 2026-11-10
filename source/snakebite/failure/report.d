@@ -1,4 +1,4 @@
-module snakebite.internalfailure;
+module snakebite.failure.report;
 
 
 private:

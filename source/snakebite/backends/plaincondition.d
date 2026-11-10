@@ -7,7 +7,7 @@ import dmd.expression: Expression;
 import dmd.tokens: EXP;
 import snakebite.backends.identity: identityPlan;
 import snakebite.frontend.typefacts: typeFacts;
-import snakebite.nativevalue: isIntegralSize;
+import snakebite.native.value: isIntegralSize;
 import std.typecons: Flag, No, Yes;
 
 // A condition that creates no temporary with a lifetime of its own, so

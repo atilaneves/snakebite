@@ -1,13 +1,13 @@
-module snakebite.hostthreads;
+module snakebite.host.threads;
 
 
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 import core.thread: Thread, ThreadID;
-import snakebite.cstack: CStack;
+import snakebite.host.cstack: CStack;
 
 
 // Makes the state that a `PerThread` holds on the C heap, which the GC

@@ -12,7 +12,7 @@ module ut.backends.flags;
 
 import snakebite.backends.program: Program;
 import snakebite.backends.checkplan: BoundsCheck, cMessageOf;
-import snakebite.backends.haltprocess: Halted, HostActions;
+import snakebite.failure.halt: Halted, HostActions;
 import snakebite.frontend.compiler:
     checksOf, FrontendFlags, parseRootModules, parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;

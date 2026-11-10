@@ -28,7 +28,7 @@ import snakebite.backends.aggregateinit: NewPlan, planNew;
 import dmd.visitor: Visitor;
 import dmd.mtype: Type;
 import dmd.func: FuncDeclaration;
-import snakebite.nativevalue: TypeFacts;
+import snakebite.native.value: TypeFacts;
 import snakebite.frontend.compiler: newInFrontend;
 import std.meta: AliasSeq;
 
@@ -50,7 +50,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     // Every backend uses the same terminal policy if closed dispatch fails.
     final override void visit(Expression expression) {
         import std.conv: text;
-        import snakebite.internalfailure: internalFailure;
+        import snakebite.failure.report: internalFailure;
 
         internalFailure(text("Expression ", expression.op,
             ": no `visit` override, and not in `UnreachableNodes`"));
@@ -58,7 +58,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
 
     final override void visit(Statement statement) {
         import std.conv: text;
-        import snakebite.internalfailure: internalFailure;
+        import snakebite.failure.report: internalFailure;
 
         internalFailure(text("Statement ", statement.stmt,
             ": no `visit` override, and not in `UnreachableNodes`"));
@@ -300,7 +300,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
         CallSelection.ScalarConstant constant;
         if (callSelection.foldedScalarIntrinsic(expression, constant)) {
             if (constant.hasStorage) {
-                import snakebite.nativevalue: TypeFacts;
+                import snakebite.native.value: TypeFacts;
 
                 visitConstantBytes(expression,
                     constant.bytes(typeFacts(expression.type).size));
@@ -590,7 +590,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
         import dmd.typesem: pointerTo;
         import snakebite.backends.arrayliteral: ArrayLiteralPlan, planArrayLiteral;
         import snakebite.frontend.typefacts: isStoredLiteral;
-        import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset;
+        import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
         // Element types must remain mutable for DMD.
         auto plan = planArrayLiteral(expression, currentFunction);

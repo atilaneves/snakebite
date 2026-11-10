@@ -4,7 +4,7 @@ module snakebite.backends.checkplan;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 import snakebite.frontend.checks: Checks;

@@ -2,7 +2,7 @@ module ut.framestack;
 
 
 import ut;
-import snakebite.framestack: FrameStack;
+import snakebite.stack.frames: FrameStack;
 import core.memory: pageSize;
 
 
@@ -557,7 +557,7 @@ unittest {
 
 @("nativeAlignment.offsetWidth")
 unittest {
-    import snakebite.nativevalue: alignUp;
+    import snakebite.native.value: alignUp;
 
     alignUp(3, 0).should == 3;
     alignUp(3, 1).should == 3;
@@ -574,7 +574,7 @@ unittest {
 
 @("nativeAlignment.compiledFieldOffsets")
 unittest {
-    import snakebite.nativevalue: alignUp;
+    import snakebite.native.value: alignUp;
 
     struct Fields {
         ubyte first;

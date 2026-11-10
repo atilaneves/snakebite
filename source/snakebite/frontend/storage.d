@@ -3,7 +3,7 @@ module snakebite.frontend.storage;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 import dmd.expression:
@@ -116,13 +116,13 @@ public struct StorageResolver(Result, Adapter) {
             return _adapter.storagePointer(ptrExp);
 
         if (auto context = expression.isDelegatePtrExp) {
-            import snakebite.nativevalue: delegateContextOffset;
+            import snakebite.native.value: delegateContextOffset;
             return _adapter.storageDelegateWord(
                 resolve(context.e1), delegateContextOffset);
         }
 
         if (auto functionPointer = expression.isDelegateFuncptrExp) {
-            import snakebite.nativevalue: delegateFunctionOffset;
+            import snakebite.native.value: delegateFunctionOffset;
             return _adapter.storageDelegateWord(
                 resolve(functionPointer.e1), delegateFunctionOffset);
         }

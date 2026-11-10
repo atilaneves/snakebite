@@ -1,24 +1,24 @@
-module snakebite.backends.variadic;
+module snakebite.native.variadic;
 
 private:
 
 import core.internal.vararg.sysv_x64: __va_list_tag;
-import snakebite.nativevalue: TypeFacts, alignUp;
+import snakebite.native.value: TypeFacts, alignUp;
 
 // Compiled code starts a `va_list` again from the state its prologue saved.
 // A cursor is followed by a copy of its first state for the same purpose.
 // `save` writes that copy and `restore` reads it; a backend that builds a
 // cursor with its own instructions takes `offset` and `size` from here.
-package struct FirstState {
-    package alias Cursor = __va_list_tag;
-    package enum offset = Cursor.sizeof;
-    package enum size = Cursor.sizeof;
+package(snakebite) struct FirstState {
+    package(snakebite) alias Cursor = __va_list_tag;
+    package(snakebite) enum offset = Cursor.sizeof;
+    package(snakebite) enum size = Cursor.sizeof;
 
-    package static void save(Cursor* cursor) nothrow @nogc {
+    package(snakebite) static void save(Cursor* cursor) nothrow @nogc {
         *(cursor + 1) = *cursor;
     }
 
-    package static void restore(Cursor* cursor) nothrow @nogc {
+    package(snakebite) static void restore(Cursor* cursor) nothrow @nogc {
         *cursor = *(cursor + 1);
     }
 }
@@ -26,14 +26,14 @@ package struct FirstState {
 // Guest calls have no native argument registers to save. A native va_list
 // with exhausted register areas reads all extra arguments from its overflow
 // area. The normal druntime va_arg implementation consumes these bytes.
-package struct VariadicLayout {
-    package alias Cursor = __va_list_tag;
-    package size_t[] offsets;
-    package size_t size = FirstState.offset + FirstState.size;
-    package uint alignment = Cursor.alignof;
-    package size_t argumentsOffset;
+package(snakebite) struct VariadicLayout {
+    package(snakebite) alias Cursor = __va_list_tag;
+    package(snakebite) size_t[] offsets;
+    package(snakebite) size_t size = FirstState.offset + FirstState.size;
+    package(snakebite) uint alignment = Cursor.alignof;
+    package(snakebite) size_t argumentsOffset;
 
-    package static VariadicLayout of(in TypeFacts[] arguments) {
+    package(snakebite) static VariadicLayout of(in TypeFacts[] arguments) {
         VariadicLayout result;
         foreach (facts; arguments)
             if (facts.alignment > result.alignment)
@@ -49,7 +49,7 @@ package struct VariadicLayout {
         return result;
     }
 
-    package void initialize(ubyte* storage) const {
+    package(snakebite) void initialize(ubyte* storage) const {
         auto cursor = cast(Cursor*) storage;
         *cursor = Cursor.init;
         cursor.stack_args = storage + argumentsOffset;

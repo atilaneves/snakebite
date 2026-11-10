@@ -1,4 +1,4 @@
-module snakebite.faulthandler;
+module snakebite.failure.fault;
 
 
 private:

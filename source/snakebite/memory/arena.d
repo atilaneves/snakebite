@@ -4,13 +4,13 @@
 // lives until the compiler exits. Unlike dmd's, this arena is one
 // reserved range of address space per region, so any thread can ask
 // "is this pointer arena memory?" with a range compare and no lock.
-module snakebite.arena;
+module snakebite.memory.arena;
 
 
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 // dmd's own alignment (`allocmemoryNoFree`): enough for any scalar D has,

@@ -3,7 +3,7 @@ module snakebite.frontend.dmd.functions;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 // The module-level function called `name`, or null if there is none.
 public imported!"dmd.func".FuncDeclaration findFunction(
@@ -69,7 +69,7 @@ public imported!"dmd.dmodule".Module moduleOf(
     imported!"dmd.dsymbol".Dsymbol declaration,
 ) {
     import snakebite.frontend.compiler: withCompilerQuery;
-    import snakebite.gc: insideFrontend;
+    import snakebite.memory.gc: insideFrontend;
 
     if (insideFrontend)
         return declaration.getModule;

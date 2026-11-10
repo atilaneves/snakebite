@@ -16,7 +16,7 @@ entry. Druntime's GC scans every registered thread's whole stack by
 default. This scan is conservative: it finds a guest pointer held in
 a host frame between two guest frames, with no marker needed to guide
 it. Guest frame storage is already registered with `GC.addRange`
-(`source/snakebite/framestack.d`, #11), so the GC also sees guest
+(`source/snakebite/stack/frames.d`, #11), so the GC also sees guest
 frames directly. A test forces a collection inside a callback entry,
 while the host caller holds the only reference to a guest object.
 This test checks that the conservative scan finds that reference on

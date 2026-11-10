@@ -12,7 +12,7 @@ import snakebite.frontend.typefacts: typeFacts;
 
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 // Everything about calling one already-compiled function that does not
@@ -284,8 +284,8 @@ public struct CallPlan {
         scope const(void*)[] arguments,
     ) const {
         import core.stdc.string: memcpy;
-        import snakebite.callarguments: CallArguments;
-        import snakebite.nativevalue: delegateFunctionOffset, delegateValueSize;
+        import snakebite.native.arguments: CallArguments;
+        import snakebite.native.value: delegateFunctionOffset, delegateValueSize;
 
         // See `_callbacks`'s own doc for why the `const` goes.
         auto bridge = cast(CallbackBridge*) _callbacks;
@@ -383,7 +383,7 @@ public struct CallPlan {
     ) const {
         if (!_callbackVariadic)
             return null;
-        import snakebite.backends.variadic:
+        import snakebite.native.variadic:
             initializeNativeCursor;
         import snakebite.ffi.abi:
             maxFloatingArguments, maxIntegerArguments;
@@ -527,7 +527,7 @@ public struct CallPlan {
         if (!_hiddenReturnPointer)
             offset += alignScratch(bytesOf(_return));
         if (_callbackVariadic) {
-            import snakebite.backends.variadic: nativeCursorSize;
+            import snakebite.native.variadic: nativeCursorSize;
             _callbackVariadicOffset = alignScratch(offset);
             offset = _callbackVariadicOffset + nativeCursorSize;
         }
@@ -689,8 +689,8 @@ public struct CallPlan {
     }
 
     // Writes `value`'s low bytes to `place`, truncated to `store`'s width -
-    // the same raw-truncation rule `nativevalue.storeIntegral` uses, but
-    // written directly rather than through `nativevalue.checkedStoreIntegral`'s
+    // the same raw-truncation rule `native.value.storeIntegral` uses, but
+    // written directly rather than through `native.value.checkedStoreIntegral`'s
     // validate-and-throw wrapper: a plan's own register widths are already
     // known good, fixed once at prepare time, and never need re-checking -
     // or a second switch on the width `store` has already picked - on
@@ -1479,7 +1479,7 @@ public struct PlanCache {
     import dmd.func: FuncDeclaration;
     import dmd.mtype: Type;
     import snakebite.ffi.abi: Register;
-    import snakebite.sharedtable: SharedTable;
+    import snakebite.host.sharedtable: SharedTable;
 
     // Read without a lock by every thread that runs guest code
     // (ADR-0006); a plan is prepared once, on its first use.
@@ -1891,7 +1891,7 @@ private CallPlan prepareCommon(
             import gen.dpragma: LDCPragma;
 
             // LDC compiles this declaration inline, so the host has no symbol
-            // for it; a wrapper in `snakebite.backends.ldcintrinsics` is the
+            // for it; a wrapper in `snakebite.builtin.ldc` is the
             // way to a result, and this one has none.
             if (function_.llvmInternal != LDCPragma.LLVMnone)
                 throw new Exception(
@@ -2056,7 +2056,7 @@ private NativeSignature signatureOf(
         // `classify`'s later, recursive field reads find every size it
         // touches already resolved.
         {
-            import snakebite.nativevalue: TypeFacts;
+            import snakebite.native.value: TypeFacts;
 
             auto returnType = type.nextOf;
             if (returnType !is null)

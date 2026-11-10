@@ -4,7 +4,7 @@ module snakebite.ffi.callback;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 import core.sync.mutex: Mutex;
@@ -574,7 +574,7 @@ private void invoke(ref Slot slot, CallFrame* frame) {
 // reference, so it is always reached through a heap-allocated
 // `CallbackBridge*`, the same way a class reference would be shared.
 public struct CallbackBridge {
-    import snakebite.sharedtable: SharedTable;
+    import snakebite.host.sharedtable: SharedTable;
 
     private struct Registered {
         NativeSignature signature;

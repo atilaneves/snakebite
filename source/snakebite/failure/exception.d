@@ -1,4 +1,4 @@
-module snakebite.exception;
+module snakebite.failure.exception;
 
 
 private:

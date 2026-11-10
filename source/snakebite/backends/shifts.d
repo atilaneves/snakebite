@@ -5,7 +5,7 @@ private:
 import snakebite.frontend.typefacts: typeFacts;
 
 
-import snakebite.nativevalue: TypeFacts;
+import snakebite.native.value: TypeFacts;
 
 // How a shift (`<<`, `>>`, `>>>` and the compound forms) runs. dmd gives the left
 // operand the common type of both promoted operands, which can be wider

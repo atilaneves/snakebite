@@ -179,7 +179,7 @@ public struct FullExpressionScope {
         imported!"dmd.expression".Expression result,
     ) {
         import snakebite.backends.casts: classify;
-        import snakebite.nativevalue: CastKind;
+        import snakebite.native.value: CastKind;
         import dmd.typesem: toBasetype;
 
         while (auto cast_ = result.isCastExp) {

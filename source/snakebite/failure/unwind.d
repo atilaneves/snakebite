@@ -1,10 +1,10 @@
-module snakebite.backends.unwindplan;
+module snakebite.failure.unwind;
 
 
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 import object: Throwable, TypeInfo_Class;

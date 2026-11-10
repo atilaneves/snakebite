@@ -1,4 +1,4 @@
-module snakebite.backends.haltprocess;
+module snakebite.failure.halt;
 
 
 private:

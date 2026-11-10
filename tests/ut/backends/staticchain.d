@@ -5,7 +5,7 @@ import ut;
 import dmd.dsymbol: Dsymbol;
 import dmd.func: FuncDeclaration;
 import dmd.statement: Statement;
-import snakebite.backends.argumentflow: SignatureTable;
+import snakebite.native.argumentflow: SignatureTable;
 import snakebite.backends.closureplan: ClosurePlan, Hop;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;

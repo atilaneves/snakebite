@@ -192,7 +192,7 @@ public struct Repl {
     // process that holds the user's work.
     private imported!"snakebite.backends".Program programOf(Module module_) {
         import snakebite.backends: Program;
-        import snakebite.backends.haltprocess: HostActions;
+        import snakebite.failure.halt: HostActions;
 
         HostActions actions;
         actions.halt = &endCell;
@@ -321,7 +321,7 @@ public struct SubmitResult {
 
 
 private noreturn endCell() {
-    import snakebite.backends.haltprocess: Halted;
+    import snakebite.failure.halt: Halted;
 
     throw new Halted;
 }

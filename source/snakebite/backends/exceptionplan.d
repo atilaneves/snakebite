@@ -6,7 +6,7 @@ private:
 
 import object: TypeInfo_Class;
 import snakebite.backends.controlflow: ScopeFrame;
-import snakebite.backends.unwindplan:
+import snakebite.failure.unwind:
     ExceptionCandidate;
 
 
@@ -59,7 +59,7 @@ public UnwindPlan unwindPlanOf(
     scope ScopeFrame[] source,
     scope ScopeFrame[] destination,
 ) @safe {
-    import snakebite.backends.unwindplan: resolve = unwindPlanOf;
+    import snakebite.failure.unwind: resolve = unwindPlanOf;
 
     // The indices shrink while the common protected-scope suffix is removed.
     auto sourceEnd = source.length;

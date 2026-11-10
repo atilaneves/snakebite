@@ -15,7 +15,7 @@ import snakebite.nativelayout: NativeData;
 import std.conv: text;
 import core.exception: AssertError;
 import core.thread: Fiber, Thread;
-import snakebite.sharedtable: PreparedExecution, SharedTable;
+import snakebite.host.sharedtable: PreparedExecution, SharedTable;
 import ut.backends: Matrix, Omit, Because, Ctfe, shouldBeStatusOf;
 
 

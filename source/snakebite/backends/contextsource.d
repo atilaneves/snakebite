@@ -6,7 +6,7 @@ private:
 
 import snakebite.backends.contextpair:
     DualContext, fieldTowards, parentTowards, wordTowards;
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 // Where a context pointer that a call or a delegate hands to its callee
@@ -90,7 +90,7 @@ public PairPlan pairPlanOf(
 public ContextSource calleeContextSourceOf(
     imported!"dmd.func".FuncDeclaration caller,
     imported!"dmd.func".FuncDeclaration callee,
-    ref imported!"snakebite.backends.argumentflow".SignatureTable signatures,
+    ref imported!"snakebite.native.argumentflow".SignatureTable signatures,
 ) {
     import snakebite.frontend.dmd.delegates: nestedContextOwnerOf;
 
@@ -121,7 +121,7 @@ private bool overrides(
 private ContextSource overriderSourceOf(
     imported!"dmd.func".FuncDeclaration caller,
     imported!"dmd.func".FuncDeclaration owner,
-    ref imported!"snakebite.backends.argumentflow".SignatureTable signatures,
+    ref imported!"snakebite.native.argumentflow".SignatureTable signatures,
 ) {
     import snakebite.backends.closureplan: ClosurePlan;
     import snakebite.backends.layout: FrameLayout;

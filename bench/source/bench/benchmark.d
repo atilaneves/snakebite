@@ -37,7 +37,7 @@ public int run(string[] args) {
     import std.stdio: stderr, writeln;
     import snakebite.execution: PreparationReport, prepareSources, runProject;
     import snakebite.project: EndsProcess;
-    import snakebite.gc: selectFrontendMemory;
+    import snakebite.memory.gc: selectFrontendMemory;
 
     Options options;
     try

@@ -4,9 +4,9 @@ module snakebite.nativelayout;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 import snakebite.frontend.typefacts;
-import snakebite.nativevalue:
+import snakebite.native.value:
     arrayLengthOffset, arrayPointerOffset, arrayValueSize, checkedLoadIntegral,
     checkedStoreIntegral, delegateContextOffset, delegateFunctionOffset,
     TypeFacts;
@@ -28,9 +28,9 @@ public struct NativeData {
     import dmd.location: Loc;
     import dmd.mtype: Type;
 
-    import snakebite.hostthreads: heapNew, PerThread;
-    import snakebite.sharedtable: SharedTable;
-    import snakebite.tlsstorage: TlsDescriptor, TlsSlots;
+    import snakebite.host.threads: heapNew, PerThread;
+    import snakebite.host.sharedtable: SharedTable;
+    import snakebite.stack.tls: TlsDescriptor, TlsSlots;
 
     private bool delegate(Dsymbol) const _isRootOwned;
     private VarDeclaration delegate(VarDeclaration) _linkedVariable;
@@ -109,7 +109,7 @@ public struct NativeData {
         import core.stdc.string: memcpy;
         import dmd.expressionsem: toInteger;
         import snakebite.frontend.compiler: withCompilerLock;
-        version(unittest) import snakebite.sharedtable: assertCacheFillAllowed;
+        version(unittest) import snakebite.host.sharedtable: assertCacheFillAllowed;
 
         void* address;
         withCompilerLock({
@@ -153,7 +153,7 @@ public struct NativeData {
     // The one static struct value for a compile-time `&literal`.
     private void* structValue(StructLiteralExp literal) {
         import snakebite.frontend.compiler: withCompilerLock;
-        version(unittest) import snakebite.sharedtable: assertCacheFillAllowed;
+        version(unittest) import snakebite.host.sharedtable: assertCacheFillAllowed;
 
         void* address;
         withCompilerLock({

@@ -4,7 +4,7 @@ module snakebite.dependencyimage;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 // Whether the image build spends time on compiler optimisation. Real
@@ -88,7 +88,7 @@ public struct DependencyImage {
     private string _path;
     private alias Modules = extern(C) const(ModuleInfo*)* function(size_t*);
     private Modules _modules;
-    import snakebite.runtimeentry: RuntimeEntry;
+    import snakebite.host.runtimeentry: RuntimeEntry;
     // The image's own function for each function of `RuntimeEntry`, or null.
     // Code in the image calls it and takes its address, so a guest
     // reference must give the same address.
@@ -322,7 +322,7 @@ public DependencyImage prepareImage(
 // Loads an image that is already built, instead of having `prepareImage` make
 // one.
 public DependencyImage loadImage(in string path) {
-    import snakebite.guestrunlock: guestRunLock;
+    import snakebite.host.runlock: guestRunLock;
 
     // Hooks belong to the process, and a guest run installs and watches them
     // under this lock. A load must not capture or restore a run's hooks.
@@ -370,7 +370,7 @@ private DependencyImage loadImageLocked(in string path) {
         "snakebite_dependency_image_modules_v1");
     if (image._modules !is null) {
         import std.string: toStringz;
-        import snakebite.runtimeentry: RuntimeEntry;
+        import snakebite.host.runtimeentry: RuntimeEntry;
 
         foreach (i, symbol; RuntimeEntry.symbols)
             image._wrappers[i] = dlsym(
@@ -471,7 +471,7 @@ private void runCompiler(
 
     const result = execute(command, null, Config.none, size_t.max, directory);
     if (result.status != 0) {
-        import snakebite.exception: SnakebiteException;
+        import snakebite.failure.exception: SnakebiteException;
 
         throw new SnakebiteException(text("Dependency image ", phase,
             " failed\nCommand: ", command, "\n", result.output));
@@ -501,7 +501,7 @@ private string compilerPath(in string compiler) {
 
 
 private void require(in bool condition, in string message) {
-    import snakebite.exception: SnakebiteException;
+    import snakebite.failure.exception: SnakebiteException;
 
     if (!condition)
         throw new SnakebiteException(message);

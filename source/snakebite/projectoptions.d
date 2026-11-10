@@ -30,7 +30,7 @@ public auto parseProjectOptions(Own...)(
     ref ProjectOptions options,
     Own own,
 ) {
-    import snakebite.gc: lowmemHelp;
+    import snakebite.memory.gc: lowmemHelp;
     import std.algorithm.searching: countUntil;
     import std.getopt: getopt;
 

@@ -3,7 +3,7 @@ module ut.backends.call.exceptions;
 
 import ut.backends;
 import snakebite.backends.program: Program;
-import snakebite.exception: SnakebiteException;
+import snakebite.failure.exception: SnakebiteException;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction, findStruct;
 import std.meta: AliasSeq;

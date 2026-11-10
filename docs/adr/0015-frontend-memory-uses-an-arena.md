@@ -103,4 +103,4 @@ The allocation boundary is implemented in [the compiler][compiler]. The
 [pointer-free]: https://github.com/atilaneves/snakebite/issues/571
 [tests]: ../../validation/arena/memory.d
 [compiler]: ../../source/snakebite/frontend/compiler.d
-[gc]: ../../source/snakebite/gc.d
+[gc]: ../../source/snakebite/memory/gc.d

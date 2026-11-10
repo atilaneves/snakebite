@@ -1,4 +1,4 @@
-module snakebite.backends.dmdintrinsics;
+module snakebite.builtin.dmd;
 
 
 private:
@@ -6,7 +6,7 @@ private:
 
 // The `core.math` intrinsics with the result dmd's code generator gives
 // them, for a host built by dmd. A host built by LDC takes the results of
-// LDC's druntime through `ldcintrinsics`.
+// LDC's druntime through `builtin.ldc`.
 version (DigitalMars):
 
 public import core.math: fabs, sqrt, sin, cos, ldexp, rint, rndtol,

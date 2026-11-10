@@ -7,11 +7,11 @@ import snakebite.frontend.typefacts: typeFacts;
 
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
-import snakebite.backends.argumentflow: Shape, Signature, SignatureTable;
-import snakebite.backends.hostcalllayout:
+import snakebite.native.argumentflow: Shape, Signature, SignatureTable;
+import snakebite.stack.hostcall:
     checkArgumentCountRule, HostCallLayout;
 
 // One guest function's declared-storage layout: each parameter's byte
@@ -28,7 +28,7 @@ import snakebite.backends.hostcalllayout:
 // instance - is not this type's concern; a caller that needs those grows
 // its own frame past `size` on top of what this type already reserved.
 package struct FrameLayout {
-    import snakebite.nativevalue: alignUp, TypeFacts;
+    import snakebite.native.value: alignUp, TypeFacts;
     import dmd.declaration: VarDeclaration;
     import dmd.func: FuncDeclaration;
     import dmd.expression: ArrayLiteralExp;
@@ -36,7 +36,7 @@ package struct FrameLayout {
 
     package size_t size;
     package uint alignment = 1;
-    package imported!"snakebite.backends.returnplace".ReturnPlace returnPlace;
+    package imported!"snakebite.stack.returnplace".ReturnPlace returnPlace;
     private imported!"snakebite.backends.returnstorage".ReturnStoragePlan _returns;
 
     // Whether a local of the function can point into the temporaries of its
@@ -137,9 +137,9 @@ package struct FrameLayout {
         if (layout._returns.hasPlace) {
             const result = typeFacts(
                 typeFunctionOf(function_).next);
-            layout.returnPlace = imported!"snakebite.backends.returnplace"
+            layout.returnPlace = imported!"snakebite.stack.returnplace"
                 .ReturnPlace(layout.reserveSlot(
-                    imported!"snakebite.nativevalue".TypeFacts.pointer).offset,
+                    imported!"snakebite.native.value".TypeFacts.pointer).offset,
                     result.size, result.alignment);
         }
 
@@ -492,7 +492,7 @@ package struct FrameLayout {
 package struct ClosureLayout {
     import dmd.declaration: VarDeclaration;
     import dmd.func: FuncDeclaration;
-    import snakebite.nativevalue: alignUp, TypeFacts;
+    import snakebite.native.value: alignUp, TypeFacts;
 
     package struct Slot {
         package size_t offset;
@@ -761,7 +761,7 @@ extern(C++) private final class LocalsCollector:
                 import snakebite.backends.arrayliteral:
                     ArrayLiteralPlan, planArrayLiteral;
                 import snakebite.frontend.typefacts: isStoredLiteral;
-                import snakebite.nativevalue: TypeFacts;
+                import snakebite.native.value: TypeFacts;
 
                 const plan = planArrayLiteral(expression, _function);
                 if (plan.storage == ArrayLiteralPlan.Storage.temporary
@@ -782,7 +782,7 @@ extern(C++) private final class LocalsCollector:
 
         import dmd.astenums: STC;
         import snakebite.backends.temporary: canRetainTemporaries;
-        import snakebite.nativevalue: TypeFacts;
+        import snakebite.native.value: TypeFacts;
 
         const retains = canRetainTemporaries(variable);
         _layout.retainsTemporaries |= retains;
@@ -847,7 +847,7 @@ package Shape.Class classOf(imported!"dmd.mtype".Type type) {
 // The shape of an argument of `type` with `facts`, as a variadic argument
 // that no parameter declares.
 package Shape shapeOf(
-    imported!"dmd.mtype".Type type, in imported!"snakebite.nativevalue".TypeFacts facts,
+    imported!"dmd.mtype".Type type, in imported!"snakebite.native.value".TypeFacts facts,
 ) {
     return Shape(facts.size, facts.alignment, classOf(type));
 }
