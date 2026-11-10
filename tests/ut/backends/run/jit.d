@@ -242,6 +242,26 @@ static foreach (backend; Matrix!()) {
             }
         }, ["scale"]);
     }
+
+    @("jit.loopUpdateUsesTheNewStep." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            int countVisits(int first, int end, int step) {
+                assert(end > first);
+                int count;
+                for (int i = first; i < end; i += ++step)
+                    ++count;
+                return count;
+            }
+            int main() {
+                foreach (_; 0 .. 300)
+                    if (countVisits(1, 7, 0) != 3)
+                        return 1;
+                return 0;
+            }
+        }, ["countVisits"]);
+    }
 }
 
 static foreach (backend; Matrix!(

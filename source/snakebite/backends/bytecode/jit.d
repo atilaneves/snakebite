@@ -1443,11 +1443,6 @@ private struct Gen {
         fix(target);
     }
 
-    void jmpLocalTo(size_t offset) {
-        a.b(0xE9);
-        a.d32(cast(int) (offset - (a.n + 4)));
-    }
-
     void jccTo(int cc, size_t target) {
         a.b(0x0F);
         a.b(cast(ubyte) (0x80 + cc));
@@ -1752,6 +1747,7 @@ private struct Gen {
             && op.fused.kind == CompareKind.floating;
         const usesInt = op.kind == JitOp.Kind.int3 || op.kind == JitOp.Kind.cmp3
             || op.kind == JitOp.Kind.castFixed || op.kind == JitOp.Kind.widen
+            || op.kind == JitOp.Kind.jump
             || (op.kind == JitOp.Kind.fused && !fpCompare);
         if (!fpArithmetic && !fpCompare)
             fpSlots = FpSlots.init;
@@ -1766,7 +1762,7 @@ private struct Gen {
         const done = emitTemplate(i, ops, op, original);
         if (!done || fpCompare)
             fpSlots = FpSlots.init;
-        if (!done)
+        if (!done || op.kind == JitOp.Kind.jump)
             intSlot = IntSlot.init;
         if (done && (!incomingFp.empty || readIntSlot)) {
             // Only the preceding template's fallthrough can assume these
@@ -1869,26 +1865,8 @@ private struct Gen {
                     JitOp.Fused test = ops[t].fused;
                     test.jumpWhen = !test.jumpWhen;
                     const saved = a.n;
-                    const previous = ops[i - 1];
-                    const update = snapshot[i - 1];
-                    const forwardLeft = previous.kind == int3
-                        && !previous.int3.resultInR0 && !test.leftInR0
-                        && !(update.destination & indirectBit)
-                        && update.destination == header.destination
-                        && (previous.width ? previous.width : update.width)
-                            == header.width;
-                    if (emitFused(header, test, t + 1, forwardLeft)) {
-                        if (forwardLeft) {
-                            // Only the preceding template leaves its result
-                            // in RAX. Dispatch into the back edge reloads it.
-                            jmpTo(exit);
-                            labels[i] = a.n;
-                            a.ld(cast(int) header.width, RAX,
-                                Mem(FRAME, cast(int) header.destination));
-                            jmpLocalTo(saved);
-                        }
+                    if (emitFused(header, test, t + 1))
                         return true;
-                    }
                     a.n = saved;
                 }
             }
@@ -2415,11 +2393,8 @@ private struct Gen {
         return true;
     }
 
-    void emitIntCompare(int w, in Mem l, in IntegerRight right,
-        bool leftInR0, int forwardedLeft = -1)
-    {
-        int left = forwardedLeft >= 0 ? forwardedLeft
-            : leftInR0 ? REG0 : cachedInt(l, w);
+    void emitIntCompare(int w, in Mem l, in IntegerRight right, bool leftInR0) {
+        int left = leftInR0 ? REG0 : cachedInt(l, w);
         const rightReg = right.constant ? -1 : cachedInt(right.memory, w);
         if (left < 0) {
             left = intScratch(rightReg);
@@ -2442,9 +2417,7 @@ private struct Gen {
         intSlot = IntSlot.init;
     }
 
-    bool emitFused(in Instruction ins, in JitOp.Fused p, size_t t,
-        bool forwardLeft = false)
-    {
+    bool emitFused(in Instruction ins, in JitOp.Fused p, size_t t) {
         const w = cast(int) ins.width;
         Mem l;
         if (p.kind != CompareKind.floating) {
@@ -2455,10 +2428,7 @@ private struct Gen {
             IntegerRight right;
             if (!integerRight(ins.source, p.constantRight, w, R10, right))
                 return false;
-            if (!p.leftInR0 && !forwardLeft)
-                a.ld(w, RAX, l);
-            emitIntCompare(w, l, right, p.leftInR0,
-                !p.leftInR0 && forwardLeft ? RAX : -1);
+            emitIntCompare(w, l, right, p.leftInR0);
             int cc = p.kind == CompareKind.signed
                 ? signedCc(p.comparison) : unsignedCc(p.comparison);
             if (!p.jumpWhen)
