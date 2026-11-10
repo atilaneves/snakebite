@@ -2,6 +2,8 @@ module snakebite.language.control.cases;
 
 private:
 
+import dmd.statement: Statement;
+
 package(snakebite) struct SwitchPlan {
     enum NoMatch { defaultTarget, exit }
 
