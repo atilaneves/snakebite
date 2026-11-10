@@ -62,6 +62,14 @@ We decide as follows.
    failed, is mapped where the kernel chooses and is found through the
    bridge's tables; the range is no limit. `CallbackBridge.release` gives
    the range back with the chunks.
+   A bridge guards its own tables (its words, adjusted entries and the
+   release of its chunks) with a mutex of its own, and takes the
+   compiler lock never. A caller that holds the compiler lock may call
+   the bridge; the lock order is compiler lock, bridge mutex, pool mutex.
+   The bridge does not read the AST: the caller builds the signature of
+   an adjusted entry, under the compiler lock, before it calls. Only the
+   first crossing of a word takes the mutex and allocates; an entry that
+   exists is found with no lock and no allocation.
    Memory is never writable and executable at the same time. If the
    kernel refuses to make the mapping executable, the pool maps one
    anonymous memory file twice instead: a read-write view to fill and
