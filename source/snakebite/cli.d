@@ -30,7 +30,7 @@ public int run(string[] args) {
     import snakebite.execution: executeBackend, prepareSources, runProject;
     import snakebite.project: EndsProcess;
     import snakebite.backends.bytecode.vm: JitSetting;
-    import snakebite.gc: selectFrontendMemory;
+    import snakebite.memory.gc: selectFrontendMemory;
     import std.file: exists, isDir;
     import std.stdio: stderr, stdout, write;
 
@@ -228,7 +228,7 @@ private enum helpText =
     "  --no-optimise-image       Build the dependency image without\n" ~
     "                            optimisation (faster build, slower run)\n" ~
     "  --lowmem                  "
-        ~ imported!"snakebite.gc".lowmemHelp ~ "\n" ~
+        ~ imported!"snakebite.memory.gc".lowmemHelp ~ "\n" ~
     "  --no-jit                  "
         ~ imported!"snakebite.projectoptions".noJitHelp ~ "\n" ~
     "  --jit-perf-map            " ~ jitPerfMapHelp ~ "\n" ~

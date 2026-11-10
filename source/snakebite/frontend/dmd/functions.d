@@ -69,7 +69,7 @@ public imported!"dmd.dmodule".Module moduleOf(
     imported!"dmd.dsymbol".Dsymbol declaration,
 ) {
     import snakebite.frontend.compiler: withCompilerQuery;
-    import snakebite.gc: insideFrontend;
+    import snakebite.memory.gc: insideFrontend;
 
     if (insideFrontend)
         return declaration.getModule;

@@ -4,7 +4,7 @@ import snakebite.frontend.typefacts: typeFacts, truthFacts;
 
 
 // The frontend allocates like dmd does: from an arena that is never
-// freed and never scanned (`snakebite.gc`). Guest and host code keep
+// freed and never scanned (`snakebite.memory.gc`). Guest and host code keep
 // the GC, exactly like compiled D.
 
 
@@ -44,7 +44,7 @@ private string manyInstances(in string moduleName) {
 // same for a snakebite executable.
 @("frontendWorkAllocatesFromTheArena")
 unittest {
-    import snakebite.gc: lowmem;
+    import snakebite.memory.gc: lowmem;
 
     const before = GC.allocatedInCurrentThread;
     auto module_ = parseSnippet(manyInstances("frontendWorkAllocatesFromTheArena"));
@@ -105,7 +105,7 @@ unittest {
 unittest {
     import dmd.identifier: Identifier;
     import snakebite.frontend.compiler: newInFrontend;
-    import snakebite.gc: lowmem;
+    import snakebite.memory.gc: lowmem;
 
     {
         arenaReportLock.lock;
@@ -136,7 +136,7 @@ unittest {
 @("arenaHoldsNoGCPointers.skipsMemoryThatHoldsNoPointers")
 unittest {
     import snakebite.frontend.compiler: withCompilerLock;
-    import snakebite.gc: enterFrontend, leaveFrontend;
+    import snakebite.memory.gc: enterFrontend, leaveFrontend;
 
     arenaReportLock.lock;
     scope(exit) arenaReportLock.unlock;
@@ -160,7 +160,7 @@ unittest {
 // be at a lower address. Each range to skip is in the region it is in.
 @("arenaWalk.skipsRangesInRegionsAtDescendingAddresses")
 unittest {
-    import snakebite.arena: PointerFreeRange, walkSpanPointerWords;
+    import snakebite.memory.arena: PointerFreeRange, walkSpanPointerWords;
 
     align(16) static ubyte[128] low;
     align(16) static ubyte[128] high;
@@ -195,7 +195,7 @@ unittest {
         pthread_attr_t, pthread_create, pthread_join, pthread_t;
     import core.thread: thread_attachThis, thread_detachThis;
     import snakebite.frontend.compiler: withCompilerLock;
-    import snakebite.gc: enterFrontend, leaveFrontend;
+    import snakebite.memory.gc: enterFrontend, leaveFrontend;
 
     __gshared void delegate() onStack;
     __gshared void** closureFrame;
@@ -437,7 +437,7 @@ unittest {
     import core.sync.semaphore: Semaphore;
     import core.thread: Thread;
     import snakebite.frontend.compiler: withCompilerLock;
-    import snakebite.gc: enterFrontend, leaveFrontend, lowmem;
+    import snakebite.memory.gc: enterFrontend, leaveFrontend, lowmem;
 
     auto go = new Semaphore;
     auto done = new Semaphore;

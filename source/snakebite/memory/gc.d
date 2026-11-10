@@ -7,7 +7,7 @@
 // the GC off for the whole process) is not available. Instead, a thread
 // inside the frontend - running dmd code that `snakebite.frontend.
 // compiler` entered on its behalf - gets every allocation from the arena
-// (`snakebite.arena`). Every other thread, and the same thread outside
+// (`snakebite.memory.arena`). Every other thread, and the same thread outside
 // the frontend, goes to the selected GC unchanged, host code that
 // holds the frontend lock included. The GC never sees the arena: no
 // collection marks the AST.
@@ -19,7 +19,7 @@
 // through the frontend (`snakebite.frontend.compiler.frontend`).
 // `arenaPointersIntoGC` checks the invariant; a debug build also stops
 // at the first dmd object made outside the frontend.
-module snakebite.gc;
+module snakebite.memory.gc;
 
 
 private:
@@ -30,7 +30,7 @@ import snakebite.failure.report: internalFailure;
 import core.gc.gcinterface: GC;
 
 
-// The name rt_options selects this GC by (`snakebite.process`).
+// The name rt_options selects this GC by (`snakebite.memory.process`).
 public enum gcName = "snakebite";
 
 
@@ -53,7 +53,7 @@ private __gshared FrontendMemory _frontendMemory;
 // thread enters the frontend: a change while a thread is inside would mix
 // arena and GC memory in one AST.
 public void selectFrontendMemory(in bool lowmem) nothrow @nogc {
-    import snakebite.arena: arenaUsed;
+    import snakebite.memory.arena: arenaUsed;
 
     const memory = lowmem ? FrontendMemory.gc : FrontendMemory.arena;
     assert(
@@ -128,7 +128,7 @@ debug private size_t _stackLow, _stackHigh;
 // Call with the frontend lock held: walks what the frontend allocated
 // since the last call.
 debug private void recordStackWords() nothrow @nogc {
-    import snakebite.arena: walkArenaWordsSince;
+    import snakebite.memory.arena: walkArenaWordsSince;
 
     if (_stackHigh == 0)
         findStack;
@@ -281,7 +281,7 @@ debug private extern(C) void backtrace_symbols_fd(void** buffer, int size, int f
 // walk. The report is plain text, so it adds no pointers to the arena it
 // is about.
 debug public string arenaPointersIntoGC() {
-    import snakebite.arena: isArenaMemory, walkArenaPointerWords;
+    import snakebite.memory.arena: isArenaMemory, walkArenaPointerWords;
     import std.format: format;
 
     static struct Found {
@@ -343,7 +343,7 @@ private final class SnakebiteGC : GC {
     import core.gc.gcinterface: BlkInfo, RangeIterator, RootIterator;
     import core.memory: GCStats = GC;
     import core.thread.threadbase: ThreadBase;
-    import snakebite.arena: ArenaArray, arenaAllocate, arenaBytesAfter, isArenaMemory;
+    import snakebite.memory.arena: ArenaArray, arenaAllocate, arenaBytesAfter, isArenaMemory;
 
     // druntime prints the GC profile in the destructor of the heap, and that
     // destructor also unmaps the pools. The heap is released only with
@@ -414,8 +414,8 @@ private final class SnakebiteGC : GC {
     // without that byte `strlen` would run on into the next arena block.
     private BlkInfo arenaBlock(in size_t size, in uint bits) nothrow {
         import core.memory: CoreGC = GC;
-        import snakebite.arena: ArenaArray, arenaAlignment, recordArenaArray;
-        debug import snakebite.arena: recordPointerFreeBlock;
+        import snakebite.memory.arena: ArenaArray, arenaAlignment, recordArenaArray;
+        debug import snakebite.memory.arena: recordPointerFreeBlock;
 
         const appendable = bits & CoreGC.BlkAttr.APPENDABLE;
         const reserved = appendable ? size + 1 : size;
@@ -580,7 +580,7 @@ private final class SnakebiteGC : GC {
     // the frontend; null otherwise. A slice that starts inside a block
     // is not found: druntime then copies, which is always correct.
     private static ArenaArray* arenaArrayAt(in void* start) nothrow @nogc {
-        import snakebite.arena: arenaArray;
+        import snakebite.memory.arena: arenaArray;
 
         return allocatesInArena ? arenaArray(start) : null;
     }
@@ -602,7 +602,7 @@ private final class SnakebiteGC : GC {
 
 // @trusted: reads `slice.ptr` only to compare it with the arena bounds.
 private bool isArenaSlice(const void[] slice) @trusted nothrow @nogc {
-    import snakebite.arena: isArenaMemory;
+    import snakebite.memory.arena: isArenaMemory;
 
     return isArenaMemory(slice.ptr);
 }

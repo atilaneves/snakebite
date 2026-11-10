@@ -6,7 +6,7 @@ public import snakebite.backends.bytecode.vm: JitSetting;
 
 import core.runtime: Runtime;
 import snakebite.backends.bytecode: Bytecode;
-import snakebite.gc: lowmemHelp, selectFrontendMemory;
+import snakebite.memory.gc: lowmemHelp, selectFrontendMemory;
 import std.algorithm.iteration: filter;
 import std.algorithm.searching: canFind;
 import std.array: array;

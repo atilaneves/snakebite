@@ -32,7 +32,7 @@ public int run(string[] args) {
     import snakebite.project: EndsProcess;
     import snakebite.dependencypreparation: prepareStartupDependencies;
     import snakebite.backends.bytecode.vm: JitSetting;
-    import snakebite.gc: selectFrontendMemory;
+    import snakebite.memory.gc: selectFrontendMemory;
     import snakebite.repl: Repl;
     import std.algorithm.iteration: map;
     import std.array: array;
@@ -348,7 +348,7 @@ public struct ReplCliResult {
 
 public ReplCliResult parseReplArgs(string[] args) {
     import snakebite.backends: parseBackendName, validBackendNames;
-    import snakebite.gc: lowmemHelp;
+    import snakebite.memory.gc: lowmemHelp;
     import snakebite.projectoptions: noJitHelp;
     import std.getopt: getopt, GetOptException;
 
@@ -415,6 +415,6 @@ private enum helpText =
     "                        valid: "
         ~ imported!"snakebite.backends".validBackendNames ~ "\n" ~
     "  -l                    Stay interactive after loading file arguments\n" ~
-    "  --lowmem              " ~ imported!"snakebite.gc".lowmemHelp ~ "\n" ~
+    "  --lowmem              " ~ imported!"snakebite.memory.gc".lowmemHelp ~ "\n" ~
     "  --no-jit              " ~ imported!"snakebite.projectoptions".noJitHelp ~ "\n" ~
     "  -h, --help            Show this help\n";

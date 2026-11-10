@@ -2,13 +2,13 @@
 // this module, so druntime reads these options in each of them: the
 // shared druntime finds `rt_options` through the executable's dynamic
 // symbol table.
-module snakebite.process;
+module snakebite.memory.process;
 
 
 private:
 
 
-// `gc`: the frontend allocates like dmd does (`snakebite.gc`).
+// `gc`: the frontend allocates like dmd does (`snakebite.memory.gc`).
 // `cleanup:none`: no collection at exit. The process is about to end and
 // the OS takes its memory back; a final collection only costs time.
 // `heapSizeFactor:4`: fewer collections. A collection costs about the
@@ -28,6 +28,6 @@ else
     private enum testGcOptions = "";
 
 extern(C) public __gshared string[] rt_options = [
-    "gcopt=gc:" ~ imported!"snakebite.gc".gcName
+    "gcopt=gc:" ~ imported!"snakebite.memory.gc".gcName
         ~ " cleanup:none heapSizeFactor:4" ~ testGcOptions,
 ];
