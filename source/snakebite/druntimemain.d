@@ -4,7 +4,7 @@ module snakebite.druntimemain;
 private:
 
 
-import snakebite.backends.backend: Backend;
+import snakebite.backends.api: Backend;
 import snakebite.backends.startdata: StartData;
 import snakebite.ffi.abi: ArgumentPlan, Register;
 import snakebite.ffi.callback: CallbackBridge, CallbackCall;
@@ -28,7 +28,7 @@ public struct StartupReport {
 // goes on running programs in one process has its destructors run before
 // this returns.
 public StartupReport runDruntimeMain(
-    imported!"snakebite.backends.backend".Backend backend,
+    imported!"snakebite.backends.api".Backend backend,
     in imported!"snakebite.image.dependency".TestHooks testHooks,
     in string[] arguments,
     in bool endsProcess = false,

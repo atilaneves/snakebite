@@ -38,7 +38,7 @@ import snakebite.failure.report: internalFailure;
 // the tests, the REPL) ends the phases itself with `finish`.
 public struct GuestModules {
     import core.time: Duration;
-    import snakebite.backends.backend: Backend;
+    import snakebite.backends.api: Backend;
 
     // Whether the records also name the unit tests of each module, for the
     // runner that druntime starts.
@@ -108,7 +108,7 @@ public struct GuestModules {
         in Ends ends,
     ) {
         import core.sys.posix.pthread: pthread_self;
-        import snakebite.backends.backend: ExecutionClock;
+        import snakebite.backends.api: ExecutionClock;
 
         GuestModules modules;
         modules._ends = ends;
@@ -275,7 +275,7 @@ private extern(C) RuntimeGroup* registeredGroup(void* dso);
 
 
 private import core.atomic: atomicLoad, atomicStore, cas;
-private import snakebite.backends.backend: Backend;
+private import snakebite.backends.api: Backend;
 private import snakebite.backends.startdata:
     FunctionHandle, GateStorage, ModuleStart, StartData;
 private import snakebite.failure.exception: SnakebiteException;

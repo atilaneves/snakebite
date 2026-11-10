@@ -7,7 +7,7 @@ import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.backends.interpreter.nodetree:
     AccessSite, CalleeResult, OuterVariable, TreeCallee, TreeFlow, TreeRoot,
     hasNoResult, isAggregate, isPair, isScalar, resultWordFor, rootOf;
-import snakebite.backends.backend: DeclarationHandle;
+import snakebite.backends.api: DeclarationHandle;
 import snakebite.backends.startdata: FunctionHandle;
 import snakebite.frontend.typefacts: tryTypeFacts, truthFacts;
 
@@ -22,7 +22,7 @@ import snakebite.native.arguments: CallArguments;
 // Walks dmd's AST directly. The one invariant: a result is never boxed
 // into a host-side representation - every expression is evaluated
 // straight into a caller-designated native address, in native layout.
-public final class Interpreter: imported!"snakebite.backends.backend".Backend {
+public final class Interpreter: imported!"snakebite.backends.api".Backend {
     import dmd.func: FuncDeclaration;
     import snakebite.program: Program;
     import snakebite.ffi: CallbackBridge, CallbackCall;

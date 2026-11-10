@@ -1,4 +1,4 @@
-module snakebite.backends.backend;
+module snakebite.backends.api;
 
 
 private:

@@ -176,7 +176,7 @@ public ExecutionReport executeBackend(
 
     auto stopWatch = StopWatch(AutoStart.yes);
     auto backend = makeBackend(name, program, jit);
-    import snakebite.backends.backend: ExecutionClock;
+    import snakebite.backends.api: ExecutionClock;
     const running = ExecutionClock.start(backend);
     import snakebite.backends.guestmodules: GuestModules;
     const entry = GuestModules.Entry(backend);

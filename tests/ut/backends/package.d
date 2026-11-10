@@ -4,7 +4,7 @@ public import ut;
 public import snakebite.backends.bytecode: Bytecode;
 public import snakebite.backends.ctfe: Ctfe;
 public import snakebite.backends.interpreter: Interpreter;
-public import snakebite.backends.backend: Owned;
+public import snakebite.backends.api: Owned;
 public import std.meta: AliasSeq;
 
 import core.sync.mutex: Mutex;
