@@ -4627,7 +4627,7 @@ static foreach (backend; Matrix!(
                 int answer() {
                     long[3] values = [7, 8, 9];
                     long result = 0;
-                    foreach (round; 0 .. 3) {
+                    foreach (round; 0 .. 300) {
                         if (three(&values[2], -1, 10) != 80) return 1;
                         if (three(&values[0], 2, -1) != -9) return 2;
                         if (three(&values[1], 0, 3) != 24) return 3;
@@ -4639,13 +4639,14 @@ static foreach (backend; Matrix!(
                             return 5;
                         cast(void) three(&values[1], 1, round);
 
-                        const index = round == 1 ? int.min : -1;
+                        const throwsNow = round == 1 || round == 270;
+                        const index = throwsNow ? int.min : -1;
                         try {
                             result = three(&values[1], index, 10 + round);
-                            if (round == 1 || result != 7L * (10 + round))
+                            if (throwsNow || result != 7L * (10 + round))
                                 return 6;
                         } catch (Exception exception) {
-                            if (round != 1 || result != 70
+                            if (!throwsNow || result != 7L * (9 + round)
                                     || exception.msg != "invalid index")
                                 return 7;
                         }
