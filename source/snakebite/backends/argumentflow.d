@@ -26,16 +26,23 @@ package struct Shape {
 
 // The parameters of a function type as the frame layout and the convention
 // see them, without the context of a delegate. Two functions with equal
-// signatures have equal frame offsets for each parameter. `intern` returns
-// one object for equal signatures, so a call compares pointers.
+// signatures have equal frame offsets for each parameter. `SignatureTable.intern`
+// returns one object for equal signatures, so a call compares pointers.
 package struct Signature {
     package enum Variadic : ubyte { none, c, d }
 
     package Shape[] parameters;
     package Variadic variadic;
+}
 
-    package static const(Signature)* intern(
-        in Shape[] parameters, in Variadic variadic,
+// The signatures of one backend instance. A `Signature*` from one table
+// never meets one from another table: a callee is reached only through the
+// entries of its own backend.
+package struct SignatureTable {
+    private SharedTable!(Signature, Signature) _signatures;
+
+    package const(Signature)* intern(
+        in Shape[] parameters, in Signature.Variadic variadic,
     ) {
         auto signature = Signature(parameters.dup, variadic);
         if (auto found = signature in _signatures)
@@ -43,8 +50,6 @@ package struct Signature {
         return _signatures.insert(signature, signature);
     }
 }
-
-private __gshared SharedTable!(Signature, Signature) _signatures;
 
 
 // Where a call from the type of a value to a function that the value holds

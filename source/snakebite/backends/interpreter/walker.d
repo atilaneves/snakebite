@@ -252,6 +252,7 @@ import snakebite.backends.temporary: canRetainTemporaries;
 // lock after that, so the only thing an evaluator keeps for itself is
 // its own execution state.
 private struct Shared {
+    import snakebite.backends.argumentflow: SignatureTable;
     import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration;
     import dmd.func: FuncDeclaration;
@@ -310,6 +311,8 @@ private struct Shared {
     // layout: the signal handler reads it and can take no lock, which dmd
     // needs to make the name.
     SharedTable!(FuncDeclaration, const(char)[]) names;
+    // The interned signatures of the layouts of this interpreter.
+    SignatureTable signatures;
     // The FFI call adapter for a guest callee's own signature: whether it
     // returns by `ref`, and whether each declared parameter passes an
     // address or a value. `FrameLayout` describes storage, not the
@@ -1089,19 +1092,24 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     extern(D) private FrameLayout buildLayout(
         FuncDeclaration function_, in LayoutKind kind,
     ) {
+        import snakebite.frontend.dmd.functions: typeFunctionOf;
         import snakebite.frontend.dmd.mangle: completeFunctionType;
 
         if (kind == LayoutKind.parameters) {
             // Native code owns its locals. Only its inferred signature,
             // if any, is needed to bind this call's arguments.
             completeFunctionType(function_);
-            return FrameLayout.ofParameters(function_);
+            auto parameters = FrameLayout.ofParameters(function_);
+            parameters.internSignature(
+                _shared.signatures, typeFunctionOf(function_));
+            return parameters;
         }
 
         import snakebite.frontend.compiler: withCompilerLock;
         import std.string: fromStringz;
 
         auto layout = FrameLayout.of(function_);
+        layout.internSignature(_shared.signatures, typeFunctionOf(function_));
         // `toPrettyChars` allocates and reads shared DMD symbol state.
         withCompilerLock({
             _shared.names.insert(
@@ -1132,7 +1140,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto call = site in _valueCalls;
         if (call is null)
             call = _valueCalls.build(
-                site, () => ValueCall.of(type, hasContext));
+                site, () => ValueCall.of(type, hasContext, _shared.signatures));
         _lastValueCallSite = site;
         _lastValueCall = call;
         return call;

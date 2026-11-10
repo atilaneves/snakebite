@@ -3364,7 +3364,9 @@ private enum checkedIndexElementSizes = [1UL, 2UL, 4UL, 8UL];
 
 // Every instantiation of `opCheckedIndex`: the one list that the lookups and
 // the roles below are built from.
-private immutable CheckedInstance[] checkedInstances;
+private static immutable CheckedInstance[] checkedInstances =
+    allCheckedInstances();
+// The hash uses a handler address, which is known only at load time.
 private immutable CheckedInstance[Instruction.Handler] checkedInstanceOf;
 
 private CheckedInstance[] allCheckedInstances() {
@@ -3389,11 +3391,9 @@ private CheckedInstance[] allCheckedInstances() {
 }
 
 shared static this() {
-    auto all = allCheckedInstances();
     CheckedInstance[Instruction.Handler] byHandler;
-    foreach (instance; all)
+    foreach (instance; checkedInstances)
         byHandler[instance.handler] = instance;
-    checkedInstances = cast(immutable) all;
     checkedInstanceOf = cast(immutable) byHandler;
 }
 
@@ -3790,8 +3790,19 @@ static foreach (comparison; EnumMembers!Comparison)
 // branch, so the handlers are also kept in a hash set.
 private enum fusedSlots = 256;
 static assert(fusedSlots >= 2 * fusedCount);
-private __gshared Instruction.Handler[fusedCount] fusedHandlers;
-private __gshared Instruction.Handler[fusedSlots] fusedSet;
+private static immutable Instruction.Handler[fusedCount] fusedHandlers = () {
+    Instruction.Handler[fusedCount] handlers;
+    static foreach (comparison; EnumMembers!Comparison)
+        static foreach (kind; EnumMembers!CompareKind)
+            static foreach (jumpWhen; [false, true])
+                static foreach (constant; [false, true])
+                    handlers[fusedIndex(comparison, kind, jumpWhen,
+                        constant)] = &opFusedBranch!(comparison, kind,
+                        jumpWhen, constant);
+    return handlers;
+}();
+// The hash uses a handler address, which is known only at load time.
+private immutable Instruction.Handler[fusedSlots] fusedSet;
 
 static assert((fusedSlots & (fusedSlots - 1)) == 0,
     "the hash keeps the top bits, so the slot count is a power of two");
@@ -3802,19 +3813,14 @@ private size_t fusedSlot(in Instruction.Handler handler) {
 }
 
 shared static this() {
-    static foreach (comparison; EnumMembers!Comparison)
-        static foreach (kind; EnumMembers!CompareKind)
-            static foreach (jumpWhen; [false, true])
-                static foreach (constant; [false, true])
-                    fusedHandlers[fusedIndex(comparison, kind, jumpWhen,
-                        constant)] = &opFusedBranch!(comparison, kind,
-                        jumpWhen, constant);
+    Instruction.Handler[fusedSlots] set;
     foreach (handler; fusedHandlers) {
         auto slot = fusedSlot(handler);
-        while (fusedSet[slot] !is null)
+        while (set[slot] !is null)
             slot = (slot + 1) % fusedSlots;
-        fusedSet[slot] = handler;
+        set[slot] = handler;
     }
+    fusedSet = set;
 }
 
 package Instruction.Handler fusedBranchHandler(
@@ -3956,17 +3962,18 @@ private const(Instruction)* runFusedBranchR(string operation, CompareKind kind,
     return execution.next;
 }
 
-private __gshared Instruction.Handler[fusedCount] fusedRegisterHandlers;
-
-shared static this() {
+private static immutable Instruction.Handler[fusedCount]
+fusedRegisterHandlers = () {
+    Instruction.Handler[fusedCount] handlers;
     static foreach (comparison; EnumMembers!Comparison)
         static foreach (kind; EnumMembers!CompareKind)
             static foreach (jumpWhen; [false, true])
                 static foreach (constant; [false, true])
-                    fusedRegisterHandlers[fusedIndex(comparison, kind,
-                        jumpWhen, constant)] = &opFusedBranchR!(comparison,
-                        kind, jumpWhen, constant);
-}
+                    handlers[fusedIndex(comparison, kind, jumpWhen,
+                        constant)] = &opFusedBranchR!(comparison, kind,
+                        jumpWhen, constant);
+    return handlers;
+}();
 
 package enum RegisterFamily {
     none,
@@ -4663,47 +4670,53 @@ private struct RoleEntry {
     Roles roles;
 }
 
-private __gshared RoleEntry[] roleEntries;
-private __gshared size_t roleCount;
-private __gshared size_t roleShift;
+// Open addressing by handler address: the address is known only at load
+// time, so the module constructor builds the table.
+private struct RoleTable {
+    RoleEntry[] entries;
+    size_t count;
+    size_t shift;
 
-private size_t roleSlot(in Instruction.Handler handler) {
-    return (cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL) >> roleShift;
+    size_t slotOf(in Instruction.Handler handler) const {
+        return (cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL) >> shift;
+    }
+
+    void add(Instruction.Handler handler, in Roles roles) {
+        if ((count + 1) * 2 > entries.length) {
+            auto old = entries;
+            const capacity = old.length == 0 ? 2048 : old.length * 2;
+            entries = new RoleEntry[capacity];
+            shift = size_t.sizeof * 8 - bsf(capacity);
+            count = 0;
+            foreach (previous; old)
+                if (previous.handler !is null)
+                    add(previous.handler, previous.roles);
+        }
+        auto slot = slotOf(handler);
+        while (entries[slot].handler !is null) {
+            if (entries[slot].handler is handler)
+                return;
+            slot = (slot + 1) & (entries.length - 1);
+        }
+        entries[slot] = RoleEntry(handler, roles);
+        ++count;
+    }
 }
 
-private void addRoles(Instruction.Handler handler, in Roles roles) {
-    if ((roleCount + 1) * 2 > roleEntries.length) {
-        auto old = roleEntries;
-        const capacity = old.length == 0 ? 2048 : old.length * 2;
-        roleEntries = new RoleEntry[capacity];
-        roleShift = size_t.sizeof * 8 - bsf(capacity);
-        roleCount = 0;
-        foreach (previous; old)
-            if (previous.handler !is null)
-                addRoles(previous.handler, previous.roles);
-    }
-    auto slot = roleSlot(handler);
-    while (roleEntries[slot].handler !is null) {
-        if (roleEntries[slot].handler is handler)
-            return;
-        slot = (slot + 1) & (roleEntries.length - 1);
-    }
-    roleEntries[slot] = RoleEntry(handler, roles);
-    ++roleCount;
-}
+private immutable RoleTable roleTable;
 
 // Whether the table holds the handler's roles, and what they are. A handler
 // that is not in the table holds no address and no instruction address.
 package bool rolesOf(in Instruction.Handler handler, out Roles roles) {
-    if (roleEntries.length == 0)
+    if (roleTable.entries.length == 0)
         return false;
-    auto slot = roleSlot(handler);
-    while (roleEntries[slot].handler !is null) {
-        if (roleEntries[slot].handler is handler) {
-            roles = roleEntries[slot].roles;
+    auto slot = roleTable.slotOf(handler);
+    while (roleTable.entries[slot].handler !is null) {
+        if (roleTable.entries[slot].handler is handler) {
+            roles = roleTable.entries[slot].roles;
             return true;
         }
-        slot = (slot + 1) & (roleEntries.length - 1);
+        slot = (slot + 1) & (roleTable.entries.length - 1);
     }
     return false;
 }
@@ -4730,7 +4743,7 @@ package size_t* branchTargetField(ref Instruction instruction) {
 version (unittest)
 public size_t specialisedHandlersWithoutRoles() {
     size_t missing;
-    foreach (entry; specialisations) {
+    foreach (entry; specialisationTable.entries) {
         if (entry.general is null || entry.roles == Roles.init)
             continue;
         foreach (frame; entry.handlers)
@@ -4830,51 +4843,68 @@ private struct Specialisation {
     Roles roles;
 }
 
-private __gshared Specialisation[] specialisations;
-private __gshared size_t specialisationCount;
-private __gshared size_t specialisationShift;
+private struct SpecialisationTable {
+    Specialisation[] entries;
+    size_t count;
+    size_t shift;
 
-private size_t specialisationSlot(in Instruction.Handler handler) {
-    return (cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL)
-        >> specialisationShift;
+    size_t slotOf(in Instruction.Handler handler) const {
+        return (cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL) >> shift;
+    }
+
+    void insert(Specialisation entry) {
+        if ((count + 1) * 2 > entries.length) {
+            auto old = entries;
+            const capacity = old.length == 0 ? 1024 : old.length * 2;
+            entries = new Specialisation[capacity];
+            shift = size_t.sizeof * 8 - bsf(capacity);
+            count = 0;
+            foreach (ref previous; old)
+                if (previous.general !is null)
+                    insert(previous);
+        }
+        auto slot = slotOf(entry.general);
+        while (entries[slot].general !is null)
+            slot = (slot + 1) & (entries.length - 1);
+        entries[slot] = entry;
+        ++count;
+    }
 }
 
-private void addSpecialisation(Specialisation entry, in Roles roles) {
-    entry.roles = roles;
-    // The table keeps only the handlers that hold an address or an
-    // instruction address. It is searched for every instruction of a
-    // function, so it stays small.
-    if (roles != Roles.init)
-    {
-        foreach (frame; entry.handlers)
-            foreach (handler; frame)
-                if (handler !is null)
-                    addRoles(handler, roles);
-        if (entry.masked !is null)
-            foreach (frame; *entry.masked)
+private immutable SpecialisationTable specialisationTable;
+
+// An instruction that counts its event, by its handler; and back.
+private struct CountingTwins {
+    Instruction.Handler[Instruction.Handler] countedOf;
+    Instruction.Handler[Instruction.Handler] uncountedOf;
+}
+
+// What the module constructor fills, before it makes the tables immutable.
+private struct Tables {
+    RoleTable roles;
+    SpecialisationTable specialisations;
+    static if (jitSupported)
+        CountingTwins twins;
+
+    void addSpecialisation(Specialisation entry, in Roles roles) {
+        entry.roles = roles;
+        // The table keeps only the handlers that hold an address or an
+        // instruction address. It is searched for every instruction of a
+        // function, so it stays small.
+        if (roles != Roles.init)
+        {
+            foreach (frame; entry.handlers)
                 foreach (handler; frame)
                     if (handler !is null)
-                        addRoles(handler, roles);
+                        this.roles.add(handler, roles);
+            if (entry.masked !is null)
+                foreach (frame; *entry.masked)
+                    foreach (handler; frame)
+                        if (handler !is null)
+                            this.roles.add(handler, roles);
+        }
+        specialisations.insert(entry);
     }
-    insertSpecialisation(entry);
-}
-
-private void insertSpecialisation(Specialisation entry) {
-    if ((specialisationCount + 1) * 2 > specialisations.length) {
-        auto old = specialisations;
-        const capacity = old.length == 0 ? 1024 : old.length * 2;
-        specialisations = new Specialisation[capacity];
-        specialisationShift = size_t.sizeof * 8 - bsf(capacity);
-        specialisationCount = 0;
-        foreach (ref previous; old)
-            if (previous.general !is null)
-                insertSpecialisation(previous);
-    }
-    auto slot = specialisationSlot(entry.general);
-    while (specialisations[slot].general !is null)
-        slot = (slot + 1) & (specialisations.length - 1);
-    specialisations[slot] = entry;
-    ++specialisationCount;
 }
 
 // The instance of `executor`, or, with `counted`, its counting twin (see
@@ -4922,24 +4952,24 @@ private void maskedInstances(bool counted, alias executor, alias operation,
 
 private void specialise(alias operation, OperandKind destinationKind,
     OperandKind sourceKind, immutable(ulong)[] widths, bool right,
-    Parameters...)()
+    Parameters...)(ref Tables tables)
 {
     specialiseWith!(executeWith, operation, destinationKind, sourceKind,
-        widths, right, Parameters)();
+        widths, right, Parameters)(tables);
 }
 
 private void specialiseWith(alias executor, alias operation,
     OperandKind destinationKind, OperandKind sourceKind,
-    immutable(ulong)[] widths, bool right, Parameters...)()
+    immutable(ulong)[] widths, bool right, Parameters...)(ref Tables tables)
 {
     // `auto`: `addSpecialisation` takes a mutable copy, and the entry has
     // pointers.
     auto entry = specialisationOf!(false, executor, operation, destinationKind,
         sourceKind, widths, right, Parameters);
-    addSpecialisation(entry,
+    tables.addSpecialisation(entry,
         rolesOfOperation!(operation, sourceKind, Parameters));
     static if (jitSupported && countsEvents!operation)
-        addCountedTwins(entry, specialisationOf!(true, executor, operation,
+        tables.addCountedTwins(entry, specialisationOf!(true, executor, operation,
             destinationKind, sourceKind, widths, right, Parameters));
 }
 
@@ -4983,33 +5013,36 @@ private Specialisation specialisationOf(bool counted, alias executor,
 
 // `opCopyFixed` takes a `size_t` width, and a handler registered with another
 // type of width would never be found.
-private void specialiseCopyFixed(size_t width, bool staticSource)() {
+private void specialiseCopyFixed(size_t width, bool staticSource)(
+    ref Tables tables,
+) {
     specialise!(runCopyFixed, OperandKind.storage,
         staticSource ? OperandKind.immediate : OperandKind.storage, noWidths,
-        false, width, staticSource)();
+        false, width, staticSource)(tables);
 }
 
 // `opLoadIndirectFixed` and `opStoreIndirectFixed` take a `size_t` width, and
 // a handler registered with another type of width would never be found.
-private void specialiseIndirect(size_t width)() {
+private void specialiseIndirect(size_t width)(ref Tables tables) {
     specialise!(runLoadIndirect, OperandKind.storage, OperandKind.storage,
-        noWidths, false, width)();
+        noWidths, false, width)(tables);
     specialise!(runStoreIndirect, OperandKind.storage, OperandKind.storage,
-        noWidths, false, width)();
+        noWidths, false, width)(tables);
 }
 
 shared static this() {
+    Tables tables;
     enum S = OperandKind.storage;
     enum I = OperandKind.immediate;
     // Handlers that no specialisation covers.
-    addRoles(&opJump, rolesOfOperation!(runJump, I));
-    addRoles(&opStaticStore, rolesOfOperation!(runStaticStore, S));
-    addRoles(&opStaticAddress, rolesOfOperation!(runStaticAddress, I));
-    addRoles(&opTlsLoad, rolesOfOperation!(runTlsLoad, I));
-    addRoles(&opTlsStore, rolesOfOperation!(runTlsStore, S));
-    addRoles(&opTlsAddress, rolesOfOperation!(runTlsAddress, I));
+    tables.roles.add(&opJump, rolesOfOperation!(runJump, I));
+    tables.roles.add(&opStaticStore, rolesOfOperation!(runStaticStore, S));
+    tables.roles.add(&opStaticAddress, rolesOfOperation!(runStaticAddress, I));
+    tables.roles.add(&opTlsLoad, rolesOfOperation!(runTlsLoad, I));
+    tables.roles.add(&opTlsStore, rolesOfOperation!(runTlsStore, S));
+    tables.roles.add(&opTlsAddress, rolesOfOperation!(runTlsAddress, I));
     foreach (instance; checkedInstances)
-        addRoles(instance.handler,
+        tables.roles.add(instance.handler,
             instance.constantValue
                 ? Roles(Role.address, Role.other, Role.instruction, true)
                 : instance.access == CheckedAccess.storeUnchecked
@@ -5017,7 +5050,7 @@ shared static this() {
                     : Roles(Role.other, Role.other, Role.instruction, true));
     // The fused return keeps the roles of the producer it replaces.
     static foreach (width; 1 .. 17)
-        addRoles(&opThenReturn!(opCopyFixed!(width, true)),
+        tables.roles.add(&opThenReturn!(opCopyFixed!(width, true)),
             rolesOfOperation!(runCopyFixed, I, width, true));
     static foreach (triple; threeAddressNames) {{
         static if (triple.family == "opInt3" || triple.family == "opCompare3")
@@ -5029,9 +5062,9 @@ shared static this() {
             enum widths = noWidths;
         enum runner = "run" ~ triple.family[2 .. $];
         mixin("specialise!(" ~ runner ~ ", S, S, widths, true, "
-            ~ triple.arguments ~ ", false)();");
+            ~ triple.arguments ~ ", false)(tables);");
         mixin("specialise!(" ~ runner ~ ", S, S, widths, false, "
-            ~ triple.arguments ~ ", true)();");
+            ~ triple.arguments ~ ", true)(tables);");
     }}
     static foreach (comparison; EnumMembers!Comparison)
         static foreach (kind; EnumMembers!CompareKind)
@@ -5040,24 +5073,24 @@ shared static this() {
                     specialise!(runFusedBranch, S, constant ? I : S,
                         kind == CompareKind.floating
                             ? floatingWidths : integralWidths,
-                        false, comparisonSymbols[comparison], kind, jumpWhen)();
+                        false, comparisonSymbols[comparison], kind, jumpWhen)(tables);
     static foreach (name; AliasSeq!("runBranchFalse", "runBranchTrue",
         "runCastToBool", "runLogicalNot"))
-        specialise!(mixin(name), S, I, integralWidths, false)();
+        specialise!(mixin(name), S, I, integralWidths, false)(tables);
     static foreach (name; AliasSeq!("runAdd", "runSubtract", "runMultiply",
         "runBitAnd", "runBitOr", "runBitXor", "runLessThanSigned",
         "runLessThanUnsigned", "runLessOrEqualSigned", "runLessOrEqualUnsigned",
         "runGreaterThanSigned", "runGreaterThanUnsigned",
         "runGreaterOrEqualSigned", "runGreaterOrEqualUnsigned", "runEqual",
         "runNotEqual"))
-        specialise!(mixin(name), S, S, integralWidths, false)();
+        specialise!(mixin(name), S, S, integralWidths, false)(tables);
     static foreach (name; AliasSeq!("runShiftLeft", "runShiftRightLogical",
         "runShiftRightArithmetic", "runCopy", "runFrameAddress",
         "runLoadIndirect", "runStoreIndirect", "runStaticArrayEqual"))
-        specialise!(mixin(name), S, S, noWidths, false)();
+        specialise!(mixin(name), S, S, noWidths, false)(tables);
     static foreach (name; AliasSeq!("runConstant", "runZero", "runNegate",
         "runStaticLoad"))
-        specialise!(mixin(name), S, I, noWidths, false)();
+        specialise!(mixin(name), S, I, noWidths, false)(tables);
     static foreach (triple; registerNames)
         static foreach (constant; [false, true])
             static foreach (from; [false, true])
@@ -5068,7 +5101,7 @@ shared static this() {
                             registerKind!to, registerKind!from,
                             triple[1] == "opInt3R"
                                 ? integralWidths : noWidths,
-                            !constant, triple[2], constant, from, to)();
+                            !constant, triple[2], constant, from, to)(tables);
     static foreach (comparison; EnumMembers!Comparison)
         static foreach (kind; EnumMembers!CompareKind)
             static foreach (jumpWhen; [false, true])
@@ -5078,9 +5111,9 @@ shared static this() {
                         constant ? I : S,
                         kind == CompareKind.floating
                             ? noWidths : integralWidths,
-                        false, comparisonSymbols[comparison], kind, jumpWhen)();
+                        false, comparisonSymbols[comparison], kind, jumpWhen)(tables);
     static foreach (width; [1, 2, 4, 8, 16, 32]) {
-        specialiseIndirect!width;
+        specialiseIndirect!width(tables);
         static foreach (copyWidth; [1, 2, 4, 8, 16]) {{
             Specialisation entry;
             entry.general = &opLoadThenCopy!(width, copyWidth);
@@ -5089,15 +5122,15 @@ shared static this() {
             entry.destination = true;
             entry.source = true;
             entry.pairWithNext = true;
-            addSpecialisation(entry, Roles.init);
+            tables.addSpecialisation(entry, Roles.init);
         }}
     }
     static foreach (width; [1, 2, 4, 8, 16])
-        specialiseCopyFixed!(width, false);
+        specialiseCopyFixed!(width, false)(tables);
     static foreach (width; 1 .. 17)
-        specialiseCopyFixed!(width, true);
+        specialiseCopyFixed!(width, true)(tables);
     static foreach (base; EnumMembers!IndexBase)
-        specialise!(runIndex, S, S, noWidths, true, base)();
+        specialise!(runIndex, S, S, noWidths, true, base)(tables);
     {
         Specialisation entry;
         entry.general = &opReturn;
@@ -5108,11 +5141,24 @@ shared static this() {
             entry.handlers[0][widthSlot(width)] = &returnHandler!(width, false);
             entry.handlers[1][widthSlot(width)] = &returnHandler!(width, true);
         }
-        addSpecialisation(entry, Roles.init);
+        tables.addSpecialisation(entry, Roles.init);
     }
+    roleTable = cast(immutable) tables.roles;
+    specialisationTable = cast(immutable) tables.specialisations;
     foreach (handler; branchHandlers)
         if (!holdsInstruction(handler))
             internalFailure("a branch handler has no instruction role");
+    static if (jitSupported) {
+        tables.addCounted(&opJump, &countedHandler!opJump);
+        static foreach (destination; EnumMembers!Destination) {
+            tables.addCounted(&callWindow!destination,
+                &callWindow!(destination, true));
+            tables.addCounted(&callIndirectWindow!destination,
+                &callIndirectWindow!(destination, true));
+        }
+        tables.addCounted(&callGeneral!false, &callGeneral!true);
+        _countingTwins = cast(immutable) tables.twins;
+    }
     checkSpecialised;
 }
 
@@ -5239,13 +5285,13 @@ package bool widthHoldsIndexSlot(in Instruction.Handler handler) {
 private const(Specialisation)* lookupSpecialisation(
     in Instruction.Handler handler,
 ) {
-    if (specialisations.length == 0)
+    if (specialisationTable.entries.length == 0)
         return null;
-    auto slot = specialisationSlot(handler);
-    while (specialisations[slot].general !is null) {
-        if (specialisations[slot].general is handler)
-            return &specialisations[slot];
-        slot = (slot + 1) & (specialisations.length - 1);
+    auto slot = specialisationTable.slotOf(handler);
+    while (specialisationTable.entries[slot].general !is null) {
+        if (specialisationTable.entries[slot].general is handler)
+            return &specialisationTable.entries[slot];
+        slot = (slot + 1) & (specialisationTable.entries.length - 1);
     }
     return null;
 }
@@ -5379,30 +5425,20 @@ static if (jitSupported) {
         return overflow;
     }
 
-    // An instruction that counts its event, by its handler; and back.
-    private struct CountingTwins {
-        Instruction.Handler[Instruction.Handler] countedOf;
-        Instruction.Handler[Instruction.Handler] uncountedOf;
-    }
-
-    // `specialiseWith` adds the twins of the branches to `_newTwins`, and the
-    // constructor below those of the jump and the calls; then it makes them
-    // `_countingTwins`, before any thread reads them.
+    // `specialiseWith` adds the twins of the branches to `Tables.twins`, and
+    // the module constructor those of the jump and the calls; then it makes
+    // them `_countingTwins`, before any thread reads them.
     private immutable CountingTwins _countingTwins;
-
-    // The module constructors run on the main thread, so this is a variable of
-    // that thread.
-    private CountingTwins _newTwins;
 
     // The twin of each handler that `original` has, by the place of the handler
     // in `counted`, which holds the twins.
-    private void addCountedTwins(in Specialisation original,
+    private void addCountedTwins(ref Tables tables, in Specialisation original,
         in Specialisation counted)
     {
         foreach (frame; 0 .. original.handlers.length)
             foreach (slot; 0 .. widthSlots)
                 if (original.handlers[frame][slot] !is null)
-                    addCounted(
+                    tables.addCounted(
                         cast(Instruction.Handler)
                             original.handlers[frame][slot],
                         cast(Instruction.Handler)
@@ -5411,30 +5447,17 @@ static if (jitSupported) {
             foreach (mask; 0 .. (*original.masked).length)
                 foreach (slot; 0 .. widthSlots)
                     if ((*original.masked)[mask][slot] !is null)
-                        addCounted(cast(Instruction.Handler)
+                        tables.addCounted(cast(Instruction.Handler)
                                 (*original.masked)[mask][slot],
                             cast(Instruction.Handler)
                                 (*counted.masked)[mask][slot]);
     }
 
-    shared static this() {
-        addCounted(&opJump, &countedHandler!opJump);
-        static foreach (destination; EnumMembers!Destination) {
-            addCounted(&callWindow!destination,
-                &callWindow!(destination, true));
-            addCounted(&callIndirectWindow!destination,
-                &callIndirectWindow!(destination, true));
-        }
-        addCounted(&callGeneral!false, &callGeneral!true);
-        _countingTwins = cast(immutable) _newTwins;
-        _newTwins = CountingTwins.init;
-    }
-
-    private void addCounted(Instruction.Handler original,
+    private void addCounted(ref Tables tables, Instruction.Handler original,
         Instruction.Handler counted)
     {
-        _newTwins.countedOf[original] = counted;
-        _newTwins.uncountedOf[counted] = original;
+        tables.twins.countedOf[original] = counted;
+        tables.twins.uncountedOf[counted] = original;
     }
 
     // Replaces the handler of each of `instructions[indices]` by its counting
@@ -5849,7 +5872,7 @@ static if (jitSupported) {
                     ambiguous: false);
         }
 
-        foreach (ref entry; specialisations) {
+        foreach (ref entry; specialisationTable.entries) {
             if (entry.general is null)
                 continue;
             foreach (frame; entry.handlers)

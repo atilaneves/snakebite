@@ -89,6 +89,16 @@ public bool isIncompleteDeclaration(
     in imported!"snakebite.frontend.compiler".FrontendFlags flags
         = imported!"snakebite.frontend.compiler".FrontendFlags.init,
 ) {
+    uint probeCounter;
+    return isIncompleteDeclaration(input, flags, probeCounter);
+}
+
+// `probeCounter` numbers the probe modules of one session.
+public bool isIncompleteDeclaration(
+    in string input,
+    in imported!"snakebite.frontend.compiler".FrontendFlags flags,
+    ref uint probeCounter,
+) {
     import dmd.errors: diagnostics, ErrorKind;
     import dmd.frontend: parseModule;
     import snakebite.frontend.compiler:
@@ -97,12 +107,10 @@ public bool isIncompleteDeclaration(
 
     bool result;
     withCompilerLock(() {
-        import core.atomic: atomicFetchAdd;
-
         resetErrors;
 
         auto moduleResult = newInFrontend!parseModule(
-            text("repl_probe_", atomicFetchAdd(_probeCounter, 1u), ".d"),
+            text("repl_probe_", probeCounter++, ".d"),
             input,
         );
         if (!moduleResult.diagnostics.hasErrors)
@@ -149,5 +157,3 @@ public bool isStandalonePragmaMessageStatement(
 
     return result;
 }
-
-private __gshared uint _probeCounter;

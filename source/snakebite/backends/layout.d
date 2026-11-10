@@ -10,7 +10,7 @@ import snakebite.nativelayout: typeFacts;
 import snakebite.internalfailure: internalFailure;
 
 
-import snakebite.backends.argumentflow: Shape, Signature;
+import snakebite.backends.argumentflow: Shape, Signature, SignatureTable;
 import snakebite.exception: SnakebiteException;
 
 // One guest function's declared-storage layout: each parameter's byte
@@ -71,7 +71,8 @@ package struct FrameLayout {
 
     // The parameters of the function type, shared by every layout of equal
     // parameters: a call through a value compares it with the one of the
-    // value's type to know that the two frames agree.
+    // value's type to know that the two frames agree. Null until
+    // `internSignature`.
     package const(Signature)* signature;
 
     // A struct method's hidden `this`, together in one place: the slot
@@ -244,7 +245,6 @@ package struct FrameLayout {
 
         layout.reserveVariadic(typeFunctionOf(function_));
         layout.reserveNativeCursor(typeFunctionOf(function_));
-        layout.signature = layout.signatureOf(typeFunctionOf(function_));
         if (function_.v_arguments !is null)
             layout._slotOf[function_.v_arguments] =
                 VariableSlot(layout.variadicTypes, false);
@@ -293,11 +293,20 @@ package struct FrameLayout {
 
         layout.reserveVariadic(type);
         layout.reserveNativeCursor(type);
-        layout.signature = layout.signatureOf(type);
         return layout;
     }
 
-    private const(Signature)* signatureOf(TypeFunction type) const {
+    // Gives the layout the interned signature of `type` from `table`. The
+    // builders above leave it null, because most callers never read it.
+    package void internSignature(
+        ref SignatureTable table, TypeFunction type,
+    ) {
+        signature = signatureOf(table, type);
+    }
+
+    private const(Signature)* signatureOf(
+        ref SignatureTable table, TypeFunction type,
+    ) const {
         import dmd.astenums: VarArg;
 
         Shape[] shapes;
@@ -309,7 +318,7 @@ package struct FrameLayout {
             ? Signature.Variadic.none
             : type.isDstyleVariadic
                 ? Signature.Variadic.d : Signature.Variadic.c;
-        return Signature.intern(shapes, variadic);
+        return table.intern(shapes, variadic);
     }
 
     private void reserveVariadic(TypeFunction type) {
