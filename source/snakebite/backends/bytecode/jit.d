@@ -1120,6 +1120,13 @@ private struct Asm {
         rrOp(w, byteReg: false, 7, r, 0xF7);
     }
 
+    void shiftRightI(int w, bool arithmetic, int r, ubyte count) {
+        rrOp(w, byteReg: false, arithmetic ? 7 : 5, r,
+            count == 1 ? 0xD1 : 0xC1);
+        if (count != 1)
+            b(count);
+    }
+
     void movRR64(int dst, int src) {
         rrOp(8, byteReg: false, src, dst, 0x89);
     }
@@ -2165,12 +2172,15 @@ private struct Gen {
         if (!binary(ins, p.twoAddress, p.constantRight,
                 leftInReg: false, destInReg: false, d, l, r, rr))
             return false;
+        const bits = p.constantRight ? constantAt(rr, w) : 0;
+        if (p.constantRight && w == 4 && divideWidth == 4
+                && emitSigned32Constant(d, l, cast(int) bits, p.remainder))
+            return true;
         if (w == divideWidth)
             a.ld(w, RAX, l);
         else
             a.ldsx(w, RAX, l);
         if (p.constantRight) {
-            const bits = constantAt(rr, w);
             int imm;
             const divisor = w != divideWidth && immOf(w, bits, imm)
                 ? cast(ulong) imm : bits;
@@ -2189,6 +2199,87 @@ private struct Gen {
             a.idivM(divideWidth, r);
         a.st(w, d, p.remainder ? RDX : RAX);
         a.movRR64(STATE, SC2);
+        return true;
+    }
+
+    bool emitSigned32Constant(in Mem d, in Mem l, int divisor,
+        bool remainder)
+    {
+        import core.bitop: bsr;
+
+        // Leave divide by zero and int.min / -1 to the hardware.
+        if (divisor == 0 || divisor == -1)
+            return false;
+        const magnitude = divisor < 0 ? -cast(uint) divisor : cast(uint) divisor;
+        if (magnitude == 1) {
+            a.ld(4, RAX, l);
+            if (remainder)
+                a.stI(4, d, 0);
+            else
+                a.st(4, d, RAX);
+            return true;
+        }
+
+        const log = cast(ubyte) bsr(magnitude);
+        if ((magnitude & (magnitude - 1)) == 0) {
+            // Bias a negative dividend before rounding down with sar.
+            const mask = cast(int) (magnitude - 1);
+            a.ld(4, RAX, l);
+            a.movRR64(R10, RAX);
+            if (log == 1)
+                a.shiftRightI(4, false, R10, 31);
+            else {
+                a.shiftRightI(4, true, R10, 31);
+                a.aluRI(Alu.and, 4, R10, mask);
+            }
+            a.aluRR(Alu.add, 4, RAX, R10);
+            if (remainder) {
+                a.aluRI(Alu.and, 4, RAX, mask);
+                a.aluRR(Alu.sub, 4, RAX, R10);
+            } else {
+                a.shiftRightI(4, true, RAX, log);
+                if (divisor < 0)
+                    a.rrOp(4, byteReg: false, 3, RAX, 0xF7); // neg
+            }
+            a.st(4, d, RAX);
+            return true;
+        }
+
+        // For M = ceil(S / magnitude), require M*magnitude - S < S/2^31.
+        // Then multiplying a nonzero |dividend| by M/S rounds up by less
+        // than 1/magnitude, so the product lies strictly between the
+        // absolute quotient and its successor. A negative product needs
+        // one added after sar to round toward zero.
+        auto shift = cast(ubyte) (31 + log);
+        auto scale = 1UL << shift;
+        auto multiplier = scale / magnitude + 1;
+        if (multiplier * magnitude - scale >= (scale >> 31)) {
+            ++shift;
+            scale <<= 1;
+            multiplier = scale / magnitude + 1;
+        }
+        a.ldsx(4, RAX, l);
+        if (multiplier <= int.max)
+            a.imulRI(R10, RAX, cast(int) multiplier);
+        else {
+            a.movI(R10, multiplier);
+            a.imulRR(8, R10, RAX);
+        }
+        a.shiftRightI(8, true, R10, shift);
+        const sign = remainder ? R11 : RAX;
+        if (remainder)
+            a.movRR64(sign, RAX);
+        a.shiftRightI(4, false, sign, 31);
+        a.aluRR(Alu.add, 4, R10, sign);
+        if (remainder) {
+            a.imulRI(R10, R10, cast(int) magnitude);
+            a.aluRR(Alu.sub, 4, RAX, R10);
+            a.st(4, d, RAX);
+        } else {
+            if (divisor < 0)
+                a.rrOp(4, byteReg: false, 3, R10, 0xF7); // neg
+            a.st(4, d, R10);
+        }
         return true;
     }
 

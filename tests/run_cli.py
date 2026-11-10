@@ -2840,18 +2840,23 @@ def test_bytecode_signed_int_overflowing_division_traps(
     ), output(result)
 
 
-@pytest.mark.parametrize("operand_type", ["int", "long"])
+@pytest.mark.parametrize(
+    "operand_type,constant", [("int", False), ("long", False), ("int", True)],
+)
 @pytest.mark.parametrize("operator", ["/", "%"])
 @pytest.mark.parametrize("divisor", [0, -1])
 def test_bytecode_hot_signed_division_traps(
-    tmp_path: Path, operand_type: str, operator: str, divisor: int,
+    tmp_path: Path, operand_type: str, constant: bool, operator: str,
+    divisor: int,
 ) -> None:
+    fault_path = f"if (divisor != 3) return value {operator} {divisor};"
     write(
         tmp_path / "app" / "main.d",
         f"""
         module main;
         {operand_type} divide({operand_type} value, {operand_type} divisor) {{
             assert(value != 0);
+            {fault_path if constant else ""}
             return value {operator} divisor;
         }}
         int main() {{

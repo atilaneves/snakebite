@@ -70,6 +70,28 @@ static foreach (backend; Matrix!()) {
         }, ["checkInt", "checkLong"]);
     }
 
+    @("jit.signedDivisionByConstants." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            enum constants = [1, 2, -2, 3, -7, 10, -10, 256, int.max, int.min];
+            void check(int dividend, int[] divisors) {
+                static foreach (index, divisor; constants) {
+                    assert(dividend / divisor == dividend / divisors[index]);
+                    assert(dividend % divisor == dividend % divisors[index]);
+                }
+            }
+            int main() {
+                auto divisors = constants.dup;
+                foreach (_; 0 .. 40)
+                    foreach (dividend; [int.min, int.min + 1, -21, -20, -19,
+                            -1, 0, 1, 19, 20, 21, int.max - 1, int.max])
+                        check(dividend, divisors);
+                return 0;
+            }
+        }, ["check"]);
+    }
+
     // The loop is the only thing that makes `scan` hot: it is called once.
     @("jit.functionBecomesHotInsideALoop." ~ backend.stringof)
     @Tags(backend.stringof)
