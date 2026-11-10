@@ -10,18 +10,23 @@ private:
 // way to call it. A backend builds it (`buildStartData`); `GuestModules` and
 // `runMain` run on it only.
 
-// A function as the backend that built the start data names it. The word
-// means nothing outside that backend, and that backend decides when the
-// function is compiled.
+// What a backend gives out to name a function. It means nothing outside the
+// backend that made it, and that backend decides when the function is
+// compiled.
+public abstract class FunctionHandle {
+}
+
+
+// A function as the backend that built the start data names it.
 public struct CompiledFunction {
     import snakebite.backends.backend: Backend;
 
-    public const(void)* word;
+    public FunctionHandle handle;
 
     public void call(
         Backend backend, void* returnPlace, void*[] args,
     ) const {
-        backend.callCompiled(word, returnPlace, args);
+        backend.callCompiled(cast() handle, returnPlace, args);
     }
 }
 

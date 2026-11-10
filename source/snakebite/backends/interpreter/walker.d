@@ -7,6 +7,8 @@ import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.backends.interpreter.nodetree:
     AccessSite, CalleeResult, OuterVariable, TreeCallee, TreeFlow, TreeRoot,
     hasNoResult, isAggregate, isPair, isScalar, resultWordFor, rootOf;
+import snakebite.backends.backend: DeclarationHandle;
+import snakebite.backends.startdata: FunctionHandle;
 import snakebite.nativelayout: tryTypeFacts, truthFacts;
 
 
@@ -94,16 +96,16 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     }
 
     // The interpreter runs a declaration, so the declaration names it.
-    public override const(void)* compiledFunction(FuncDeclaration function_) {
-        return cast(const(void)*) function_;
+    public override FunctionHandle compiledFunction(FuncDeclaration function_) {
+        return new DeclarationHandle(function_);
     }
 
     public override void callCompiled(
-        const(void)* word,
+        FunctionHandle handle,
         void* returnPlace,
         void*[] args,
     ) {
-        call(cast(FuncDeclaration) word, returnPlace, args);
+        call((cast(DeclarationHandle) handle).function_, returnPlace, args);
     }
 
     private void prepareOnEvaluator(FuncDeclaration function_) {

@@ -4,7 +4,17 @@ module snakebite.backends.backend;
 private:
 
 
-import snakebite.backends.startdata: StartData;
+import snakebite.backends.startdata: FunctionHandle, StartData;
+
+
+// The handle of a backend that runs a function from its declaration.
+public final class DeclarationHandle: FunctionHandle {
+    public imported!"dmd.func".FuncDeclaration function_;
+
+    public this(imported!"dmd.func".FuncDeclaration function_) {
+        this.function_ = function_;
+    }
+}
 
 
 // The root modules of the guest program, parsed and semantically analysed by
@@ -304,11 +314,11 @@ public abstract class Backend {
     // the function is compiled: the bytecode backend compiles it at the
     // first `callCompiled`. The start data (`StartData`) needs a frontend
     // declaration in this and in `staticStorage`, and nowhere else.
-    public abstract const(void)* compiledFunction(FuncDeclaration function_);
+    public abstract FunctionHandle compiledFunction(FuncDeclaration function_);
 
     // As `call`, for a function named by `compiledFunction`.
     public abstract void callCompiled(
-        const(void)* word, void* returnPlace, void*[] args,
+        FunctionHandle handle, void* returnPlace, void*[] args,
     );
 
     // The start data of the program, built once (see `buildStartData`).

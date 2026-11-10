@@ -7,7 +7,8 @@ private:
 // Runs guest code with dmd's own compile-time function evaluator.
 public final class Ctfe: imported!"snakebite.backends.backend".Backend {
     import dmd.func: FuncDeclaration;
-    import snakebite.backends.backend: Program;
+    import snakebite.backends.backend: DeclarationHandle, Program;
+    import snakebite.backends.startdata: FunctionHandle;
     import snakebite.exception: SnakebiteException;
 
     public this(const Program program) {
@@ -39,16 +40,16 @@ public final class Ctfe: imported!"snakebite.backends.backend".Backend {
     }
 
     // CTFE runs a declaration, so the declaration names it.
-    public override const(void)* compiledFunction(FuncDeclaration function_) {
-        return cast(const(void)*) function_;
+    public override FunctionHandle compiledFunction(FuncDeclaration function_) {
+        return new DeclarationHandle(function_);
     }
 
     public override void callCompiled(
-        const(void)* word,
+        FunctionHandle handle,
         void* returnPlace,
         void*[] args,
     ) {
-        call(cast(FuncDeclaration) word, returnPlace, args);
+        call((cast(DeclarationHandle) handle).function_, returnPlace, args);
     }
 
     public override string eval(FuncDeclaration function_) {

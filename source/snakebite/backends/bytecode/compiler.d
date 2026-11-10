@@ -3,6 +3,7 @@ module snakebite.backends.bytecode.compiler;
 
 private:
 
+import snakebite.backends.startdata: FunctionHandle;
 import snakebite.nativelayout: typeFacts, truthFacts;
 
 
@@ -252,25 +253,26 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // compiled function once there is one; until then it holds the step
     // that compiles it, so the function compiles at its first call, as with
     // `call`. The declaration is reachable only through that step.
-    public override const(void)* compiledFunction(FuncDeclaration function_) {
-        auto handle = new StartFunction(
-            () => compileFunction(function_));
-        _startFunctions ~= handle;
-        return handle;
+    public override FunctionHandle compiledFunction(FuncDeclaration function_) {
+        return new StartFunction(() => compileFunction(function_));
     }
 
     public override void callCompiled(
-        const(void)* word,
+        FunctionHandle handle,
         void* returnPlace,
         void*[] args,
     ) {
-        auto handle = cast(StartFunction*) word;
-        runHostToGuest(handle.get(), returnPlace, args);
+        runHostToGuest(
+            (cast(StartFunction) handle).function_.get(), returnPlace, args);
     }
 
-    private alias StartFunction = FunctionCompiler.Deferred!(const(Function)*);
-    // Keeps every handle given out alive. Appended under the compiler lock.
-    private StartFunction*[] _startFunctions;
+    private final class StartFunction: FunctionHandle {
+        FunctionCompiler.Deferred!(const(Function)*) function_;
+
+        this(const(Function)* delegate() compute) {
+            function_ = typeof(function_)(compute);
+        }
+    }
 
     // The bytecode backend's one host-to-guest entry. The program
     // runner's top-level call (`call`) and a callback's re-entry
