@@ -106,8 +106,16 @@ JIT code. The template uses these facts as immediates. It claims the frame,
 links the same activation as the handler, and jumps through the callee's
 first handler slot. If the frame stack must grow or the callee reaches the
 tier-up threshold, the original counting handler takes over before the
-template changes the frame or the count. Sites that still need preparation
-and calls through function values keep their handlers.
+template changes the frame or the count.
+
+An indirect window call can use the same template. The counting handler
+records the first target whose frame fits the window. The callback bridge
+keeps that entry valid for the lifetime of the bytecode that uses it. If
+the caller compiles after the handler publishes the target, the template
+checks the current entry address before using the recorded callee and
+receiver adjustment. It reads the receiver from the current window on
+every call. A different target or a site with no recorded target uses the
+original handler.
 
 A return to a guest caller with no pending cleanup releases the frame and
 jumps through the caller's resume slot. A value return can copy up to 64

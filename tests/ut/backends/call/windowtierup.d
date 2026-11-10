@@ -64,3 +64,49 @@ static foreach (backend; Matrix!()) {
         }, ["main", "digits", "sumTo"]);
     }
 }
+
+
+static foreach (backend; Matrix!()) {
+    @("window.hotDelegateCallsUseCurrentTargetAndReceiver." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            interface Operation {
+                long evaluate(long value);
+            }
+
+            class Add : Operation {
+                long offset;
+                this(long offset) { this.offset = offset; }
+                override long evaluate(long value) { return value + offset; }
+            }
+
+            class Subtract : Operation {
+                long offset;
+                this(long offset) { this.offset = offset; }
+                override long evaluate(long value) { return value - offset; }
+            }
+
+            void main() {
+                Operation first = new Add(17);
+                Operation second = new Add(29);
+                Operation third = new Subtract(41);
+                auto addFirst = &first.evaluate;
+                auto addSecond = &second.evaluate;
+                auto subtract = &third.evaluate;
+                foreach (round; 0 .. 1024) {
+                    auto operation = addFirst;
+                    long offset = 17;
+                    if (round % 3 == 1) {
+                        operation = addSecond;
+                        offset = 29;
+                    } else if (round % 3 == 2) {
+                        operation = subtract;
+                        offset = -41;
+                    }
+                    assert(operation(round) == round + offset);
+                }
+            }
+        }, ["main"]);
+    }
+}

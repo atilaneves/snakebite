@@ -348,6 +348,33 @@ public struct CallSite {
 
     package FastCall fast;
 
+    static if (jitSupported && chainedDispatch) {
+        // The first eligible indirect target. The entry publishes the
+        // callee and adjustment. Only the thread that claims callee writes
+        // the other fields.
+        package struct IndirectTarget {
+            package const(void)* entry;
+            package const(Function)* callee;
+            package ptrdiff_t adjustment;
+
+            pragma(inline, true)
+            private void remember(const(void)* entry, const(Function)* callee,
+                in ptrdiff_t adjustment,
+            ) {
+                import core.atomic: atomicLoad, atomicStore, cas, MemoryOrder;
+
+                if (atomicLoad!(MemoryOrder.raw)(this.callee) !is null
+                        || !cas(&this.callee, cast(const(Function)*) null,
+                            callee))
+                    return;
+                this.adjustment = adjustment;
+                atomicStore!(MemoryOrder.rel)(this.entry, entry);
+            }
+        }
+
+        package IndirectTarget indirectTarget;
+    }
+
     // Compiles the callee of a `guest` site on its first call and keeps it
     // in `callee`: a later call reads the field, not `prepareGuest`. Two
     // threads that race here store the same value.
@@ -1065,16 +1092,15 @@ package void recordCallSiteRelocs(
     // `prepareNativePlan`, `builtinEntry` and `value.signature`. A
     // delegate is kept by its function; its context is state of the
     // compiler. The instruction addresses `cleanupStart` and `cleanupEnd`
-    // follow from the two indexes. `fast` and `directTarget` are not listed
-    // as address fields: they are filled only at run time, when a call first
-    // runs, so a compiled function never holds an address in them.
+    // follow from the two indexes. The call caches are filled at run time,
+    // so the compiled bytecode has no addresses in them.
     enum plainFields = AliasSeq!(
         "kind", "value", "args", "nativeArgs", "returnWidth", "fast",
         "calleeSlotOffset", "hasContext", "cleanupStartIndex",
         "cleanupEndIndex", "cleanupStart", "cleanupEnd", "windowSlot",
         "windowDisp", "windowScratch", "windowEnd", "windowAlignment",
         "directState", "directTarget", "directSwapped", "directOrder",
-        "directLoads",
+        "directLoads", "indirectTarget",
     );
     enum addressFields = AliasSeq!(
         "callee", "prepareGuest", "nativePlan", "prepareNativePlan",
@@ -2027,6 +2053,10 @@ private const(Instruction)* callIndirectWindow(Destination destination,
         state.decodedAdjustment = adjustment;
         return opCallSlow!counted(pc, active, state, frame, r0, fp0);
     }
+
+    static if (jitSupported && chainedDispatch && counted)
+        (cast(CallSite.IndirectTarget*) &site.indirectTarget)
+            .remember(address, callee, adjustment);
 
     return enterWindow!(destination, true, counted)(
         pc, active, state, frame, r0, fp0, site, &callee.windowFacts, callee,
@@ -5608,10 +5638,14 @@ static if (jitSupported) {
 
         static if (chainedDispatch) {
             static foreach (destination; EnumMembers!Destination)
-                static foreach (counted; [false, true])
+                static foreach (counted; [false, true]) {
                     put(&callWindow!(destination, counted),
-                        JitOp.make!(Kind.callWindow)(
-                            JitOp.CallWindow(destination, counted)));
+                        JitOp.make!(Kind.callWindow)(JitOp.CallWindow(
+                            destination, counted, indirect: false)));
+                    put(&callIndirectWindow!(destination, counted),
+                        JitOp.make!(Kind.callWindow)(JitOp.CallWindow(
+                            destination, counted, indirect: true)));
+                }
             put(&opReturn, JitOp.plain(Kind.returnValue));
             put(&opReturnVoid, JitOp.plain(Kind.returnVoid));
         }
