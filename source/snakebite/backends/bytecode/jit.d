@@ -372,9 +372,15 @@ package struct JitInstance {
 
     @disable this(this);
 
-    ~this() {
-        // Nothing else uses the instance when it is destroyed.
+    // Unmaps the code and closes the file. The owner calls it when no guest
+    // code of the instance can run again; no function may run JIT code of
+    // this instance afterwards, and a later compile fails. No lock: nothing
+    // else uses the instance then.
+    void release() {
+        import core.atomic: atomicStore, MemoryOrder;
+
         (cast(JitState*) &state).release;
+        atomicStore!(MemoryOrder.rel)(setup, Setup.unavailable);
     }
 }
 
@@ -608,7 +614,9 @@ package bool jitUsable(ref JitLock lock) {
     ref state = lock.state;
     const ok = state.region.create;
     if (ok) {
-        // Repeating them in a race between two instances is harmless.
+        // Instances that race here can each run the check before one of them
+        // sets the flag. The result is the same, and each run uses a little
+        // room in the region of its own instance.
         if (!atomicLoad!(MemoryOrder.acq)(_conventionChecked)) {
             checkCallingConvention(state.region);
             atomicStore!(MemoryOrder.rel)(_conventionChecked, true);

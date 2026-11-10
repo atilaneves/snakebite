@@ -121,13 +121,14 @@ The function counts another 256 events and asks again.
 The VM does not compile while `GC.inFinalizer` is true. A guest destructor
 that runs in a finalizer can make a function hot. The compile can allocate
 from the GC, because the first one builds the tables that classify handlers,
-and they are associative arrays. It also maps memory and takes a lock. A finalizer must not allocate from the
-GC, and must not wait for a thread that a collection suspended. The function
-stays in its handlers, and compiles at a later event.
+and they are associative arrays. It also maps memory and takes a lock. A
+finalizer must not allocate from the GC, and must not wait for a thread that a
+collection suspended. The function stays in its handlers, and compiles at a
+later event.
 
 The emitter allocates nothing for each instruction. It works in buffers that
-a compile reuses (they belong to the instance), and in the code region. The cost of a compile is paid at
-run time, so it must be small.
+a compile reuses (they belong to the instance), and in the code region. The
+cost of a compile is paid at run time, so it must be small.
 
 The code of a function is made from a snapshot of its instructions. A
 counting twin is replaced by the handler it counts, so that the code
@@ -149,14 +150,22 @@ is left of the chunk, the function goes to a new chunk. Pages are made
 present with `MADV_POPULATE_*` in parts of 128 KiB, so no compile takes a
 page fault.
 
-Code is never freed while its instance lives. The code region belongs to the
-`Bytecode` instance that compiled the functions, not to the process. The
-instance makes the region at its first JIT compile, and the destructor of the
-instance unmaps every chunk and closes the file. A function that has JIT code
-keeps it until its instance is destroyed. Each `Function` points to the JIT
-state of its instance (`Function.jit`), so a tier-up finds the region, the lock
-and the scratch buffers of its owner. The lock is one word in that state, so
-two instances do not exclude each other.
+Code is never freed while guest code of its instance can run. The code region
+belongs to the `Bytecode` instance that compiled the functions, not to the
+process. The instance makes the region at its first JIT compile. Each
+`Function` points to the JIT state of its instance (`Function.jit`), so a
+tier-up finds the region, the lock and the scratch buffers of its owner. The
+lock is one word in that state, so two instances do not exclude each other.
+
+The owner gives the region back; the garbage collector does not. A `Bytecode`
+instance has no finalizer, so a collection never runs a destructor of its
+state. When the owner ends the instance (`Owned`), the instance checks
+whether host code holds a callback entry. If it does, a callback can enter
+the instance at any time, so the region stays. If it does not, the region is
+unmapped and its file is closed when the last execution state of the
+instance ends (`ExecutionStates`): an active call or a suspended fiber keeps
+its state until it returns, so no guest code of the instance, and no JIT code,
+is running or can start. A later compile on the instance fails.
 
 Two things are not instance state. The CPU check (BMI2) and the check of the
 calling convention have one answer for the process, so the first instance that

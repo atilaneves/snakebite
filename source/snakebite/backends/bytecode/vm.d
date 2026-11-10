@@ -5513,7 +5513,9 @@ static if (jitSupported) {
         // A guest destructor in a GC finalizer can make a function hot. The
         // function keeps its handlers until a later event outside the
         // finalizer.
-        auto lock = GC.inFinalizer || function_.jit is null
+        if (function_.jit is null)
+            internalFailure("a function that counts events has no JIT state");
+        auto lock = GC.inFinalizer
             ? JitLock.init : JitLock.tryTake(*function_.jit);
         if (!lock.held) {
             atomicStore!(MemoryOrder.rel)(*state,
