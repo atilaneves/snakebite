@@ -8,15 +8,17 @@ import snakebite.internalfailure: internalFailure;
 
 
 import core.sync.mutex: Mutex;
-import snakebite.ffi.plan: CallPlan, prepareCallback;
+import snakebite.ffi.plan: CallPlan, NativeSignature, prepareCallback;
 import snakebite.ffi.sysv:
     CallbackTrailer, CallFrame, callbackEntriesPerChunk, callbackEntryBytes,
     snakebite_ffi_callback_chunk, snakebite_ffi_callback_chunk_end,
     snakebite_ffi_callback_chunk_trailer, snakebite_ffi_callback_common;
 
 // `imported!"dmd.func"` is a module-scope-only construct (ai/CODING.md);
-// this names the one type this module reads from it, so every struct
-// and class below reads it as a plain type instead.
+// this names the one type this module only carries for a backend that
+// keeps the declaration (`CallbackCall`, `Registered`, `Slot` and
+// `adjustedEntryOf`), so every struct and class below reads it as a plain
+// type instead.
 private alias FuncDeclaration = imported!"dmd.func".FuncDeclaration;
 
 
@@ -59,6 +61,8 @@ private alias FuncDeclaration = imported!"dmd.func".FuncDeclaration;
 // `runHostToGuest` reads it exactly as it reads a declared parameter.
 public struct CallbackCall {
     public const(void)* function_;
+    // Only what the caller of `register` or `adjustedEntryOf` passed;
+    // the pool never reads it.
     public FuncDeclaration declaration;
     public void* returnPlace;
     public const(void*)[] arguments;
@@ -656,6 +660,7 @@ public struct CallbackBridge {
     import snakebite.sharedtable: SharedTable;
 
     private struct Registered {
+        NativeSignature signature;
         FuncDeclaration declaration;
         const(void)* entry;
     }
@@ -676,14 +681,14 @@ public struct CallbackBridge {
     private SharedTable!(const(void)*, Adjusted) _adjustedGuestEntries;
     private CallbackHandler _handler;
     private void* _owner;
-    private void function(void*, FuncDeclaration) _prepare;
+    private void function(void*, const(void)*) _prepare;
     // Every entry this bridge reserved, written under the compiler lock.
     private const(void)*[] _reserved;
 
     public this(
         CallbackHandler handler,
         void* owner,
-        void function(void*, FuncDeclaration) prepare = null,
+        void function(void*, const(void)*) prepare = null,
     ) {
         if (handler is null)
             throw new Exception("ffi callback bridge has no handler");
@@ -693,14 +698,17 @@ public struct CallbackBridge {
         _prepare = prepare;
     }
 
+    // `declaration` is handed to the backend in `CallbackCall.declaration`
+    // and serves nothing else: the entry's type is `signature`.
     public void register(
         const(void)* word,
-        FuncDeclaration declaration,
+        NativeSignature signature,
+        FuncDeclaration declaration = null,
     ) {
         if (word is null || word in _words)
             return;
         includeWord(cast(size_t) word);
-        _words.insert(word, Registered(declaration, null));
+        _words.insert(word, Registered(signature, declaration, null));
     }
 
     // Publish a wider range before publishing its new word. Concurrent
@@ -746,18 +754,18 @@ public struct CallbackBridge {
             return entry;
 
         if (_prepare !is null)
-            _prepare(_owner, registered.declaration);
+            _prepare(_owner, word);
 
-        // `prepareCallback` touches dmd (finding 1.2), so this takes the
-        // compiler lock in place of a bridge-only mutex: one lock order
-        // everywhere - the compiler lock, then the pool (ADR-0003) -
-        // instead of two locks a caller could take in either order.
+        // The bridge has no mutex of its own: the compiler lock guards
+        // its tables and `reserve` takes the pool lock (ADR-0003) inside
+        // it, so there is one lock order everywhere, not two locks a
+        // caller could take in either order.
         import snakebite.frontend.compiler: withCompilerLock;
 
         withCompilerLock({
             if (registered.entry is null) {
                 auto plan = new CallPlan;
-                *plan = prepareCallback(registered.declaration);
+                *plan = prepareCallback(registered.signature);
                 auto slot = Slot(
                     _handler, _owner, word, registered.declaration, plan);
                 slot.bridge = &this;
@@ -829,8 +837,8 @@ public struct CallbackBridge {
     // A native ABI thunk owns the receiver adjustment. Callers keep the
     // original interface pointer, including when they store a delegate.
     public const(void)* adjustedEntryOf(
-        const(void)* word, FuncDeclaration declaration,
-        in ptrdiff_t adjustment,
+        const(void)* word, lazy NativeSignature signature,
+        in ptrdiff_t adjustment, FuncDeclaration declaration = null,
     ) {
         if (adjustment == 0) {
             const entry = entryOf(word);
@@ -849,7 +857,7 @@ public struct CallbackBridge {
                 return;
             }
             auto plan = new CallPlan;
-            *plan = prepareCallback(declaration);
+            *plan = prepareCallback(signature);
             assert(plan.hasHiddenContext);
             auto slot = Slot(
                 _handler, _owner, word, declaration, plan, adjustment,

@@ -8,6 +8,7 @@ import snakebite.ffi.callback:
     ChunkStrategy;
 import snakebite.ffi.sysv:
     snakebite_ffi_callback_chunk, snakebite_ffi_callback_chunk_end;
+import snakebite.ffi.plan: nativeSignatureOf;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import std.conv: text;
@@ -99,9 +100,46 @@ private FuncDeclaration declarationOf(string code, string name) {
 }
 
 
+// The registration a backend makes: the signature comes from the
+// declaration, which the handlers below also read in `call.declaration`.
+private void registerFunction(
+    CallbackBridge* bridge, const(void)* word, FuncDeclaration function_,
+) {
+    bridge.register(word, nativeSignatureOf(function_), function_);
+}
+
+
+private const(void)* adjustedFunctionEntryOf(
+    CallbackBridge* bridge, const(void)* word, FuncDeclaration function_,
+    ptrdiff_t adjustment,
+) {
+    return bridge.adjustedEntryOf(
+        word, nativeSignatureOf(function_), adjustment, function_);
+}
+
+
 private bool inTemplateChunk(const(void)* entry) {
     return entry >= cast(const(void)*) &snakebite_ffi_callback_chunk
         && entry < cast(const(void)*) &snakebite_ffi_callback_chunk_end;
+}
+
+private extern(C) void doubleIntNoDeclaration(void*, CallbackCall* call) {
+    assert(call.declaration is null);
+    *cast(int*) call.returnPlace = *cast(const int*) call.arguments[0] * 2;
+}
+
+// A backend with no AST registers an entry from the signature data alone.
+@("entry.fromSignatureWithoutDeclaration")
+unittest {
+    auto signature = nativeSignatureOf(
+        declarationOf(q{ extern(C) int twice(int x); }, "twice"));
+    auto bridge = new CallbackBridge(&doubleIntNoDeclaration, null);
+    int word;
+    bridge.register(&word, signature);
+
+    auto entry = cast(IntOfInt) bridge.entryOf(&word);
+    (entry !is null).should == true;
+    entry(21).should == 42;
 }
 
 @("entry.vector4ArgumentAndReturn")
@@ -112,7 +150,7 @@ unittest {
     );
     auto bridge = new CallbackBridge(&recordVector4, null);
     int word;
-    bridge.register(&word, function_);
+    bridge.registerFunction(&word, function_);
     auto entry = cast(Vector4OfVector4) bridge.entryOf(&word);
     float[4] input = [1.0f, 2.0f, 3.0f, 4.0f];
     auto output = entry(cast(Vector4) input);
@@ -125,7 +163,7 @@ unittest {
         q{ extern(C) int addExtra(int x, ...); }, "addExtra");
     auto bridge = new CallbackBridge(&recordCVariadicInt, null);
     int word;
-    bridge.register(&word, function_);
+    bridge.registerFunction(&word, function_);
     auto entry = cast(CVariadicInt) bridge.entryOf(&word);
 
     entry(13, 29).should == 42;
@@ -142,7 +180,7 @@ unittest {
     Recorded recorded;
     auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
     int[5] words;
-    bridge.register(&words[2], function_);
+    bridge.registerFunction(&words[2], function_);
 
     auto entry = cast(IntOfInt) bridge.entryOf(&words[2]);
     (entry !is null).should == true;
@@ -160,7 +198,7 @@ unittest {
 
     foreach (index; [4, 0]) {
         (bridge.entryOf(&words[index]) is null).should == true;
-        bridge.register(&words[index], function_);
+        bridge.registerFunction(&words[index], function_);
         auto added = cast(IntOfInt) bridge.entryOf(&words[index]);
         (added !is null).should == true;
         added(10).should == 21;
@@ -214,7 +252,7 @@ unittest {
     Recorded recorded;
     auto bridge = new CallbackBridge(&recordMixed, &recorded);
     int word;
-    bridge.register(&word, function_);
+    bridge.registerFunction(&word, function_);
 
     auto entry = cast(DoubleOfMixed) bridge.entryOf(&word);
     entry(1.5, 10, 0.25f).should == 11.75;
@@ -231,7 +269,7 @@ unittest {
     Recorded recorded;
     auto bridge = new CallbackBridge(&recordReal, &recorded);
     int word;
-    bridge.register(&word, function_);
+    bridge.registerFunction(&word, function_);
 
     auto entry = cast(RealOfReal) bridge.entryOf(&word);
     const value = 1.0L + real.epsilon;
@@ -250,7 +288,7 @@ unittest {
     Recorded recorded;
     auto bridge = new CallbackBridge(&recordReverseReal, &recorded);
     int word;
-    bridge.register(&word, function_);
+    bridge.registerFunction(&word, function_);
 
     auto entry = cast(ReverseReal) bridge.entryOf(&word);
     const value = 1.0L + real.epsilon;
@@ -283,7 +321,7 @@ unittest {
     Recorded recorded;
     auto bridge = new CallbackBridge(&recordTriple, &recorded);
     int word;
-    bridge.register(&word, function_);
+    bridge.registerFunction(&word, function_);
 
     auto entry = cast(TripleOfLong) bridge.entryOf(&word);
     entry(7).should == Triple(7, 14, 21);
@@ -316,7 +354,7 @@ unittest {
     Recorded recorded;
     auto bridge = new CallbackBridge(&recordEight, &recorded);
     int word;
-    bridge.register(&word, function_);
+    bridge.registerFunction(&word, function_);
 
     auto entry = cast(LongOfEight) bridge.entryOf(&word);
     entry(1, 2, 3, 4, 5, 6, 7, 8).should == 204;
@@ -344,7 +382,7 @@ unittest {
     Recorded recorded;
     auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
     int word;
-    bridge.register(&word, function_);
+    bridge.registerFunction(&word, function_);
 
     int delegate(int) callback;
     callback.funcptr = cast(int function(int)) bridge.entryOf(&word);
@@ -359,17 +397,17 @@ unittest {
     ubyte[32] object;
     callback.ptr = object.ptr + 16;
     callback.funcptr = cast(int function(int))
-        bridge.adjustedEntryOf(&word, function_, -16);
+        bridge.adjustedFunctionEntryOf(&word, function_, -16);
     callback(5).should == 11;
     (recorded.context is object.ptr).should == true;
     (callback.ptr is object.ptr + 16).should == true;
-    (bridge.adjustedEntryOf(&word, function_, -16)
+    (bridge.adjustedFunctionEntryOf(&word, function_, -16)
         is cast(const(void)*) callback.funcptr).should == true;
 
     auto native = ContextValue(37);
     auto target = &native.add;
     callback.ptr = cast(ubyte*) target.ptr + 16;
-    callback.funcptr = cast(int function(int)) bridge.adjustedEntryOf(
+    callback.funcptr = cast(int function(int)) bridge.adjustedFunctionEntryOf(
         cast(const(void)*) target.funcptr, function_, -16);
     callback(5).should == 42;
 }
@@ -389,7 +427,7 @@ static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
         Recorded recorded;
         auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
         int word;
-        bridge.register(&word, function_);
+        bridge.registerFunction(&word, function_);
 
         const chunksBefore = callbackChunkCount;
         beginCallbackChunk(strategy);
@@ -416,7 +454,7 @@ static foreach (freshChunk; [false, true]) {
         auto owner = new CallbackBridge(&recordIntOfInt, &recorded);
         auto other = new CallbackBridge(&recordIntOfInt, &recorded);
         int word;
-        owner.register(&word, function_);
+        owner.registerFunction(&word, function_);
         if (freshChunk)
             beginCallbackChunk(ChunkStrategy.protect);
         const entry = owner.entryOf(&word);
@@ -438,7 +476,7 @@ static foreach (freshChunk; [false, true]) {
         Recorded recorded;
         auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
         int word;
-        bridge.register(&word, function_);
+        bridge.registerFunction(&word, function_);
         if (freshChunk)
             beginCallbackChunk(ChunkStrategy.protect);
         const entry = bridge.entryOf(&word);
@@ -469,11 +507,11 @@ static foreach (freshChunk; [false, true]) {
         Recorded recorded;
         auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
         int word;
-        bridge.register(&word, function_);
+        bridge.registerFunction(&word, function_);
         if (freshChunk)
             beginCallbackChunk(ChunkStrategy.protect);
 
-        const entry = bridge.adjustedEntryOf(&word, function_, -16);
+        const entry = bridge.adjustedFunctionEntryOf(&word, function_, -16);
 
         const target = bridge.guestTarget(entry);
         target.word.should == &word;
