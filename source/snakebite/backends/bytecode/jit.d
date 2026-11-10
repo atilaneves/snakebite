@@ -153,6 +153,7 @@ package struct JitOp {
     static struct CallWindow {
         Destination destination;
         bool counted;
+        bool indirect;
     }
 
     Kind kind;
@@ -1386,13 +1387,33 @@ private struct Gen {
 
         const ins = snapshot[i];
         const site = &callSites[ins.source];
-        const fast = &site.fast;
-        // Preparing a site may compile guest bytecode. Only read facts that
-        // the handler has published and that will stay valid for this site.
-        if (atomicLoad!(MemoryOrder.acq)(
-                *cast(shared(uint)*) &fast.state) != CallSite.FastCall.State.ready)
-            return false;
-        const callee = fast.callee;
+        const(CallSite.FastCall)* fast;
+        const(Function)* callee;
+        const(void)* entry;
+        ptrdiff_t adjustment;
+        // Only read facts that a handler has published.
+        static if (chainedDispatch) {
+            if (op.indirect) {
+                const target = &site.indirectTarget;
+                entry = atomicLoad!(MemoryOrder.acq)(target.entry);
+                if (entry is null || site.calleeSlotOffset > int.max)
+                    return false;
+                callee = target.callee;
+                adjustment = target.adjustment;
+                if (adjustment < int.min || adjustment > int.max
+                        || (adjustment != 0 && callee.contextOffset > int.max))
+                    return false;
+                fast = &callee.windowFacts;
+            }
+        }
+        if (entry is null) {
+            fast = &site.fast;
+            if (atomicLoad!(MemoryOrder.acq)(
+                    *cast(shared(uint)*) &fast.state)
+                    != CallSite.FastCall.State.ready)
+                return false;
+            callee = fast.callee;
+        }
         const hasPlace = callee.returnPlace.offset != size_t.max;
         const hasWindows = callee.windowSlot != size_t.max;
         if (site.windowSlot > int.max || site.windowDisp > int.max
@@ -1403,6 +1424,12 @@ private struct Gen {
                     || fast.windowBase > int.max)))
             return false;
 
+        size_t otherTarget;
+        if (entry !is null) {
+            a.movI(RAX, cast(size_t) entry);
+            a.alu(Alu.cmp, 8, RAX, Mem(FRAME, cast(int) site.calleeSlotOffset));
+            otherTarget = jccLocal(CC_NE);
+        }
         a.ld(8, R9, Mem(STATE, DispatchState.frames.offsetof));
         a.ld(8, R10, Mem(FRAME, cast(int) site.windowSlot));
         a.lea(R11, Mem(R10, cast(int) site.windowDisp));
@@ -1433,6 +1460,12 @@ private struct Gen {
         a.st(8, Mem(R11, Activation.frame.offsetof), FRAME);
         if (hasPlace)
             a.st(8, Mem(FRAME, cast(int) fast.placeStore), RAX);
+        if (adjustment != 0) {
+            const context = Mem(FRAME, cast(int) callee.contextOffset);
+            a.ld(8, RAX, context);
+            a.aluRI(Alu.add, 8, RAX, cast(int) adjustment);
+            a.st(8, context, RAX);
+        }
         if (hasWindows) {
             a.lea(RAX, Mem(R11, cast(int) fast.windowBase));
             a.st(8, Mem(FRAME, cast(int) fast.windowStore), RAX);
@@ -1458,6 +1491,8 @@ private struct Gen {
         a.movRR64(ACTIVE, R11);
         a.jmpM(Mem(PCREG, Instruction.handler.offsetof));
 
+        if (entry !is null)
+            patchHere(otherTarget);
         patchHere(grow);
         if (op.counted)
             patchHere(tierUp);
