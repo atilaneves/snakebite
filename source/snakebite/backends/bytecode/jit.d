@@ -48,6 +48,7 @@ package struct JitOp {
         none, copy, constant, zero, jump, branch, int3, cmp3, fused, fp3,
         fpcmp3, index, checked, castFixed, widen, loadInd, storeInd,
         frameAddr, staticLoad, staticStore, staticAddr, boolOp, unary, shift,
+        signedDivide,
     }
 
     enum IntOperation : ubyte { add, or, and, subtract, xor, multiply }
@@ -143,6 +144,14 @@ package struct JitOp {
         bool twoAddress;
     }
 
+    static struct SignedDivide {
+        bool remainder;
+        bool constantRight;
+        bool twoAddress;
+        // The general two-address handlers divide sign-extended longs.
+        bool widenInt;
+    }
+
     Kind kind;
     ubyte width;
     union {
@@ -160,6 +169,7 @@ package struct JitOp {
         BoolOp boolOp;
         Unary unary;
         Shift shift;
+        SignedDivide signedDivide;
     }
 
     // A kind that has no parameters.
@@ -938,6 +948,21 @@ private struct Asm {
         d32(imm);
     }
 
+    // cdq or cqo prepares the implicit high half of the dividend.
+    void extendDividend(int w) {
+        if (w == 8)
+            b(0x48);
+        b(0x99);
+    }
+
+    void idivM(int w, in Mem m) {
+        memOp(w, byteReg: false, 7, m, 0xF7);
+    }
+
+    void idivR(int w, int r) {
+        rrOp(w, byteReg: false, 7, r, 0xF7);
+    }
+
     void movRR64(int dst, int src) {
         rrOp(8, byteReg: false, src, dst, 0x89);
     }
@@ -1254,6 +1279,8 @@ private struct Gen {
 
         case int3:
             return emitInt3(ins, op);
+        case signedDivide:
+            return emitSignedDivide(ins, op);
         case cmp3:
             return emitCmp3(ins, op);
         case fused:
@@ -1513,6 +1540,44 @@ private struct Gen {
             a.alu(aluOf(p.operation), w, acc, r);
         if (!p.resultInR0)
             a.st(w, d, acc);
+        return true;
+    }
+
+    bool emitSignedDivide(in Instruction ins, in JitOp op) {
+        const p = op.signedDivide;
+        if (!goodWidth(ins.width))
+            return false;
+        const w = cast(int) ins.width;
+        const divideWidth = w == 8 || (w == 4 && p.widenInt) ? 8 : 4;
+        Mem d, l, r;
+        size_t rr;
+        if (!binary(ins, p.twoAddress, p.constantRight,
+                leftInReg: false, destInReg: false, d, l, r, rr))
+            return false;
+        if (w == divideWidth)
+            a.ld(w, RAX, l);
+        else
+            a.ldsx(w, RAX, l);
+        if (p.constantRight) {
+            const bits = constantAt(rr, w);
+            int imm;
+            const divisor = w != divideWidth && immOf(w, bits, imm)
+                ? cast(ulong) imm : bits;
+            a.movI(R11, divisor);
+        } else if (w != divideWidth)
+            a.ldsx(w, R11, r);
+
+        // idiv uses rdx for the dividend and remainder. Save the VM state
+        // until the result is stored. The hardware reports the same faults
+        // as the handler.
+        a.movRR64(SC2, STATE);
+        a.extendDividend(divideWidth);
+        if (p.constantRight || w != divideWidth)
+            a.idivR(divideWidth, R11);
+        else
+            a.idivM(divideWidth, r);
+        a.st(w, d, p.remainder ? RDX : RAX);
+        a.movRR64(STATE, SC2);
         return true;
     }
 
