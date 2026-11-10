@@ -1281,6 +1281,18 @@ private struct FpSlots {
         return true;
     }
 
+    bool bounds(out long first, out long end) const pure @safe {
+        import std.algorithm.comparison: max, min;
+
+        first = int.max;
+        foreach (ref const slot; slots)
+            if (slot.offset >= 0) {
+                first = min(first, slot.offset);
+                end = max(end, cast(long) slot.offset + slot.width);
+            }
+        return end != 0;
+    }
+
     void reload(ref Asm a) const {
         foreach (i, ref const slot; slots)
             if (slot.offset >= 0)
@@ -2465,14 +2477,8 @@ private struct Gen {
         const rightReg = right.literalAddress ? -1
             : fpSlots.find(right.memory, w);
         int acc = fp0Register;
-        if (!p.resultInFp0) {
-            if (d.base == FRAME)
-                acc = fpSlots.assign(d, w, left, rightReg);
-            else {
-                fpSlots = FpSlots.init;
-                acc = XMM1;
-            }
-        }
+        if (!p.resultInFp0)
+            acc = d.base == FRAME ? fpSlots.assign(d, w, left, rightReg) : XMM1;
         if (left < 0)
             a.sse(prefix, loadOpcode, acc, l);
         else if (acc != left)
@@ -2481,9 +2487,36 @@ private struct Gen {
             a.sseRR(prefix, _floatOpcodes[p.operation], acc, rightReg);
         else
             sseRight(w, prefix, _floatOpcodes[p.operation], acc, right);
-        if (!p.resultInFp0)
+        if (!p.resultInFp0) {
             a.sse(prefix, storeOpcode, acc, d);
+            if (d.base != FRAME)
+                refreshFpAfterStore(d, w);
+        }
         return true;
+    }
+
+    private void refreshFpAfterStore(in Mem destination, int width) {
+        long first, end;
+        if (!fpSlots.bounds(first, end))
+            return;
+
+        // A store starting before the first slot can still reach its first byte.
+        const bias = width - 1;
+        const displacement = destination.disp - first + bias;
+        const span = end - first + bias;
+        if (displacement < int.min || displacement > int.max || span > int.max) {
+            fpSlots = FpSlots.init;
+            return;
+        }
+
+        // The store can overwrite the frame word that supplied its address.
+        a.lea(R10, Mem(destination.base, cast(int) displacement,
+            destination.index, destination.scale));
+        a.aluRR(Alu.sub, long.sizeof, R10, FRAME);
+        a.aluRI(Alu.cmp, long.sizeof, R10, cast(int) span);
+        const miss = jccLocal(CC_AE);
+        fpSlots.reload(a);
+        patchHere(miss);
     }
 
     bool emitFpCmp3(in Instruction ins, in JitOp op) {
