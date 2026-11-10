@@ -22,7 +22,7 @@ import std.meta: AliasSeq;
 // `FrameLayout.offsetOf` failing to find such a temporary at run time
 // rather than a compile error, which is why both consult this same list
 // instead of keeping their own.
-package alias LoweredExpressionTypes = AliasSeq!(
+package(snakebite) alias LoweredExpressionTypes = AliasSeq!(
     ArrayLiteralExp, AssocArrayLiteralExp, CastExp, CatAssignExp, CatExp,
     EqualExp, LoweredAssignExp, NewExp, ConstructExp,
     CatElemAssignExp, CatDcharAssignExp);

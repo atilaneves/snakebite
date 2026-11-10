@@ -4,14 +4,14 @@ module snakebite.language.layout.returnstorage;
 private:
 
 
-package struct ReturnStoragePlan {
+package(snakebite) struct ReturnStoragePlan {
     import dmd.declaration: VarDeclaration;
     import dmd.func: FuncDeclaration;
 
-    package bool hasPlace;
+    package(snakebite) bool hasPlace;
     private VarDeclaration _selected;
 
-    package static ReturnStoragePlan of(FuncDeclaration function_) {
+    package(snakebite) static ReturnStoragePlan of(FuncDeclaration function_) {
         import snakebite.frontend.compiler: returnsOnStack;
 
         ReturnStoragePlan plan;
@@ -22,7 +22,7 @@ package struct ReturnStoragePlan {
         return plan;
     }
 
-    package bool aliases(VarDeclaration variable) const {
+    package(snakebite) bool aliases(VarDeclaration variable) const {
         // DMD e2ir also maps generated copy/move and out-result locals
         // marked nrvo to the hidden return pointer, independently of isNRVO.
         return hasPlace && (variable is _selected || variable.nrvo);

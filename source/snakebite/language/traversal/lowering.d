@@ -44,7 +44,7 @@ static foreach (name; __traits(allMembers, imported!"dmd.expression")) {
 
 // Allocation lowering produces storage; constructor execution remains on
 // NewExp. Destination hooks keep that result alive across nested evaluation.
-extern(C++) package abstract class LoweringVisitor: Visitor {
+extern(C++) package(snakebite) abstract class LoweringVisitor: Visitor {
     alias visit = Visitor.visit;
 
     // Every backend uses the same terminal policy if closed dispatch fails.

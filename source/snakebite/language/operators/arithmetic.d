@@ -14,7 +14,7 @@ import snakebite.native.value: ComplexOperands;
 // How an arithmetic operator combines its operands. Semantic analysis has
 // already applied D's usual arithmetic conversions, so the operation's own
 // type decides it.
-package struct ArithmeticPlan {
+package(snakebite) struct ArithmeticPlan {
     enum Kind {
         integral,
         // `float`, `double`, `real` and the imaginary types. An imaginary
@@ -40,7 +40,7 @@ package struct ArithmeticPlan {
     TypeFacts laneFacts;
 }
 
-package ArithmeticPlan arithmeticPlan(
+package(snakebite) ArithmeticPlan arithmeticPlan(
     imported!"dmd.expression".BinExp expression,
 ) {
     import dmd.astenums: Tpointer;
@@ -69,7 +69,7 @@ package ArithmeticPlan arithmeticPlan(
     return plan;
 }
 
-package ArithmeticPlan arithmeticPlan(
+package(snakebite) ArithmeticPlan arithmeticPlan(
     imported!"dmd.expression".UnaExp expression,
 ) {
     import dmd.typesem: toBasetype;
@@ -85,7 +85,7 @@ package ArithmeticPlan arithmeticPlan(
 // The bytes that a postfix `++` or `--` moves a pointer by: the size of the
 // pointee. dmd scales the step `e2` only when the type of `e1` is itself a
 // pointer, and leaves it 1 for an enum of a pointer.
-package size_t pointerPostStep(imported!"dmd.expression".PostExp expression) {
+package(snakebite) size_t pointerPostStep(imported!"dmd.expression".PostExp expression) {
     import dmd.typesem: nextOf, toBasetype;
 
     return typeFacts(expression.e1.type.toBasetype.nextOf).size;
@@ -104,7 +104,7 @@ private ArithmeticPlan planOf(
 }
 
 // How arithmetic in `type` combines its operands.
-package ArithmeticPlan.Kind arithmeticKind(imported!"dmd.mtype".Type type) {
+package(snakebite) ArithmeticPlan.Kind arithmeticKind(imported!"dmd.mtype".Type type) {
     import dmd.astenums: TY;
     import dmd.typesem: toBasetype;
     import std.conv: text;

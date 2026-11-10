@@ -7,7 +7,7 @@ private:
 // an `if (__ctfe)` block never runs through the `if` itself. A `case` or
 // `default` label in the body is still a target of the enclosing `switch`,
 // and dmd leaves the statements of that body without their lowerings.
-package struct IfPlan {
+package(snakebite) struct IfPlan {
     enum Kind {
         condition,
         ctfeBlock,
@@ -17,7 +17,7 @@ package struct IfPlan {
     bool bodyHasLabels;
 }
 
-package IfPlan ifPlan(imported!"dmd.statement".IfStatement statement) {
+package(snakebite) IfPlan ifPlan(imported!"dmd.statement".IfStatement statement) {
     if (!statement.isIfCtfeBlock)
         return IfPlan(IfPlan.Kind.condition, false);
 

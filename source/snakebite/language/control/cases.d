@@ -2,7 +2,7 @@ module snakebite.language.control.cases;
 
 private:
 
-package struct SwitchPlan {
+package(snakebite) struct SwitchPlan {
     enum NoMatch { defaultTarget, exit }
 
     imported!"dmd.statement".CaseStatement[] cases;
@@ -22,7 +22,7 @@ package struct SwitchPlan {
 // Semantic analysis has converted string switches to integer dispatch and
 // expanded case ranges. Keep the cases and default target in one plan so
 // both backends select the same case.
-package SwitchPlan switchPlan(
+package(snakebite) SwitchPlan switchPlan(
     imported!"dmd.statement".SwitchStatement statement,
 ) {
     import dmd.statement: CaseStatement;
@@ -37,12 +37,12 @@ package SwitchPlan switchPlan(
 // ascending order, with the index in `plan.cases` of the case of each one.
 // A value is the integral value of the case expression in the type of the
 // condition, as a `long` with the bits that a value of that type has.
-package struct CaseTable {
+package(snakebite) struct CaseTable {
     long[] values;
     size_t[] cases;
 }
 
-package CaseTable caseTableOf(SwitchPlan plan) {
+package(snakebite) CaseTable caseTableOf(SwitchPlan plan) {
     import dmd.expressionsem: toInteger;
     import std.algorithm: sort;
     import std.range: zip;
@@ -60,7 +60,7 @@ package CaseTable caseTableOf(SwitchPlan plan) {
     return table;
 }
 
-package imported!"dmd.statement".CaseStatement selectCase(
+package(snakebite) imported!"dmd.statement".CaseStatement selectCase(
     SwitchPlan plan,
     long value,
     scope long delegate(
@@ -73,13 +73,13 @@ package imported!"dmd.statement".CaseStatement selectCase(
     return null;
 }
 
-package bool switchCaseMatches(long value, long caseValue)
+package(snakebite) bool switchCaseMatches(long value, long caseValue)
     @safe @nogc nothrow pure scope
 {
     return value == caseValue;
 }
 
-package imported!"dmd.statement".CaseStatement gotoCaseTarget(
+package(snakebite) imported!"dmd.statement".CaseStatement gotoCaseTarget(
     imported!"dmd.statement".GotoCaseStatement statement,
 )
     @safe @nogc nothrow pure scope
@@ -87,7 +87,7 @@ package imported!"dmd.statement".CaseStatement gotoCaseTarget(
     return statement.cs;
 }
 
-package imported!"dmd.statement".DefaultStatement gotoDefaultTarget(
+package(snakebite) imported!"dmd.statement".DefaultStatement gotoDefaultTarget(
     imported!"dmd.statement".GotoDefaultStatement statement,
 )
     @safe @nogc nothrow pure scope

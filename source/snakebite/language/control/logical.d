@@ -7,7 +7,7 @@ private:
 // or `noreturn` has no value for the truth test: dmd types `a || throw e` as
 // `bool` anyway, and the only path that completes is the one where the left
 // operand decided the answer.
-package struct LogicalPlan {
+package(snakebite) struct LogicalPlan {
     enum Right {
         value,
         effect,
@@ -18,7 +18,7 @@ package struct LogicalPlan {
     bool hasValue;
 }
 
-package LogicalPlan logicalPlan(
+package(snakebite) LogicalPlan logicalPlan(
     imported!"dmd.expression".LogicalExp expression,
 ) {
     import dmd.astenums: Tnoreturn, Tvoid;

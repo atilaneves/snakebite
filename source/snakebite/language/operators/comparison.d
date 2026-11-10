@@ -10,7 +10,7 @@ import snakebite.failure.report: internalFailure;
 
 import snakebite.native.value: TypeFacts;
 
-package struct ComparisonPlan {
+package(snakebite) struct ComparisonPlan {
     enum Kind {
         integral,
         floating,
@@ -44,7 +44,7 @@ package struct ComparisonPlan {
 // Semantic analysis has already applied D's usual arithmetic conversions.
 // This plan records the one operand representation and category that both
 // backends must use for the comparison.
-package ComparisonPlan comparisonPlan(
+package(snakebite) ComparisonPlan comparisonPlan(
     imported!"dmd.expression".BinExp expression,
 ) {
     import dmd.astenums: TY;

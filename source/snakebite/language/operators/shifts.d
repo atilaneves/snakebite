@@ -12,7 +12,7 @@ import snakebite.native.value: TypeFacts;
 // than the target (`int <<= long`) or differ from it in signedness
 // (`int >>= uint`), so the width, the count mask and the kind of right
 // shift come from that operation type, not from the target's own.
-package struct ShiftPlan {
+package(snakebite) struct ShiftPlan {
     enum Direction {
         left,
         rightArithmetic,
@@ -29,7 +29,7 @@ package struct ShiftPlan {
 
 // The operands of a plain shift are already promoted, so the left
 // operand's own type is the operation type.
-package ShiftPlan shiftPlan(imported!"dmd.expression".BinExp expression) {
+package(snakebite) ShiftPlan shiftPlan(imported!"dmd.expression".BinExp expression) {
     const facts = typeFacts(expression.e1.type);
     const direction = expression.isShlExp
         ? ShiftPlan.Direction.left
@@ -40,7 +40,7 @@ package ShiftPlan shiftPlan(imported!"dmd.expression".BinExp expression) {
     return ShiftPlan(direction, facts.size, !facts.isUnsigned);
 }
 
-package ShiftPlan shiftPlan(
+package(snakebite) ShiftPlan shiftPlan(
     imported!"dmd.expression".BinAssignExp expression,
 ) {
     import snakebite.language.operators.compound: compoundTarget;

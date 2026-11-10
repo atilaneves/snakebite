@@ -41,7 +41,7 @@ private bool sameScalar(
 // operands (`int += double` runs as a `double` operation), reads the target
 // converted to that type and converts the result back to the target's own
 // type. `step` has already been converted to the operation type by dmd.
-package struct CompoundConversion {
+package(snakebite) struct CompoundConversion {
     // The target and the operation differ in kind, not only in width: an
     // integral target under a floating operation. A same-kind width change
     // stays with the width-only handling each target kind already has.
@@ -58,7 +58,7 @@ package struct CompoundConversion {
     CastPlan store;
 }
 
-package CompoundConversion compoundConversion(
+package(snakebite) CompoundConversion compoundConversion(
     imported!"dmd.expression".BinAssignExp expression,
 ) {
     import snakebite.language.operators.arithmetic: arithmeticKind;
@@ -92,7 +92,7 @@ package CompoundConversion compoundConversion(
 // `f` stores 10 in `x` and returns 1, dmd gives 3 and ldc gives 11, and
 // `int += double` differs the same way. snakebite follows dmd, the host
 // compiler of `bin/ut`.
-package bool readsTargetFirst(
+package(snakebite) bool readsTargetFirst(
     in ArithmeticPlan.Kind operationKind, in bool crossesKind,
     in size_t targetSize, in size_t operationSize,
 ) {

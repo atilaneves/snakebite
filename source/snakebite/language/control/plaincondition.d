@@ -14,7 +14,7 @@ import std.typecons: Flag, No, Yes;
 // that splitting `&&` and `||` into branches changes no destructor
 // order: scalar operations on scalar variables and literals, and direct
 // calls of them. Aggregates and everything else keep the value path.
-package bool isPlainCondition(
+package(snakebite) bool isPlainCondition(
     Expression expression, in Flag!"calls" calls = Yes.calls,
 ) {
     import dmd.astenums: STC, Tpointer, VarArg;
@@ -72,7 +72,7 @@ package bool isPlainCondition(
 
 // A chain of fields, dereferences and `this` over variables: reading
 // it creates no temporary with a lifetime of its own.
-package bool isPlainPlace(Expression expression) {
+package(snakebite) bool isPlainPlace(Expression expression) {
     import dmd.astenums: STC;
 
     with (EXP) switch (expression.op) {
@@ -97,7 +97,7 @@ package bool isPlainPlace(Expression expression) {
     }
 }
 
-package bool isRealFloatType(imported!"dmd.mtype".Type type) {
+package(snakebite) bool isRealFloatType(imported!"dmd.mtype".Type type) {
     import dmd.astenums: Tfloat32, Tfloat64, Tfloat80;
     import dmd.typesem: toBasetype;
 

@@ -27,22 +27,22 @@ import snakebite.stack.hostcall:
 // differs between them - the bytecode compiler's own temporary slots, for
 // instance - is not this type's concern; a caller that needs those grows
 // its own frame past `size` on top of what this type already reserved.
-package struct FrameLayout {
+package(snakebite) struct FrameLayout {
     import snakebite.native.value: alignUp, TypeFacts;
     import dmd.declaration: VarDeclaration;
     import dmd.func: FuncDeclaration;
     import dmd.expression: ArrayLiteralExp;
     import dmd.mtype: DmdParameter = Parameter, Type, TypeFunction;
 
-    package size_t size;
-    package uint alignment = 1;
-    package imported!"snakebite.stack.returnplace".ReturnPlace returnPlace;
+    package(snakebite) size_t size;
+    package(snakebite) uint alignment = 1;
+    package(snakebite) imported!"snakebite.stack.returnplace".ReturnPlace returnPlace;
     private imported!"snakebite.language.layout.returnstorage".ReturnStoragePlan _returns;
 
     // Whether a local of the function can point into the temporaries of its
     // initialiser: decided once here, so a call of any other function does
     // no work for it.
-    package bool retainsTemporaries;
+    package(snakebite) bool retainsTemporaries;
 
     // One parameter's slot: its offset into the frame, the facts needed
     // to place a value there, and whether it is `ref` - decided together,
@@ -51,30 +51,30 @@ package struct FrameLayout {
     // pointer's, not the parameter's own type's: a `ref` parameter
     // occupies a pointer slot in a compiled frame, the address of the
     // argument's own storage rather than a copy of its value.
-    package struct Parameter {
-        package size_t offset;
-        package TypeFacts facts;
-        package bool isRef;
-        package Shape.Class class_ = Shape.Class.other;
+    package(snakebite) struct Parameter {
+        package(snakebite) size_t offset;
+        package(snakebite) TypeFacts facts;
+        package(snakebite) bool isRef;
+        package(snakebite) Shape.Class class_ = Shape.Class.other;
     }
 
     // Parallel to the function's parameter list, indexed positionally.
     // The argument-evaluation loop already has the positional index in
     // hand, so it never pays an AA hash lookup for the hottest path.
-    package Parameter[] parameters;
-    package size_t variadicTypes = size_t.max;
-    package size_t variadicCursor = size_t.max;
+    package(snakebite) Parameter[] parameters;
+    package(snakebite) size_t variadicTypes = size_t.max;
+    package(snakebite) size_t variadicCursor = size_t.max;
     // The slot that holds the address of the heap closure of a function
     // whose captured variables dmd moves there (`ClosureLayout`): the
     // function's own context, which its body and the delegates it makes
     // reach from the frame. `size_t.max` for a function without one.
-    package size_t closure = size_t.max;
+    package(snakebite) size_t closure = size_t.max;
 
     // The parameters of the function type, shared by every layout of equal
     // parameters: a call through a value compares it with the one of the
     // value's type to know that the two frames agree. The builders intern
     // it in the `SignatureTable` that they get.
-    package const(Signature)* signature;
+    package(snakebite) const(Signature)* signature;
 
     // A struct method's hidden `this`, together in one place: the slot
     // and the declaration that owns it always exist - or not - as a
@@ -82,37 +82,37 @@ package struct FrameLayout {
     // the explicit parameters as in the native calling layout, holds
     // the receiver's address, the same shape every other `ref`
     // parameter's slot has above.
-    package struct HiddenThis {
-        package Parameter parameter;
+    package(snakebite) struct HiddenThis {
+        package(snakebite) Parameter parameter;
 
         // dmd resolves a `this` the guest wrote to this same
         // declaration, but a constructor's implicit `return this;` is a
         // `ThisExp` dmd synthesises with no `var` at all, so the
         // evaluator reaches the slot through this instead for that
         // node. Null for a function with no `this`.
-        package VarDeclaration variable;
+        package(snakebite) VarDeclaration variable;
     }
-    package HiddenThis hiddenThis;
+    package(snakebite) HiddenThis hiddenThis;
 
     // Keyed by declaration instead of position: `visit(VarExp)` resolves
     // a parameter or local read from a `VarDeclaration` it found by name
     // lookup, not by position, so it still needs a hash lookup. A `ref`
     // parameter or local occupies a pointer slot, which `Evaluator.slotOf`
     // reads through. Reached through the lookup helpers below.
-    package struct VariableSlot {
-        package size_t offset;
-        package bool isRef;
+    package(snakebite) struct VariableSlot {
+        package(snakebite) size_t offset;
+        package(snakebite) bool isRef;
         // Whether the variable can point into the temporaries of its own
         // initialiser.
-        package bool retainsTemporaries;
-        package bool isReturnPlace;
+        package(snakebite) bool retainsTemporaries;
+        package(snakebite) bool isReturnPlace;
     }
     private VariableSlot[VarDeclaration] _slotOf;
 
     // DMD gives each temporary array literal one slot for the guest call.
     private size_t[ArrayLiteralExp] _arrayLiteralOffset;
 
-    package size_t arrayLiteralOffset(
+    package(snakebite) size_t arrayLiteralOffset(
         ArrayLiteralExp expression,
     ) const {
         return _arrayLiteralOffset[expression];
@@ -120,9 +120,9 @@ package struct FrameLayout {
 
     // Count declared-function layouts so tests can detect repeated builds
     // when a backend should reuse a completed layout.
-    version(unittest) package static size_t builds;
+    version(unittest) package(snakebite) static size_t builds;
 
-    package static FrameLayout of(
+    package(snakebite) static FrameLayout of(
         FuncDeclaration function_, ref SignatureTable signatures,
     ) {
         import snakebite.frontend.dmd.delegates: runSemantic3;
@@ -169,7 +169,7 @@ package struct FrameLayout {
     // FFI calls need argument storage even when the native body's locals
     // have never had semantic analysis. Walking those locals would force
     // work that belongs to the native compiler, not this call's frame.
-    package static FrameLayout ofParameters(
+    package(snakebite) static FrameLayout ofParameters(
         FuncDeclaration function_, ref SignatureTable signatures,
     ) {
         import snakebite.frontend.dmd.delegates: hasHiddenThis;
@@ -279,7 +279,7 @@ package struct FrameLayout {
     // that function's own `vthis` (its hidden context slot) first, before
     // its declared parameters, so a delegate call site that reserves this
     // same slot first lines up with whatever callee it actually reaches.
-    package static FrameLayout ofParameters(
+    package(snakebite) static FrameLayout ofParameters(
         TypeFunction type, ref SignatureTable signatures,
         in bool hasContext = false,
     ) {
@@ -341,14 +341,14 @@ package struct FrameLayout {
     // and the facts `typeFacts` already had to compute to know how
     // big the slot was and how it had to be aligned - so a caller that
     // wants both, like a parameter's slot, gets them from the one call.
-    package struct Slot {
-        package size_t offset;
-        package TypeFacts facts;
+    package(snakebite) struct Slot {
+        package(snakebite) size_t offset;
+        package(snakebite) TypeFacts facts;
     }
 
     private Slot[] _allocatedSlots;
 
-    package const(Slot)[] allocatedSlots() const {
+    package(snakebite) const(Slot)[] allocatedSlots() const {
         return _allocatedSlots;
     }
 
@@ -404,11 +404,11 @@ package struct FrameLayout {
     // Whether `variable` has a slot in this layout at all - checked before
     // `isRef` by a reach that must tell "not here, try the static chain"
     // apart from "not here, and nowhere else either".
-    package bool hasSlot(VarDeclaration variable) const {
+    package(snakebite) bool hasSlot(VarDeclaration variable) const {
         return slotOf(variable) !is null;
     }
 
-    package const(VariableSlot)* slotOf(
+    package(snakebite) const(VariableSlot)* slotOf(
         VarDeclaration variable,
     ) const {
         return variable in _slotOf;
@@ -418,7 +418,7 @@ package struct FrameLayout {
     // offset from the frame's base - the caller owns the frame's actual
     // address, so it is the one that turns this into a pointer. The layout
     // must own `variable`: `hasSlot` tells whether it does.
-    package size_t offsetOf(VarDeclaration variable) const {
+    package(snakebite) size_t offsetOf(VarDeclaration variable) const {
         import std.conv: text;
 
         auto slot = slotOf(variable);
@@ -435,12 +435,12 @@ package struct FrameLayout {
     // address-of a variable goes through - reads through it once more before
     // handing back an address any of them can use directly. `false` for a
     // value variable or one this layout never reserved a slot for.
-    package bool isRef(VarDeclaration variable) const {
+    package(snakebite) bool isRef(VarDeclaration variable) const {
         auto slot = variable in _slotOf;
         return slot !is null && slot.isRef;
     }
 
-    package bool isReturnPlace(VarDeclaration variable) const {
+    package(snakebite) bool isReturnPlace(VarDeclaration variable) const {
         const slot = slotOf(variable);
         return slot !is null && slot.isReturnPlace;
     }
@@ -456,7 +456,7 @@ package struct FrameLayout {
     // other mismatch gets the generic one. `backendName` names the
     // caller in both messages, the same way each backend already names
     // itself in its own text.
-    package void checkHostArgumentCount(
+    package(snakebite) void checkHostArgumentCount(
         in size_t argumentCount, FuncDeclaration function_,
         in string backendName,
     ) const {
@@ -468,7 +468,7 @@ package struct FrameLayout {
     // What a host caller needs to bind its arguments into a frame of this
     // layout, with no declaration left in it. `name` is how errors about the
     // function read.
-    package HostCallLayout hostCall(string name) const {
+    package(snakebite) HostCallLayout hostCall(string name) const {
         HostCallLayout result;
         result.name = name;
         foreach (parameter; parameters)
@@ -489,22 +489,22 @@ package struct FrameLayout {
 // followed by the captured variables dmd stores in the closure object.
 // Shared between backends because the context has the same native shape
 // regardless of whether a tree walker or bytecode VM consumes it.
-package struct ClosureLayout {
+package(snakebite) struct ClosureLayout {
     import dmd.declaration: VarDeclaration;
     import dmd.func: FuncDeclaration;
     import snakebite.native.value: alignUp, TypeFacts;
 
-    package struct Slot {
-        package size_t offset;
-        package TypeFacts facts;
-        package bool isRef;
+    package(snakebite) struct Slot {
+        package(snakebite) size_t offset;
+        package(snakebite) TypeFacts facts;
+        package(snakebite) bool isRef;
     }
 
-    package size_t size;
-    package uint alignment = 1;
+    package(snakebite) size_t size;
+    package(snakebite) uint alignment = 1;
     private Slot[VarDeclaration] _slots;
 
-    package static ClosureLayout of(FuncDeclaration function_) {
+    package(snakebite) static ClosureLayout of(FuncDeclaration function_) {
         import dmd.astenums: STC;
 
         ClosureLayout closure;
@@ -529,11 +529,11 @@ package struct ClosureLayout {
         return closure;
     }
 
-    package bool hasSlot(VarDeclaration variable) const {
+    package(snakebite) bool hasSlot(VarDeclaration variable) const {
         return (variable in _slots) !is null;
     }
 
-    package Slot slotOf(VarDeclaration variable) const {
+    package(snakebite) Slot slotOf(VarDeclaration variable) const {
         return *(variable in _slots);
     }
 }
@@ -825,7 +825,7 @@ extern(C++) private final class LocalsCollector:
 
 
 // The register class of an argument of `type`, once its facts are known.
-package Shape.Class classOf(imported!"dmd.mtype".Type type) {
+package(snakebite) Shape.Class classOf(imported!"dmd.mtype".Type type) {
     import dmd.astenums:
         Tbool, Tchar, Tclass, Tdchar, Tfloat32, Tfloat64, Timaginary32,
         Timaginary64, Tint16, Tint32, Tint64, Tint8, Tnull, Tpointer, Taarray,
@@ -846,7 +846,7 @@ package Shape.Class classOf(imported!"dmd.mtype".Type type) {
 
 // The shape of an argument of `type` with `facts`, as a variadic argument
 // that no parameter declares.
-package Shape shapeOf(
+package(snakebite) Shape shapeOf(
     imported!"dmd.mtype".Type type, in imported!"snakebite.native.value".TypeFacts facts,
 ) {
     return Shape(facts.size, facts.alignment, classOf(type));

@@ -12,12 +12,12 @@ import snakebite.native.value: TypeFacts;
 // Evaluate the source once, then copy its native bytes `count` times. An
 // equal-size static array is one copy; a scalar is converted by DMD to the
 // lane type before VectorExp is made, and fills every lane.
-package struct VectorInitPlan {
+package(snakebite) struct VectorInitPlan {
     TypeFacts sourceFacts;
     size_t count;
 }
 
-package VectorInitPlan planVectorInit(
+package(snakebite) VectorInitPlan planVectorInit(
     imported!"dmd.expression".VectorExp expression,
 ) {
     import dmd.astenums: Tsarray;

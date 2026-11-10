@@ -11,12 +11,12 @@ import std.meta: AliasSeq;
 // A frontend node class that no backend ever receives, and why. A class on
 // this list needs no `visit` override. A visitor that handles the class
 // anyway is an error, unless `handledAnyway` states why that is correct.
-package struct Unreachable(Node, string reason, string handledAnywayReason = "") {
+package(snakebite) struct Unreachable(Node, string reason, string handledAnywayReason = "") {
     alias Class = Node;
     enum handledAnyway = handledAnywayReason;
 }
 
-package alias UnreachableNodes = AliasSeq!(
+package(snakebite) alias UnreachableNodes = AliasSeq!(
     Unreachable!(ErrorExp,
         "semantic analysis reports an error, so no module with it loads"),
     Unreachable!(VoidInitExp,
@@ -159,7 +159,7 @@ package alias UnreachableNodes = AliasSeq!(
 // entry names a class that `Visitor` handles, because that entry says
 // something false about the code. An override of the `Expression` or
 // `Statement` catch-all itself does not count as handling a class.
-package template AssertEveryNodeHandled(Visitor) {
+package(snakebite) template AssertEveryNodeHandled(Visitor) {
     private enum missing = missingNodes!Visitor;
     static assert(missing.length == 0,
         Visitor.stringof ~ " has no `visit` override for:" ~ missing);

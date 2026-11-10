@@ -5,7 +5,7 @@ private:
 // The frontend has already established that an IdentityExp is legal.  This
 // plan records the native comparison that DMD's e2ir.d emits for it.  The
 // backends consume the plan; they do not classify the operand type again.
-package struct IdentityPlan {
+package(snakebite) struct IdentityPlan {
     size_t width;
     bool staticArray;
     size_t length;
@@ -17,7 +17,7 @@ package struct IdentityPlan {
     bool reference;
 }
 
-package IdentityPlan identityPlan(
+package(snakebite) IdentityPlan identityPlan(
     imported!"dmd.expression".IdentityExp expression,
 ) {
     import dmd.astenums: Tclass, Tfloat80, Tnull, Tpointer, Tsarray;
