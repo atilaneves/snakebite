@@ -58,6 +58,37 @@ static foreach (backend; Matrix!()) {
         }, ["scan"]);
     }
 
+    @("jit.floatingPointSlotsFollowJumpsAndPointerWrites." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            double update(double a, double b, bool skip) {
+                assert(b > 0);
+                double* view = &a;
+                if (skip)
+                    goto second;
+                a = a + b;
+            second:
+                b = a - b;
+                a = a + b;
+                *view = a * b;
+                b = a - b;
+                if (b > 8)
+                    return a + b;
+                return a - b;
+            }
+            int main() {
+                foreach (i; 0 .. 300) {
+                    if (update(2, 3, false) != 26)
+                        return 1;
+                    if (update(2, 3, true) != -1)
+                        return 2;
+                }
+                return 0;
+            }
+        }, ["update"]);
+    }
+
     @("jit.hotForLoopChecksItsFirstIteration." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

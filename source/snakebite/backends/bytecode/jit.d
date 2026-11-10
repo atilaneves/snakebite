@@ -259,6 +259,7 @@ package struct JitState {
     // The buffers of the fixup and label tables, which compiles reuse.
     Scratch!Fixup fixups;
     Scratch!size_t labels;
+    Scratch!FpEntry fpEntries;
     // The buffers of one compile in `vm.d`: the template of each instruction,
     // a snapshot of the instructions, and their handlers.
     Scratch!JitOp opScratch;
@@ -270,6 +271,7 @@ package struct JitState {
         region.release;
         fixups.release;
         labels.release;
+        fpEntries.release;
         opScratch.release;
         snapshotScratch.release;
         originalScratch.release;
@@ -288,6 +290,7 @@ package struct JitState {
         Gen g;
         g.a.buf = region.writeBase + start;
         g.fixupScratch = &fixups;
+        g.fpEntryScratch = &fpEntries;
         g.bmi2 = bmi2;
         g.instructions = instructions;
         g.snapshot = snapshot;
@@ -305,9 +308,7 @@ package struct JitState {
             g.labels[i] = g.a.n;
             const saved = g.a.n;
             const savedFixups = g.fixupCount;
-            bool done;
-            if (originals[i] !is null && ops[i].kind != JitOp.Kind.none)
-                done = g.emitOp(i, ops);
+            const done = g.emitOp(i, ops);
             if (g.outOfMemory)
                 return Emitted.failed;
             if (!done) {
@@ -337,6 +338,16 @@ package struct JitState {
             return Emitted.full;
         g.labels[instructions.length] = g.a.n;
         g.a.ud2();
+
+        foreach (ref const entry; fpEntries.ptr[0 .. g.fpEntryCount]) {
+            if (cap - g.a.n < maximumBytesPerInstruction)
+                return Emitted.full;
+            const body = g.labels[entry.index];
+            g.labels[entry.index] = g.a.n;
+            entry.slots.reload(g.a);
+            g.a.b(0xE9);
+            g.a.d32(cast(int) (body - (g.a.n + int.sizeof)));
+        }
 
         foreach (f; g.fixups[0 .. g.fixupCount])
             *cast(int*) (g.a.buf + f.position) = cast(int) (
@@ -1023,6 +1034,68 @@ private struct Asm {
     void jmpRax() { b(0xFF); b(0xE0); }
 }
 
+private struct FpSlots {
+    @nogc nothrow:
+
+    // XMM3 through XMM6 are caller-saved in both handler conventions.
+    enum firstRegister = 3;
+    enum count = 4;
+
+    static struct Slot {
+        int offset = -1;
+        int width;
+    }
+
+    Slot[count] slots;
+    size_t next;
+
+    int find(in Mem mem, int width) const pure @safe {
+        if (mem.base == FRAME)
+            foreach (i, ref const slot; slots)
+                if (slot.offset == mem.disp && slot.width == width)
+                    return firstRegister + cast(int) i;
+        return -1;
+    }
+
+    int assign(in Mem dest, int width, int left, int right) pure @safe {
+        // SSE overwrites its left operand. If the right operand is distinct,
+        // keep its register until the arithmetic instruction has read it.
+        const avoid = right == left ? -1 : right;
+        int reg = find(dest, width);
+        if (reg < 0 || reg == avoid) {
+            do {
+                reg = firstRegister + cast(int) next;
+                next = (next + 1) % count;
+            } while (reg == avoid);
+        }
+        foreach (ref slot; slots)
+            if (slot.offset < dest.disp + width
+                    && dest.disp < slot.offset + slot.width)
+                slot = Slot.init;
+        slots[reg - firstRegister] = Slot(dest.disp, width);
+        return reg;
+    }
+
+    bool empty() const pure @safe {
+        foreach (ref const slot; slots)
+            if (slot.offset >= 0)
+                return false;
+        return true;
+    }
+
+    void reload(ref Asm a) const {
+        foreach (i, ref const slot; slots)
+            if (slot.offset >= 0)
+                a.sse(slot.width == 8 ? doublePrefix : singlePrefix, loadOpcode,
+                    firstRegister + cast(int) i, Mem(FRAME, slot.offset));
+    }
+}
+
+private struct FpEntry {
+    size_t index;
+    FpSlots slots;
+}
+
 private struct Gen {
     import snakebite.backends.bytecode.vm: CheckedAccess, CompareKind,
         Comparison, DispatchState, indirectBit, IndexBase, Instruction;
@@ -1032,6 +1105,9 @@ private struct Gen {
 
     Asm a;
     Scratch!Fixup* fixupScratch;
+    Scratch!FpEntry* fpEntryScratch;
+    FpSlots fpSlots;
+    size_t fpEntryCount;
     bool bmi2;
     const(Instruction)[] instructions;
     const(Instruction)[] snapshot;
@@ -1173,6 +1249,32 @@ private struct Gen {
     }
 
     bool emitOp(size_t i, const(JitOp)[] ops) {
+        const op = ops[i];
+        const arithmetic = op.kind == JitOp.Kind.fp3;
+        const compare = op.kind == JitOp.Kind.fused
+            && op.fused.kind == CompareKind.floating;
+        if (!arithmetic && !compare) {
+            fpSlots = FpSlots.init;
+            return emitTemplate(i, ops);
+        }
+
+        const incoming = fpSlots;
+        const done = emitTemplate(i, ops);
+        if (!done || compare)
+            fpSlots = FpSlots.init;
+        if (done && !incoming.empty) {
+            // Only the preceding template's fallthrough can assume these
+            // registers are live. All other entries reload the frame.
+            auto entries = fpEntryScratch.grow(fpEntryCount + 1);
+            if (entries is null)
+                outOfMemory = true;
+            else
+                entries[fpEntryCount++] = FpEntry(i, incoming);
+        }
+        return done;
+    }
+
+    bool emitTemplate(size_t i, const(JitOp)[] ops) {
         const op = ops[i];
         const ins = snapshot[i];
         final switch (op.kind) with (JitOp.Kind) {
@@ -1605,28 +1707,32 @@ private struct Gen {
             r = Mem(R10, 0);
         } else if (!opnd(ins.source, R10, r))
             return false;
-        int leftX = fp0Register;
-        if (!p.leftInR0) {
+        int leftX = p.leftInR0 ? fp0Register : fpSlots.find(l, w);
+        if (leftX < 0) {
             a.sse(prefix, loadOpcode, XMM1, l);
             leftX = XMM1;
         }
+        int rightX = fpSlots.find(r, w);
+        // Reverse less-than comparisons so unordered sets the carry flag.
+        if (p.comparison == Comparison.lessThan
+                || p.comparison == Comparison.lessOrEqual) {
+            if (rightX < 0) {
+                a.sse(prefix, loadOpcode, XMM2, r);
+                rightX = XMM2;
+            }
+            a.sseRR(comparePrefix, compareOpcode, rightX, leftX);
+        } else if (rightX >= 0)
+            a.sseRR(comparePrefix, compareOpcode, leftX, rightX);
+        else
+            a.sse(comparePrefix, compareOpcode, leftX, r);
         final switch (p.comparison) with (Comparison) {
             case greaterThan:
-            case greaterOrEqual: {
-                a.sse(comparePrefix, compareOpcode, leftX, r);
-                int cc = p.comparison == greaterThan ? CC_A : CC_AE;
-                if (!p.jumpWhen)
-                    cc ^= 1;
-                jccTo(cc, t);
-                break;
-            }
+            case greaterOrEqual:
             case lessThan:
             case lessOrEqual: {
-                // Compares the right operand with the left one, so that an
-                // unordered answer sets the carry flag.
-                a.sse(prefix, loadOpcode, XMM2, r);
-                a.sseRR(comparePrefix, compareOpcode, XMM2, leftX);
-                int cc = p.comparison == lessThan ? CC_A : CC_AE;
+                const strict = p.comparison == greaterThan
+                    || p.comparison == lessThan;
+                int cc = strict ? CC_A : CC_AE;
                 if (!p.jumpWhen)
                     cc ^= 1;
                 jccTo(cc, t);
@@ -1634,7 +1740,6 @@ private struct Gen {
             }
             case equal:
             case notEqual: {
-                a.sse(comparePrefix, compareOpcode, leftX, r);
                 const eq = p.comparison == equal;
                 if (eq == p.jumpWhen) {
                     // Jump when ZF=1 and PF=0.
@@ -1668,13 +1773,25 @@ private struct Gen {
             r = Mem(R11, 0);
         } else if (!opnd(ins.sourceWidth, R11, r))
             return false;
-        const acc = p.resultInFp0 ? fp0Register : XMM1;
-        if (p.leftInFp0) {
-            if (acc != fp0Register)
-                a.sseRR(noPrefix, moveAlignedOpcode, acc, fp0Register);
-        } else
+        const left = p.leftInFp0 ? fp0Register : fpSlots.find(l, w);
+        const right = fpSlots.find(r, w);
+        int acc = fp0Register;
+        if (!p.resultInFp0) {
+            if (d.base == FRAME)
+                acc = fpSlots.assign(d, w, left, right);
+            else {
+                fpSlots = FpSlots.init;
+                acc = XMM1;
+            }
+        }
+        if (left < 0)
             a.sse(prefix, loadOpcode, acc, l);
-        a.sse(prefix, _floatOpcodes[p.operation], acc, r);
+        else if (acc != left)
+            a.sseRR(noPrefix, moveAlignedOpcode, acc, left);
+        if (right >= 0)
+            a.sseRR(prefix, _floatOpcodes[p.operation], acc, right);
+        else
+            a.sse(prefix, _floatOpcodes[p.operation], acc, r);
         if (!p.resultInFp0)
             a.sse(prefix, storeOpcode, acc, d);
         return true;
