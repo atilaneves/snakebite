@@ -69,9 +69,7 @@ We decide as follows.
    The bridge does not read the AST: the caller builds the signature of
    an adjusted entry, under the compiler lock, before it calls. Only the
    first crossing of a word takes the mutex and allocates; an entry that
-   exists is found with no lock and no allocation. A GC finalizer may use
-   only that path, because a thread that holds the mutex can be waiting
-   for the collector.
+   exists is found with no lock and no allocation.
    Memory is never writable and executable at the same time. If the
    kernel refuses to make the mapping executable, the pool maps one
    anonymous memory file twice instead: a read-write view to fill and

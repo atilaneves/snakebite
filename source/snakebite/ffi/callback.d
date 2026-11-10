@@ -604,7 +604,7 @@ public struct CallbackBridge {
     // may hold it when it calls the bridge; nothing here takes it, and
     // nothing here reads the AST), this mutex, then the pool's mutex
     // (`reserve`, `releaseChunks`) and the tables' own insert locks, which
-    // are leaves. The mutex is recursive.
+    // are leaves.
     private Mutex _mutex;
     // This bridge's chunks of entries, free list and lock (ADR-0003).
     private Pool _pool;
@@ -806,20 +806,18 @@ public struct CallbackBridge {
         _mutex.lock;
         scope(exit) _mutex.unlock;
 
-        {
-            if (auto found = key in _adjustedEntries)
-                return *found;
-            auto plan = new CallPlan;
-            *plan = prepareCallback(signature);
-            assert(plan.hasHiddenContext);
-            auto slot = Slot(
-                _handler, _owner, word, plan, adjustment,
-                contains(word) ? null : word,
-            );
-            const reserved = _pool.reserve(slot);
-            if (contains(word))
-                _adjustedGuestEntries.insert(reserved, key);
-            return *_adjustedEntries.insert(key, reserved);
-        }
+        if (auto found = key in _adjustedEntries)
+            return *found;
+        auto plan = new CallPlan;
+        *plan = prepareCallback(signature);
+        assert(plan.hasHiddenContext);
+        auto slot = Slot(
+            _handler, _owner, word, plan, adjustment,
+            contains(word) ? null : word,
+        );
+        const reserved = _pool.reserve(slot);
+        if (contains(word))
+            _adjustedGuestEntries.insert(reserved, key);
+        return *_adjustedEntries.insert(key, reserved);
     }
 }

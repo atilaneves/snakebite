@@ -1343,8 +1343,11 @@ public struct PlanCache {
             word = of(declaration)._address;
         // The bridge never reads the AST, so the signature is built here,
         // under the compiler lock and only when the bridge has no entry
-        // yet; the lock is released before the bridge takes its mutex
-        // (lock order: `CallbackBridge._mutex`).
+        // yet. Lock order, outermost first: the compiler lock, then the
+        // bridge's mutex. A caller may already hold the compiler lock
+        // here (`ClassRuntimeCache.build` does), so the lock is not
+        // always released before the bridge takes its mutex; the bridge
+        // never takes the compiler lock.
         NativeSignature signature;
         if (adjustment != 0
                 && _callbacks.reservedAdjustedEntry(word, adjustment) is null) {
