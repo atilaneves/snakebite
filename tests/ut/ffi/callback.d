@@ -31,22 +31,23 @@ private struct Recorded {
     double[] doubles;
     real[] reals;
     void* context;
+    // Set by the test before the call: whether the signature has a
+    // hidden context. A raw handler has no layout to ask.
+    bool expectsContext;
     bool hasContext;
     size_t calls;
 }
 
 
-// A raw handler has no layout of its own, only `call.declaration` - the
-// same thing a real backend's `runHostToGuest` asks to decide whether
-// `call.arguments[0]` is a hidden context or the first declared
-// parameter. There is one argument list either way: a context, when
-// there is one, is `arguments[0]`'s own address, not a separate field.
+// A raw handler has no layout of its own, so the test says through
+// `Recorded.expectsContext` whether `call.arguments[0]` is a hidden
+// context or the first declared parameter. There is one argument list
+// either way: a context, when there is one, is `arguments[0]`'s own
+// address, not a separate field.
 private extern(C) void recordIntOfInt(void* owner, CallbackCall* call) {
-    import snakebite.frontend.dmd.delegates: hasHiddenThis;
-
     auto recorded = cast(Recorded*) owner;
     ++recorded.calls;
-    recorded.hasContext = hasHiddenThis(call.declaration);
+    recorded.hasContext = recorded.expectsContext;
     const first = recorded.hasContext ? 1 : 0;
     recorded.context = recorded.hasContext
         ? *cast(void**) call.arguments[0] : null;
@@ -101,11 +102,11 @@ private FuncDeclaration declarationOf(string code, string name) {
 
 
 // The registration a backend makes: the signature comes from the
-// declaration, which the handlers below also read in `call.declaration`.
+// declaration.
 private void registerFunction(
     CallbackBridge* bridge, const(void)* word, FuncDeclaration function_,
 ) {
-    bridge.register(word, nativeSignatureOf(function_), function_);
+    bridge.register(word, nativeSignatureOf(function_));
 }
 
 
@@ -114,7 +115,7 @@ private const(void)* adjustedFunctionEntryOf(
     ptrdiff_t adjustment,
 ) {
     return bridge.adjustedEntryOf(
-        word, nativeSignatureOf(function_), adjustment, function_);
+        word, nativeSignatureOf(function_), adjustment);
 }
 
 
@@ -124,7 +125,6 @@ private bool inTemplateChunk(const(void)* entry) {
 }
 
 private extern(C) void doubleIntNoDeclaration(void*, CallbackCall* call) {
-    assert(call.declaration is null);
     *cast(int*) call.returnPlace = *cast(const int*) call.arguments[0] * 2;
 }
 
@@ -380,6 +380,7 @@ unittest {
     auto function_ = findFunction(findStruct(module_, "Holder"), "twice");
     assert(function_ !is null, "No method `twice` in the snippet");
     Recorded recorded;
+    recorded.expectsContext = true;
     auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
     int word;
     bridge.registerFunction(&word, function_);

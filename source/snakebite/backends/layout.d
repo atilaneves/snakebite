@@ -459,28 +459,92 @@ package struct FrameLayout {
         in size_t argumentCount, FuncDeclaration function_,
         in string backendName,
     ) const {
-        import std.conv: text;
+        checkArgumentCountRule(
+            argumentCount, parameters.length, hiddenThis.variable !is null,
+            function_.toString, backendName);
+    }
 
-        const required = parameters.length
-            + (hiddenThis.variable !is null ? 1 : 0);
-        if (argumentCount == required)
-            return;
-
-        if (hiddenThis.variable !is null
-                && argumentCount == parameters.length)
-            throw new SnakebiteException(
-                text(backendName, " cannot run `", function_.toString,
-                    "`: the host passed no context for its "
-                    ~ "hidden `this`"),
-            );
-
-        throw new SnakebiteException(
-            text(backendName, " expected ", required,
-                " host-to-guest argument(s) for `",
-                function_.toString, "`, got ", argumentCount),
-        );
+    // What a host caller needs to bind its arguments into a frame of this
+    // layout, with no declaration left in it. `name` is how errors about the
+    // function read.
+    package HostCallLayout hostCall(string name) const {
+        HostCallLayout result;
+        result.name = name;
+        foreach (parameter; parameters)
+            result.parameters ~= HostCallLayout.Argument(
+                parameter.offset, parameter.facts.size);
+        if (hiddenThis.variable !is null) {
+            result.hasHiddenThis = true;
+            result.hiddenThis = HostCallLayout.Argument(
+                hiddenThis.parameter.offset, size_t.sizeof);
+        }
+        result.variadicCursor = variadicCursor;
+        result.variadicTypes = variadicTypes;
+        return result;
     }
 }
+
+// Where a host caller writes the arguments of a compiled function: the
+// frame offset and width of each declared parameter, of the hidden `this`
+// and of the C-variadic cursor and types. It holds no frontend data, so a
+// compiled function carries it.
+package struct HostCallLayout {
+    package struct Argument {
+        package size_t offset;
+        package size_t width;
+    }
+
+    // How errors name the function.
+    package string name;
+    package Argument[] parameters;
+    package bool hasHiddenThis;
+    package Argument hiddenThis;
+    // `size_t.max` unless the function reads that variadic slot.
+    package size_t variadicCursor = size_t.max;
+    package size_t variadicTypes = size_t.max;
+
+    package void checkArgumentCount(
+        in size_t argumentCount, in string backendName,
+    ) const {
+        checkArgumentCountRule(
+            argumentCount, parameters.length, hasHiddenThis, name,
+            backendName);
+    }
+}
+
+// The one host-to-guest argument-count rule, shared by both backends'
+// one entry point apiece (a program's top-level `Backend.call` and a
+// callback's re-entry send `args` through the same check): the count
+// must be one slot per declared parameter, plus one more when there is
+// a hidden `this` - that slot holds the context word's own address,
+// first, the same as `CallPlan.call` and a callback's own `addresses`
+// already order it. A count short by exactly that one slot gets the
+// specific "no context" message; every other mismatch gets the generic
+// one. `backendName` names the caller in both messages. `name` is read
+// only to build a message.
+private void checkArgumentCountRule(
+    in size_t argumentCount, in size_t declared, in bool hasHiddenThis,
+    lazy const(char)[] name, in string backendName,
+) {
+    import std.conv: text;
+
+    const required = declared + (hasHiddenThis ? 1 : 0);
+    if (argumentCount == required)
+        return;
+
+    if (hasHiddenThis && argumentCount == declared)
+        throw new SnakebiteException(
+            text(backendName, " cannot run `", name,
+                "`: the host passed no context for its hidden `this`"),
+        );
+
+    throw new SnakebiteException(
+        text(backendName, " expected ", required,
+            " host-to-guest argument(s) for `", name, "`, got ",
+            argumentCount),
+    );
+}
+
 
 // One guest closure's native context layout: the enclosing context pointer
 // followed by the captured variables dmd stores in the closure object.
