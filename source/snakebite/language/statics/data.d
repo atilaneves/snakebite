@@ -1,4 +1,4 @@
-module snakebite.nativelayout;
+module snakebite.language.statics.data;
 
 
 private:

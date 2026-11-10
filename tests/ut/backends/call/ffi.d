@@ -2755,7 +2755,7 @@ static foreach (backend; Matrix!(
 // its `tsize` and its raw bytes back through `_arguments[0]` alone,
 // never a compile-time-known guest type - `object.TypeInfo_Struct.
 // tsize`'s own druntime implementation returns its `m_init.length`,
-// which `snakebite.backends.runtimetypes.RuntimeTypes.structInfo`
+// which `snakebite.language.statics.typeinfo.RuntimeTypes.structInfo`
 // already sets to the guest struct's own real init bytes, so this also
 // checks that fabricated `TypeInfo_Struct` is the right size, not merely
 // present.

@@ -11,7 +11,7 @@ import dmd.func: FuncDeclaration;
 import dmd.dsymbol: Dsymbol;
 import dmd.declaration: VarDeclaration;
 import snakebite.language.layout.variables: forEachRuntimeVariable;
-import snakebite.nativelayout: NativeData;
+import snakebite.language.statics.data: NativeData;
 import std.conv: text;
 import core.exception: AssertError;
 import core.thread: Fiber, Thread;

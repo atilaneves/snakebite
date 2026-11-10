@@ -1,4 +1,4 @@
-module snakebite.backends.classinfo;
+module snakebite.language.statics.classinfo;
 
 
 private:

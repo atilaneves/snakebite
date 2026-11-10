@@ -277,15 +277,15 @@ private struct Shared {
     import snakebite.failure.unwind: ExceptionCandidate;
     import snakebite.program: Program;
     import snakebite.language.call.selection: CallSelection;
-    import snakebite.backends.classinfo: ClassRuntimeCache;
+    import snakebite.language.statics.classinfo: ClassRuntimeCache;
     import snakebite.language.layout.frame: ClosureLayout, FrameLayout;
-    import snakebite.backends.runtimetypes: RuntimeTypes;
+    import snakebite.language.statics.typeinfo: RuntimeTypes;
     import snakebite.language.context.chain: ClosurePlan, Hop;
     import snakebite.language.context.source: ContextSource;
     import snakebite.ffi: PlanCache;
     import dmd.declaration: VarDeclaration;
     import snakebite.native.value: TypeFacts;
-    import snakebite.nativelayout: NativeData;
+    import snakebite.language.statics.data: NativeData;
     import snakebite.native.value: BitfieldAccess;
     import snakebite.host.sharedtable: SharedTable;
 
@@ -452,7 +452,7 @@ private struct Shared {
     // a function that holds them allocates a closure when it starts, and
     // the lookup of a class that exists must not allocate.
     private TypeInfo_Class buildClassRuntimeInfo(ClassDeclaration declaration) {
-        import snakebite.backends.classinfo:
+        import snakebite.language.statics.classinfo:
             classRuntimeInfo_ = classRuntimeInfo, Hooks;
 
         return classRuntime.build(() => classRuntimeInfo_(
@@ -600,7 +600,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     import snakebite.language.context.source:
         ContextSource, PairPlan, contextSourceOf, pairPlanOf;
     import snakebite.backends.interpreter.scout: BodyScout, Preparation;
-    import snakebite.backends.classinfo;
+    import snakebite.language.statics.classinfo;
     import dmd.dclass: ClassDeclaration;
     import dmd.dstruct: StructDeclaration;
     import snakebite.stack.frames: FrameStack, defaultFrameCapacity;
@@ -643,9 +643,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         UnrolledLoopStatement, WithStatement;
     import dmd.tokens: EXP;
     import dmd.typesem: isIntegral, nextOf, toBasetype;
-    import snakebite.nativelayout: NativeData;
+    import snakebite.language.statics.data: NativeData;
     import snakebite.frontend.dmd.mangle: nativeSymbolName;
-    import snakebite.backends.runtimetypes: RuntimeTypes;
+    import snakebite.language.statics.typeinfo: RuntimeTypes;
 
     alias visit = LoweringVisitor.visit;
 
@@ -6090,7 +6090,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     override void visit(TypeidExp expression) {
         import dmd.dtemplate: isExpression, isType;
-        import snakebite.backends.classinfo: typeidLoadCount;
+        import snakebite.language.statics.classinfo: typeidLoadCount;
         import snakebite.native.value: checkedStoreIntegral;
         import std.conv: text;
 

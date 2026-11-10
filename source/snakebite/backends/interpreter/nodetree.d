@@ -7645,7 +7645,7 @@ private Node buildConditional(alias buildBranch, Result, E)(
 // The vtable of an object of an interface type has the interface's own
 // information in between.
 private Node buildTypeidOf(E)(E ev, Expression object, in Scalar scalar) {
-    import snakebite.backends.classinfo: typeidLoadCount;
+    import snakebite.language.statics.classinfo: typeidLoadCount;
 
     static if (E.nullCheckedEvaluator)
         return null;

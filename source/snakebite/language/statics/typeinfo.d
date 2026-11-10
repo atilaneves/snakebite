@@ -1,4 +1,4 @@
-module snakebite.backends.runtimetypes;
+module snakebite.language.statics.typeinfo;
 
 
 private:

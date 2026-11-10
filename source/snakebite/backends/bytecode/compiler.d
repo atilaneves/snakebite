@@ -55,7 +55,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import snakebite.backends.api: CompilationStatistics;
     import snakebite.program: Program;
     import snakebite.language.call.selection: CallSelection;
-    import snakebite.backends.classinfo;
+    import snakebite.language.statics.classinfo;
     import snakebite.backends.bytecode.vm: Function, InlineBody, JitSetting, Vm;
     import snakebite.language.layout.frame: FrameLayout;
     import snakebite.frontend.checks: Checks;
@@ -64,9 +64,9 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import snakebite.stack.frames: defaultFrameCapacity;
     import snakebite.host.threads: heapNew;
     import snakebite.host.executionstates: ExecutionStates;
-    import snakebite.nativelayout: NativeData;
+    import snakebite.language.statics.data: NativeData;
     import snakebite.frontend.dmd.mangle: nativeSymbolName;
-    import snakebite.backends.runtimetypes: RuntimeTypes;
+    import snakebite.language.statics.typeinfo: RuntimeTypes;
 
     // Each native stack needs its own guest frame stack. Fibers can resume
     // out of nesting order, so they cannot share one LIFO stack.
@@ -119,7 +119,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // real linked data - this builds the same shapes by hand instead, once
     // per `ClassDeclaration`, and every later `new`/virtual call/`typeid`
     // reuses the one already built.
-    private snakebite.backends.classinfo.ClassRuntimeCache _classRuntime;
+    private snakebite.language.statics.classinfo.ClassRuntimeCache _classRuntime;
     private size_t _compilationDepth;
     // The number of callees that compile only so that their callers can
     // copy them, nested inside each other. Greater than zero while such a
@@ -450,14 +450,14 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // The native metadata a guest class needs at run time: an instance
     // vtable, a per-interface vtable and the `.init` bytes `_d_newclassT`'s
     // real body would otherwise copy from a linked symbol this project's
-    // compiler never emits. Built by `snakebite.backends.classinfo`,
+    // compiler never emits. Built by `snakebite.language.statics.classinfo`,
     // shared with the interpreter's own version of this same question;
     // only how a vtable slot gets its callable value is this backend's
     // own.
     package TypeInfo_Class classRuntimeInfo(
         ClassDeclaration declaration,
     ) {
-        import snakebite.backends.classinfo:
+        import snakebite.language.statics.classinfo:
             classRuntimeInfo_ = classRuntimeInfo, Hooks;
 
         if (auto found = _classRuntime.find(declaration))
@@ -749,7 +749,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     //
     // Locked on the frontend (compiler) lock (`snakebite.frontend.
     // compiler.withCompilerLock`), not a lock of this backend's own: a
-    // guest class's runtime info (`snakebite.backends.classinfo.
+    // guest class's runtime info (`snakebite.language.statics.classinfo.
     // ClassRuntimeCache.build`) already runs its `make` callback under
     // this same lock, and `make` can reach `callableAddress` -> here,
     // compiling a method for the first time to fill a vtable slot. A
@@ -7115,7 +7115,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     override void visit(TypeidExp expression) {
         import dmd.dtemplate: isExpression, isType;
-        import snakebite.backends.classinfo: typeidLoadCount;
+        import snakebite.language.statics.classinfo: typeidLoadCount;
         import std.conv: text;
 
         requireDestination(expression);

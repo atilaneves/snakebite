@@ -65,7 +65,7 @@ private void writeResult(
 ) {
     import dmd.astenums: Tvoid;
     import dmd.typesem: nextOf;
-    import snakebite.nativelayout: storeValue;
+    import snakebite.language.statics.data: storeValue;
 
     auto type = function_.type.nextOf;
 
