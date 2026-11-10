@@ -356,32 +356,74 @@ private shared JitState _jitState;
 
 private struct PerfMap {
     import core.stdc.stdio: FILE;
+    import core.sys.posix.sys.types: pid_t;
+
+    @nogc nothrow:
 
     private FILE* _file;
-    private bool _opened;
+    private pid_t _pid;
 
-    void record(in ubyte* code, in size_t size, in char[] name) @nogc nothrow {
-        import core.stdc.stdio: fclose, fflush, fopen, fprintf, perror,
-            snprintf;
+    void record(in ubyte* code, in size_t size, in char[] name) {
+        import core.stdc.stdio: fclose, fflush, fprintf, fputc, perror;
         import core.sys.posix.unistd: getpid;
 
-        if (!_opened) {
-            _opened = true;
-            char[64] path;
-            snprintf(path.ptr, path.length, "/tmp/perf-%d.map", getpid());
-            // A stale file or a link at this path must not be overwritten.
-            _file = fopen(path.ptr, "wex");
-            if (_file is null)
-                perror(path.ptr);
+        const pid = getpid();
+        if (pid != _pid) {
+            if (_file !is null)
+                fclose(_file);
+            _pid = pid;
+            _file = openMap(pid);
         }
         if (_file is null)
             return;
-        if (fprintf(_file, "%zx %zx %.*s\n", cast(size_t) code, size,
-                cast(int) name.length, name.ptr) < 0 || fflush(_file) != 0) {
+        if (fprintf(_file, "%zx %zx ", cast(size_t) code, size) < 0
+                || !writeSymbol(name) || fputc('\n', _file) < 0
+                || fflush(_file) != 0) {
             perror("snakebite: cannot write JIT perf map");
             fclose(_file);
             _file = null;
         }
+    }
+
+    private static FILE* openMap(in pid_t pid) {
+        import core.stdc.stdio: perror, snprintf;
+        import core.sys.posix.fcntl: O_CLOEXEC, O_CREAT, O_EXCL, O_WRONLY, open;
+        import core.sys.posix.stdio: fdopen;
+        import core.sys.posix.sys.stat: S_IRUSR, S_IWUSR;
+        import core.sys.posix.unistd: close;
+
+        char[64] path;
+        snprintf(path.ptr, path.length, "/tmp/perf-%d.map", pid);
+        const descriptor = open(path.ptr,
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, S_IRUSR | S_IWUSR);
+        if (descriptor < 0) {
+            perror(path.ptr);
+            return null;
+        }
+        auto file = fdopen(descriptor, "w");
+        if (file is null) {
+            perror(path.ptr);
+            close(descriptor);
+        }
+        return file;
+    }
+
+    private bool writeSymbol(in char[] name) {
+        import core.stdc.stdio: fputs, fwrite;
+
+        size_t start;
+        foreach (index, character; name) {
+            if (character != '\r' && character != '\n')
+                continue;
+            const length = index - start;
+            const escape = character == '\r' ? "\\r" : "\\n";
+            if (fwrite(name.ptr + start, char.sizeof, length, _file) != length
+                    || fputs(escape.ptr, _file) < 0)
+                return false;
+            start = index + 1;
+        }
+        const length = name.length - start;
+        return fwrite(name.ptr + start, char.sizeof, length, _file) == length;
     }
 }
 

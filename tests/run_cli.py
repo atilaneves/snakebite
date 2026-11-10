@@ -52,7 +52,7 @@ def test_jit_perf_map(
 ) -> None:
     write(
         tmp_path / "perf_map_guest.d",
-        """
+        r"""
         module perf_map_guest;
         version (ObserveJitPerfMap)
             import core.stdc.stdio: fflush, getchar, puts;
@@ -65,6 +65,17 @@ def test_jit_perf_map(
             return sum;
         }
 
+        version (ObserveJitPerfMap) {
+            pragma(mangle, "lineOne\rlineTwo\n1 2 forged")
+            int named(int count) {
+                assert(count > 0);
+                int sum;
+                foreach (i; 0 .. count)
+                    sum += i;
+                return sum;
+            }
+        }
+
         int main() {
             version (ObserveJitPerfMap)
                 assert(getchar() == 's');
@@ -72,6 +83,7 @@ def test_jit_perf_map(
             assert(hot(301L) == 45150);
             assert(hot(300) == 44850);
             version (ObserveJitPerfMap) {
+                assert(named(300) == 44850);
                 puts("ready");
                 fflush(null);
                 return getchar() == 'x' ? 0 : 1;
@@ -105,18 +117,21 @@ def test_jit_perf_map(
         assert select.select([child.stdout], [], [], 30)[0], "guest did not start"
         ready = child.stdout.readline()
         assert ready.strip() == "ready", f"unexpected guest output: {ready!r}"
-        records = [line.split() for line in path.read_text().splitlines()]
-        assert len(records) == 2
-        assert records[0][2] != records[1][2]
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        records = [line.split(maxsplit=2) for line in path.read_text().splitlines()]
+        assert len(records) == 3
+        names = {record[2] for record in records}
+        names.remove(r"lineOne\rlineTwo\n1 2 forged")
+        assert len(names) == 2
+        assert all(name.startswith("_D14perf_map_guest") and "hot" in name
+                   for name in names)
         ranges = []
-        for start, size, name in records:
-            assert name.startswith("_D14perf_map_guest")
-            assert "hot" in name
+        for start, size, _ in records:
             base, length = int(start, 16), int(size, 16)
             assert length > 0
             ranges.append((base, base + length))
         ranges.sort()
-        assert ranges[0][1] <= ranges[1][0]
+        assert all(left[1] <= right[0] for left, right in zip(ranges, ranges[1:]))
 
         mappings = Path(f"/proc/{child.pid}/maps").read_text().splitlines()
         executable = [
@@ -135,6 +150,68 @@ def test_jit_perf_map(
         child.communicate(timeout=30)
         if new_map:
             path.unlink(missing_ok=True)
+
+
+def test_jit_perf_map_after_fork(tmp_path: Path) -> None:
+    write(
+        tmp_path / "perf_map_fork.d",
+        r"""
+        module perf_map_fork;
+        import core.stdc.stdio: fflush, getchar, printf;
+        import core.sys.posix.sys.wait: waitpid;
+        import core.sys.posix.unistd: _exit, fork;
+
+        T hot(T)(T count) {
+            assert(count > 0);
+            T sum;
+            foreach (i; 0 .. count)
+                sum += i;
+            return sum;
+        }
+
+        int main() {
+            assert(getchar() == 's');
+            assert(hot(300) == 44850);
+            const child = fork();
+            assert(child >= 0);
+            if (child == 0)
+                _exit(hot(301L) == 45150 ? 0 : 1);
+            printf("child=%d\n", child);
+            fflush(null);
+            int status;
+            assert(waitpid(child, &status, 0) == child);
+            return status == 0 ? 0 : 1;
+        }
+        """,
+    )
+    with subprocess.Popen(
+        [sb_path(), "--jit-perf-map", str(tmp_path)],
+        cwd=tmp_path, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True,
+    ) as process:
+        parent_map = Path(f"/tmp/perf-{process.pid}.map")
+        new_map = not parent_map.exists()
+        child_map = None
+        try:
+            assert new_map, f"map already exists: {parent_map}"
+            stdout, _ = process.communicate(input="s", timeout=30)
+            child = re.search(r"^child=(\d+)$", stdout, re.MULTILINE)
+            assert child is not None, stdout
+            child_map = Path(f"/tmp/perf-{child[1]}.map")
+            assert process.returncode == 0, stdout
+
+            for path, type_code in [(parent_map, "i"), (child_map, "l")]:
+                record, = path.read_text().splitlines()
+                symbol = record.split(maxsplit=2)[2]
+                assert symbol.startswith(f"_D13perf_map_fork__T3hotT{type_code}Z")
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=30)
+            if new_map:
+                parent_map.unlink(missing_ok=True)
+            if child_map is not None:
+                child_map.unlink(missing_ok=True)
 
 
 @pytest.mark.parametrize("collector", ["", "symgc", "unknown"])

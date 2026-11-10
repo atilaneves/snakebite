@@ -175,9 +175,12 @@ ends.
 With `bin/sb --jit-perf-map`, the JIT creates `/tmp/perf-<pid>.map` on the
 first successful compilation. Each line contains the hexadecimal start
 address, the hexadecimal size in bytes, and the mangled function name.
+The JIT escapes carriage returns and line feeds in the name to keep one
+record per function. Only the process owner can read or write the file.
 The JIT writes the line before it publishes the handler addresses. The map
 stays on disk so `perf report` can read it after the process ends. The option
-is off by default.
+is off by default. After a fork, the child map records functions that the
+child compiles.
 
 ### Independent of stored bytecode
 
