@@ -15,18 +15,18 @@ import object: TypeInfo_Class;
 import snakebite.native.argumentflow: Shape, SignatureTable;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.language.operators.identity: IdentityPlan, identityPlan;
-import snakebite.backends.ifplan: IfPlan;
-import snakebite.backends.logical: LogicalPlan;
-import snakebite.backends.plaincondition:
+import snakebite.language.control.ifplan: IfPlan;
+import snakebite.language.control.logical: LogicalPlan;
+import snakebite.language.control.plaincondition:
     isPlainCondition, isPlainPlace, isRealFloatType;
 import snakebite.language.operators.comparison: ComparisonPlan, comparisonPlan;
-import snakebite.backends.switchplan:
+import snakebite.language.control.cases:
     SwitchPlan, switchPlan, gotoCaseTarget, gotoDefaultTarget;
 import snakebite.backends.fullexpression:
     FullExpressionScope;
-import snakebite.backends.controlflow:
+import snakebite.language.control.transfer:
     ScopeFrame, ScopePaths, labelTargetOf, scopePathsOf;
-import snakebite.backends.exceptionplan:
+import snakebite.language.control.unwinding:
     UnwindPlan, catchPlanOf, unwindPlanOf;
 import snakebite.backends.checkplan: BoundsCheck, hookOf;
 import snakebite.backends.druntimehooks: DruntimeHook, planOf;

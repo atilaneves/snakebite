@@ -1,11 +1,11 @@
-module snakebite.backends.exceptionplan;
+module snakebite.language.control.unwinding;
 
 
 private:
 
 
 import object: TypeInfo_Class;
-import snakebite.backends.controlflow: ScopeFrame;
+import snakebite.language.control.transfer: ScopeFrame;
 import snakebite.failure.unwind:
     ExceptionCandidate;
 

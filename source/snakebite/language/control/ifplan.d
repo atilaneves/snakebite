@@ -1,4 +1,4 @@
-module snakebite.backends.ifplan;
+module snakebite.language.control.ifplan;
 
 
 private:

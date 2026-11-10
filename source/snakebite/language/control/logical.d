@@ -1,4 +1,4 @@
-module snakebite.backends.logical;
+module snakebite.language.control.logical;
 
 
 private:

@@ -1,4 +1,4 @@
-module snakebite.backends.switchplan;
+module snakebite.language.control.cases;
 
 private:
 

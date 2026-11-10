@@ -241,16 +241,16 @@ import snakebite.failure.halt: isHalt;
 import snakebite.backends.exceptions: CAssertCall;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.language.operators.identity: IdentityPlan;
-import snakebite.backends.ifplan: IfPlan;
-import snakebite.backends.logical: LogicalPlan;
+import snakebite.language.control.ifplan: IfPlan;
+import snakebite.language.control.logical: LogicalPlan;
 import snakebite.language.operators.comparison: ComparisonPlan;
-import snakebite.backends.controlflow: ControlFlowState,
+import snakebite.language.control.transfer: ControlFlowState,
     ScopeFrame, ScopePaths, scopePathsOf;
-import snakebite.backends.exceptionplan: CatchPlan, catchPlanOf;
+import snakebite.language.control.unwinding: CatchPlan, catchPlanOf;
 import snakebite.backends.aggregateinit: AggregateInitPlan;
 import snakebite.failure.unwind:
     ExceptionCandidate, ExceptionUnwindPlan = UnwindPlan;
-import snakebite.backends.switchplan: SwitchPlan, switchPlan, selectCase,
+import snakebite.language.control.cases: SwitchPlan, switchPlan, selectCase,
     gotoCaseTarget, gotoDefaultTarget;
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
 import snakebite.host.cstack: CStack;
@@ -2757,7 +2757,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         in FinallyKey key,
         TryFinallyStatement statement,
     ) {
-        import snakebite.backends.exceptionplan: unwindPlanOf;
+        import snakebite.language.control.unwinding: unwindPlanOf;
 
         // The unwind planner takes mutable ScopeFrame arrays from dmd.
         auto scopes = scopesOf(_preparing is null ? _function : _preparing);

@@ -1,4 +1,4 @@
-module snakebite.backends.controlflow;
+module snakebite.language.control.transfer;
 
 private:
 

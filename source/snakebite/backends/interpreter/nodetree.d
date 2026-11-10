@@ -19,7 +19,7 @@ import dmd.mtype: Type;
 import dmd.statement: Statement;
 import snakebite.backends.aggregateinit: InitStep;
 import snakebite.backends.checkplan: BoundsCheck;
-import snakebite.backends.controlflow: ControlFlowState, labelTargetOf;
+import snakebite.language.control.transfer: ControlFlowState, labelTargetOf;
 import snakebite.backends.fullexpression: FullExpressionScope;
 import snakebite.backends.interpreter.faultslot:
     FaultSite, ResultWord, fastFrameLead, faultSlotOf, resultPlaceOf,
@@ -7263,7 +7263,7 @@ private Node buildAssertion(E)(E ev, AssertExp expression) {
 // The node that tests the truth of `expression`, as a condition does.
 private Node buildTruth(E)(E ev, Expression expression) {
     import dmd.tokens: EXP;
-    import snakebite.backends.plaincondition: isPlainCondition;
+    import snakebite.language.control.plaincondition: isPlainCondition;
 
     if (expression.op == EXP.comma)
         return buildComma(ev, expression.isCommaExp, &buildTruth!E);
@@ -7345,7 +7345,7 @@ private Node buildTruthAfterEnd(E)(
 // `&&` or `||` as its plan says (`logicalPlan`): a right operand with a
 // value is a test, and one without runs for its effect.
 private Node buildLogical(E)(E ev, imported!"dmd.expression".LogicalExp logical) {
-    import snakebite.backends.logical: LogicalPlan, logicalPlan;
+    import snakebite.language.control.logical: LogicalPlan, logicalPlan;
 
     const plan = logicalPlan(logical);
     auto left = buildTruth(ev, logical.e1);
@@ -8632,8 +8632,8 @@ private Node buildReferenceBinding(E)(
 private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
     import dmd.astenums: STMT;
     import dmd.tokens: EXP;
-    import snakebite.backends.ifplan: IfPlan, ifPlan;
-    import snakebite.backends.switchplan: gotoCaseTarget, gotoDefaultTarget;
+    import snakebite.language.control.ifplan: IfPlan, ifPlan;
+    import snakebite.language.control.cases: gotoCaseTarget, gotoDefaultTarget;
 
     Node generic() {
         return new GenericStatement!E(ev, statement);
@@ -8894,7 +8894,7 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
 private Node buildSwitch(E)(
     E ev, imported!"dmd.statement".SwitchStatement statement,
 ) {
-    import snakebite.backends.switchplan: SwitchPlan, caseTableOf, switchPlan;
+    import snakebite.language.control.cases: SwitchPlan, caseTableOf, switchPlan;
 
     enum where = FullExpressionScope.Position.switchOperand;
     auto operand = buildIntegral(ev, statement.condition, where);

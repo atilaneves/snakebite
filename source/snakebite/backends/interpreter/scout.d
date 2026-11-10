@@ -18,9 +18,9 @@ import dmd.statement:
     ExpStatement, GotoCaseStatement, GotoDefaultStatement, GotoStatement,
     Statement, TryCatchStatement, TryFinallyStatement, WithStatement;
 import dmd.visitor: SemanticTimeTransitiveVisitor;
-import snakebite.backends.controlflow: ScopePaths;
+import snakebite.language.control.transfer: ScopePaths;
 import snakebite.language.layout.lowered: LoweredExpressionTypes;
-import snakebite.backends.switchplan: gotoCaseTarget, gotoDefaultTarget;
+import snakebite.language.control.cases: gotoCaseTarget, gotoDefaultTarget;
 import snakebite.frontend.dmd.functions: unresolvedCalleeOf;
 import snakebite.frontend.typefacts: initializerValueOf;
 import std.meta: staticIndexOf;

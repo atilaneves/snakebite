@@ -1,4 +1,4 @@
-module snakebite.backends.plaincondition;
+module snakebite.language.control.plaincondition;
 
 
 private:
