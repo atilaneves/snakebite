@@ -3,6 +3,7 @@ module snakebite.backends;
 
 public import snakebite.backends.backend;
 public import snakebite.backends.runprogram;
+public import snakebite.backends.program;
 
 
 private:

@@ -24,7 +24,7 @@ import snakebite.callarguments: CallArguments;
 // straight into a caller-designated native address, in native layout.
 public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     import dmd.func: FuncDeclaration;
-    import snakebite.backends.backend: Program;
+    import snakebite.backends.program: Program;
     import snakebite.ffi: CallbackBridge, CallbackCall;
     import snakebite.hostthreads: heapNew;
     import snakebite.executionstates: ExecutionStates;
@@ -275,7 +275,7 @@ private struct Shared {
     import dmd.statement: Catch, TryCatchStatement, TryFinallyStatement;
     import snakebite.ffi: CallPlan;
     import snakebite.backends.unwindplan: ExceptionCandidate;
-    import snakebite.backends.backend: Program;
+    import snakebite.backends.program: Program;
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.classinfo: ClassRuntimeCache;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
@@ -591,7 +591,7 @@ private struct CallShape {
 extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     import snakebite.backends.aggregateinit: InitStep, NewPlan;
     import snakebite.backends.calls: CallSelection;
-    import snakebite.backends.backend: Program;
+    import snakebite.backends.program: Program;
     import snakebite.frontend.dmd.delegates:
         DelegateTarget, isCtfeVariable, outerFunctionOf;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;

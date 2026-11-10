@@ -2,7 +2,7 @@ module ut.backends.run.main;
 
 
 import ut.backends;
-import snakebite.backends.backend: Program;
+import snakebite.backends.program: Program;
 import snakebite.backends.runprogram: run;
 import snakebite.frontend.compiler: parseSnippet, newInFrontend, withCompilerLock;
 import std.meta: AliasSeq;

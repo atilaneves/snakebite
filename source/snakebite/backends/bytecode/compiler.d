@@ -52,7 +52,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import dmd.declaration: Declaration;
     import dmd.func: FuncDeclaration;
     import dmd.root.string: toDString;
-    import snakebite.backends.backend: CompilationStatistics, Program;
+    import snakebite.backends.backend: CompilationStatistics;
+    import snakebite.backends.program: Program;
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.classinfo;
     import snakebite.backends.bytecode.vm: Function, InlineBody, JitSetting, Vm;

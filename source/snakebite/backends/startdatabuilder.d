@@ -4,15 +4,30 @@ module snakebite.backends.startdatabuilder;
 private:
 
 
-import snakebite.backends.backend: Backend, Program;
+import snakebite.backends.program: Program;
 import snakebite.backends.startdata:
     FunctionHandle, GateStorage, ModuleStart, StartData;
 
 
+// What the builder asks of a backend.
+struct Hooks {
+    FunctionHandle delegate(imported!"dmd.func".FuncDeclaration)
+        compiledFunction;
+    void[] delegate(imported!"dmd.declaration".VarDeclaration) staticStorage;
+}
+
+
 // Reads the frontend one time and builds the start data of `program`. The
-// functions in it are the ones `backend` names; it compiles them when it
-// likes. A failure throws before the caller has a value to keep.
-public StartData buildStartData(Backend backend, Program program) {
+// functions in it are the ones `compiledFunction` names; it compiles them when
+// it likes. `staticStorage` gives the bytes of a static variable. A failure
+// throws before the caller has a value to keep.
+public StartData buildStartData(
+    Program program,
+    FunctionHandle delegate(imported!"dmd.func".FuncDeclaration)
+        compiledFunction,
+    void[] delegate(imported!"dmd.declaration".VarDeclaration) staticStorage,
+) {
+    const hooks = Hooks(compiledFunction, staticStorage);
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import dmd.astenums: Tvoid;
     import dmd.typesem: nextOf;
@@ -25,7 +40,7 @@ public StartData buildStartData(Backend backend, Program program) {
         data.main.present = true;
         data.main.returnsVoid = main_.type.nextOf.ty == Tvoid;
         data.main.parameterCount = typeFunctionOf(main_).parameterList.length;
-        data.main.function_ = compiled(backend, main_);
+        data.main.function_ = compiled(hooks, main_);
     }
 
     if (data.betterC)
@@ -33,14 +48,14 @@ public StartData buildStartData(Backend backend, Program program) {
 
     data.dependencyModules = program.dependencyImage is null
         ? null : program.dependencyImage.deferredModules;
-    addModules(data, backend, program);
+    addModules(data, hooks, program);
     return data;
 }
 
 
 private void addModules(
     ref StartData data,
-    Backend backend,
+    const Hooks hooks,
     Program program,
 ) {
     import dmd.dmodule: Module;
@@ -72,53 +87,53 @@ private void addModules(
         }
 
         start.independentConstructors =
-            compiled(backend, functions.independentConstructors);
+            compiled(hooks, functions.independentConstructors);
         start.sharedConstructors =
-            compiled(backend, functions.sharedConstructors);
+            compiled(hooks, functions.sharedConstructors);
         start.threadConstructors =
-            compiled(backend, functions.threadConstructors);
+            compiled(hooks, functions.threadConstructors);
         start.sharedDestructors =
-            compiled(backend, functions.sharedDestructors);
+            compiled(hooks, functions.sharedDestructors);
         start.threadDestructors =
-            compiled(backend, functions.threadDestructors);
-        start.sharedGates = gatesOf(backend, functions.sharedDestructors);
-        start.threadGates = gatesOf(backend, functions.threadDestructors);
-        start.unitTests = compiled(backend, functions.unittests);
+            compiled(hooks, functions.threadDestructors);
+        start.sharedGates = gatesOf(hooks, functions.sharedDestructors);
+        start.threadGates = gatesOf(hooks, functions.threadDestructors);
+        start.unitTests = compiled(hooks, functions.unittests);
 
-        data.crtConstructors ~= compiled(backend, functions.crtConstructors);
-        data.crtDestructors ~= compiled(backend, functions.crtDestructors);
+        data.crtConstructors ~= compiled(hooks, functions.crtConstructors);
+        data.crtDestructors ~= compiled(hooks, functions.crtDestructors);
         data.modules ~= start;
     }
 }
 
 
 private FunctionHandle[] compiled(
-    Backend backend,
+    const Hooks hooks,
     imported!"dmd.func".FuncDeclaration[] functions,
 ) {
     FunctionHandle[] result;
     foreach (function_; functions)
-        result ~= compiled(backend, function_);
+        result ~= compiled(hooks, function_);
     return result;
 }
 
 
 private FunctionHandle compiled(
-    Backend backend,
+    const Hooks hooks,
     imported!"dmd.func".FuncDeclaration function_,
 ) {
-    return backend.compiledFunction(function_);
+    return hooks.compiledFunction(function_);
 }
 
 
 private GateStorage[] gatesOf(
-    Backend backend,
+    const Hooks hooks,
     imported!"dmd.func".FuncDeclaration[] destructors,
 ) {
     GateStorage[] gates;
     foreach (destructor; destructors)
         if (auto gate = destructor.isStaticDtorDeclaration.vgate)
-            if (auto storage = backend.staticStorage(gate))
+            if (auto storage = hooks.staticStorage(gate))
                 if (storage.length)
                     gates ~= storage;
     return gates;

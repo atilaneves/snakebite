@@ -2,7 +2,7 @@ module ut.backends.interpreter.cost;
 
 
 import ut;
-import snakebite.backends.backend: Program;
+import snakebite.backends.program: Program;
 import snakebite.backends.interpreter: Interpreter;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
