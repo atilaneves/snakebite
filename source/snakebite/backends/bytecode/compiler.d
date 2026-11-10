@@ -14,12 +14,12 @@ import dmd.mtype: Type;
 import object: TypeInfo_Class;
 import snakebite.native.argumentflow: Shape, SignatureTable;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
-import snakebite.backends.identity: IdentityPlan, identityPlan;
+import snakebite.language.operators.identity: IdentityPlan, identityPlan;
 import snakebite.backends.ifplan: IfPlan;
 import snakebite.backends.logical: LogicalPlan;
 import snakebite.backends.plaincondition:
     isPlainCondition, isPlainPlace, isRealFloatType;
-import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
+import snakebite.language.operators.comparison: ComparisonPlan, comparisonPlan;
 import snakebite.backends.switchplan:
     SwitchPlan, switchPlan, gotoCaseTarget, gotoDefaultTarget;
 import snakebite.backends.fullexpression:
@@ -971,9 +971,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.frontend.typefacts: bitfieldAccess, fieldOffset;
     import snakebite.builtin.call: BuiltinCall;
     import snakebite.backends.calls: CallSelection;
-    import snakebite.backends.casts: CastPlan;
+    import snakebite.language.operators.casts: CastPlan;
     import snakebite.backends.closureplan: ClosurePlan;
-    import snakebite.backends.compoundassign:
+    import snakebite.language.operators.compound:
         CompoundConversion, compoundConversion;
     import snakebite.backends.contextpair:
         constructedObjectOffset, constructsThroughPair;
@@ -5489,7 +5489,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileCompoundAssign(
         BinAssignExp expression, in size_t destOffset,
     ) {
-        import snakebite.backends.compoundassign: compoundTarget;
+        import snakebite.language.operators.compound: compoundTarget;
 
         if (compileDirectCompound(expression, destOffset))
             return;
@@ -5501,10 +5501,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         BinAssignExp expression, in size_t targetOffset,
         in size_t destOffset = discardResult,
     ) {
-        import snakebite.backends.arithmetic:
+        import snakebite.language.operators.arithmetic:
             ArithmeticPlan, arithmeticKind, arithmeticPlan;
-        import snakebite.backends.shifts: shiftPlan;
-        import snakebite.backends.compoundassign: compoundTarget;
+        import snakebite.language.operators.shifts: shiftPlan;
+        import snakebite.language.operators.compound: compoundTarget;
         import std.conv: text;
 
         auto target = compoundTarget(expression);
@@ -5604,7 +5604,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // A vector target has the operation's own type: dmd promotes no lane.
     private void compileVectorCompoundAssign(
         BinAssignExp expression,
-        in imported!"snakebite.backends.arithmetic".ArithmeticPlan plan,
+        in imported!"snakebite.language.operators.arithmetic".ArithmeticPlan plan,
         in size_t targetOffset, in size_t destOffset,
     ) {
         auto storage = ScalarStorage(ScalarStorage.Kind.indirect, plan.facts,
@@ -5651,7 +5651,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         TypeFacts facts;
         size_t offset;
         VarDeclaration variable;
-        imported!"snakebite.backends.arithmetic".ArithmeticPlan.Kind
+        imported!"snakebite.language.operators.arithmetic".ArithmeticPlan.Kind
             arithmetic;
         // Only a compound assignment sets it.
         CompoundConversion conversion;
@@ -5659,7 +5659,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // DMD reads a promoted floating or complex target before its right
         // side; integral targets keep the ordinary right-side-first order.
         bool promotesBeforeOperand() const {
-            import snakebite.backends.arithmetic: ArithmeticPlan;
+            import snakebite.language.operators.arithmetic: ArithmeticPlan;
 
             with (ArithmeticPlan.Kind) final switch (arithmetic) {
                 case floating, complex:
@@ -5671,7 +5671,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private ScalarStorage scalarStorage(Expression target) {
-        import snakebite.backends.arithmetic: arithmeticKind;
+        import snakebite.language.operators.arithmetic: arithmeticKind;
 
         const facts = typeFacts(target.type);
         const arithmetic = arithmeticKind(target.type);
@@ -5757,11 +5757,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // Converts a target's value between its own width and the width of a
     // compound assignment's promoted operation.
     private void emitWidthChange(
-        imported!"snakebite.backends.arithmetic".ArithmeticPlan.Kind kind,
+        imported!"snakebite.language.operators.arithmetic".ArithmeticPlan.Kind kind,
         in TypeFacts facts, in size_t destination, in size_t source,
         in size_t width, in size_t sourceWidth,
     ) {
-        import snakebite.backends.arithmetic: ArithmeticPlan;
+        import snakebite.language.operators.arithmetic: ArithmeticPlan;
         import snakebite.native.value: CastKind;
 
         with (ArithmeticPlan.Kind) final switch (kind) {
@@ -5889,9 +5889,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private Instruction.Handler shiftHandler(
-        in imported!"snakebite.backends.shifts".ShiftPlan plan,
+        in imported!"snakebite.language.operators.shifts".ShiftPlan plan,
     ) {
-        with (imported!"snakebite.backends.shifts".ShiftPlan.Direction)
+        with (imported!"snakebite.language.operators.shifts".ShiftPlan.Direction)
             final switch (plan.direction) {
                 case left:
                     return &opShiftLeft;
@@ -5936,7 +5936,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // an expression - goes, captured before the target changes;
     // `discardResult` when a caller at statement level does not want it.
     private void compilePost(PostExp expression, in size_t destOffset) {
-        import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan,
+        import snakebite.language.operators.arithmetic: ArithmeticPlan, arithmeticPlan,
             pointerPostStep;
         import std.conv: text;
 
@@ -7546,7 +7546,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private void compileShiftExpression(BinExp expression) {
-        import snakebite.backends.shifts: shiftPlan;
+        import snakebite.language.operators.shifts: shiftPlan;
 
         compileBinaryExpression(
             expression, shiftHandler(shiftPlan(expression)));
@@ -7579,7 +7579,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         BinExp expression, in size_t destOffset, in size_t width,
         Instruction.Handler handler,
     ) {
-        import snakebite.backends.arithmetic:
+        import snakebite.language.operators.arithmetic:
             ArithmeticPlan, arithmeticKind, arithmeticPlan;
         import std.conv: text;
 
@@ -7675,10 +7675,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // lane, the floating operation for a floating one.
     private Instruction.Handler laneHandler(
         BinExp expression,
-        in imported!"snakebite.backends.arithmetic".ArithmeticPlan plan,
+        in imported!"snakebite.language.operators.arithmetic".ArithmeticPlan plan,
         Instruction.Handler integralHandler,
     ) {
-        import snakebite.backends.arithmetic: ArithmeticPlan;
+        import snakebite.language.operators.arithmetic: ArithmeticPlan;
         import std.conv: text;
 
         with (ArithmeticPlan.Kind) final switch (plan.laneKind) {
@@ -7696,7 +7696,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // leaving the answer at `left`.
     private void emitLanes(
         Instruction.Handler handler,
-        in imported!"snakebite.backends.arithmetic".ArithmeticPlan plan,
+        in imported!"snakebite.language.operators.arithmetic".ArithmeticPlan plan,
         in size_t left, in size_t right,
     ) {
         const laneSize = plan.laneFacts.size;
@@ -8545,7 +8545,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in FullExpressionScope.Position position,
         in Flag!"plain" plain,
     ) {
-        import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
+        import snakebite.language.operators.comparison: ComparisonPlan, comparisonPlan;
 
         const logical = condition.op == EXP.andAnd
             || condition.op == EXP.orOr;
@@ -8737,7 +8737,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Expression value, in imported!"snakebite.native.value".TypeFacts facts,
         in bool floating,
     ) {
-        import snakebite.backends.arithmetic:
+        import snakebite.language.operators.arithmetic:
             ArithmeticPlan, arithmeticPlan;
 
         const valueFacts = typeFacts(value.type);
@@ -8783,9 +8783,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         BinAssignExp expression, in size_t destOffset,
     ) {
         import dmd.sideeffect: hasSideEffect;
-        import snakebite.backends.arithmetic:
+        import snakebite.language.operators.arithmetic:
             ArithmeticPlan, arithmeticPlan;
-        import snakebite.backends.compoundassign: compoundTarget;
+        import snakebite.language.operators.compound: compoundTarget;
 
         if (compoundTarget(expression) !is expression.e1)
             return false;
@@ -8846,7 +8846,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private bool compileDirectPost(
         PostExp expression, in size_t destOffset,
     ) {
-        import snakebite.backends.arithmetic:
+        import snakebite.language.operators.arithmetic:
             ArithmeticPlan, arithmeticPlan;
 
         const facts = typeFacts(expression.e1.type);
@@ -9353,7 +9353,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         UnaExp expression, in size_t destOffset, in size_t width,
         Instruction.Handler handler,
     ) {
-        import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
+        import snakebite.language.operators.arithmetic: ArithmeticPlan, arithmeticPlan;
         import std.conv: text;
 
         const plan = arithmeticPlan(expression);
@@ -9540,7 +9540,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _finished = ifFinished && elseFinished;
     }
 
-    // `cast(T) x`. `snakebite.backends.casts.classify` has already turned
+    // `cast(T) x`. `snakebite.language.operators.casts.classify` has already turned
     // the source and destination types into a `Kind`; this is the
     // adapter that executes each one, with no type inspection of its
     // own. `cast(bool)` is not a narrowing: dmd classifies `bool` as an
@@ -9557,7 +9557,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileCast(
         CastExp expression, in size_t destOffset, in size_t width,
     ) {
-        import snakebite.backends.casts: classify;
+        import snakebite.language.operators.casts: classify;
         import std.conv: text;
 
         auto sourceType = expression.e1.type;

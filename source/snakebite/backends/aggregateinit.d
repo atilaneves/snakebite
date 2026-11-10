@@ -119,7 +119,7 @@ public struct InitStep {
     // (`glue/e2ir.d`, `NewExp.thisexp` case) adds when `thisexp`'s static
     // type is a class *derived* from the nested class's actual lexical
     // parent, computed the same way an upcast `CastExp` computes it
-    // (`snakebite.backends.casts.classify`'s `classReference` kind).
+    // (`snakebite.language.operators.casts.classify`'s `classReference` kind).
     public int sourceAdjustment;
 }
 
@@ -330,7 +330,7 @@ private InitStep classVthisStep(
 )
 in (cd.isNested() && cd.vthis !is null)
 {
-    import snakebite.backends.casts: classify;
+    import snakebite.language.operators.casts: classify;
 
     auto step = InitStep(
         InitStep.Kind.vthis, cd.vthis.offset, TypeFacts.pointer(),

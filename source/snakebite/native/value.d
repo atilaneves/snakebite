@@ -574,7 +574,7 @@ public enum delegateValueSize = 2 * (void*).sizeof;
 
 // Which byte-level transform a cast performs, once `snakebite.backends.
 // casts.classify` has decided it. This is the one enum both
-// `snakebite.backends.casts.CastPlan.kind` (classify's own answer,
+// `snakebite.language.operators.casts.CastPlan.kind` (classify's own answer,
 // while dmd's types are still in scope) and `applyCast`/`applyCastAs`
 // below (turning that answer into bytes, once they are not) read -
 // `snakebite.backends.bytecode.vm` may not import DMD frontend
@@ -626,9 +626,9 @@ public enum CastKind {
     truth,
 }
 
-// The DMD-free subset of `snakebite.backends.casts.CastPlan` that
+// The DMD-free subset of `snakebite.language.operators.casts.CastPlan` that
 // `applyCast` needs to turn a cast's source bytes into its destination
-// bytes - `snakebite.backends.casts.layoutOf` builds one from a
+// bytes - `snakebite.language.operators.casts.layoutOf` builds one from a
 // `CastPlan`. Kept here, next to `applyCast` itself, rather than in
 // `casts.d`, because `snakebite.backends.bytecode.vm` may not import
 // DMD frontend modules and `casts.d` reaches dmd's own `Type` in its
@@ -804,7 +804,7 @@ pragma(inline, true) public void applyCastAs(CastKind kind)(
     // width, never inside the narrower destination, so `narrow` reads
     // the same regardless of sign. `widenSigned`/`widenUnsigned` fix
     // the sign the extension itself uses at the kind, rather than at
-    // `layout.sourceUnsigned` - `snakebite.backends.casts.classify`
+    // `layout.sourceUnsigned` - `snakebite.language.operators.casts.classify`
     // already chose between them on the source's own signedness, so
     // there is nothing left for `layout` to add.
     else static if (kind == narrow)

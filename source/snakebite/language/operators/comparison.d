@@ -1,4 +1,4 @@
-module snakebite.backends.comparison;
+module snakebite.language.operators.comparison;
 
 private:
 

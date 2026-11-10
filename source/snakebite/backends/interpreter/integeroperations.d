@@ -73,14 +73,14 @@ private ulong divided(string op)(
 package ulong shifted(
     in long a,
     in long count,
-    in imported!"snakebite.backends.shifts".ShiftPlan plan,
+    in imported!"snakebite.language.operators.shifts".ShiftPlan plan,
 ) {
     import snakebite.native.value: shiftCount;
 
     const width = plan.width * 8;
     const b = shiftCount(count, plan.width);
 
-    with (imported!"snakebite.backends.shifts".ShiftPlan.Direction)
+    with (imported!"snakebite.language.operators.shifts".ShiftPlan.Direction)
         final switch (plan.direction) {
             case left:
                 return cast(ulong) a << b;

@@ -240,10 +240,10 @@ import snakebite.backends.calls: ValueCall;
 import snakebite.failure.halt: isHalt;
 import snakebite.backends.exceptions: CAssertCall;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
-import snakebite.backends.identity: IdentityPlan;
+import snakebite.language.operators.identity: IdentityPlan;
 import snakebite.backends.ifplan: IfPlan;
 import snakebite.backends.logical: LogicalPlan;
-import snakebite.backends.comparison: ComparisonPlan;
+import snakebite.language.operators.comparison: ComparisonPlan;
 import snakebite.backends.controlflow: ControlFlowState,
     ScopeFrame, ScopePaths, scopePathsOf;
 import snakebite.backends.exceptionplan: CatchPlan, catchPlanOf;
@@ -4736,7 +4736,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         BinAssignExp expression, void* resolvedTarget = null,
     ) {
         import core.stdc.string: memcpy;
-        import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
+        import snakebite.language.operators.arithmetic: ArithmeticPlan, arithmeticPlan;
         import std.conv: text;
 
         const plan = arithmeticPlan(expression);
@@ -4783,9 +4783,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private extern(D) void storeFloatingAssign(string op)(
         BinAssignExp expression, void* resolvedTarget,
     ) {
-        import snakebite.backends.arithmetic: ArithmeticPlan;
-        import snakebite.backends.compoundassign: readsTargetFirst;
-        import snakebite.backends.compoundassign: compoundTarget;
+        import snakebite.language.operators.arithmetic: ArithmeticPlan;
+        import snakebite.language.operators.compound: readsTargetFirst;
+        import snakebite.language.operators.compound: compoundTarget;
         import snakebite.native.value: loadFloating, storeFloating;
 
         auto target_ = compoundTarget(expression);
@@ -4821,8 +4821,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private extern(D) void storeConvertedFloatingAssign(string op)(
         BinAssignExp expression, Expression target_, void* target,
     ) {
-        import snakebite.backends.casts: layoutOf;
-        import snakebite.backends.compoundassign: compoundConversion;
+        import snakebite.language.operators.casts: layoutOf;
+        import snakebite.language.operators.compound: compoundConversion;
         import snakebite.native.value: checkedLoadIntegral, checkedStoreIntegral;
         import snakebite.native.value: applyCast, loadFloating, storeFloating;
 
@@ -4877,11 +4877,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // As `storeFloatingAssign`, for both halves of a complex target.
     private extern(D) void storeComplexAssign(string op)(
         BinAssignExp expression,
-        in imported!"snakebite.backends.arithmetic".ArithmeticPlan plan,
+        in imported!"snakebite.language.operators.arithmetic".ArithmeticPlan plan,
         void* resolvedTarget,
     ) {
-        import snakebite.backends.compoundassign: readsTargetFirst;
-        import snakebite.backends.compoundassign: compoundTarget;
+        import snakebite.language.operators.compound: readsTargetFirst;
+        import snakebite.language.operators.compound: compoundTarget;
         import snakebite.native.value: applyComplex;
 
         auto target_ = compoundTarget(expression);
@@ -4909,8 +4909,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private extern(D) void storeIntegralAssign(string op)(
         BinAssignExp expression, void* resolvedTarget,
     ) {
-        import snakebite.backends.shifts: shiftPlan;
-        import snakebite.backends.compoundassign: compoundTarget;
+        import snakebite.language.operators.shifts: shiftPlan;
+        import snakebite.language.operators.compound: compoundTarget;
         import snakebite.native.value: checkedLoadIntegral, checkedStoreIntegral;
 
         auto target_ = compoundTarget(expression);
@@ -4974,7 +4974,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     override void visit(PostExp expression) {
-        import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
+        import snakebite.language.operators.arithmetic: ArithmeticPlan, arithmeticPlan;
         import std.conv: text;
 
         const plan = arithmeticPlan(expression);
@@ -5029,7 +5029,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     private void storeComplexPost(
         PostExp expression,
-        in imported!"snakebite.backends.arithmetic".ArithmeticPlan plan,
+        in imported!"snakebite.language.operators.arithmetic".ArithmeticPlan plan,
     ) {
         import core.stdc.string: memcpy;
         import snakebite.native.value: applyComplex, ComplexOperation;
@@ -5049,7 +5049,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     private void storeVectorPost(
         PostExp expression,
-        in imported!"snakebite.backends.arithmetic".ArithmeticPlan plan,
+        in imported!"snakebite.language.operators.arithmetic".ArithmeticPlan plan,
     ) {
         import core.stdc.string: memcpy;
 
@@ -5066,10 +5066,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // `left op right` lane by lane into `result`, which may be `left`.
     private extern(D) void vectorLanes(string op)(
         void* result, in void* left, in void* right,
-        in imported!"snakebite.backends.arithmetic".ArithmeticPlan plan,
+        in imported!"snakebite.language.operators.arithmetic".ArithmeticPlan plan,
         Expression expression,
     ) {
-        import snakebite.backends.arithmetic: ArithmeticPlan;
+        import snakebite.language.operators.arithmetic: ArithmeticPlan;
         import snakebite.native.value: checkedLoadIntegral, checkedStoreIntegral;
         import snakebite.native.value: loadFloating, storeFloating;
         import std.conv: text;
@@ -5258,7 +5258,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // zero have different representations but compare equal in D.
     protected override void visitUnloweredEqual(EqualExp expression) {
         import core.stdc.string: memcmp;
-        import snakebite.backends.comparison: comparisonPlan;
+        import snakebite.language.operators.comparison: comparisonPlan;
         import snakebite.native.value: checkedStoreIntegral;
 
         const plan = comparisonPlan(expression);
@@ -5498,8 +5498,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     // `extern(D)`: a string template parameter has no C++ mangling.
     private extern(D) void storeBinaryExp(string op)(BinExp expression) {
-        import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
-        import snakebite.backends.shifts: shiftPlan;
+        import snakebite.language.operators.arithmetic: ArithmeticPlan, arithmeticPlan;
+        import snakebite.language.operators.shifts: shiftPlan;
         import snakebite.native.value: checkedStoreIntegral;
         import snakebite.native.value: applyComplex, storeFloating;
         import std.conv: text;
@@ -5629,7 +5629,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // `-x` and `~x` leave the same low bits whether the operand was read as
     // signed or unsigned, so neither needs the operand's own facts.
     private extern(D) void storeUnaryExp(string op)(UnaExp expression) {
-        import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
+        import snakebite.language.operators.arithmetic: ArithmeticPlan, arithmeticPlan;
         import snakebite.native.value: checkedStoreIntegral;
         import snakebite.native.value: negateComplex, storeFloating;
         import std.conv: text;
@@ -5703,13 +5703,13 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         }
     }
 
-    // `snakebite.backends.casts.classify` has already turned the source
+    // `snakebite.language.operators.casts.classify` has already turned the source
     // and destination types into a `Kind`; this is the adapter that
     // executes each one, with no type inspection of its own beyond the
     // pre-check below that classify does not see: `cast(void) e`, whose
     // meaning is "keep `e`'s effects, produce no value".
     protected override void visitUnloweredCast(CastExp expression) {
-        import snakebite.backends.casts: layoutOf;
+        import snakebite.language.operators.casts: layoutOf;
         import snakebite.native.value:
             applyCast, arrayValueSize, CastKind, delegateValueSize;
         import snakebite.native.value: checkedStoreIntegral;

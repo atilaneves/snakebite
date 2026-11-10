@@ -1,11 +1,11 @@
-module snakebite.backends.compoundassign;
+module snakebite.language.operators.compound;
 
 private:
 
 import dmd.typesem: toBasetype;
 
-import snakebite.backends.arithmetic: ArithmeticPlan;
-import snakebite.backends.casts: CastPlan;
+import snakebite.language.operators.arithmetic: ArithmeticPlan;
+import snakebite.language.operators.casts: CastPlan;
 import snakebite.frontend.typefacts: typeFacts;
 
 // DMD represents the target of a compound assignment at its promoted
@@ -61,8 +61,8 @@ package struct CompoundConversion {
 package CompoundConversion compoundConversion(
     imported!"dmd.expression".BinAssignExp expression,
 ) {
-    import snakebite.backends.arithmetic: arithmeticKind;
-    import snakebite.backends.casts: classify;
+    import snakebite.language.operators.arithmetic: arithmeticKind;
+    import snakebite.language.operators.casts: classify;
     import snakebite.native.value: TypeFacts;
 
     auto targetType = compoundTarget(expression).type;

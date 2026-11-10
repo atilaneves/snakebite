@@ -1537,7 +1537,7 @@ private Node fuse(alias make, V, Kind[] lefts, Kind[] rights, Args...)(
 // besides its two operands.
 private struct Operation(string op) {
     static if (shiftOp!op)
-        public imported!"snakebite.backends.shifts".ShiftPlan plan;
+        public imported!"snakebite.language.operators.shifts".ShiftPlan plan;
     else static if (!simpleOp!op) {
         public TypeFacts leftFacts;
         public TypeFacts rightFacts;
@@ -1556,7 +1556,7 @@ private struct Operation(string op) {
 // `e` keeps its own type: a compound assignment plans its shift differently
 // from a plain shift.
 private Operation!op operationOf(string op, E, B : BinExp)(E ev, B e) {
-    import snakebite.backends.shifts: shiftPlan;
+    import snakebite.language.operators.shifts: shiftPlan;
 
     static if (shiftOp!op)
         return Operation!op(shiftPlan(e));
@@ -6941,7 +6941,7 @@ private Node buildSliceOf(E)(E ev, SliceExp expression) {
 
 // A cast whose result is a dynamic array.
 private Node buildSliceCast(E)(E ev, CastExp castExp) {
-    import snakebite.backends.casts: layoutOf;
+    import snakebite.language.operators.casts: layoutOf;
     import snakebite.failure.report: internalFailure;
     import snakebite.native.value: CastKind;
 
@@ -7662,7 +7662,7 @@ private Node buildTypeidOf(E)(E ev, Expression object, in Scalar scalar) {
 }
 
 private Node buildIdentity(bool negate, E)(E ev, IdentityExp e) {
-    import snakebite.backends.identity: identityPlan;
+    import snakebite.language.operators.identity: identityPlan;
 
     // `is` compares bits: the plan says how many, and which operands need
     // no compare. The nodes below serve the widths they can carry.
@@ -7794,7 +7794,7 @@ private template binaryOf(string op) {
 }
 
 private Node buildBinary(string op, E)(E ev, BinExp e, in Scalar scalar) {
-    import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
+    import snakebite.language.operators.arithmetic: ArithmeticPlan, arithmeticPlan;
 
     final switch (arithmeticPlan(e).kind) with (ArithmeticPlan.Kind) {
         // dmd has scaled the offset of a pointer by the size of the pointee,
@@ -7840,7 +7840,7 @@ private Node buildBinary(string op, E)(E ev, BinExp e, in Scalar scalar) {
 // `==` and `!=`: dmd's lowering (a call to `__equals`) where it made one;
 // otherwise dynamic arrays compared as bytes, or a scalar compare.
 private Node buildEquality(bool negate, E)(E ev, EqualExp e) {
-    import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
+    import snakebite.language.operators.comparison: ComparisonPlan, comparisonPlan;
 
     if (e.lowering !is null)
         return buildValue(ev, e.lowering);
@@ -7901,7 +7901,7 @@ private Node integerCompare(string op)(
 // reads the left operand last: `x < (x = 10)` with `int x = 1` is true with
 // dmd and false with ldc. snakebite follows dmd, the host compiler of `bin/ut`.
 private Node buildCompare(string op, E)(E ev, BinExp e) {
-    import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
+    import snakebite.language.operators.comparison: ComparisonPlan, comparisonPlan;
 
     const plan = comparisonPlan(e);
     auto left = buildValue(ev, e.e1);
@@ -8003,9 +8003,9 @@ private Node fuseStep(alias make, V, Kind[] steps, Args...)(
 // arrives wrapped in the cast that promotes it, and the result is converted
 // back to the target's own type.
 private Node buildOpAssign(string op, E)(E ev, BinAssignExp e, in Scalar scalar) {
-    import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
-    import snakebite.backends.shifts: shiftPlan;
-    import snakebite.backends.compoundassign: compoundTarget;
+    import snakebite.language.operators.arithmetic: ArithmeticPlan, arithmeticPlan;
+    import snakebite.language.operators.shifts: shiftPlan;
+    import snakebite.language.operators.compound: compoundTarget;
 
     const plan = arithmeticPlan(e);
     auto step = buildValue(ev, e.e2);
@@ -8041,7 +8041,7 @@ private Node buildOpAssign(string op, E)(E ev, BinAssignExp e, in Scalar scalar)
 private Node buildFloatingOpAssign(string op, E)(
     E ev, BinAssignExp e, in Scalar scalar, Target target, Node step,
 ) {
-    import snakebite.backends.compoundassign: compoundConversion;
+    import snakebite.language.operators.compound: compoundConversion;
 
     const conversion = compoundConversion(e);
     // The type the operation runs in: an integral target's comes from the
@@ -8082,7 +8082,7 @@ private Node buildFloatingOpAssign(string op, E)(
 // pointer: the value is the old one, and the new one wraps in the target's
 // own type.
 private Node buildPost(long delta, E)(E ev, PostExp e, in Scalar scalar) {
-    import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan,
+    import snakebite.language.operators.arithmetic: ArithmeticPlan, arithmeticPlan,
         pointerPostStep;
 
     if (scalar.kind != Scalar.Kind.integral)

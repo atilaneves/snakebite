@@ -303,7 +303,7 @@ public struct StorageResolver(Result, Adapter) {
         // CatAssignExp is a BinAssignExp in dmd's AST. The typed overload
         // keeps that family dispatch complete without asking `isAssignExp`,
         // whose predicate only accepts the plain `EXP.assign` opcode.
-        import snakebite.backends.compoundassign: compoundTarget;
+        import snakebite.language.operators.compound: compoundTarget;
 
         auto target = resolve(compoundTarget(expression));
         if (auto cat = expression.isCatAssignExp)

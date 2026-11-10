@@ -1,4 +1,4 @@
-module snakebite.backends.identity;
+module snakebite.language.operators.identity;
 
 private:
 

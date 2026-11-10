@@ -5,7 +5,7 @@ private:
 
 import dmd.expression: Expression;
 import dmd.tokens: EXP;
-import snakebite.backends.identity: identityPlan;
+import snakebite.language.operators.identity: identityPlan;
 import snakebite.frontend.typefacts: typeFacts;
 import snakebite.native.value: isIntegralSize;
 import std.typecons: Flag, No, Yes;

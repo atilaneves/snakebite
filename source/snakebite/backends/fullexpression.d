@@ -178,7 +178,7 @@ public struct FullExpressionScope {
     public static imported!"dmd.expression".Expression lvalueOf(
         imported!"dmd.expression".Expression result,
     ) {
-        import snakebite.backends.casts: classify;
+        import snakebite.language.operators.casts: classify;
         import snakebite.native.value: CastKind;
         import dmd.typesem: toBasetype;
 

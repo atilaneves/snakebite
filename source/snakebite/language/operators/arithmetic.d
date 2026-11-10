@@ -1,4 +1,4 @@
-module snakebite.backends.arithmetic;
+module snakebite.language.operators.arithmetic;
 
 private:
 

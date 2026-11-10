@@ -1,4 +1,4 @@
-module snakebite.backends.shifts;
+module snakebite.language.operators.shifts;
 
 private:
 
@@ -43,7 +43,7 @@ package ShiftPlan shiftPlan(imported!"dmd.expression".BinExp expression) {
 package ShiftPlan shiftPlan(
     imported!"dmd.expression".BinAssignExp expression,
 ) {
-    import snakebite.backends.compoundassign: compoundTarget;
+    import snakebite.language.operators.compound: compoundTarget;
 
     const targetFacts = typeFacts(compoundTarget(expression).type);
     const width = typeFacts(expression.e1.type).size;
