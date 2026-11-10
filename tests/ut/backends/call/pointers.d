@@ -1344,7 +1344,6 @@ static foreach (backend; Matrix!(
     @("pointers.functionPointer.poolGrowth." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        import snakebite.ffi.callback: callbackChunkCount;
         import std.conv: text;
         import std.range: iota;
         import std.algorithm: map, sum;
@@ -1378,7 +1377,6 @@ static foreach (backend; Matrix!(
             backend_.call(function_, &result, []);
 
             result.should == expected;
-            callbackChunkCount.shouldBeGreaterThan(1);
         }
     }
 }

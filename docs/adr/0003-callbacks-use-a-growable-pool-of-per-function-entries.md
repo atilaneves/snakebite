@@ -32,8 +32,8 @@ We decide as follows.
    released, except that a bridge whose entries no host code can reach
    any more gives all of its slots back (`CallbackBridge.release`): the
    module phases of a guest program that ended. A guest function pointer
-   maps to its slot for the life of the program, within the backend
-   instance that owns the function.
+   maps to its slot for the life of the backend instance that owns the
+   function.
    A guest delegate uses the same per-function slot as its function
    pointer, and keeps its own context word untouched, because the
    host passes that context back on every call.
@@ -41,11 +41,17 @@ We decide as follows.
    adjust `this` is keyed by target and adjustment; the entry owns that
    adjustment, not the call site or the delegate context. The same entry
    mechanism can forward to a host method inherited by a guest class.
-3. The pool grows on demand. There is no fixed limit and no
-   exhaustion error. The first chunk of entries is a template linked
-   into the binary. When every slot in every chunk is taken, the pool
-   copies the template's bytes into a new read-write mapping, patches
-   the chunk's trailer, and changes the mapping to read-execute.
+3. Each `CallbackBridge` owns a pool: its chunks, its free list, and
+   its mutex. No state of a pool is process-wide, and no address range
+   is shared between pools. The pool grows on demand. There is no
+   fixed limit and no exhaustion error. A chunk of entries is a copy of
+   a template that is linked into the binary; the template is only
+   bytes, and holds no state of a pool. When every slot in every chunk
+   of a pool is taken, the pool copies the template's bytes into a new
+   read-write mapping, patches the chunk's trailer to name the chunk's
+   own slot table, and changes the mapping to read-execute. A chunk and
+   its slot table stay for as long as host code can call an entry of
+   the chunk, which is until the process ends.
    Memory is never writable and executable at the same time. If the
    kernel refuses to make the mapping executable, the pool maps one
    anonymous memory file twice instead: a read-write view to fill and
@@ -66,14 +72,20 @@ We decide as follows.
 - **A fixed pool with a hard limit.** Rejected. A limit that is large
   enough for every program is a guess, and a program that reaches it
   fails with no way to continue. Growth keeps the fixed pool's
-  properties for the common case, since the template chunk serves
-  every program that needs no more than one chunk.
+  properties for the common case, since one chunk serves every program
+  that needs no more than one chunk.
 - **Memory that is writable and executable at the same time.**
   Rejected. This is the platform-fragile part named in the research
   note above. What is accepted instead is a copy of the template
   chunk that is written first and made executable second, or a
   memory file mapped once to write and once to execute. Neither view
   is ever both writable and executable.
+- **One pool for the process.** Rejected. The path from an entry to
+  its guest function reads the chunk trailer and the slot only, so a
+  process-wide pool buys nothing there. It adds a global lock and an
+  address range that every backend instance shares, and a second
+  instance in the same process (a test, a REPL) must not depend on the
+  first.
 - **libffi closures.** Rejected. Slower in the #98 measurement, and
   an external dependency.
 

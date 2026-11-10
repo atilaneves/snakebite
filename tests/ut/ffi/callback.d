@@ -4,8 +4,7 @@ module ut.ffi.callback;
 import ut;
 import dmd.func: FuncDeclaration;
 import snakebite.ffi.callback:
-    beginCallbackChunk, callbackChunkCount, CallbackBridge, CallbackCall,
-    ChunkStrategy;
+    CallbackBridge, CallbackCall, ChunkStrategy;
 import snakebite.ffi.sysv:
     snakebite_ffi_callback_chunk, snakebite_ffi_callback_chunk_end;
 import snakebite.ffi.plan: nativeSignatureOf;
@@ -392,10 +391,9 @@ unittest {
 }
 
 
-// A chunk the pool copied from the template at run time works the same
-// as the template: `beginCallbackChunk` forces a fresh chunk made with
-// the given strategy, so the entry reserved next lives outside the
-// binary's own chunk. The dual-mapping strategy is the fallback for a
+// Every chunk of a bridge is a copy of the template: `beginChunk` forces a
+// fresh chunk made with the given strategy, so the entry reserved next lives
+// outside the binary's own template bytes. The dual-mapping strategy is the fallback for a
 // kernel that refuses to make written memory executable; a kernel that
 // allows it never takes that path on its own, so this drives it directly.
 static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
@@ -408,9 +406,9 @@ static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
         int word;
         bridge.registerFunction(&word, function_);
 
-        const chunksBefore = callbackChunkCount;
-        beginCallbackChunk(strategy);
-        callbackChunkCount.should == chunksBefore + 1;
+        const chunksBefore = bridge.chunkCount;
+        bridge.beginChunk(strategy);
+        bridge.chunkCount.should == chunksBefore + 1;
 
         auto entry = cast(IntOfInt) bridge.entryOf(&word);
         inTemplateChunk(entry).should == false;
@@ -435,7 +433,7 @@ static foreach (freshChunk; [false, true]) {
         int word;
         owner.registerFunction(&word, function_);
         if (freshChunk)
-            beginCallbackChunk(ChunkStrategy.protect);
+            owner.beginChunk(ChunkStrategy.protect);
         const entry = owner.entryOf(&word);
 
         owner.guestTarget(entry).word.should == &word;
@@ -457,7 +455,7 @@ static foreach (freshChunk; [false, true]) {
         int word;
         bridge.registerFunction(&word, function_);
         if (freshChunk)
-            beginCallbackChunk(ChunkStrategy.protect);
+            bridge.beginChunk(ChunkStrategy.protect);
         const entry = bridge.entryOf(&word);
         bridge.guestTarget(entry).word.should == &word;
 
@@ -488,7 +486,7 @@ static foreach (freshChunk; [false, true]) {
         int word;
         bridge.registerFunction(&word, function_);
         if (freshChunk)
-            beginCallbackChunk(ChunkStrategy.protect);
+            bridge.beginChunk(ChunkStrategy.protect);
 
         const entry = bridge.adjustedFunctionEntryOf(&word, function_, -16);
 
