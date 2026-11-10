@@ -30,7 +30,7 @@ We decide as follows.
    program counter, and embeds no absolute address of any table.
 2. A slot is keyed by guest function, never by call, and is never
    released, except that a bridge whose entries no host code can reach
-   any more gives all of its slots back (`CallbackBridge.release`): the
+   any more gives back all of its chunks (`CallbackBridge.release`): the
    module phases of a guest program that ended. A guest function pointer
    maps to its slot for the life of the backend instance that owns the
    function.
@@ -41,8 +41,8 @@ We decide as follows.
    adjust `this` is keyed by target and adjustment; the entry owns that
    adjustment, not the call site or the delegate context. The same entry
    mechanism can forward to a host method inherited by a guest class.
-3. Each `CallbackBridge` owns a pool: its chunks, its free list, and
-   its mutex. No state of a pool is process-wide, and no address range
+3. Each `CallbackBridge` owns a pool: its chunks and its mutex.
+   No state of a pool is process-wide, and no address range
    is shared between pools. The pool grows on demand. There is no
    fixed limit and no exhaustion error. A chunk of entries is a copy of
    a template that is linked into the binary; the template is only
@@ -51,7 +51,8 @@ We decide as follows.
    read-write mapping, patches the chunk's trailer to name the chunk's
    own slot table, and changes the mapping to read-execute. A chunk and
    its slot table stay for as long as host code can call an entry of
-   the chunk, which is until the process ends.
+   the chunk, which is until `CallbackBridge.release` unmaps the chunk and
+   drops the root of its slot table, or until the process ends.
    Memory is never writable and executable at the same time. If the
    kernel refuses to make the mapping executable, the pool maps one
    anonymous memory file twice instead: a read-write view to fill and

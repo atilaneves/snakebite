@@ -10,7 +10,7 @@ import snakebite.ffi.sysv:
 import snakebite.ffi.plan: nativeSignatureOf;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
-import std.conv: text;
+import std.conv: text, to;
 
 
 // These tests drive the callback pool (`snakebite.ffi.callback`, ADR-0003)
@@ -415,6 +415,57 @@ static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
 
         entry(100).should == 201;
         recorded.integers.should == [100];
+    }
+}
+
+
+// Bytes of read-execute mappings the process holds that have no file, or
+// that are the pool's memory file: what a chunk of entries occupies.
+private size_t executableChunkBytes() {
+    import std.algorithm: canFind;
+    import std.file: readText;
+    import std.string: lineSplitter, split;
+
+    size_t total;
+    foreach (line; readText("/proc/self/maps").lineSplitter) {
+        const fields = line.split;
+        if (fields[1][0 .. 3] != "r-x" || (fields.length > 5
+                && !fields[5].canFind("snakebite-callbacks")))
+            continue;
+        const range = fields[0].split("-");
+        total += range[1].to!size_t(16) - range[0].to!size_t(16);
+    }
+    return total;
+}
+
+
+// A released bridge gives back what it mapped: after many bridges were made,
+// used and released, the process holds no more executable memory for entries
+// than before. Without this, a process that makes a bridge per module run
+// ends up out of mappings.
+static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
+    @("release.givesBackChunks." ~ text(strategy))
+    unittest {
+        import core.memory: pageSize;
+
+        auto function_ = declarationOf(
+            q{ extern(C) int twice(int x); }, "twice");
+        int word;
+        Recorded recorded;
+        enum rounds = 2000;
+
+        const before = executableChunkBytes;
+        foreach (round; 0 .. rounds) {
+            auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
+            bridge.register(&word, function_);
+            bridge.beginChunk(strategy);
+            auto entry = cast(IntOfInt) bridge.entryOf(&word);
+            entry(round).should == round * 2 + 1;
+            bridge.release;
+        }
+
+        (executableChunkBytes - before < rounds * pageSize / 4)
+            .should == true;
     }
 }
 

@@ -8,6 +8,9 @@ import snakebite.internalfailure: internalFailure;
 
 
 import core.sync.mutex: Mutex;
+import core.sys.posix.sys.mman:
+    MAP_ANON, MAP_FAILED, MAP_PRIVATE, MAP_SHARED, PROT_EXEC, PROT_READ,
+    PROT_WRITE, mmap, mprotect, munmap;
 import snakebite.ffi.plan: CallPlan, NativeSignature, prepareCallback;
 import snakebite.ffi.sysv:
     CallbackTrailer, CallFrame, callbackEntriesPerChunk, callbackEntryBytes,
@@ -23,14 +26,13 @@ import snakebite.ffi.sysv:
 // which finds the entry's slot and replays the slot's plan in reverse to
 // re-enter the backend that owns the slot.
 //
-// Each `CallbackBridge` owns a `Pool`: its chunks, its free list and its
-// mutex. The template linked into the binary is only bytes: a new chunk
+// Each `CallbackBridge` owns a `Pool`: its chunks and its mutex. The template linked into the binary is only bytes: a new chunk
 // is a copy of them in a new mapping, flipped to read-execute
 // (`allocateChunk`), so memory is never writable and executable at the
 // same time. A slot is released only by `CallbackBridge.release`, for a
-// bridge whose entries no host code can call any more; the next
-// reservation of that bridge reuses it. A chunk and its slot table stay
-// until the process ends, so an entry that host code keeps stays callable.
+// bridge whose entries no host code can call any more; it unmaps every
+// chunk and drops the root of every slot table. Until then a chunk and its
+// slot table stay, so an entry that host code keeps stays callable.
 // Nothing else is shared between bridges, and no lock is taken when an
 // entry is called (ADR-0006).
 
@@ -98,7 +100,6 @@ public enum ChunkStrategy {
 // completely before its entry is handed out.
 private struct Pool {
     Chunk[] chunks;
-    const(void)*[] freeEntries;
     Mutex mutex;
 }
 
@@ -144,18 +145,11 @@ private size_t trailerOffset() {
 }
 
 
-// The address host code calls for `slot`: an entry that was released, else
-// the next free entry, from a new chunk if every existing one is full.
+// The address host code calls for `slot`: the next free entry, from a new
+// chunk if every existing one is full.
 private const(void)* reserve(ref Pool pool, Slot slot) {
     pool.mutex.lock;
     scope(exit) pool.mutex.unlock;
-
-    if (pool.freeEntries.length) {
-        const entry = pool.freeEntries[$ - 1];
-        pool.freeEntries = pool.freeEntries[0 .. $ - 1];
-        *pool.slotOf(entry) = slot;
-        return entry;
-    }
 
     if (pool.chunks.length == 0
             || pool.chunks[$ - 1].used == callbackEntriesPerChunk)
@@ -168,36 +162,33 @@ private const(void)* reserve(ref Pool pool, Slot slot) {
 }
 
 
-// Makes `entries`, which `reserve` handed out, free for the next
-// reservation. Host code must not call them after this.
-private void releaseEntries(ref Pool pool, in const(void)*[] entries) {
+// Gives every chunk of `pool` back: unmaps its entries and lets the
+// collector free its slot table. Host code must not call any entry of the
+// pool after this.
+private void releaseChunks(ref Pool pool) {
+    import core.memory: GC;
+
     pool.mutex.lock;
     scope(exit) pool.mutex.unlock;
 
-    foreach (entry; entries) {
-        *pool.slotOf(entry) = Slot.init;
-        pool.freeEntries ~= entry;
+    foreach (chunk; pool.chunks) {
+        GC.removeRoot(chunk.slots.ptr);
+        munmap(cast(void*) chunk.base, roundUpToPage(chunkBytes));
     }
+    pool.chunks = null;
 }
 
 
-private Slot* slotOf(ref Pool pool, in const(void)* entry) {
-    foreach (ref chunk; pool.chunks) {
-        const offset = cast(const(ubyte)*) entry - chunk.base;
-        if (offset >= 0
-                && offset < callbackEntriesPerChunk * callbackEntryBytes)
-            return &chunk.slots[offset / callbackEntryBytes];
-    }
-
-    internalFailure("the entry belongs to a chunk of the pool");
+private size_t chunkBytes() {
+    return templateEnd - templateBase;
 }
 
 
 // A new chunk: the template's bytes, in memory this process can execute,
 // with the trailer patched to reach `snakebite_ffi_callback_common` from
 // the copy's own address and to name the copy's own slot table. The table
-// is a GC root for as long as the process runs: host code can call the
-// chunk's entries until then, and each used slot holds its owner.
+// is a GC root until `releaseChunks`: host code can call the chunk's
+// entries until then, and each used slot holds its owner.
 // `fallback` says whether a refused `protect` may fall through to
 // `dualMapping`.
 private Chunk allocateChunk(in ChunkStrategy strategy, in bool fallback) {
@@ -249,9 +240,6 @@ private void fillChunk(
 // Returns null, with the mapping released, when the kernel refuses the
 // flip - the one failure `allocateChunk` can fall back from.
 private const(ubyte)* copyThenProtect(in size_t bytes, Slot* slots) {
-    import core.sys.posix.sys.mman:
-        MAP_ANON, MAP_FAILED, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE,
-        mmap, mprotect, munmap;
 
     const size = roundUpToPage(bytes);
     auto mapping = cast(ubyte*) mmap(
@@ -276,9 +264,6 @@ private const(ubyte)* copyThenProtect(in size_t bytes, Slot* slots) {
 // a read-execute view to keep. The write view is unmapped once filled, so
 // nothing stays writable and executable at the same time.
 private const(ubyte)* copyDualMapped(in size_t bytes, Slot* slots) {
-    import core.sys.posix.sys.mman:
-        MAP_FAILED, MAP_SHARED, PROT_EXEC, PROT_READ, PROT_WRITE,
-        mmap, munmap;
     import core.sys.posix.unistd: close, ftruncate;
 
     const size = roundUpToPage(bytes);
@@ -427,9 +412,9 @@ private void invoke(ref Slot slot, CallFrame* frame) {
 // reserves the slot on first use - keyed by guest function, so a
 // delegate to a function and a pointer to it share one entry, and the
 // delegate keeps its own context word because the host passes that
-// word back on every call. Slots are never released: host code may keep
-// an entry for as long as it likes, and this bridge keeps its owner
-// reachable for the same reason.
+// word back on every call. Slots are not released one by one: host code
+// may keep an entry for as long as it likes, and this bridge keeps its
+// owner reachable for the same reason, until `release`.
 //
 // Any thread that runs guest code registers words and crosses the
 // barrier with them (ADR-0006): a registered word is found without a
@@ -550,7 +535,6 @@ public struct CallbackBridge {
                     _handler, _owner, word, plan);
                 const entry = _pool.reserve(slot);
                 _wordOfEntry.insert(entry, word);
-                _reserved ~= entry;
                 atomicStore!(MemoryOrder.rel)(registered.entry, entry);
             }
         });
@@ -564,15 +548,14 @@ public struct CallbackBridge {
         return atomicLoad!(MemoryOrder.acq)(registered.entry);
     }
 
-    // Gives every entry of this bridge back to the pool, and with them the
-    // reference to the owner that the pool slots held. The caller promises
-    // that no host code can call an entry again, and does not use the
-    // bridge again.
+    // Gives back every chunk of this bridge, and with them the reference to
+    // the owner that the pool slots held. The caller promises that no host
+    // code can call an entry again, and does not use the bridge again.
     public void release() {
         import snakebite.frontend.compiler: withCompilerLock;
 
         withCompilerLock({
-            _pool.releaseEntries(_reserved);
+            _pool.releaseChunks;
             _reserved = null;
         });
     }
@@ -662,7 +645,6 @@ public struct CallbackBridge {
                 contains(word) ? null : word,
             );
             const reserved = _pool.reserve(slot);
-            _reserved ~= reserved;
             if (contains(word))
                 _adjustedGuestEntries.insert(reserved, key);
             entry = *_adjustedEntries.insert(key, reserved);
