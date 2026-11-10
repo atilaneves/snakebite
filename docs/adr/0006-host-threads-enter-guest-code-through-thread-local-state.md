@@ -21,7 +21,9 @@ code with none. Shared structures, such as the plan cache, the
 resolver, and the callback pool of a `CallbackBridge` (ADR-0003), are
 either immutable once built, or guarded by a lock on their slow path
 only. Their fast path takes no lock. The callback pool is not
-program-wide: each bridge owns its chunks and its lock.
+program-wide: each bridge owns its chunks, its lock and the address
+range that its chunks use, and a lock-free read of the range's table tells
+a guest call which guest function an entry runs.
 A thread druntime does not know about is attached on its first entry,
 so the GC can scan its stack (ADR-0005). The first
 test of this decision is unit-threaded's task pool running without

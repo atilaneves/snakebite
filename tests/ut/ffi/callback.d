@@ -493,6 +493,26 @@ static foreach (freshChunk; [false, true]) {
 }
 
 
+// A bridge that has more chunks than its reserved address range holds still
+// names the guest function behind an entry of a chunk outside the range.
+@("guestTarget.chunkOutsideTheRange")
+unittest {
+    auto function_ = declarationOf(
+        q{ extern(C) int twice(int x); }, "twice");
+    Recorded recorded;
+    auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
+    int word;
+    bridge.register(&word, function_);
+    foreach (_; 0 .. 300)
+        bridge.beginChunk(ChunkStrategy.protect);
+
+    const entry = bridge.entryOf(&word);
+
+    bridge.guestTarget(entry).word.should == &word;
+    (cast(IntOfInt) entry)(100).should == 201;
+}
+
+
 // An entry that adjusts the receiver names its target together with the
 // adjustment, so a guest call through it passes the adjusted receiver on.
 static foreach (freshChunk; [false, true]) {

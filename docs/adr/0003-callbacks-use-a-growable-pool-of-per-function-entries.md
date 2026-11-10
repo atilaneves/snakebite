@@ -53,6 +53,15 @@ We decide as follows.
    its slot table stay for as long as host code can call an entry of
    the chunk, which is until `CallbackBridge.release` unmaps the chunk and
    drops the root of its slot table, or until the process ends.
+   A pool reserves an address range of its own at its first chunk
+   (address space only, 1 MiB) and maps each chunk into the next page of
+   it, with a table that holds the guest function of each entry. A guest
+   call through an address in the range finds its target with one
+   comparison and an index, with no hash lookup and no lock. A chunk
+   that does not fit in the range, or every chunk when the reservation
+   failed, is mapped where the kernel chooses and is found through the
+   bridge's tables; the range is no limit. `CallbackBridge.release` gives
+   the range back with the chunks.
    Memory is never writable and executable at the same time. If the
    kernel refuses to make the mapping executable, the pool maps one
    anonymous memory file twice instead: a read-write view to fill and

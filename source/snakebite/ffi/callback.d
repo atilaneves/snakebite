@@ -9,8 +9,8 @@ import snakebite.internalfailure: internalFailure;
 
 import core.sync.mutex: Mutex;
 import core.sys.posix.sys.mman:
-    MAP_ANON, MAP_FAILED, MAP_PRIVATE, MAP_SHARED, PROT_EXEC, PROT_READ,
-    PROT_WRITE, mmap, mprotect, munmap;
+    MAP_ANON, MAP_FAILED, MAP_FIXED, MAP_PRIVATE, MAP_SHARED, PROT_EXEC,
+    PROT_NONE, PROT_READ, PROT_WRITE, mmap, mprotect, munmap;
 import snakebite.ffi.plan: CallPlan, NativeSignature, prepareCallback;
 import snakebite.ffi.sysv:
     CallbackTrailer, CallFrame, callbackEntriesPerChunk, callbackEntryBytes,
@@ -26,15 +26,16 @@ import snakebite.ffi.sysv:
 // which finds the entry's slot and replays the slot's plan in reverse to
 // re-enter the backend that owns the slot.
 //
-// Each `CallbackBridge` owns a `Pool`: its chunks and its mutex. The
-// template linked into the binary is only bytes: a new chunk is a copy of
-// them in a new mapping, flipped to read-execute (`allocateChunk`), so
-// memory is never writable and executable at the same time. A slot is
-// released only by `CallbackBridge.release`, for a bridge whose entries no
-// host code can call any more; it unmaps every chunk and drops the root of
-// every slot table. Until then a chunk and its slot table stay, so an entry
-// that host code keeps stays callable. Nothing else is shared between
-// bridges, and no lock is taken when an entry is called (ADR-0006).
+// Each `CallbackBridge` owns a `Pool`: its chunks, its mutex and its
+// address range (`Pool`, below). The template linked into the binary is only
+// bytes: a new chunk is a copy of them in a new mapping, flipped to
+// read-execute (`allocateChunk`), so memory is never writable and executable
+// at the same time. A slot is released only by `CallbackBridge.release`, for
+// a bridge whose entries no host code can call any more; it unmaps every
+// chunk and the range, and drops the root of every slot table. Until then a
+// chunk and its slot table stay, so an entry that host code keeps stays
+// callable. Nothing else is shared between bridges, and no lock is taken
+// when an entry is called (ADR-0006).
 
 
 // What the pool hands a backend when host code calls one of its guest
@@ -95,12 +96,65 @@ public enum ChunkStrategy {
 }
 
 
+// What `CallbackBridge.guestTarget` reads for an entry in the bridge's
+// reserved range. `word` is written last, with release, and is null while
+// the entry is free or forwards to a host function.
+private struct GuestEntry {
+    const(void)* word;
+    ptrdiff_t adjustment;
+}
+
+
+// 1 MiB of address space for the chunks of one bridge: 256 one-page chunks,
+// 65024 entries. Nothing is committed until a chunk is mapped, and the part
+// of the guest-entry table that describes a chunk is committed when the
+// chunk's place in the range is claimed.
+private enum reservedBytes = size_t(1) << 20;
+
+
 // One bridge's pool of entries. Guarded by `mutex`; the entry code and
 // the handler read a chunk's slot table without it, and a slot is written
 // completely before its entry is handed out.
+//
+// The pool reserves one address range at its first chunk, followed by a
+// table with a `GuestEntry` for each 16 bytes of the range, and maps each
+// chunk into the next page of the range. An address inside the claimed part
+// of the range is an entry of this pool, and the table says which guest
+// function it runs: one comparison and an index, no hash lookup and no lock
+// (ADR-0006). A chunk that does not fit in the range, or every chunk when
+// the reservation failed, is mapped wherever the kernel chooses and found
+// through the bridge's hash tables, so the pool has no fixed limit
+// (ADR-0003).
 private struct Pool {
     Chunk[] chunks;
     Mutex mutex;
+    // Set under `mutex` before the first release store of `rangeClaimed`;
+    // read without a lock only after an acquire load of `rangeClaimed`.
+    // Null when the reservation failed or was not tried yet.
+    ubyte* range;
+    GuestEntry* guestEntries;
+    // How much of the range chunks use. Written under `mutex`.
+    size_t rangeUsed;
+    // How much of `guestEntries` is committed, as a length of the range.
+    // Stored with release under `mutex`, after the pages are readable; an
+    // address at or past it is not an entry yet.
+    shared(size_t) rangeClaimed;
+    bool rangeTried;
+
+    bool inRange(in const(void)* address) const {
+        return cast(size_t) address - cast(size_t) range < reservedBytes;
+    }
+
+    // The table position of `address` when it is in the claimed part of the
+    // range; null for any other address.
+    inout(GuestEntry)* guestEntryOf(in const(void)* address) inout {
+        import core.atomic: atomicLoad, MemoryOrder;
+
+        const claimed = atomicLoad!(MemoryOrder.acq)(rangeClaimed);
+        const offset = cast(size_t) address - cast(size_t) range;
+        return offset < claimed
+            ? &guestEntries[offset / callbackEntryBytes] : null;
+    }
 }
 
 
@@ -153,12 +207,29 @@ private const(void)* reserve(ref Pool pool, Slot slot) {
 
     if (pool.chunks.length == 0
             || pool.chunks[$ - 1].used == callbackEntriesPerChunk)
-        pool.chunks ~= allocateChunk(ChunkStrategy.protect, true);
+        pool.chunks ~= pool.allocateChunk(ChunkStrategy.protect, true);
 
     auto chunk = &pool.chunks[$ - 1];
     const index = chunk.used++;
     chunk.slots[index] = slot;
-    return chunk.base + index * callbackEntryBytes;
+    const entry = chunk.base + index * callbackEntryBytes;
+    pool.publishGuest(entry, slot);
+    return entry;
+}
+
+
+// Callers hold `pool.mutex`. The fields are written before `word`, whose
+// release store publishes them to `guestTarget`. The entry's address
+// reaches guest data only after this returns.
+private void publishGuest(ref Pool pool, in const(void)* entry, in Slot slot) {
+    import core.atomic: atomicStore, MemoryOrder;
+
+    auto guest = pool.guestEntryOf(entry);
+    if (guest is null || slot.nativeAddress !is null)
+        return;
+
+    guest.adjustment = slot.contextAdjustment;
+    atomicStore!(MemoryOrder.rel)(guest.word, slot.function_);
 }
 
 
@@ -166,17 +237,30 @@ private const(void)* reserve(ref Pool pool, Slot slot) {
 // collector free its slot table. Host code must not call any entry of the
 // pool after this.
 private void releaseChunks(ref Pool pool) {
+    import core.atomic: atomicStore, MemoryOrder;
     import core.memory: GC;
 
     pool.mutex.lock;
     scope(exit) pool.mutex.unlock;
 
+    // No entry is an entry any more, and no reader gets a stale table.
+    atomicStore!(MemoryOrder.rel)(pool.rangeClaimed, 0);
     foreach (chunk; pool.chunks) {
         GC.removeRoot(chunk.slots.ptr);
-        munmap(cast(void*) chunk.base, roundUpToPage(chunkBytes));
+        if (!pool.inRange(chunk.base))
+            munmap(cast(void*) chunk.base, roundUpToPage(chunkBytes));
     }
     pool.chunks = null;
+    if (pool.range !is null)
+        munmap(pool.range, reservedBytes + tableBytes);
+    pool.range = null;
+    pool.guestEntries = null;
+    pool.rangeUsed = 0;
+    pool.rangeTried = false;
 }
+
+
+private enum tableBytes = reservedBytes / callbackEntryBytes * GuestEntry.sizeof;
 
 
 private size_t chunkBytes() {
@@ -191,33 +275,86 @@ private size_t chunkBytes() {
 // entries until then, and each used slot holds its owner.
 // `fallback` says whether a refused `protect` may fall through to
 // `dualMapping`.
-private Chunk allocateChunk(in ChunkStrategy strategy, in bool fallback) {
+private Chunk allocateChunk(
+    ref Pool pool, in ChunkStrategy strategy, in bool fallback,
+) {
     import core.memory: GC;
 
     auto slots = new Slot[callbackEntriesPerChunk];
     const bytes = chunkBytes;
+    auto target = pool.claimRange(roundUpToPage(bytes));
 
     const(ubyte)* base;
     final switch (strategy) with (ChunkStrategy) {
         case protect:
-            base = copyThenProtect(bytes, slots.ptr);
+            base = copyThenProtect(bytes, slots.ptr, target);
             if (base is null) {
                 if (!fallback)
                     throw new Exception(
                         "ffi callback pool: mprotect refused to make the " ~
                             "chunk executable, and no fallback was allowed",
                     );
-                base = copyDualMapped(bytes, slots.ptr);
+                base = copyDualMapped(bytes, slots.ptr, target);
             }
             break;
 
         case dualMapping:
-            base = copyDualMapped(bytes, slots.ptr);
+            base = copyDualMapped(bytes, slots.ptr, target);
             break;
     }
 
     GC.addRoot(slots.ptr);
     return Chunk(base, slots, 0);
+}
+
+
+// The next `size` bytes of the pool's range, or null when it is used up,
+// could not be reserved, or the kernel refuses to commit the matching part
+// of the table. The first call reserves the range. Callers hold
+// `pool.mutex`.
+private ubyte* claimRange(ref Pool pool, in size_t size) {
+    import core.atomic: atomicStore, MemoryOrder;
+    import core.memory: pageSize;
+
+    if (!pool.rangeTried) {
+        pool.rangeTried = true;
+        auto range = mmap(
+            null, reservedBytes + tableBytes, PROT_NONE,
+            MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+        if (range != MAP_FAILED) {
+            pool.range = cast(ubyte*) range;
+            pool.guestEntries = cast(GuestEntry*) (pool.range + reservedBytes);
+        }
+    }
+
+    if (pool.range is null || pool.rangeUsed + size > reservedBytes)
+        return null;
+
+    const first = pool.rangeUsed / callbackEntryBytes * GuestEntry.sizeof;
+    const last = (pool.rangeUsed + size) / callbackEntryBytes
+        * GuestEntry.sizeof;
+    const start = first / pageSize * pageSize;
+    if (mprotect(
+            cast(ubyte*) pool.guestEntries + start,
+            roundUpToPage(last) - start,
+            PROT_READ | PROT_WRITE) != 0)
+        return null;
+
+    auto claimed = pool.range + pool.rangeUsed;
+    pool.rangeUsed += size;
+    atomicStore!(MemoryOrder.rel)(pool.rangeClaimed, pool.rangeUsed);
+    return claimed;
+}
+
+
+// Gives a mapping back: a chunk in the range goes back to reserved address
+// space, which later chunks may need, and any other mapping is unmapped.
+private void discardMapping(ubyte* mapping, in size_t size, in bool inRange) {
+    if (inRange)
+        mmap(mapping, size, PROT_NONE,
+            MAP_PRIVATE | MAP_ANON | MAP_NORESERVE | MAP_FIXED, -1, 0);
+    else
+        munmap(mapping, size);
 }
 
 
@@ -236,13 +373,17 @@ private void fillChunk(
 }
 
 
-// An anonymous read-write mapping, filled, then flipped to read-execute.
-// Returns null, with the mapping released, when the kernel refuses the
-// flip - the one failure `allocateChunk` can fall back from.
-private const(ubyte)* copyThenProtect(in size_t bytes, Slot* slots) {
+// An anonymous read-write mapping at `target` (anywhere when null), filled,
+// then flipped to read-execute. Returns null, with the mapping released,
+// when the kernel refuses the flip - the one failure `allocateChunk` can
+// fall back from.
+private const(ubyte)* copyThenProtect(
+    in size_t bytes, Slot* slots, ubyte* target,
+) {
     const size = roundUpToPage(bytes);
     auto mapping = cast(ubyte*) mmap(
-        null, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        target, size, PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANON | (target is null ? 0 : MAP_FIXED), -1, 0);
     if (mapping == cast(ubyte*) MAP_FAILED)
         throw new Exception(
             "ffi callback pool: " ~ errnoText("mmap of a new chunk"),
@@ -251,7 +392,7 @@ private const(ubyte)* copyThenProtect(in size_t bytes, Slot* slots) {
     fillChunk(mapping, mapping, slots);
 
     if (mprotect(mapping, size, PROT_READ | PROT_EXEC) != 0) {
-        munmap(mapping, size);
+        discardMapping(mapping, size, target !is null);
         return null;
     }
 
@@ -261,8 +402,11 @@ private const(ubyte)* copyThenProtect(in size_t bytes, Slot* slots) {
 
 // One anonymous memory file, mapped twice: a read-write view to fill, and
 // a read-execute view to keep. The write view is unmapped once filled, so
-// nothing stays writable and executable at the same time.
-private const(ubyte)* copyDualMapped(in size_t bytes, Slot* slots) {
+// nothing stays writable and executable at the same time. The read-execute
+// view goes to `target` (anywhere when null).
+private const(ubyte)* copyDualMapped(
+    in size_t bytes, Slot* slots, ubyte* target,
+) {
     import core.sys.posix.unistd: close, ftruncate;
 
     const size = roundUpToPage(bytes);
@@ -279,7 +423,8 @@ private const(ubyte)* copyDualMapped(in size_t bytes, Slot* slots) {
         );
 
     auto executable = cast(ubyte*) mmap(
-        null, size, PROT_READ | PROT_EXEC, MAP_SHARED, file, 0);
+        target, size, PROT_READ | PROT_EXEC,
+        MAP_SHARED | (target is null ? 0 : MAP_FIXED), file, 0);
     if (executable == cast(ubyte*) MAP_FAILED)
         throw new Exception(
             "ffi callback pool: "
@@ -289,7 +434,7 @@ private const(ubyte)* copyDualMapped(in size_t bytes, Slot* slots) {
     auto writable = cast(ubyte*) mmap(
         null, size, PROT_READ | PROT_WRITE, MAP_SHARED, file, 0);
     if (writable == cast(ubyte*) MAP_FAILED) {
-        munmap(executable, size);
+        discardMapping(executable, size, target !is null);
         throw new Exception(
             "ffi callback pool: "
                 ~ errnoText("read-write mapping of the memory file"),
@@ -301,6 +446,10 @@ private const(ubyte)* copyDualMapped(in size_t bytes, Slot* slots) {
 
     return executable;
 }
+
+
+// Linux's value; druntime does not declare it.
+private enum MAP_NORESERVE = 0x4000;
 
 
 private extern(C) int memfd_create(const(char)* name, uint flags) @nogc nothrow;
@@ -582,7 +731,7 @@ public struct CallbackBridge {
         _pool.mutex.lock;
         scope(exit) _pool.mutex.unlock;
 
-        _pool.chunks ~= allocateChunk(strategy, false);
+        _pool.chunks ~= _pool.allocateChunk(strategy, false);
     }
 
     // The guest word behind one of this bridge's own entries, or null.
@@ -603,6 +752,17 @@ public struct CallbackBridge {
     // Adjusted entries must retain their receiver offset when a backend
     // resolves them to guest calls. Stripping only the entry loses it.
     public GuestTarget guestTarget(const(void)* address) const {
+        import core.atomic: atomicLoad, MemoryOrder;
+
+        // An address in this bridge's range is one of its entries or none,
+        // and the table says which. It is read without a lock: `word` is
+        // stored last, with release.
+        if (const guest = _pool.guestEntryOf(address)) {
+            const word = atomicLoad!(MemoryOrder.acq)(guest.word);
+            return word !is null
+                ? GuestTarget(word, guest.adjustment) : GuestTarget.init;
+        }
+
         if (auto adjusted = address in _adjustedGuestEntries)
             return GuestTarget(adjusted.word, adjusted.offset);
         if (const word = wordOf(address))
