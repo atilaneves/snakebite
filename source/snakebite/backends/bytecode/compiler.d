@@ -974,8 +974,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.backends.closureplan: ClosurePlan;
     import snakebite.backends.compoundassign:
         CompoundConversion, compoundConversion;
-    import snakebite.backends.contextpair: constructedObjectOffset, constructsThroughPair;
-    import snakebite.backends.contextsource: ContextSource, PairPlan, calleeContextSourceOf, contextSourceOf, pairPlanOf;
+    import snakebite.backends.contextpair:
+        constructedObjectOffset, constructsThroughPair;
+    import snakebite.backends.contextsource:
+        ContextSource, PairPlan, calleeContextSourceOf, contextSourceOf,
+        pairPlanOf;
     import snakebite.backends.bytecode.relocation:
         Address, Place, Reloc, Target;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;

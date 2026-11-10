@@ -596,7 +596,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         DelegateTarget, isCtfeVariable, outerFunctionOf;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.backends.closureplan: ClosurePlan, Hop;
-    import snakebite.backends.contextsource: ContextSource, PairPlan, contextSourceOf, pairPlanOf;
+    import snakebite.backends.contextsource:
+        ContextSource, PairPlan, contextSourceOf, pairPlanOf;
     import snakebite.backends.interpreter.scout: BodyScout, Preparation;
     import snakebite.backends.classinfo;
     import dmd.dclass: ClassDeclaration;
@@ -1300,7 +1301,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             });
         }
 
-        import snakebite.backends.contextpair: constructedObjectOffset, constructsThroughPair;
+        import snakebite.backends.contextpair:
+            constructedObjectOffset, constructsThroughPair;
         import snakebite.backends.temporary: constructTemporary;
         import snakebite.nativelayout: loadIntegral;
 
