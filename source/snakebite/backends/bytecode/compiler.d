@@ -73,6 +73,17 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     private PlanCache _plans;
     // What the functions of this backend do with the JIT.
     private JitSetting _jit;
+    // The JIT code region and the other JIT state of this instance. Its
+    // address never changes, and each `Function` that this instance compiles
+    // points to it. The destructor of the field frees the region.
+    static if (imported!"snakebite.backends.bytecode.jit".jitSupported) {
+        private imported!"snakebite.backends.bytecode.jit".JitInstance
+            _jitInstance;
+
+        package auto jitInstance() {
+            return &_jitInstance;
+        }
+    }
     private CallSelection _callSelection;
     // Keyed by pointer, not by value: a call site compiled while
     // `function_` itself is still mid-compile - direct or mutual
@@ -1342,6 +1353,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         result.fixWindowFacts();
         result.jitHeat = _jit.jitStartHeat;
         result.jitCounts = _jit.jitCounting;
+        static if (imported!"snakebite.backends.bytecode.jit".jitSupported)
+            result.jit = _bytecode.jitInstance;
         return result;
     }
 

@@ -1027,6 +1027,9 @@ public struct Function {
     package uint jitState;
     // Whether calls of this function count towards `jitHeat`.
     package bool jitCounts;
+    // The JIT state of the `Bytecode` instance that compiled this function.
+    static if (jitSupported)
+        package imported!"snakebite.backends.bytecode.jit".JitInstance* jit;
 
     package void fixWindowFacts() {
         activationAlignment = frameAlignment > uint(Activation.alignof)
@@ -5454,20 +5457,33 @@ static if (jitSupported) {
     // `failed` when it cannot have any.
     private enum JitTier : uint { interpreted, compiling, compiled, failed }
 
-    // The tables that classify handlers, and the buffers of one compile. They
-    // belong to the JIT lock: only `JitLock.owned` gives access to them. The
-    // first thread that compiles builds the tables.
+    // The tables that classify handlers. They are the same for each
+    // instance and nothing writes them after they are built, so they are
+    // `immutable` and shared by all instances.
     private struct JitTables {
         // The handlers that have a template, with how to emit them.
         JitOp[Instruction.Handler] jitTable;
         Unspecialised[Instruction.Handler] unspecialised;
-        bool ready;
-        Scratch!JitOp opScratch;
-        Scratch!Instruction snapshotScratch;
-        Scratch!(Instruction.Handler) originalScratch;
     }
 
-    private shared JitTables _jitTables;
+    private shared(immutable(JitTables)*) _jitTables;
+
+    // The tables, built by the first thread that needs them. Two threads can
+    // build them at the same time; the first to publish wins and the other
+    // copy is garbage. Nobody waits.
+    private immutable(JitTables)* jitTables() nothrow {
+        import core.atomic: atomicLoad, cas, MemoryOrder;
+
+        if (auto built = atomicLoad!(MemoryOrder.acq)(_jitTables))
+            return built;
+        auto fresh = new JitTables;
+        (*fresh).buildJitTable;
+        (*fresh).buildUnspecialiseTable;
+        auto frozen = cast(immutable(JitTables)*) fresh;
+        if (cas(&_jitTables, cast(immutable(JitTables)*) null, frozen))
+            return frozen;
+        return atomicLoad!(MemoryOrder.acq)(_jitTables);
+    }
 
     // How `specialiseHandlers` made a handler: the general handler, and the
     // indirect operands whose bit it cleared (`mask`: 1 destination, 2 source,
@@ -5497,7 +5513,8 @@ static if (jitSupported) {
         // A guest destructor in a GC finalizer can make a function hot. The
         // function keeps its handlers until a later event outside the
         // finalizer.
-        auto lock = GC.inFinalizer ? JitLock.init : JitLock.tryTake;
+        auto lock = GC.inFinalizer || function_.jit is null
+            ? JitLock.init : JitLock.tryTake(*function_.jit);
         if (!lock.held) {
             atomicStore!(MemoryOrder.rel)(*state,
                 cast(uint) JitTier.interpreted);
@@ -5515,13 +5532,13 @@ static if (jitSupported) {
     {
         if (!lock.jitUsable)
             return false;
-        ref tables = lock.owned(_jitTables);
-        tables.ensureJitTables;
+        ref tables = *jitTables;
+        ref scratch = lock.state;
         auto instructions = function_.instructions;
         const n = instructions.length;
-        auto snapshotMemory = tables.snapshotScratch.reserve(n);
-        auto opMemory = tables.opScratch.reserve(n);
-        auto originalMemory = tables.originalScratch.reserve(n);
+        auto snapshotMemory = scratch.snapshotScratch.reserve(n);
+        auto opMemory = scratch.opScratch.reserve(n);
+        auto originalMemory = scratch.originalScratch.reserve(n);
         if (snapshotMemory is null || opMemory is null
                 || originalMemory is null)
             return false;
@@ -5552,15 +5569,6 @@ static if (jitSupported) {
         }
         return lock.jitFunction(instructions, snapshot, ops, originals,
             function_.constants);
-    }
-
-    // Builds the tables of `tables` once.
-    private void ensureJitTables(ref JitTables tables) nothrow {
-        if (!tables.ready) {
-            tables.buildJitTable;
-            tables.buildUnspecialiseTable;
-            tables.ready = true;
-        }
     }
 
     private void buildJitTable(ref JitTables tables) nothrow {

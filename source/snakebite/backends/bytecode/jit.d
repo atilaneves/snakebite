@@ -245,9 +245,9 @@ private enum : ubyte {
 }
 
 
-// What the JIT keeps from one compile to the next. It belongs to the JIT lock:
-// only `JitLock.owned` gives access to it.
-private struct JitState {
+// What the JIT keeps from one compile to the next. It belongs to the JIT lock
+// of its `JitInstance`: only `JitLock.owned` gives access to it.
+package struct JitState {
     import snakebite.backends.bytecode.vm: Instruction;
 
     @nogc nothrow:
@@ -259,6 +259,21 @@ private struct JitState {
     // The buffers of the fixup and label tables, which compiles reuse.
     Scratch!Fixup fixups;
     Scratch!size_t labels;
+    // The buffers of one compile in `vm.d`: the template of each instruction,
+    // a snapshot of the instructions, and their handlers.
+    Scratch!JitOp opScratch;
+    Scratch!Instruction snapshotScratch;
+    Scratch!(Instruction.Handler) originalScratch;
+
+    // Gives back the memory of the region and the buffers.
+    void release() {
+        region.release;
+        fixups.release;
+        labels.release;
+        opScratch.release;
+        snapshotScratch.release;
+        originalScratch.release;
+    }
 
     Emitted emitFunction(Instruction[] instructions,
         const(Instruction)[] snapshot, const(JitOp)[] ops,
@@ -344,7 +359,24 @@ private struct JitState {
     }
 }
 
-private shared JitState _jitState;
+// The JIT state of one `Bytecode` instance. The code region lives as long as
+// the instance: the destructor unmaps it. Every `Function` that the instance
+// compiles points here, so that a tier-up finds the state of its owner.
+package struct JitInstance {
+    @nogc nothrow:
+
+    // How far this instance's set-up got. It is read without the lock.
+    private shared Setup setup;
+    private shared int lockWord;
+    private shared JitState state;
+
+    @disable this(this);
+
+    ~this() {
+        // Nothing else uses the instance when it is destroyed.
+        (cast(JitState*) &state).release;
+    }
+}
 
 // The code region. It is a memfd file that grows by chunks. Each chunk is
 // mapped twice: `writeBase` is read+write, where the JIT emits, and `execBase`
@@ -362,6 +394,38 @@ private struct CodeRegion {
     size_t chunkCapacity;
     size_t chunkUsed;
     size_t populatedEnd;
+    // Every chunk ever mapped, so that `release` can unmap them.
+    Chunk* chunks;
+    size_t chunkCount;
+    size_t chunkRecordCapacity;
+
+    private struct Chunk {
+        ubyte* write;
+        ubyte* execute;
+        size_t size;
+    }
+
+    // Unmaps every chunk and closes the file. The code is gone: no function
+    // that points into it may run again.
+    void release() {
+        import core.stdc.stdlib: free;
+        import core.sys.posix.sys.mman: munmap;
+        import core.sys.posix.unistd: close;
+
+        foreach (chunk; chunks[0 .. chunkCount]) {
+            munmap(chunk.write, chunk.size);
+            munmap(chunk.execute, chunk.size);
+        }
+        free(chunks);
+        chunks = null;
+        chunkCount = chunkRecordCapacity = 0;
+        if (file >= 0)
+            close(file);
+        file = -1;
+        fileSize = 0;
+        writeBase = execBase = null;
+        chunkCapacity = chunkUsed = populatedEnd = 0;
+    }
 
     bool create() {
         import core.sys.posix.unistd: close;
@@ -372,6 +436,7 @@ private struct CodeRegion {
         if (newChunk(chunkSize))
             return true;
         close(file);
+        file = -1;
         return false;
     }
 
@@ -397,6 +462,21 @@ private struct CodeRegion {
                 munmap(execute, size);
             return false;
         }
+        if (chunkCount == chunkRecordCapacity) {
+            import core.stdc.stdlib: realloc;
+
+            const capacity = chunkRecordCapacity ? chunkRecordCapacity * 2 : 8;
+            auto grown = cast(Chunk*) realloc(chunks, capacity * Chunk.sizeof);
+            if (grown is null) {
+                munmap(write, size);
+                munmap(execute, size);
+                return false;
+            }
+            chunks = grown;
+            chunkRecordCapacity = capacity;
+        }
+        chunks[chunkCount++] = Chunk(cast(ubyte*) write, cast(ubyte*) execute,
+            size);
         fileSize += size;
         writeBase = cast(ubyte*) write;
         execBase = cast(ubyte*) execute;
@@ -432,12 +512,9 @@ private enum MFD_CLOEXEC = 1;
 extern(C) private int madvise(void*, size_t, int) nothrow @nogc;
 extern(C) private int memfd_create(const(char)* name, uint flags) nothrow @nogc;
 
-// How far the one-time set-up got: nothing, a usable JIT, or a JIT that this
-// process cannot have (no memfd). It is read without the lock.
+// How far the set-up of an instance got: nothing, a usable JIT, or a JIT that
+// this instance cannot have (no memfd).
 private enum Setup : int { pending, ready, unavailable }
-private shared Setup _setup;
-
-private shared int _lockWord;
 
 // The JIT lock. A thread takes it without waiting: a thread that waits for the
 // lock can wait for a thread that the GC suspended while it held the lock. The
@@ -448,14 +525,16 @@ package struct JitLock {
     @nogc nothrow:
 
     private bool _held;
+    private JitInstance* _instance;
 
     @disable this(this);
 
-    package static JitLock tryTake() {
+    package static JitLock tryTake(ref JitInstance instance) {
         import core.atomic: cas;
 
         JitLock lock;
-        lock._held = cas(&_lockWord, 0, 1);
+        lock._held = cas(&instance.lockWord, 0, 1);
+        lock._instance = &instance;
         return lock;
     }
 
@@ -463,7 +542,7 @@ package struct JitLock {
         import core.atomic: atomicStore, MemoryOrder;
 
         if (_held)
-            atomicStore!(MemoryOrder.rel)(_lockWord, 0);
+            atomicStore!(MemoryOrder.rel)(_instance.lockWord, 0);
     }
 
     package bool held() const {
@@ -477,6 +556,11 @@ package struct JitLock {
         if (!_held)
             internalFailure("JIT state used without the JIT lock");
         return *cast(T*) &state;
+    }
+
+    // The state of the instance that holds this lock.
+    package ref JitState state() {
+        return owned(_instance.state);
     }
 
     // Gives the function JIT code. Returns false when it could not: the
@@ -493,7 +577,7 @@ package struct JitLock {
     {
         if (instructions.length == 0)
             return false;
-        ref state = owned(_jitState);
+        ref state = this.state;
         auto result = state.emitFunction(instructions, snapshot, ops, originals,
             constants);
         if (result == Emitted.full) {
@@ -508,24 +592,48 @@ package struct JitLock {
     }
 }
 
-// True when a function can get JIT code. The first call sets the JIT up:
-// the CPU features, the region, and the check of the calling convention.
+// True when a function can get JIT code. The first call for an instance sets
+// its region up. The CPU features and the check of the calling convention have
+// one answer for the process, so the first instance that gets here makes them.
 package bool jitUsable(ref JitLock lock) {
     import core.atomic: atomicLoad, atomicStore, MemoryOrder;
 
-    final switch (atomicLoad!(MemoryOrder.acq)(_setup)) {
+    ref instance = *lock._instance;
+    final switch (atomicLoad!(MemoryOrder.acq)(instance.setup)) {
         case Setup.ready: return true;
         case Setup.unavailable: return false;
         case Setup.pending:
             break;
     }
-    ref state = lock.owned(_jitState);
+    ref state = lock.state;
     const ok = state.region.create;
-    if (ok)
-        checkCallingConvention(state.region);
-    state.bmi2 = ok && cpuHasBmi2;
-    atomicStore!(MemoryOrder.rel)(_setup, ok ? Setup.ready : Setup.unavailable);
+    if (ok) {
+        // Repeating them in a race between two instances is harmless.
+        if (!atomicLoad!(MemoryOrder.acq)(_conventionChecked)) {
+            checkCallingConvention(state.region);
+            atomicStore!(MemoryOrder.rel)(_conventionChecked, true);
+        }
+        state.bmi2 = processHasBmi2;
+    }
+    atomicStore!(MemoryOrder.rel)(instance.setup,
+        ok ? Setup.ready : Setup.unavailable);
     return ok;
+}
+
+// What the CPU and the host binary give for the whole process.
+private shared bool _conventionChecked;
+// -1 before the first CPUID read.
+private shared int _bmi2 = -1;
+
+private bool processHasBmi2() {
+    import core.atomic: atomicLoad, atomicStore, MemoryOrder;
+
+    auto known = atomicLoad!(MemoryOrder.acq)(_bmi2);
+    if (known < 0) {
+        known = cpuHasBmi2 ? 1 : 0;
+        atomicStore!(MemoryOrder.rel)(_bmi2, known);
+    }
+    return known == 1;
 }
 
 // Whether the CPU has the BMI2 shifts (`shlx`, `shrx`, `sarx`); without them
@@ -597,7 +705,7 @@ private void checkCallingConvention(ref CodeRegion region) {
             ~ "calling convention of this compiler");
 }
 
-// A growable buffer that lives as long as the process; compiles reuse it.
+// A growable buffer that compiles reuse; `release` frees it.
 package struct Scratch(T) {
     T* ptr;
     size_t cap;
@@ -615,6 +723,14 @@ package struct Scratch(T) {
             cap = ptr is null ? 0 : newCap;
         }
         return ptr;
+    }
+
+    void release() {
+        import core.stdc.stdlib: free;
+
+        free(ptr);
+        ptr = null;
+        cap = 0;
     }
 
     // Keeps the contents. Null if no memory.
