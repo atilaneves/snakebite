@@ -2,7 +2,7 @@ module ut.backends.call.func;
 
 
 import ut.backends;
-import snakebite.backends.program: Program;
+import snakebite.program: Program;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import ut.threadsync: beginExplicitCollect, endExplicitCollect;

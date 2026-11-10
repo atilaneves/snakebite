@@ -3,7 +3,7 @@ module at.runtime.faultregistration;
 import core.memory: GC;
 import core.thread: Thread;
 import core.time: msecs;
-import snakebite.backends.program: Program;
+import snakebite.program: Program;
 import snakebite.backends.runprogram: run;
 import snakebite.backends.guestmodules: GuestModules;
 import snakebite.image.dependency: defaultCompiler;

@@ -10,7 +10,7 @@ public import std.meta: AliasSeq;
 import core.sync.mutex: Mutex;
 import dmd.dmodule: Module;
 import dmd.func: FuncDeclaration;
-import snakebite.backends.program: Program;
+import snakebite.program: Program;
 import snakebite.backends.runprogram: run;
 import snakebite.frontend.compiler: parseSnippet, parseSnippets;
 import snakebite.frontend.dmd.functions: findFunction, findStruct;

@@ -2,7 +2,7 @@ module ut.backends.call.pointers;
 
 
 import ut.backends;
-import snakebite.backends.program: Program;
+import snakebite.program: Program;
 import snakebite.ffi.sysv: callbackEntriesPerChunk;
 import snakebite.frontend.compiler: parseSnippets;
 import snakebite.frontend.dmd.functions: findFunction;

@@ -3,7 +3,7 @@ module at.runtime.registration;
 
 import core.memory: GC;
 import ut.backends;
-import snakebite.backends.program: Program;
+import snakebite.program: Program;
 import snakebite.backends.runprogram: run;
 import snakebite.backends.guestmodules: GuestModules;
 import snakebite.ffi.callback: CallbackBridge, CallbackCall, ChunkStrategy;

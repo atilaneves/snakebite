@@ -2,7 +2,7 @@ module at.ffi.dvariadic;
 
 
 import unit_threaded;
-import snakebite.backends.program: Program;
+import snakebite.program: Program;
 import snakebite.backends.bytecode: Bytecode;
 import snakebite.backends.interpreter: Interpreter;
 import snakebite.frontend.compiler: parseSnippet;

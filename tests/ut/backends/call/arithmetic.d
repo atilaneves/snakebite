@@ -1,7 +1,7 @@
 module ut.backends.call.arithmetic;
 
 
-import snakebite.backends.program: Program;
+import snakebite.program: Program;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import std.format: format;
