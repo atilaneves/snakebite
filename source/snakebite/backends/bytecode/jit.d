@@ -357,51 +357,74 @@ private shared JitState _jitState;
 
 private struct PerfMap {
     import core.stdc.stdio: FILE;
-    import core.sys.posix.sys.types: pid_t;
+    import core.sys.posix.sys.types: dev_t, ino_t, pid_t;
 
     @nogc nothrow:
 
-    private FILE* _file;
     private pid_t _pid;
+    private dev_t _device;
+    private ino_t _inode;
+    private bool _available;
 
     void record(in ubyte* code, in size_t size, in char[] name) {
-        import core.stdc.stdio: fclose, fflush, fprintf, fputc, perror;
+        import core.stdc.stdio: fclose, fprintf, fputc, perror;
         import core.sys.posix.unistd: getpid;
 
         const pid = getpid();
-        if (pid != _pid) {
-            if (_file !is null)
-                fclose(_file);
-            _pid = pid;
-            _file = openMap(pid);
-        }
-        if (_file is null)
+        const first = pid != _pid;
+        if (!first && !_available)
             return;
-        if (fprintf(_file, "%zx %zx ", cast(size_t) code, size) < 0
-                || !writeSymbol(name) || fputc('\n', _file) < 0
-                || fflush(_file) != 0) {
+        _pid = pid;
+        _available = false;
+
+        // A guest can replace any descriptor between compiles, also after fork.
+        auto file = openMap(pid, first); // The writer needs a mutable FILE.
+        if (file is null)
+            return;
+        const written = fprintf(file, "%zx %zx ", cast(size_t) code, size) >= 0
+            && writeSymbol(file, name) && fputc('\n', file) >= 0;
+        if (!written)
             perror("snakebite: cannot write JIT perf map");
-            fclose(_file);
-            _file = null;
-        }
+        const closed = fclose(file) == 0;
+        if (written && !closed)
+            perror("snakebite: cannot write JIT perf map");
+        _available = written && closed;
     }
 
-    private static FILE* openMap(in pid_t pid) {
-        import core.stdc.stdio: perror, snprintf;
-        import core.sys.posix.fcntl: O_CLOEXEC, O_CREAT, O_EXCL, O_WRONLY, open;
+    private FILE* openMap(in pid_t pid, in bool first) {
+        import core.stdc.stdio: fprintf, perror, snprintf, stderr;
+        import core.sys.posix.fcntl: O_APPEND, O_CLOEXEC, O_CREAT, O_EXCL,
+            O_NOFOLLOW, O_NONBLOCK, O_WRONLY, open;
         import core.sys.posix.stdio: fdopen;
-        import core.sys.posix.sys.stat: S_IRUSR, S_IWUSR;
+        import core.sys.posix.sys.stat: fstat, stat_t, S_IRUSR, S_IWUSR;
         import core.sys.posix.unistd: close;
 
         char[64] path;
         snprintf(path.ptr, path.length, "/tmp/perf-%d.map", pid);
-        const descriptor = open(path.ptr,
-            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, S_IRUSR | S_IWUSR);
+        const flags = O_WRONLY | O_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK;
+        const descriptor = first
+            ? open(path.ptr, flags | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR)
+            : open(path.ptr, flags);
         if (descriptor < 0) {
             perror(path.ptr);
             return null;
         }
-        auto file = fdopen(descriptor, "w"); // The writer needs a mutable FILE.
+
+        stat_t info;
+        if (fstat(descriptor, &info) != 0) {
+            perror(path.ptr);
+            close(descriptor);
+            return null;
+        }
+        if (!first && (info.st_dev != _device || info.st_ino != _inode)) {
+            fprintf(stderr, "snakebite: JIT perf map changed: %s\n", path.ptr);
+            close(descriptor);
+            return null;
+        }
+        _device = info.st_dev;
+        _inode = info.st_ino;
+
+        auto file = fdopen(descriptor, "a"); // The writer needs a mutable FILE.
         if (file is null) {
             perror(path.ptr);
             close(descriptor);
@@ -409,7 +432,7 @@ private struct PerfMap {
         return file;
     }
 
-    private bool writeSymbol(in char[] name) {
+    private static bool writeSymbol(FILE* file, in char[] name) {
         import core.stdc.stdio: fputs, fwrite;
 
         size_t start;
@@ -418,13 +441,13 @@ private struct PerfMap {
                 continue;
             const length = index - start;
             const escape = character == '\r' ? "\\r" : "\\n";
-            if (fwrite(name.ptr + start, char.sizeof, length, _file) != length
-                    || fputs(escape.ptr, _file) < 0)
+            if (fwrite(name.ptr + start, char.sizeof, length, file) != length
+                    || fputs(escape.ptr, file) < 0)
                 return false;
             start = index + 1;
         }
         const length = name.length - start;
-        return fwrite(name.ptr + start, char.sizeof, length, _file) == length;
+        return fwrite(name.ptr + start, char.sizeof, length, file) == length;
     }
 }
 

@@ -161,8 +161,9 @@ def test_jit_perf_map_after_fork(tmp_path: Path) -> None:
         r"""
         module perf_map_fork;
         import core.stdc.stdio: fflush, getchar, printf;
+        import core.sys.posix.fcntl: open, O_RDONLY;
         import core.sys.posix.sys.wait: waitpid;
-        import core.sys.posix.unistd: _exit, fork;
+        import core.sys.posix.unistd: _exit, dup2, fork, read;
 
         T hot(T)(T count) {
             assert(count > 0);
@@ -180,7 +181,15 @@ def test_jit_perf_map_after_fork(tmp_path: Path) -> None:
             if (child == 0) {
                 if (getchar() != 'c')
                     _exit(1);
-                _exit(hot(301L) == 45150 ? 0 : 1);
+                const file = open("/dev/null", O_RDONLY);
+                assert(file >= 0);
+                foreach (fd; 3 .. 32)
+                    assert(dup2(file, fd) == fd);
+                assert(hot(301L) == 45150);
+                char byte_;
+                foreach (fd; 3 .. 32)
+                    assert(read(fd, &byte_, 1) == 0, "child descriptor");
+                _exit(0);
             }
             printf("child=%d\n", child);
             fflush(null);
@@ -217,13 +226,13 @@ def test_jit_perf_map_after_fork(tmp_path: Path) -> None:
 
             assert not os.path.lexists(child_map), f"map already exists: {child_map}"
             stdout, _ = process.communicate(input="c", timeout=30)
-            assert process.returncode == 0, stdout
             assert stat.S_ISREG(child_map.lstat().st_mode)
             child_record, = child_map.read_text().splitlines()
             assert child_record.split(maxsplit=2)[2].startswith(
                 "_D13perf_map_fork__T3hotTlZ"
             )
             verified_maps.append(child_map)
+            assert process.returncode == 0, stdout
             assert parent_map.read_text().splitlines() == [parent_record]
         finally:
             if process.poll() is None:
